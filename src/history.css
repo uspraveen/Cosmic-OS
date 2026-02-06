@@ -1,0 +1,28 @@
+.history-overlay {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  /* UPDATED: Higher than spotlight.css (9000) */
+  z-index: 9500; 
+  display: flex;
+  justify-content: flex-start;
+  padding: 80px 20px 20px 20px;
+  pointer-events: none;
+}
+/* ... rest of file is fine ... */
+.history-panel {
+  width: 280px; height: 500px; max-height: 80vh; pointer-events: auto;
+  animation: slideIn 0.3s ease;
+}
+@keyframes slideIn { from { opacity:0; transform:translateX(-20px); } to { opacity:1; transform:translateX(0); } }
+.history-content { display: flex; flex-direction: column; height: 100%; padding: 20px; }
+.history-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.1); color: #fff; font-weight: 600; }
+.sessions-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.sessions-list::-webkit-scrollbar { display: none; }
+.session-item { padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,0.03); cursor: pointer; transition: all 0.2s; }
+.session-item:hover { background: rgba(255,255,255,0.08); }
+.session-item.active { background: rgba(0, 122, 255, 0.2); border: 1px solid rgba(0, 122, 255, 0.3); }
+.session-title { color: #fff; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.session-date { color: rgba(255,255,255,0.4); font-size: 10px; margin-top: 2px; }
+.close-icon-btn, .new-chat-btn { background: none; border: none; color: rgba(255,255,255,0.6); cursor: pointer; font-size: 18px; }
+.close-icon-btn:hover, .new-chat-btn:hover { color: #fff; }
+.empty-history { text-align: center; color: rgba(255,255,255,0.3); font-size: 13px; margin-top: 40px; }
