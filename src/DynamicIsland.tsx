@@ -661,68 +661,71 @@ export default function DynamicIsland({
 
     // Sort next few events - showing more now with scroll
     const upcoming = calendarData.events.slice(0, 10)
+    const upcomingCountLabel = upcoming.length === 1 ? '1 upcoming' : `${upcoming.length} upcoming`
+
+    const formatTimeSimple = (dateStr: string) => {
+      const date = new Date(dateStr)
+      if (Number.isNaN(date.getTime())) return '--'
+      return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }).toLowerCase()
+    }
 
     return (
       <div className="slide slide-calendar">
         <div className="cal-left">
-          <div className="cal-label">SCHEDULE</div>
-          <button
-            className="cal-today"
-            onClick={() => setShowMonthView(true)} // Toggle View
-            style={{ cursor: 'pointer' }}
-          >
-            <span>TODAY</span>
-            <span>{now.getDate()}</span>
+          <button type="button" className="cal-today" onClick={() => setShowMonthView(true)} aria-label="Open month calendar">
+            <div className="cal-header">
+              <span>{now.toLocaleDateString([], { month: 'short' })}</span>
+            </div>
+            <div className="cal-body">
+              <span>{now.getDate()}</span>
+            </div>
           </button>
+          <div className="cal-meta">
+            <span className="dt-label">{now.toLocaleDateString([], { weekday: 'long' })}</span>
+            <span className="cal-sub">{upcomingCountLabel}</span>
+          </div>
         </div>
 
         <div className="cal-right">
           <div className="cal-events-list">
             {upcoming.length > 0 ? upcoming.map((evt, i) => (
-              <div key={i} className="cal-task" tabIndex={0}>
+              <div
+                key={i}
+                className="cal-task"
+                tabIndex={0}
+                role="button"
+                onClick={() => setShowMonthView(true)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    setShowMonthView(true)
+                  }
+                }}
+              >
                 <div
-                  className="task-dot"
-                  style={{
-                    backgroundColor: evt.colorId === '1' ? '#a4b0be' : '#007AFF',
-                    color: evt.colorId === '1' ? '#a4b0be' : '#007AFF'
-                  }}
+                  className="task-bar"
+                  style={{ backgroundColor: evt.colorId === '1' ? '#a4b0be' : '#007AFF' }}
                 />
-                <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
-                  <span style={{
-                    fontSize: '13px',
-                    fontWeight: 600,
-                    color: '#fff',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap'
-                  }}>
-                    {evt.summary}
-                  </span>
-                  <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.5)', marginTop: '1px' }}>
-                    {new Date(evt.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                  </span>
+                <div className="task-content">
+                  <span className="task-time">{formatTimeSimple(evt.start)}</span>
+                  <span className="task-title">{evt.summary}</span>
                 </div>
               </div>
             )) : (
-              <div style={{ padding: '10px 0', opacity: 0.5, fontSize: '13px' }}>No upcoming events</div>
+              <div className="no-events">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+                  <line x1="16" y1="2" x2="16" y2="6" />
+                  <line x1="8" y1="2" x2="8" y2="6" />
+                  <line x1="3" y1="10" x2="21" y2="10" />
+                </svg>
+                <span>No upcoming events</span>
+              </div>
             )}
           </div>
 
-          {/* Show Email if available - fixed at bottom if needed, or remove to keep list clean. 
-              Let's keep it but maybe outside the scroll list if we want it anchored? 
-              Actually, putting it freely in cal-right (flex-col) *after* the list will make it sit below 
-              if the list takes flex: 1. But cal-events-list doesn't have flex: 1 yet. 
-              Let's make cal-events-list flex:1 so it pushes the email down.
-          */}
           {calendarData.email && (
-            <div style={{
-              fontSize: '10px',
-              color: 'rgba(255,255,255,0.2)',
-              marginTop: '8px',
-              paddingTop: '8px',
-              borderTop: '1px solid rgba(255,255,255,0.05)',
-              textAlign: 'right'
-            }}>
+            <div className="cal-email">
               {calendarData.email}
             </div>
           )}

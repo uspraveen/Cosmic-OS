@@ -73,7 +73,12 @@ function startGeminiBridge(window: BrowserWindow) {
 }
 
 function startMediaBridge(window: BrowserWindow) {
-  const scriptPath = path.join(process.env.APP_ROOT, 'resources', 'media_bridge.py')
+  let scriptName = 'media_bridge_win.py'
+  if (process.platform === 'darwin') {
+    scriptName = 'media_bridge_mac.py'
+  }
+
+  const scriptPath = path.join(process.env.APP_ROOT, 'resources', scriptName)
   mediaProcess = spawn('python', ['-u', scriptPath])
 
   let rawBuffer = ''
@@ -96,7 +101,12 @@ function startMediaBridge(window: BrowserWindow) {
 }
 
 function startWindowBridge(window: BrowserWindow) {
-  const scriptPath = path.join(process.env.APP_ROOT, 'resources', 'window_bridge.py')
+  let scriptName = 'window_bridge_win.py'
+  if (process.platform === 'darwin') {
+    scriptName = 'window_bridge_mac.py'
+  }
+
+  const scriptPath = path.join(process.env.APP_ROOT, 'resources', scriptName)
   windowProcess = spawn('python', ['-u', scriptPath])
 
   let rawBuffer = ''

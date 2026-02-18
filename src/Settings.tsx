@@ -39,7 +39,7 @@ export default function Settings({
     return () => window.removeEventListener('keydown', handleEsc)
   }, [onClose])
 
-  const [currentView, setCurrentView] = useState<'main' | 'monitors' | 'api'>('main')
+  const [currentView, setCurrentView] = useState<'main' | 'monitors' | 'api' | 'ui'>('main')
 
   useEffect(() => {
     if (!isOpen) setCurrentView('main')
@@ -82,41 +82,6 @@ export default function Settings({
             {/* --- MAIN PAGE --- */}
             {currentView === 'main' && (
               <>
-                {/* Position */}
-                <div className="setting-row">
-                  <span className="setting-label">Search Position</span>
-                  <div className="toggle-group">
-                    <button className={`toggle-btn ${searchPosition === 'bottom' ? 'active' : ''}`} onClick={() => onPositionChange('bottom')}>Bottom</button>
-                    <button className={`toggle-btn ${searchPosition === 'middle' ? 'active' : ''}`} onClick={() => onPositionChange('middle')}>Middle</button>
-                  </div>
-                </div>
-
-                {/* Stayback Time */}
-                <div className="setting-row vertical">
-                  <div className="setting-header-row">
-                    <span className="setting-label">Stayback Time</span>
-                    <span className="setting-value">{staybackTime}s</span>
-                  </div>
-                  <input type="range" min="0" max="10" value={staybackTime} onChange={(e) => onStaybackChange(parseInt(e.target.value))} className="settings-slider" />
-                </div>
-
-                {/* Island Opacity */}
-                <div className="setting-row vertical">
-                  <div className="setting-header-row">
-                    <span className="setting-label">Island Opacity</span>
-                    <span className="setting-value">{Math.round(islandOpacity * 100)}%</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0.2"
-                    max="1"
-                    step="0.05"
-                    value={islandOpacity}
-                    onChange={(e) => onOpacityChange(parseFloat(e.target.value))}
-                    className="settings-slider"
-                  />
-                </div>
-
                 {/* --- GOOGLE CALENDAR (iCal) SECTION --- */}
                 <div className="setting-row vertical" style={{ borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 16, width: '100%' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
@@ -156,6 +121,12 @@ export default function Settings({
 
                 {/* NAVIGATION BUTTONS */}
 
+                {/* UI Settings Page Button */}
+                <button className="setting-nav-btn" onClick={() => setCurrentView('ui')}>
+                  <span style={{ fontWeight: 600 }}>UI Settings</span>
+                  <span style={{ opacity: 0.5 }}>›</span>
+                </button>
+
                 {/* API Keys Page Button */}
                 <button className="setting-nav-btn" onClick={() => setCurrentView('api')}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -190,6 +161,63 @@ export default function Settings({
                   If the monitor is disconnected, we'll try to find a suitable fallback.
                 </div>
                 <MonitorSelector />
+              </div>
+            )}
+
+            {/* --- UI SUB-PAGE --- */}
+            {currentView === 'ui' && (
+              <div className="setting-subpage ui-settings-page">
+                <div className="ui-settings-intro">
+                  Fine-tune where the island appears and how it behaves after interaction.
+                </div>
+
+                {/* Position */}
+                <div className="ui-setting-card">
+                  <div className="ui-setting-head">
+                    <div>
+                      <span className="setting-label">Search Position</span>
+                      <div className="ui-setting-note">Choose where search opens on screen.</div>
+                    </div>
+                    <div className="toggle-group">
+                      <button className={`toggle-btn ${searchPosition === 'bottom' ? 'active' : ''}`} onClick={() => onPositionChange('bottom')}>Bottom</button>
+                      <button className={`toggle-btn ${searchPosition === 'middle' ? 'active' : ''}`} onClick={() => onPositionChange('middle')}>Middle</button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Stayback Time */}
+                <div className="ui-setting-card">
+                  <div className="setting-header-row">
+                    <span className="setting-label">Stayback Time</span>
+                    <span className="setting-value">{staybackTime}s</span>
+                  </div>
+                  <input type="range" min="0" max="10" value={staybackTime} onChange={(e) => onStaybackChange(parseInt(e.target.value))} className="settings-slider" />
+                  <div className="slider-labels ui-slider-labels">
+                    <span>Instant</span>
+                    <span>10s linger</span>
+                  </div>
+                </div>
+
+                {/* Island Opacity */}
+                <div className="ui-setting-card">
+                  <div className="setting-header-row">
+                    <span className="setting-label">Island Opacity</span>
+                    <span className="setting-value">{Math.round(islandOpacity * 100)}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.2"
+                    max="1"
+                    step="0.05"
+                    value={islandOpacity}
+                    onChange={(e) => onOpacityChange(parseFloat(e.target.value))}
+                    className="settings-slider"
+                  />
+                  <div className="slider-labels ui-slider-labels">
+                    <span>20%</span>
+                    <span>100%</span>
+                  </div>
+                </div>
               </div>
             )}
 

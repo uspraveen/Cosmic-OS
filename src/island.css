@@ -458,61 +458,221 @@
   transform: scale(1.25);
 }
 
-/* CALENDAR */
+/* CALENDAR - Premium Redesign */
 .slide-calendar {
-  gap: 26px;
+  gap: 18px;
+  align-items: flex-start;
+  padding-top: 4px;
 }
 
 .cal-left {
+  width: 120px;
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  min-width: 96px;
+  align-items: flex-start;
+  perspective: 1200px;
 }
 
-.cal-label {
-  font-size: 11px;
-  color: #007AFF;
-  font-weight: 800;
-  letter-spacing: 1.3px;
-}
-
+/* Apple-style Calendar Icon */
 .cal-today {
-  display: inline-flex;
+  position: relative;
+  display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 10px 16px;
-  background: rgba(255, 255, 255, 0.08);
-  border: 0.5px solid rgba(255, 255, 255, 0.15);
-  border-radius: 14px;
-  width: fit-content;
+  width: 56px;
+  height: 56px;
+  background: linear-gradient(180deg, rgba(36, 36, 36, 0.72) 0%, rgba(22, 22, 22, 0.8) 100%);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-radius: 13px;
+  overflow: hidden;
+  box-shadow:
+    0 14px 24px rgba(0, 0, 0, 0.44),
+    0 4px 10px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.15),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.4);
+  border: 0.5px solid rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+  transform-style: preserve-3d;
+  will-change: transform, box-shadow;
+  transition: transform 0.3s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.3s ease;
+  padding: 0;
+  transform: translateY(0);
+  animation: calIconFloat 3.2s ease-in-out infinite;
 }
 
-.cal-today span:first-child {
-  font-size: 10px;
-  color: rgba(255, 255, 255, 0.5);
-  text-transform: uppercase;
-  letter-spacing: 0.9px;
+.cal-today::before {
+  content: '';
+  position: absolute;
+  inset: 1px;
+  border-radius: 12px;
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.24) 0%, rgba(255, 255, 255, 0) 50%);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.cal-today::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -85%;
+  width: 60%;
+  height: 100%;
+  background: linear-gradient(100deg, rgba(255, 255, 255, 0), rgba(255, 255, 255, 0.36), rgba(255, 255, 255, 0));
+  transform: skewX(-18deg);
+  pointer-events: none;
+  z-index: 3;
+  animation: calIconSheen 3.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.cal-today:hover {
+  animation-play-state: paused;
+  transform: translateY(-3px) scale(1.04);
+  box-shadow:
+    0 22px 28px rgba(0, 0, 0, 0.5),
+    0 9px 18px rgba(0, 0, 0, 0.34),
+    0 0 0 1px rgba(0, 122, 255, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+.cal-today:active {
+  transform: translateY(0) scale(0.97);
+}
+
+.cal-today:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px rgba(0, 122, 255, 0.8),
+    0 12px 18px rgba(0, 0, 0, 0.35);
+}
+
+.cal-header {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  height: 18px;
+  background: linear-gradient(180deg, #4f9cff 0%, #007AFF 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.18);
+}
+
+.cal-header span {
+  font-size: 8px;
   font-weight: 700;
-}
-
-.cal-today span:last-child {
-  font-size: 18px;
   color: #fff;
-  font-weight: 800;
-  margin-top: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
+.cal-body {
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  width: 100%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(236, 236, 236, 0.94) 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.65);
+}
+
+.cal-body span {
+  font-size: 25px;
+  font-weight: 650;
+  color: #000;
+  margin-top: -2px;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.4);
+  animation: calDateBreathe 2.2s ease-in-out infinite;
+}
+
+@keyframes calIconFloat {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+
+  50% {
+    transform: translateY(-2px);
+  }
+}
+
+@keyframes calIconSheen {
+  0%,
+  58%,
+  100% {
+    left: -85%;
+    opacity: 0;
+  }
+
+  70% {
+    opacity: 1;
+  }
+
+  92% {
+    left: 130%;
+    opacity: 0;
+  }
+}
+
+@keyframes calDateBreathe {
+  0%,
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+
+  50% {
+    transform: translateY(-1px);
+    opacity: 0.88;
+  }
+}
+
+.cal-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  align-items: center;
+  text-align: center;
+}
+
+.cal-kicker {
+  font-size: 10px;
+  color: #007AFF;
+  font-weight: 800;
+  letter-spacing: 1.1px;
+  text-transform: uppercase;
+}
+
+.dt-label {
+  font-size: 13px;
+  color: #fff;
+  font-weight: 500;
+  letter-spacing: 0.1px;
+}
+
+.cal-sub {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.42);
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+
+/* Right Side List */
 .cal-right {
   flex: 1;
   display: flex;
   flex-direction: column;
-  justify-content: flex-start;
-  /* Align to top */
-  padding-left: 26px;
-  border-left: 0.5px solid rgba(255, 255, 255, 0.12);
   height: 100%;
   overflow: hidden;
+  min-width: 0;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  padding-left: 18px;
 }
 
 .cal-events-list {
@@ -520,10 +680,10 @@
   flex-direction: column;
   gap: 8px;
   overflow-y: auto;
-  flex: 1;
-  min-height: 0;
   padding-right: 4px;
-  scroll-behavior: smooth;
+  padding-bottom: 6px;
+  min-height: 0;
+  flex: 1;
 
   /* Hide scrollbar */
   -ms-overflow-style: none;
@@ -534,34 +694,92 @@
   display: none;
 }
 
+/* Event Item - Premium Glass Card */
 .cal-task {
   display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 12px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.03);
+  align-items: stretch;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 10px;
+  overflow: hidden;
+  transition: all 0.2s;
   border: 1px solid rgba(255, 255, 255, 0.05);
-  transition: all 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-  cursor: default;
+  position: relative;
+  min-height: 40px;
+  cursor: pointer;
 }
 
-.cal-task:hover,
-.cal-task:focus {
-  background: rgba(255, 255, 255, 0.1);
+.cal-task:hover {
+  background: rgba(255, 255, 255, 0.08);
   border-color: rgba(255, 255, 255, 0.15);
-  transform: translateX(4px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-  outline: none;
 }
 
-.task-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
+.cal-task:focus-visible {
+  outline: none;
+  border-color: rgba(0, 122, 255, 0.8);
+  box-shadow: 0 0 0 1px rgba(0, 122, 255, 0.45);
+}
+
+.task-bar {
+  width: 3px;
   flex-shrink: 0;
-  box-shadow: 0 0 8px currentColor;
-  /* Glow effect */
+}
+
+.task-content {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  gap: 10px;
+  min-width: 0;
+}
+
+.task-time {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.task-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+}
+
+.no-events {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100px;
+  opacity: 0.45;
+  gap: 8px;
+}
+
+.no-events svg {
+  width: 24px;
+  height: 24px;
+}
+
+.no-events span {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.cal-email {
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.22);
+  margin-top: 4px;
+  text-align: right;
+  padding-right: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ANCHOR BUTTON */

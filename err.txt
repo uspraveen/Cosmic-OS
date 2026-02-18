@@ -1,0 +1,6 @@
+load_backend: loaded RPC backend from C:\Users\Praveen Raj U S\AppData\Local\Microsoft\WinGet\Packages\ggml.llamacpp_Microsoft.Winget.Source_8wekyb3d8bbwe\ggml-rpc.dll
+ggml_vulkan: Found 1 Vulkan devices:
+ggml_vulkan: 0 = AMD Radeon(TM) Graphics (AMD proprietary driver) | uma: 1 | fp16: 1 | bf16: 0 | warp size: 64 | shared memory: 65536 | int dot: 0 | matrix cores: none
+load_backend: loaded Vulkan backend from C:\Users\Praveen Raj U S\AppData\Local\Microsoft\WinGet\Packages\ggml.llamacpp_Microsoft.Winget.Source_8wekyb3d8bbwe\ggml-vulkan.dll
+load_backend: loaded CPU backend from C:\Users\Praveen Raj U S\AppData\Local\Microsoft\WinGet\Packages\ggml.llamacpp_Microsoft.Winget.Source_8wekyb3d8bbwe\ggml-cpu-haswell.dll
+error from HF API (https://huggingface.co/v2/Qwen/Qwen3-0.6B/manifests/latest), response code: 400, data: {"error":"Repository is not GGUF or is not compatible with llama.cpp"}

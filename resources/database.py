@@ -50,7 +50,10 @@ class Database:
 
     def _init_db(self):
         cur = self.conn.cursor()
-        cur.execute("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)")
+        
+        # Renamed config -> env
+        cur.execute("CREATE TABLE IF NOT EXISTS env (key TEXT PRIMARY KEY, value TEXT)")
+        
         cur.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY, title TEXT, model TEXT, 
@@ -64,43 +67,59 @@ class Database:
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
             )
         """)
+        
+        # New correct table name
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS add_settings (
+            CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY, value TEXT
             )
         """)
+
+        # Migration Logic: config -> env
+        try:
+            # Check if old table exists
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='config'")
+            if cur.fetchone():
+                print("[DB] Migrating 'config' to 'env'...", file=sys.stderr)
+                # Copy data
+                cur.execute("INSERT OR IGNORE INTO env SELECT * FROM config")
+                # Drop old table
+                cur.execute("DROP TABLE config")
+                print("[DB] Migration complete.", file=sys.stderr)
+        except Exception as e:
+            print(f"[DB] Migration warning: {e}", file=sys.stderr)
+
         self.conn.commit()
 
     # --- SETTINGS ---
     def set_setting(self, key, value):
-        self.conn.execute("INSERT OR REPLACE INTO add_settings (key, value) VALUES (?, ?)", (key, str(value)))
+        self.conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)", (key, str(value)))
         self.conn.commit()
 
     def get_setting(self, key, default=None):
-        cur = self.conn.execute("SELECT value FROM add_settings WHERE key = ?", (key,))
+        cur = self.conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,))
         row = cur.fetchone()
         return row['value'] if row else default
 
     def get_all_settings(self):
-        cur = self.conn.execute("SELECT key, value FROM add_settings")
+        cur = self.conn.execute("SELECT key, value FROM app_settings")
         return {row['key']: row['value'] for row in cur.fetchall()}
-        self.conn.commit()
 
     # --- API KEYS (Now Encrypted) ---
     def set_api_key(self, provider, key):
         encrypted_val = self._encrypt(key)
-        self.conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)", 
+        self.conn.execute("INSERT OR REPLACE INTO env (key, value) VALUES (?, ?)", 
                           (f"{provider}_api_key", encrypted_val))
         self.conn.commit()
 
     def get_api_key(self, provider):
-        cur = self.conn.execute("SELECT value FROM config WHERE key = ?", (f"{provider}_api_key",))
+        cur = self.conn.execute("SELECT value FROM env WHERE key = ?", (f"{provider}_api_key",))
         row = cur.fetchone()
         if not row: return None
         return self._decrypt(row['value'])
     
     def has_api_keys(self):
-        cur = self.conn.execute("SELECT COUNT(*) FROM config WHERE key LIKE '%_api_key'")
+        cur = self.conn.execute("SELECT COUNT(*) FROM env WHERE key LIKE '%_api_key'")
         return cur.fetchone()[0] > 0
 
     # --- SESSIONS & MESSAGES (Same as before) ---
@@ -179,6 +198,6 @@ class Database:
         self.conn.commit()
 
     def clear_google_auth(self):
-        self.conn.execute("DELETE FROM config WHERE key IN ('google_calendar_token', 'user_gmail')")
+        self.conn.execute("DELETE FROM env WHERE key IN ('google_calendar_token', 'user_gmail')")
         self.conn.commit()
 db = Database()
