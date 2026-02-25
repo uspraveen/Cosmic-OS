@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Power, RotateCw } from 'lucide-react'
+import { motion, AnimatePresence } from 'framer-motion'
 import './island.css'
 import Settings from './Settings'
 import WeatherAnimation from './WeatherAnimation'
@@ -152,19 +153,27 @@ export default function DynamicIsland({
   keyStatus
 }: DynamicIslandProps) {
   const [activeSlide, setActiveSlide] = useState(0)
-  const TOTAL_SLIDES = 5
+  const TOTAL_SLIDES = 6
 
   const [showVolume, setShowVolume] = useState(false)
   const [internalHover, setInternalHover] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [isAnchored, setIsAnchored] = useState(false)
 
+  // Voice State
+  const [voiceActive, setVoiceActive] = useState(false)
+  const [voiceStatus, setVoiceStatus] = useState<string>('ready')
+  const [voiceTranscript, setVoiceTranscript] = useState('')
+  const [voiceError, setVoiceError] = useState<string | null>(null)
+  const [voiceHistory, setVoiceHistory] = useState<string[]>([])
+  const [lastFinalTranscript, setLastFinalTranscript] = useState('')
+
   // New State for Notification
   const [notificationEvent, setNotificationEvent] = useState<any | null>(null)
   // Track notified events to prevent double notification
   const notifiedEventsRef = useRef<Set<string>>(new Set())
 
-  const shouldExpand = searchActive || hovered || internalHover || showSettings || isAnchored || !!notificationEvent
+  const shouldExpand = searchActive || hovered || internalHover || showSettings || isAnchored || !!notificationEvent || voiceActive
   const [expanded, setExpanded] = useState(shouldExpand)
 
   useEffect(() => {
@@ -200,6 +209,21 @@ export default function DynamicIsland({
   }, [])
 
   const draggingRef = useRef(false)
+
+  useEffect(() => {
+    const handleUp = () => {
+      if (draggingRef.current) {
+        draggingRef.current = false;
+        setTimeout(() => setShowVolume(false), 1000);
+      }
+    };
+    window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', handleUp);
+    return () => {
+      window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleUp);
+    };
+  }, []);
   const [localVolume, setLocalVolume] = useState(0)
 
   const [media, setMedia] = useState<MediaState>({
@@ -228,18 +252,16 @@ export default function DynamicIsland({
 
   useEffect(() => {
     let timer: NodeJS.Timeout
-    if (media.title === 'Not Playing') {
-      setIsMusicActive(false)
-      return
-    }
 
     if (media.isPlaying) {
       setIsMusicActive(true)
     } else {
+      const waitTime = media.title === 'Not Playing' ? 2000 : 60000
       timer = setTimeout(() => {
         setIsMusicActive(false)
-      }, 60000)
+      }, waitTime)
     }
+
     return () => clearTimeout(timer)
   }, [media.isPlaying, media.title])
 
@@ -256,8 +278,8 @@ export default function DynamicIsland({
 
   const slideContentMap = useMemo(() => {
     if (notificationEvent) return ['notification'] as const
-    if (isMusicActive) return ['music', 'home', 'weather', 'calendar', 'utilities'] as const
-    return ['home', 'music', 'weather', 'calendar', 'utilities'] as const
+    if (isMusicActive) return ['music', 'home', 'weather', 'calendar', 'voice', 'utilities'] as const
+    return ['home', 'music', 'weather', 'calendar', 'voice', 'utilities'] as const
   }, [isMusicActive, notificationEvent])
 
   useEffect(() => {
@@ -288,6 +310,55 @@ export default function DynamicIsland({
     window.cosmic?.requestWeather()
     return () => unsub?.()
   }, [])
+
+  useEffect(() => {
+    if (!window.cosmic?.onVoiceTranscript) return
+    const unsub = window.cosmic.onVoiceTranscript((data) => {
+      if (data.is_final) {
+        if (data.text && data.text !== lastFinalTranscript) {
+          setVoiceHistory(prev => {
+            const newHistory = [...prev.slice(-2), data.text]
+            return newHistory
+          })
+          setLastFinalTranscript(data.text)
+        }
+        setVoiceTranscript('')
+      } else {
+        setVoiceTranscript(data.text)
+      }
+    })
+    return () => unsub?.()
+  }, [lastFinalTranscript])
+
+  useEffect(() => {
+    if (!window.cosmic?.onVoiceStatus) return
+    const unsub = window.cosmic.onVoiceStatus((data) => {
+      setVoiceStatus(data.status)
+      if (data.error) {
+        setVoiceError(data.error)
+      } else if (data.status === 'connected' || data.status === 'listening') {
+        setVoiceActive(true)
+        setVoiceError(null)
+      } else if (data.status === 'stopped' || data.status === 'disconnected') {
+        setVoiceActive(false)
+        setVoiceTranscript('')
+      } else if (data.status === 'ready') {
+        setVoiceHistory([])
+        setVoiceTranscript('')
+        setLastFinalTranscript('')
+      }
+    })
+    return () => unsub?.()
+  }, [])
+
+  // Auto-navigate to voice slide when voice session starts
+  useEffect(() => {
+    if (voiceActive) {
+      const voiceIdx = slideContentMap.findIndex(s => s === 'voice')
+      if (voiceIdx !== -1) setActiveSlide(voiceIdx)
+      setExpanded(true)
+    }
+  }, [voiceActive, slideContentMap])
 
   const [thumbSrc, setThumbSrc] = useState<string | null>(null)
   const lastObjectUrl = useRef<string | null>(null)
@@ -546,17 +617,10 @@ export default function DynamicIsland({
     )
   }
 
-  const [calendarData, setCalendarData] = useState<{ events: any[], email: string }>({ events: [], email: '' })
+  const [calendarData] = useState<{ events: any[], email: string }>({ events: [], email: '' })
   const [showMonthView, setShowMonthView] = useState(false)
 
-  // Add Listener
-  useEffect(() => {
-    if (!window.cosmic?.onCalendarUpdate) return
-    const unsub = window.cosmic.onCalendarUpdate((data) => {
-      setCalendarData(data)
-    })
-    return () => unsub?.()
-  }, [])
+
 
   // --- NOTIFICATION LOGIC ---
   useEffect(() => {
@@ -734,6 +798,92 @@ export default function DynamicIsland({
     )
   }
 
+  const renderVoice = () => {
+    const isError = voiceStatus === 'error'
+    const isListening = voiceActive && !isError
+
+    const handleToggleVoice = () => {
+      if (voiceActive) {
+        window.cosmic?.stopVoice()
+      } else {
+        window.cosmic?.startVoice()
+      }
+    }
+
+    const historyItems = voiceHistory.slice(-3)
+    const totalHistory = voiceHistory.length
+
+    return (
+      <div className="slide slide-voice">
+        <div className="voice-teleprompter">
+          <div className="voice-history">
+            <AnimatePresence mode="popLayout">
+              {historyItems.map((text, i) => {
+                const globalIndex = totalHistory - historyItems.length + i
+                return (
+                  <motion.div
+                    key={`hist-${globalIndex}`}
+                    className="voice-history-line"
+                    initial={{ opacity: 0, y: 28 }}
+                    animate={{ opacity: [0.3, 0.45, 0.6][i] || 0.6, y: 0 }}
+                    exit={{ opacity: 0, y: -28 }}
+                    transition={{ duration: 0.35, ease: 'easeOut' }}
+                    layout
+                  >
+                    {text}
+                  </motion.div>
+                )
+              })}
+            </AnimatePresence>
+          </div>
+          <motion.div
+            className={`voice-current ${voiceTranscript ? 'active' : ''}`}
+            layout
+            transition={{ duration: 0.25, ease: 'easeOut' }}
+          >
+            {isError ? (
+              <span className="voice-error-text">{voiceError}</span>
+            ) : voiceTranscript ? (
+              <span className="voice-highlight">{voiceTranscript}</span>
+            ) : isListening ? (
+              <span className="voice-placeholder">Listening...</span>
+            ) : (
+              <span className="voice-placeholder">Click mic to start</span>
+            )}
+          </motion.div>
+        </div>
+
+        <div className="voice-mic-container">
+          <button
+            onClick={handleToggleVoice}
+            className={`voice-mic-btn ${isListening ? 'listening' : ''} ${isError ? 'error' : ''}`}
+            type="button"
+            aria-label={isListening ? 'Stop listening' : 'Start listening'}
+          >
+            {isListening ? (
+              <div className="voice-bars">
+                {[0, 1, 2, 3].map(i => (
+                  <div key={i} className="vbar" style={{ animationDelay: `${i * 0.15}s` }} />
+                ))}
+              </div>
+            ) : (
+              <svg viewBox="0 0 24 24" fill="currentColor" width="24" height="24">
+                {isError ? (
+                  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z" />
+                ) : (
+                  <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1 1.93c-3.94-.49-7-3.85-7-7.93h2c0 3.31 2.69 6 6 6s6-2.69 6-6h2c0 4.08-3.06 7.44-7 7.93V20h4v2H8v-2h4v-4.07z" />
+                )}
+              </svg>
+            )}
+          </button>
+          <div className="voice-status-label">
+            {isError ? 'ERROR' : isListening ? 'LISTENING' : 'READY'}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   const renderUtilities = () => {
     return (
       <div className="slide slide-utilities">
@@ -762,7 +912,8 @@ export default function DynamicIsland({
     if (type === 'home') return renderHome()
     if (type === 'music') return renderMusic()
     if (type === 'weather') return renderWeather()
-    if (type === 'utilities') return renderUtilities() // ADDED
+    if (type === 'voice') return renderVoice()
+    if (type === 'utilities') return renderUtilities()
     return renderCalendar()
   }
 
@@ -840,7 +991,7 @@ export default function DynamicIsland({
           onStaybackChange={onStaybackChange}
           onClose={() => setShowSettings(false)}
           keyStatus={keyStatus}
-          googleEmail={calendarData.email} // Pass email prop
+
           islandOpacity={islandOpacity}
           onOpacityChange={onOpacityChange}
         />

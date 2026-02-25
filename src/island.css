@@ -590,6 +590,7 @@
 }
 
 @keyframes calIconFloat {
+
   0%,
   100% {
     transform: translateY(0);
@@ -601,6 +602,7 @@
 }
 
 @keyframes calIconSheen {
+
   0%,
   58%,
   100% {
@@ -619,6 +621,7 @@
 }
 
 @keyframes calDateBreathe {
+
   0%,
   100% {
     transform: translateY(0);
@@ -1118,4 +1121,196 @@
 
 .utility-item:hover .utility-label {
   color: #fff;
+}
+
+/* ─── VOICE SLIDE ─── Teleprompter Style */
+
+.slide-voice {
+  justify-content: space-between;
+  align-items: stretch;
+  gap: 16px;
+}
+
+.voice-teleprompter {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  overflow: hidden;
+  height: 100%;
+  padding-bottom: 4px;
+}
+
+.voice-history {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex-shrink: 0;
+  margin-bottom: 4px;
+  min-height: 0;
+}
+
+.voice-history-line {
+  font-size: 22px;
+  font-weight: 300;
+  color: #fff;
+  line-height: 1.25;
+  letter-spacing: -0.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  height: 28px;
+}
+
+.voice-current {
+  font-size: 22px;
+  font-weight: 300;
+  color: #fff;
+  line-height: 1.25;
+  letter-spacing: -0.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  min-height: 28px;
+  flex-shrink: 0;
+}
+
+.voice-current.active {
+  animation: voice-pulse 2s ease-in-out infinite;
+}
+
+@keyframes voice-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.85; }
+}
+
+.voice-highlight {
+  background: linear-gradient(90deg, #fff 0%, rgba(255, 255, 255, 0.9) 100%);
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.voice-placeholder {
+  color: rgba(255, 255, 255, 0.25);
+  font-weight: 300;
+}
+
+.voice-error-text {
+  color: rgba(255, 100, 100, 0.8);
+  font-size: 16px;
+  font-weight: 400;
+}
+
+/* Mic Button Container */
+.voice-mic-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.voice-mic-btn {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.06);
+  border: 0.5px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.voice-mic-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.8);
+  transform: scale(1.05);
+}
+
+.voice-mic-btn.listening {
+  background: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: #fff;
+  box-shadow:
+    0 0 20px rgba(255, 255, 255, 0.15),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  animation: mic-glow 2s ease-in-out infinite;
+}
+
+@keyframes mic-glow {
+  0%, 100% {
+    box-shadow:
+      0 0 20px rgba(255, 255, 255, 0.15),
+      inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  }
+  50% {
+    box-shadow:
+      0 0 30px rgba(255, 255, 255, 0.25),
+      inset 0 1px 0 rgba(255, 255, 255, 0.15);
+  }
+}
+
+.voice-mic-btn.error {
+  border-color: rgba(255, 100, 100, 0.3);
+  color: rgba(255, 100, 100, 0.7);
+}
+
+.voice-status-label {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 1.2px;
+  color: rgba(255, 255, 255, 0.35);
+  text-transform: uppercase;
+}
+
+/* Mini bars inside mic button when listening */
+.voice-bars {
+  display: flex;
+  align-items: center;
+  gap: 2.5px;
+  height: 20px;
+}
+
+.vbar {
+  width: 3px;
+  border-radius: 2px;
+  background: #fff;
+  box-shadow: 0 0 6px rgba(255, 255, 255, 0.3);
+  animation: vbar-dance 0.7s ease-in-out infinite alternate;
+}
+
+.vbar:nth-child(1) {
+  height: 6px;
+}
+
+.vbar:nth-child(2) {
+  height: 14px;
+}
+
+.vbar:nth-child(3) {
+  height: 18px;
+}
+
+.vbar:nth-child(4) {
+  height: 10px;
+}
+
+@keyframes vbar-dance {
+  0% {
+    transform: scaleY(0.35);
+    opacity: 0.5;
+  }
+
+  100% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
 }

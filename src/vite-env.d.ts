@@ -40,5 +40,12 @@ interface Window {
     quitApp: () => void
     restartApp: () => void
     openExternal: (url: string) => void
+
+    // Voice APIs
+    startVoice: () => void
+    stopVoice: () => void
+    setVoiceKey: (key: string) => void
+    onVoiceTranscript: (cb: (data: { text: string; is_final: boolean; timestamp: number }) => void) => () => void
+    onVoiceStatus: (cb: (data: { status: string; error?: string; timestamp: number }) => void) => () => void
   }
 }

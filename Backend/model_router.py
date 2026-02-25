@@ -33,6 +33,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import re
 import sys
 import time
@@ -40,13 +41,15 @@ from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ============================================================================
 # Configuration
 # ============================================================================
 
-# User-requested hardcoded key (be careful if you share/commit this file)
-GROQ_API_KEY = ""
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 CLASSIFIER_MODEL = "openai/gpt-oss-20b"
 GROQ_API_BASE = "https://api.groq.com/openai/v1"

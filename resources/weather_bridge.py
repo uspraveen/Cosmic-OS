@@ -5,7 +5,7 @@ import urllib.request
 import urllib.error
 
 # --- Configuration ---
-LOCATION_API = "http://ip-api.com/json/"
+LOCATION_API_FALLBACK = "http://ip-api.com/json/"
 
 # Updated API: Added humidity, daily highs/lows, and precip probability. 
 # Added timezone=auto so 'daily' refers to local time.
@@ -23,13 +23,30 @@ def dlog(*args):
     print("[weather_bridge]", *args, file=sys.stderr, flush=True)
 
 def get_location():
+    # Primary: ipinfo.io (More accurate geolocation)
     try:
-        with urllib.request.urlopen(LOCATION_API, timeout=5) as url:
+        req = urllib.request.Request(
+            "https://ipinfo.io/json",
+            headers={'User-Agent': 'Mozilla/5.0'}
+        )
+        with urllib.request.urlopen(req, timeout=5) as url:
+            data = json.loads(url.read().decode())
+            if "loc" in data:
+                loc = data["loc"].split(",")
+                if len(loc) == 2:
+                    return float(loc[0]), float(loc[1]), data.get("city", "Unknown")
+    except Exception as e:
+        dlog("Primary location fetch failed (ipinfo):", e)
+    
+    # Fallback: ip-api.com (Less accurate, generous rate limits)
+    try:
+        with urllib.request.urlopen(LOCATION_API_FALLBACK, timeout=5) as url:
             data = json.loads(url.read().decode())
             if data.get("status") == "success":
                 return data["lat"], data["lon"], data["city"]
     except Exception as e:
-        dlog("Location fetch failed:", e)
+        dlog("Fallback location fetch failed:", e)
+        
     return None, None, "Unknown"
 
 def get_weather(lat, lon):

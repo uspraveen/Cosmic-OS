@@ -28,12 +28,6 @@ interface Splash {
 }
 
 // New interfaces
-interface Ray {
-  angle: number
-  length: number
-  speed: number
-}
-
 interface Sun {
   x: number
   y: number

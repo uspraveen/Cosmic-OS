@@ -6,6 +6,7 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+weather_log.txt
 
 # Node
 node_modules
@@ -23,13 +24,28 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+*.swp
+*.swo
+*~
+
+# Secrets & environment
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.csr
+credentials.json
+token.json
 
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
 venv/
-.env
 .venv/
 env/
 .Python
@@ -50,6 +66,8 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
 
 # Electron
 dist-electron
@@ -57,3 +75,10 @@ release
 resources/user_data.db
 *.db
 resources/secret.key
+
+# OS files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.Spotlight-V100
+.Trashes

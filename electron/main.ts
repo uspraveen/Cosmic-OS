@@ -29,7 +29,9 @@ let windowProcess: any = null
 let geminiProcess: any = null
 let perplexityProcess: any = null
 let weatherProcess: any = null
-let calendarProcess: any = null
+
+let voiceProcess: any = null
+let voiceActive = false
 let searchVisible = false
 let lastWeatherData: any = null
 
@@ -49,7 +51,7 @@ function startGeminiBridge(window: BrowserWindow) {
     let lastIndex = 0
 
     while ((match = regex.exec(rawBuffer)) !== null) {
-      const [fullMatch, tag, content] = match
+      const [, tag, content] = match
       lastIndex = regex.lastIndex
 
       try {
@@ -192,31 +194,6 @@ function startPerplexityBridge(window: BrowserWindow) {
   })
 }
 
-function startCalendarBridge(window: BrowserWindow) {
-  const scriptPath = path.join(process.env.APP_ROOT, 'resources', 'calendar_bridge.py')
-  calendarProcess = spawn('python', ['-u', scriptPath])
-
-  // ADDED: Error logging to catch crashes (e.g., missing libraries/credentials)
-  calendarProcess.stderr?.on('data', (d: any) => console.error('[CALENDAR ERR]', d.toString()))
-
-  let rawBuffer = ''
-  calendarProcess.stdout.on('data', (chunk: any) => {
-    rawBuffer += chunk.toString()
-    let startIndex = rawBuffer.indexOf('<<CALENDAR>>')
-    let endIndex = rawBuffer.indexOf('<<END>>')
-    while (startIndex !== -1 && endIndex !== -1) {
-      if (endIndex > startIndex) {
-        try {
-          const jsonStr = rawBuffer.substring(startIndex + 12, endIndex)
-          window.webContents.send('calendar:update', JSON.parse(jsonStr))
-        } catch (e) { console.error('Calendar Parse Error:', e) }
-        rawBuffer = rawBuffer.substring(endIndex + 7)
-      } else { rawBuffer = rawBuffer.substring(startIndex) }
-      startIndex = rawBuffer.indexOf('<<CALENDAR>>')
-      endIndex = rawBuffer.indexOf('<<END>>')
-    }
-  })
-}
 
 let settingsProcess: any = null
 
@@ -243,6 +220,85 @@ function startSettingsBridge(window: BrowserWindow) {
       endIndex = rawBuffer.indexOf('<<END>>')
     }
   })
+}
+
+function startVoiceBridge(window: BrowserWindow) {
+  let scriptName = 'voice_bridge_win.py'
+  if (process.platform === 'darwin') {
+    scriptName = 'voice_bridge_mac.py'
+  }
+
+  const scriptPath = path.join(process.env.APP_ROOT, 'resources', scriptName)
+  voiceProcess = spawn('python', ['-u', scriptPath])
+
+  voiceProcess.stderr?.on('data', (d: any) => console.error('[VOICE ERR]', d.toString()))
+
+  let rawBuffer = ''
+  voiceProcess.stdout.on('data', (chunk: any) => {
+    rawBuffer += chunk.toString()
+
+    let transcriptIndex = rawBuffer.indexOf('<<VOICE_TRANSCRIPT>>')
+    let statusIndex = rawBuffer.indexOf('<<VOICE_STATUS>>')
+
+    while (transcriptIndex !== -1 || statusIndex !== -1) {
+      let nextTag = -1
+      let tagName = ''
+
+      if (transcriptIndex === -1) {
+        nextTag = statusIndex
+        tagName = 'VOICE_STATUS'
+      } else if (statusIndex === -1) {
+        nextTag = transcriptIndex
+        tagName = 'VOICE_TRANSCRIPT'
+      } else {
+        nextTag = Math.min(transcriptIndex, statusIndex)
+        tagName = transcriptIndex < statusIndex ? 'VOICE_TRANSCRIPT' : 'VOICE_STATUS'
+      }
+
+      const endIndex = rawBuffer.indexOf('<<END>>', nextTag)
+      if (endIndex === -1) break
+
+      const contentStart = nextTag + (tagName === 'VOICE_TRANSCRIPT' ? 20 : 16)
+      if (contentStart < endIndex) {
+        try {
+          const jsonStr = rawBuffer.substring(contentStart, endIndex)
+          const json = JSON.parse(jsonStr)
+          if (tagName === 'VOICE_TRANSCRIPT') {
+            window.webContents.send('voice:transcript', json)
+          } else {
+            window.webContents.send('voice:status', json)
+            // Update voiceActive state based on status
+            if (json.status === 'stopped' || json.status === 'disconnected') {
+              voiceActive = false
+            } else if (json.status === 'error') {
+              voiceActive = false
+              console.error('[VOICE ERROR]', json.error)
+              // Show error dialog to user
+              import('electron').then(({ dialog }) => {
+                dialog.showErrorBox('Voice Recognition Error', `Deepgram Error: ${json.error}\n\nPlease check your .env file and API key.`)
+              })
+            } else if (json.status === 'connected' || json.status === 'listening') {
+              voiceActive = true
+            }
+          }
+        } catch (e) { console.error('Voice Parse Error:', e) }
+      }
+
+      rawBuffer = rawBuffer.substring(endIndex + 7)
+      transcriptIndex = rawBuffer.indexOf('<<VOICE_TRANSCRIPT>>')
+      statusIndex = rawBuffer.indexOf('<<VOICE_STATUS>>')
+    }
+  })
+
+  voiceProcess.on('close', (code: any) => {
+    console.log('[VOICE] Process exited with code:', code)
+  })
+}
+
+function sendToVoiceBridge(command: string) {
+  if (voiceProcess && voiceProcess.stdin) {
+    voiceProcess.stdin.write(command + '\n')
+  }
 }
 
 // Get the preferred display or fallback to cursor display
@@ -324,12 +380,13 @@ function cleanupProcesses() {
   kill(geminiProcess); geminiProcess = null
   kill(perplexityProcess); perplexityProcess = null
   kill(weatherProcess); weatherProcess = null
-  kill(calendarProcess); calendarProcess = null
+
   kill(settingsProcess); settingsProcess = null
+  kill(voiceProcess); voiceProcess = null
 }
 
 // Monitor change detection
-function handleDisplayChange(event: any, display: Electron.Display) {
+function handleDisplayChange(_event: any, display: Electron.Display) {
   console.log('📺 Display changed:', display.id)
   if (store.get('autoRepositionOnChange')) {
     sizeToDisplay()
@@ -348,8 +405,9 @@ app.whenReady().then(() => {
     startGeminiBridge(win)
     startPerplexityBridge(win)
     startWeatherBridge(win)
-    startCalendarBridge(win)
+
     startSettingsBridge(win)
+    startVoiceBridge(win)
     sizeToDisplay()
     win.show()
   }
@@ -379,10 +437,27 @@ app.whenReady().then(() => {
   })
 
   ipcMain.on('media:control', (_, a) => mediaProcess?.stdin.write(`${a}\n`))
-  ipcMain.on('media:set_volume', (_, l) => mediaProcess?.stdin.write(`setvol:${l}\n`))
+  let volumeTimeout: NodeJS.Timeout | null = null;
+  ipcMain.on('media:set_volume', async (_, l) => {
+    if (volumeTimeout) clearTimeout(volumeTimeout);
+    volumeTimeout = setTimeout(() => {
+      mediaProcess?.stdin.write(`setvol:${l}\n`);
+    }, 50);
+  })
 
   ipcMain.on('settings:get-all', () => {
     settingsProcess?.stdin.write('GET_ALL_SETTINGS\n')
+  })
+
+  // Voice IPC handlers
+  ipcMain.on('voice:start', () => {
+    sendToVoiceBridge('START')
+  })
+  ipcMain.on('voice:stop', () => {
+    sendToVoiceBridge('STOP')
+  })
+  ipcMain.on('voice:set-key', (_, key: string) => {
+    sendToVoiceBridge(`SET_KEY:${key}`)
   })
 
   ipcMain.on('settings:save', (_, { key, value }) => {
@@ -432,12 +507,7 @@ app.whenReady().then(() => {
     shell.openExternal(url)
   })
 
-  ipcMain.on('calendar:save-url', (_, url) => {
-    if (calendarProcess?.stdin) {
-      // Send the "SAVE_URL:" command to our new Python script
-      calendarProcess.stdin.write(`SAVE_URL:${url}\n`)
-    }
-  })
+
 
   // Multi-monitor IPC handlers
   ipcMain.handle('get-all-displays', () => {
@@ -465,4 +535,16 @@ app.whenReady().then(() => {
   })
 
   globalShortcut.register('CommandOrControl+Shift+Space', toggleSearch)
+
+  // Voice activation shortcut - CommandOrControl+Shift+V to toggle voice
+  globalShortcut.register('CommandOrControl+Shift+V', () => {
+    // Toggle voice on/off
+    if (voiceActive) {
+      sendToVoiceBridge('STOP')
+      voiceActive = false
+    } else {
+      sendToVoiceBridge('START')
+      voiceActive = true
+    }
+  })
 })

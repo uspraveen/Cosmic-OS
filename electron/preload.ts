@@ -110,14 +110,7 @@ contextBridge.exposeInMainWorld('cosmic', {
     return () => ipcRenderer.removeListener('session-set', listener)
   },
 
-  onCalendarUpdate: (cb: (data: any) => void) => {
-    const listener = (_: any, data: any) => cb(data)
-    ipcRenderer.on('calendar:update', listener)
-    return () => ipcRenderer.removeListener('calendar:update', listener)
-  },
 
-  // NEW: Calendar Auth
-  saveCalendarUrl: (url: string) => ipcRenderer.send('calendar:save-url', url),
 
   quitApp: () => ipcRenderer.send('app:quit'),
   restartApp: () => ipcRenderer.send('app:restart'),

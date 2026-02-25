@@ -67,9 +67,9 @@ def init_volume_pycaw():
     if not HAS_PYCAW: return False
     _coinit()
     try:
-        audio_device_object = AudioUtilities.GetSpeakers()
-        interface = audio_device_object.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-        volume_interface = cast(interface, POINTER(IAudioEndpointVolume))
+        devices = AudioUtilities.GetSpeakers()
+        volume_interface = devices.EndpointVolume
+        audio_device_object = devices 
         return True
     except:
         volume_interface = None
@@ -166,38 +166,41 @@ def sniff_mime(buf: bytes) -> str:
 async def main():
     try:
         manager = await GlobalSystemMediaTransportControlsSessionManager.request_async()
-        session = manager.get_current_session()
+        sessions = manager.get_sessions()
         
-        if not session:
-            sessions = manager.get_sessions()
-            for s in sessions:
-                try:
-                    info = s.get_playback_info()
-                    if info.playback_status in [4, 5]:
-                        session = s
-                        break
-                except: pass
-
-        if not session: return
-
-        props = await session.try_get_media_properties_async()
-        if not props or not props.thumbnail: return
-
-        stream = await props.thumbnail.open_read_async()
-        if not stream: return
+        # Priority: Playing > Paused > Anything with a thumbnail
+        best_session = manager.get_current_session()
         
-        size = stream.size
-        if size == 0: return
+        candidates = []
+        if best_session: candidates.append(best_session)
+        for s in sessions:
+            if best_session and s.source_app_user_model_id == best_session.source_app_user_model_id:
+                continue
+            candidates.append(s)
+            
+        for session in candidates:
+            try:
+                props = await session.try_get_media_properties_async()
+                if not props or not props.thumbnail: continue
 
-        reader = DataReader(stream.get_input_stream_at(0))
-        await reader.load_async(size)
-        buf = bytearray(size)
-        reader.read_bytes(buf)
-        
-        if buf:
-            mime = sniff_mime(bytes(buf))
-            b64 = base64.b64encode(bytes(buf)).decode("utf-8")
-            print("THUMB:data:" + mime + ";base64," + b64)
+                stream = await props.thumbnail.open_read_async()
+                if not stream: continue
+                
+                size = stream.size
+                if size == 0: continue
+
+                reader = DataReader(stream.get_input_stream_at(0))
+                await reader.load_async(size)
+                buf = bytearray(size)
+                reader.read_bytes(buf)
+                
+                if buf:
+                    mime = sniff_mime(bytes(buf))
+                    b64 = base64.b64encode(bytes(buf)).decode("utf-8")
+                    print("THUMB:data:" + mime + ";base64," + b64)
+                    return # Exit once we find the first valid thumbnail
+            except:
+                pass
     except: pass
 
 asyncio.run(main())
@@ -367,10 +370,6 @@ async def update_loop():
 
 async def handle_command(cmd: str):
     try:
-        if cmd.startswith("setvol:"):
-            set_volume(int(cmd.split(":")[1]))
-            return
-        
         # Only try media controls if we have a valid manager
         if HAS_MEDIA:
             manager = await GlobalSystemMediaTransportControlsSessionManager.request_async()
@@ -383,7 +382,11 @@ async def handle_command(cmd: str):
 
 def input_listener(loop):
     for line in sys.stdin:
-        asyncio.run_coroutine_threadsafe(handle_command(line.strip()), loop)
+        cmd = line.strip()
+        if cmd.startswith("setvol:"):
+            set_volume(int(cmd.split(":")[1]))
+        else:
+            asyncio.run_coroutine_threadsafe(handle_command(cmd), loop)
 
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()

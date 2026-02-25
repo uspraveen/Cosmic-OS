@@ -1,3 +1,7 @@
 winsdk
 pycaw
 comtypes
+websockets
+pyaudio
+python-dotenv
+

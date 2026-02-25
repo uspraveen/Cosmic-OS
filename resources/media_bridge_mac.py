@@ -157,10 +157,6 @@ async def update_loop():
 
 async def handle_command(cmd: str):
     try:
-        if cmd.startswith("setvol:"):
-            set_volume_mac(int(cmd.split(":")[1]))
-            return
-        
         # Determine which app to control
         script_play = ""
         
@@ -190,7 +186,11 @@ async def handle_command(cmd: str):
 
 def input_listener(loop):
     for line in sys.stdin:
-        asyncio.run_coroutine_threadsafe(handle_command(line.strip()), loop)
+        cmd = line.strip()
+        if cmd.startswith("setvol:"):
+            set_volume_mac(int(cmd.split(":")[1]))
+        else:
+            asyncio.run_coroutine_threadsafe(handle_command(cmd), loop)
 
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
