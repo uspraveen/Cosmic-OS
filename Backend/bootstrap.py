@@ -44,6 +44,7 @@ PYTHON_CANDIDATES = [
     "python3.10",
     "python3",
 ]
+MIN_NODE_MAJOR = 20
 PACKAGE_NAMES: Dict[str, Dict[str, str]] = {
     "python": {
         "apt-get": "python3",
@@ -141,6 +142,19 @@ def executable_version(command: Sequence[str]) -> Optional[str]:
     except (BootstrapError, subprocess.CalledProcessError, FileNotFoundError):
         return None
     return (result.stdout or "").strip() or None
+
+
+def node_major_version(version_text: Optional[str]) -> Optional[int]:
+    if not version_text:
+        return None
+    normalized = version_text.strip()
+    if normalized.startswith("v"):
+        normalized = normalized[1:]
+    major, *_rest = normalized.split(".", 1)
+    try:
+        return int(major)
+    except ValueError:
+        return None
 
 
 def install_system_packages(manager: str, packages: Iterable[str]) -> None:
@@ -492,7 +506,8 @@ def has_npm() -> bool:
 def ensure_node_toolchain() -> None:
     node_version = executable_version(["node", "--version"])
     npm_version = executable_version(["npm", "--version"])
-    if node_version and npm_version:
+    node_major = node_major_version(node_version)
+    if node_version and npm_version and node_major is not None and node_major >= MIN_NODE_MAJOR:
         log("Node available: {0}".format(node_version))
         log("npm available: {0}".format(npm_version))
         return
@@ -500,6 +515,37 @@ def ensure_node_toolchain() -> None:
     manager = detect_package_manager()
     if not is_linux() or not manager:
         raise BootstrapError("Node.js/npm missing and no supported Linux package manager was found.")
+
+    if manager == "apt-get":
+        log(
+            "Installing/upgrading Node.js via NodeSource because COSMIC WhatsApp bridge requires Node.js {0}+.".format(
+                MIN_NODE_MAJOR
+            )
+        )
+        install_system_packages(manager, ["ca-certificates", "curl"])
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".sh") as temp_script:
+            setup_script = Path(temp_script.name)
+        try:
+            run(["curl", "-fsSL", "https://deb.nodesource.com/setup_20.x", "-o", str(setup_script)])
+            run(["bash", str(setup_script)], use_sudo=True)
+            run(["apt-get", "install", "-y", "nodejs"], use_sudo=True)
+        finally:
+            setup_script.unlink(missing_ok=True)
+
+        node_version = executable_version(["node", "--version"])
+        npm_version = executable_version(["npm", "--version"])
+        node_major = node_major_version(node_version)
+        if node_version and npm_version and node_major is not None and node_major >= MIN_NODE_MAJOR:
+            log("Node available: {0}".format(node_version))
+            log("npm available: {0}".format(npm_version))
+            return
+
+        raise BootstrapError(
+            "Node.js upgrade did not produce a supported runtime. Need Node.js {0}+, got {1}.".format(
+                MIN_NODE_MAJOR,
+                node_version or "missing",
+            )
+        )
 
     packages: list[str] = []
     if not node_version:
@@ -516,8 +562,16 @@ def ensure_node_toolchain() -> None:
     log("Installing Node.js toolchain via {0}: {1}".format(manager, ", ".join(packages)))
     install_system_packages(manager, packages)
 
-    if not has_node() or not has_npm():
-        raise BootstrapError("Node.js/npm are still unavailable after installation attempts.")
+    node_version = executable_version(["node", "--version"])
+    npm_version = executable_version(["npm", "--version"])
+    node_major = node_major_version(node_version)
+    if not node_version or not npm_version or node_major is None or node_major < MIN_NODE_MAJOR:
+        raise BootstrapError(
+            "Node.js/npm are still unavailable or too old after installation attempts. Need Node.js {0}+, got {1}.".format(
+                MIN_NODE_MAJOR,
+                node_version or "missing",
+            )
+        )
 
 
 def load_package_json(package_json: Path) -> dict:
