@@ -396,8 +396,20 @@ def has_venv_module() -> bool:
         return False
 
 
+def can_create_virtualenv() -> bool:
+    if not has_venv_module():
+        return False
+
+    with tempfile.TemporaryDirectory(prefix="cosmic-bootstrap-venv-check-") as temp_dir:
+        try:
+            run([sys.executable, "-m", "venv", temp_dir], capture_output=True)
+            return True
+        except (BootstrapError, subprocess.CalledProcessError):
+            return False
+
+
 def ensure_venv_support() -> None:
-    if has_venv_module():
+    if can_create_virtualenv():
         log("venv module available.")
         return
 
@@ -412,7 +424,7 @@ def ensure_venv_support() -> None:
     log("Installing venv support via {0}: {1}".format(manager, package_name))
     install_system_packages(manager, [package_name])
 
-    if not has_venv_module():
+    if not can_create_virtualenv():
         raise BootstrapError("Python venv support is still unavailable after installation attempts.")
 
 
@@ -424,6 +436,10 @@ def ensure_virtualenv(venv_path: Path) -> None:
     if venv_python_path(venv_path).exists():
         log("Virtual environment already exists at {0}".format(venv_path))
         return
+
+    if venv_path.exists():
+        log("Removing incomplete virtual environment at {0}".format(venv_path))
+        shutil.rmtree(venv_path)
 
     log("Creating virtual environment at {0}".format(venv_path))
     run([sys.executable, "-m", "venv", str(venv_path)])
