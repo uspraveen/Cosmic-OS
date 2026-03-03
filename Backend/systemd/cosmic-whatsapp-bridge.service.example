@@ -5,9 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=<SERVICE_USER>
+Group=<SERVICE_GROUP>
 WorkingDirectory=<BACKEND_ROOT>/bridges/whatsapp_bridge
 EnvironmentFile=/etc/cosmic/whatsapp-bridge.env
-ExecStart=/usr/bin/node <BACKEND_ROOT>/bridges/whatsapp_bridge/src/index.js
+ExecStart=/usr/bin/env node <BACKEND_ROOT>/bridges/whatsapp_bridge/src/index.js
 Restart=always
 RestartSec=5
 

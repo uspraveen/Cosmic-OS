@@ -19,6 +19,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import getpass
+import secrets
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -33,6 +35,8 @@ DEFAULT_ENV_SEARCH_ROOTS = (
     BACKEND_ROOT,
     BACKEND_ROOT / "bridges",
 )
+DEFAULT_SYSTEM_ENV_DIR = Path("/etc/cosmic")
+DEFAULT_WHATSAPP_AUTH_DIR = Path("/var/lib/cosmic/whatsapp/auth")
 PYTHON_CANDIDATES = [
     "python3.13",
     "python3.12",
@@ -200,6 +204,52 @@ def ensure_env_files(search_roots: Sequence[Path]) -> List[Path]:
         created.append(target_path)
         log("Created env file from template: {0}".format(target_path))
     return created
+
+
+def parse_env_text(raw: str) -> Dict[str, str]:
+    parsed: Dict[str, str] = {}
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        parsed[key.strip()] = value.strip()
+    return parsed
+
+
+def render_env_with_overrides(raw: str, overrides: Dict[str, str]) -> str:
+    rendered_lines: list[str] = []
+    seen: set[str] = set()
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            rendered_lines.append(line)
+            continue
+
+        key, _value = line.split("=", 1)
+        env_key = key.strip()
+        if env_key in overrides:
+            rendered_lines.append("{0}={1}".format(key, overrides[env_key]))
+            seen.add(env_key)
+        else:
+            rendered_lines.append(line)
+
+    for key, value in overrides.items():
+        if key not in seen:
+            rendered_lines.append("{0}={1}".format(key, value))
+
+    return "\n".join(rendered_lines).rstrip() + "\n"
+
+
+def meaningful_env_value(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if normalized.startswith("<") and normalized.endswith(">"):
+        return None
+    return normalized
 
 
 def version_for(executable: str) -> Optional[Tuple[int, int, int]]:
@@ -446,6 +496,85 @@ def load_package_json(package_json: Path) -> dict:
         raise BootstrapError("Invalid package.json at {0}: {1}".format(package_json, exc)) from exc
 
 
+def service_env_specs() -> List[Tuple[Path, Path]]:
+    return [
+        (BACKEND_ROOT / "gateway.env", DEFAULT_SYSTEM_ENV_DIR / "gateway.env"),
+        (BACKEND_ROOT / "model_router.env", DEFAULT_SYSTEM_ENV_DIR / "model-router.env"),
+        (DEFAULT_BRIDGE_DIR / ".env", DEFAULT_SYSTEM_ENV_DIR / "whatsapp-bridge.env"),
+    ]
+
+
+def fallback_service_env_specs() -> List[Tuple[Path, Path]]:
+    return [
+        (BACKEND_ROOT / "gateway.env.example", DEFAULT_SYSTEM_ENV_DIR / "gateway.env"),
+        (BACKEND_ROOT / "model_router.env.example", DEFAULT_SYSTEM_ENV_DIR / "model-router.env"),
+        (DEFAULT_BRIDGE_DIR / ".env.example", DEFAULT_SYSTEM_ENV_DIR / "whatsapp-bridge.env"),
+    ]
+
+
+def install_service_env_files(system_env_dir: Path) -> List[Path]:
+    if not is_linux():
+        raise BootstrapError("System env provisioning currently targets Linux VMs only.")
+
+    effective_sources: list[Tuple[Path, Path]] = []
+    fallback_sources = {dest: source for source, dest in fallback_service_env_specs()}
+    for source, dest in service_env_specs():
+        effective_sources.append((source if source.exists() else fallback_sources[dest], dest))
+
+    gateway_source = next(source for source, dest in effective_sources if dest.name == "gateway.env")
+    bridge_source = next(source for source, dest in effective_sources if dest.name == "whatsapp-bridge.env")
+    gateway_data = parse_env_text(gateway_source.read_text(encoding="utf-8"))
+    bridge_data = parse_env_text(bridge_source.read_text(encoding="utf-8"))
+
+    shared_internal_token = (
+        meaningful_env_value(gateway_data.get("GATEWAY_INTERNAL_TOKEN"))
+        or meaningful_env_value(bridge_data.get("GATEWAY_INTERNAL_TOKEN"))
+        or secrets.token_urlsafe(32)
+    )
+    bridge_token = (
+        meaningful_env_value(gateway_data.get("WHATSAPP_BRIDGE_TOKEN"))
+        or meaningful_env_value(bridge_data.get("WHATSAPP_BRIDGE_TOKEN"))
+        or secrets.token_urlsafe(32)
+    )
+    local_api_token = meaningful_env_value(gateway_data.get("GATEWAY_LOCAL_API_TOKEN")) or secrets.token_urlsafe(24)
+
+    overrides_by_dest = {
+        "gateway.env": {
+            "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
+            "GATEWAY_LOCAL_API_TOKEN": local_api_token,
+            "WHATSAPP_BRIDGE_TOKEN": bridge_token,
+        },
+        "whatsapp-bridge.env": {
+            "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
+            "WHATSAPP_BRIDGE_TOKEN": bridge_token,
+            "WHATSAPP_AUTH_DIR": str(DEFAULT_WHATSAPP_AUTH_DIR),
+        },
+    }
+
+    run(["install", "-d", "-m", "755", str(system_env_dir)], use_sudo=True)
+
+    installed: list[Path] = []
+    for source_path, dest_path in effective_sources:
+        if dest_path.exists():
+            log("System env file already exists: {0}".format(dest_path))
+            continue
+
+        raw = source_path.read_text(encoding="utf-8")
+        rendered = render_env_with_overrides(raw, overrides_by_dest.get(dest_path.name, {}))
+        with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8", newline="\n") as tmp:
+            tmp.write(rendered)
+            temp_path = Path(tmp.name)
+        try:
+            run(["install", "-m", "600", str(temp_path), str(dest_path)], use_sudo=True)
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+        installed.append(dest_path)
+        log("Installed system env file: {0}".format(dest_path))
+
+    return installed
+
+
 def install_whatsapp_bridge_dependencies(bridge_dir: Path) -> None:
     package_json = bridge_dir / "package.json"
     if not bridge_dir.exists():
@@ -471,7 +600,16 @@ def install_whatsapp_bridge_dependencies(bridge_dir: Path) -> None:
         run(["npm", "run", "build"], check=True, capture_output=False, cwd=bridge_dir)
 
 
-def install_systemd_units(template_dir: Path, *, enable_units: bool = False) -> List[str]:
+def current_service_user() -> str:
+    return os.getenv("SUDO_USER") or os.getenv("USER") or getpass.getuser()
+
+
+def install_systemd_units(
+    template_dir: Path,
+    *,
+    enable_units: bool = False,
+    start_units: bool = False,
+) -> List[str]:
     if not is_linux():
         raise BootstrapError("Systemd install currently targets Linux VMs only.")
     if shutil.which("systemctl") is None:
@@ -483,13 +621,35 @@ def install_systemd_units(template_dir: Path, *, enable_units: bool = False) -> 
     if not templates:
         raise BootstrapError("No systemd template files found in {0}".format(template_dir))
 
+    install_service_env_files(DEFAULT_SYSTEM_ENV_DIR)
+
     installed_names: list[str] = []
+    service_user = current_service_user()
+    run(
+        [
+            "install",
+            "-d",
+            "-m",
+            "700",
+            "-o",
+            service_user,
+            "-g",
+            service_user,
+            str(DEFAULT_WHATSAPP_AUTH_DIR),
+        ],
+        use_sudo=True,
+    )
     with tempfile.TemporaryDirectory(prefix="cosmic-systemd-") as temp_dir:
         temp_path = Path(temp_dir)
         for template in templates:
             rendered_name = template.name[: -len(".example")]
             rendered_path = temp_path / rendered_name
-            rendered_text = template.read_text(encoding="utf-8").replace("<BACKEND_ROOT>", str(BACKEND_ROOT))
+            rendered_text = (
+                template.read_text(encoding="utf-8")
+                .replace("<BACKEND_ROOT>", str(BACKEND_ROOT))
+                .replace("<SERVICE_USER>", service_user)
+                .replace("<SERVICE_GROUP>", service_user)
+            )
             rendered_path.write_text(rendered_text, encoding="utf-8")
             run(
                 ["install", "-m", "644", str(rendered_path), "/etc/systemd/system/{0}".format(rendered_name)],
@@ -502,6 +662,8 @@ def install_systemd_units(template_dir: Path, *, enable_units: bool = False) -> 
     if enable_units and installed_names:
         preferred_units = [name for name in installed_names if name.endswith(".target")] or installed_names
         run(["systemctl", "enable", *preferred_units], use_sudo=True)
+        if start_units:
+            run(["systemctl", "restart", *preferred_units], use_sudo=True)
 
     return installed_names
 
@@ -585,6 +747,29 @@ def bootstrap(venv_path: Path, requirements_path: Path, bridge_dir: Path, env_se
     print("  next   : source {0}/bin/activate".format(venv_path))
 
 
+def provision_vm(
+    venv_path: Path,
+    requirements_path: Path,
+    bridge_dir: Path,
+    env_search_roots: Sequence[Path],
+    systemd_template_dir: Path,
+    *,
+    enable_units: bool = True,
+    start_units: bool = True,
+) -> None:
+    bootstrap(venv_path, requirements_path, bridge_dir, env_search_roots)
+    installed = install_systemd_units(
+        systemd_template_dir,
+        enable_units=enable_units,
+        start_units=start_units,
+    )
+
+    print("")
+    print("VM provisioning complete")
+    for unit_name in installed:
+        print("  unit   : {0}".format(unit_name))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Bootstrap COSMIC Backend on a Linux VM.")
     parser.add_argument(
@@ -641,6 +826,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable the installed units (prefers the target unit when present).",
     )
+    install_systemd_parser.add_argument(
+        "--start",
+        action="store_true",
+        help="Restart the enabled units after installation.",
+    )
+    subparsers.add_parser(
+        "provision-vm",
+        help="Create env files, install Python and bridge deps, provision /etc/cosmic envs, install systemd units, enable them, and start the backend target.",
+    )
     return parser
 
 
@@ -670,10 +864,19 @@ def main() -> int:
             installed = install_systemd_units(
                 systemd_template_dir,
                 enable_units=bool(getattr(args, "enable", False)),
+                start_units=bool(getattr(args, "start", False)),
             )
             print("Installed systemd units:")
             for unit_name in installed:
                 print("  - {0}".format(unit_name))
+        elif command == "provision-vm":
+            provision_vm(
+                venv_path,
+                requirements_path,
+                bridge_dir,
+                env_search_roots,
+                systemd_template_dir,
+            )
         else:
             bootstrap(venv_path, requirements_path, bridge_dir, env_search_roots)
     except BootstrapError as exc:

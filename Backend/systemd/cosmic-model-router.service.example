@@ -5,6 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=<SERVICE_USER>
+Group=<SERVICE_GROUP>
 WorkingDirectory=<BACKEND_ROOT>
 EnvironmentFile=/etc/cosmic/model-router.env
 ExecStart=<BACKEND_ROOT>/.venv/bin/python <BACKEND_ROOT>/model_router.py --server
