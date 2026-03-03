@@ -297,7 +297,7 @@ The Model Router runs as a standalone FastAPI microservice, called by the Gatewa
         {"role": "user", "content": "Tell me about AI stocks"},
         {"role": "assistant", "content": "Here are the top AI stocks..."}
     ],
-    "max_completion_tokens": 380
+    "max_completion_tokens": 430
 }
 
 # Response

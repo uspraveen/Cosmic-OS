@@ -30,7 +30,7 @@ class ModelRouterClient:
         *,
         query: str,
         conversation_context: list[dict[str, str]],
-        max_completion_tokens: int = 380,
+        max_completion_tokens: int = 430,
     ) -> dict[str, Any]:
         if self._client is None:
             await self.start()
