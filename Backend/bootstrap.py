@@ -432,8 +432,19 @@ def venv_python_path(venv_path: Path) -> Path:
     return venv_path / "bin" / "python"
 
 
+def venv_has_pip(venv_path: Path) -> bool:
+    python_path = venv_python_path(venv_path)
+    if not python_path.exists():
+        return False
+    try:
+        run([str(python_path), "-m", "pip", "--version"], capture_output=True)
+        return True
+    except (BootstrapError, subprocess.CalledProcessError):
+        return False
+
+
 def ensure_virtualenv(venv_path: Path) -> None:
-    if venv_python_path(venv_path).exists():
+    if venv_python_path(venv_path).exists() and venv_has_pip(venv_path):
         log("Virtual environment already exists at {0}".format(venv_path))
         return
 
@@ -449,6 +460,12 @@ def upgrade_venv_pip(venv_path: Path) -> None:
     python_path = venv_python_path(venv_path)
     if not python_path.exists():
         raise BootstrapError("Missing venv python executable at {0}".format(python_path))
+
+    if not venv_has_pip(venv_path):
+        log("pip missing inside virtual environment. Trying ensurepip.")
+        run([str(python_path), "-m", "ensurepip", "--upgrade"])
+        if not venv_has_pip(venv_path):
+            raise BootstrapError("pip is still unavailable inside the virtual environment at {0}".format(venv_path))
 
     run([str(python_path), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])
 
