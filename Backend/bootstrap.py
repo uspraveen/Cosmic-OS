@@ -37,6 +37,9 @@ DEFAULT_ENV_SEARCH_ROOTS = (
 )
 DEFAULT_SYSTEM_ENV_DIR = Path("/etc/cosmic")
 DEFAULT_WHATSAPP_AUTH_DIR = Path("/var/lib/cosmic/whatsapp/auth")
+REQUIRED_SERVICE_ENV_KEYS: Dict[str, Tuple[str, ...]] = {
+    "model-router.env": ("GROQ_API_KEY",),
+}
 PYTHON_CANDIDATES = [
     "python3.13",
     "python3.12",
@@ -264,6 +267,45 @@ def meaningful_env_value(value: Optional[str]) -> Optional[str]:
     if normalized.startswith("<") and normalized.endswith(">"):
         return None
     return normalized
+
+
+def missing_required_env_keys(env_path: Path, required_keys: Sequence[str]) -> List[str]:
+    if not required_keys:
+        return []
+    if not env_path.exists():
+        return list(required_keys)
+
+    parsed = parse_env_text(env_path.read_text(encoding="utf-8"))
+    missing: list[str] = []
+    for key in required_keys:
+        if meaningful_env_value(parsed.get(key)) is None:
+            missing.append(key)
+    return missing
+
+
+def validate_required_service_env_files(effective_sources: Sequence[Tuple[Path, Path]]) -> None:
+    failures: list[str] = []
+    for source_path, dest_path in effective_sources:
+        required_keys = REQUIRED_SERVICE_ENV_KEYS.get(dest_path.name, ())
+        if not required_keys:
+            continue
+
+        missing_keys = missing_required_env_keys(source_path, required_keys)
+        if missing_keys:
+            failures.append(
+                "{0}: missing required values for {1}".format(
+                    source_path,
+                    ", ".join(missing_keys),
+                )
+            )
+
+    if failures:
+        raise BootstrapError(
+            "Required service env values are missing or placeholders remain.\n"
+            "Fill the local env files before provisioning services:\n  - {0}".format(
+                "\n  - ".join(failures)
+            )
+        )
 
 
 def version_for(executable: str) -> Optional[Tuple[int, int, int]]:
@@ -608,6 +650,8 @@ def install_service_env_files(system_env_dir: Path) -> List[Path]:
     for source, dest in service_env_specs():
         effective_sources.append((source if source.exists() else fallback_sources[dest], dest))
 
+    validate_required_service_env_files(effective_sources)
+
     gateway_source = next(source for source, dest in effective_sources if dest.name == "gateway.env")
     bridge_source = next(source for source, dest in effective_sources if dest.name == "whatsapp-bridge.env")
     gateway_data = parse_env_text(gateway_source.read_text(encoding="utf-8"))
@@ -789,6 +833,23 @@ def doctor(
     print("  env search roots   : {0}".format(", ".join(str(path) for path in env_search_roots)))
     print("  env templates      : {0}".format(len(env_examples)))
     print("  systemd templates  : {0}".format(systemd_template_dir if systemd_template_dir.exists() else "missing"))
+
+    effective_sources: list[Tuple[Path, Path]] = []
+    fallback_sources = {dest: source for source, dest in fallback_service_env_specs()}
+    for source, dest in service_env_specs():
+        effective_sources.append((source if source.exists() else fallback_sources[dest], dest))
+
+    for source_path, dest_path in effective_sources:
+        required_keys = REQUIRED_SERVICE_ENV_KEYS.get(dest_path.name, ())
+        if not required_keys:
+            continue
+        missing_keys = missing_required_env_keys(source_path, required_keys)
+        print(
+            "  required env check : {0} -> {1}".format(
+                source_path,
+                "ok" if not missing_keys else "missing {0}".format(", ".join(missing_keys)),
+            )
+        )
 
     supported = find_supported_python()
     if supported and Path(supported).resolve() != Path(sys.executable).resolve():
