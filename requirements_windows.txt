@@ -4,4 +4,7 @@ comtypes
 websockets
 pyaudio
 python-dotenv
-
+requests
+httpx[http2]
+google-auth
+google-auth-oauthlib

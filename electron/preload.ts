@@ -71,6 +71,21 @@ contextBridge.exposeInMainWorld('cosmic', {
 
   requestWeather: () => ipcRenderer.send('weather:request'),
 
+  // --- VOICE BRIDGE ---
+  startVoice: () => ipcRenderer.send('voice:start'),
+  stopVoice: () => ipcRenderer.send('voice:stop'),
+  setVoiceKey: (key: string) => ipcRenderer.send('voice:set-key', key),
+  onVoiceTranscript: (cb: (data: { text: string; is_final: boolean; timestamp: number }) => void) => {
+    const listener = (_: any, data: { text: string; is_final: boolean; timestamp: number }) => cb(data)
+    ipcRenderer.on('voice:transcript', listener)
+    return () => ipcRenderer.removeListener('voice:transcript', listener)
+  },
+  onVoiceStatus: (cb: (data: { status: string; error?: string; timestamp: number }) => void) => {
+    const listener = (_: any, data: { status: string; error?: string; timestamp: number }) => cb(data)
+    ipcRenderer.on('voice:status', listener)
+    return () => ipcRenderer.removeListener('voice:status', listener)
+  },
+
   onGeminiChunk: (cb: (data: { chunk: string, done: boolean }) => void) => {
     const listener = (_: any, data: { chunk: string, done: boolean }) => cb(data)
     ipcRenderer.on('gemini:chunk', listener)
@@ -110,6 +125,61 @@ contextBridge.exposeInMainWorld('cosmic', {
     return () => ipcRenderer.removeListener('session-set', listener)
   },
 
+  // --- MEETING MODE ---
+  startMeeting: (payload: any) => ipcRenderer.send('meeting:start', payload),
+  stopMeeting: () => ipcRenderer.send('meeting:stop'),
+  pauseMeeting: () => ipcRenderer.send('meeting:pause'),
+  resumeMeeting: () => ipcRenderer.send('meeting:resume'),
+  setMeetingWebSearch: (enabled: boolean) => ipcRenderer.send('meeting:set-web-search', { web_search_enabled: enabled }),
+  askMeeting: (payload: any) => ipcRenderer.send('meeting:ask', payload),
+  checkMeetingKeys: () => ipcRenderer.send('meeting:check-keys'),
+  getMeetingSettings: () => ipcRenderer.send('meeting:get-settings'),
+  saveMeetingSettings: (payload: any) => ipcRenderer.send('meeting:save-settings', payload),
+  onMeetingInvoke: (cb: () => void) => {
+    const listener = () => cb()
+    ipcRenderer.on('meeting:invoke', listener)
+    return () => ipcRenderer.removeListener('meeting:invoke', listener)
+  },
+  onMeetingStatus: (cb: (data: any) => void) => {
+    const listener = (_: any, data: any) => cb(data)
+    ipcRenderer.on('meeting:status', listener)
+    return () => ipcRenderer.removeListener('meeting:status', listener)
+  },
+  onMeetingTranscript: (cb: (data: any) => void) => {
+    const listener = (_: any, data: any) => cb(data)
+    ipcRenderer.on('meeting:transcript', listener)
+    return () => ipcRenderer.removeListener('meeting:transcript', listener)
+  },
+  onMeetingUpdate: (cb: (data: any) => void) => {
+    const listener = (_: any, data: any) => cb(data)
+    ipcRenderer.on('meeting:update', listener)
+    return () => ipcRenderer.removeListener('meeting:update', listener)
+  },
+  onMeetingAnswer: (cb: (data: any) => void) => {
+    const listener = (_: any, data: any) => cb(data)
+    ipcRenderer.on('meeting:answer', listener)
+    return () => ipcRenderer.removeListener('meeting:answer', listener)
+  },
+  onMeetingAnswerChunk: (cb: (data: { question: string; chunk: string }) => void) => {
+    const listener = (_: any, data: any) => cb(data)
+    ipcRenderer.on('meeting:answer-chunk', listener)
+    return () => ipcRenderer.removeListener('meeting:answer-chunk', listener)
+  },
+  onMeetingFinal: (cb: (data: any) => void) => {
+    const listener = (_: any, data: any) => cb(data)
+    ipcRenderer.on('meeting:final', listener)
+    return () => ipcRenderer.removeListener('meeting:final', listener)
+  },
+  onMeetingSettings: (cb: (data: any) => void) => {
+    const listener = (_: any, data: any) => cb(data)
+    ipcRenderer.on('meeting:settings', listener)
+    return () => ipcRenderer.removeListener('meeting:settings', listener)
+  },
+  onMeetingToggle: (cb: () => void) => {
+    const listener = () => cb()
+    ipcRenderer.on('meeting:toggle-visibility', listener)
+    return () => ipcRenderer.removeListener('meeting:toggle-visibility', listener)
+  },
 
 
   quitApp: () => ipcRenderer.send('app:quit'),
@@ -128,5 +198,26 @@ contextBridge.exposeInMainWorld('cosmic', {
     const listener = (_: any, data: any) => cb(data)
     ipcRenderer.on('settings:all', listener)
     return () => ipcRenderer.removeListener('settings:all', listener)
+  },
+  getIntegrations: () => ipcRenderer.send('integrations:get-all'),
+  getCalendarAgenda: () => ipcRenderer.send('calendar:get-agenda'),
+  saveIntegrationAccount: (payload: any) => ipcRenderer.send('integrations:save-account', payload),
+  deleteIntegrationAccount: (accountId: string) => ipcRenderer.send('integrations:delete-account', accountId),
+  connectGoogleAccount: (payload: any) => ipcRenderer.send('integrations:connect-google', payload),
+  disconnectGoogleAccount: (accountId: string) => ipcRenderer.send('integrations:disconnect-google', accountId),
+  onCalendarAgendaUpdate: (cb: (data: any) => void) => {
+    const listener = (_: any, data: any) => cb(data)
+    ipcRenderer.on('calendar:agenda', listener)
+    return () => ipcRenderer.removeListener('calendar:agenda', listener)
+  },
+  onIntegrationsUpdate: (cb: (data: any) => void) => {
+    const listener = (_: any, data: any) => cb(data)
+    ipcRenderer.on('integrations:all', listener)
+    return () => ipcRenderer.removeListener('integrations:all', listener)
+  },
+  onIntegrationEvent: (cb: (data: any) => void) => {
+    const listener = (_: any, data: any) => cb(data)
+    ipcRenderer.on('integration:event', listener)
+    return () => ipcRenderer.removeListener('integration:event', listener)
   },
 })

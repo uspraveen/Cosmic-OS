@@ -9,7 +9,7 @@
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  padding-top: 180px;
+  padding-top: clamp(72px, 18vh, 180px);
   animation: fadeIn 0.2s ease-out;
 }
 
@@ -24,7 +24,7 @@
 }
 
 .settings-panel {
-  width: 360px;
+  width: min(440px, calc(100vw - 28px));
   animation: slideDown 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.1);
 }
 
@@ -79,6 +79,12 @@
   font-weight: 600;
   color: #fff;
   letter-spacing: -0.02em;
+}
+
+.settings-header-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .close-btn {
@@ -257,6 +263,20 @@
   margin-top: 12px;
 }
 
+.setting-nav-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.setting-nav-subcopy {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+  line-height: 1.35;
+  text-align: left;
+}
+
 .setting-nav-btn:hover {
   background: rgba(255, 255, 255, 0.08);
   border-color: rgba(255, 255, 255, 0.2);
@@ -311,4 +331,653 @@
 .ui-slider-labels {
   margin-top: -2px;
   font-size: 10px;
+}
+
+
+/* --- PRX INTEGRATIONS REDESIGN (Apple & Perplexity Style) --- */
+
+.prx-integrations-page, .prx-gint-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  animation: fadeIn 0.3s ease;
+}
+
+.prx-intro {
+  margin-bottom: 4px;
+}
+
+.prx-intro h3 {
+  font-size: 20px;
+  color: #fff;
+  margin: 0 0 6px 0;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+
+.prx-intro p {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.6);
+  margin: 0;
+  line-height: 1.4;
+}
+
+/* PRX Provider Card (Main Settings) */
+.prx-provider-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.2s cubic-bezier(0.2, 0, 0, 1);
+  width: 100%;
+}
+
+.prx-provider-card:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.15);
+  transform: translateY(-1px);
+}
+
+.prx-provider-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+.prx-provider-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.prx-provider-info strong {
+  font-size: 15px;
+  font-weight: 500;
+  color: #fff;
+  letter-spacing: -0.01em;
+}
+
+.prx-provider-info span {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  line-height: 1.3;
+}
+
+.prx-provider-arrow {
+  color: rgba(255, 255, 255, 0.3);
+  transition: transform 0.2s, color 0.2s;
+}
+
+.prx-provider-card:hover .prx-provider-arrow {
+  transform: translateX(2px);
+  color: rgba(255, 255, 255, 0.8);
+}
+
+/* ========== COSMIC GOOGLE PAGE (App design language) ========== */
+.cosmic-google-page {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  animation: cosmicFadeIn 0.35s cubic-bezier(0.19, 1, 0.22, 1) forwards;
+}
+
+@keyframes cosmicFadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Hero — Liquid Glass style */
+.cosmic-google-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 22px;
+  border-radius: 16px;
+  background: rgba(20, 20, 22, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  transition: transform 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94), box-shadow 0.3s ease;
+}
+
+.cosmic-google-hero:hover {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 8px 24px rgba(0, 0, 0, 0.15);
+}
+
+.cosmic-google-hero-inner {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
+.cosmic-google-hero-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+}
+
+.cosmic-google-hero-text h3 {
+  font-size: 18px;
+  font-weight: 600;
+  color: #fff;
+  margin: 0 0 2px 0;
+  letter-spacing: -0.02em;
+}
+
+.cosmic-google-hero-stat {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted, rgba(255, 255, 255, 0.55));
+}
+
+.cosmic-google-hero-desc {
+  margin: 6px 0 0 0;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.45);
+  line-height: 1.4;
+}
+
+.cosmic-google-cta {
+  padding: 10px 20px;
+  border: none;
+  border-radius: 22px;
+  background: #fff;
+  color: #000;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: transform 0.25s cubic-bezier(0.19, 1, 0.22, 1), background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.cosmic-google-cta:hover:not(:disabled) {
+  background: #f5f5f5;
+  transform: scale(1.03);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.cosmic-google-cta:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.cosmic-google-cta:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Banner */
+.cosmic-google-banner {
+  padding: 12px 16px;
+  border-radius: 12px;
+  font-size: 13px;
+  text-align: center;
+  background: rgba(48, 209, 88, 0.12);
+  border: 1px solid rgba(48, 209, 88, 0.22);
+  color: rgba(200, 255, 220, 0.95);
+  animation: cosmicBannerIn 0.3s cubic-bezier(0.19, 1, 0.22, 1);
+}
+
+@keyframes cosmicBannerIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Empty & loading */
+.cosmic-google-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px dashed rgba(255, 255, 255, 0.1);
+  gap: 12px;
+  text-align: center;
+}
+
+.cosmic-google-empty-invite .cosmic-google-empty-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.04);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.35);
+  margin-bottom: 4px;
+}
+
+.cosmic-google-empty-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #fff;
+  letter-spacing: -0.01em;
+}
+
+.cosmic-google-empty-desc {
+  margin: 0;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.5);
+  max-width: 280px;
+  line-height: 1.45;
+}
+
+.cosmic-google-spinner {
+  width: 28px;
+  height: 28px;
+  border: 2px solid rgba(255, 255, 255, 0.12);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: cosmicSpin 0.7s linear infinite;
+}
+
+@keyframes cosmicSpin {
+  to { transform: rotate(360deg); }
+}
+
+/* Section label */
+.cosmic-google-section-label {
+  margin: 0 0 4px 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.cosmic-google-accounts {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Account card — single glass surface */
+.cosmic-google-card {
+  border-radius: 16px;
+  overflow: hidden;
+  background: rgba(20, 20, 22, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  display: flex;
+  flex-direction: column;
+  animation: cosmicCardIn 0.4s cubic-bezier(0.19, 1, 0.22, 1) backwards;
+  transition: transform 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94), box-shadow 0.25s ease;
+}
+
+.cosmic-google-card:hover {
+  transform: translateY(-1px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 10px 28px rgba(0, 0, 0, 0.12);
+}
+
+@keyframes cosmicCardIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.cosmic-google-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.cosmic-google-card-profile {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.cosmic-google-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: linear-gradient(145deg, #4285F4, #34A853);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  font-weight: 600;
+  flex-shrink: 0;
+  transition: box-shadow 0.25s ease;
+}
+
+.cosmic-google-avatar.connected {
+  box-shadow: 0 0 0 2px rgba(52, 199, 89, 0.4);
+}
+
+.cosmic-google-card-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.cosmic-google-card-info strong {
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cosmic-google-card-info span {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cosmic-google-card-badges {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.cosmic-google-badge {
+  padding: 4px 9px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.cosmic-google-badge.primary {
+  background: rgba(0, 122, 255, 0.18);
+  color: rgba(180, 220, 255, 0.95);
+}
+
+.cosmic-google-badge.status-connected {
+  background: rgba(52, 199, 89, 0.18);
+  color: rgba(180, 255, 200, 0.95);
+}
+
+.cosmic-google-badge.status-needs_auth {
+  background: rgba(255, 159, 10, 0.18);
+  color: rgba(255, 230, 180, 0.95);
+}
+
+.cosmic-google-badge.status-revoked {
+  background: rgba(255, 69, 58, 0.18);
+  color: rgba(255, 200, 195, 0.95);
+}
+
+/* Card body */
+.cosmic-google-card-body {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.cosmic-google-field label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.cosmic-google-input {
+  width: 100%;
+  padding: 11px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.25);
+  color: #fff;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.cosmic-google-input:focus {
+  border-color: rgba(0, 122, 255, 0.4);
+  background: rgba(0, 0, 0, 0.35);
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.12);
+}
+
+.cosmic-google-input::placeholder {
+  color: rgba(255, 255, 255, 0.28);
+}
+
+/* Apps — iOS-style grouped list */
+.cosmic-google-apps {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.cosmic-google-apps-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.cosmic-google-apps-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.cosmic-google-apps-count {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.cosmic-google-app-list {
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.cosmic-google-app-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  align-items: center;
+  gap: 0 14px;
+  width: 100%;
+  padding: 12px 16px;
+  border: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.18s ease;
+}
+
+.cosmic-google-app-row:last-child {
+  border-bottom: none;
+}
+
+.cosmic-google-app-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.cosmic-google-app-row.on {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.cosmic-google-app-title {
+  grid-row: 1;
+  grid-column: 1;
+  font-size: 14px;
+  font-weight: 500;
+  color: #fff;
+}
+
+.cosmic-google-app-sub {
+  grid-row: 2;
+  grid-column: 1;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.45);
+  margin-top: 2px;
+}
+
+.cosmic-google-toggle {
+  grid-row: 1 / -1;
+  grid-column: 2;
+  align-self: center;
+  width: 44px;
+  height: 26px;
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.15);
+  position: relative;
+  flex-shrink: 0;
+  transition: background 0.25s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.cosmic-google-toggle.on {
+  background: var(--accent, #007AFF);
+}
+
+.cosmic-google-toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+  transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.cosmic-google-toggle.on .cosmic-google-toggle-thumb {
+  transform: translateX(18px);
+}
+
+.cosmic-google-apps-hint {
+  margin: 0;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.4);
+  line-height: 1.35;
+}
+
+/* Card footer */
+.cosmic-google-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 16px 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.cosmic-google-card-note {
+  margin: 0;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.42);
+  max-width: 240px;
+  line-height: 1.35;
+}
+
+.cosmic-google-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cosmic-google-action {
+  padding: 8px 14px;
+  border: none;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.2s cubic-bezier(0.19, 1, 0.22, 1), background 0.2s ease, color 0.2s ease;
+}
+
+.cosmic-google-action:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.cosmic-google-action.ghost {
+  background: transparent;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.cosmic-google-action.ghost:hover:not(:disabled) {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.cosmic-google-action.secondary {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.cosmic-google-action.secondary:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.cosmic-google-action.primary {
+  background: var(--accent, #007AFF);
+  color: #fff;
+}
+
+.cosmic-google-action.primary:hover:not(:disabled) {
+  background: #0a84ff;
+  transform: scale(1.02);
+}
+
+.cosmic-google-action.danger {
+  background: rgba(255, 69, 58, 0.15);
+  color: #ff6b6b;
+}
+
+.cosmic-google-action.danger:hover:not(:disabled) {
+  background: rgba(255, 69, 58, 0.25);
+}
+
+.cosmic-google-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+@media (max-width: 480px) {
+  .cosmic-google-hero {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .cosmic-google-card-footer {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 }

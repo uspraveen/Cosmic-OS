@@ -18,6 +18,15 @@ interface Window {
     getSettings: () => void
     saveSetting: (key: string, value: any) => void
     onSettingsUpdate: (cb: (data: any) => void) => () => void
+    getIntegrations: () => void
+    getCalendarAgenda: () => void
+    saveIntegrationAccount: (payload: any) => void
+    deleteIntegrationAccount: (accountId: string) => void
+    connectGoogleAccount: (payload: any) => void
+    disconnectGoogleAccount: (accountId: string) => void
+    onCalendarAgendaUpdate: (cb: (data: any) => void) => () => void
+    onIntegrationsUpdate: (cb: (data: any) => void) => () => void
+    onIntegrationEvent: (cb: (data: any) => void) => () => void
 
     // Perplexity APIs
     sendToPerplexity: (prompt: string) => void
@@ -28,7 +37,16 @@ interface Window {
     onGeminiChunk: (cb: (data: { chunk: string, done: boolean }) => void) => () => void
 
     // DB / History APIs
-    onKeyStatus: (cb: (data: any) => void) => () => void
+    onKeyStatus: (
+      cb: (data: {
+        hasKeys: boolean
+        gemini: boolean
+        perplexity: boolean
+        deepgram?: boolean
+        groq?: boolean
+        anthropic?: boolean
+      }) => void
+    ) => () => void
     onSessionList: (cb: (data: any[]) => void) => () => void
     onHistoryLoad: (cb: (data: any[]) => void) => () => void
     onSessionSet: (cb: (id: string) => void) => () => void
@@ -47,5 +65,34 @@ interface Window {
     setVoiceKey: (key: string) => void
     onVoiceTranscript: (cb: (data: { text: string; is_final: boolean; timestamp: number }) => void) => () => void
     onVoiceStatus: (cb: (data: { status: string; error?: string; timestamp: number }) => void) => () => void
+
+    // Meeting APIs
+    startMeeting: (payload: {
+      title: string
+      goal?: string
+      user_name?: string
+      custom_instructions?: string
+      mic_sensitivity?: number
+      update_interval_sec?: number
+      meeting_type?: 'online' | 'physical' | string
+      web_search_enabled?: boolean
+    }) => void
+    stopMeeting: () => void
+    pauseMeeting: () => void
+    resumeMeeting: () => void
+    setMeetingWebSearch: (enabled: boolean) => void
+    askMeeting: (payload: { question: string; web_search_enabled?: boolean }) => void
+    checkMeetingKeys: () => void
+    getMeetingSettings: () => void
+    saveMeetingSettings: (payload: { name_on_call?: string; mic_sensitivity?: number; update_interval_sec?: number }) => void
+    onMeetingInvoke: (cb: () => void) => () => void
+    onMeetingToggle: (cb: () => void) => () => void
+    onMeetingStatus: (cb: (data: any) => void) => () => void
+    onMeetingTranscript: (cb: (data: any) => void) => () => void
+    onMeetingUpdate: (cb: (data: any) => void) => () => void
+    onMeetingAnswer: (cb: (data: any) => void) => () => void
+    onMeetingAnswerChunk: (cb: (data: { question: string; chunk: string }) => void) => () => void
+    onMeetingFinal: (cb: (data: any) => void) => () => void
+    onMeetingSettings: (cb: (data: { name_on_call?: string; mic_sensitivity?: number; update_interval_sec?: number }) => void) => () => void
   }
 }

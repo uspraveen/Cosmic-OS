@@ -9,6 +9,9 @@ interface SetupModalProps {
 export default function SetupModal({ onComplete }: SetupModalProps) {
   const [geminiKey, setGeminiKey] = useState('')
   const [pplxKey, setPplxKey] = useState('')
+  const [deepgramKey, setDeepgramKey] = useState('')
+  const [anthropicKey, setAnthropicKey] = useState('')
+  const [groqKey, setGroqKey] = useState('')
 
   useEffect(() => {
     const handleEsc = (e: KeyboardEvent) => {
@@ -19,8 +22,14 @@ export default function SetupModal({ onComplete }: SetupModalProps) {
   }, [onComplete])
 
   const handleSave = () => {
-    if (!geminiKey && !pplxKey) return
-    const payload = JSON.stringify({ gemini: geminiKey, perplexity: pplxKey })
+    if (!geminiKey && !pplxKey && !deepgramKey && !anthropicKey && !groqKey) return
+    const payload = JSON.stringify({
+      gemini: geminiKey,
+      perplexity: pplxKey,
+      deepgram: deepgramKey,
+      anthropic: anthropicKey,
+      groq: groqKey
+    })
     window.cosmic?.sendToGemini(`SAVE_KEYS:${payload}`)
     onComplete()
   }
@@ -35,7 +44,7 @@ export default function SetupModal({ onComplete }: SetupModalProps) {
             <div style={{ textAlign: 'center', marginBottom: 24 }}>
               <h2 style={{ color: '#fff', fontSize: 24, marginBottom: 8 }}>Welcome to Cosmic</h2>
               <p style={{ color: 'rgba(255,255,255,0.6)', fontSize: 14 }}>
-                Please enter your API keys to get started. Keys are stored locally.
+                Add your API keys to get started. Keys are stored locally.
               </p>
             </div>
 
@@ -55,8 +64,32 @@ export default function SetupModal({ onComplete }: SetupModalProps) {
               />
             </div>
 
-            <button onClick={handleSave} disabled={!geminiKey}
-              style={{ width: '100%', padding: '12px', background: geminiKey ? '#007AFF' : 'rgba(255,255,255,0.1)', color: '#fff', border: 'none', borderRadius: 12, marginTop: 24, cursor: geminiKey ? 'pointer' : 'not-allowed', opacity: geminiKey ? 1 : 0.5 }}
+            <div className="setting-row vertical" style={{ marginTop: 16 }}>
+              <span className="setting-label">Deepgram API Key (Meeting)</span>
+              <input type="password" placeholder="dg_..." value={deepgramKey}
+                onChange={(e) => setDeepgramKey(e.target.value)}
+                style={{ width: '100%', background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.1)', padding: '10px', borderRadius: 8, color: '#fff', outline: 'none', marginTop: 8 }}
+              />
+            </div>
+
+            <div className="setting-row vertical" style={{ marginTop: 16 }}>
+              <span className="setting-label">Anthropic API Key (Meeting)</span>
+              <input type="password" placeholder="sk-ant-..." value={anthropicKey}
+                onChange={(e) => setAnthropicKey(e.target.value)}
+                style={{ width: '100%', background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.1)', padding: '10px', borderRadius: 8, color: '#fff', outline: 'none', marginTop: 8 }}
+              />
+            </div>
+
+            <div className="setting-row vertical" style={{ marginTop: 16 }}>
+              <span className="setting-label">Groq API Key (Meeting, optional)</span>
+              <input type="password" placeholder="gsk_..." value={groqKey}
+                onChange={(e) => setGroqKey(e.target.value)}
+                style={{ width: '100%', background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.1)', padding: '10px', borderRadius: 8, color: '#fff', outline: 'none', marginTop: 8 }}
+              />
+            </div>
+
+            <button onClick={handleSave} disabled={!geminiKey && !pplxKey && !deepgramKey && !anthropicKey && !groqKey}
+              style={{ width: '100%', padding: '12px', background: (geminiKey || pplxKey || deepgramKey || anthropicKey || groqKey) ? '#007AFF' : 'rgba(255,255,255,0.1)', color: '#fff', border: 'none', borderRadius: 12, marginTop: 24, cursor: (geminiKey || pplxKey || deepgramKey || anthropicKey || groqKey) ? 'pointer' : 'not-allowed', opacity: (geminiKey || pplxKey || deepgramKey || anthropicKey || groqKey) ? 1 : 0.5 }}
             >
               Start Cosmic
             </button>

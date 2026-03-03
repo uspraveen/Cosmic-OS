@@ -1,11 +1,22 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { Power, RotateCw } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowLeft, Power, RefreshCw, RotateCw, Video } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import './island.css'
 import Settings from './Settings'
 import WeatherAnimation from './WeatherAnimation'
+import DotBurstCheckmark from './DotBurstCheckmark'
 import type { SearchPosition } from './App'
 import CalendarMonthView from './CalendarMonthView'
+import {
+  EMPTY_CALENDAR_AGENDA,
+  formatCalendarTime,
+  getCalendarEventEnd,
+  getCalendarEventStart,
+  getCalendarRelativeLabel,
+  normalizeCalendarAgendaSnapshot,
+  type CalendarAgendaEvent,
+  type CalendarAgendaSnapshot,
+} from './calendar'
 
 interface DynamicIslandProps {
   searchActive: boolean
@@ -52,6 +63,83 @@ interface WeatherState {
   low?: number
   precip_prob?: number
   snowfall?: number
+}
+
+type IntegrationToastTone = 'progress' | 'success' | 'error'
+
+interface IntegrationToastState {
+  id: number
+  tone: IntegrationToastTone
+  provider: string
+  title: string
+  message: string
+  statusLabel: string
+}
+
+interface IntegrationToastEvent {
+  provider?: string
+  type?: string
+  message?: string
+  account_label?: string
+  email?: string
+  display_name?: string
+}
+
+interface IslandNotificationDetail {
+  type?: 'progress' | 'success' | 'error'
+  title?: string
+  message?: string
+  provider?: string
+}
+
+const DOT_PROGRESS_COLUMNS = 28
+const DOT_PROGRESS_ROWS = 3
+const CALENDAR_REFRESH_MS = 5 * 60 * 1000
+const CALENDAR_STALE_AFTER_MS = 2 * 60 * 1000
+
+function getCalendarAccentColor(colorId: string) {
+  if (colorId.startsWith('#')) return colorId
+  const palette: Record<string, string> = {
+    '1': '#7dc4ff',
+    '2': '#6ce3b1',
+    '3': '#c6a8ff',
+    '4': '#ff9b7d',
+    '5': '#ffd76b',
+    '6': '#87b8ff',
+    '7': '#8fd1ff',
+    '8': '#ee89ff',
+    '9': '#3b82f6',
+    '10': '#22c55e',
+    '11': '#a855f7',
+  }
+  return palette[colorId] ?? '#76a7ff'
+}
+
+function getEventDurationLabel(event: CalendarAgendaEvent) {
+  if (event.isAllDay) return 'All day'
+  const start = getCalendarEventStart(event)
+  const end = getCalendarEventEnd(event)
+  if (!start || !end) return ''
+  const diffMinutes = Math.max(0, Math.round((end.getTime() - start.getTime()) / 60000))
+  if (diffMinutes < 60) return `${diffMinutes} min`
+  const hours = Math.floor(diffMinutes / 60)
+  const minutes = diffMinutes % 60
+  return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`
+}
+
+function getIntegrationAccountName(event: IntegrationToastEvent | IslandNotificationDetail) {
+  if ('account_label' in event && event.account_label) return String(event.account_label).trim()
+  if ('display_name' in event && event.display_name) return String(event.display_name).trim()
+  if ('email' in event && event.email) return String(event.email).trim()
+  return ''
+}
+
+function compactToastMessage(message: string, fallback: string) {
+  const normalized = String(message || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!normalized) return fallback
+  return normalized.length > 108 ? `${normalized.slice(0, 105).trimEnd()}...` : normalized
 }
 
 function getSourceColor(source: string): string {
@@ -169,11 +257,49 @@ export default function DynamicIsland({
   const [lastFinalTranscript, setLastFinalTranscript] = useState('')
 
   // New State for Notification
-  const [notificationEvent, setNotificationEvent] = useState<any | null>(null)
+  const [notificationEvent, setNotificationEvent] = useState<CalendarAgendaEvent | null>(null)
   // Track notified events to prevent double notification
   const notifiedEventsRef = useRef<Set<string>>(new Set())
 
-  const shouldExpand = searchActive || hovered || internalHover || showSettings || isAnchored || !!notificationEvent || voiceActive
+  // Temporary Google integration toast (connect / disconnect / remove) — show in island then auto-dismiss
+  const [integrationToast, setIntegrationToast] = useState<IntegrationToastState | null>(null)
+  const integrationToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const integrationToastIdRef = useRef(0)
+  const integrationDotsTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const burstPlayedRef = useRef(false)
+  const previousIntegrationToastToneRef = useRef<IntegrationToastTone | null>(null)
+  const integrationToastId = integrationToast?.id ?? null
+  const integrationToastTone = integrationToast?.tone ?? null
+  const [integrationDotsTransitionToastId, setIntegrationDotsTransitionToastId] = useState<number | null>(null)
+  const [calendarData, setCalendarData] = useState<CalendarAgendaSnapshot>(EMPTY_CALENDAR_AGENDA)
+  const [calendarRefreshing, setCalendarRefreshing] = useState(false)
+  const [showMonthView, setShowMonthView] = useState(false)
+  const [selectedCalendarEvent, setSelectedCalendarEvent] = useState<CalendarAgendaEvent | null>(null)
+  const calendarRefreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const calendarGeneratedAtRef = useRef(0)
+
+  const requestCalendarAgenda = useCallback((showSpinner = false) => {
+    if (!window.cosmic?.getCalendarAgenda) return
+    if (showSpinner) {
+      setCalendarRefreshing(true)
+    }
+    if (calendarRefreshTimeoutRef.current) {
+      clearTimeout(calendarRefreshTimeoutRef.current)
+    }
+    calendarRefreshTimeoutRef.current = setTimeout(() => {
+      calendarRefreshTimeoutRef.current = null
+      setCalendarRefreshing(false)
+    }, 8000)
+    window.cosmic.getCalendarAgenda()
+  }, [])
+
+  const openCalendarEventDetail = useCallback((event: CalendarAgendaEvent) => {
+    setSelectedCalendarEvent(event)
+    setExpanded(true)
+  }, [])
+
+
+  const shouldExpand = searchActive || hovered || internalHover || showSettings || isAnchored || !!notificationEvent || !!integrationToast || !!selectedCalendarEvent || voiceActive
   const [expanded, setExpanded] = useState(shouldExpand)
 
   useEffect(() => {
@@ -197,7 +323,13 @@ export default function DynamicIsland({
     if (!expanded && wasExpanded.current) {
       setActiveSlide(0)
       setShowMonthView(false)
-      setNotificationEvent(null) // Clear notification on collapse
+      setSelectedCalendarEvent(null)
+      setNotificationEvent(null)
+      setIntegrationToast(null)
+      if (integrationToastTimerRef.current) {
+        clearTimeout(integrationToastTimerRef.current)
+        integrationToastTimerRef.current = null
+      }
     }
     wasExpanded.current = expanded
   }, [expanded])
@@ -286,7 +418,7 @@ export default function DynamicIsland({
     if (!window.cosmic?.onWindowUpdate) return
     const unsub = window.cosmic.onWindowUpdate((data: WindowInfo) => setWindowInfo(data))
     return () => unsub?.()
-  }, [])
+  }, [requestCalendarAgenda])
 
   useEffect(() => {
     if (!window.cosmic?.onMediaUpdate) return
@@ -310,6 +442,208 @@ export default function DynamicIsland({
     window.cosmic?.requestWeather()
     return () => unsub?.()
   }, [])
+
+  useEffect(() => {
+    if (!window.cosmic?.onCalendarAgendaUpdate) return
+
+    const offAgenda = window.cosmic.onCalendarAgendaUpdate((snapshot: unknown) => {
+      const normalizedSnapshot = normalizeCalendarAgendaSnapshot(snapshot as Record<string, unknown>)
+      calendarGeneratedAtRef.current = normalizedSnapshot.generated_at
+      setCalendarData(normalizedSnapshot)
+      if (calendarRefreshTimeoutRef.current) {
+        clearTimeout(calendarRefreshTimeoutRef.current)
+        calendarRefreshTimeoutRef.current = null
+      }
+      setCalendarRefreshing(false)
+    })
+
+    const offShown = window.cosmic.onShown(() => {
+      const lastGeneratedAtMs = calendarGeneratedAtRef.current * 1000
+      if (!lastGeneratedAtMs || Date.now() - lastGeneratedAtMs > CALENDAR_STALE_AFTER_MS) {
+        requestCalendarAgenda(false)
+      }
+    })
+
+    const offIntegration = window.cosmic.onIntegrationEvent((event: IntegrationToastEvent) => {
+      if (event.provider !== 'google') return
+      if (event.type === 'auth_success' || event.type === 'disconnect_success') {
+        requestCalendarAgenda(true)
+      }
+    })
+
+    requestCalendarAgenda(true)
+    const intervalId = window.setInterval(() => requestCalendarAgenda(false), CALENDAR_REFRESH_MS)
+
+    return () => {
+      offAgenda?.()
+      offShown?.()
+      offIntegration?.()
+      window.clearInterval(intervalId)
+      if (calendarRefreshTimeoutRef.current) {
+        clearTimeout(calendarRefreshTimeoutRef.current)
+        calendarRefreshTimeoutRef.current = null
+      }
+    }
+  }, [requestCalendarAgenda])
+
+  // Google integration events → temporary island toast (connect / disconnect status)
+  useEffect(() => {
+    const showToast = (
+      tone: IntegrationToastTone,
+      title: string,
+      message: string,
+      statusLabel: string,
+      provider = 'Google',
+    ) => {
+      const nextToast: IntegrationToastState = {
+        id: ++integrationToastIdRef.current,
+        tone,
+        provider,
+        title,
+        message,
+        statusLabel,
+      }
+      setIntegrationToast(nextToast)
+    }
+
+    const off = window.cosmic?.onIntegrationEvent((event: IntegrationToastEvent) => {
+      if (event.provider !== 'google') return
+      const accountName = getIntegrationAccountName(event)
+      const provider = 'Google'
+      const t = event.type
+      if (t === 'auth_started') {
+        showToast(
+          'progress',
+          accountName ? `Connecting ${accountName}` : 'Connecting Google',
+          compactToastMessage(event.message || 'Finish the Google sign-in flow in your browser.', 'Finish the Google sign-in flow in your browser.'),
+          'In Progress',
+          provider,
+        )
+      } else if (t === 'auth_success') {
+        showToast(
+          'success',
+          accountName ? `Connected ${accountName}` : 'Google connected',
+          compactToastMessage(
+            accountName ? `${accountName} is ready for Cosmic.` : 'This Google account is ready for Cosmic.',
+            'This Google account is ready for Cosmic.',
+          ),
+          'Connected',
+          provider,
+        )
+      } else if (t === 'auth_error') {
+        showToast(
+          'error',
+          accountName ? `Could not connect ${accountName}` : 'Google connection failed',
+          compactToastMessage(event.message || 'We could not complete the Google sign-in flow.', 'We could not complete the Google sign-in flow.'),
+          'Action Needed',
+          provider,
+        )
+      } else if (t === 'disconnect_started') {
+        showToast(
+          'progress',
+          accountName ? `Disconnecting ${accountName}` : 'Disconnecting Google',
+          compactToastMessage(event.message || 'Removing account access from Cosmic.', 'Removing account access from Cosmic.'),
+          'In Progress',
+          provider,
+        )
+      } else if (t === 'disconnect_success') {
+        showToast(
+          'success',
+          accountName ? `Disconnected ${accountName}` : 'Google disconnected',
+          compactToastMessage(
+            accountName ? `${accountName} is no longer available to Cosmic.` : 'This account is no longer available to Cosmic.',
+            'This account is no longer available to Cosmic.',
+          ),
+          'Disconnected',
+          provider,
+        )
+      } else if (t === 'disconnect_error') {
+        showToast(
+          'error',
+          accountName ? `Could not disconnect ${accountName}` : 'Google disconnection failed',
+          compactToastMessage(event.message || 'We could not disconnect this Google account.', 'We could not disconnect this Google account.'),
+          'Action Needed',
+          provider,
+        )
+      }
+    })
+
+    const onCustom = (e: CustomEvent<IslandNotificationDetail>) => {
+      const detail = e.detail || {}
+      if (!detail.type || !detail.message) return
+      showToast(
+        detail.type,
+        detail.title || 'Update',
+        compactToastMessage(detail.message, detail.message),
+        detail.type === 'error' ? 'Action Needed' : detail.type === 'progress' ? 'In Progress' : 'Complete',
+        detail.provider || 'Cosmic',
+      )
+    }
+    window.addEventListener('cosmic:island-notification', onCustom as EventListener)
+    return () => {
+      off?.()
+      window.removeEventListener('cosmic:island-notification', onCustom as EventListener)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (integrationToastTimerRef.current) {
+      clearTimeout(integrationToastTimerRef.current)
+      integrationToastTimerRef.current = null
+    }
+
+    if (!integrationToastId || integrationToastTone === 'progress') {
+      return
+    }
+
+    integrationToastTimerRef.current = setTimeout(() => {
+      integrationToastTimerRef.current = null
+      setIntegrationToast((current) => (current?.id === integrationToastId ? null : current))
+
+    }, 4200)
+
+    return () => {
+      if (integrationToastTimerRef.current) {
+        clearTimeout(integrationToastTimerRef.current)
+        integrationToastTimerRef.current = null
+      }
+    }
+  }, [integrationToastId, integrationToastTone])
+
+  useEffect(() => {
+    if (integrationDotsTransitionTimerRef.current) {
+      clearTimeout(integrationDotsTransitionTimerRef.current)
+      integrationDotsTransitionTimerRef.current = null
+    }
+
+    if (!integrationToast) {
+      previousIntegrationToastToneRef.current = null
+      setIntegrationDotsTransitionToastId(null)
+      burstPlayedRef.current = false
+      return
+    }
+
+    const previousTone = previousIntegrationToastToneRef.current
+    if (integrationToast.tone === 'success' && previousTone === 'progress') {
+      setIntegrationDotsTransitionToastId(integrationToast.id)
+      burstPlayedRef.current = true
+      integrationDotsTransitionTimerRef.current = setTimeout(() => {
+        integrationDotsTransitionTimerRef.current = null
+        setIntegrationDotsTransitionToastId((current) => (current === integrationToast.id ? null : current))
+      }, 1800)
+    } else if (integrationToast.tone !== 'progress') {
+      setIntegrationDotsTransitionToastId(null)
+    }
+
+    previousIntegrationToastToneRef.current = integrationToast.tone
+
+    return () => {
+      if (integrationDotsTransitionTimerRef.current) {
+        clearTimeout(integrationDotsTransitionTimerRef.current)
+        integrationDotsTransitionTimerRef.current = null
+      }
+    }
+  }, [integrationToast])
 
   useEffect(() => {
     if (!window.cosmic?.onVoiceTranscript) return
@@ -401,12 +735,16 @@ export default function DynamicIsland({
     if (dir === 'prev' && activeSlide > 0) setActiveSlide(p => p - 1)
   }
 
+  const currentSlideType = slideContentMap[activeSlide]
   const lastWheel = useRef(0)
   const onWheel = (e: React.WheelEvent) => {
-    if (showMonthView) return
+    if (showMonthView || selectedCalendarEvent) return
+    const horizontalDelta = Math.abs(e.deltaX)
+    const verticalDelta = Math.abs(e.deltaY)
+    if (currentSlideType === 'calendar' && verticalDelta >= horizontalDelta) return
     const now = Date.now()
     if (now - lastWheel.current < 400) return
-    const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY
+    const delta = horizontalDelta > verticalDelta ? e.deltaX : e.deltaY
     if (Math.abs(delta) > 20) {
       if (delta > 0) {
         if (activeSlide < TOTAL_SLIDES - 1) {
@@ -617,11 +955,6 @@ export default function DynamicIsland({
     )
   }
 
-  const [calendarData] = useState<{ events: any[], email: string }>({ events: [], email: '' })
-  const [showMonthView, setShowMonthView] = useState(false)
-
-
-
   // --- NOTIFICATION LOGIC ---
   useEffect(() => {
     if (!calendarData.events.length) return
@@ -631,16 +964,20 @@ export default function DynamicIsland({
       const nowMs = Date.now()
 
       for (const evt of calendarData.events) {
+        if (evt.isAllDay) continue
         // Already notified?
-        if (notifiedEventsRef.current.has(evt.id)) continue
+        const notificationKey = `${evt.account_id}:${evt.id}`
+        if (notifiedEventsRef.current.has(notificationKey)) continue
 
-        const startMs = new Date(evt.start).getTime()
+        const startDate = getCalendarEventStart(evt)
+        if (!startDate) continue
+        const startMs = startDate.getTime()
         const diffMin = (startMs - nowMs) / 60000
 
         // Trigger if between 4.8 and 5.2 minutes away
         if (diffMin > 4.8 && diffMin < 5.2) {
           setNotificationEvent(evt)
-          notifiedEventsRef.current.add(evt.id)
+          notifiedEventsRef.current.add(notificationKey)
           setExpanded(true)
 
           // Auto dismiss after 10 seconds if user doesn't interact
@@ -664,7 +1001,7 @@ export default function DynamicIsland({
 
   const renderNotification = () => {
     if (!notificationEvent) return null
-    const startTime = new Date(notificationEvent.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    const startTime = formatCalendarTime(notificationEvent.start, notificationEvent.isAllDay)
 
     return (
       <div className="slide slide-notification" style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: '20px' }}>
@@ -680,6 +1017,9 @@ export default function DynamicIsland({
 
         <div style={{ fontSize: 18, fontWeight: 600, color: '#fff', marginBottom: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
           {notificationEvent.summary}
+        </div>
+        <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}>
+          {notificationEvent.location || notificationEvent.account_label}
         </div>
 
         <button
@@ -703,96 +1043,371 @@ export default function DynamicIsland({
     )
   }
 
+  const renderCalendarDetail = () => {
+    if (!selectedCalendarEvent) return null
+
+    const start = getCalendarEventStart(selectedCalendarEvent)
+    const end = getCalendarEventEnd(selectedCalendarEvent)
+    const dateLabel = start
+      ? start.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })
+      : ''
+    const timeLabel = selectedCalendarEvent.isAllDay
+      ? 'All day'
+      : start && end
+        ? `${formatCalendarTime(selectedCalendarEvent.start, false)} \u2013 ${formatCalendarTime(selectedCalendarEvent.end, false)}`
+        : formatCalendarTime(selectedCalendarEvent.start, selectedCalendarEvent.isAllDay)
+    const attendees = selectedCalendarEvent.attendees
+    const attendeePreview = attendees.slice(0, 4)
+    const attendeeOverflow = Math.max(0, attendees.length - attendeePreview.length)
+    const durationLabel = getEventDurationLabel(selectedCalendarEvent)
+
+    const relativeLabel = getCalendarRelativeLabel(selectedCalendarEvent, now)
+    const isPast = relativeLabel.startsWith('Ended') || relativeLabel === 'Just ended'
+
+    return (
+      <div className="slide slide-calendar-detail">
+        <div className="cal-detail">
+          {/* Left: Back + Title */}
+          <div className="cal-detail-main">
+            <div className="cal-detail-head">
+              <button
+                type="button"
+                className="cal-detail-back"
+                onClick={() => setSelectedCalendarEvent(null)}
+                aria-label={showMonthView ? 'Back to month view' : 'Back to schedule'}
+              >
+                <ArrowLeft size={14} />
+              </button>
+              <span className={`cal-detail-kicker ${isPast ? 'past' : ''}`}>{relativeLabel}</span>
+              <span className="cal-detail-support">{selectedCalendarEvent.calendar_name}</span>
+            </div>
+
+            <h3 className="cal-detail-title">{selectedCalendarEvent.summary}</h3>
+
+            <div className="cal-detail-when">
+              {dateLabel} {'\u00B7'} {timeLabel}{durationLabel ? ` (${durationLabel})` : ''}
+            </div>
+
+            {selectedCalendarEvent.location && (
+              <div className="cal-detail-location">{selectedCalendarEvent.location}</div>
+            )}
+          </div>
+
+          {/* Right: Attendees + Actions */}
+          <div className="cal-detail-side">
+            {selectedCalendarEvent.organizer && (
+              <div className="cal-detail-host">
+                <span className="cal-detail-meta-label">Host</span>
+                <strong>{selectedCalendarEvent.organizer}</strong>
+              </div>
+            )}
+
+            {attendees.length > 0 && (
+              <div className="cal-detail-attendees">
+                <span className="cal-detail-meta-label">{attendees.length} attendee{attendees.length !== 1 ? 's' : ''}</span>
+                <div className="cal-detail-attendee-list">
+                  {attendeePreview.map((attendee) => (
+                    <span key={`${attendee.email}-${attendee.response_status}`} className={`cal-attendee-pill status-${attendee.response_status}`}>
+                      {attendee.display_name}
+                    </span>
+                  ))}
+                  {attendeeOverflow > 0 && (
+                    <span className="cal-attendee-pill overflow">+{attendeeOverflow}</span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div className="cal-detail-actions">
+              {selectedCalendarEvent.meetingLink && (
+                <button
+                  type="button"
+                  className="cal-detail-action join-btn"
+                  onClick={() => window.cosmic?.openExternal(selectedCalendarEvent.meetingLink)}
+                >
+                  <Video size={13} />
+                  Join
+                </button>
+              )}
+              {selectedCalendarEvent.htmlLink && (
+                <button
+                  type="button"
+                  className="cal-detail-action"
+                  onClick={() => window.cosmic?.openExternal(selectedCalendarEvent.htmlLink)}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0 }}>
+                    <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4" />
+                    <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
+                    <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05" />
+                    <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
+                  </svg>
+                  Open
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const renderIntegrationToast = () => {
+    if (!integrationToast) return null
+    const dotsAreTransitioningToSuccess =
+      integrationToast.tone === 'success' && integrationDotsTransitionToastId === integrationToast.id
+    // Keep dot grid in DOM during burst so canvas can measure its position
+    const showDotProgress = integrationToast.tone === 'progress' || dotsAreTransitioningToSuccess
+    // Show the burst canvas for the entire success lifetime when burst played
+    const showBurstCanvas = integrationToast.tone === 'success' && burstPlayedRef.current
+    // Show the SVG checkmark only if success arrived without a burst (e.g. direct success tone)
+    const showStaticCheck = integrationToast.tone === 'success' && !burstPlayedRef.current
+
+    return (
+      <motion.div
+        key={integrationToast.id}
+        className={`it-shell tone-${integrationToast.tone} ${dotsAreTransitioningToSuccess ? 'dots-transitioning-success' : ''}`}
+        initial={{ opacity: 0, y: 10, scale: 0.985, filter: 'blur(10px)' }}
+        animate={{ opacity: 1, y: 0, scale: 1, filter: 'blur(0px)' }}
+        transition={{ duration: 0.38, ease: [0.22, 1, 0.36, 1] }}
+        style={{ position: 'relative' }}
+      >
+        <div className="it-header">
+          <div className="it-provider-cluster">
+            <div className={`it-mark tone-${integrationToast.tone} ${showBurstCanvas ? 'burst-active' : ''}`} aria-hidden="true">
+              {integrationToast.tone === 'progress' ? (
+                <div className="it-spinner">
+                  <span />
+                  <span />
+                </div>
+              ) : integrationToast.tone === 'success' ? (
+                // When burst played: canvas stays alive as the checkmark — no SVG needed.
+                // When success arrived without burst: show the normal SVG draw animation.
+                showStaticCheck ? (
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round">
+                    <path className="it-check-short" d="M6.7 12.5l3.05 3.15" />
+                    <path className="it-check-long" d="M9.75 15.65 17.7 7.85" />
+                  </svg>
+                ) : null
+              ) : (
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                  <path className="it-error-1" d="M17.5 6.5L6.5 17.5" />
+                  <path className="it-error-2" d="M6.5 6.5l11 11" />
+                </svg>
+              )}
+            </div>
+
+            <div className="it-copy">
+              <span className="it-provider">{integrationToast.provider}</span>
+              <strong className="it-title">{integrationToast.title}</strong>
+            </div>
+          </div>
+
+          <span className={`it-status tone-${integrationToast.tone}`}>
+            {integrationToast.statusLabel}
+          </span>
+        </div>
+
+        {showDotProgress && (
+          <div className="it-footer" style={showBurstCanvas ? { opacity: 0, pointerEvents: 'none' } : undefined}>
+            <div className="it-dot-progress" aria-hidden="true">
+              {Array.from({ length: DOT_PROGRESS_ROWS * DOT_PROGRESS_COLUMNS }).map((_, index) => {
+                const row = Math.floor(index / DOT_PROGRESS_COLUMNS) + 1
+                const column = (index % DOT_PROGRESS_COLUMNS) + 1
+                return (
+                  <span
+                    key={`${row}-${column}`}
+                    className="it-dot-progress-dot"
+                    style={{
+                      gridRow: row,
+                      gridColumn: column,
+                      animationDelay: `${(column - 1) * 0.08}s`,
+                    }}
+                  />
+                )
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Dot-burst canvas: particles burst from grid, converge to form checkmark */}
+        {showBurstCanvas && (
+          <DotBurstCheckmark />
+        )}
+      </motion.div>
+    )
+  }
+
   // --- OPACITY STATE ---
   // Managed by App.tsx now
 
 
-  // Override 'expanded' style if Month View is open
-  const islandStyle = showMonthView
-    ? { width: '380px', height: '360px', borderRadius: '0 0 40px 40px' }
-    : (notificationEvent ? { width: '300px', height: '160px' } : {})
+  // Override 'expanded' style if Month View or integration toast is open
+  const islandStyle = selectedCalendarEvent
+    ? {}
+    : showMonthView
+      ? { width: '400px', height: '360px', borderRadius: '0 0 36px 36px' }
+      : integrationToast
+        ? { width: '456px', height: '136px', borderRadius: '0 0 30px 30px' }
+        : (notificationEvent ? { width: '300px', height: '160px' } : {})
 
-  // Dynamic background style
-  const dynamicBgStyle = {
-    background: `rgba(0, 0, 0, ${islandOpacity})`
-  }
+  const dynamicBgStyle = { background: `rgba(0, 0, 0, ${islandOpacity})` }
 
   // ... renderCalendar function
   const renderCalendar = () => {
     if (showMonthView) {
-      return <CalendarMonthView currentDate={now} events={calendarData.events} />
+      return (
+        <CalendarMonthView
+          currentDate={now}
+          events={calendarData.events}
+          accounts={calendarData.accounts}
+          onEventSelect={openCalendarEventDetail}
+        />
+      )
     }
 
-    // Sort next few events - showing more now with scroll
-    const upcoming = calendarData.events.slice(0, 10)
-    const upcomingCountLabel = upcoming.length === 1 ? '1 upcoming' : `${upcoming.length} upcoming`
+    const calendarAccounts = calendarData.accounts.filter((account) => account.tool_enabled)
+    const activeAccounts = calendarAccounts.filter((account) => !account.needs_reconnect)
+    const reconnectAccounts = calendarAccounts.filter((account) => account.needs_reconnect)
+    const upcoming = calendarData.events
+      .filter((event) => {
+        const end = getCalendarEventEnd(event)
+        return !end || end.getTime() >= now.getTime() - 60_000
+      })
+    const nextEvent = upcoming[0] ?? null
+    const nextEventAttendees = nextEvent?.attendees.filter((attendee) => !attendee.self) ?? []
+    const todayDateLabel = now.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' })
 
-    const formatTimeSimple = (dateStr: string) => {
-      const date = new Date(dateStr)
-      if (Number.isNaN(date.getTime())) return '--'
-      return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }).toLowerCase()
-    }
+    const statusTone = calendarRefreshing
+      ? 'syncing'
+      : calendarData.state === 'error'
+        ? 'warning'
+        : nextEvent
+          ? 'busy'
+          : activeAccounts.length > 0
+            ? 'clear'
+            : reconnectAccounts.length > 0
+              ? 'warning'
+              : 'idle'
+
+    const statusLabel = calendarRefreshing
+      ? 'Syncing'
+      : calendarData.state === 'error'
+        ? 'Sync issue'
+        : nextEvent
+          ? 'Next up'
+          : activeAccounts.length > 0
+            ? 'All clear'
+            : reconnectAccounts.length > 0
+              ? 'Reconnect'
+              : 'Setup'
+
+    const headline = nextEvent
+      ? getCalendarRelativeLabel(nextEvent, now)
+      : calendarData.state === 'error'
+        ? 'Calendar sync needs attention'
+        : activeAccounts.length > 0
+          ? 'Nothing urgent on deck'
+          : reconnectAccounts.length > 0
+            ? 'Reconnect Google Calendar'
+            : 'Connect Google Calendar'
+
+    const support = nextEvent
+      ? nextEvent.location || nextEvent.calendar_name || nextEvent.account_label
+      : calendarData.message
+      || (activeAccounts.length > 0
+        ? 'No upcoming events in the current sync window.'
+        : 'Use Settings > Integrations to enable Calendar on a Google account.')
 
     return (
       <div className="slide slide-calendar">
-        <div className="cal-left">
-          <button type="button" className="cal-today" onClick={() => setShowMonthView(true)} aria-label="Open month calendar">
-            <div className="cal-header">
-              <span>{now.toLocaleDateString([], { month: 'short' })}</span>
-            </div>
-            <div className="cal-body">
-              <span>{now.getDate()}</span>
-            </div>
-          </button>
-          <div className="cal-meta">
-            <span className="dt-label">{now.toLocaleDateString([], { weekday: 'long' })}</span>
-            <span className="cal-sub">{upcomingCountLabel}</span>
-          </div>
-        </div>
+        <div className="cal-minimal">
+          <div className="cal-main">
+            {/* Date chip — minimal, borderless */}
+            <button type="button" className="cal-today" onClick={() => setShowMonthView(true)} aria-label="Open month calendar">
+              <div className="cal-header">
+                <span>{now.toLocaleDateString([], { month: 'short' }).toUpperCase()}</span>
+              </div>
+              <div className="cal-body">
+                <span>{now.getDate()}</span>
+              </div>
+              <span className="cal-day-label">{now.toLocaleDateString([], { weekday: 'short' })}</span>
+            </button>
 
-        <div className="cal-right">
-          <div className="cal-events-list">
-            {upcoming.length > 0 ? upcoming.map((evt, i) => (
-              <div
-                key={i}
-                className="cal-task"
-                tabIndex={0}
-                role="button"
-                onClick={() => setShowMonthView(true)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault()
-                    setShowMonthView(true)
-                  }
-                }}
-              >
-                <div
-                  className="task-bar"
-                  style={{ backgroundColor: evt.colorId === '1' ? '#a4b0be' : '#007AFF' }}
-                />
-                <div className="task-content">
-                  <span className="task-time">{formatTimeSimple(evt.start)}</span>
-                  <span className="task-title">{evt.summary}</span>
-                </div>
+            {/* Main content */}
+            <div className="cal-main-copy">
+              <div className="cal-main-kicker-row">
+                <span className={`cal-status tone-${statusTone}`}>{statusLabel}</span>
+                <span className="cal-main-date">{todayDateLabel}</span>
+                <button
+                  type="button"
+                  className={`cal-refresh-btn ${calendarRefreshing ? 'spinning' : ''}`}
+                  onClick={() => requestCalendarAgenda(true)}
+                  aria-label="Refresh calendar agenda"
+                >
+                  <RefreshCw size={10} />
+                </button>
               </div>
-            )) : (
-              <div className="no-events">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
-                  <line x1="16" y1="2" x2="16" y2="6" />
-                  <line x1="8" y1="2" x2="8" y2="6" />
-                  <line x1="3" y1="10" x2="21" y2="10" />
-                </svg>
-                <span>No upcoming events</span>
+
+              {nextEvent ? (
+                <>
+                  <div className="cal-main-focus">
+                    <span className="cal-main-time">{formatCalendarTime(nextEvent.start, nextEvent.isAllDay)}</span>
+                    <span className="cal-main-sep" />
+                    <span className="cal-main-title">{nextEvent.summary}</span>
+                  </div>
+                  <div className="cal-main-meta">
+                    <span>{getCalendarRelativeLabel(nextEvent, now)}</span>
+                    <span>{'\u00B7'}</span>
+                    <span>{getEventDurationLabel(nextEvent)}</span>
+                    {nextEventAttendees.length > 0 && <><span>{'\u00B7'}</span><span>{nextEventAttendees.length} guest{nextEventAttendees.length !== 1 ? 's' : ''}</span></>}
+                    {nextEvent.meetingLink && <><span>{'\u00B7'}</span><span>Join ready</span></>}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="cal-main-focus empty">{headline}</div>
+                  <div className="cal-main-meta single">
+                    <span>{support}</span>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Right sidebar — compact agenda */}
+          <div className="cal-side">
+            <div className="cal-side-head">
+              <span>Agenda</span>
+            </div>
+
+            {upcoming.length > 0 ? (
+              <div className="cal-list">
+                {upcoming.slice(0, 4).map((event, idx) => {
+                  const accentColor = idx % 2 === 0 ? '#007AFF' : 'rgba(255, 255, 255, 0.65)'
+                  return (
+                    <button
+                      key={`${event.account_id}-${event.id}-${event.start}`}
+                      type="button"
+                      className="cal-row"
+                      onClick={() => openCalendarEventDetail(event)}
+                    >
+                      <span className="cal-row-accent" style={{ backgroundColor: accentColor }} />
+                      <span className="cal-row-time">
+                        {formatCalendarTime(event.start, event.isAllDay)}
+                      </span>
+                      <div className="cal-row-copy">
+                        <strong>{event.summary}</strong>
+                      </div>
+                    </button>
+                  )
+                })}
               </div>
+            ) : (
+              <button type="button" className="cal-side-empty" onClick={() => setShowMonthView(true)}>
+                <strong>{activeAccounts.length > 0 ? 'No events' : 'Connect'}</strong>
+              </button>
             )}
           </div>
-
-          {calendarData.email && (
-            <div className="cal-email">
-              {calendarData.email}
-            </div>
-          )}
         </div>
       </div>
     )
@@ -907,7 +1522,9 @@ export default function DynamicIsland({
   }
 
   const renderContent = () => {
+    if (integrationToast) return renderIntegrationToast()
     if (notificationEvent) return renderNotification()
+    if (selectedCalendarEvent) return renderCalendarDetail()
     const type = slideContentMap[activeSlide]
     if (type === 'home') return renderHome()
     if (type === 'music') return renderMusic()
@@ -920,13 +1537,13 @@ export default function DynamicIsland({
   return (
     <>
       <div
-        className={`island ${expanded ? 'expanded' : ''}`}
+        className={`island ${expanded ? 'expanded' : ''} ${integrationToast ? `integration-open tone-${integrationToast.tone}` : ''}`}
         onMouseEnter={() => setInternalHover(true)}
         onMouseLeave={() => setInternalHover(false)}
         onWheel={onWheel}
         style={{
           ...dynamicBgStyle, // Apply background opacity here
-          ...(expanded && (showMonthView || notificationEvent) ? islandStyle : {}),
+          ...(expanded && (showMonthView || selectedCalendarEvent || notificationEvent || integrationToast) ? islandStyle : {}),
           pointerEvents: 'auto'
         }}
       >
@@ -934,7 +1551,7 @@ export default function DynamicIsland({
 
         {expanded && (
           <>
-            {!showMonthView && !notificationEvent && (
+            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !integrationToast && (
               <>
                 <div style={{ position: 'absolute', top: 0, bottom: '50px', left: 0, width: '40px', zIndex: 50, cursor: activeSlide > 0 ? 'w-resize' : 'default' }} onMouseEnter={() => switchSlide('prev')} />
                 <div style={{ position: 'absolute', top: 0, bottom: '50px', right: 0, width: '40px', zIndex: 50, cursor: activeSlide < TOTAL_SLIDES - 1 ? 'e-resize' : 'default' }} onMouseEnter={() => switchSlide('next')} />
@@ -945,7 +1562,7 @@ export default function DynamicIsland({
               {renderContent()}
             </div>
 
-            {showMonthView && (
+            {showMonthView && !selectedCalendarEvent && (
               <button
                 onClick={() => setShowMonthView(false)}
                 style={{ position: 'absolute', top: '20px', right: '20px', background: 'none', border: 'none', color: 'rgba(255,255,255,0.3)', cursor: 'pointer', zIndex: 100 }}
@@ -954,7 +1571,7 @@ export default function DynamicIsland({
               </button>
             )}
 
-            {!showMonthView && !notificationEvent && (
+            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !integrationToast && (
               <>
                 <div className="island-anchor-container">
                   <button className={`anchor-btn ${isAnchored ? 'active' : ''}`} onClick={(e) => { e.stopPropagation(); setIsAnchored(!isAnchored) }}>

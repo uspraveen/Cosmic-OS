@@ -29,6 +29,7 @@ let windowProcess: any = null
 let geminiProcess: any = null
 let perplexityProcess: any = null
 let weatherProcess: any = null
+let meetingProcess: any = null
 
 let voiceProcess: any = null
 let voiceActive = false
@@ -194,6 +195,45 @@ function startPerplexityBridge(window: BrowserWindow) {
   })
 }
 
+function startMeetingBridge(window: BrowserWindow) {
+  const scriptPath = path.join(process.env.APP_ROOT, 'resources', 'meeting_bridge.py')
+  meetingProcess = spawn('python', ['-u', scriptPath])
+
+  meetingProcess.stderr?.on('data', (d: any) => console.error('[MEETING ERR]', d.toString()))
+
+  let rawBuffer = ''
+  meetingProcess.stdout.on('data', (chunk: any) => {
+    rawBuffer += chunk.toString()
+
+    const regex = /<<([A-Z_]+)>>(.*?)<<END>>/gs
+    let match
+    let lastIndex = 0
+
+    while ((match = regex.exec(rawBuffer)) !== null) {
+      const [, tag, content] = match
+      lastIndex = regex.lastIndex
+
+      try {
+        const json = JSON.parse(content)
+        if (tag === 'MEETING_STATUS') window.webContents.send('meeting:status', json)
+        else if (tag === 'MEETING_TRANSCRIPT') window.webContents.send('meeting:transcript', json)
+        else if (tag === 'MEETING_UPDATE') window.webContents.send('meeting:update', json)
+        else if (tag === 'MEETING_ANSWER') window.webContents.send('meeting:answer', json)
+        else if (tag === 'MEETING_ANSWER_CHUNK') window.webContents.send('meeting:answer-chunk', json)
+        else if (tag === 'MEETING_FINAL') window.webContents.send('meeting:final', json)
+        else if (tag === 'MEETING_SETTINGS') window.webContents.send('meeting:settings', json)
+        else if (tag === 'KEY_STATUS') window.webContents.send('key-status', json)
+      } catch (e) {
+        console.error('Meeting Parse Error:', e)
+      }
+    }
+
+    if (lastIndex > 0) {
+      rawBuffer = rawBuffer.substring(lastIndex)
+    }
+  })
+}
+
 
 let settingsProcess: any = null
 
@@ -206,18 +246,27 @@ function startSettingsBridge(window: BrowserWindow) {
   let rawBuffer = ''
   settingsProcess.stdout.on('data', (chunk: any) => {
     rawBuffer += chunk.toString()
-    let startIndex = rawBuffer.indexOf('<<SETTINGS>>')
-    let endIndex = rawBuffer.indexOf('<<END>>')
-    while (startIndex !== -1 && endIndex !== -1) {
-      if (endIndex > startIndex) {
-        try {
-          const jsonStr = rawBuffer.substring(startIndex + 12, endIndex)
-          window.webContents.send('settings:all', JSON.parse(jsonStr))
-        } catch (e) { console.error('Settings Parse Error:', e) }
-        rawBuffer = rawBuffer.substring(endIndex + 7)
-      } else { rawBuffer = rawBuffer.substring(startIndex) }
-      startIndex = rawBuffer.indexOf('<<SETTINGS>>')
-      endIndex = rawBuffer.indexOf('<<END>>')
+    const regex = /<<([A-Z_]+)>>(.*?)<<END>>/gs
+    let match
+    let lastIndex = 0
+
+    while ((match = regex.exec(rawBuffer)) !== null) {
+      const [, tag, content] = match
+      lastIndex = regex.lastIndex
+
+      try {
+        const json = JSON.parse(content)
+        if (tag === 'SETTINGS') window.webContents.send('settings:all', json)
+        else if (tag === 'INTEGRATIONS') window.webContents.send('integrations:all', json)
+        else if (tag === 'CALENDAR_AGENDA') window.webContents.send('calendar:agenda', json)
+        else if (tag === 'INTEGRATION_EVENT') window.webContents.send('integration:event', json)
+      } catch (e) {
+        console.error('Settings Parse Error:', e)
+      }
+    }
+
+    if (lastIndex > 0) {
+      rawBuffer = rawBuffer.substring(lastIndex)
     }
   })
 }
@@ -343,6 +392,22 @@ function toggleSearch() {
   }
 }
 
+function invokeMeetingMode() {
+  if (!win) return
+
+  if (!searchVisible) {
+    sizeToDisplay()
+    searchVisible = true
+    win.setIgnoreMouseEvents(false)
+    win.webContents.send('cosmic:shown')
+  } else {
+    win.setIgnoreMouseEvents(false)
+  }
+
+  win.webContents.send('meeting:invoke')
+  win.focus()
+}
+
 function createWindow() {
   win = new BrowserWindow({
     show: false,
@@ -383,6 +448,7 @@ function cleanupProcesses() {
 
   kill(settingsProcess); settingsProcess = null
   kill(voiceProcess); voiceProcess = null
+  kill(meetingProcess); meetingProcess = null
 }
 
 // Monitor change detection
@@ -405,6 +471,7 @@ app.whenReady().then(() => {
     startGeminiBridge(win)
     startPerplexityBridge(win)
     startWeatherBridge(win)
+    startMeetingBridge(win)
 
     startSettingsBridge(win)
     startVoiceBridge(win)
@@ -449,6 +516,14 @@ app.whenReady().then(() => {
     settingsProcess?.stdin.write('GET_ALL_SETTINGS\n')
   })
 
+  ipcMain.on('integrations:get-all', () => {
+    settingsProcess?.stdin.write('GET_ALL_INTEGRATIONS\n')
+  })
+
+  ipcMain.on('calendar:get-agenda', () => {
+    settingsProcess?.stdin.write('GET_CALENDAR_AGENDA\n')
+  })
+
   // Voice IPC handlers
   ipcMain.on('voice:start', () => {
     sendToVoiceBridge('START')
@@ -460,8 +535,60 @@ app.whenReady().then(() => {
     sendToVoiceBridge(`SET_KEY:${key}`)
   })
 
+  ipcMain.on('meeting:start', (_, payload) => {
+    if (meetingProcess?.stdin) {
+      meetingProcess.stdin.write(`START_MEETING:${JSON.stringify(payload || {})}\n`)
+    }
+  })
+  ipcMain.on('meeting:stop', () => {
+    meetingProcess?.stdin?.write('STOP_MEETING\n')
+  })
+  ipcMain.on('meeting:pause', () => {
+    meetingProcess?.stdin?.write('PAUSE_MEETING\n')
+  })
+  ipcMain.on('meeting:resume', () => {
+    meetingProcess?.stdin?.write('RESUME_MEETING\n')
+  })
+  ipcMain.on('meeting:set-web-search', (_, payload) => {
+    if (meetingProcess?.stdin) {
+      meetingProcess.stdin.write(`SET_MEETING_WEB_SEARCH:${JSON.stringify(payload || {})}\n`)
+    }
+  })
+  ipcMain.on('meeting:ask', (_, payload) => {
+    if (meetingProcess?.stdin) {
+      meetingProcess.stdin.write(`ASK_MEETING:${JSON.stringify(payload || {})}\n`)
+    }
+  })
+  ipcMain.on('meeting:check-keys', () => {
+    meetingProcess?.stdin?.write('CHECK_MEETING_KEYS\n')
+  })
+  ipcMain.on('meeting:get-settings', () => {
+    meetingProcess?.stdin?.write('GET_MEETING_SETTINGS\n')
+  })
+  ipcMain.on('meeting:save-settings', (_, payload) => {
+    if (meetingProcess?.stdin) {
+      meetingProcess.stdin.write(`SAVE_MEETING_SETTINGS:${JSON.stringify(payload || {})}\n`)
+    }
+  })
+
   ipcMain.on('settings:save', (_, { key, value }) => {
     settingsProcess?.stdin.write(`SAVE_SETTING:${key}:${value}\n`)
+  })
+
+  ipcMain.on('integrations:save-account', (_, payload) => {
+    settingsProcess?.stdin.write(`SAVE_INTEGRATION_ACCOUNT:${JSON.stringify(payload || {})}\n`)
+  })
+
+  ipcMain.on('integrations:delete-account', (_, accountId: string) => {
+    settingsProcess?.stdin.write(`DELETE_INTEGRATION_ACCOUNT:${accountId}\n`)
+  })
+
+  ipcMain.on('integrations:connect-google', (_, payload) => {
+    settingsProcess?.stdin.write(`CONNECT_GOOGLE_ACCOUNT:${JSON.stringify(payload || {})}\n`)
+  })
+
+  ipcMain.on('integrations:disconnect-google', (_, accountId: string) => {
+    settingsProcess?.stdin.write(`DISCONNECT_GOOGLE_ACCOUNT:${accountId}\n`)
   })
 
   ipcMain.on('gemini:send', (_, prompt) => {
@@ -535,6 +662,21 @@ app.whenReady().then(() => {
   })
 
   globalShortcut.register('CommandOrControl+Shift+Space', toggleSearch)
+
+  // Meeting mode shortcut - CommandOrControl+Left: affect only meeting UI
+  const meetingShortcutRegistered = globalShortcut.register('CommandOrControl+Left', () => {
+    if (!win) return
+    // If overlay is not visible, invoke meeting UI in its last state
+    if (!searchVisible) {
+      invokeMeetingMode()
+      return
+    }
+    // If overlay is visible, let the renderer decide based on current mode
+    win.webContents.send('meeting:toggle-visibility')
+  })
+  if (!meetingShortcutRegistered) {
+    console.warn('Failed to register meeting shortcut: CommandOrControl+Left')
+  }
 
   // Voice activation shortcut - CommandOrControl+Shift+V to toggle voice
   globalShortcut.register('CommandOrControl+Shift+V', () => {

@@ -8,10 +8,11 @@ import LiquidGlass from './LiquidGlass'
 import DynamicIsland from './DynamicIsland'
 import SetupModal from './SetupModal'
 import LiquidGlassLoader from './LiquidGlassLoader'
+import MeetingMode from './MeetingMode'
 import './spotlight.css'
 
 export type SearchPosition = 'bottom' | 'middle'
-export type QueryMode = 'perplexity' | 'llm'
+export type QueryMode = 'perplexity' | 'llm' | 'meeting'
 
 
 
@@ -40,6 +41,7 @@ export default function App() {
   const [islandOpacity, setIslandOpacity] = useState(0.85) // Default opacity
 
   const [mode, setMode] = useState<QueryMode>('llm')
+  const modeRef = useRef<QueryMode>('llm')
   const [showModeDropdown, setShowModeDropdown] = useState(false)
   const [isInputFocused, setIsInputFocused] = useState(false)
 
@@ -56,13 +58,29 @@ export default function App() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
 
   // Track key status for SetupModal
-  const [keyStatus, setKeyStatus] = useState({ gemini: false, perplexity: false })
+  const [keyStatus, setKeyStatus] = useState({
+    gemini: false,
+    perplexity: false,
+    deepgram: false,
+    groq: false,
+    anthropic: false,
+  })
+
+  useEffect(() => {
+    modeRef.current = mode
+  }, [mode])
 
   // --- INIT & MOUSE EVENTS ---
   useEffect(() => {
     // Check Keys on Load
     const unsubKeys = window.cosmic?.onKeyStatus((status) => {
-      setKeyStatus({ gemini: status.gemini, perplexity: status.perplexity })
+      setKeyStatus({
+        gemini: !!status.gemini,
+        perplexity: !!status.perplexity,
+        deepgram: !!status.deepgram,
+        groq: !!status.groq,
+        anthropic: !!status.anthropic,
+      })
       if (!status.hasKeys) {
         setIsFirstRun(true)
         setSearchState('visible')
@@ -121,6 +139,7 @@ export default function App() {
       setSearchState('hidden')
       setShowModeDropdown(false)
       setShowHistory(false)
+      if (modeRef.current === 'meeting') setMode('llm')
     }, 250)
   }
 
@@ -134,10 +153,26 @@ export default function App() {
       }
     }
 
+    const handleMeetingInvoke = () => {
+      setSearchState('visible')
+      setMode('meeting')
+      setShowModeDropdown(false)
+      setShowHistory(false)
+      setIsInputFocused(false)
+    }
+
     const off1 = window.cosmic?.onShown(handleShown)
     const off2 = window.cosmic?.onHiding(performHide)
+    const off3 = window.cosmic?.onMeetingInvoke(handleMeetingInvoke)
+    const off4 = window.cosmic?.onMeetingToggle(() => {
+      if (modeRef.current === 'meeting') {
+        window.cosmic?.hide()
+        return
+      }
+      handleMeetingInvoke()
+    })
 
-    return () => { off1?.(); off2?.() }
+    return () => { off1?.(); off2?.(); off3?.(); off4?.() }
   }, [])
 
   // --- DATA LISTENERS ---
@@ -229,6 +264,7 @@ export default function App() {
   }
 
   const handleSubmit = () => {
+    if (mode === 'meeting') return
     setIsInputFocused(false)
     if (inputRef.current) inputRef.current.blur()
 
@@ -355,7 +391,7 @@ export default function App() {
     searchState === 'hidden' ? '' : 'visible',
     effectivePosition === 'middle' ? 'position-middle' : '',
     messages.length > 0 ? 'has-response' : '',
-    (isInputFocused || messages.length > 0 || isStreaming) ? 'focused' : ''
+    (isInputFocused || messages.length > 0 || isStreaming || mode === 'meeting') ? 'focused' : ''
   ].join(' ')
 
   return (
@@ -399,8 +435,14 @@ export default function App() {
         }}
         style={{ pointerEvents: searchState === 'visible' ? 'auto' : 'none' }}
       >
+        <MeetingMode
+          active={mode === 'meeting'}
+          keyStatus={keyStatus}
+          onBackToChat={() => setMode('llm')}
+        />
+
         {/* MESSAGES AREA */}
-        {messages.length > 0 && (
+        {mode !== 'meeting' && messages.length > 0 && (
           <div className={`response-container ${searchState === 'visible' ? 'visible' : ''}`}>
             <LiquidGlass disableTilt={true} cornerRadius={32} style={{ width: '100%', height: '100%' }}>
               <div className="response-wrapper">
@@ -542,7 +584,7 @@ export default function App() {
         )}
 
         {/* SCROLL TO BOTTOM BUTTON */}
-        {showScrollButton && (
+        {mode !== 'meeting' && showScrollButton && (
           <button className="scroll-to-bottom" onClick={scrollToBottom}>
             <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
               <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z" />
@@ -551,7 +593,7 @@ export default function App() {
         )}
 
         {/* INPUT BAR / HISTORY CONTAINER */}
-        <div className={`cosmic ${searchState === 'visible' ? 'visible' : searchState === 'hiding' ? 'hiding' : ''} ${showHistory ? 'history-open' : ''}`}>
+        {mode !== 'meeting' && <div className={`cosmic ${searchState === 'visible' ? 'visible' : searchState === 'hiding' ? 'hiding' : ''} ${showHistory ? 'history-open' : ''}`}>
           <LiquidGlass cornerRadius={24} style={{ width: '100%', height: '100%' }}>
             <div className="glass-content">
 
@@ -640,7 +682,9 @@ export default function App() {
                       type="button"
                     >
                       <ModeIcon mode={mode} />
-                      <span className="mode-label">{mode === 'llm' ? 'Gemini' : 'Perplexity'}</span>
+                      <span className="mode-label">
+                        {mode === 'llm' ? 'Gemini' : mode === 'perplexity' ? 'Perplexity' : 'Meeting'}
+                      </span>
                       <svg className="chevron" width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
                         <path d="M7 10l5 5 5-5z" />
                       </svg>
@@ -697,7 +741,7 @@ export default function App() {
 
             </div>
           </LiquidGlass>
-        </div>
+        </div>}
       </div>
     </>
   )
@@ -708,6 +752,13 @@ function ModeIcon({ mode }: { mode: QueryMode }) {
     return (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
         <path d="M9 2L7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z" />
+      </svg>
+    )
+  }
+  if (mode === 'meeting') {
+    return (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M17 10.5V7c0-2.76-2.24-5-5-5S7 4.24 7 7v3.5C5.21 11.41 4 13.11 4 15c0 2.76 3.58 5 8 5s8-2.24 8-5c0-1.89-1.21-3.59-3-4.5zM9 7c0-1.65 1.35-3 3-3s3 1.35 3 3v2.74c-.94-.47-1.99-.74-3-.74s-2.06.27-3 .74V7zm3 11c-3.31 0-6-1.34-6-3 0-1.66 2.69-3 6-3s6 1.34 6 3c0 1.66-2.69 3-6 3z" />
       </svg>
     )
   }

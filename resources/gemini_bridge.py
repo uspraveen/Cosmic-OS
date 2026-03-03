@@ -94,10 +94,16 @@ async def handle_command(cmd: str):
     elif cmd == "CHECK_KEYS":
         gemini = db.get_api_key("gemini")
         pplx = db.get_api_key("perplexity")
+        deepgram = db.get_api_key("deepgram")
+        groq = db.get_api_key("groq")
+        anthropic = db.get_api_key("anthropic")
         status = {
-            "hasKeys": (gemini is not None) or (pplx is not None),
+            "hasKeys": (gemini is not None) or (pplx is not None) or (deepgram is not None) or (groq is not None) or (anthropic is not None),
             "gemini": bool(gemini),
-            "perplexity": bool(pplx)
+            "perplexity": bool(pplx),
+            "deepgram": bool(deepgram),
+            "groq": bool(groq),
+            "anthropic": bool(anthropic),
         }
         print(f"<<KEY_STATUS>>{json.dumps(status)}<<END>>", flush=True)
 
@@ -106,6 +112,9 @@ async def handle_command(cmd: str):
             payload = json.loads(cmd[10:])
             if payload.get("gemini"): db.set_api_key("gemini", payload["gemini"])
             if payload.get("perplexity"): db.set_api_key("perplexity", payload["perplexity"])
+            if payload.get("deepgram"): db.set_api_key("deepgram", payload["deepgram"])
+            if payload.get("groq"): db.set_api_key("groq", payload["groq"])
+            if payload.get("anthropic"): db.set_api_key("anthropic", payload["anthropic"])
             print("<<KEY_SAVED>>true<<END>>", flush=True)
             
             # Send updated status immediately to unlock UI

@@ -1,78 +1,156 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import {
+  formatCalendarRange,
+  getCalendarEventStart,
+  isCalendarEventOnDate,
+  isSameCalendarDay,
+  type CalendarAgendaAccount,
+  type CalendarAgendaEvent,
+} from './calendar'
 
 interface CalendarMonthViewProps {
   currentDate: Date
-  events: any[]
+  events: CalendarAgendaEvent[]
+  accounts: CalendarAgendaAccount[]
+  onEventSelect: (event: CalendarAgendaEvent) => void
 }
 
-export default function CalendarMonthView({ currentDate, events }: CalendarMonthViewProps) {
-  const { days, monthLabel } = useMemo(() => {
+const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S']
+
+function getDayKey(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
+export default function CalendarMonthView({ currentDate, events, accounts, onEventSelect }: CalendarMonthViewProps) {
+  const [selectedDate, setSelectedDate] = useState(() => new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate()))
+  const currentYear = currentDate.getFullYear()
+  const currentMonth = currentDate.getMonth()
+  const currentDay = currentDate.getDate()
+
+  useEffect(() => {
+    setSelectedDate(new Date(currentYear, currentMonth, currentDay))
+  }, [currentDay, currentMonth, currentYear])
+
+  const { days, monthLabel, eventCountByDay } = useMemo(() => {
     const year = currentDate.getFullYear()
     const month = currentDate.getMonth()
-    
     const firstDay = new Date(year, month, 1)
     const lastDay = new Date(year, month + 1, 0)
-    
-    const daysArr = []
-    // Padding
-    for (let i = 0; i < firstDay.getDay(); i++) daysArr.push(null)
-    // Days
-    for (let i = 1; i <= lastDay.getDate(); i++) daysArr.push(new Date(year, month, i))
+    const daysArr: Array<Date | null> = []
+    const counts = new Map<string, number>()
+
+    for (let i = 0; i < firstDay.getDay(); i += 1) {
+      daysArr.push(null)
+    }
+    for (let day = 1; day <= lastDay.getDate(); day += 1) {
+      daysArr.push(new Date(year, month, day))
+    }
+
+    for (const event of events) {
+      const date = getCalendarEventStart(event)
+      if (!date) continue
+      const key = getDayKey(date)
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    }
 
     return {
       days: daysArr,
-      monthLabel: firstDay.toLocaleString('default', { month: 'long', year: 'numeric' })
+      monthLabel: firstDay.toLocaleString([], { month: 'long', year: 'numeric' }),
+      eventCountByDay: counts,
     }
-  }, [currentDate])
+  }, [currentDate, events])
 
-  // FIX: Safe Local Date Comparison
-  const hasEvent = (day: Date | null) => {
-    if (!day) return false
-    
-    // Create a local YYYY-MM-DD string for the calendar cell
-    const cellDateStr = `${day.getFullYear()}-${String(day.getMonth()+1).padStart(2,'0')}-${String(day.getDate()).padStart(2,'0')}`
-    
-    return events.some(e => {
-        // The python script now sends ISO strings with offsets (e.g. 2026-01-25T18:00:00-06:00)
-        // We act like a "Day View" and just check if the YYYY-MM-DD matches
-        return e.start.startsWith(cellDateStr)
-    })
-  }
-  
-  const isToday = (day: Date | null) => {
-      if (!day) return false
-      const now = new Date()
-      return day.getDate() === now.getDate() && 
-             day.getMonth() === now.getMonth() && 
-             day.getFullYear() === now.getFullYear()
-  }
+  const selectedEvents = useMemo(
+    () => events.filter((event) => isCalendarEventOnDate(event, selectedDate)).slice(0, 3),
+    [events, selectedDate],
+  )
+
+  const connectedAccounts = accounts.filter((account) => account.tool_enabled && !account.needs_reconnect).length
+  const selectedLabel = selectedDate.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' })
+  const today = new Date()
 
   return (
-    <div style={{ width: '100%', height: '100%', padding: '20px', display: 'flex', flexDirection: 'column' }}>
-      <div style={{ fontSize: '18px', fontWeight: '600', color: '#fff', marginBottom: '16px' }}>
-        {monthLabel}
+    <div className="month-view">
+      <div className="month-view-header">
+        <div>
+          <span className="month-view-kicker">Calendar</span>
+          <h3>{monthLabel}</h3>
+          <p>{connectedAccounts === 0 ? 'No synced accounts' : `${connectedAccounts} synced account${connectedAccounts === 1 ? '' : 's'}`}</p>
+        </div>
+        <div className="month-view-summary">
+          <strong>{events.length}</strong>
+          <span>{events.length === 1 ? 'event' : 'events'}</span>
+        </div>
       </div>
-      
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '8px', textAlign: 'center' }}>
-        {['S','M','T','W','T','F','S'].map(d => (
-          <div key={d} style={{ fontSize: '11px', color: 'rgba(255,255,255,0.4)', fontWeight:'700' }}>{d}</div>
+
+      <div className="month-view-weekdays">
+        {WEEKDAY_LABELS.map((label, i) => (
+          <span key={`${label}-${i}`}>{label}</span>
         ))}
-        
-        {days.map((day, i) => (
-          <div key={i} style={{ 
-            height: '32px', display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: '13px', color: day ? '#fff' : 'transparent',
-            background: hasEvent(day) ? 'rgba(0, 122, 255, 0.2)' : 'transparent',
-            borderRadius: '8px', position: 'relative',
-            border: isToday(day) ? '1px solid #007AFF' : 'none',
-            cursor: day ? 'default' : 'none'
-          }}>
-            {day ? day.getDate() : ''}
-            {hasEvent(day) && (
-              <div style={{ position: 'absolute', bottom: '4px', width: '4px', height: '4px', background: '#007AFF', borderRadius:'50%' }} />
-            )}
+      </div>
+
+      <div className="month-view-grid">
+        {days.map((day, index) => {
+          if (!day) {
+            return <div key={`empty-${index}`} className="month-view-day month-view-day-empty" aria-hidden="true" />
+          }
+
+          const key = getDayKey(day)
+          const count = eventCountByDay.get(key) ?? 0
+          const selected = isSameCalendarDay(day, selectedDate)
+          const isToday = isSameCalendarDay(day, today)
+
+          return (
+            <button
+              key={key}
+              type="button"
+              className={`month-view-day ${selected ? 'selected' : ''} ${count > 0 ? 'has-events' : ''} ${isToday ? 'today' : ''}`}
+              onClick={() => setSelectedDate(day)}
+            >
+              <span className="month-view-day-number">{day.getDate()}</span>
+              {count > 0 && (
+                <span className="month-view-day-meta">
+                  <span className="month-view-day-dot" />
+                  {count > 1 && <span className="month-view-day-count">{count}</span>}
+                </span>
+              )}
+            </button>
+          )
+        })}
+      </div>
+
+      <div className="month-view-agenda">
+        <div className="month-view-agenda-head">
+          <div>
+            <span className="month-view-agenda-label">{selectedLabel}</span>
+            <strong>{selectedEvents.length === 0 ? 'No events' : `${selectedEvents.length} event${selectedEvents.length === 1 ? '' : 's'}`}</strong>
           </div>
-        ))}
+          <span className="month-view-agenda-meta">{connectedAccounts === 0 ? 'Connect in Settings' : 'Select a day'}</span>
+        </div>
+
+        {selectedEvents.length > 0 ? (
+          <div className="month-view-agenda-list">
+            {selectedEvents.map((event) => (
+              <button
+                key={`${event.account_id}-${event.id}-${event.start}`}
+                type="button"
+                className="month-view-agenda-item"
+                onClick={() => onEventSelect(event)}
+              >
+                <div className="month-view-agenda-copy">
+                  <span className="month-view-agenda-time">{formatCalendarRange(event)}</span>
+                  <strong>{event.summary}</strong>
+                  <span>{event.calendar_name}{event.location ? ` \u00B7 ${event.location}` : ''}</span>
+                </div>
+                <span className="month-view-agenda-account">{event.account_label}</span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="month-view-empty-state">
+            <span>Nothing scheduled</span>
+          </div>
+        )}
       </div>
     </div>
   )
