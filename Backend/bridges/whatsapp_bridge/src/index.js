@@ -120,6 +120,13 @@ function clearQrState() {
   qrUpdatedAt = null;
 }
 
+function describeDisconnect(statusCode, fallbackMessage = 'Connection failure') {
+  if (statusCode === null || statusCode === undefined) {
+    return fallbackMessage;
+  }
+  return `${fallbackMessage} (${statusCode})`;
+}
+
 async function buildStatusPayload() {
   return {
     status: 'ok',
@@ -541,6 +548,7 @@ function bindSocketEvents(currentSock, saveCreds) {
     const authExists = await hasExistingAuthState();
     const loggedOut = statusCode === DisconnectReason.loggedOut;
     const shouldReconnect = !loggedOut && authExists;
+    const errorMessage = lastDisconnect?.error?.message ?? null;
 
     if (sock === currentSock) {
       sock = null;
@@ -550,9 +558,16 @@ function bindSocketEvents(currentSock, saveCreds) {
       clearQrState();
     }
 
+    if (loggedOut) {
+      lastError = describeDisconnect(statusCode, 'WhatsApp session logged out');
+    } else if (!authExists && statusCode !== null) {
+      lastError = errorMessage || describeDisconnect(statusCode);
+    }
+
     setConnectionState({
       connected: false,
-      pairingState: loggedOut ? 'logged_out' : authExists ? 'disconnected' : 'idle',
+      pairingState:
+        loggedOut ? 'logged_out' : (!authExists && statusCode !== null) ? 'error' : authExists ? 'disconnected' : 'idle',
       lastDisconnectCode: statusCode,
       connectedJid: null,
     });
@@ -634,7 +649,12 @@ async function ensureSocketConnected({ refresh = false } = {}) {
 async function waitForPairingArtifact(timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (connectionState.connected || latestQr || connectionState.pairingState === 'error') {
+    if (
+      connectionState.connected ||
+      latestQr ||
+      connectionState.pairingState === 'error' ||
+      connectionState.lastDisconnectCode !== null
+    ) {
       return buildStatusPayload();
     }
     await sleep(250);
@@ -664,6 +684,16 @@ app.post('/pairing/qr', verifyBridgeToken, async (req, res) => {
     }
 
     const payload = await waitForPairingArtifact(requestTimeoutMs);
+    if (!payload.connected && !payload.qr && (payload.last_error || payload.last_disconnect_code !== null)) {
+      const disconnectMessage = payload.last_error || describeDisconnect(payload.last_disconnect_code);
+      res.status(502).json({
+        status: 'error',
+        error: disconnectMessage,
+        bridge_status: payload,
+      });
+      return;
+    }
+
     const statusCode = payload.connected || payload.qr ? 200 : 202;
     res.status(statusCode).json(payload);
   } catch (error) {

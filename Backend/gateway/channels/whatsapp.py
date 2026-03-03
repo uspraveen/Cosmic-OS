@@ -180,15 +180,11 @@ class WhatsAppAdapter(ChannelAdapter):
         if self._http is None:
             raise RuntimeError("WhatsApp bridge client is not initialized")
 
-        response = await self._http.get(
+        return await self._request_bridge_json(
+            "GET",
             self.config.status_path,
             headers=self._bridge_headers(),
         )
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise RuntimeError("WhatsApp bridge returned a non-object status payload")
-        return payload
 
     async def request_pairing_qr(
         self,
@@ -200,34 +196,28 @@ class WhatsAppAdapter(ChannelAdapter):
         if self._http is None:
             raise RuntimeError("WhatsApp bridge client is not initialized")
 
-        response = await self._http.post(
+        timeout_sec = max(15.0, (wait_timeout_ms / 1000.0) + 5.0)
+        return await self._request_bridge_json(
+            "POST",
             self.config.pairing_qr_path,
             json={
                 "refresh": refresh,
                 "wait_timeout_ms": wait_timeout_ms,
             },
             headers=self._bridge_headers(),
+            timeout=httpx.Timeout(timeout_sec, connect=5.0),
         )
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise RuntimeError("WhatsApp bridge returned a non-object pairing payload")
-        return payload
 
     async def clear_session(self) -> dict[str, Any]:
         await self.ensure_ready()
         if self._http is None:
             raise RuntimeError("WhatsApp bridge client is not initialized")
 
-        response = await self._http.delete(
+        return await self._request_bridge_json(
+            "DELETE",
             self.config.session_path,
             headers=self._bridge_headers(),
         )
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise RuntimeError("WhatsApp bridge returned a non-object session payload")
-        return payload
 
     async def handle_incoming(self, payload: dict[str, Any]) -> NormalizedMessage:
         normalized = self.normalize_message(payload)
@@ -594,6 +584,55 @@ class WhatsAppAdapter(ChannelAdapter):
         if self.config.bridge_token:
             headers["X-Bridge-Token"] = self.config.bridge_token
         return headers
+
+    async def _request_bridge_json(
+        self,
+        method: str,
+        path: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        if self._http is None:
+            raise RuntimeError("WhatsApp bridge client is not initialized")
+
+        try:
+            response = await self._http.request(method, path, **kwargs)
+            response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise RuntimeError("WhatsApp bridge request timed out") from exc
+        except httpx.HTTPStatusError as exc:
+            detail = self._extract_bridge_error_detail(exc.response)
+            raise RuntimeError(detail) from exc
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"WhatsApp bridge request failed: {exc}") from exc
+
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("WhatsApp bridge returned a non-object payload")
+        return payload
+
+    def _extract_bridge_error_detail(self, response: httpx.Response) -> str:
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+
+        if isinstance(payload, dict):
+            for key in ("detail", "error", "message"):
+                value = self._coerce_str(payload.get(key))
+                if value:
+                    return value
+
+            bridge_status = payload.get("bridge_status")
+            if isinstance(bridge_status, dict):
+                for key in ("last_error",):
+                    value = self._coerce_str(bridge_status.get(key))
+                    if value:
+                        return value
+                disconnect_code = self._coerce_int(bridge_status.get("last_disconnect_code"))
+                if disconnect_code is not None:
+                    return f"WhatsApp bridge pairing failed (disconnect code {disconnect_code})"
+
+        return f"WhatsApp bridge request failed ({response.status_code})"
 
     def _normalize_message_type(self, value: Any) -> str:
         text = (self._coerce_str(value) or "unknown").lower()
