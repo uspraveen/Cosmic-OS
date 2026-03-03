@@ -36,6 +36,91 @@ let voiceActive = false
 let searchVisible = false
 let lastWeatherData: any = null
 
+interface GatewayConnectionConfig {
+  baseUrl: string
+  apiToken: string
+}
+
+function normalizeGatewayBaseUrl(rawBaseUrl: string) {
+  const trimmed = String(rawBaseUrl || '').trim()
+  if (!trimmed) {
+    throw new Error('Gateway URL is required.')
+  }
+
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)
+  const withScheme = hasScheme
+    ? trimmed
+    : /^(localhost|127(?:\.\d{1,3}){3}|\[::1\])/i.test(trimmed)
+      ? `http://${trimmed}`
+      : `https://${trimmed}`
+
+  const url = new URL(withScheme)
+  return url.toString().replace(/\/$/, '')
+}
+
+async function callGatewayJson(
+  config: GatewayConnectionConfig,
+  pathName: string,
+  init: {
+    method?: string
+    body?: unknown
+    timeoutMs?: number
+  } = {},
+) {
+  const apiToken = String(config?.apiToken || '').trim()
+  if (!apiToken) {
+    throw new Error('Gateway API token is required.')
+  }
+
+  const baseUrl = normalizeGatewayBaseUrl(config?.baseUrl || '')
+  const requestUrl = new URL(pathName, `${baseUrl}/`).toString()
+  const controller = new AbortController()
+  const timeoutMs = Math.max(1000, init.timeoutMs ?? 20000)
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const response = await fetch(requestUrl, {
+      method: init.method ?? 'GET',
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${apiToken}`,
+        ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      },
+      body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
+      signal: controller.signal,
+    })
+
+    const responseText = await response.text()
+    let payload: any = null
+
+    if (responseText) {
+      try {
+        payload = JSON.parse(responseText)
+      } catch {
+        payload = { raw: responseText }
+      }
+    }
+
+    if (!response.ok) {
+      const detail =
+        (typeof payload?.detail === 'string' && payload.detail) ||
+        (typeof payload?.error === 'string' && payload.error) ||
+        response.statusText ||
+        `Gateway request failed (${response.status})`
+      throw new Error(detail)
+    }
+
+    return payload
+  } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      throw new Error('Gateway request timed out.')
+    }
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
 function startGeminiBridge(window: BrowserWindow) {
   const scriptPath = path.join(process.env.APP_ROOT, 'resources', 'gemini_bridge.py')
   geminiProcess = spawn('python', ['-u', scriptPath])
@@ -632,6 +717,34 @@ app.whenReady().then(() => {
   // NEW: Open External Link
   ipcMain.on('open-external', (_, url) => {
     shell.openExternal(url)
+  })
+
+  ipcMain.handle('whatsapp:get-status', async (_, payload: GatewayConnectionConfig) => {
+    return callGatewayJson(payload, '/channels/whatsapp/status')
+  })
+
+  ipcMain.handle('whatsapp:request-pairing-qr', async (_, payload: GatewayConnectionConfig & {
+    refresh?: boolean
+    waitTimeoutMs?: number
+  }) => {
+    return callGatewayJson(
+      payload,
+      '/channels/whatsapp/pairing/qr',
+      {
+        method: 'POST',
+        body: {
+          refresh: payload?.refresh !== false,
+          wait_timeout_ms: payload?.waitTimeoutMs ?? 15000,
+        },
+        timeoutMs: Math.max(5000, Number(payload?.waitTimeoutMs ?? 15000) + 5000),
+      },
+    )
+  })
+
+  ipcMain.handle('whatsapp:clear-session', async (_, payload: GatewayConnectionConfig) => {
+    return callGatewayJson(payload, '/channels/whatsapp/session', {
+      method: 'DELETE',
+    })
   })
 
 

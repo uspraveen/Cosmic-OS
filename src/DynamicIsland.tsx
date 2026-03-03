@@ -97,24 +97,6 @@ const DOT_PROGRESS_ROWS = 3
 const CALENDAR_REFRESH_MS = 5 * 60 * 1000
 const CALENDAR_STALE_AFTER_MS = 2 * 60 * 1000
 
-function getCalendarAccentColor(colorId: string) {
-  if (colorId.startsWith('#')) return colorId
-  const palette: Record<string, string> = {
-    '1': '#7dc4ff',
-    '2': '#6ce3b1',
-    '3': '#c6a8ff',
-    '4': '#ff9b7d',
-    '5': '#ffd76b',
-    '6': '#87b8ff',
-    '7': '#8fd1ff',
-    '8': '#ee89ff',
-    '9': '#3b82f6',
-    '10': '#22c55e',
-    '11': '#a855f7',
-  }
-  return palette[colorId] ?? '#76a7ff'
-}
-
 function getEventDurationLabel(event: CalendarAgendaEvent) {
   if (event.isAllDay) return 'All day'
   const start = getCalendarEventStart(event)
