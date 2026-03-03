@@ -673,9 +673,10 @@ def install_whatsapp_bridge_dependencies(bridge_dir: Path) -> None:
     package_data = load_package_json(package_json)
 
     package_lock = bridge_dir / "package-lock.json"
-    node_modules = bridge_dir / "node_modules"
     install_command = ["npm", "install"]
-    if package_lock.exists() and not node_modules.exists():
+    if package_lock.exists():
+        # Keep bridge installs reproducible on the VM and avoid mutating the
+        # committed lockfile during routine provisioning.
         install_command = ["npm", "ci"]
 
     log("Installing WhatsApp bridge dependencies in {0}".format(bridge_dir))
