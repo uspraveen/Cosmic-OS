@@ -69,6 +69,8 @@ Every design decision flows from one mental model. Keep these three layers stric
 │  Tags every input with source, source_id, and channel.           │
 │  Strips <awaiting_reply/> tags from LLM responses.               │
 │  Sticky routing (reply → last_route) + task input relay.         │
+│  Usage Ledger (SQLite): append-only token/cost telemetry for     │
+│  direct LLM routes, orchestrator, model router, and agents.      │
 │                                                                   │
 │  ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐ │
 │  │  SESSION MANAGER │ │CREDENTIAL MANAGER│ │    SCHEDULER     │ │
@@ -83,7 +85,7 @@ Every design decision flows from one mental model. Keep these three layers stric
 │  │ WEBHOOK HANDLER  │ │  HOOKS ENGINE    │ │ CHANNEL ADAPTER  │ │
 │  │ Provider sig     │ │ Internal state   │ │ REGISTRY         │ │
 │  │ verification,    │ │ change triggers, │ │ Platform adapters│ │
-│  │ event conversion │ │ lifecycle events │ │ per-channel      │ │
+│  │ event conversion │ │ lifecycle events │ │ channel-tagged   │ │
 │  │ to TaskEnvelopes │ │ to TaskEnvelopes │ │ session routing  │ │
 │  └──────────────────┘ └──────────────────┘ └──────────────────┘ │
 ├──────────────────────────────────────────────────────────────────┤
@@ -126,7 +128,7 @@ Every design decision flows from one mental model. Keep these three layers stric
 |---|---|
 | **Desktop App** | Electron + React UI. Always-on background process registered at startup. Maintains conversation history locally. Connects to Gateway via WebSocket. Settings panel triggers OAuth account connections via Gateway. One of several channel adapters — see §27. |
 | **Channel Adapters** | Normalize platform-specific messages into the unified TaskEnvelope format. Each adapter handles authentication, message parsing, and response delivery for its platform. Available adapters: Desktop (WebSocket), WhatsApp, Telegram, Slack, Discord, CLI. New platforms are added by implementing the adapter interface (§27). |
-| **Gateway** | Receives inputs from all five sources (messages, heartbeats, crons, hooks, webhooks), validates auth + schema, tags every input with `source`, `source_id`, and `channel`, assembles session context via the Session Manager (today's conversation + retrieved memories). Checks `awaiting_reply` for sticky routing (§3.7); otherwise calls Model Router for classification. Routes to appropriate backend, strips `<awaiting_reply/>` control tags from responses (§3.8), streams responses and task events via the originating channel adapter. Relays task input requests from `user_input:requests` to UI and user replies to `user_input:replies` (§3.12). Owns the Credential Manager (§22), Session Manager (§23), Scheduler (§25), Webhook Handler (§26), Hooks Engine (§28), and Channel Adapter Registry (§27). |
+| **Gateway** | Receives inputs from all five sources (messages, heartbeats, crons, hooks, webhooks), validates auth + schema, tags every input with `source`, `source_id`, and `channel`, assembles session context via the Session Manager (today's conversation + retrieved memories). Checks `awaiting_reply` for sticky routing (§3.7); otherwise calls Model Router for classification. Routes to appropriate backend, strips `<awaiting_reply/>` control tags from responses (§3.8), streams responses and task events via the originating channel adapter. Relays task input requests from `user_input:requests` to UI and user replies to `user_input:replies` (§3.12). Owns the Credential Manager (§22), Session Manager (§23), Scheduler (§25), Webhook Handler (§26), Hooks Engine (§28), Channel Adapter Registry (§27), and the Usage Ledger (`gateway/usage.db`) for append-only token/cost telemetry. |
 | **Scheduler** | Gateway module that manages crons and heartbeats. Stores cron definitions and heartbeat config in SQLite. Runs a polling loop that fires TaskEnvelopes to the orchestrator when jobs are due. Exposes internal API for CRUD operations. The orchestrator creates and manages crons via this API. See §25. |
 | **Webhook Handler** | Gateway module that receives HTTP POST callbacks from external systems (Gmail, GitHub, Jira, Slack). Verifies provider-specific signatures, converts payloads into TaskEnvelopes tagged with `source='webhook'`, and dispatches to the orchestrator. See §26. |
 | **Hooks Engine** | Gateway module that fires TaskEnvelopes in response to internal state changes: gateway startup/shutdown, session reset, compaction, agent registration/deregistration. Configurable hook definitions stored alongside the Gateway. See §28. |
@@ -449,11 +451,27 @@ CIRCUIT_BREAKER_FAILURE_THRESHOLD=3        # failures before opening circuit
 CIRCUIT_BREAKER_RECOVERY_SEC=30            # seconds before half-open probe
 ```
 
+**Process-scoped environment rule:** the architecture uses environment variables as the configuration interface, but in real deployments those variables are injected **per service/process**, not through one giant backend-wide env file. A Gateway process, Model Router process, WhatsApp Bridge process, and Orchestrator process each receive only the variables they need.
+
+**Canonical VM pattern:**
+
+- `/etc/cosmic/gateway.env`
+- `/etc/cosmic/model-router.env`
+- `/etc/cosmic/whatsapp-bridge.env`
+- `/etc/cosmic/orchestrator.env`
+- optional agent-specific env files when an agent needs unique runtime settings
+
+Shared values such as `GATEWAY_INTERNAL_TOKEN` may intentionally appear in more than one env file when two internal services must trust each other. This is expected and preferable to leaking every secret into every process.
+
+`CLASSIFIER_MODEL` is only the model identifier. The Model Router resolves its SDK family,
+provider `base_url`, context limits, and pricing metadata from `shared/model_specs.json` (see
+§7.2c) rather than hardcoding them in `model_router/config.py`.
+
 ---
 
 ## 3. Gateway
 
-The Gateway is the single entry point for all input sources. It handles authentication, request validation, input tagging, model routing, session management, credential management, scheduling, webhook ingestion, internal hooks, channel adapter management, and response delivery. No external client communicates with the orchestrator or agents directly.
+The Gateway is the single entry point for all input sources. It handles authentication, request validation, input tagging, model routing, session management, credential management, usage monitoring, scheduling, webhook ingestion, internal hooks, channel adapter management, and response delivery. No external client communicates with the orchestrator or agents directly.
 
 ### 3.1 Responsibilities
 
@@ -470,6 +488,7 @@ The Gateway is the single entry point for all input sources. It handles authenti
 | Task input relay | Consumes `user_input:requests` from orchestrator, surfaces to UI via the appropriate channel; collects user replies, publishes to `user_input:replies` |
 | Rate limiting | Token-bucket rate limiting per session |
 | Credential management | Owns the Credential Manager: handles OAuth PKCE flows, stores encrypted refresh tokens, manages connected accounts, validates scopes, refreshes access tokens, and exposes internal-only endpoints for the orchestrator to resolve credentials at dispatch time (see §22) |
+| Usage monitoring | Owns the Usage Ledger: append-only token/cost telemetry in `gateway/usage.db`. Logs direct LLM route usage locally and accepts internal usage events from the orchestrator, agents, Session Manager, and Model Router. Stores `llm_call_placed_at` as the UTC timestamp of each metered call. |
 | Scheduling | Owns the Scheduler module: manages cron job definitions and heartbeat configuration in SQLite. Runs a polling loop that fires TaskEnvelopes when jobs are due. Exposes internal API for CRUD operations (see §25) |
 | Webhook ingestion | Owns the Webhook Handler: receives HTTP POST callbacks from external systems, verifies provider signatures, converts payloads to TaskEnvelopes tagged with `source='webhook'` (see §26) |
 | Channel management | Owns the Channel Adapter Registry: manages platform adapters (Desktop/WebSocket, WhatsApp, Telegram, Slack, Discord, CLI), normalizes incoming messages, routes responses back to originating channels (see §27) |
@@ -480,6 +499,8 @@ The Gateway is the single entry point for all input sources. It handles authenti
 The desktop app maintains a persistent WebSocket connection for real-time bidirectional communication. REST endpoints are available for stateless operations and health checks.
 
 **Why WebSocket as primary?** The desktop app is always-on (background process, registered as startup app). A persistent WebSocket connection eliminates connection setup overhead on every query and enables the server to push task events, progress updates, and clarification requests without polling.
+
+**Single Gateway server:** The Gateway is one FastAPI service with multiple route surfaces. Desktop chat uses WebSocket. Webhooks, health checks, scheduler/credential APIs, and sidecar-bridge callbacks use REST endpoints on the same Gateway process. New channel adapters do **not** create separate FastAPI servers; they extend the existing Gateway with additional adapter logic and, when needed, internal callback routes.
 
 ### 3.3 WebSocket Protocol
 
@@ -636,15 +657,174 @@ The desktop app maintains a persistent WebSocket connection for real-time bidire
 | `GET` | `/auth/accounts` | List all connected provider accounts for the current user |
 | `DELETE` | `/auth/accounts/{account_id}` | Disconnect a provider account — revokes tokens, marks credential revoked |
 | | | |
+| | **Channel Management (desktop app / local API token)** | |
+| `GET` | `/channels` | List configured channels, enabled state, and high-level connection status for the desktop settings UI |
+| `GET` | `/channels/{platform}/status` | Get detailed status for one channel (connected, disconnected, pairing_required, bridge_unreachable, last_error) |
+| `POST` | `/channels/whatsapp/pairing/qr` | Request a fresh WhatsApp pairing QR from the running WhatsApp Bridge and return renderable QR payload to the desktop app |
+| `DELETE` | `/channels/whatsapp/session` | Disconnect the active WhatsApp session and clear bridge-owned device auth state |
+| | | |
 | | **Credential Management (internal — orchestrator only)** | |
 | `POST` | `/internal/credentials/resolve` | Resolve provider + scopes + user → short-lived access token + credential_ref. Authenticated via internal service token (see §22.3) |
 | `POST` | `/internal/credentials/refresh` | Refresh an existing credential by credential_ref → new access token. Used for mid-task token refresh (see §22.5) |
 | `GET` | `/internal/credentials/accounts/{provider}` | List connected accounts for a provider. Used by orchestrator for account resolution. |
 | `POST` | `/internal/credentials/lookup-resource` | Look up resource bindings (e.g., doc_id → account) for orchestrator account resolution |
 | | | |
+| | **Channel Intake (internal — sidecar bridges)** | |
+| `POST` | `/internal/channels/whatsapp/incoming` | Receive authenticated inbound events from the WhatsApp Bridge, validate payload, normalize via the adapter, then enter the Gateway user-message processing pipeline |
+| | | |
 | | **Memory (internal — agents via service token)** | |
 | `POST` | `/internal/memory/search` | Semantic search across shared memory store. Used by MemoryRead universal tool (§32.5) |
 | `POST` | `/internal/memory/write` | Write a new memory to the shared store. Used by MemoryWrite universal tool (§32.5) |
+| | | |
+| | **Usage Monitoring (internal — gateway, orchestrator, agents, model router)** | |
+| `POST` | `/internal/usage/log` | Append one token/cost usage event to `gateway/usage.db`. |
+
+### 3.4a Usage Ledger
+
+The Gateway owns a dedicated append-only SQLite ledger for model/API usage. This is separate from
+`sessions.db` and `credentials.db` because usage tracking is observability/billing telemetry, not
+conversation state or secret storage.
+
+**Database:** `gateway/usage.db`
+
+```sql
+-- gateway/usage.db
+
+CREATE TABLE usage_events (
+    llm_call_id TEXT PRIMARY KEY,           -- unique ID for one metered LLM/API call
+    user_id TEXT NOT NULL,                  -- always same value per VM today; future-proof
+
+    source_component TEXT NOT NULL,         -- 'gateway', 'orchestrator', 'agent', 'session_manager', 'model_router'
+    source_id TEXT,                         -- 'cosmic/orchestrator:1.0.0', 'cosmic/research-agent:1.0.0', 'gateway:gemini'
+
+    task_id TEXT,                           -- NULL for non-task calls
+    plan_id TEXT,
+    parent_task_id TEXT,
+    session_id TEXT,
+
+    route TEXT,                             -- 'opus', 'gemini', 'perplexity', nullable
+    operation TEXT NOT NULL,                -- 'orchestrator.process', 'research.topic', 'model_router.classify'
+    usage_kind TEXT NOT NULL,               -- 'chat_completion', 'classifier', 'embedding', 'rerank', 'other'
+
+    provider TEXT NOT NULL,                 -- 'anthropic', 'google', 'perplexity', 'groq', 'openrouter'
+    model TEXT NOT NULL,                    -- actual provider model id
+
+    request_id TEXT,                        -- local correlation id
+    provider_request_id TEXT,               -- provider-side request id if available
+
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_tokens INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+
+    estimated_cost_usd REAL,
+    latency_ms INTEGER,
+
+    success BOOLEAN NOT NULL DEFAULT TRUE,
+    error_code TEXT,
+
+    metadata_json TEXT,                     -- raw provider usage blob / extra fields
+    llm_call_placed_at TIMESTAMP NOT NULL   -- UTC timestamp when the outbound LLM/API call was initiated
+);
+
+CREATE INDEX idx_usage_task_id
+    ON usage_events(task_id);
+
+CREATE INDEX idx_usage_plan_id
+    ON usage_events(plan_id);
+
+CREATE INDEX idx_usage_session_id
+    ON usage_events(session_id);
+
+CREATE INDEX idx_usage_source
+    ON usage_events(source_component, source_id, llm_call_placed_at);
+
+CREATE INDEX idx_usage_provider_model
+    ON usage_events(provider, model, llm_call_placed_at);
+```
+
+**Logging rules:**
+
+- The table is append-only. Never update token counts after insert; corrections are separate admin events.
+- `llm_call_placed_at` is the UTC timestamp when the outbound LLM/API call was initiated.
+- The Gateway logs direct Gemini/Perplexity usage itself.
+- The orchestrator logs its own Opus/task-planning usage via `/internal/usage/log`.
+- Agents log their own model usage via `/internal/usage/log` when they call LLMs or embedding APIs.
+- The Model Router logs classifier usage via `/internal/usage/log`.
+- Session Manager memory/embed operations may also log usage rows when they consume metered APIs.
+
+#### Internal Usage Event Contract
+
+`POST /internal/usage/log` accepts one JSON object per metered LLM/API call. The request body maps
+directly to one row in `usage_events`.
+
+**Required fields:**
+
+- `llm_call_id`: unique ID for this specific metered call. This is generated by the caller in the
+  code path that initiates the outbound LLM/API request, not by the Gateway.
+- `source_component`: one of `gateway`, `orchestrator`, `agent`, `session_manager`, `model_router`
+- `operation`: logical operation name such as `orchestrator.process`, `research.topic`,
+  `model_router.classify`
+- `usage_kind`: one of `chat_completion`, `classifier`, `embedding`, `rerank`, `other`
+- `provider`: provider name such as `anthropic`, `google`, `perplexity`, `groq`, `openrouter`
+- `model`: concrete provider model ID
+- `llm_call_placed_at`: UTC timestamp when the outbound call was initiated
+
+**Optional fields:**
+
+- `source_id`
+- `task_id`
+- `plan_id`
+- `parent_task_id`
+- `session_id`
+- `route`
+- `request_id`
+- `provider_request_id`
+- `prompt_tokens`
+- `completion_tokens`
+- `total_tokens`
+- `cached_tokens`
+- `reasoning_tokens`
+- `estimated_cost_usd`
+- `latency_ms`
+- `success`
+- `error_code`
+- `metadata_json`
+- `user_id`
+
+**Validation rules:**
+
+- `llm_call_placed_at` must be an ISO 8601 / RFC 3339 UTC timestamp, for example
+  `2026-03-02T15:04:05.123Z`.
+- `llm_call_id` must be generated once per outbound metered call and reused on retries of the same
+  log event.
+- Omitted token fields default to `0`.
+- If `estimated_cost_usd` is computed locally rather than returned by the provider, it must be
+  derived from the matching entry in `shared/model_specs.json`.
+- `success=false` may include `error_code`; successful rows should leave `error_code=NULL`.
+- `metadata_json` is for provider-specific usage blobs and extra structured telemetry that does not
+  deserve a first-class column.
+
+**Idempotency and write behavior:**
+
+- The Gateway treats `llm_call_id` as the idempotency key for `/internal/usage/log`.
+- Retrying the same event with the same `llm_call_id` must not create a second row.
+- The endpoint writes append-only into `gateway/usage.db`; it never mutates an existing usage row.
+
+**Response shape:**
+
+- `201 Created` when a new usage row is inserted
+- `200 OK` when the same `llm_call_id` is replayed and treated as an idempotent duplicate
+- response body:
+
+```json
+{
+  "ok": true,
+  "llm_call_id": "call_01HXYZ...",
+  "deduplicated": false
+}
+```
 
 ### 3.5 Authentication
 
@@ -671,7 +851,7 @@ async def verify_ws_auth(websocket: WebSocket):
 
 **Future mobile app:** When a mobile client is added, the auth layer can be extended with JWT or OAuth2 without changing the Gateway's internal routing logic. The auth middleware is a pluggable concern.
 
-**Internal service authentication:** The `/internal/*` credential endpoints are protected by a separate internal service token, not the desktop app's local API token. Only the orchestrator holds this token. The desktop app cannot access internal credential endpoints.
+**Internal service authentication:** The `/internal/*` credential, memory, and usage endpoints are protected by a separate internal service token, not the desktop app's local API token. The orchestrator and any agent/runtime component that needs sanctioned internal APIs hold this token. The desktop app cannot access internal endpoints.
 
 ```python
 INTERNAL_SERVICE_TOKEN = os.environ['GATEWAY_INTERNAL_TOKEN']
@@ -681,6 +861,8 @@ async def verify_internal_auth(request: Request):
     if not hmac.compare_digest(token, INTERNAL_SERVICE_TOKEN):
         raise HTTPException(status_code=403, detail='Internal access only')
 ```
+
+This same internal service token protects sidecar bridge callbacks such as `/internal/channels/whatsapp/incoming`. The WhatsApp Bridge authenticates to the existing Gateway service over an internal route; the Gateway does **not** open a second server or a WhatsApp-specific FastAPI process.
 
 ### 3.6 Rate Limiting
 
@@ -699,9 +881,9 @@ async def handle_query(session_id: str, content: str, context: list,
                        channel_adapter: ChannelAdapter,
                        source: str = 'user', source_id: str | None = None,
                        channel: str | None = None):
-    # 1. Assign session (channel-scoped — see §27)
+    # 1. Assign session (unified across channels — see §27.2)
     if not session_id:
-        session_id = generate_session_id(channel=channel)
+        session_id = generate_session_id()
 
     # 2. Rate limit check
     if not rate_limiter.allow(session_id):
@@ -719,7 +901,9 @@ async def handle_query(session_id: str, content: str, context: list,
     # }
 
     # 4. Sticky routing check: awaiting_reply? (see §2.2 Layer 1)
-    last_msg = await get_last_assistant_message(session_id)
+    #    Channel-scoped: only match awaiting_reply from the SAME channel.
+    #    A Desktop awaiting_reply must not capture a WhatsApp message.
+    last_msg = await get_last_assistant_message(session_id, channel=channel)
     used_sticky = last_msg and last_msg.get('awaiting_reply')
     if used_sticky:
         # Skip classifier entirely — route to the model that asked
@@ -778,6 +962,10 @@ async def handle_query(session_id: str, content: str, context: list,
 **Message storage ordering rationale:** The user's message is stored in `sessions.db` (step 6) **before** dispatch (step 7). This is a deliberate crash-safety choice. If the Gateway crashes between dispatch and storage, the session would permanently lose the message — the LLM received a task referencing context it can never reconstruct. Storing first makes the session always-consistent: if dispatch fails after storage, the user sees an error and retries; if the Gateway crashes after storage but before dispatch, the message is preserved for the next attempt. The cost is that a message might be stored for a dispatch that immediately fails — this is acceptable because the message reflects what the user actually said, regardless of dispatch success.
 
 **Sticky routing design rationale:** When a model (Opus, Gemini, or Perplexity) is in a conversational exchange and asks the user a question, the user's reply must go back to that same model. Without this, a short reply like "B" would be classified as low-confidence or continuation and routed to Opus, even if Gemini asked the question. The `awaiting_reply` flag is the model's own declaration that it expects a direct response — no heuristics, no guessing. See §3.8 for how the flag is detected from model output.
+
+**Channel entry-point rule:** `handle_query(...)` is the common post-normalization path for user-originated messages regardless of channel. The Desktop adapter reaches it from the WebSocket handler. A sidecar-backed adapter such as WhatsApp reaches it from an internal REST route after the Bridge payload has been authenticated and normalized by `gateway/channels/whatsapp.py`.
+
+**Routing nuance:** not every incoming user message becomes a Redis-dispatched orchestrator task. Only `route='opus'` results in TaskEnvelope creation and Redis dispatch to the orchestrator. `gemini` and `perplexity` remain on the Gateway's direct LLM proxy path.
 
 ### 3.8 Direct LLM Routing & Response Control Tags
 
@@ -988,6 +1176,7 @@ CREATE TABLE messages (
     role TEXT,               -- 'user', 'assistant', 'system'
     content TEXT,
     route TEXT,              -- 'opus', 'gemini', 'perplexity'
+    channel TEXT,            -- originating channel: 'desktop', 'whatsapp:+1234567890', 'telegram:chat_123', etc.
     task_id TEXT,            -- null for non-opus messages
     awaiting_reply BOOLEAN DEFAULT FALSE,  -- model expects direct reply (sticky routing)
     created_at TIMESTAMP,
@@ -995,6 +1184,7 @@ CREATE TABLE messages (
 );
 
 CREATE INDEX idx_messages_session ON messages(session_id, created_at);
+CREATE INDEX idx_messages_channel ON messages(session_id, channel, created_at);
 ```
 
 ### 3.12 Task User Input Relay
@@ -1167,6 +1357,8 @@ cosmic-agents/
 │   ├── memory_tools.py         # MemoryRead + MemoryWrite universal tools (§32.5)
 │   ├── leader.py               # Leader election + fencing
 │   ├── artifact_security.py    # Path allowlist + integrity checks
+│   ├── model_specs.py          # Loader/lookup helpers for shared/model_specs.json
+│   ├── model_specs.json        # Global metered-model registry: SDK, base URL, limits, pricing
 │   └── config.py               # TTL tunables, constants
 │
 ├── agents/                     # One folder per agent
@@ -1193,8 +1385,9 @@ cosmic-agents/
 │   ├── channels/               # Channel Adapter Registry (see §27)
 │   │   ├── base.py             # ChannelAdapter base class (interface contract)
 │   │   ├── registry.py         # Adapter registry + channel → session routing
+│   │   ├── routes.py           # Channel management + bridge intake routes (/channels/*, /internal/channels/*)
 │   │   ├── desktop.py          # Desktop app adapter (WebSocket)
-│   │   ├── whatsapp.py         # WhatsApp adapter (Baileys / WhatsApp Business API)
+│   │   ├── whatsapp.py         # WhatsApp adapter (Baileys via bridge / WhatsApp Business API)
 │   │   ├── telegram.py         # Telegram adapter (Bot API / grammY)
 │   │   ├── slack.py            # Slack adapter (Bolt / Events API)
 │   │   ├── discord.py          # Discord adapter (discord.py)
@@ -1226,9 +1419,19 @@ cosmic-agents/
 │   │   ├── memory_writer.py    # Write memories to .md files + embed into Qdrant
 │   │   └── response_processor.py # LLMStreamProcessor: strip <awaiting_reply/> tags, set flags (§3.8)
 │   ├── user_input.py           # Task input relay: consume user_input:requests, publish replies (§3.12)
+│   ├── usage.py                # Usage Ledger write/query helpers (§3.4a)
 │   ├── sessions.py             # Session storage (SQLite)
 │   ├── sessions.db             # Session + message storage
-│   └── credentials.db          # Credential store (accounts, tokens, audit — see §22)
+│   ├── credentials.db          # Credential store (accounts, tokens, audit — see §22)
+│   └── usage.db                # Token/cost telemetry ledger (SQLite)
+│
+├── bridges/                    # Sidecar-backed adapter/integration services
+│   └── whatsapp_bridge/        # WhatsApp bridge process for Baileys-based adapter (§27.6, §27.7)
+│       ├── package.json        # Bridge runtime/dependencies
+│       ├── src/                # Bridge code: socket lifecycle, reconnects, internal API/callbacks
+│       ├── store/              # PERSISTENT. Channel auth/session/device state
+│       │   └── auth/           # e.g. Baileys multi-file auth state
+│       └── runtime/            # EPHEMERAL. Logs, cache, pidfiles, temp files
 │
 ├── memory/                     # Persistent memory store (.md source of truth)
 │   ├── sessions/               # Compacted daily session summaries
@@ -1263,10 +1466,15 @@ cosmic-agents/
 │   └── artifacts/
 │       └── <task_id>/
 │
+├── bootstrap.py                # First-run Linux VM bootstrap helper (deps, venv, bridge setup)
+├── requirements.txt            # Python runtime dependencies for Gateway, Router, Orchestrator, Agents
+├── requirements-dev.txt        # Dev/test/lint dependencies (-r requirements.txt + extras)
+│
 ├── supervisord.conf            # Process management
 └── docker-compose.yml          # Container deployment
-    # NOTE: agents/*/store/ directories MUST be mapped to persistent
-    # volumes in docker-compose.yml. runtime/ directories are ephemeral.
+    # NOTE: agents/*/store/ and bridges/*/store/ directories MUST be
+    # mapped to persistent volumes in docker-compose.yml. runtime/
+    # directories are ephemeral.
     # gateway/credentials.db MUST also be on a persistent volume —
     # it contains encrypted refresh tokens and account bindings.
     # gateway/scheduler/scheduler.db MUST be on a persistent volume —
@@ -1278,6 +1486,79 @@ cosmic-agents/
     # logs/events/ MUST be on a persistent volume —
     # it contains archived task event history (see §12.8).
 ```
+
+### 5.1a Sidecar Bridge Layout
+
+Most channel adapters are simple in-process modules inside `gateway/channels/`. A **bridge** is only introduced when the platform SDK, transport, or auth model does not fit cleanly inside the Python Gateway process.
+
+**Use a bridge when one or more of these are true:**
+
+- The required platform library is not Python-native or is operationally better in another runtime (for example, Baileys in Node.js).
+- The platform needs a long-lived socket/session process with its own reconnect and device-state lifecycle.
+- The platform persists non-OAuth runtime state (session blobs, device registrations, encrypted local auth files) that should be isolated from Gateway code.
+
+**Canonical bridge shape:**
+
+```text
+bridges/<name>_bridge/
+├── src/                        # Bridge implementation
+├── store/                      # PERSISTENT. Runtime auth/session/device state
+│   └── auth/
+└── runtime/                    # EPHEMERAL. Logs, cache, temp files
+```
+
+**Hard rules:**
+
+1. The Gateway-facing adapter still lives in `gateway/channels/<platform>.py`. The bridge is an implementation detail behind that adapter, not a replacement for it.
+2. `store/` is for channel/runtime auth state only. It survives restarts and deploys. It must be on a persistent volume in containers, or on persistent disk in VM deployments.
+3. `runtime/` is ephemeral. It may be deleted on restart without data loss.
+4. Bridges stay thin: connection lifecycle, provider-specific auth/session handling, inbound event capture, outbound send. They do **not** own sessions, model routing, memory, credentials, orchestration, or response policy.
+5. Bridge traffic is internal-only. Expose it on localhost or a Unix socket, authenticate it, and never treat it like a public webhook surface.
+
+### 5.1b Bootstrap + Dependency Manifests
+
+COSMIC uses **one Python runtime environment for the entire Python backend** and **one dependency environment per non-Python bridge runtime**.
+
+**Top-level Python dependency files:**
+
+- `bootstrap.py`: First-run provisioning helper for Linux VM deployments. It prepares Python, `pip`, `venv`, installs backend Python dependencies, and can provision sidecar runtimes such as the WhatsApp bridge.
+- `requirements.txt`: Runtime dependency manifest for all Python services in this repository: Gateway, Model Router, Orchestrator, and agents.
+- `requirements-dev.txt`: Development-only extension of `requirements.txt` for linting, tests, and local verification. Production process managers do **not** install or depend on it.
+
+**Runtime separation rules:**
+
+1. Use a single top-level Python virtual environment for the backend, for example `./.venv`. Do **not** create separate Python virtual environments for `gateway/`, `scheduler/`, `credentials/`, or individual adapters.
+2. Each bridge owns its own non-Python runtime manifest inside the bridge directory. For Node.js bridges, this means `package.json`, `package-lock.json`, and bridge-local `node_modules/`.
+3. Separate environments are created by **runtime/ecosystem boundary**, not by feature folder. Today that means:
+   - Python backend → one shared `.venv`
+   - `bridges/whatsapp_bridge/` → its own Node.js dependencies
+4. Introduce an additional Python virtual environment only if a real incompatibility forces it (for example, conflicting interpreter or binary dependency constraints across separately deployed Python services). Do not pre-optimize for this.
+
+**Bootstrap script role:**
+
+`bootstrap.py` is a deployment helper, not a long-running service. It may execute package-manager and shell commands via Python `subprocess` to prepare the machine. It should remain:
+
+- idempotent where practical
+- subcommand-based rather than one monolithic setup function
+- limited to provisioning/setup concerns, not application runtime behavior
+
+**Canonical commands:**
+
+```bash
+python bootstrap.py doctor
+python bootstrap.py setup-python
+python bootstrap.py setup-whatsapp-bridge
+python bootstrap.py bootstrap
+```
+
+**Current command meanings:**
+
+- `doctor`: Read-only prerequisite check. Reports Python, `pip`, `venv`, requirements-file, Node/npm, and bridge-manifest state.
+- `setup-python`: Ensures Python `3.10+`, `pip`, and `venv`; creates/updates `.venv`; installs `requirements.txt`.
+- `setup-whatsapp-bridge`: Installs the Node.js dependency set for `bridges/whatsapp_bridge/`.
+- `bootstrap`: Runs the full first-pass provisioning flow for the backend VM by executing both Python and bridge setup.
+
+**Operational note:** `bootstrap.py` is intended to be the first backend command after clone on a Linux VM image that already has a callable Python interpreter. If the base image has no Python at all, a minimal cloud-init/scripted OS bootstrap may install Python first and then hand off to `bootstrap.py`.
 
 ### 5.2 Per-Agent Folder (Every Agent Is Identical in Shape)
 
@@ -1324,6 +1605,8 @@ agents/research_agent/
 - `store/data/` → **Agent-managed storage.** Each agent defines its own database schema, session tables, indexes, and data files here. No uniform schema is imposed — a research agent might track source credibility scores while a docs agent tracks edit history. Must be on a persistent volume.
 - `runtime/` → **EPHEMERAL.** Gitignored. Recreated on restart. Used for in-flight state, caches, and logs only.
 - `runs/artifacts/<task_id>/` → **PER-TASK isolation.** Never shared across tasks.
+- Any agent that makes a metered LLM or embedding API call **must** emit one usage event to `POST /internal/usage/log` using the Usage Ledger contract in §3.4a. This is a runtime obligation, not an optional capability.
+- Model SDK choice, provider `base_url`, context-window limits, output limits, and token pricing are **NOT** defined per agent. Resolve them from `shared/model_specs.json`, not from `agent_card.yaml` and not from agent-local constants.
 - Orchestrator **NEVER** silently rewrites prompts live. Use versioned rollout + rollback.
 - Track sha256 hashes of prompt files in registry so audits detect drift.
 
@@ -1422,6 +1705,8 @@ version_info:
 ```
 
 **Tool access** is declared per agent under `policies.tool_access`. Agents can invoke tools via any mechanism — MCP servers, direct SDK calls, REST clients, shell commands — the contract only cares *what* tools are permitted, not *how* they're called. **Note:** Universal tools (StepPlan, MemoryRead, MemoryWrite) are NOT listed in `policies.tool_access` — they are injected by the agent runtime and available to all agents automatically (see §32).
+
+**Important:** `agent_card.yaml` is not the source of truth for model runtime metadata. It does not carry provider SDK choice, `base_url`, context window, output limits, or token pricing. Those belong in the shared model registry at `shared/model_specs.json` (see §7.2c).
 
 **Session recall intents** like `research.recall_session` allow the orchestrator to query agents about past sessions. For example, when a user asks "explain the last edits we did on this doc," the orchestrator sends a `docs.recall_session` task to the docs agent, which queries its own `store/data/` storage and returns the relevant history. Each agent is the authority on its own past work.
 
@@ -1579,6 +1864,216 @@ async def connect_async(db_path: str) -> aiosqlite.Connection:
 | `foreign_keys=ON` | Enforces FK constraints. SQLite disables this by default — every connection must enable it explicitly. |
 
 **Critical rule:** Every SQLite database in the system — `sessions.db`, `credentials.db`, `scheduler.db`, `webhooks.db`, `task_ledger.db`, `registry.db`, and all `agents/*/store/data/*.db` — **must** be opened via these helper functions. Direct `sqlite3.connect()` calls without pragmas are a bug.
+
+### 7.2b Usage Logging Contract
+
+Usage logging is part of the runtime contract for any agent that initiates a metered LLM or embedding
+API call. It is not optional, and it is not defined separately by each agent.
+
+- The agent code path that initiates the outbound metered call generates `llm_call_id`.
+- The agent records `llm_call_placed_at` at the moment the outbound call is initiated.
+- After the provider returns (or fails), the agent emits exactly one usage event for that call to
+  `POST /internal/usage/log`.
+- Retries of the usage log write must reuse the same `llm_call_id` so the Gateway can deduplicate
+  idempotently.
+- Agents do not write `gateway/usage.db` directly. The Gateway is the only writer to the Usage
+  Ledger.
+- The request body and validation rules are defined in §3.4a `Internal Usage Event Contract`.
+- If the agent computes `estimated_cost_usd`, context-headroom telemetry, or other model-limit
+  analytics, it resolves provider/model metadata from `shared/model_specs.json` (see §7.2c).
+
+**Optional implementation note (LangChain / LangGraph):**
+
+If an agent is built with LangChain or LangGraph, it is acceptable to derive usage from the
+returned `AIMessage` before posting the COSMIC usage event:
+
+- read `AIMessage.usage_metadata` first
+- then fall back to `AIMessage.response_metadata['token_usage']` or
+  `AIMessage.response_metadata['usage']`
+- normalize `prompt_tokens` / input tokens, `completion_tokens` / output tokens, `total_tokens`,
+  and, when present, cached-input and reasoning token details
+
+This is only a suggested extraction pattern. The hard requirement is that the final event sent to
+`POST /internal/usage/log` matches the COSMIC usage contract in §3.4a.
+
+This requirement applies to:
+
+- specialist agents calling LLM/chat APIs
+- specialist agents calling embedding APIs
+- agent runtime helper paths that make metered model calls on behalf of the agent
+
+It does not apply to:
+
+- agents that complete a task without making any metered model/API call
+- purely local deterministic work such as SQLite queries, filesystem operations, schema validation,
+  hashing, or Redis operations
+
+### 7.2c Global Model Spec Registry
+
+All metered model definitions live in one shared declarative registry:
+
+- file: `shared/model_specs.json`
+- optional helper loader: `shared/model_specs.py`
+- ownership: shared runtime layer, not any individual agent
+
+This registry is the single source of truth for:
+
+- `provider`
+- `model`
+- `sdk` family used by code to talk to that model
+- default provider `base_url`
+- `usage_kind`
+- context-window and output-token limits
+- recommended reserve/headroom
+- token pricing
+- token-field normalization hints
+
+The registry is used by:
+
+- Gateway direct LLM adapters
+- Model Router
+- orchestrator model calls
+- Session Manager compaction and embedding paths
+- specialist agents that make metered LLM or embedding calls
+- usage/cost estimation code
+
+It is **not** duplicated into `agent_card.yaml`. The agent card declares capabilities and intent
+contracts; `shared/model_specs.json` declares runtime model metadata.
+
+**Recommended shape:**
+
+```json
+{
+  "version": 1,
+  "models": {
+    "anthropic:claude-opus": {
+      "provider": "anthropic",
+      "model": "claude-opus",
+      "sdk": "anthropic",
+      "base_url": "https://api.anthropic.com/v1",
+      "usage_kind": "chat_completion",
+      "context_window_tokens": 200000,
+      "max_output_tokens": 32000,
+      "recommended_headroom_reserve_tokens": 12000,
+      "pricing": {
+        "input_per_1m_usd": null,
+        "cached_input_per_1m_usd": null,
+        "output_per_1m_usd": null
+      },
+      "capabilities": {
+        "supports_cached_input_tokens": true,
+        "supports_reasoning_tokens": false,
+        "supports_streaming": true
+      },
+      "token_field_map": {
+        "prompt_tokens": ["input_tokens", "prompt_tokens"],
+        "completion_tokens": ["output_tokens", "completion_tokens"],
+        "total_tokens": ["total_tokens"],
+        "cached_tokens": ["cache_read_input_tokens", "cached_tokens"],
+        "reasoning_tokens": ["reasoning_tokens"]
+      },
+      "status": "active"
+    },
+    "groq:openai/gpt-oss-20b": {
+      "provider": "groq",
+      "model": "openai/gpt-oss-20b",
+      "sdk": "openai_compatible",
+      "base_url": "https://api.groq.com/openai/v1",
+      "usage_kind": "classifier",
+      "context_window_tokens": null,
+      "max_output_tokens": null,
+      "recommended_headroom_reserve_tokens": 0,
+      "pricing": {
+        "input_per_1m_usd": null,
+        "cached_input_per_1m_usd": null,
+        "output_per_1m_usd": null
+      },
+      "capabilities": {
+        "supports_cached_input_tokens": false,
+        "supports_reasoning_tokens": false,
+        "supports_streaming": false
+      },
+      "token_field_map": {
+        "prompt_tokens": ["prompt_tokens", "input_tokens"],
+        "completion_tokens": ["completion_tokens", "output_tokens"],
+        "total_tokens": ["total_tokens"],
+        "cached_tokens": [],
+        "reasoning_tokens": []
+      },
+      "status": "active"
+    },
+    "google:gemini-flash": {
+      "provider": "google",
+      "model": "gemini-flash",
+      "sdk": "google_genai",
+      "base_url": "https://generativelanguage.googleapis.com",
+      "usage_kind": "chat_completion",
+      "context_window_tokens": null,
+      "max_output_tokens": null,
+      "recommended_headroom_reserve_tokens": 8000,
+      "pricing": {
+        "input_per_1m_usd": null,
+        "cached_input_per_1m_usd": null,
+        "output_per_1m_usd": null
+      },
+      "capabilities": {
+        "supports_cached_input_tokens": false,
+        "supports_reasoning_tokens": false,
+        "supports_streaming": true
+      },
+      "token_field_map": {
+        "prompt_tokens": ["promptTokenCount", "input_tokens", "prompt_tokens"],
+        "completion_tokens": ["candidatesTokenCount", "output_tokens", "completion_tokens"],
+        "total_tokens": ["totalTokenCount", "total_tokens"],
+        "cached_tokens": [],
+        "reasoning_tokens": []
+      },
+      "status": "active"
+    },
+    "openrouter:qwen3-embedding-8b": {
+      "provider": "openrouter",
+      "model": "qwen3-embedding-8b",
+      "sdk": "openai_compatible",
+      "base_url": "https://openrouter.ai/api/v1",
+      "usage_kind": "embedding",
+      "context_window_tokens": null,
+      "max_output_tokens": 0,
+      "recommended_headroom_reserve_tokens": 0,
+      "pricing": {
+        "input_per_1m_usd": null,
+        "cached_input_per_1m_usd": null,
+        "output_per_1m_usd": null
+      },
+      "capabilities": {
+        "supports_cached_input_tokens": false,
+        "supports_reasoning_tokens": false,
+        "supports_streaming": false
+      },
+      "token_field_map": {
+        "prompt_tokens": ["prompt_tokens", "input_tokens", "total_tokens"],
+        "completion_tokens": [],
+        "total_tokens": ["total_tokens"],
+        "cached_tokens": [],
+        "reasoning_tokens": []
+      },
+      "status": "active"
+    }
+  }
+}
+```
+
+**Rules:**
+
+- The lookup key is `{provider}:{model}`.
+- Every metered model actually used anywhere in the system must have an entry.
+- `sdk` identifies the client family the code path should use, for example `anthropic`,
+  `google_genai`, or `openai_compatible`.
+- `base_url` is the default provider endpoint for that model family. Environment overrides are
+  allowed for testing or self-hosted proxies, but the registry remains the canonical default.
+- Provider-reported token counts are authoritative when present. `token_field_map` exists for
+  normalization and fallback extraction across SDK/provider response shapes.
+- Pricing fields may be `null` when not yet tracked, but the entry must still exist if the model is
+  used for metered work or context-budget calculations.
 
 ### 7.3 TaskEnvelope (Bidirectional)
 
@@ -1979,13 +2474,23 @@ except BackpressureError:
 
 ## 9. Process Management: supervisord
 
-supervisord manages agent worker processes. Each agent is a supervised program that restarts automatically on crash.
+supervisord manages long-running COSMIC processes in containerized deployments: gateway, model_router, bridge services, and agent workers. Each supervised process restarts automatically on crash.
 
 | Tool | When to Use |
 |---|---|
 | supervisord | User-space. Simple INI config. Natural fit inside Docker containers. Install via pip. |
 | systemd | OS-level init. Linux only. Better for bare-metal/VM. Journald log integration. Use on COSMIC lab Dell servers. |
 | **Rule** | Container → supervisord. Bare-metal lab server → systemd. Never mix within one deployment target. |
+
+**Provisioning before process start:** dependency/bootstrap work happens **before** `systemd` or `supervisord` takes over. On VM deployments, the expected first backend command after cloning is:
+
+```bash
+python bootstrap.py bootstrap
+```
+
+That command prepares the shared Python virtual environment from `requirements.txt` and installs bridge-local dependencies such as `bridges/whatsapp_bridge/package.json`. After provisioning completes, the selected process manager (`systemd` on VMs, `supervisord` in containers) owns long-running service lifecycle.
+
+For containerized deployments, the image/Dockerfile should bake in the equivalent of `bootstrap.py setup-python` and any required bridge dependency installation during build time. Do not rely on an interactive bootstrap step at container start.
 
 ### 9.1 `supervisord.conf`
 
@@ -1998,7 +2503,7 @@ logfile=/var/log/supervisord.log
 command=uvicorn gateway.main:app --host 0.0.0.0 --port 8080
 autostart=true
 autorestart=true
-environment=GATEWAY_INTERNAL_TOKEN='<internal-service-token>',CREDENTIAL_ENCRYPTION_KEY='<fernet-key>',OPENROUTER_API_KEY='<openrouter-key>',EMBEDDING_MODEL='qwen3-embedding-8b',QDRANT_PATH='./qdrant_data',MEMORY_STORE_PATH='./memory',SESSION_RESET_HOUR='4',COMPACTION_THRESHOLD='0.70',MEMORY_TOKEN_BUDGET='12000'
+environment=GATEWAY_INTERNAL_TOKEN='<internal-service-token>',GATEWAY_SIGNING_SECRET='<gateway-signing-secret>',CREDENTIAL_ENCRYPTION_KEY='<fernet-key>',OPENROUTER_API_KEY='<openrouter-key>',EMBEDDING_MODEL='qwen3-embedding-8b',QDRANT_PATH='./qdrant_data',MEMORY_STORE_PATH='./memory',SESSION_RESET_HOUR='4',COMPACTION_THRESHOLD='0.70',MEMORY_TOKEN_BUDGET='12000'
 stderr_logfile=/var/log/gateway.err.log
 stdout_logfile=/var/log/gateway.out.log
 
@@ -2017,11 +2522,19 @@ environment=GROQ_API_KEY='<groq-api-key>',CLASSIFIER_MODEL='openai/gpt-oss-20b'
 stderr_logfile=/var/log/model_router.err.log
 stdout_logfile=/var/log/model_router.out.log
 
+[program:whatsapp_bridge]
+command=node bridges/whatsapp_bridge/src/index.js
+autostart=true
+autorestart=true
+environment=WHATSAPP_BRIDGE_HOST='127.0.0.1',WHATSAPP_BRIDGE_PORT='8091',WHATSAPP_BRIDGE_TOKEN='<bridge-token>',WHATSAPP_AUTH_DIR='./bridges/whatsapp_bridge/store/auth',GATEWAY_INTERNAL_URL='http://127.0.0.1:8080',GATEWAY_INTERNAL_TOKEN='<internal-service-token>'
+stderr_logfile=/var/log/whatsapp_bridge.err.log
+stdout_logfile=/var/log/whatsapp_bridge.out.log
+
 [program:orchestrator]
 command=python -m agents.orchestrator
 autostart=true
 autorestart=true
-environment=INSTANCE_ID='orchestrator-1',AGENT_SECRETS='{"cosmic/research-agent:1.0.0": "...", "cosmic/docs-agent:2.1.0": "..."}',GATEWAY_INTERNAL_TOKEN='<internal-service-token>'
+environment=INSTANCE_ID='orchestrator-1',AGENT_SECRETS='{"cosmic/gateway:1.0.0": "<gateway-signing-secret>", "cosmic/research-agent:1.0.0": "...", "cosmic/docs-agent:2.1.0": "..."}',GATEWAY_INTERNAL_TOKEN='<internal-service-token>'
 stderr_logfile=/var/log/orchestrator.err.log
 stdout_logfile=/var/log/orchestrator.out.log
 
@@ -2075,6 +2588,94 @@ stdout_logfile=/var/log/cli_agent.out.log
 ; Alpha agent. autostart=false — wakes on demand only.
 ; autorestart=false — does not restart after exit.
 ```
+
+### 9.1a Bridge Services on Bare-Metal / VM
+
+On bare-metal or VM deployments, bridges follow the same process-management rule as the rest of the system: use `systemd`, not `supervisord`.
+
+```ini
+# /etc/systemd/system/cosmic-whatsapp-bridge.service
+[Unit]
+Description=COSMIC WhatsApp Bridge
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/cosmic-agents/bridges/whatsapp_bridge
+ExecStart=/usr/bin/node src/index.js
+Restart=always
+EnvironmentFile=/etc/cosmic/whatsapp-bridge.env
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Operational rule:** Bridges are first-class backend processes. Do not run them ad hoc in a terminal. They must be started, restarted, and monitored by the same process-management layer as the Gateway and agents.
+
+### 9.1b Service Environment Files on Bare-Metal / VM
+
+On VM deployments, the recommended pattern is **one env file per long-running service**, referenced by `systemd` `EnvironmentFile=` entries. Do **not** put Gateway, Model Router, Bridge, Orchestrator, and agent variables into one giant shared env file.
+
+**Why this is the default:**
+
+- least privilege: each process receives only the secrets it actually needs
+- simpler rotation: one service can change its config/secrets without rewriting unrelated services
+- clearer ownership: `GROQ_API_KEY` belongs to the Model Router, not the Gateway or Bridge
+- easier debugging: service configuration is inspectable and isolated at the process boundary
+
+**Canonical VM env-file layout:**
+
+```text
+/etc/cosmic/gateway.env
+/etc/cosmic/model-router.env
+/etc/cosmic/whatsapp-bridge.env
+/etc/cosmic/orchestrator.env
+/etc/cosmic/agents/research-agent.env
+/etc/cosmic/agents/docs-agent.env
+...
+```
+
+**Model Router example:**
+
+```ini
+# /etc/cosmic/model-router.env
+GROQ_API_KEY=<groq-api-key>
+CLASSIFIER_MODEL=openai/gpt-oss-20b
+MODEL_ROUTER_HOST=0.0.0.0
+MODEL_ROUTER_PORT=8742
+HTTP2_ENABLED=true
+CONNECTION_POOL_SIZE=10
+KEEPALIVE_EXPIRY=30
+```
+
+```ini
+# /etc/systemd/system/cosmic-model-router.service
+[Unit]
+Description=COSMIC Model Router
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/cosmic-agents
+ExecStart=/opt/cosmic-agents/.venv/bin/uvicorn model_router.main:app --host 0.0.0.0 --port 8742
+Restart=always
+EnvironmentFile=/etc/cosmic/model-router.env
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Gateway example:**
+
+- `gateway.env` contains Gateway-owned config such as `GEMINI_API_KEY`, `PERPLEXITY_API_KEY`, `GATEWAY_INTERNAL_TOKEN`, `GATEWAY_SIGNING_SECRET`, `CREDENTIAL_ENCRYPTION_KEY`, `OPENROUTER_API_KEY`, and session/memory tunables.
+- It may also include references to other internal services such as `MODEL_ROUTER_URL`, but it should not carry Model Router-only provider secrets like `GROQ_API_KEY` unless the Gateway itself truly needs them.
+
+**Shared-secret note:** some values will appear in multiple files by design:
+
+- `GATEWAY_INTERNAL_TOKEN` in Gateway + WhatsApp Bridge + Orchestrator
+- `GATEWAY_SIGNING_SECRET` in Gateway + Orchestrator
+
+Duplication of a small number of shared inter-service secrets is acceptable. A single all-services env file is not.
 
 ### 9.2 `__main__.py` Pattern (Every Agent)
 
@@ -3170,12 +3771,21 @@ All API keys and secrets **must** be externalized to environment variables. Neve
 | Perplexity API key | Gateway (Perplexity adapter) | `PERPLEXITY_API_KEY` |
 | Gateway local token | Gateway + Desktop App | `GATEWAY_LOCAL_TOKEN` |
 | Per-agent HMAC secrets | Orchestrator (all), Agents (own) | `AGENT_SECRET` / `AGENT_SECRETS` |
+| Gateway → Orchestrator signing secret | Gateway + Orchestrator (in `AGENT_SECRETS` as `cosmic/gateway:1.0.0`) | `GATEWAY_SIGNING_SECRET` |
 | Gateway internal service token | Gateway + Orchestrator | `GATEWAY_INTERNAL_TOKEN` |
 | Credential encryption key | Gateway (Credential Manager) | `CREDENTIAL_ENCRYPTION_KEY` |
 | OAuth client secrets (per provider) | Gateway (Credential Manager) | `OAUTH_GOOGLE_CLIENT_SECRET`, `OAUTH_GITHUB_CLIENT_SECRET`, etc. |
 | OpenRouter API key | Gateway (Session Manager — embeddings) | `OPENROUTER_API_KEY` |
 
 **Storage:** In development, secrets live in `.env` files (gitignored). In production, use a secrets manager or encrypted environment injection (Docker secrets, Kubernetes secrets, systemd `CredentialDirectory`).
+
+**Scoping rule:** production env injection is per service/process, not one backend-wide env blob. Gateway, Model Router, Bridges, Orchestrator, and agents should each receive the smallest env surface they require. This reduces accidental secret exposure and matches the process boundaries defined in §9.
+
+**Important distinction:** environment variables are for deploy-time static secrets/configuration. They are **not** the storage mechanism for user OAuth refresh tokens or channel device/session state:
+
+- user OAuth tokens live in `gateway/credentials.db`, encrypted at rest
+- channel/device auth such as Baileys multi-file state lives in the bridge's persistent `store/` path
+- env vars hold keys, client secrets, shared service tokens, and filesystem references to those persistent stores
 
 **Rotation:** HMAC agent secrets can be rotated by updating the orchestrator's `AGENT_SECRETS` map and each agent's `AGENT_SECRET` in a rolling deploy. The contract version mechanism (§21) ensures in-flight envelopes signed with the old key are drained before the old key is removed.
 
@@ -4098,6 +4708,7 @@ These rules are non-negotiable. Violating any of them is a security incident.
 5. **Revocation is immediate.** When a user disconnects an account, the credential is marked revoked in the DB. Future resolve calls fail. In-flight tasks fail on next provider API call.
 6. **OAuth client secrets are env vars.** Never in source code, never in `credentials.db`, never in agent folders.
 7. **One credential_ref per (account, agent, scope-set).** No shared "global token" across agents. If two agents need the same provider, each gets its own credential_ref with its own scope validation.
+8. **Channel runtime auth is not Credential Manager data.** Device/session state for channel bridges (for example, Baileys multi-file auth) does **not** belong in `gateway/credentials.db`. `credentials.db` is only for provider OAuth credentials. Channel/device auth lives in the owning bridge's persistent `store/`.
 
 ---
 
@@ -4688,6 +5299,10 @@ MEMORY_STORE_PATH=./memory                    # .md file tree root
 MEMORY_SYNC_ON_STARTUP=true                   # run consistency check at Gateway startup (§23.5a)
 ```
 
+`COMPACTION_MODEL` and `EMBEDDING_MODEL` must resolve to entries in `shared/model_specs.json`
+(§7.2c). The Session Manager uses that registry for SDK/base-URL selection, context budgeting, and
+cost estimation rather than maintaining a second copy of model metadata.
+
 ### 23.9 Context Assembly Diagram (Per Turn)
 
 ```
@@ -4756,7 +5371,9 @@ MEMORY_SYNC_ON_STARTUP=true                   # run consistency check at Gateway
 
 ## 24. Five Input Sources
 
-COSMIC accepts five types of input. When combined, they create a system that acts proactively without any autonomous reasoning — it is purely reactive to events that the user has preconfigured. Every input source produces a standard TaskEnvelope tagged with `source`, `source_id`, and `channel`, then enters the same processing pipeline through the Gateway.
+COSMIC accepts five types of input. When combined, they create a system that acts proactively without any autonomous reasoning — it is purely reactive to events that the user has preconfigured. Every input source is normalized and tagged at the Gateway boundary with `source`, `source_id`, and `channel`, then enters the same processing pipeline through the Gateway.
+
+**Important nuance for message sources:** infrastructure-driven inputs (heartbeats, crons, hooks, webhooks) become TaskEnvelopes immediately. Human messages first enter the Gateway's session/routing path. Only the `opus` route is converted into a TaskEnvelope and dispatched to the orchestrator; `gemini` and `perplexity` are handled directly by the Gateway.
 
 ### 24.1 Input Source Overview
 
@@ -4771,7 +5388,7 @@ COSMIC accepts five types of input. When combined, they create a system that act
 ### 24.2 How It Works
 
 ```
-① Human types on WhatsApp ──► Channel Adapter ──► Gateway ──► TaskEnvelope(source='user', channel='whatsapp:+1234')
+① Human types on WhatsApp ──► WhatsApp Bridge ──► Gateway internal route ──► WhatsApp adapter ──► tagged user message
 ② Timer fires every 30m ────► Scheduler ────────► Gateway ──► TaskEnvelope(source='heartbeat', source_id='default')
 ③ Cron job at 9 AM ─────────► Scheduler ────────► Gateway ──► TaskEnvelope(source='cron', source_id='cron_morning_email')
 ④ Gateway starts up ─────────► Hooks Engine ─────► Gateway ──► TaskEnvelope(source='hook', source_id='hook_gateway_startup')
@@ -4779,7 +5396,10 @@ COSMIC accepts five types of input. When combined, they create a system that act
                                                       │
                                                       ▼
                                               Same processing pipeline:
-                                              Session Manager → Model Router → Route
+                                              Session Manager → sticky route / Model Router
+                                                           │
+                                                           ├── gemini/perplexity → direct Gateway LLM path
+                                                           └── opus → TaskEnvelope → orchestrator
 ```
 
 **The orchestrator doesn't care where the input came from.** It receives a TaskEnvelope, decomposes it, dispatches to agents. The `source`, `source_id`, and `channel` fields are metadata for observability and response routing — they do not affect orchestration logic.
@@ -4934,7 +5554,7 @@ async def scheduler_polling_loop(redis):
                 channel=cron['delivery_channel'],
                 signature='',  # signed below
             )
-            task.signature = sign_task(task, ORCHESTRATOR_SECRET)
+            task.signature = sign_task(task, GATEWAY_SIGNING_SECRET)
             await dispatch(task, redis)
 
             # Update execution tracking
@@ -4991,7 +5611,7 @@ async def check_and_fire_heartbeat(redis):
         channel=config['delivery_channel'],
         signature='',
     )
-    task.signature = sign_task(task, ORCHESTRATOR_SECRET)
+    task.signature = sign_task(task, GATEWAY_SIGNING_SECRET)
     await dispatch(task, redis)
     await redis.set(last_key, utcnow().isoformat())
 ```
@@ -5139,7 +5759,7 @@ async def on_schedule_request(self, task: TaskEnvelope):
 # Scheduler configuration (gateway environment)
 SCHEDULER_POLL_INTERVAL_SEC=10          # how often the polling loop runs
 SCHEDULER_TIMEZONE=America/New_York     # timezone for active_hours evaluation
-ORCHESTRATOR_SECRET=<secret>            # for signing scheduler-generated TaskEnvelopes
+GATEWAY_SIGNING_SECRET=<secret>         # for signing gateway-generated TaskEnvelopes (scheduler, heartbeat, webhook, hooks)
 ```
 
 ---
@@ -5234,6 +5854,11 @@ async def receive_webhook(webhook_id: str, request: Request):
     else:
         prompt = f'Webhook event from {webhook["provider"]}: {json.dumps(payload, indent=2)}'
 
+    # Extract provider-specific event ID for deterministic idempotency.
+    # Without this, provider redeliveries would bypass §14 deduplication
+    # because each delivery got a random uuid4() key.
+    provider_event_id = verifier.extract_event_id(request.headers, payload)
+
     task_id = generate_task_id()
     task = TaskEnvelope(
         task_id=task_id,
@@ -5243,14 +5868,14 @@ async def receive_webhook(webhook_id: str, request: Request):
         recipient='cosmic/orchestrator:1.0.0',
         intent='orchestrator.process',
         input={'query': prompt, 'webhook_payload': payload},
-        idempotency_key=str(uuid4()),
+        idempotency_key=f'webhook:{webhook_id}:{provider_event_id}',
         priority=webhook['priority'],
         source='webhook',
         source_id=webhook_id,
         channel=webhook['delivery_channel'],
         signature='',
     )
-    task.signature = sign_task(task, ORCHESTRATOR_SECRET)
+    task.signature = sign_task(task, GATEWAY_SIGNING_SECRET)
     await dispatch(task, redis)
 
     log_webhook(webhook_id, 'processed', task_id, payload)
@@ -5266,12 +5891,21 @@ class WebhookVerifier:
     """Base class for webhook signature verification."""
     provider: str
     def verify(self, headers: dict, body: bytes, secret: str) -> bool: ...
+    def extract_event_id(self, headers: dict, payload: dict) -> str:
+        """Extract a provider-specific event ID for deterministic idempotency.
+        Returns a stable ID that is identical across redeliveries of the same event.
+        Subclasses MUST override this — the base implementation falls back to uuid4()
+        which defeats deduplication (only used for unknown providers)."""
+        return str(uuid4())
 
 class GmailPushVerifier(WebhookVerifier):
     provider = 'gmail'
     def verify(self, headers, body, secret):
         # Gmail uses Google Cloud Pub/Sub — verify JWT bearer token
         ...
+    def extract_event_id(self, headers, payload):
+        # Pub/Sub message_id is stable across redeliveries
+        return payload.get('message', {}).get('message_id', str(uuid4()))
 
 class GitHubVerifier(WebhookVerifier):
     provider = 'github'
@@ -5281,6 +5915,9 @@ class GitHubVerifier(WebhookVerifier):
             secret.encode(), body, hashlib.sha256
         ).hexdigest()
         return hmac.compare_digest(sig, expected)
+    def extract_event_id(self, headers, payload):
+        # X-GitHub-Delivery is a unique GUID per event, stable across redeliveries
+        return headers.get('X-GitHub-Delivery', str(uuid4()))
 
 class SlackVerifier(WebhookVerifier):
     provider = 'slack'
@@ -5292,6 +5929,9 @@ class SlackVerifier(WebhookVerifier):
             secret.encode(), sig_basestring.encode(), hashlib.sha256
         ).hexdigest()
         return hmac.compare_digest(headers.get('X-Slack-Signature', ''), expected)
+    def extract_event_id(self, headers, payload):
+        # Slack event_id is stable per event delivery
+        return payload.get('event_id', str(uuid4()))
 
 class GenericHMACVerifier(WebhookVerifier):
     provider = 'custom'
@@ -5299,13 +5939,16 @@ class GenericHMACVerifier(WebhookVerifier):
         sig = headers.get('X-Webhook-Signature', '')
         expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
         return hmac.compare_digest(sig, expected)
+    def extract_event_id(self, headers, payload):
+        # Convention: providers may send X-Webhook-Event-ID header
+        return headers.get('X-Webhook-Event-ID', str(uuid4()))
 ```
 
 ---
 
 ## 27. Channel Adapters
 
-Channel Adapters normalize platform-specific messages into the unified COSMIC processing pipeline and route responses back to the originating platform. Each adapter handles authentication, message parsing, and response delivery for its platform.
+Channel Adapters normalize platform-specific messages into the unified COSMIC processing pipeline and route responses back to the originating platform. Each adapter handles authentication, message parsing, and response delivery for its platform. Most adapters run directly inside the Gateway process; when a platform requires a non-Python SDK or an isolated long-lived runtime, the adapter may delegate transport/auth concerns to a sidecar bridge (§27.6).
 
 **Design principle:** The Gateway's core logic (session management, routing, model classification) is platform-agnostic. Channel adapters are thin translation layers. Adding a new platform means implementing the adapter interface — no changes to Gateway internals.
 
@@ -5356,26 +5999,24 @@ class ChannelAdapter(ABC):
         ...
 ```
 
-### 27.2 Per-Channel Sessions
+### 27.2 Unified Sessions with Channel Tagging
 
-Sessions are scoped by channel. A user messaging on WhatsApp and the same user messaging on the Desktop App have **separate sessions with separate contexts** — just like how a phone call and an email thread are separate conversations.
+Sessions are **channel-agnostic** — all channels share a single session per day. Individual messages carry their originating channel in the `channel` column (see §3.11 messages table), enabling responses to be routed back to the correct platform. This gives the assistant full cross-channel context continuity: a user can start a complex task on the Desktop App and seamlessly continue it on WhatsApp or Telegram.
 
 ```python
-# Session ID generation includes channel
-def generate_session_id(channel: str | None = None) -> str:
-    """Channel-scoped session ID. Two messages from different channels
-    create separate sessions, even for the same user."""
+# Session ID generation is channel-agnostic
+def generate_session_id() -> str:
+    """Unified session ID. All channels share one session per day,
+    enabling cross-channel context continuity for a personal assistant."""
     date_part = utcnow().strftime('%Y%m%d')
-    channel_part = (channel or 'desktop').replace(':', '_')
-    return f'sess_{channel_part}_{date_part}'
+    return f'sess_{date_part}'
 
 # Examples:
-# Desktop:  sess_desktop_20250115
-# WhatsApp: sess_whatsapp_1234567890_20250115
-# Telegram: sess_telegram_chat_123_20250115
+# Any channel on Jan 15: sess_20250115
+# Next day:              sess_20250116
 ```
 
-**Why per-channel sessions?** A user might ask something casual on WhatsApp while working on a complex task on the Desktop App. Merging these contexts would pollute the Desktop session with casual chat, and vice versa. Per-channel sessions keep contexts clean. The Session Manager's memory retrieval (§23.4) still works across sessions — past memories from any channel are retrievable by relevance.
+**Why unified sessions?** COSMIC is a single-user personal assistant. Splitting context by channel fragments the assistant's understanding — it wouldn't know about a task you started on Desktop when you message on WhatsApp. Unified sessions ensure full continuity. Each message stores its originating `channel` so responses route back correctly, and **sticky routing is channel-scoped** (§3.7): an `awaiting_reply` flag on Desktop doesn't capture a WhatsApp message. The Session Manager's memory retrieval (§23.4) and context assembly work across the unified session — all messages from all channels are visible during context assembly, giving the LLM the complete picture.
 
 ### 27.3 Channel Adapter Registry
 
@@ -5415,7 +6056,7 @@ class ChannelAdapterRegistry:
 |---|---|---|---|
 | `DesktopAdapter` | Desktop App (Electron) | WebSocket (persistent) | **Primary** — ships with v1.0 |
 | `CLIAdapter` | CLI Agent | Internal pipe (in-process) | **Alpha** — ships with v1.0 |
-| `WhatsAppAdapter` | WhatsApp | Baileys / WhatsApp Business API | **Planned** |
+| `WhatsAppAdapter` | WhatsApp | Baileys (via bridge) / WhatsApp Business API | **Planned** |
 | `TelegramAdapter` | Telegram | Bot API (grammY / python-telegram-bot) | **Planned** |
 | `SlackAdapter` | Slack | Bolt SDK / Events API | **Planned** |
 | `DiscordAdapter` | Discord | discord.py | **Planned** |
@@ -5441,6 +6082,318 @@ adapter = channel_registry.get_adapter(task.channel or 'desktop')
 ```
 
 **Cron/heartbeat delivery:** Cron definitions and heartbeat config include a `delivery_channel` field. When the result comes back, the Gateway uses this field to look up the correct adapter. If the specified channel is unavailable (e.g., user is offline on WhatsApp), the result is held in a pending queue and delivered on reconnect — same mechanism as the `user_input:requests` pending entries list (§3.12).
+
+### 27.5a Channel Management Control Plane
+
+Channel integrations have two distinct planes. They must not be conflated.
+
+**1. Message / data plane**
+
+- Purpose: receive human messages, normalize them, run them through `handle_query(...)`, and route responses back to the originating channel.
+- Entry points:
+  - Desktop WebSocket messages
+  - Internal bridge intake routes such as `/internal/channels/whatsapp/incoming`
+- Behavior:
+  - Message arrives
+  - Adapter normalizes it to `{ content, session_id, channel, metadata }`
+  - Gateway applies session assembly, sticky routing, and model routing
+  - `route='opus'` → TaskEnvelope → Redis → orchestrator
+  - `route='gemini'|'perplexity'` → direct Gateway LLM path
+
+**2. Channel management / control plane**
+
+- Purpose: operational channel actions such as status checks, pairing, disconnect, relink, and bridge health inspection.
+- Entry points:
+  - Desktop-authenticated Gateway routes under `/channels/*`
+  - Internal bridge callbacks under `/internal/channels/*`
+- Behavior:
+  - Explicit FastAPI route handlers decide the action
+  - No model router classification
+  - No orchestrator dispatch
+  - No Redis unless a future operation is intentionally designed as a background task
+
+**Design rule:** the Gateway determines which flow to execute from the route or message entrypoint, not by asking an LLM to infer intent. A desktop WebSocket `query` goes to the message pipeline. A desktop `POST /channels/whatsapp/pairing/qr` call goes to the control plane. A bridge `POST /internal/channels/whatsapp/incoming` call goes to the message pipeline after adapter normalization.
+
+**Recommended implementation location:** channel-management HTTP handlers live in `gateway/channels/routes.py`, mounted by the existing Gateway FastAPI app alongside the other subsystem route modules (`credentials/routes.py`, `scheduler/routes.py`, `webhooks/routes.py`).
+
+**Why separate the planes?**
+
+1. Query routing is AI/runtime behavior; channel management is operational control.
+2. Pairing/status/disconnect operations must be deterministic and auditable.
+3. Channel management routes need standard request/response semantics for the desktop settings UI.
+4. Keeping control actions out of the query pipeline avoids accidental model-router/orchestrator involvement in infrastructure operations.
+
+**Example control-plane flow (WhatsApp QR):**
+
+```text
+Desktop Settings "Get QR"
+  └── POST /channels/whatsapp/pairing/qr
+        └── Gateway authenticates desktop token
+              └── Gateway asks WhatsAppAdapter / bridge for fresh pairing QR
+                    └── Bridge returns QR payload
+                          └── Gateway returns QR payload to desktop
+                                └── Desktop renders QR locally
+```
+
+**Example message-plane flow (WhatsApp text/image/audio/etc.):**
+
+```text
+WhatsApp user message
+  └── Baileys Bridge receives socket event
+        └── POST /internal/channels/whatsapp/incoming
+              └── Gateway authenticates bridge token
+                    └── WhatsApp adapter normalizes payload
+                          └── handle_query(...)
+                                ├── gemini/perplexity → direct Gateway route
+                                └── opus → TaskEnvelope → Redis → orchestrator
+```
+
+### 27.6 Sidecar-Backed Adapters
+
+Most adapters should remain in-process Python modules. Introduce a sidecar bridge only when the platform runtime forces it.
+
+**Examples that justify a bridge:**
+
+- The required client library is effectively single-runtime (for example, Node.js-only or vendor-maintained only in another language).
+- The platform connection is a long-lived socket/session process that is operationally cleaner to isolate from the Gateway.
+- The platform persists local device/session state that should not live inside Gateway code or `gateway/credentials.db`.
+
+**Architecture rule:**
+
+```text
+Gateway core
+  └── gateway/channels/<platform>.py      # Python ChannelAdapter
+        └── talks to
+bridges/<platform>_bridge/                # sidecar process (language/runtime as needed)
+```
+
+**Responsibility split:**
+
+| Concern | Gateway ChannelAdapter | Sidecar Bridge |
+|---|---|---|
+| Session assignment | Owns | Never |
+| `source` / `source_id` / `channel` tagging | Owns | Never |
+| Model routing / sticky routing | Owns | Never |
+| Task dispatch / response routing | Owns | Never |
+| Provider-specific socket/session lifecycle | Never | Owns |
+| Platform reconnect logic | Never | Owns |
+| Platform auth/session/device state | Never | Owns |
+| Platform send / receive primitives | Delegates | Owns |
+
+**Auth model:**
+
+- Bridge traffic is internal-only and authenticated.
+- The bridge must not expose a public internet callback surface unless the platform itself requires it.
+- Gateway internal OAuth credentials continue to live in `gateway/credentials.db` (§22).
+- Channel/device auth state lives in `bridges/<name>_bridge/store/`.
+
+**Implementation guidance for future integrations:**
+
+1. Start with an in-process adapter by default.
+2. Introduce a bridge only if the SDK/runtime requirements justify it.
+3. Keep bridge persistence local to the bridge (`store/`) and Gateway-owned OAuth credentials in `gateway/credentials.db`.
+4. Treat the bridge as a transport/auth shim, not a second Gateway.
+
+### 27.7 WhatsApp Reference Implementation (Baileys)
+
+WhatsApp is the reference sidecar-backed adapter because Baileys runs in Node.js and maintains its own device/session auth state.
+
+**Folder structure:**
+
+```text
+gateway/channels/whatsapp.py              # Python ChannelAdapter
+bridges/whatsapp_bridge/
+├── package.json                          # Node.js runtime/dependencies
+├── src/                                  # Baileys socket lifecycle + internal bridge API
+├── store/
+│   └── auth/                             # PERSISTENT. Baileys multi-file auth state
+└── runtime/                              # EPHEMERAL. Logs, cache, temp files
+    └── inbound_media/                    # Optional temp storage for downloaded/decrypted inbound media
+```
+
+**Auth/state placement:**
+
+- Baileys auth files live in `bridges/whatsapp_bridge/store/auth/`.
+- These files are persistent runtime state, not source code.
+- They are not OAuth credentials and do not belong in `gateway/credentials.db`.
+- In containerized deployments, map `bridges/whatsapp_bridge/store/` to a persistent volume.
+- In bare-metal / VM deployments, keep the same logical separation: version-controlled code in the repo, persistent auth state on durable disk.
+- Typical VM deployment pattern: keep bridge code under the repo checkout and point `WHATSAPP_AUTH_DIR` at an absolute persistent path such as `/var/lib/cosmic/whatsapp/auth`.
+
+**Operational considerations:**
+
+1. The Gateway talks to the bridge over an internal authenticated channel only.
+2. The bridge is responsible for QR/pairing state, reconnects, and send/receive primitives.
+3. The Gateway remains the single entry point for COSMIC logic: session context, routing, response policy, and task dispatch.
+4. `gateway/channels/whatsapp.py` is still the canonical adapter that the Channel Adapter Registry knows about. The Node bridge is behind it.
+5. If a future WhatsApp integration uses an official provider API with OAuth credentials, those provider credentials belong in `gateway/credentials.db`; Baileys-style local device auth still belongs in bridge `store/`.
+
+#### 27.7.1 Bridge -> Gateway Inbound Contract
+
+The Bridge posts inbound WhatsApp traffic to an internal Gateway route such as `/internal/channels/whatsapp/incoming`. This route is owned by the Gateway and hands the payload to `gateway/channels/whatsapp.py`.
+
+**Hard requirements:**
+
+1. The payload must be delivered over an internal authenticated channel only.
+2. The Bridge must forward **all** inbound WhatsApp message types, not just plain text.
+3. The Bridge must preserve attachment metadata for images, video, audio, voice notes, documents, stickers, contacts, locations, reactions, button/list replies, poll replies, and future unknown message types.
+4. The Gateway adapter normalizes this into COSMIC's internal `{ content, session_id, channel, metadata }` format. The Bridge does not assign sessions.
+
+**Ingress ownership:** only the Bridge receives real WhatsApp traffic from Baileys. The Gateway receives WhatsApp messages second-hand from the Bridge over the internal route above. The Gateway must not embed a second WhatsApp socket or create a separate FastAPI service just for WhatsApp.
+
+**Recommended payload shape:**
+
+```json
+{
+  "schema_version": 1,
+  "event": "message.inbound",
+  "event_id": "evt_123",
+  "sender": {
+    "jid": "15551234567@s.whatsapp.net",
+    "phone": "+15551234567",
+    "push_name": "Alice"
+  },
+  "chat": {
+    "jid": "15551234567@s.whatsapp.net",
+    "type": "dm"
+  },
+  "message": {
+    "id": "wamid_abc",
+    "type": "image",
+    "text": null,
+    "caption": "look at this",
+    "timestamp_unix_ms": 1710000000000,
+    "quoted_message_id": null,
+    "mentions": [],
+    "attachments": [
+      {
+        "id": "att_1",
+        "kind": "image",
+        "mime_type": "image/jpeg",
+        "filename": null,
+        "size_bytes": 183920,
+        "width": 1280,
+        "height": 720,
+        "duration_ms": null,
+        "sha256": "base64-or-hex-hash",
+        "bridge_media_ref": "wamid_abc:att_1",
+        "download_url": "http://127.0.0.1:8091/media/wamid_abc/att_1"
+      }
+    ]
+  }
+}
+```
+
+**Normalization rule:** if a message has no user-visible text, the adapter still emits a non-empty `content` placeholder such as `[image]`, `[video]`, `[voice note]`, `Location shared`, or `[unsupported whatsapp message]`. This ensures every inbound event enters the Gateway even before downstream media processing is implemented.
+
+**Media storage rule:** raw inbound media remains Bridge-owned at intake time. If the Bridge downloads or decrypts media, it stores temporary files under `bridges/whatsapp_bridge/runtime/` (for example `runtime/inbound_media/`) and exposes stable references such as `bridge_media_ref` and/or an internal authenticated `download_url`. The Gateway and `gateway/channels/whatsapp.py` store metadata plus references during intake; they should **not** treat a local filesystem path as the primary cross-process contract.
+
+**Downstream processing rule:** when later processing actually needs the media bytes, the downstream consumer fetches them via the Bridge reference/URL and may then persist its own working copy or artifact in the appropriate durable location. Bridge runtime media is ephemeral transport state, not long-term storage.
+
+#### 27.7.2 Gateway -> Bridge Outbound Contract
+
+The Gateway adapter sends outbound WhatsApp text via the Bridge's internal send API.
+
+**Bridge endpoints:**
+
+- `GET /health` — internal liveness/readiness probe
+- `GET /status` — internal connection state
+- `POST /send` — send one WhatsApp message
+
+**Send request shape:**
+
+```json
+{
+  "number": "+15551234567",
+  "message": "Rendered text chunk"
+}
+```
+
+The Gateway adapter owns delivery policy:
+
+1. `response.chunk` events are buffered in the adapter; they are **not** forwarded token-by-token to WhatsApp.
+2. `response.complete` sends the final conversational text.
+3. `task.input_required` sends the question plus numbered options.
+4. `task.progress` may be rate-limited by the adapter to avoid chat spam.
+5. `task.failed` and `error` are rendered into concise failure text.
+
+#### 27.7.3 WhatsApp Text Chunking Policy
+
+WhatsApp delivery must be chunk-aware. The adapter, not the Bridge, is responsible for splitting long text into ordered sends.
+
+**Required behavior:**
+
+1. Default chunk limit: `4000` characters.
+2. Default mode: `newline` — prefer paragraph boundaries first, then line boundaries, then sentence boundaries, then hard wrap.
+3. Alternative mode: `length` — direct hard wrapping at the configured limit.
+4. Chunks are delivered sequentially per destination channel, with a small inter-send delay to preserve order.
+5. The chunker must not drop content. Long code blocks may be split, but the text must remain complete.
+
+#### 27.7.4 WhatsApp Pairing / QR Flow
+
+WhatsApp account linking is a **channel management control-plane flow**, not a query flow.
+
+**User experience goal:** the user clicks a `Get QR` button in the desktop app settings, sees a scannable QR locally, scans it with WhatsApp on their phone, and the Bridge transitions to connected state automatically.
+
+**Architecture rule:** the Gateway brokers this pairing flow, but it does not own the Baileys socket lifecycle. The WhatsApp Bridge remains the runtime component responsible for generating pairing state, receiving the pairing confirmation from WhatsApp, and persisting device auth state.
+
+**Recommended flow:**
+
+```text
+1. User clicks "Get QR" in Desktop Settings
+2. Desktop calls Gateway: POST /channels/whatsapp/pairing/qr
+3. Gateway authenticates the desktop/local API token
+4. Gateway resolves the registered WhatsAppAdapter
+5. WhatsAppAdapter calls the Bridge's internal pairing endpoint
+6. Bridge starts or refreshes pairing state inside the existing Baileys process
+7. Bridge returns a renderable QR payload (text/ASCII/data URL/raw QR string)
+8. Gateway returns that payload to the desktop app
+9. Desktop renders the QR locally
+10. User scans it from WhatsApp on their phone
+11. Baileys receives the successful pairing/connection update automatically
+12. Bridge persists auth state and reports `connected`
+13. Desktop checks `GET /channels/whatsapp/status` or receives a later status update
+```
+
+**Bridge-side control endpoints** (internal, Gateway-only) should cover at least:
+
+- `GET /health` — process liveness/readiness
+- `GET /status` — connection/pairing state
+- `POST /pairing/qr` — create or refresh a renderable pairing QR payload
+- `DELETE /session` — disconnect and clear bridge-owned device auth state
+
+These are Bridge implementation details behind `gateway/channels/whatsapp.py`. The desktop app never calls them directly.
+
+**Operational rule:** this flow assumes the WhatsApp Bridge is already managed as a long-running service (`systemd` on a VM, `supervisord` in a container deployment per §9). The Gateway should request pairing state from the running Bridge. It should **not** become the process manager that starts/stops the Bridge on every QR request.
+
+**Why keep the Bridge running?**
+
+1. Once paired, the same process must remain available to receive WhatsApp traffic.
+2. Process supervision belongs to deployment/runtime management, not to a desktop button click.
+3. On-demand service startup adds race conditions around readiness, reconnect, and auth persistence.
+
+**Desktop / Gateway / Bridge responsibility split during pairing:**
+
+| Concern | Desktop App | Gateway | WhatsApp Bridge |
+|---|---|---|---|
+| User clicks `Get QR` | Owns | Never | Never |
+| Authenticate the request | Never | Owns | Never |
+| Decide this is a control-plane action | Never | Owns | Never |
+| Generate/refresh QR pairing state | Never | Delegates | Owns |
+| Render QR for the user | Owns | Returns payload only | Never |
+| Detect successful scan / pairing | Never | Observes status only | Owns |
+| Persist Baileys auth/device state | Never | Never | Owns |
+
+**Status model:** `GET /channels/whatsapp/status` should return control-plane state useful for the desktop settings UI, for example:
+
+- `disconnected`
+- `pairing_required`
+- `pairing_qr_ready`
+- `connected`
+- `bridge_unreachable`
+- `error`
+
+This route is for operational visibility only. It is not part of the message routing pipeline and does not create TaskEnvelopes.
 
 ---
 
@@ -5534,7 +6487,7 @@ class HooksEngine:
             channel=None,       # hooks are internal — no user-facing delivery by default
             signature='',
         )
-        task.signature = sign_task(task, ORCHESTRATOR_SECRET)
+        task.signature = sign_task(task, GATEWAY_SIGNING_SECRET)
         await dispatch(task, self.redis)
 
 # Usage in Gateway lifecycle:
@@ -5925,9 +6878,10 @@ CREATE INDEX idx_tasks_session ON tasks(session_id);
 
 -- Task status lifecycle:
 --   pending → dispatched → accepted → in_progress → completed
---                                                  → failed → (retry → dispatched | dlq)
+--                                                  → failed → (retry → superseded + new task | dlq)
 --                                    → suspended → resumed → in_progress
 --                       → rejected → (redrive → dispatched)
+--                       → superseded  (replaced by retry — terminal state, prevents zombie rows)
 
 -- ═══════════════════════════════════════════════════════════
 -- PLANS: Structured decomposition of complex requests
@@ -5967,6 +6921,8 @@ CREATE TABLE plan_steps (
     depends_on TEXT,                           -- JSON array of step_ids this step waits for: '["step_001"]'
     status TEXT NOT NULL DEFAULT 'pending',    -- pending → in_progress → completed → failed → skipped
     task_id TEXT,                              -- linked TaskEnvelope.task_id once dispatched
+    attempt INTEGER DEFAULT 0,                -- current retry attempt for this step (increments across task rows)
+    max_attempts INTEGER DEFAULT 3,           -- max retries (sourced from agent_card SLA on plan creation)
     input_json TEXT,                           -- planned input for this step (may reference prior step outputs)
     output_json TEXT,                          -- result from the agent (populated on completion)
     started_at TIMESTAMP,
@@ -6272,6 +7228,19 @@ async def _dispatch_step(self, plan_id: str, step: dict,
         credential = await self._resolve_credential(auth_req, context, input_data)
         if credential:
             input_data['auth'] = credential
+        else:
+            # No valid credential — escalate to user instead of dispatching
+            # without auth (which would cause the agent to fail immediately).
+            # The step stays 'pending' until the credential is provided.
+            await self.request_user_credential(
+                plan_id=plan_id,
+                step_id=step['step_id'],
+                agent_id=agent_id,
+                intent=intent,
+                auth_requirement=auth_req,
+                parent_task=parent_task,
+            )
+            return
 
     # Create and dispatch TaskEnvelope
     task_id = generate_task_id()
@@ -6446,17 +7415,18 @@ async def on_step_failed(self, event: EventEnvelope):
 
     error = event.payload.get('error', {})
 
-    # Check retry policy (from agent_card SLA)
-    task_record = db.execute('SELECT * FROM tasks WHERE task_id = ?', [task_id]).fetchone()
-    if error.get('retryable') and task_record['attempt'] < task_record['max_attempts']:
-        # Retry the step
+    # Check retry policy (step-level retry tracking prevents zombie task rows)
+    if error.get('retryable') and step['attempt'] < step['max_attempts']:
+        # Mark the failed task as superseded — terminal state, not a zombie.
+        # _dispatch_step will create a fresh task row for the retry.
         db.execute('''
-            UPDATE tasks SET attempt = attempt + 1, status = 'pending',
-            updated_at = ? WHERE task_id = ?
+            UPDATE tasks SET status = 'superseded', updated_at = ?
+            WHERE task_id = ?
         ''', [utcnow(), task_id])
+        # Advance step retry counter and reset for re-dispatch
         db.execute('''
-            UPDATE plan_steps SET status = 'pending', task_id = NULL
-            WHERE step_id = ?
+            UPDATE plan_steps SET status = 'pending', task_id = NULL,
+            attempt = attempt + 1 WHERE step_id = ?
         ''', [step['step_id']])
         # Re-enter execute_plan — it will re-dispatch this step
         parent_task_id = db.execute(
@@ -7168,15 +8138,22 @@ async def memory_write(request: MemoryWriteRequest):
     await pipe.execute()
 
     # ── Content deduplication: reject near-identical writes ────────
+    # Generate memory_id BEFORE the dedup check so the SETNX stores a valid ID
+    # from the start. The old pattern set an empty-string placeholder first,
+    # then overwrote with the real ID after the write — concurrent duplicates
+    # arriving between SETNX and the overwrite would get an empty memory_id.
     content_hash = hashlib.sha256(request.content.encode()).hexdigest()[:16]
     dedup_key = f'memory_write_dedup:{request.agent_id}:{content_hash}'
-    if await redis.exists(dedup_key):
+    memory_id = f'mem_{request.agent_id.split("/")[1].split(":")[0]}_{uuid4().hex[:8]}'
+
+    # Atomic set-if-not-exists: first writer wins, stores the real memory_id
+    was_set = await redis.set(dedup_key, memory_id, ex=86400, nx=True)
+    if not was_set:
+        # Another write already claimed this content hash — return the winner's ID
         existing_id = await redis.get(dedup_key)
         return {'memory_id': existing_id, 'indexed': True, 'deduplicated': True}
-    await redis.set(dedup_key, '', ex=86400)   # dedup window: 24 hours
 
-    # ── Write ──────────────────────────────────────────────────────
-    memory_id = f'mem_{request.agent_id.split("/")[1].split(":")[0]}_{uuid4().hex[:8]}'
+    # ── Write (we won the race — dedup key already holds our memory_id) ───
     await session_manager.memory_writer.write_memory(
         memory_id=memory_id,
         memory_type=request.memory_type,
@@ -7187,9 +8164,6 @@ async def memory_write(request: MemoryWriteRequest):
             'date': utcnow().isoformat(),
         },
     )
-
-    # Store memory_id in dedup key so duplicates return the original ID
-    await redis.set(dedup_key, memory_id, ex=86400)
     return {'memory_id': memory_id, 'indexed': True}
 ```
 
@@ -7299,6 +8273,7 @@ def build_tool_definitions(self) -> list[dict]:
 | `registry/registry.db` | Registry | Agents (write), Orchestrator (read) | Agent capabilities, intents |
 | `gateway/sessions.db` | Gateway | Session Manager | Conversation history, messages |
 | `gateway/credentials.db` | Gateway | Credential Manager | OAuth accounts, encrypted tokens, audit |
+| `gateway/usage.db` | Gateway | Usage Ledger | Append-only token/cost telemetry for direct LLM routes, model router, orchestrator, and agents |
 | `gateway/scheduler/scheduler.db` | Gateway | Scheduler | Cron definitions, heartbeat config, execution log |
 | `gateway/webhooks/webhooks.db` | Gateway | Webhook Handler | Webhook registrations, webhook log |
 | `agents/*/store/data/*.db` | Per-agent | Each agent | Agent-specific session data (§12.2) |

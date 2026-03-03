@@ -13,6 +13,11 @@ node_modules
 dist
 dist-ssr
 *.local
+Backend/bridges/*/node_modules/
+Backend/bridges/*/.npm-cache/
+Backend/bridges/*/store/auth/
+Backend/bridges/*/runtime/
+auth_info_baileys/
 
 # Editor directories and files
 .vscode/*
