@@ -1,3 +1,5 @@
+import fsSync from 'node:fs';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -8,11 +10,45 @@ import makeWASocket, {
   getContentType,
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
-import qrcode from 'qrcode-terminal';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const BRIDGE_ROOT = path.resolve(__dirname, '..');
+
+function loadEnvFile(filePath) {
+  if (!fsSync.existsSync(filePath)) {
+    return;
+  }
+
+  const raw = fsSync.readFileSync(filePath, 'utf8');
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) {
+      continue;
+    }
+
+    const eqIndex = trimmed.indexOf('=');
+    if (eqIndex <= 0) {
+      continue;
+    }
+
+    const key = trimmed.slice(0, eqIndex).trim();
+    if (!key || Object.prototype.hasOwnProperty.call(process.env, key)) {
+      continue;
+    }
+
+    let value = trimmed.slice(eqIndex + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    process.env[key] = value;
+  }
+}
+
+loadEnvFile(path.resolve(BRIDGE_ROOT, '.env'));
 
 function envInt(name, fallback) {
   const raw = process.env[name];
@@ -30,11 +66,15 @@ function resolveBridgePath(rawPath, fallbackSegments) {
   return path.resolve(BRIDGE_ROOT, ...fallbackSegments);
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 const config = {
   gatewayUrl:
     process.env.GATEWAY_INTERNAL_URL ??
     process.env.COSMIC_URL ??
-    'http://127.0.0.1:5000/webhook',
+    'http://127.0.0.1:8080/internal/channels/whatsapp/incoming',
   host: process.env.WHATSAPP_BRIDGE_HOST ?? '127.0.0.1',
   port: envInt('WHATSAPP_BRIDGE_PORT', 3000),
   authDir: resolveBridgePath(process.env.WHATSAPP_AUTH_DIR, ['store', 'auth']),
@@ -43,14 +83,57 @@ const config = {
 };
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 
 let sock = null;
+let connectPromise = null;
+let latestQr = null;
+let qrUpdatedAt = null;
+let lastError = null;
 let connectionState = {
   connected: false,
+  pairingState: 'idle',
   lastDisconnectCode: null,
   authDir: config.authDir,
+  connectedJid: null,
 };
+
+async function ensureAuthDir() {
+  await fs.mkdir(config.authDir, { recursive: true });
+}
+
+async function hasExistingAuthState() {
+  try {
+    await fs.access(path.join(config.authDir, 'creds.json'));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function setConnectionState(patch) {
+  connectionState = { ...connectionState, ...patch };
+}
+
+function clearQrState() {
+  latestQr = null;
+  qrUpdatedAt = null;
+}
+
+async function buildStatusPayload() {
+  return {
+    status: 'ok',
+    connected: connectionState.connected,
+    pairing_state: connectionState.pairingState,
+    last_disconnect_code: connectionState.lastDisconnectCode,
+    auth_dir: connectionState.authDir,
+    has_auth_state: await hasExistingAuthState(),
+    qr: latestQr,
+    qr_updated_at: qrUpdatedAt,
+    connected_jid: connectionState.connectedJid,
+    last_error: lastError,
+  };
+}
 
 function verifyBridgeToken(req, res, next) {
   if (!config.bridgeToken) {
@@ -376,45 +459,110 @@ async function forwardIncomingMessage(payload) {
   return axios.post(config.gatewayUrl, payload, { headers });
 }
 
-async function connectToWhatsApp() {
-  const { state, saveCreds } = await useMultiFileAuthState(config.authDir);
+async function closeSocket({ logout = false } = {}) {
+  const currentSock = sock;
+  sock = null;
+  connectPromise = null;
 
-  sock = makeWASocket({
-    auth: state,
-    printQRInTerminal: true,
-  });
+  if (!currentSock) {
+    return;
+  }
 
-  sock.ev.on('creds.update', saveCreds);
+  try {
+    if (typeof currentSock.ev?.removeAllListeners === 'function') {
+      currentSock.ev.removeAllListeners();
+    }
+  } catch {}
 
-  sock.ev.on('connection.update', (update) => {
+  if (logout && typeof currentSock.logout === 'function') {
+    try {
+      await currentSock.logout();
+    } catch {}
+  }
+
+  try {
+    currentSock.end?.(new Error('socket restart'));
+  } catch {}
+
+  try {
+    currentSock.ws?.close?.();
+  } catch {}
+}
+
+async function clearAuthState() {
+  await fs.rm(config.authDir, { recursive: true, force: true });
+  await ensureAuthDir();
+}
+
+function bindSocketEvents(currentSock, saveCreds) {
+  currentSock.ev.on('creds.update', saveCreds);
+
+  currentSock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      qrcode.generate(qr, { small: true });
+      latestQr = qr;
+      qrUpdatedAt = new Date().toISOString();
+      lastError = null;
+      setConnectionState({
+        connected: false,
+        pairingState: 'qr_ready',
+        lastDisconnectCode: null,
+        connectedJid: null,
+      });
     }
 
-    if (connection === 'close') {
-      const statusCode = lastDisconnect?.error?.output?.statusCode ?? null;
-      connectionState = {
-        ...connectionState,
+    if (connection === 'connecting') {
+      setConnectionState({
         connected: false,
-        lastDisconnectCode: statusCode,
-      };
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-      if (shouldReconnect) {
-        void connectToWhatsApp();
-      }
-    } else if (connection === 'open') {
-      connectionState = {
-        ...connectionState,
+        pairingState: 'connecting',
+      });
+      return;
+    }
+
+    if (connection === 'open') {
+      clearQrState();
+      lastError = null;
+      setConnectionState({
         connected: true,
+        pairingState: 'connected',
         lastDisconnectCode: null,
-      };
+        connectedJid: currentSock.user?.id ?? null,
+      });
       console.log('WhatsApp bridge connected.');
+      return;
+    }
+
+    if (connection !== 'close') {
+      return;
+    }
+
+    const statusCode = lastDisconnect?.error?.output?.statusCode ?? null;
+    const authExists = await hasExistingAuthState();
+    const loggedOut = statusCode === DisconnectReason.loggedOut;
+    const shouldReconnect = !loggedOut && authExists;
+
+    if (sock === currentSock) {
+      sock = null;
+    }
+
+    if (loggedOut) {
+      clearQrState();
+    }
+
+    setConnectionState({
+      connected: false,
+      pairingState: loggedOut ? 'logged_out' : authExists ? 'disconnected' : 'idle',
+      lastDisconnectCode: statusCode,
+      connectedJid: null,
+    });
+
+    if (shouldReconnect) {
+      void ensureSocketConnected({ refresh: false });
     }
   });
 
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+  currentSock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
 
     for (const msg of messages) {
@@ -427,33 +575,139 @@ async function connectToWhatsApp() {
       console.log(`Incoming WhatsApp message from ${sender}: ${summary}`);
 
       try {
-        const response = await forwardIncomingMessage(payload);
-        if (response.data?.reply) {
-          await sock.sendMessage(sender, { text: response.data.reply });
-        }
+        await forwardIncomingMessage(payload);
       } catch (error) {
-        console.error('Failed to forward incoming WhatsApp message:', error?.message ?? error);
+        const message = error?.response?.data ?? error?.message ?? error;
+        console.error('Failed to forward incoming WhatsApp message:', message);
       }
     }
   });
 }
 
-app.get('/health', (_req, res) => {
-  res.json({
-    status: 'ok',
-    connected: connectionState.connected,
-    auth_dir: connectionState.authDir,
-  });
+async function ensureSocketConnected({ refresh = false } = {}) {
+  if (connectionState.connected && sock) {
+    return sock;
+  }
+
+  if (refresh) {
+    await closeSocket({ logout: false });
+    clearQrState();
+  } else if (connectPromise) {
+    return connectPromise;
+  }
+
+  connectPromise = (async () => {
+    await ensureAuthDir();
+    lastError = null;
+    setConnectionState({
+      connected: false,
+      pairingState: 'connecting',
+      connectedJid: null,
+    });
+
+    const { state, saveCreds } = await useMultiFileAuthState(config.authDir);
+    const currentSock = makeWASocket({
+      auth: state,
+      printQRInTerminal: false,
+    });
+
+    sock = currentSock;
+    bindSocketEvents(currentSock, saveCreds);
+    return currentSock;
+  })()
+    .catch((error) => {
+      lastError = error?.message ?? String(error);
+      setConnectionState({
+        connected: false,
+        pairingState: 'error',
+        connectedJid: null,
+      });
+      throw error;
+    })
+    .finally(() => {
+      connectPromise = null;
+    });
+
+  return connectPromise;
+}
+
+async function waitForPairingArtifact(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (connectionState.connected || latestQr || connectionState.pairingState === 'error') {
+      return buildStatusPayload();
+    }
+    await sleep(250);
+  }
+  return buildStatusPayload();
+}
+
+app.get('/health', async (_req, res) => {
+  res.json(await buildStatusPayload());
 });
 
-app.get('/status', verifyBridgeToken, (_req, res) => {
-  res.json(connectionState);
+app.get('/status', verifyBridgeToken, async (_req, res) => {
+  res.json(await buildStatusPayload());
+});
+
+app.post('/pairing/qr', verifyBridgeToken, async (req, res) => {
+  const refresh = req.body?.refresh !== false;
+  const waitTimeoutMs = Math.max(1000, Math.min(envInt('WHATSAPP_QR_WAIT_TIMEOUT_MS', 15000), 60000));
+  const requestTimeoutMs = Math.max(
+    1000,
+    Math.min(coerceNumber(req.body?.wait_timeout_ms) ?? waitTimeoutMs, 60000),
+  );
+
+  try {
+    if (!connectionState.connected) {
+      await ensureSocketConnected({ refresh });
+    }
+
+    const payload = await waitForPairingArtifact(requestTimeoutMs);
+    const statusCode = payload.connected || payload.qr ? 200 : 202;
+    res.status(statusCode).json(payload);
+  } catch (error) {
+    const message = error?.message ?? String(error);
+    lastError = message;
+    setConnectionState({
+      connected: false,
+      pairingState: 'error',
+      connectedJid: null,
+    });
+    res.status(500).json({
+      status: 'error',
+      error: message,
+    });
+  }
+});
+
+app.delete('/session', verifyBridgeToken, async (_req, res) => {
+  try {
+    await closeSocket({ logout: true });
+    await clearAuthState();
+    clearQrState();
+    lastError = null;
+    setConnectionState({
+      connected: false,
+      pairingState: 'idle',
+      lastDisconnectCode: null,
+      connectedJid: null,
+    });
+    res.json(await buildStatusPayload());
+  } catch (error) {
+    const message = error?.message ?? String(error);
+    lastError = message;
+    res.status(500).json({
+      status: 'error',
+      error: message,
+    });
+  }
 });
 
 async function handleSend(req, res) {
   const { number, message } = req.body ?? {};
 
-  if (!sock) {
+  if (!sock || !connectionState.connected) {
     res.status(500).json({ error: 'WhatsApp not connected' });
     return;
   }
@@ -463,16 +717,16 @@ async function handleSend(req, res) {
     return;
   }
 
-  const jid = number.includes('@s.whatsapp.net')
+  const jid = number.includes('@')
     ? number
-    : `${number}@s.whatsapp.net`;
+    : `${number.replace(/\D/g, '')}@s.whatsapp.net`;
 
   try {
     await sock.sendMessage(jid, { text: message });
     console.log(`Outgoing WhatsApp message to ${number}: ${message}`);
     res.json({ status: 'success' });
   } catch (error) {
-    console.error('Failed to send WhatsApp message:', error);
+    console.error('Failed to send WhatsApp message:', error?.message ?? error);
     res.status(500).json({ error: 'Failed to send message' });
   }
 }
@@ -480,8 +734,15 @@ async function handleSend(req, res) {
 app.post('/send-message', verifyBridgeToken, handleSend);
 app.post('/send', verifyBridgeToken, handleSend);
 
-app.listen(config.port, config.host, () => {
+app.listen(config.port, config.host, async () => {
   console.log(`WhatsApp bridge listening on http://${config.host}:${config.port}`);
+  console.log(`Gateway intake URL: ${config.gatewayUrl}`);
   console.log(`Baileys auth directory: ${config.authDir}`);
-  void connectToWhatsApp();
+
+  if (await hasExistingAuthState()) {
+    console.log('Existing WhatsApp auth state detected. Attempting reconnect.');
+    void ensureSocketConnected({ refresh: false });
+  } else {
+    console.log('No existing WhatsApp auth state detected. Waiting for pairing QR request.');
+  }
 });

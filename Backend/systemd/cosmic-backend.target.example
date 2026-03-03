@@ -1,0 +1,7 @@
+[Unit]
+Description=COSMIC Backend Target
+Wants=cosmic-model-router.service cosmic-gateway.service cosmic-whatsapp-bridge.service
+After=cosmic-model-router.service cosmic-gateway.service cosmic-whatsapp-bridge.service
+
+[Install]
+WantedBy=multi-user.target

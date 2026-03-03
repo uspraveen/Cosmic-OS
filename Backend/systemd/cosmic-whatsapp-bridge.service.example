@@ -1,0 +1,15 @@
+[Unit]
+Description=COSMIC WhatsApp Bridge
+After=network-online.target cosmic-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=<BACKEND_ROOT>/bridges/whatsapp_bridge
+EnvironmentFile=/etc/cosmic/whatsapp-bridge.env
+ExecStart=/usr/bin/node <BACKEND_ROOT>/bridges/whatsapp_bridge/src/index.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

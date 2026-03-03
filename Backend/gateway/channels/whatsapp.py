@@ -46,7 +46,10 @@ class WhatsAppConfig:
     send_delay_ms: int = 200
     progress_min_interval_sec: float = 8.0
     health_path: str = "/health"
+    status_path: str = "/status"
     send_path: str = "/send"
+    pairing_qr_path: str = "/pairing/qr"
+    session_path: str = "/session"
 
     @classmethod
     def from_env(cls) -> "WhatsAppConfig":
@@ -157,6 +160,10 @@ class WhatsAppAdapter(ChannelAdapter):
         response = await self._http.get(self.config.health_path)
         response.raise_for_status()
 
+    async def ensure_ready(self) -> None:
+        if self._http is None:
+            await self.start()
+
     async def stop(self) -> None:
         self._stream_buffers.clear()
         self._last_progress_sent.clear()
@@ -167,6 +174,60 @@ class WhatsAppAdapter(ChannelAdapter):
 
     async def on_message(self, callback: MessageCallback) -> None:
         self._callback = callback
+
+    async def get_status(self) -> dict[str, Any]:
+        await self.ensure_ready()
+        if self._http is None:
+            raise RuntimeError("WhatsApp bridge client is not initialized")
+
+        response = await self._http.get(
+            self.config.status_path,
+            headers=self._bridge_headers(),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("WhatsApp bridge returned a non-object status payload")
+        return payload
+
+    async def request_pairing_qr(
+        self,
+        *,
+        refresh: bool = True,
+        wait_timeout_ms: int = 15000,
+    ) -> dict[str, Any]:
+        await self.ensure_ready()
+        if self._http is None:
+            raise RuntimeError("WhatsApp bridge client is not initialized")
+
+        response = await self._http.post(
+            self.config.pairing_qr_path,
+            json={
+                "refresh": refresh,
+                "wait_timeout_ms": wait_timeout_ms,
+            },
+            headers=self._bridge_headers(),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("WhatsApp bridge returned a non-object pairing payload")
+        return payload
+
+    async def clear_session(self) -> dict[str, Any]:
+        await self.ensure_ready()
+        if self._http is None:
+            raise RuntimeError("WhatsApp bridge client is not initialized")
+
+        response = await self._http.delete(
+            self.config.session_path,
+            headers=self._bridge_headers(),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("WhatsApp bridge returned a non-object session payload")
+        return payload
 
     async def handle_incoming(self, payload: dict[str, Any]) -> NormalizedMessage:
         normalized = self.normalize_message(payload)

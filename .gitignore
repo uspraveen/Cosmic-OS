@@ -15,6 +15,9 @@ dist-ssr
 *.local
 Backend/bridges/*/node_modules/
 Backend/bridges/*/.npm-cache/
+Backend/bridges/*/dist/
+Backend/bridges/*/coverage/
+Backend/bridges/*/*.tgz
 Backend/bridges/*/store/auth/
 Backend/bridges/*/runtime/
 auth_info_baileys/
@@ -37,6 +40,8 @@ auth_info_baileys/
 .env
 .env.*
 !.env.example
+Backend/*.env
+Backend/**/.env
 *.key
 *.pem
 *.p12
@@ -52,6 +57,7 @@ __pycache__/
 *$py.class
 venv/
 .venv/
+Backend/.venv/
 env/
 .Python
 build/

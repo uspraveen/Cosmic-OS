@@ -1,0 +1,15 @@
+[Unit]
+Description=COSMIC Gateway
+After=network-online.target cosmic-model-router.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=<BACKEND_ROOT>
+EnvironmentFile=/etc/cosmic/gateway.env
+ExecStart=<BACKEND_ROOT>/.venv/bin/python -m gateway.main
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
