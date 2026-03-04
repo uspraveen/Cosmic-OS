@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from 'react'
+import { useEffect, useState } from 'react'
 import QRCode from 'qrcode'
 
 interface WhatsAppIntegrationSettingsProps {
@@ -32,73 +32,22 @@ const SETTINGS_KEYS = {
   apiToken: 'gatewayApiToken',
 } as const
 
-const WHATSAPP_THEME_STYLE: CSSProperties = {
-  ['--accent' as string]: '#25D366',
-}
-
 function getPairingLabel(status: WhatsAppBridgeStatus | null) {
-  if (!status) return 'Gateway not configured'
+  if (!status) return 'Not configured'
   if (status.connected) return 'Connected'
-
   switch (status.pairing_state) {
-    case 'qr_ready':
-      return 'Waiting for scan'
-    case 'connecting':
-      return 'Connecting'
-    case 'connected':
-      return 'Connected'
-    case 'logged_out':
-      return 'Logged out'
-    case 'disconnected':
-      return 'Disconnected'
-    case 'error':
-      return 'Error'
-    default:
-      return status.has_auth_state ? 'Ready to reconnect' : 'Not connected'
+    case 'qr_ready': return 'Waiting for scan'
+    case 'connecting': return 'Connecting'
+    case 'connected': return 'Connected'
+    case 'logged_out': return 'Logged out'
+    case 'disconnected': return 'Disconnected'
+    case 'error': return 'Error'
+    default: return status.has_auth_state ? 'Ready' : 'Not connected'
   }
-}
-
-function getStatusDescription(status: WhatsAppBridgeStatus | null) {
-  if (!status) {
-    return 'Enter your Gateway URL and API token below to get started.'
-  }
-
-  if (status.connected) {
-    return 'Your WhatsApp number is linked to the backend bridge on the VM. New messages will flow through Gateway once the rest of the desktop/live pipeline is wired.'
-  }
-
-  if (status.qr) {
-    return 'Scan the QR with WhatsApp on your phone: Linked devices -> Link a device.'
-  }
-
-  if (status.pairing_state === 'connecting') {
-    return 'The VM bridge is starting a fresh pairing session.'
-  }
-
-  if (status.has_auth_state) {
-    return 'Auth state exists on the VM, but the bridge is not currently connected.'
-  }
-
-  return 'Request a QR code to link the COSMIC WhatsApp device from this desktop app.'
-}
-
-function formatTimestamp(value?: string | null) {
-  if (!value) return 'Not yet generated'
-  const timestamp = Date.parse(value)
-  if (Number.isNaN(timestamp)) return value
-  return new Date(timestamp).toLocaleString()
-}
-
-function compactValue(value: string, tail = 8) {
-  const trimmed = value.trim()
-  if (trimmed.length <= tail + 6) return trimmed
-  return `${trimmed.slice(0, 6)}...${trimmed.slice(-tail)}`
 }
 
 function getErrorMessage(error: unknown, fallback: string) {
-  if (error instanceof Error && error.message.trim()) {
-    return error.message
-  }
+  if (error instanceof Error && error.message.trim()) return error.message
   return fallback
 }
 
@@ -117,503 +66,302 @@ export default function WhatsAppIntegrationSettings({ active, cosmicAuth }: What
   const [savingBridgeConfig, setSavingBridgeConfig] = useState(false)
   const [pairingBusy, setPairingBusy] = useState(false)
   const [disconnecting, setDisconnecting] = useState(false)
+  const [sendingTest, setSendingTest] = useState(false)
   const [qrDataUrl, setQrDataUrl] = useState('')
+  const [showDetails, setShowDetails] = useState(false)
 
-  const configReady =
-    gatewayBaseUrl.trim().length > 0 &&
-    gatewayApiToken.trim().length > 0
+  const configReady = gatewayBaseUrl.trim().length > 0 && gatewayApiToken.trim().length > 0
 
+  // Banner auto-dismiss
   useEffect(() => {
     if (!banner) return
-    const timer = window.setTimeout(() => setBanner(null), 3600)
+    const timer = window.setTimeout(() => setBanner(null), 4000)
     return () => window.clearTimeout(timer)
   }, [banner])
 
+  // Load settings
   useEffect(() => {
     if (!active) return
-
     const offSettings = window.cosmic?.onSettingsUpdate((settings) => {
       setGatewayBaseUrl(String(settings?.[SETTINGS_KEYS.baseUrl] ?? ''))
       setGatewayApiToken(String(settings?.[SETTINGS_KEYS.apiToken] ?? ''))
       setConfigLoaded(true)
     })
-
     window.cosmic?.getSettings()
-    return () => {
-      offSettings?.()
-    }
+    return () => { offSettings?.() }
   }, [active])
 
+  // QR rendering
   useEffect(() => {
     let cancelled = false
-
-    if (!status?.qr) {
-      setQrDataUrl('')
-      return
-    }
-
+    if (!status?.qr) { setQrDataUrl(''); return }
     QRCode.toDataURL(status.qr, {
-      width: 280,
-      margin: 1,
-      errorCorrectionLevel: 'M',
-      color: {
-        dark: '#111827',
-        light: '#ffffff',
-      },
+      width: 260, margin: 1, errorCorrectionLevel: 'M',
+      color: { dark: '#111827', light: '#ffffff' },
     })
-      .then((dataUrl) => {
-        if (!cancelled) setQrDataUrl(dataUrl)
-      })
-      .catch(() => {
-        if (!cancelled) setQrDataUrl('')
-      })
-
-    return () => {
-      cancelled = true
-    }
+      .then((url) => { if (!cancelled) setQrDataUrl(url) })
+      .catch(() => { if (!cancelled) setQrDataUrl('') })
+    return () => { cancelled = true }
   }, [status?.qr])
 
+  // Status polling
   useEffect(() => {
     if (!active || !configLoaded || !configReady) {
-      if (!configReady) {
-        setStatus(null)
-        setStatusError('')
-        setQrDataUrl('')
-        setAllowedPhone('')
-        setAllowedPhoneDirty(false)
-      }
+      if (!configReady) { setStatus(null); setStatusError(''); setQrDataUrl(''); setAllowedPhone(''); setAllowedPhoneDirty(false) }
       return
     }
-
     let cancelled = false
-
     const refreshStatus = async (quiet = true) => {
       if (!quiet) setLoadingStatus(true)
-
       try {
-        const nextStatus = await window.cosmic?.getWhatsAppStatus({
-          baseUrl: gatewayBaseUrl,
-          apiToken: gatewayApiToken,
-        })
+        const s = await window.cosmic?.getWhatsAppStatus({ baseUrl: gatewayBaseUrl, apiToken: gatewayApiToken })
         if (cancelled) return
-        setStatus(nextStatus ?? null)
-        const config = nextStatus?.bridge_config
-        if (!allowedPhoneDirty && config && typeof config === 'object') {
-          setAllowedPhone(String(config.allowed_phone ?? ''))
-        }
+        setStatus(s ?? null)
+        if (!allowedPhoneDirty && s?.bridge_config) setAllowedPhone(String(s.bridge_config.allowed_phone ?? ''))
         setStatusError('')
-      } catch (error: unknown) {
+      } catch (e: unknown) {
         if (cancelled) return
-        setStatus(null)
-        setQrDataUrl('')
-        setStatusError(getErrorMessage(error, 'Unable to reach the configured Gateway.'))
+        setStatus(null); setQrDataUrl('')
+        setStatusError(getErrorMessage(e, 'Unable to reach Gateway.'))
       } finally {
         if (!cancelled) setLoadingStatus(false)
       }
     }
-
     void refreshStatus(false)
-    const poll = window.setInterval(() => {
-      void refreshStatus(true)
-    }, 5000)
+    const poll = window.setInterval(() => void refreshStatus(true), 5000)
+    return () => { cancelled = true; window.clearInterval(poll) }
+  }, [active, allowedPhoneDirty, configLoaded, configReady, gatewayApiToken, gatewayBaseUrl])
 
-    return () => {
-      cancelled = true
-      window.clearInterval(poll)
-    }
-  }, [
-    active,
-    allowedPhoneDirty,
-    configLoaded,
-    configReady,
-    gatewayApiToken,
-    gatewayBaseUrl,
-  ])
-
-  const persistGatewayConfig = async (successMessage?: string) => {
-    const trimmedBaseUrl = gatewayBaseUrl.trim()
-    const trimmedToken = gatewayApiToken.trim()
-    if (!trimmedBaseUrl || !trimmedToken) {
-      throw new Error('Gateway URL and API token are both required.')
-    }
-
+  const persistGatewayConfig = async (msg?: string) => {
+    const url = gatewayBaseUrl.trim(); const token = gatewayApiToken.trim()
+    if (!url || !token) throw new Error('Gateway URL and API token are required.')
     setSavingConfig(true)
     try {
-      window.cosmic?.saveSetting(SETTINGS_KEYS.baseUrl, trimmedBaseUrl)
-      window.cosmic?.saveSetting(SETTINGS_KEYS.apiToken, trimmedToken)
-      if (successMessage) {
-        setBanner({ tone: 'success', message: successMessage })
-      }
-    } finally {
-      setSavingConfig(false)
-    }
+      window.cosmic?.saveSetting(SETTINGS_KEYS.baseUrl, url)
+      window.cosmic?.saveSetting(SETTINGS_KEYS.apiToken, token)
+      if (msg) setBanner({ tone: 'success', message: msg })
+    } finally { setSavingConfig(false) }
   }
 
-  const persistBridgeConfig = async (successMessage?: string) => {
-    if (!configReady) {
-      throw new Error('Save the Gateway connection first.')
-    }
-
+  const persistBridgeConfig = async (msg?: string) => {
+    if (!configReady) throw new Error('Save connection first.')
     setSavingBridgeConfig(true)
     try {
-      const nextConfig = await window.cosmic?.saveWhatsAppConfig({
-        baseUrl: gatewayBaseUrl.trim(),
-        apiToken: gatewayApiToken.trim(),
+      const r = await window.cosmic?.saveWhatsAppConfig({
+        baseUrl: gatewayBaseUrl.trim(), apiToken: gatewayApiToken.trim(),
         allowedPhone: allowedPhone.trim() || null,
       })
-      const persistedAllowedPhone = String(nextConfig?.allowed_phone ?? '')
-      setAllowedPhone(persistedAllowedPhone)
-      setAllowedPhoneDirty(false)
-      setStatus((current) => current ? {
-        ...current,
-        bridge_config: {
-          ...(current.bridge_config ?? {}),
-          allowed_phone: persistedAllowedPhone || null,
-        },
-      } : current)
-      if (successMessage) {
-        setBanner({ tone: 'success', message: successMessage })
-      }
-    } finally {
-      setSavingBridgeConfig(false)
-    }
+      const phone = String(r?.allowed_phone ?? '')
+      setAllowedPhone(phone); setAllowedPhoneDirty(false)
+      setStatus((c) => c ? { ...c, bridge_config: { ...(c.bridge_config ?? {}), allowed_phone: phone || null } } : c)
+      if (msg) setBanner({ tone: 'success', message: msg })
+    } finally { setSavingBridgeConfig(false) }
   }
 
   const handleCheckStatus = async () => {
     try {
       await persistGatewayConfig()
       setLoadingStatus(true)
-      const nextStatus = await window.cosmic?.getWhatsAppStatus({
-        baseUrl: gatewayBaseUrl,
-        apiToken: gatewayApiToken,
-      })
-      setStatus(nextStatus ?? null)
-      const config = nextStatus?.bridge_config
-      if (!allowedPhoneDirty && config && typeof config === 'object') {
-        setAllowedPhone(String(config.allowed_phone ?? ''))
-      }
-      setStatusError('')
-      setBanner({ tone: 'success', message: 'Gateway connection verified.' })
-    } catch (error: unknown) {
-      const message = getErrorMessage(error, 'Unable to reach the configured Gateway.')
-      setStatus(null)
-      setQrDataUrl('')
-      setStatusError(message)
-      setBanner({ tone: 'error', message })
-    } finally {
-      setLoadingStatus(false)
-    }
+      const s = await window.cosmic?.getWhatsAppStatus({ baseUrl: gatewayBaseUrl, apiToken: gatewayApiToken })
+      setStatus(s ?? null)
+      if (!allowedPhoneDirty && s?.bridge_config) setAllowedPhone(String(s.bridge_config.allowed_phone ?? ''))
+      setStatusError(''); setBanner({ tone: 'success', message: 'Connection verified.' })
+    } catch (e: unknown) {
+      const msg = getErrorMessage(e, 'Unable to reach Gateway.')
+      setStatus(null); setQrDataUrl(''); setStatusError(msg); setBanner({ tone: 'error', message: msg })
+    } finally { setLoadingStatus(false) }
   }
 
   const handleRequestQr = async () => {
     try {
-      await persistGatewayConfig()
-      await persistBridgeConfig()
+      await persistGatewayConfig(); await persistBridgeConfig()
       setPairingBusy(true)
-      const nextStatus = await window.cosmic?.requestWhatsAppPairingQr({
-        baseUrl: gatewayBaseUrl,
-        apiToken: gatewayApiToken,
-        refresh: true,
-        waitTimeoutMs: 20000,
+      const s = await window.cosmic?.requestWhatsAppPairingQr({
+        baseUrl: gatewayBaseUrl, apiToken: gatewayApiToken, refresh: true, waitTimeoutMs: 20000,
       })
-      setStatus(nextStatus ?? null)
-      const config = nextStatus?.bridge_config
-      if (config && typeof config === 'object') {
-        setAllowedPhone(String(config.allowed_phone ?? ''))
-        setAllowedPhoneDirty(false)
-      }
+      setStatus(s ?? null)
+      if (s?.bridge_config) { setAllowedPhone(String(s.bridge_config.allowed_phone ?? '')); setAllowedPhoneDirty(false) }
       setStatusError('')
-      setBanner({
-        tone: nextStatus?.qr ? 'info' : 'success',
-        message: nextStatus?.qr
-          ? 'QR generated. Scan it with WhatsApp on your phone.'
-          : 'Pairing request sent to the backend bridge.',
-      })
-    } catch (error: unknown) {
-      const message = getErrorMessage(error, 'Failed to request pairing QR.')
-      setBanner({ tone: 'error', message })
-      setStatusError(message)
-    } finally {
-      setPairingBusy(false)
-    }
+      setBanner({ tone: s?.qr ? 'info' : 'success', message: s?.qr ? 'Scan the QR code with WhatsApp.' : 'Pairing request sent.' })
+    } catch (e: unknown) {
+      const msg = getErrorMessage(e, 'Failed to request QR.'); setBanner({ tone: 'error', message: msg }); setStatusError(msg)
+    } finally { setPairingBusy(false) }
   }
 
   const handleClearSession = async () => {
     try {
-      await persistGatewayConfig()
-      setDisconnecting(true)
-      const nextStatus = await window.cosmic?.clearWhatsAppSession({
-        baseUrl: gatewayBaseUrl,
-        apiToken: gatewayApiToken,
+      await persistGatewayConfig(); setDisconnecting(true)
+      const s = await window.cosmic?.clearWhatsAppSession({ baseUrl: gatewayBaseUrl, apiToken: gatewayApiToken })
+      setStatus(s ?? null); setStatusError(''); setQrDataUrl('')
+      setBanner({ tone: 'success', message: 'WhatsApp session cleared.' })
+    } catch (e: unknown) {
+      const msg = getErrorMessage(e, 'Failed to clear session.'); setBanner({ tone: 'error', message: msg }); setStatusError(msg)
+    } finally { setDisconnecting(false) }
+  }
+
+  const handleSendTest = async () => {
+    const phone = allowedPhone.trim()
+    if (!phone || !configReady) return
+    setSendingTest(true)
+    try {
+      await window.cosmic?.sendWhatsAppTest({
+        baseUrl: gatewayBaseUrl, apiToken: gatewayApiToken, number: phone, message: 'Hello from COSMIC!',
       })
-      setStatus(nextStatus ?? null)
-      setStatusError('')
-      setQrDataUrl('')
-      setBanner({ tone: 'success', message: 'WhatsApp session cleared on the VM.' })
-    } catch (error: unknown) {
-      const message = getErrorMessage(error, 'Failed to clear the WhatsApp session.')
-      setBanner({ tone: 'error', message })
-      setStatusError(message)
-    } finally {
-      setDisconnecting(false)
-    }
+      setBanner({ tone: 'success', message: 'Test message sent!' })
+    } catch (e: unknown) {
+      setBanner({ tone: 'error', message: getErrorMessage(e, 'Failed to send test message.') })
+    } finally { setSendingTest(false) }
   }
 
   if (!active) return null
 
+  const isConnected = !!status?.connected
+  const statusColor = isConnected ? '#25D366' : status ? '#ffc107' : 'rgba(255,255,255,0.3)'
+
   return (
-    <div className="setting-subpage cosmic-google-page cosmic-whatsapp-page" style={WHATSAPP_THEME_STYLE}>
-      <div className="cosmic-google-hero">
-        <div className="cosmic-google-hero-inner">
-          <div className="cosmic-google-hero-icon cosmic-whatsapp-hero-icon" aria-hidden="true">
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg">
-              <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.888-.788-1.489-1.761-1.663-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51a12.8 12.8 0 0 0-.57-.01c-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413z" />
-            </svg>
-          </div>
-          <div className="cosmic-google-hero-text">
-            <h3>
-              WhatsApp
-              <span className="cosmic-whatsapp-beta">Beta</span>
-            </h3>
-            <p className="cosmic-google-hero-stat">{getPairingLabel(status)}</p>
-            <p className="cosmic-google-hero-desc">{getStatusDescription(status)}</p>
-          </div>
+    <div className="wa-page">
+      {/* Header */}
+      <div className="wa-header">
+        <div className="wa-header-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg">
+            <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.888-.788-1.489-1.761-1.663-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51a12.8 12.8 0 0 0-.57-.01c-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413z" />
+          </svg>
         </div>
-        <div className="cosmic-whatsapp-hero-actions">
-          <button
-            type="button"
-            className="cosmic-google-cta cosmic-whatsapp-cta-secondary"
-            onClick={handleCheckStatus}
-            disabled={loadingStatus || savingConfig}
-          >
-            {loadingStatus ? 'Checking…' : 'Check status'}
-          </button>
-          <button
-            type="button"
-            className="cosmic-google-cta"
-            onClick={handleRequestQr}
-            disabled={pairingBusy || savingConfig}
-          >
-            {pairingBusy ? 'Preparing…' : status?.qr ? 'Refresh QR' : 'Connect WhatsApp'}
-          </button>
+        <div className="wa-header-text">
+          <div className="wa-header-title">
+            WhatsApp
+            <span className="wa-beta">Beta</span>
+          </div>
+          <div className="wa-header-status">
+            <span className="wa-status-dot" style={{ background: statusColor }} />
+            {getPairingLabel(status)}
+          </div>
         </div>
       </div>
 
+      {/* Banner */}
       {banner && (
-        <div className={`cosmic-google-banner cosmic-google-banner-${banner.tone}`} role="status">
-          {banner.message}
+        <div className={`wa-banner wa-banner-${banner.tone}`}>{banner.message}</div>
+      )}
+
+      {/* Actions row */}
+      <div className="wa-actions">
+        <button className="wa-btn wa-btn-outline" onClick={handleCheckStatus} disabled={loadingStatus || savingConfig}>
+          {loadingStatus ? 'Checking…' : 'Check status'}
+        </button>
+        <button className="wa-btn wa-btn-primary" onClick={handleRequestQr} disabled={pairingBusy || savingConfig}>
+          {pairingBusy ? 'Preparing…' : status?.qr ? 'Refresh QR' : 'Connect'}
+        </button>
+        {isConnected && allowedPhone.trim() && (
+          <button className="wa-btn wa-btn-accent" onClick={handleSendTest} disabled={sendingTest}>
+            {sendingTest ? 'Sending…' : 'Send test'}
+          </button>
+        )}
+        {(isConnected || status?.has_auth_state) && (
+          <button className="wa-btn wa-btn-danger" onClick={handleClearSession} disabled={disconnecting}>
+            {disconnecting ? 'Clearing…' : 'Unlink'}
+          </button>
+        )}
+      </div>
+
+      {/* QR code (only when available) */}
+      {qrDataUrl && (
+        <div className="wa-qr-section">
+          <div className="wa-qr-frame">
+            <img src={qrDataUrl} alt="WhatsApp pairing QR" className="wa-qr-img" />
+          </div>
+          <div className="wa-qr-hint">
+            Open WhatsApp on your phone → Linked devices → Link a device → Scan this QR
+          </div>
         </div>
       )}
 
-      <div className="cosmic-google-card cosmic-whatsapp-config-card">
-        <div className="cosmic-google-card-header">
-          <div className="cosmic-google-card-profile">
-            <div className="cosmic-google-avatar cosmic-whatsapp-avatar" aria-hidden="true">
-              {authManaged ? 'Ph' : 'VM'}
+      {/* Configuration */}
+      <div className="wa-section">
+        <div className="wa-section-title">Configuration</div>
+
+        {!authManaged && (
+          <>
+            <div className="wa-field">
+              <label>Gateway URL</label>
+              <input
+                className="wa-input"
+                value={gatewayBaseUrl}
+                onChange={(e) => setGatewayBaseUrl(e.target.value)}
+                placeholder="http://your-vm-ip:8080"
+                spellCheck={false}
+              />
             </div>
-            <div className="cosmic-google-card-info">
-              <strong>{authManaged ? 'Phone number' : 'Gateway connection'}</strong>
-              <span>{authManaged ? 'Which number can chat with COSMIC.' : 'Your COSMIC VM Gateway URL and API token.'}</span>
+            <div className="wa-field">
+              <label>API Token</label>
+              <input
+                className="wa-input"
+                type="password"
+                value={gatewayApiToken}
+                onChange={(e) => setGatewayApiToken(e.target.value)}
+                placeholder="Gateway API token"
+                spellCheck={false}
+              />
             </div>
-          </div>
-          <div className="cosmic-google-card-badges">
-            <span className={`cosmic-google-badge ${configReady ? 'status-connected' : 'status-needs_auth'}`}>
-              {configReady ? 'Configured' : 'Needs setup'}
-            </span>
-          </div>
+          </>
+        )}
+
+        <div className="wa-field">
+          <label>Allowed phone number</label>
+          <input
+            className="wa-input"
+            value={allowedPhone}
+            onChange={(e) => { setAllowedPhone(e.target.value); setAllowedPhoneDirty(true) }}
+            placeholder="+1 555 123 4567"
+            spellCheck={false}
+          />
         </div>
 
-        <div className="cosmic-google-card-body">
+        <div className="wa-field-actions">
           {!authManaged && (
-            <>
-              <div className="cosmic-google-field">
-                <label>Gateway Base URL</label>
-                <input
-                  className="cosmic-google-input"
-                  value={gatewayBaseUrl}
-                  onChange={(event) => setGatewayBaseUrl(event.target.value)}
-                  placeholder="https://your-vm-domain or http://127.0.0.1:8080"
-                  spellCheck={false}
-                />
-              </div>
-
-              <div className="cosmic-google-field">
-                <label>Gateway API Token</label>
-                <input
-                  className="cosmic-google-input"
-                  type="password"
-                  value={gatewayApiToken}
-                  onChange={(event) => setGatewayApiToken(event.target.value)}
-                  placeholder="Paste the Gateway API token"
-                  spellCheck={false}
-                />
-              </div>
-            </>
-          )}
-
-          <div className="cosmic-google-field">
-            <label>Allowed User Phone Number</label>
-            <input
-              className="cosmic-google-input"
-              value={allowedPhone}
-              onChange={(event) => {
-                setAllowedPhone(event.target.value)
-                setAllowedPhoneDirty(true)
-              }}
-              placeholder="+1 555 123 4567"
-              spellCheck={false}
-            />
-          </div>
-
-          <p className="cosmic-google-apps-hint">
-            {authManaged
-              ? 'Restrict which WhatsApp number can interact with COSMIC.'
-              : 'Enter the public Gateway URL of your COSMIC VM and its API token. Set an allowed phone to restrict inbound/outbound messages.'
-            }
-          </p>
-
-          <div className="cosmic-google-card-actions">
-            {!authManaged && (
-              <button
-                type="button"
-                className="cosmic-google-action primary"
-                onClick={() => {
-                  void persistGatewayConfig('Gateway connection saved locally.')
-                }}
-                disabled={savingConfig || !configReady}
-              >
-                {savingConfig ? 'Saving…' : 'Save connection'}
-              </button>
-            )}
-            <button
-              type="button"
-              className={`cosmic-google-action ${authManaged ? 'primary' : 'secondary'}`}
-              onClick={() => {
-                void persistBridgeConfig('Allowed WhatsApp number saved on the VM.')
-              }}
-              disabled={savingBridgeConfig || !configReady}
-            >
-              {savingBridgeConfig ? 'Saving…' : 'Save number'}
+            <button className="wa-btn wa-btn-outline wa-btn-sm" onClick={() => void persistGatewayConfig('Connection saved.')} disabled={savingConfig || !configReady}>
+              {savingConfig ? 'Saving…' : 'Save connection'}
             </button>
-          </div>
-
-          {statusError && <p className="cosmic-whatsapp-error-note">{statusError}</p>}
+          )}
+          <button className="wa-btn wa-btn-primary wa-btn-sm" onClick={() => void persistBridgeConfig('Phone number saved.')} disabled={savingBridgeConfig || !configReady}>
+            {savingBridgeConfig ? 'Saving…' : 'Save number'}
+          </button>
         </div>
+
+        {statusError && <div className="wa-error">{statusError}</div>}
       </div>
 
-      <div className="cosmic-google-card">
-        <div className="cosmic-google-card-header">
-          <div className="cosmic-google-card-profile">
-            <div className={`cosmic-google-avatar ${status?.connected ? 'connected' : ''}`} aria-hidden="true">
-              WA
-            </div>
-            <div className="cosmic-google-card-info">
-              <strong>Bridge status</strong>
-              <span>Live state reported by the VM Gateway and WhatsApp bridge.</span>
-            </div>
-          </div>
-          <div className="cosmic-google-card-badges">
-            <span className={`cosmic-google-badge ${status?.connected ? 'status-connected' : 'status-needs_auth'}`}>
-              {status?.connected ? 'Connected' : 'Pending'}
-            </span>
-          </div>
-        </div>
-
-        <div className="cosmic-google-card-body">
-          <div className="cosmic-whatsapp-status-grid">
-            <div className="cosmic-whatsapp-status-row">
-              <span>Pairing state</span>
-              <strong>{getPairingLabel(status)}</strong>
-            </div>
-            <div className="cosmic-whatsapp-status-row">
-              <span>Linked JID</span>
-              <strong>{status?.connected_jid ? compactValue(status.connected_jid) : 'Not linked yet'}</strong>
-            </div>
-            <div className="cosmic-whatsapp-status-row">
-              <span>Auth state on VM</span>
-              <strong>{status?.has_auth_state ? 'Present' : 'Missing'}</strong>
-            </div>
-            <div className="cosmic-whatsapp-status-row">
-              <span>Latest QR</span>
-              <strong>{formatTimestamp(status?.qr_updated_at)}</strong>
-            </div>
-          </div>
-
-          {status?.last_error && (
-            <p className="cosmic-whatsapp-error-note">Last bridge error: {status.last_error}</p>
-          )}
-        </div>
-
-        <div className="cosmic-google-card-footer">
-          <p className="cosmic-google-card-note">
-            Once paired, the bridge keeps the auth state on the VM so you do not need to scan again after normal restarts.
-          </p>
-          <div className="cosmic-google-card-actions">
-            <button
-              type="button"
-              className="cosmic-google-action secondary"
-              onClick={handleCheckStatus}
-              disabled={loadingStatus}
-            >
-              Refresh status
-            </button>
-            <button
-              type="button"
-              className="cosmic-google-action danger"
-              onClick={handleClearSession}
-              disabled={disconnecting || !configReady}
-            >
-              {disconnecting ? 'Clearing…' : 'Unlink number'}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <div className="cosmic-google-card cosmic-whatsapp-qr-card">
-        <div className="cosmic-google-card-header">
-          <div className="cosmic-google-card-profile">
-            <div className="cosmic-google-avatar cosmic-whatsapp-avatar" aria-hidden="true">
-              QR
-            </div>
-            <div className="cosmic-google-card-info">
-              <strong>Pairing QR</strong>
-              <span>Request a QR from the Gateway, then scan it from your phone&apos;s WhatsApp app.</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="cosmic-google-card-body cosmic-whatsapp-qr-body">
-          {qrDataUrl ? (
-            <>
-              <div className="cosmic-whatsapp-qr-panel">
-                <img src={qrDataUrl} alt="WhatsApp pairing QR code" className="cosmic-whatsapp-qr-image" />
+      {/* Details toggle */}
+      {status && (
+        <div className="wa-section">
+          <button className="wa-details-toggle" onClick={() => setShowDetails(!showDetails)}>
+            <span>Bridge details</span>
+            <span style={{ transform: showDetails ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }}>›</span>
+          </button>
+          {showDetails && (
+            <div className="wa-details-grid">
+              <div className="wa-detail">
+                <span>State</span>
+                <strong>{getPairingLabel(status)}</strong>
               </div>
-              <ol className="cosmic-whatsapp-steps">
-                <li>Open WhatsApp on your phone.</li>
-                <li>Go to Settings or Menu -&gt; Linked devices.</li>
-                <li>Choose Link a device and scan this QR.</li>
-                <li>Keep this window open until the bridge status changes to Connected.</li>
-              </ol>
-            </>
-          ) : (
-            <div className="cosmic-google-empty cosmic-google-empty-invite cosmic-whatsapp-empty">
-              <div className="cosmic-google-empty-icon" aria-hidden="true">
-                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                  <rect x="7" y="7" width="3" height="3" />
-                  <rect x="14" y="7" width="3" height="3" />
-                  <rect x="7" y="14" width="3" height="3" />
-                  <rect x="14" y="14" width="3" height="3" />
-                </svg>
+              <div className="wa-detail">
+                <span>JID</span>
+                <strong>{status.connected_jid || '—'}</strong>
               </div>
-              <p className="cosmic-google-empty-title">No QR generated yet</p>
-              <p className="cosmic-google-empty-desc">
-                Click Connect WhatsApp above to generate a QR code for pairing.
-              </p>
+              <div className="wa-detail">
+                <span>Auth</span>
+                <strong>{status.has_auth_state ? 'Present' : 'Missing'}</strong>
+              </div>
+              {status.last_error && (
+                <div className="wa-detail wa-detail-full">
+                  <span>Error</span>
+                  <strong className="wa-detail-error">{status.last_error}</strong>
+                </div>
+              )}
             </div>
           )}
         </div>
-      </div>
+      )}
     </div>
   )
 }

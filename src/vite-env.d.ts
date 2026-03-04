@@ -43,6 +43,7 @@ interface Window {
       allowedPhone?: string | null
       selfChatOnly?: boolean | null
     }) => Promise<any>
+    sendWhatsAppTest: (payload: GatewayConnectionPayload & { number: string; message: string }) => Promise<any>
     onCalendarAgendaUpdate: (cb: (data: any) => void) => () => void
     onIntegrationsUpdate: (cb: (data: any) => void) => () => void
     onIntegrationEvent: (cb: (data: any) => void) => () => void

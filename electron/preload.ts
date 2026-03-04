@@ -214,6 +214,7 @@ contextBridge.exposeInMainWorld('cosmic', {
   requestWhatsAppPairingQr: (payload: any) => ipcRenderer.invoke('whatsapp:request-pairing-qr', payload),
   clearWhatsAppSession: (payload: any) => ipcRenderer.invoke('whatsapp:clear-session', payload),
   saveWhatsAppConfig: (payload: any) => ipcRenderer.invoke('whatsapp:save-config', payload),
+  sendWhatsAppTest: (payload: any) => ipcRenderer.invoke('whatsapp:send-test', payload),
   onCalendarAgendaUpdate: (cb: (data: any) => void) => {
     const listener = (_: any, data: any) => cb(data)
     ipcRenderer.on('calendar:agenda', listener)

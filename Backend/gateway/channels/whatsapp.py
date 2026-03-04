@@ -628,6 +628,13 @@ class WhatsAppAdapter(ChannelAdapter):
             headers["X-Bridge-Token"] = self.config.bridge_token
         return headers
 
+    async def send_test_message(self, number: str, message: str) -> dict[str, Any]:
+        return await self._request_bridge_json(
+            "POST",
+            self.config.send_path,
+            json={"number": number, "message": message},
+        )
+
     async def _request_bridge_json(
         self,
         method: str,

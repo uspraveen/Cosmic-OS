@@ -776,6 +776,15 @@ app.whenReady().then(() => {
     })
   })
 
+  ipcMain.handle('whatsapp:send-test', async (_, payload: GatewayConnectionConfig & { number: string; message: string }) => {
+    return callGatewayJson(payload, '/channels/whatsapp/send', {
+      method: 'POST',
+      body: {
+        number: payload.number,
+        message: payload.message,
+      },
+    })
+  })
 
 
   // --- AUTH IPC HANDLERS ---

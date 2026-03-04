@@ -20,6 +20,11 @@ class WhatsAppConfigUpdateRequest(BaseModel):
     self_chat_only: bool | None = None
 
 
+class WhatsAppSendRequest(BaseModel):
+    number: str = Field(..., min_length=1, max_length=32)
+    message: str = Field(..., min_length=1, max_length=8000)
+
+
 def get_runtime(request: Request) -> GatewayRuntime:
     runtime = getattr(request.app.state, "gateway_runtime", None)
     if runtime is None:
@@ -149,6 +154,24 @@ async def update_whatsapp_config(
         payload = await runtime.update_whatsapp_config(
             allowed_phone=body.allowed_phone,
             self_chat_only=body.self_chat_only,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="WhatsApp adapter is not registered") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    return payload
+
+
+@router.post("/channels/whatsapp/send")
+async def send_whatsapp_message(
+    body: WhatsAppSendRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        payload = await runtime.send_whatsapp_test(
+            number=body.number,
+            message=body.message,
         )
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="WhatsApp adapter is not registered") from exc

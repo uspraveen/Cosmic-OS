@@ -971,161 +971,284 @@
   transform: none;
 }
 
-.cosmic-whatsapp-page {
-  gap: 16px;
+/* ── WhatsApp integration page ── */
+.wa-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  animation: cosmicFadeIn 0.3s ease forwards;
 }
 
-.cosmic-whatsapp-hero-icon {
-  background: #25D366;
-}
-
-.cosmic-whatsapp-beta {
-  display: inline-flex;
-  align-items: center;
-  margin-left: 8px;
-  padding: 3px 7px;
-  border-radius: 999px;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.92);
-  background: rgba(37, 211, 102, 0.16);
-  border: 1px solid rgba(37, 211, 102, 0.3);
-  vertical-align: middle;
-}
-
-.cosmic-whatsapp-hero-actions {
+.wa-header {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 14px;
+  padding: 18px 20px;
+  border-radius: 14px;
+  background: rgba(20, 20, 22, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.wa-header-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: #25D366;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
 }
 
-.cosmic-whatsapp-cta-secondary {
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.cosmic-whatsapp-cta-secondary:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.12);
-}
-
-.cosmic-google-banner-info {
-  background: rgba(0, 122, 255, 0.14);
-  border-color: rgba(0, 122, 255, 0.24);
-  color: rgba(220, 236, 255, 0.96);
-}
-
-.cosmic-google-banner-error {
-  background: rgba(255, 69, 58, 0.14);
-  border-color: rgba(255, 69, 58, 0.22);
-  color: rgba(255, 214, 210, 0.96);
-}
-
-.cosmic-google-banner-success {
-  background: rgba(48, 209, 88, 0.12);
-  border-color: rgba(48, 209, 88, 0.22);
-  color: rgba(200, 255, 220, 0.95);
-}
-
-.cosmic-whatsapp-config-card {
-  overflow: visible;
-}
-
-.cosmic-whatsapp-avatar {
-  background: linear-gradient(145deg, #25D366, #128C7E);
-}
-
-.cosmic-whatsapp-status-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.cosmic-whatsapp-status-row {
+.wa-header-text {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  padding: 12px 14px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.03);
+  gap: 3px;
+  min-width: 0;
+}
+
+.wa-header-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wa-beta {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(37, 211, 102, 0.15);
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.wa-header-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.wa-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* Banner */
+.wa-banner {
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 12px;
+  text-align: center;
+  animation: cosmicBannerIn 0.25s ease;
+}
+.wa-banner-success { background: rgba(48, 209, 88, 0.12); border: 1px solid rgba(48, 209, 88, 0.2); color: rgba(200, 255, 220, 0.95); }
+.wa-banner-error { background: rgba(255, 69, 58, 0.12); border: 1px solid rgba(255, 69, 58, 0.2); color: rgba(255, 214, 210, 0.96); }
+.wa-banner-info { background: rgba(0, 122, 255, 0.12); border: 1px solid rgba(0, 122, 255, 0.2); color: rgba(220, 236, 255, 0.96); }
+
+/* Actions row */
+.wa-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.wa-btn {
+  padding: 8px 14px;
+  border: none;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.15s, opacity 0.15s;
+}
+.wa-btn:active:not(:disabled) { transform: scale(0.97); }
+.wa-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.wa-btn-outline {
+  background: rgba(255, 255, 255, 0.07);
+  color: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.wa-btn-outline:hover:not(:disabled) { background: rgba(255, 255, 255, 0.12); }
+
+.wa-btn-primary {
+  background: #25D366;
+  color: #fff;
+}
+.wa-btn-primary:hover:not(:disabled) { background: #2be374; }
+
+.wa-btn-accent {
+  background: rgba(0, 122, 255, 0.2);
+  color: rgba(180, 220, 255, 0.95);
+}
+.wa-btn-accent:hover:not(:disabled) { background: rgba(0, 122, 255, 0.3); }
+
+.wa-btn-danger {
+  background: rgba(255, 69, 58, 0.12);
+  color: #ff6b6b;
+}
+.wa-btn-danger:hover:not(:disabled) { background: rgba(255, 69, 58, 0.22); }
+
+.wa-btn-sm {
+  padding: 7px 12px;
+  font-size: 11px;
+}
+
+/* QR section */
+.wa-qr-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 20px;
+  border-radius: 14px;
+  background: rgba(20, 20, 22, 0.4);
   border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
-.cosmic-whatsapp-status-row span {
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.45);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+.wa-qr-frame {
+  width: 220px;
+  padding: 12px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.95);
 }
 
-.cosmic-whatsapp-status-row strong {
-  font-size: 13px;
-  color: #fff;
-  line-height: 1.35;
-  word-break: break-word;
-}
-
-.cosmic-whatsapp-error-note {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.45;
-  color: rgba(255, 166, 158, 0.95);
-}
-
-.cosmic-whatsapp-qr-card .cosmic-google-card-body {
-  gap: 18px;
-}
-
-.cosmic-whatsapp-qr-body {
-  align-items: center;
-}
-
-.cosmic-whatsapp-qr-panel {
-  width: min(100%, 320px);
-  padding: 16px;
-  border-radius: 20px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(244, 248, 246, 0.92));
-  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.18);
-}
-
-.cosmic-whatsapp-qr-image {
+.wa-qr-img {
   display: block;
   width: 100%;
   height: auto;
-  border-radius: 12px;
+  border-radius: 8px;
 }
 
-.cosmic-whatsapp-steps {
-  margin: 0;
-  padding-left: 18px;
+.wa-qr-hint {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  text-align: center;
+  line-height: 1.45;
+  max-width: 320px;
+}
+
+/* Sections */
+.wa-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 18px;
+  border-radius: 14px;
+  background: rgba(20, 20, 22, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.wa-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: rgba(255, 255, 255, 0.4);
+  margin-bottom: 2px;
+}
+
+.wa-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.wa-field label {
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.wa-input {
   width: 100%;
-  color: rgba(255, 255, 255, 0.72);
-  line-height: 1.55;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.25);
+  color: #fff;
   font-size: 13px;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.wa-input:focus {
+  border-color: rgba(37, 211, 102, 0.4);
+  box-shadow: 0 0 0 2px rgba(37, 211, 102, 0.1);
+}
+.wa-input::placeholder { color: rgba(255, 255, 255, 0.25); }
+
+.wa-field-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
 }
 
-.cosmic-whatsapp-empty {
+.wa-error {
+  font-size: 12px;
+  color: rgba(255, 166, 158, 0.95);
+  line-height: 1.4;
+}
+
+/* Details toggle */
+.wa-details-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   width: 100%;
+  padding: 0;
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.wa-details-toggle:hover { color: rgba(255, 255, 255, 0.75); }
+.wa-details-toggle > span:last-child { font-size: 16px; }
+
+.wa-details-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
 }
 
-@media (max-width: 480px) {
-  .cosmic-google-hero {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-  .cosmic-google-card-footer {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-  .cosmic-whatsapp-hero-actions {
-    width: 100%;
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .cosmic-whatsapp-status-grid {
-    grid-template-columns: 1fr;
-  }
+.wa-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.wa-detail span {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.4);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.wa-detail strong {
+  font-size: 12px;
+  color: #fff;
+  word-break: break-all;
+}
+
+.wa-detail-full {
+  grid-column: 1 / -1;
+}
+
+.wa-detail-error {
+  color: rgba(255, 166, 158, 0.95) !important;
 }
