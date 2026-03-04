@@ -1,5 +1,21 @@
 /// <reference types="vite/client" />
 
+interface GatewayTunnelPayload {
+  enabled?: boolean
+  host?: string
+  port?: number
+  username?: string
+  privateKeyPath?: string
+  remoteHost?: string
+  remotePort?: number
+}
+
+interface GatewayConnectionPayload {
+  baseUrl: string
+  apiToken: string
+  tunnel?: GatewayTunnelPayload
+}
+
 interface Window {
   cosmic?: {
     hide: () => void
@@ -24,13 +40,14 @@ interface Window {
     deleteIntegrationAccount: (accountId: string) => void
     connectGoogleAccount: (payload: any) => void
     disconnectGoogleAccount: (accountId: string) => void
-    getWhatsAppStatus: (payload: { baseUrl: string; apiToken: string }) => Promise<any>
-    getWhatsAppConfig: (payload: { baseUrl: string; apiToken: string }) => Promise<any>
-    requestWhatsAppPairingQr: (payload: { baseUrl: string; apiToken: string; refresh?: boolean; waitTimeoutMs?: number }) => Promise<any>
-    clearWhatsAppSession: (payload: { baseUrl: string; apiToken: string }) => Promise<any>
+    getWhatsAppStatus: (payload: GatewayConnectionPayload) => Promise<any>
+    getWhatsAppConfig: (payload: GatewayConnectionPayload) => Promise<any>
+    requestWhatsAppPairingQr: (payload: GatewayConnectionPayload & { refresh?: boolean; waitTimeoutMs?: number }) => Promise<any>
+    clearWhatsAppSession: (payload: GatewayConnectionPayload) => Promise<any>
     saveWhatsAppConfig: (payload: {
       baseUrl: string
       apiToken: string
+      tunnel?: GatewayTunnelPayload
       allowedPhone?: string | null
       selfChatOnly?: boolean | null
     }) => Promise<any>

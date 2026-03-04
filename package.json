@@ -23,6 +23,7 @@
     "rehype-katex": "^7.0.0",
     "remark-gfm": "^4.0.0",
     "remark-math": "^6.0.0",
+    "ssh2": "^1.17.0",
     "spotify-web-api-node": "^5.0.2"
   },
   "devDependencies": {
