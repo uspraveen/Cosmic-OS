@@ -206,8 +206,10 @@ contextBridge.exposeInMainWorld('cosmic', {
   connectGoogleAccount: (payload: any) => ipcRenderer.send('integrations:connect-google', payload),
   disconnectGoogleAccount: (accountId: string) => ipcRenderer.send('integrations:disconnect-google', accountId),
   getWhatsAppStatus: (payload: any) => ipcRenderer.invoke('whatsapp:get-status', payload),
+  getWhatsAppConfig: (payload: any) => ipcRenderer.invoke('whatsapp:get-config', payload),
   requestWhatsAppPairingQr: (payload: any) => ipcRenderer.invoke('whatsapp:request-pairing-qr', payload),
   clearWhatsAppSession: (payload: any) => ipcRenderer.invoke('whatsapp:clear-session', payload),
+  saveWhatsAppConfig: (payload: any) => ipcRenderer.invoke('whatsapp:save-config', payload),
   onCalendarAgendaUpdate: (cb: (data: any) => void) => {
     const listener = (_: any, data: any) => cb(data)
     ipcRenderer.on('calendar:agenda', listener)

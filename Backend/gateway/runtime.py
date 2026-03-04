@@ -273,6 +273,30 @@ class GatewayRuntime:
         self.adapter_errors.pop("whatsapp", None)
         return response
 
+    async def get_whatsapp_config(self) -> dict[str, Any]:
+        adapter = self.registry.adapters.get("whatsapp")
+        if adapter is None:
+            raise KeyError("whatsapp")
+        response = await adapter.get_config()  # type: ignore[attr-defined]
+        self.adapter_errors.pop("whatsapp", None)
+        return response
+
+    async def update_whatsapp_config(
+        self,
+        *,
+        allowed_phone: str | None = None,
+        self_chat_only: bool | None = None,
+    ) -> dict[str, Any]:
+        adapter = self.registry.adapters.get("whatsapp")
+        if adapter is None:
+            raise KeyError("whatsapp")
+        response = await adapter.update_config(  # type: ignore[attr-defined]
+            allowed_phone=allowed_phone,
+            self_chat_only=self_chat_only,
+        )
+        self.adapter_errors.pop("whatsapp", None)
+        return response
+
     async def health_payload(self) -> dict[str, Any]:
         return {
             "status": "ok" if self.started else "starting",

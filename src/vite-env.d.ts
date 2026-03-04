@@ -25,8 +25,15 @@ interface Window {
     connectGoogleAccount: (payload: any) => void
     disconnectGoogleAccount: (accountId: string) => void
     getWhatsAppStatus: (payload: { baseUrl: string; apiToken: string }) => Promise<any>
+    getWhatsAppConfig: (payload: { baseUrl: string; apiToken: string }) => Promise<any>
     requestWhatsAppPairingQr: (payload: { baseUrl: string; apiToken: string; refresh?: boolean; waitTimeoutMs?: number }) => Promise<any>
     clearWhatsAppSession: (payload: { baseUrl: string; apiToken: string }) => Promise<any>
+    saveWhatsAppConfig: (payload: {
+      baseUrl: string
+      apiToken: string
+      allowedPhone?: string | null
+      selfChatOnly?: boolean | null
+    }) => Promise<any>
     onCalendarAgendaUpdate: (cb: (data: any) => void) => () => void
     onIntegrationsUpdate: (cb: (data: any) => void) => () => void
     onIntegrationEvent: (cb: (data: any) => void) => () => void

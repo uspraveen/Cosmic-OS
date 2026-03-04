@@ -15,6 +15,11 @@ class WhatsAppPairingRequest(BaseModel):
     wait_timeout_ms: int = Field(default=15000, ge=1000, le=60000)
 
 
+class WhatsAppConfigUpdateRequest(BaseModel):
+    allowed_phone: str | None = Field(default=None, max_length=32)
+    self_chat_only: bool | None = None
+
+
 def get_runtime(request: Request) -> GatewayRuntime:
     runtime = getattr(request.app.state, "gateway_runtime", None)
     if runtime is None:
@@ -113,6 +118,38 @@ async def clear_whatsapp_session(
 ) -> dict[str, Any]:
     try:
         payload = await runtime.clear_whatsapp_session()
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="WhatsApp adapter is not registered") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    return payload
+
+
+@router.get("/channels/whatsapp/config")
+async def get_whatsapp_config(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        payload = await runtime.get_whatsapp_config()
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="WhatsApp adapter is not registered") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    return payload
+
+
+@router.post("/channels/whatsapp/config")
+async def update_whatsapp_config(
+    body: WhatsAppConfigUpdateRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        payload = await runtime.update_whatsapp_config(
+            allowed_phone=body.allowed_phone,
+            self_chat_only=body.self_chat_only,
+        )
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="WhatsApp adapter is not registered") from exc
     except RuntimeError as exc:

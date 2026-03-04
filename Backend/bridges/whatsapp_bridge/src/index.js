@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import axios from 'axios';
 import express from 'express';
 import makeWASocket, {
+  Browsers,
   DisconnectReason,
   getContentType,
   useMultiFileAuthState,
@@ -57,6 +58,12 @@ function envInt(name, fallback) {
   return Number.isNaN(parsed) ? fallback : parsed;
 }
 
+function envBool(name, fallback) {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
+}
+
 function resolveBridgePath(rawPath, fallbackSegments) {
   if (rawPath) {
     return path.isAbsolute(rawPath)
@@ -78,6 +85,10 @@ const config = {
   host: process.env.WHATSAPP_BRIDGE_HOST ?? '127.0.0.1',
   port: envInt('WHATSAPP_BRIDGE_PORT', 3000),
   authDir: resolveBridgePath(process.env.WHATSAPP_AUTH_DIR, ['store', 'auth']),
+  configStorePath: resolveBridgePath(
+    process.env.WHATSAPP_CONFIG_PATH,
+    ['store', 'bridge-config.json'],
+  ),
   bridgeToken: process.env.WHATSAPP_BRIDGE_TOKEN ?? '',
   gatewayInternalToken: process.env.GATEWAY_INTERNAL_TOKEN ?? '',
 };
@@ -97,9 +108,17 @@ let connectionState = {
   authDir: config.authDir,
   connectedJid: null,
 };
+let bridgeConfig = {
+  allowedPhone: normalizePhoneValue(process.env.WHATSAPP_ALLOWED_PHONE ?? ''),
+  selfChatOnly: envBool('WHATSAPP_SELF_CHAT_ONLY', false),
+};
 
 async function ensureAuthDir() {
   await fs.mkdir(config.authDir, { recursive: true });
+}
+
+async function ensureConfigStoreDir() {
+  await fs.mkdir(path.dirname(config.configStorePath), { recursive: true });
 }
 
 async function hasExistingAuthState() {
@@ -118,6 +137,98 @@ function setConnectionState(patch) {
 function clearQrState() {
   latestQr = null;
   qrUpdatedAt = null;
+}
+
+function normalizePhoneValue(rawValue) {
+  const text = String(rawValue ?? '').trim();
+  if (!text) {
+    return '';
+  }
+  const digits = text.replace(/\D/g, '');
+  return digits ? `+${digits}` : '';
+}
+
+function normalizeBridgeRecipient(rawValue) {
+  const text = String(rawValue ?? '').trim();
+  if (!text) {
+    return '';
+  }
+  if (text.endsWith('@s.whatsapp.net')) {
+    return normalizePhoneValue(text.split('@', 1)[0]);
+  }
+  return normalizePhoneValue(text);
+}
+
+async function loadBridgeConfig() {
+  await ensureConfigStoreDir();
+
+  try {
+    const raw = await fs.readFile(config.configStorePath, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') {
+      return;
+    }
+
+    bridgeConfig = {
+      allowedPhone: normalizePhoneValue(parsed.allowed_phone ?? bridgeConfig.allowedPhone),
+      selfChatOnly: Boolean(parsed.self_chat_only ?? bridgeConfig.selfChatOnly),
+    };
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      console.warn('Failed to load WhatsApp bridge config:', error?.message ?? error);
+    }
+  }
+}
+
+async function saveBridgeConfig() {
+  await ensureConfigStoreDir();
+  await fs.writeFile(
+    config.configStorePath,
+    JSON.stringify(
+      {
+        allowed_phone: bridgeConfig.allowedPhone || null,
+        self_chat_only: bridgeConfig.selfChatOnly,
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+}
+
+function buildBridgeConfigPayload() {
+  return {
+    allowed_phone: bridgeConfig.allowedPhone || null,
+    self_chat_only: bridgeConfig.selfChatOnly,
+  };
+}
+
+function getSelfChatPhone() {
+  return normalizePhoneFromJid(connectionState.connectedJid);
+}
+
+function getEffectiveAllowedPhone() {
+  if (bridgeConfig.allowedPhone) {
+    return bridgeConfig.allowedPhone;
+  }
+  if (bridgeConfig.selfChatOnly) {
+    return getSelfChatPhone();
+  }
+  return '';
+}
+
+function shouldAcceptInboundPayload(payload) {
+  const effectiveAllowedPhone = getEffectiveAllowedPhone();
+  if (!effectiveAllowedPhone) {
+    return true;
+  }
+
+  if (payload?.chat?.type !== 'dm') {
+    return false;
+  }
+
+  const senderPhone = normalizePhoneValue(payload?.sender?.phone ?? payload?.sender?.jid ?? '');
+  return senderPhone === effectiveAllowedPhone;
 }
 
 function describeDisconnect(statusCode, fallbackMessage = 'Connection failure') {
@@ -139,6 +250,7 @@ async function buildStatusPayload() {
     qr_updated_at: qrUpdatedAt,
     connected_jid: connectionState.connectedJid,
     last_error: lastError,
+    bridge_config: buildBridgeConfigPayload(),
   };
 }
 
@@ -587,6 +699,11 @@ function bindSocketEvents(currentSock, saveCreds) {
       const sender = payload.sender?.jid ?? payload.chat?.jid ?? 'unknown';
       const summary = payload.message?.text ?? payload.message?.caption ?? `[${payload.message?.type ?? 'unknown'}]`;
 
+      if (!shouldAcceptInboundPayload(payload)) {
+        console.log(`Ignoring WhatsApp message outside configured user scope: ${sender}`);
+        continue;
+      }
+
       console.log(`Incoming WhatsApp message from ${sender}: ${summary}`);
 
       try {
@@ -623,7 +740,10 @@ async function ensureSocketConnected({ refresh = false } = {}) {
     const { state, saveCreds } = await useMultiFileAuthState(config.authDir);
     const currentSock = makeWASocket({
       auth: state,
+      browser: Browsers.macOS('Google Chrome'),
+      markOnlineOnConnect: false,
       printQRInTerminal: false,
+      shouldSyncHistoryMessage: () => false,
     });
 
     sock = currentSock;
@@ -668,6 +788,37 @@ app.get('/health', async (_req, res) => {
 
 app.get('/status', verifyBridgeToken, async (_req, res) => {
   res.json(await buildStatusPayload());
+});
+
+app.get('/config', verifyBridgeToken, async (_req, res) => {
+  res.json({
+    status: 'ok',
+    config: buildBridgeConfigPayload(),
+  });
+});
+
+app.post('/config', verifyBridgeToken, async (req, res) => {
+  const nextAllowedPhone = normalizePhoneValue(req.body?.allowed_phone ?? '');
+  const nextSelfChatOnly = Boolean(req.body?.self_chat_only ?? false);
+
+  bridgeConfig = {
+    allowedPhone: nextAllowedPhone,
+    selfChatOnly: nextSelfChatOnly,
+  };
+
+  try {
+    await saveBridgeConfig();
+    res.json({
+      status: 'ok',
+      config: buildBridgeConfigPayload(),
+    });
+  } catch (error) {
+    const message = error?.message ?? String(error);
+    res.status(500).json({
+      status: 'error',
+      error: message,
+    });
+  }
 });
 
 app.post('/pairing/qr', verifyBridgeToken, async (req, res) => {
@@ -747,13 +898,25 @@ async function handleSend(req, res) {
     return;
   }
 
-  const jid = number.includes('@')
-    ? number
-    : `${number.replace(/\D/g, '')}@s.whatsapp.net`;
+  const normalizedPhone = normalizeBridgeRecipient(number);
+  if (!normalizedPhone) {
+    res.status(400).json({ error: 'number must be a valid WhatsApp destination' });
+    return;
+  }
+
+  const effectiveAllowedPhone = getEffectiveAllowedPhone();
+  if (effectiveAllowedPhone && normalizedPhone !== effectiveAllowedPhone) {
+    res.status(403).json({
+      error: `Outbound WhatsApp is restricted to ${effectiveAllowedPhone}`,
+    });
+    return;
+  }
+
+  const jid = `${normalizedPhone.replace(/\D/g, '')}@s.whatsapp.net`;
 
   try {
     await sock.sendMessage(jid, { text: message });
-    console.log(`Outgoing WhatsApp message to ${number}: ${message}`);
+    console.log(`Outgoing WhatsApp message to ${normalizedPhone}: ${message}`);
     res.json({ status: 'success' });
   } catch (error) {
     console.error('Failed to send WhatsApp message:', error?.message ?? error);
@@ -765,6 +928,7 @@ app.post('/send-message', verifyBridgeToken, handleSend);
 app.post('/send', verifyBridgeToken, handleSend);
 
 app.listen(config.port, config.host, async () => {
+  await loadBridgeConfig();
   console.log(`WhatsApp bridge listening on http://${config.host}:${config.port}`);
   console.log(`Gateway intake URL: ${config.gatewayUrl}`);
   console.log(`Baileys auth directory: ${config.authDir}`);

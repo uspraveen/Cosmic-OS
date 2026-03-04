@@ -41,6 +41,13 @@ interface GatewayConnectionConfig {
   apiToken: string
 }
 
+function unwrapWhatsAppBridgePayload(payload: any) {
+  if (payload && typeof payload === 'object' && payload.bridge && typeof payload.bridge === 'object') {
+    return payload.bridge
+  }
+  return payload
+}
+
 function normalizeGatewayBaseUrl(rawBaseUrl: string) {
   const trimmed = String(rawBaseUrl || '').trim()
   if (!trimmed) {
@@ -720,7 +727,12 @@ app.whenReady().then(() => {
   })
 
   ipcMain.handle('whatsapp:get-status', async (_, payload: GatewayConnectionConfig) => {
-    return callGatewayJson(payload, '/channels/whatsapp/status')
+    const response = await callGatewayJson(payload, '/channels/whatsapp/status')
+    return unwrapWhatsAppBridgePayload(response)
+  })
+
+  ipcMain.handle('whatsapp:get-config', async (_, payload: GatewayConnectionConfig) => {
+    return callGatewayJson(payload, '/channels/whatsapp/config')
   })
 
   ipcMain.handle('whatsapp:request-pairing-qr', async (_, payload: GatewayConnectionConfig & {
@@ -744,6 +756,19 @@ app.whenReady().then(() => {
   ipcMain.handle('whatsapp:clear-session', async (_, payload: GatewayConnectionConfig) => {
     return callGatewayJson(payload, '/channels/whatsapp/session', {
       method: 'DELETE',
+    })
+  })
+
+  ipcMain.handle('whatsapp:save-config', async (_, payload: GatewayConnectionConfig & {
+    allowedPhone?: string | null
+    selfChatOnly?: boolean | null
+  }) => {
+    return callGatewayJson(payload, '/channels/whatsapp/config', {
+      method: 'POST',
+      body: {
+        allowed_phone: payload?.allowedPhone ?? null,
+        self_chat_only: payload?.selfChatOnly ?? null,
+      },
     })
   })
 

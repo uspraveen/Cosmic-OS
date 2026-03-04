@@ -16,6 +16,12 @@ interface WhatsAppBridgeStatus {
   qr_updated_at?: string | null
   connected_jid?: string | null
   last_error?: string | null
+  bridge_config?: WhatsAppBridgeConfig | null
+}
+
+interface WhatsAppBridgeConfig {
+  allowed_phone?: string | null
+  self_chat_only?: boolean | null
 }
 
 type BannerTone = 'success' | 'error' | 'info'
@@ -100,10 +106,13 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
   const [gatewayApiToken, setGatewayApiToken] = useState('')
   const [configLoaded, setConfigLoaded] = useState(false)
   const [status, setStatus] = useState<WhatsAppBridgeStatus | null>(null)
+  const [allowedPhone, setAllowedPhone] = useState('')
+  const [allowedPhoneDirty, setAllowedPhoneDirty] = useState(false)
   const [statusError, setStatusError] = useState('')
   const [banner, setBanner] = useState<{ tone: BannerTone; message: string } | null>(null)
   const [loadingStatus, setLoadingStatus] = useState(false)
   const [savingConfig, setSavingConfig] = useState(false)
+  const [savingBridgeConfig, setSavingBridgeConfig] = useState(false)
   const [pairingBusy, setPairingBusy] = useState(false)
   const [disconnecting, setDisconnecting] = useState(false)
   const [qrDataUrl, setQrDataUrl] = useState('')
@@ -166,6 +175,8 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
         setStatus(null)
         setStatusError('')
         setQrDataUrl('')
+        setAllowedPhone('')
+        setAllowedPhoneDirty(false)
       }
       return
     }
@@ -182,6 +193,10 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
         })
         if (cancelled) return
         setStatus(nextStatus ?? null)
+        const config = nextStatus?.bridge_config
+        if (!allowedPhoneDirty && config && typeof config === 'object') {
+          setAllowedPhone(String(config.allowed_phone ?? ''))
+        }
         setStatusError('')
       } catch (error: unknown) {
         if (cancelled) return
@@ -202,7 +217,7 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
       cancelled = true
       window.clearInterval(poll)
     }
-  }, [active, configLoaded, configReady, gatewayApiToken, gatewayBaseUrl])
+  }, [active, allowedPhoneDirty, configLoaded, configReady, gatewayApiToken, gatewayBaseUrl])
 
   const persistGatewayConfig = async (successMessage?: string) => {
     const trimmedBaseUrl = gatewayBaseUrl.trim()
@@ -223,6 +238,36 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
     }
   }
 
+  const persistBridgeConfig = async (successMessage?: string) => {
+    if (!configReady) {
+      throw new Error('Save the Gateway connection first.')
+    }
+
+    setSavingBridgeConfig(true)
+    try {
+      const nextConfig = await window.cosmic?.saveWhatsAppConfig({
+        baseUrl: gatewayBaseUrl.trim(),
+        apiToken: gatewayApiToken.trim(),
+        allowedPhone: allowedPhone.trim() || null,
+      })
+      const persistedAllowedPhone = String(nextConfig?.allowed_phone ?? '')
+      setAllowedPhone(persistedAllowedPhone)
+      setAllowedPhoneDirty(false)
+      setStatus((current) => current ? {
+        ...current,
+        bridge_config: {
+          ...(current.bridge_config ?? {}),
+          allowed_phone: persistedAllowedPhone || null,
+        },
+      } : current)
+      if (successMessage) {
+        setBanner({ tone: 'success', message: successMessage })
+      }
+    } finally {
+      setSavingBridgeConfig(false)
+    }
+  }
+
   const handleCheckStatus = async () => {
     try {
       await persistGatewayConfig()
@@ -232,6 +277,10 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
         apiToken: gatewayApiToken,
       })
       setStatus(nextStatus ?? null)
+      const config = nextStatus?.bridge_config
+      if (!allowedPhoneDirty && config && typeof config === 'object') {
+        setAllowedPhone(String(config.allowed_phone ?? ''))
+      }
       setStatusError('')
       setBanner({ tone: 'success', message: 'Gateway connection verified.' })
     } catch (error: unknown) {
@@ -248,6 +297,7 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
   const handleRequestQr = async () => {
     try {
       await persistGatewayConfig()
+      await persistBridgeConfig()
       setPairingBusy(true)
       const nextStatus = await window.cosmic?.requestWhatsAppPairingQr({
         baseUrl: gatewayBaseUrl,
@@ -256,6 +306,11 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
         waitTimeoutMs: 20000,
       })
       setStatus(nextStatus ?? null)
+      const config = nextStatus?.bridge_config
+      if (config && typeof config === 'object') {
+        setAllowedPhone(String(config.allowed_phone ?? ''))
+        setAllowedPhoneDirty(false)
+      }
       setStatusError('')
       setBanner({
         tone: nextStatus?.qr ? 'info' : 'success',
@@ -381,8 +436,22 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
             />
           </div>
 
+          <div className="cosmic-google-field">
+            <label>Allowed User Phone Number</label>
+            <input
+              className="cosmic-google-input"
+              value={allowedPhone}
+              onChange={(event) => {
+                setAllowedPhone(event.target.value)
+                setAllowedPhoneDirty(true)
+              }}
+              placeholder="+1 555 123 4567"
+              spellCheck={false}
+            />
+          </div>
+
           <p className="cosmic-google-apps-hint">
-            Do not enter the WhatsApp bridge port here. The desktop app must talk to the Gateway only, and the Gateway will call the internal bridge.
+            Do not enter the WhatsApp bridge port here. The desktop app must talk to the Gateway only, and the Gateway will call the internal bridge. If an allowed user phone number is set, the bridge will only accept inbound messages from that number and will only send replies back to it.
           </p>
 
           <div className="cosmic-google-card-actions">
@@ -395,6 +464,16 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
               disabled={savingConfig || !configReady}
             >
               {savingConfig ? 'Saving…' : 'Save connection'}
+            </button>
+            <button
+              type="button"
+              className="cosmic-google-action secondary"
+              onClick={() => {
+                void persistBridgeConfig('Allowed WhatsApp number saved on the VM.')
+              }}
+              disabled={savingBridgeConfig || !configReady}
+            >
+              {savingBridgeConfig ? 'Saving…' : 'Save user number'}
             </button>
           </div>
 

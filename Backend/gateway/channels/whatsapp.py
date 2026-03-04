@@ -50,6 +50,7 @@ class WhatsAppConfig:
     send_path: str = "/send"
     pairing_qr_path: str = "/pairing/qr"
     session_path: str = "/session"
+    config_path: str = "/config"
 
     @classmethod
     def from_env(cls) -> "WhatsAppConfig":
@@ -218,6 +219,48 @@ class WhatsAppAdapter(ChannelAdapter):
             self.config.session_path,
             headers=self._bridge_headers(),
         )
+
+    async def get_config(self) -> dict[str, Any]:
+        await self.ensure_ready()
+        if self._http is None:
+            raise RuntimeError("WhatsApp bridge client is not initialized")
+
+        payload = await self._request_bridge_json(
+            "GET",
+            self.config.config_path,
+            headers=self._bridge_headers(),
+        )
+        config_payload = payload.get("config")
+        if isinstance(config_payload, dict):
+            return config_payload
+        return payload
+
+    async def update_config(
+        self,
+        *,
+        allowed_phone: str | None = None,
+        self_chat_only: bool | None = None,
+    ) -> dict[str, Any]:
+        await self.ensure_ready()
+        if self._http is None:
+            raise RuntimeError("WhatsApp bridge client is not initialized")
+
+        body: dict[str, Any] = {}
+        if allowed_phone is not None:
+            body["allowed_phone"] = allowed_phone
+        if self_chat_only is not None:
+            body["self_chat_only"] = self_chat_only
+
+        payload = await self._request_bridge_json(
+            "POST",
+            self.config.config_path,
+            json=body,
+            headers=self._bridge_headers(),
+        )
+        config_payload = payload.get("config")
+        if isinstance(config_payload, dict):
+            return config_payload
+        return payload
 
     async def handle_incoming(self, payload: dict[str, Any]) -> NormalizedMessage:
         normalized = self.normalize_message(payload)
