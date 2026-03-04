@@ -1,5 +1,6 @@
 declare module 'ssh2' {
   export class Client {
+    on(event: string, listener: (...args: any[]) => void): this
     once(event: string, listener: (...args: any[]) => void): this
     off(event: string, listener: (...args: any[]) => void): this
     connect(config: {

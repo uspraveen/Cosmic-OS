@@ -85,9 +85,7 @@ function normalizeGatewayBaseUrl(rawBaseUrl: string) {
 }
 
 function normalizeTunnelConfig(config: Partial<GatewaySshTunnelConfig> | undefined, baseUrl: string): GatewaySshTunnelConfig {
-  const normalizedBaseUrl = normalizeGatewayBaseUrl(baseUrl)
-  const gatewayUrl = new URL(normalizedBaseUrl)
-  const parsedPort = Number.parseInt(gatewayUrl.port || '', 10)
+  normalizeGatewayBaseUrl(baseUrl)
 
   return {
     enabled: Boolean(config?.enabled),
@@ -96,9 +94,9 @@ function normalizeTunnelConfig(config: Partial<GatewaySshTunnelConfig> | undefin
     username: String(config?.username || '').trim(),
     privateKeyPath: String(config?.privateKeyPath || '').trim(),
     remoteHost: String(config?.remoteHost || '').trim() || '127.0.0.1',
-    remotePort: Number.isFinite(parsedPort)
-      ? parsedPort
-      : (gatewayUrl.protocol === 'https:' ? 443 : 80),
+    remotePort: Number.isFinite(Number(config?.remotePort))
+      ? Number(config?.remotePort)
+      : 8080,
   }
 }
 
@@ -163,6 +161,9 @@ async function ensureGatewayTunnel(
   const privateKey = fs.readFileSync(normalized.privateKeyPath, 'utf8')
   const client = new SSHClient()
   gatewayTunnelClient = client
+  client.on('error', (error: Error) => {
+    console.error('[Gateway SSH tunnel]', error.message)
+  })
 
   await new Promise<void>((resolve, reject) => {
     const onReady = () => {
