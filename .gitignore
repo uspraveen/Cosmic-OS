@@ -18,6 +18,7 @@ Backend/bridges/*/.npm-cache/
 Backend/bridges/*/dist/
 Backend/bridges/*/coverage/
 Backend/bridges/*/*.tgz
+Backend/bridges/*/store/
 Backend/bridges/*/store/auth/
 Backend/bridges/*/runtime/
 auth_info_baileys/
