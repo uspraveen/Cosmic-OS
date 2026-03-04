@@ -19,6 +19,10 @@ interface Window {
     setVolume: (level: number) => void
     sendToGemini: (prompt: string) => void
 
+    // Auth
+    login: (apiKey: string) => Promise<{ success: boolean; error?: string; message?: string; [key: string]: any }>
+    logout: () => Promise<{ success: boolean }>
+
     // Settings
     getSettings: () => void
     saveSetting: (key: string, value: any) => void

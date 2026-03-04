@@ -3,6 +3,7 @@ import QRCode from 'qrcode'
 
 interface WhatsAppIntegrationSettingsProps {
   active: boolean
+  cosmicAuth?: { gatewayUrl: string; gatewayApiToken: string }
 }
 
 interface WhatsAppBridgeStatus {
@@ -101,7 +102,8 @@ function getErrorMessage(error: unknown, fallback: string) {
   return fallback
 }
 
-export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrationSettingsProps) {
+export default function WhatsAppIntegrationSettings({ active, cosmicAuth }: WhatsAppIntegrationSettingsProps) {
+  const authManaged = !!cosmicAuth
   const [gatewayBaseUrl, setGatewayBaseUrl] = useState('')
   const [gatewayApiToken, setGatewayApiToken] = useState('')
   const [configLoaded, setConfigLoaded] = useState(false)
@@ -407,11 +409,11 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
         <div className="cosmic-google-card-header">
           <div className="cosmic-google-card-profile">
             <div className="cosmic-google-avatar cosmic-whatsapp-avatar" aria-hidden="true">
-              VM
+              {authManaged ? 'Ph' : 'VM'}
             </div>
             <div className="cosmic-google-card-info">
-              <strong>Gateway connection</strong>
-              <span>Your COSMIC VM Gateway URL and API token.</span>
+              <strong>{authManaged ? 'Phone number' : 'Gateway connection'}</strong>
+              <span>{authManaged ? 'Which number can chat with COSMIC.' : 'Your COSMIC VM Gateway URL and API token.'}</span>
             </div>
           </div>
           <div className="cosmic-google-card-badges">
@@ -422,28 +424,32 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
         </div>
 
         <div className="cosmic-google-card-body">
-          <div className="cosmic-google-field">
-            <label>Gateway Base URL</label>
-            <input
-              className="cosmic-google-input"
-              value={gatewayBaseUrl}
-              onChange={(event) => setGatewayBaseUrl(event.target.value)}
-              placeholder="https://your-vm-domain or http://127.0.0.1:8080"
-              spellCheck={false}
-            />
-          </div>
+          {!authManaged && (
+            <>
+              <div className="cosmic-google-field">
+                <label>Gateway Base URL</label>
+                <input
+                  className="cosmic-google-input"
+                  value={gatewayBaseUrl}
+                  onChange={(event) => setGatewayBaseUrl(event.target.value)}
+                  placeholder="https://your-vm-domain or http://127.0.0.1:8080"
+                  spellCheck={false}
+                />
+              </div>
 
-          <div className="cosmic-google-field">
-            <label>Gateway API Token</label>
-            <input
-              className="cosmic-google-input"
-              type="password"
-              value={gatewayApiToken}
-              onChange={(event) => setGatewayApiToken(event.target.value)}
-              placeholder="Paste the Gateway API token"
-              spellCheck={false}
-            />
-          </div>
+              <div className="cosmic-google-field">
+                <label>Gateway API Token</label>
+                <input
+                  className="cosmic-google-input"
+                  type="password"
+                  value={gatewayApiToken}
+                  onChange={(event) => setGatewayApiToken(event.target.value)}
+                  placeholder="Paste the Gateway API token"
+                  spellCheck={false}
+                />
+              </div>
+            </>
+          )}
 
           <div className="cosmic-google-field">
             <label>Allowed User Phone Number</label>
@@ -460,29 +466,34 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
           </div>
 
           <p className="cosmic-google-apps-hint">
-            Enter the public Gateway URL of your COSMIC VM and its API token. If an allowed user phone number is set, the bridge will only accept inbound messages from that number and will only send replies back to it.
+            {authManaged
+              ? 'Restrict which WhatsApp number can interact with COSMIC.'
+              : 'Enter the public Gateway URL of your COSMIC VM and its API token. Set an allowed phone to restrict inbound/outbound messages.'
+            }
           </p>
 
           <div className="cosmic-google-card-actions">
+            {!authManaged && (
+              <button
+                type="button"
+                className="cosmic-google-action primary"
+                onClick={() => {
+                  void persistGatewayConfig('Gateway connection saved locally.')
+                }}
+                disabled={savingConfig || !configReady}
+              >
+                {savingConfig ? 'Saving…' : 'Save connection'}
+              </button>
+            )}
             <button
               type="button"
-              className="cosmic-google-action primary"
-              onClick={() => {
-                void persistGatewayConfig('Gateway connection saved locally.')
-              }}
-              disabled={savingConfig || !configReady}
-            >
-              {savingConfig ? 'Saving…' : 'Save connection'}
-            </button>
-            <button
-              type="button"
-              className="cosmic-google-action secondary"
+              className={`cosmic-google-action ${authManaged ? 'primary' : 'secondary'}`}
               onClick={() => {
                 void persistBridgeConfig('Allowed WhatsApp number saved on the VM.')
               }}
               disabled={savingBridgeConfig || !configReady}
             >
-              {savingBridgeConfig ? 'Saving…' : 'Save user number'}
+              {savingBridgeConfig ? 'Saving…' : 'Save number'}
             </button>
           </div>
 

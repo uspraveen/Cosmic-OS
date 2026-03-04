@@ -29,6 +29,8 @@ interface DynamicIslandProps {
   onOpacityChange: (opacity: number) => void
   debug: boolean
   keyStatus: { gemini: boolean; perplexity: boolean }
+  authData?: any
+  onLogout?: () => void
 }
 
 interface MediaState {
@@ -220,7 +222,9 @@ export default function DynamicIsland({
   onStaybackChange,
   islandOpacity,
   onOpacityChange,
-  keyStatus
+  keyStatus,
+  authData,
+  onLogout,
 }: DynamicIslandProps) {
   const [activeSlide, setActiveSlide] = useState(0)
   const TOTAL_SLIDES = 6
@@ -1590,9 +1594,10 @@ export default function DynamicIsland({
           onStaybackChange={onStaybackChange}
           onClose={() => setShowSettings(false)}
           keyStatus={keyStatus}
-
           islandOpacity={islandOpacity}
           onOpacityChange={onOpacityChange}
+          authData={authData}
+          onLogout={onLogout}
         />
       )}
     </>

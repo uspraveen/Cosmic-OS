@@ -7,6 +7,7 @@ import 'katex/dist/katex.min.css'
 import LiquidGlass from './LiquidGlass'
 import DynamicIsland from './DynamicIsland'
 import SetupModal from './SetupModal'
+import CosmicLoginModal from './CosmicLoginModal'
 import LiquidGlassLoader from './LiquidGlassLoader'
 import MeetingMode from './MeetingMode'
 import './spotlight.css'
@@ -51,6 +52,10 @@ export default function App() {
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [showScrollButton, setShowScrollButton] = useState(false)
 
+  // --- AUTH STATE ---
+  const [authState, setAuthState] = useState<'loading' | 'unauthenticated' | 'authenticated'>('loading')
+  const [authData, setAuthData] = useState<any>(null)
+
   // --- HISTORY / DB STATE ---
   const [isFirstRun, setIsFirstRun] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
@@ -88,13 +93,30 @@ export default function App() {
     })
     window.cosmic?.sendToGemini("CHECK_KEYS")
 
-    // Load Settings
+    // Load Settings + Auth Check
     window.cosmic?.getSettings()
     const unsubSettings = window.cosmic?.onSettingsUpdate((settings) => {
       console.log("App: Loaded settings", settings)
       if (settings['searchPosition']) setSearchPosition(settings['searchPosition'])
       if (settings['staybackTime']) setStaybackTime(parseInt(settings['staybackTime']))
       if (settings['islandOpacity']) setIslandOpacity(parseFloat(settings['islandOpacity']))
+
+      // Check auth from settings
+      if (settings['cosmicAuth']) {
+        try {
+          const auth = typeof settings['cosmicAuth'] === 'string'
+            ? JSON.parse(settings['cosmicAuth'])
+            : settings['cosmicAuth']
+          if (auth?.userId) {
+            setAuthState('authenticated')
+            setAuthData(auth)
+            return
+          }
+        } catch { /* invalid JSON, treat as unauthenticated */ }
+      }
+      if (authState === 'loading') {
+        setAuthState('unauthenticated')
+      }
     })
 
     let lastIgnore: boolean | null = null
@@ -416,9 +438,24 @@ export default function App() {
           window.cosmic?.saveSetting('islandOpacity', val)
         }}
         keyStatus={keyStatus}
+        authData={authData}
+        onLogout={() => {
+          window.cosmic?.logout()
+          setAuthState('unauthenticated')
+          setAuthData(null)
+        }}
       />
 
-      {isFirstRun && (
+      {authState === 'unauthenticated' && (
+        <CosmicLoginModal
+          onAuthenticated={(data) => {
+            setAuthState('authenticated')
+            setAuthData(data)
+          }}
+        />
+      )}
+
+      {authState === 'authenticated' && isFirstRun && (
         <SetupModal
           onComplete={() => {
             setIsFirstRun(false);

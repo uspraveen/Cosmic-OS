@@ -24,6 +24,8 @@ interface SettingsProps {
   }
   islandOpacity: number
   onOpacityChange: (opacity: number) => void
+  authData?: any
+  onLogout?: () => void
 }
 
 type SettingsView = 'main' | 'monitors' | 'api' | 'ui' | 'integrations' | 'integrations-google' | 'integrations-whatsapp'
@@ -38,6 +40,8 @@ export default function Settings({
   keyStatus,
   islandOpacity,
   onOpacityChange,
+  authData,
+  onLogout,
 }: SettingsProps) {
   const [currentView, setCurrentView] = useState<SettingsView>('main')
 
@@ -113,6 +117,43 @@ export default function Settings({
 
             {currentView === 'main' && (
               <>
+                {authData && (
+                  <div style={{
+                    padding: '14px 16px',
+                    background: 'rgba(255,255,255,0.03)',
+                    border: '1px solid rgba(255,255,255,0.08)',
+                    borderRadius: 12,
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: 8,
+                  }}>
+                    <div>
+                      <div style={{ color: '#fff', fontWeight: 600, fontSize: 14 }}>
+                        {authData.fullName || 'Cosmic User'}
+                      </div>
+                      <div style={{ color: 'rgba(255,255,255,0.45)', fontSize: 12, marginTop: 2 }}>
+                        Connected to VM
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => onLogout?.()}
+                      style={{
+                        padding: '6px 14px',
+                        background: 'rgba(255, 69, 58, 0.15)',
+                        color: '#ff6b6b',
+                        border: 'none',
+                        borderRadius: 8,
+                        fontSize: 12,
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Log out
+                    </button>
+                  </div>
+                )}
+
                 <button className="setting-nav-btn" onClick={() => setCurrentView('integrations')}>
                   <div className="setting-nav-copy">
                     <span style={{ fontWeight: 600 }}>Integrations</span>
@@ -208,7 +249,10 @@ export default function Settings({
             )}
 
             {currentView === 'integrations-whatsapp' && (
-              <WhatsAppIntegrationSettings active={currentView === 'integrations-whatsapp'} />
+              <WhatsAppIntegrationSettings
+                active={currentView === 'integrations-whatsapp'}
+                cosmicAuth={authData ? { gatewayUrl: authData.gatewayUrl, gatewayApiToken: authData.gatewayApiToken } : undefined}
+              />
             )}
 
             {currentView === 'monitors' && (

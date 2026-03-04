@@ -610,8 +610,15 @@ async function closeSocket({ logout = false } = {}) {
 }
 
 async function clearAuthState() {
-  await fs.rm(config.authDir, { recursive: true, force: true });
-  await ensureAuthDir();
+  // Delete contents of authDir rather than the directory itself.
+  // The parent dir may be owned by root (e.g. /var/lib/cosmic/whatsapp/)
+  // so removing + recreating authDir would fail with EACCES.
+  const entries = await fs.readdir(config.authDir).catch(() => []);
+  await Promise.all(
+    entries.map((entry) =>
+      fs.rm(path.join(config.authDir, entry), { recursive: true, force: true })
+    )
+  );
 }
 
 function bindSocketEvents(currentSock, saveCreds) {

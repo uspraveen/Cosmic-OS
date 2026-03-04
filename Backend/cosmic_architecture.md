@@ -10,6 +10,7 @@
 | Session & Memory | Session Manager (Gateway) + Qdrant local (hybrid: dense + sparse vectors) + .md file store |
 | Embeddings | Dense: Qwen3-embedding-8b via OpenRouter. Sparse: FastEmbed BM25 (local). |
 | Credentials | Gateway Credential Manager (OAuth PKCE, encrypted token store) |
+| User Auth & Provisioning | Supabase (user accounts, VM provisioning, API key auth — §3.5a) |
 | Process Management | supervisord (containers) / systemd (bare-metal) |
 | Protocol | Agent Runtime Contract v1.6 |
 | Tool Access | Declared per agent in `agent_card.yaml` |
@@ -126,7 +127,7 @@ Every design decision flows from one mental model. Keep these three layers stric
 
 | Component | Responsibility |
 |---|---|
-| **Desktop App** | Electron + React UI. Always-on background process registered at startup. Maintains conversation history locally. Connects to Gateway via WebSocket. Settings panel triggers OAuth account connections via Gateway. One of several channel adapters — see §27. |
+| **Desktop App** | Electron + React UI. Always-on background process registered at startup. Authenticates users via Cosmic API key against Supabase, auto-provisions Gateway URL and API token from the user's VM config (§3.5a). Maintains conversation history locally. Connects to Gateway via WebSocket. Settings panel triggers OAuth account connections via Gateway. One of several channel adapters — see §27. |
 | **Channel Adapters** | Normalize platform-specific messages into the unified TaskEnvelope format. Each adapter handles authentication, message parsing, and response delivery for its platform. Available adapters: Desktop (WebSocket), WhatsApp, Telegram, Slack, Discord, CLI. New platforms are added by implementing the adapter interface (§27). |
 | **Gateway** | Receives inputs from all five sources (messages, heartbeats, crons, hooks, webhooks), validates auth + schema, tags every input with `source`, `source_id`, and `channel`, assembles session context via the Session Manager (today's conversation + retrieved memories). Checks `awaiting_reply` for sticky routing (§3.7); otherwise calls Model Router for classification. Routes to appropriate backend, strips `<awaiting_reply/>` control tags from responses (§3.8), streams responses and task events via the originating channel adapter. Relays task input requests from `user_input:requests` to UI and user replies to `user_input:replies` (§3.12). Owns the Credential Manager (§22), Session Manager (§23), Scheduler (§25), Webhook Handler (§26), Hooks Engine (§28), Channel Adapter Registry (§27), and the Usage Ledger (`gateway/usage.db`) for append-only token/cost telemetry. |
 | **Scheduler** | Gateway module that manages crons and heartbeats. Stores cron definitions and heartbeat config in SQLite. Runs a polling loop that fires TaskEnvelopes to the orchestrator when jobs are due. Exposes internal API for CRUD operations. The orchestrator creates and manages crons via this API. See §25. |
@@ -830,7 +831,7 @@ directly to one row in `usage_events`.
 
 ### 3.5 Authentication
 
-For the desktop app (localhost), authentication uses a local API token generated on first setup and stored in the app's secure storage (Electron `safeStorage`).
+For the desktop app, authentication uses a local API token (`GATEWAY_LOCAL_API_TOKEN`) that is auto-provisioned from Supabase during user login and stored in the desktop app's local SQLite database (`resources/user_data.db`) via the settings bridge. See §3.5a for the full user authentication and VM provisioning flow.
 
 ```python
 import hmac
@@ -853,7 +854,7 @@ async def verify_ws_auth(websocket: WebSocket):
 
 **Desktop → Gateway connectivity:** The desktop app connects directly to the Gateway over HTTPS using the Gateway's public URL (e.g., `http://<vm-ip>:8080`). The Gateway binds to `0.0.0.0` so it is reachable from outside the VM. There is no SSH tunnel or VPN layer between the desktop and Gateway — the local API token provides the authentication boundary. The Gateway port (default `8080`) must be opened in the VM's security group / firewall.
 
-**Production auth model:** In production, each user gets a dedicated VM/VPC. The Gateway URL and local API token are auto-provisioned during onboarding — the user never sees or enters infrastructure credentials. The desktop settings UI for WhatsApp reduces to just the user's phone number and a "Connect" button. The token and Gateway URL are injected by the provisioning layer.
+**Production auth model:** In production, each user gets a dedicated VM/VPC. The Gateway URL and local API token are auto-provisioned from Supabase during login — the user enters their Cosmic API key once and the desktop app resolves their VM config automatically (see §3.5a for the full Supabase schema, RPC function, and desktop auth flow). The desktop settings UI for WhatsApp reduces to just the user's phone number and a "Connect" button. The token and Gateway URL are injected by the auth system, not entered manually.
 
 **Future mobile app:** When a mobile client is added, the auth layer can be extended with JWT or OAuth2 without changing the Gateway's internal routing logic. The auth middleware is a pluggable concern.
 
@@ -869,6 +870,245 @@ async def verify_internal_auth(request: Request):
 ```
 
 This same internal service token protects sidecar bridge callbacks such as `/internal/channels/whatsapp/incoming`. The WhatsApp Bridge authenticates to the existing Gateway service over an internal route; the Gateway does **not** open a second server or a WhatsApp-specific FastAPI process.
+
+### 3.5a User Authentication & VM Provisioning (Supabase)
+
+The desktop app authenticates users against a centralized Supabase project before connecting to any per-user Gateway. This is the **platform-level** authentication layer — it proves the user is a valid COSMIC subscriber and resolves which VM/Gateway they should connect to. It is separate from the **Gateway-level** `GATEWAY_LOCAL_API_TOKEN` authentication described in §3.5, which secures traffic between the desktop app and the Gateway process running on the user's VM.
+
+**Architecture:**
+
+```text
+Desktop App (Electron)
+  └── Supabase RPC (authenticate_with_api_key)
+        └── Returns: user profile + VM config (gateway_url, api_token, vm_ip, vm_dns)
+              └── Desktop stores auth data in local SQLite (resources/user_data.db)
+              └── Auto-configures Gateway URL + API token for all downstream connections
+```
+
+**Supabase project constants** (public — safe to commit, RLS-protected):
+
+```
+URL:      https://hluenippcdiejenmteen.supabase.co
+Anon Key: eyJhbGciOi...  (standard Supabase anon key — only allows RLS-protected queries)
+```
+
+#### 3.5a.1 Supabase Schema: `user_vms` Table
+
+Each COSMIC user gets one dedicated VM. The `user_vms` table maps users to their VM infrastructure.
+
+```sql
+-- Create user_vms table
+CREATE TABLE public.user_vms (
+  id          uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  user_id     uuid NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  gateway_url text NOT NULL,          -- e.g. 'http://3.137.194.119:8080'
+  api_token   text NOT NULL,          -- the GATEWAY_LOCAL_API_TOKEN value for this user's VM
+  vm_ip       text,                   -- e.g. '3.137.194.119'
+  vm_dns      text,                   -- e.g. 'ec2-3-137-194-119.us-east-2.compute.amazonaws.com'
+  vm_region   text DEFAULT 'us-east-2',
+  status      text DEFAULT 'active' CHECK (status IN ('active','suspended','terminated')),
+  created_at  timestamptz DEFAULT now(),
+  updated_at  timestamptz DEFAULT now(),
+  CONSTRAINT  one_vm_per_user UNIQUE (user_id)
+);
+
+-- Index for fast lookup by user_id
+CREATE INDEX idx_user_vms_user_id ON public.user_vms(user_id);
+
+-- Auto-update updated_at timestamp
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER set_user_vms_updated_at
+  BEFORE UPDATE ON public.user_vms
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at_column();
+
+-- RLS: users can only read their own VM row
+ALTER TABLE public.user_vms ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can view their own VM"
+  ON public.user_vms
+  FOR SELECT
+  USING (auth.uid() = user_id);
+```
+
+#### 3.5a.2 Supabase RPC: `authenticate_with_api_key`
+
+A `SECURITY DEFINER` function that bypasses RLS to validate a Cosmic API key and return the user's profile and VM config in a single call. Callable with the Supabase anon key — no prior session required.
+
+```sql
+CREATE OR REPLACE FUNCTION public.authenticate_with_api_key(p_api_key text)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_user  record;
+  v_vm    record;
+BEGIN
+  -- Look up user by API key
+  SELECT id, full_name, email, is_privileged
+    INTO v_user
+    FROM public.users
+   WHERE api_key = p_api_key;
+
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object(
+      'success', false,
+      'error',   'invalid_api_key',
+      'message', 'No user found with this API key.'
+    );
+  END IF;
+
+  -- Check privilege flag
+  IF NOT v_user.is_privileged THEN
+    RETURN jsonb_build_object(
+      'success', false,
+      'error',   'not_privileged',
+      'message', 'This account does not have desktop access.'
+    );
+  END IF;
+
+  -- Look up active VM
+  SELECT gateway_url, api_token, vm_ip, vm_dns, vm_region
+    INTO v_vm
+    FROM public.user_vms
+   WHERE user_id = v_user.id
+     AND status = 'active';
+
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object(
+      'success', false,
+      'error',   'no_active_vm',
+      'message', 'No active VM found for this account.'
+    );
+  END IF;
+
+  -- Return full auth payload
+  RETURN jsonb_build_object(
+    'success', true,
+    'user', jsonb_build_object(
+      'id',            v_user.id,
+      'full_name',     v_user.full_name,
+      'email',         v_user.email,
+      'is_privileged', v_user.is_privileged
+    ),
+    'vm', jsonb_build_object(
+      'gateway_url', v_vm.gateway_url,
+      'api_token',   v_vm.api_token,
+      'vm_ip',       v_vm.vm_ip,
+      'vm_dns',      v_vm.vm_dns,
+      'vm_region',   v_vm.vm_region
+    )
+  );
+END;
+$$;
+```
+
+**Example: provisioning a user's VM row:**
+
+```sql
+-- Insert a new user's VM config
+INSERT INTO public.user_vms (user_id, gateway_url, api_token, vm_ip, vm_dns, vm_region)
+VALUES (
+  (SELECT id FROM public.users WHERE email = 'user@example.com'),
+  'http://3.137.194.119:8080',
+  'generated-gateway-api-token-here',
+  '3.137.194.119',
+  'ec2-3-137-194-119.us-east-2.compute.amazonaws.com',
+  'us-east-2'
+);
+
+-- Update an existing user's VM config (e.g. IP changed after VM restart)
+UPDATE public.user_vms
+SET gateway_url = 'http://3.137.194.119:8080',
+    vm_ip       = '3.137.194.119',
+    vm_dns      = 'ec2-3-137-194-119.us-east-2.compute.amazonaws.com',
+    vm_region   = 'us-east-2',
+    updated_at  = now()
+WHERE user_id = (SELECT id FROM public.users WHERE email = 'user@example.com');
+```
+
+#### 3.5a.3 Desktop App Auth Flow
+
+The desktop app (Electron) implements a login gate that runs before the main UI loads:
+
+```text
+App startup
+  → Settings bridge loads all settings from SQLite (resources/user_data.db)
+  → Renderer checks for 'cosmicAuth' in settings
+    ├── Found & valid → authState = 'authenticated' → show main UI
+    └── Not found     → authState = 'unauthenticated' → show Login Modal
+
+Login:
+  → User enters Cosmic API key
+  → Renderer calls window.cosmic.login(apiKey)
+  → Main process (IPC 'auth:login'):
+    1. POST to Supabase RPC: authenticate_with_api_key({ p_api_key: apiKey })
+    2. On success: write to SQLite via settings bridge:
+       - SAVE_SETTING:cosmicAuth:{full auth JSON}
+       - SAVE_SETTING:gatewayBaseUrl:{vm.gateway_url}
+       - SAVE_SETTING:gatewayApiToken:{vm.api_token}
+    3. Settings bridge persists to SQLite, emits updated settings
+    4. Renderer receives updated settings → authState = 'authenticated'
+  → Gateway URL and API token are now auto-configured for all WhatsApp/channel operations
+
+Logout:
+  → window.cosmic.logout()
+  → Main process (IPC 'auth:logout'):
+    1. SAVE_SETTING:cosmicAuth:    (empty value — clears the key)
+    2. SAVE_SETTING:gatewayBaseUrl:
+    3. SAVE_SETTING:gatewayApiToken:
+  → Settings cleared → renderer → authState = 'unauthenticated' → show Login Modal
+```
+
+**Local storage:** Auth data is stored in the existing `app_settings` table in `resources/user_data.db` (SQLite) under the key `cosmicAuth`. This is the same database used by the settings bridge for all desktop app settings. The database file and its encryption key (`resources/secret.key`) are both gitignored (`*.db`, `*.key`). The Fernet encryption infrastructure in `resources/database.py` is available for future use.
+
+**Auth data shape** (stored as JSON string in `app_settings.value`):
+
+```json
+{
+  "apiKey": "cosmic_...",
+  "userId": "uuid",
+  "fullName": "User Name",
+  "isPrivileged": true,
+  "gatewayUrl": "http://3.137.194.119:8080",
+  "gatewayApiToken": "the-gateway-token",
+  "vmIp": "3.137.194.119",
+  "vmDns": "ec2-3-137-194-119.us-east-2.compute.amazonaws.com",
+  "authenticatedAt": 1709500000000
+}
+```
+
+**Desktop app files involved:**
+
+| File | Role |
+|---|---|
+| `electron/main.ts` | Supabase constants, `auth:login` / `auth:logout` IPC handlers |
+| `electron/preload.ts` | Exposes `window.cosmic.login()` and `window.cosmic.logout()` to renderer |
+| `src/vite-env.d.ts` | TypeScript declarations for `login` and `logout` on `Window.cosmic` |
+| `src/CosmicLoginModal.tsx` | Login screen component (API key input, error display, LiquidGlass styling) |
+| `src/App.tsx` | Auth gate: `authState` state machine, renders `CosmicLoginModal` when unauthenticated, passes `authData` / `onLogout` through component tree |
+| `src/DynamicIsland.tsx` | Threads `authData` and `onLogout` props to Settings |
+| `src/Settings.tsx` | User info card (name + "Connected to VM" + logout button), passes `cosmicAuth` to WhatsApp settings |
+| `src/WhatsAppIntegrationSettings.tsx` | When `cosmicAuth` prop is present: hides Gateway URL / API Token fields, shows simplified phone-number-only UI |
+
+**UI behavior when authenticated:** The WhatsApp integration settings page hides the Gateway URL and API Token input fields (they are auto-configured from the Supabase response). The card header changes from "Gateway connection" to "Phone number", and the user only needs to enter their allowed WhatsApp number and click "Save number". The "Save connection" button is hidden since the connection is managed by the auth system.
+
+**Hard rules:**
+
+1. Supabase URL and anon key are public constants — safe to commit. They only enable RLS-protected queries.
+2. The user's Cosmic API key, Gateway token, and VM details are stored only in the local SQLite database — never committed to source control.
+3. The `authenticate_with_api_key` function is `SECURITY DEFINER` — it runs with elevated privileges to read across tables regardless of RLS. The function itself validates the API key and checks privileges.
+4. The desktop app never stores auth data in `electron-store` / APPDATA / `localStorage`. All auth persistence goes through the SQLite settings bridge pipeline.
+5. On logout, all three settings keys (`cosmicAuth`, `gatewayBaseUrl`, `gatewayApiToken`) are cleared. The app returns to the login modal.
 
 ### 3.6 Rate Limiting
 
@@ -8357,6 +8597,15 @@ def build_tool_definitions(self) -> list[dict]:
 | `gateway/webhooks/webhooks.db` | Gateway | Webhook Handler | Webhook registrations, webhook log |
 | `agents/*/store/data/*.db` | Per-agent | Each agent | Agent-specific session data (§12.2) |
 | `agents/*/runtime/state.db` | Per-agent | Each agent | In-flight task state (ephemeral) |
+| `resources/user_data.db` | Desktop App | Settings bridge (`resources/settings_bridge.py`) | Desktop app settings (`app_settings` key-value table) including `cosmicAuth`, `gatewayBaseUrl`, `gatewayApiToken`, and all UI preferences. Fernet encryption available via `resources/database.py`. Gitignored (`*.db`). See §3.5a |
+
+**External databases (Supabase — cloud-hosted):**
+
+| Table / Function | Location | Owner | Contents |
+|---|---|---|---|
+| `public.users` | Supabase | Platform | User accounts, API keys, privilege flags |
+| `public.user_vms` | Supabase | Platform | Per-user VM provisioning: gateway URL, API token, VM IP/DNS, region, status. RLS-protected — users can only read their own row (§3.5a.1) |
+| `public.authenticate_with_api_key()` | Supabase RPC | Platform | SECURITY DEFINER function — validates Cosmic API key, returns user profile + VM config (§3.5a.2) |
 
 ## Appendix B: Quick Reference — All Pydantic Models
 

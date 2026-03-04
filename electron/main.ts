@@ -7,6 +7,10 @@ import Store from 'electron-store'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 process.env.APP_ROOT = path.join(__dirname, '..')
 
+// Supabase public constants (anon key is safe to commit — only allows RLS-protected queries)
+const SUPABASE_URL = 'https://hluenippcdiejenmteen.supabase.co'
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhsdWVuaXBwY2RpZWplbm10ZWVuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTE4MzYwOTMsImV4cCI6MjA2NzQxMjA5M30.dm6YO4B9SAQ8hnGtR-OZS7jn5FcL-zz4s4XxP-TyCpk'
+
 export const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL']
 export const MAIN_DIST = path.join(process.env.APP_ROOT, 'dist-electron')
 export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist')
@@ -773,6 +777,67 @@ app.whenReady().then(() => {
   })
 
 
+
+  // --- AUTH IPC HANDLERS ---
+  ipcMain.handle('auth:login', async (_, apiKey: string) => {
+    try {
+      const response = await fetch(
+        `${SUPABASE_URL}/rest/v1/rpc/authenticate_with_api_key`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+          },
+          body: JSON.stringify({ p_api_key: apiKey.trim() }),
+        }
+      )
+
+      if (!response.ok) {
+        return { success: false, error: 'network_error', message: `Server error: ${response.status}` }
+      }
+
+      const result = await response.json()
+
+      if (!result.success) {
+        return { success: false, error: result.error, message: result.message }
+      }
+
+      const authData = {
+        apiKey: apiKey.trim(),
+        userId: result.user.id,
+        fullName: result.user.full_name,
+        isPrivileged: result.user.is_privileged,
+        gatewayUrl: result.vm.gateway_url,
+        gatewayApiToken: result.vm.api_token,
+        vmIp: result.vm.vm_ip,
+        vmDns: result.vm.vm_dns,
+        authenticatedAt: Date.now(),
+      }
+
+      // Persist auth to SQLite via settings bridge
+      const authJson = JSON.stringify(authData)
+      settingsProcess?.stdin.write(`SAVE_SETTING:cosmicAuth:${authJson}\n`)
+      settingsProcess?.stdin.write(`SAVE_SETTING:gatewayBaseUrl:${result.vm.gateway_url}\n`)
+      settingsProcess?.stdin.write(`SAVE_SETTING:gatewayApiToken:${result.vm.api_token}\n`)
+
+      return { success: true, ...authData }
+    } catch (error: any) {
+      return {
+        success: false,
+        error: 'network_error',
+        message: error?.message || 'Unable to connect to authentication server.',
+      }
+    }
+  })
+
+  ipcMain.handle('auth:logout', () => {
+    settingsProcess?.stdin.write('SAVE_SETTING:cosmicAuth:\n')
+    settingsProcess?.stdin.write('SAVE_SETTING:gatewayBaseUrl:\n')
+    settingsProcess?.stdin.write('SAVE_SETTING:gatewayApiToken:\n')
+    return { success: true }
+  })
 
   // Multi-monitor IPC handlers
   ipcMain.handle('get-all-displays', () => {
