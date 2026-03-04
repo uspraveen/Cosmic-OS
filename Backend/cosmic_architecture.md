@@ -662,6 +662,8 @@ The desktop app maintains a persistent WebSocket connection for real-time bidire
 | `GET` | `/channels/{platform}/status` | Get detailed status for one channel (connected, disconnected, pairing_required, bridge_unreachable, last_error) |
 | `POST` | `/channels/whatsapp/pairing/qr` | Request a fresh WhatsApp pairing QR from the running WhatsApp Bridge and return renderable QR payload to the desktop app |
 | `DELETE` | `/channels/whatsapp/session` | Disconnect the active WhatsApp session and clear bridge-owned device auth state |
+| `GET` | `/channels/whatsapp/config` | Retrieve persisted WhatsApp bridge configuration (allowed phone, self-chat-only flag) from the running bridge |
+| `POST` | `/channels/whatsapp/config` | Update WhatsApp bridge configuration (allowed phone, self-chat-only flag). Persisted by the bridge in `store/bridge-config.json` |
 | | | |
 | | **Credential Management (internal — orchestrator only)** | |
 | `POST` | `/internal/credentials/resolve` | Resolve provider + scopes + user → short-lived access token + credential_ref. Authenticated via internal service token (see §22.3) |
@@ -834,7 +836,7 @@ For the desktop app (localhost), authentication uses a local API token generated
 import hmac
 from fastapi import Request, HTTPException, WebSocket
 
-LOCAL_API_TOKEN = os.environ['GATEWAY_LOCAL_TOKEN']
+LOCAL_API_TOKEN = os.environ['GATEWAY_LOCAL_API_TOKEN']
 
 async def verify_auth(request: Request):
     token = request.headers.get('Authorization', '').replace('Bearer ', '')
@@ -849,9 +851,13 @@ async def verify_ws_auth(websocket: WebSocket):
     return True
 ```
 
+**Desktop → Gateway connectivity:** The desktop app connects directly to the Gateway over HTTPS using the Gateway's public URL (e.g., `http://<vm-ip>:8080`). The Gateway binds to `0.0.0.0` so it is reachable from outside the VM. There is no SSH tunnel or VPN layer between the desktop and Gateway — the local API token provides the authentication boundary. The Gateway port (default `8080`) must be opened in the VM's security group / firewall.
+
+**Production auth model:** In production, each user gets a dedicated VM/VPC. The Gateway URL and local API token are auto-provisioned during onboarding — the user never sees or enters infrastructure credentials. The desktop settings UI for WhatsApp reduces to just the user's phone number and a "Connect" button. The token and Gateway URL are injected by the provisioning layer.
+
 **Future mobile app:** When a mobile client is added, the auth layer can be extended with JWT or OAuth2 without changing the Gateway's internal routing logic. The auth middleware is a pluggable concern.
 
-**Internal service authentication:** The `/internal/*` credential, memory, and usage endpoints are protected by a separate internal service token, not the desktop app's local API token. The orchestrator and any agent/runtime component that needs sanctioned internal APIs hold this token. The desktop app cannot access internal endpoints.
+**Internal service authentication:** The `/internal/*` credential, memory, and usage endpoints are protected by a separate internal service token (`GATEWAY_INTERNAL_TOKEN`), not the desktop app's local API token. The orchestrator and any agent/runtime component that needs sanctioned internal APIs hold this token. The desktop app cannot access internal endpoints.
 
 ```python
 INTERNAL_SERVICE_TOKEN = os.environ['GATEWAY_INTERNAL_TOKEN']
@@ -3769,7 +3775,7 @@ All API keys and secrets **must** be externalized to environment variables. Neve
 | Groq API key | Model Router | `GROQ_API_KEY` |
 | Gemini API key | Gateway (Gemini adapter) | `GEMINI_API_KEY` |
 | Perplexity API key | Gateway (Perplexity adapter) | `PERPLEXITY_API_KEY` |
-| Gateway local token | Gateway + Desktop App | `GATEWAY_LOCAL_TOKEN` |
+| Gateway local API token | Gateway + Desktop App | `GATEWAY_LOCAL_API_TOKEN` |
 | Per-agent HMAC secrets | Orchestrator (all), Agents (own) | `AGENT_SECRET` / `AGENT_SECRETS` |
 | Gateway → Orchestrator signing secret | Gateway + Orchestrator (in `AGENT_SECRETS` as `cosmic/gateway:1.0.0`) | `GATEWAY_SIGNING_SECRET` |
 | Gateway internal service token | Gateway + Orchestrator | `GATEWAY_INTERNAL_TOKEN` |
@@ -6056,7 +6062,7 @@ class ChannelAdapterRegistry:
 |---|---|---|---|
 | `DesktopAdapter` | Desktop App (Electron) | WebSocket (persistent) | **Primary** — ships with v1.0 |
 | `CLIAdapter` | CLI Agent | Internal pipe (in-process) | **Alpha** — ships with v1.0 |
-| `WhatsAppAdapter` | WhatsApp | Baileys (via bridge) / WhatsApp Business API | **Planned** |
+| `WhatsAppAdapter` | WhatsApp | Baileys (via Node.js sidecar bridge) | **Implemented** — ships with v1.0 |
 | `TelegramAdapter` | Telegram | Bot API (grammY / python-telegram-bot) | **Planned** |
 | `SlackAdapter` | Slack | Bolt SDK / Events API | **Planned** |
 | `DiscordAdapter` | Discord | discord.py | **Planned** |
@@ -6203,10 +6209,12 @@ WhatsApp is the reference sidecar-backed adapter because Baileys runs in Node.js
 ```text
 gateway/channels/whatsapp.py              # Python ChannelAdapter
 bridges/whatsapp_bridge/
-├── package.json                          # Node.js runtime/dependencies
-├── src/                                  # Baileys socket lifecycle + internal bridge API
+├── package.json                          # Node.js runtime/dependencies (Baileys 6.7.21)
+├── src/
+│   └── index.js                          # Baileys socket lifecycle + Express bridge API
 ├── store/
-│   └── auth/                             # PERSISTENT. Baileys multi-file auth state
+│   ├── auth/                             # PERSISTENT. Baileys multi-file auth state
+│   └── bridge-config.json                # PERSISTENT. Bridge-level config (allowed phone, self-chat-only)
 └── runtime/                              # EPHEMERAL. Logs, cache, temp files
     └── inbound_media/                    # Optional temp storage for downloaded/decrypted inbound media
 ```
@@ -6227,6 +6235,50 @@ bridges/whatsapp_bridge/
 3. The Gateway remains the single entry point for COSMIC logic: session context, routing, response policy, and task dispatch.
 4. `gateway/channels/whatsapp.py` is still the canonical adapter that the Channel Adapter Registry knows about. The Node bridge is behind it.
 5. If a future WhatsApp integration uses an official provider API with OAuth credentials, those provider credentials belong in `gateway/credentials.db`; Baileys-style local device auth still belongs in bridge `store/`.
+
+**Baileys protocol version management (CRITICAL):**
+
+WhatsApp servers periodically expire old client protocol versions. Baileys ships with a hardcoded version number that will eventually become stale, causing `Connection failure (405)` during QR pairing. The bridge **must** dynamically fetch the current WhatsApp Web protocol version at connection time using Baileys' `fetchLatestBaileysVersion()` API:
+
+```javascript
+import makeWASocket, {
+  fetchLatestBaileysVersion,
+  useMultiFileAuthState,
+  Browsers,
+} from '@whiskeysockets/baileys';
+
+// Before creating the socket:
+let waVersion;
+try {
+  const { version } = await fetchLatestBaileysVersion();
+  waVersion = version;
+  console.log(`Fetched latest WhatsApp Web version: ${version.join('.')}`);
+} catch (err) {
+  console.warn('Failed to fetch latest version, using Baileys default:', err?.message);
+}
+
+const sock = makeWASocket({
+  auth: state,
+  ...(waVersion ? { version: waVersion } : {}),
+  browser: Browsers.macOS('Google Chrome'),  // deliberate fingerprint — see note below
+  connectTimeoutMs: 60_000,
+  defaultQueryTimeoutMs: 0,
+  // ...
+});
+```
+
+Without this dynamic fetch, the bridge will work fine while the Baileys-bundled version is current, then silently break when WhatsApp rotates it. This is the single most common cause of Baileys pairing failures and has been a persistent production issue.
+
+**Browser fingerprint note:** The `Browsers.macOS('Google Chrome')` fingerprint is deliberate. It presents the linked device as a macOS Chrome session to WhatsApp. This is a widely-used safety convention in the Baileys community to reduce the risk of account restrictions. It is cosmetic only — WhatsApp's "Linked Devices" screen will show "Mac OS" for this session.
+
+**Allowed-phone enforcement:**
+
+The bridge supports restricting inbound and outbound traffic to a single configured phone number. This is persisted in `store/bridge-config.json` and enforced at the bridge level:
+
+- **Inbound:** Messages from numbers other than the allowed phone are silently dropped before forwarding to the Gateway.
+- **Outbound:** Send requests targeting numbers other than the allowed phone are rejected with `403`.
+- **Self-chat-only mode:** When `selfChatOnly` is true, only messages from the linked WhatsApp account itself are processed (useful for personal-assistant mode where the user talks to themselves).
+- **Config persistence:** The bridge reads `store/bridge-config.json` on startup and updates it via `POST /config`. The Gateway adapter proxies config read/write through `GET/POST /channels/whatsapp/config`.
 
 #### 27.7.1 Bridge -> Gateway Inbound Contract
 
@@ -6297,8 +6349,14 @@ The Gateway adapter sends outbound WhatsApp text via the Bridge's internal send 
 **Bridge endpoints:**
 
 - `GET /health` — internal liveness/readiness probe
-- `GET /status` — internal connection state
+- `GET /status` — internal connection state (returns `pairing_state`, `qr` string if available, `connected` flag)
 - `POST /send` — send one WhatsApp message
+- `GET /config` — retrieve bridge-level config (allowed phone, self-chat-only flag)
+- `POST /config` — update bridge-level config; persisted to `store/bridge-config.json`
+- `POST /pairing/qr` — create or refresh a renderable QR payload for WhatsApp device linking
+- `DELETE /session` — disconnect and clear bridge-owned Baileys auth state
+
+All bridge endpoints are authenticated via `X-Bridge-Token` header. The token value is set by the `WHATSAPP_BRIDGE_TOKEN` environment variable. The Gateway adapter (`gateway/channels/whatsapp.py`) reads the bridge base URL from `WHATSAPP_BRIDGE_URL` (default `http://127.0.0.1:3000`) and authenticates with `X-Bridge-Token`.
 
 **Send request shape:**
 
@@ -6342,27 +6400,32 @@ WhatsApp account linking is a **channel management control-plane flow**, not a q
 ```text
 1. User clicks "Get QR" in Desktop Settings
 2. Desktop calls Gateway: POST /channels/whatsapp/pairing/qr
-3. Gateway authenticates the desktop/local API token
+3. Gateway authenticates the desktop/local API token (Authorization: Bearer <GATEWAY_LOCAL_API_TOKEN>)
 4. Gateway resolves the registered WhatsAppAdapter
-5. WhatsAppAdapter calls the Bridge's internal pairing endpoint
-6. Bridge starts or refreshes pairing state inside the existing Baileys process
-7. Bridge returns a renderable QR payload (text/ASCII/data URL/raw QR string)
-8. Gateway returns that payload to the desktop app
-9. Desktop renders the QR locally
-10. User scans it from WhatsApp on their phone
-11. Baileys receives the successful pairing/connection update automatically
-12. Bridge persists auth state and reports `connected`
-13. Desktop checks `GET /channels/whatsapp/status` or receives a later status update
+5. WhatsAppAdapter calls the Bridge's internal pairing endpoint (POST /pairing/qr, X-Bridge-Token auth)
+6. Bridge calls fetchLatestBaileysVersion() to get the current WhatsApp Web protocol version
+7. Bridge starts or refreshes pairing state inside the existing Baileys process with the fetched version
+8. Bridge returns a renderable QR payload (raw QR string)
+9. Gateway returns that payload to the desktop app
+10. Desktop renders the QR locally (using qrcode library)
+11. User scans it from WhatsApp on their phone
+12. Baileys receives the successful pairing/connection update automatically
+13. Bridge persists auth state in store/auth/ and reports `connected`
+14. Desktop checks `GET /channels/whatsapp/status` or receives a later status update
 ```
 
-**Bridge-side control endpoints** (internal, Gateway-only) should cover at least:
+**Critical prerequisite:** Step 6 (dynamic version fetch) is essential. Without it, QR pairing will fail with `Connection failure (405)` once the Baileys-bundled protocol version expires on WhatsApp's servers. See "Baileys protocol version management" in §27.7 above.
+
+**Bridge-side control endpoints** (internal, Gateway-only):
 
 - `GET /health` — process liveness/readiness
-- `GET /status` — connection/pairing state
+- `GET /status` — connection/pairing state (`pairing_state`, `qr`, `connected`)
 - `POST /pairing/qr` — create or refresh a renderable pairing QR payload
 - `DELETE /session` — disconnect and clear bridge-owned device auth state
+- `GET /config` — retrieve bridge-level config (allowed phone, self-chat-only)
+- `POST /config` — update bridge-level config, persisted to `store/bridge-config.json`
 
-These are Bridge implementation details behind `gateway/channels/whatsapp.py`. The desktop app never calls them directly.
+These are Bridge implementation details behind `gateway/channels/whatsapp.py`. The desktop app never calls them directly — it calls the Gateway's `/channels/whatsapp/*` routes, which proxy to the bridge.
 
 **Operational rule:** this flow assumes the WhatsApp Bridge is already managed as a long-running service (`systemd` on a VM, `supervisord` in a container deployment per §9). The Gateway should request pairing state from the running Bridge. It should **not** become the process manager that starts/stops the Bridge on every QR request.
 
@@ -6371,6 +6434,22 @@ These are Bridge implementation details behind `gateway/channels/whatsapp.py`. T
 1. Once paired, the same process must remain available to receive WhatsApp traffic.
 2. Process supervision belongs to deployment/runtime management, not to a desktop button click.
 3. On-demand service startup adds race conditions around readiness, reconnect, and auth persistence.
+
+**Desktop → Gateway → Bridge connectivity:**
+
+The desktop app connects directly to the Gateway over HTTP using the Gateway's public URL. There is no SSH tunnel, VPN, or proxy between the desktop and Gateway. The Gateway port (default `8080`) is exposed via the VM's security group / firewall, and the `GATEWAY_LOCAL_API_TOKEN` provides the authentication boundary.
+
+```text
+Desktop App (Electron)
+  └── HTTP (direct, over public internet)
+        └── Gateway (FastAPI, 0.0.0.0:8080)
+              └── HTTP (localhost only)
+                    └── WhatsApp Bridge (Express, 127.0.0.1:3000)
+                          └── WebSocket (Baileys)
+                                └── WhatsApp servers
+```
+
+The Gateway → Bridge link is internal-only (`127.0.0.1`). The bridge does not need to be reachable from outside the VM.
 
 **Desktop / Gateway / Bridge responsibility split during pairing:**
 
