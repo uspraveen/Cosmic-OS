@@ -8,6 +8,7 @@ import express from 'express';
 import makeWASocket, {
   Browsers,
   DisconnectReason,
+  fetchLatestBaileysVersion,
   getContentType,
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
@@ -737,12 +738,24 @@ async function ensureSocketConnected({ refresh = false } = {}) {
       connectedJid: null,
     });
 
+    let waVersion;
+    try {
+      const { version } = await fetchLatestBaileysVersion();
+      waVersion = version;
+      console.log(`Fetched latest WhatsApp Web version: ${version.join('.')}`);
+    } catch (versionError) {
+      console.warn('Failed to fetch latest WhatsApp Web version, using Baileys default:', versionError?.message);
+    }
+
     const { state, saveCreds } = await useMultiFileAuthState(config.authDir);
     const currentSock = makeWASocket({
       auth: state,
+      ...(waVersion ? { version: waVersion } : {}),
       browser: Browsers.macOS('Google Chrome'),
       markOnlineOnConnect: false,
       printQRInTerminal: false,
+      connectTimeoutMs: 60000,
+      defaultQueryTimeoutMs: 0,
       shouldSyncHistoryMessage: () => false,
     });
 
