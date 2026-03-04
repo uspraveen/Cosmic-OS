@@ -2,10 +2,7 @@ import { app, BrowserWindow, globalShortcut, ipcMain, screen, shell } from 'elec
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
-import fs from 'node:fs'
-import net, { type AddressInfo } from 'node:net'
 import Store from 'electron-store'
-import { Client as SSHClient } from 'ssh2'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 process.env.APP_ROOT = path.join(__dirname, '..')
@@ -42,23 +39,7 @@ let lastWeatherData: any = null
 interface GatewayConnectionConfig {
   baseUrl: string
   apiToken: string
-  tunnel?: Partial<GatewaySshTunnelConfig>
 }
-
-interface GatewaySshTunnelConfig {
-  enabled: boolean
-  host: string
-  port: number
-  username: string
-  privateKeyPath: string
-  remoteHost?: string
-  remotePort?: number
-}
-
-let gatewayTunnelClient: SSHClient | null = null
-let gatewayTunnelServer: net.Server | null = null
-let gatewayTunnelBaseUrl = ''
-let gatewayTunnelSignature = ''
 
 function unwrapWhatsAppBridgePayload(payload: any) {
   if (payload && typeof payload === 'object' && payload.bridge && typeof payload.bridge === 'object') {
@@ -84,152 +65,6 @@ function normalizeGatewayBaseUrl(rawBaseUrl: string) {
   return url.toString().replace(/\/$/, '')
 }
 
-function normalizeTunnelConfig(config: Partial<GatewaySshTunnelConfig> | undefined, baseUrl: string): GatewaySshTunnelConfig {
-  normalizeGatewayBaseUrl(baseUrl)
-
-  return {
-    enabled: Boolean(config?.enabled),
-    host: String(config?.host || '').trim(),
-    port: Number.isFinite(Number(config?.port)) ? Number(config?.port) : 22,
-    username: String(config?.username || '').trim(),
-    privateKeyPath: String(config?.privateKeyPath || '').trim(),
-    remoteHost: String(config?.remoteHost || '').trim() || '127.0.0.1',
-    remotePort: Number.isFinite(Number(config?.remotePort))
-      ? Number(config?.remotePort)
-      : 8080,
-  }
-}
-
-async function closeGatewayTunnel() {
-  const server = gatewayTunnelServer
-  gatewayTunnelServer = null
-  const client = gatewayTunnelClient
-  gatewayTunnelClient = null
-
-  if (server) {
-    await new Promise<void>((resolve) => {
-      server.close(() => resolve())
-    })
-  }
-
-  if (client) {
-    await new Promise<void>((resolve) => {
-      let settled = false
-      const finish = () => {
-        if (settled) return
-        settled = true
-        resolve()
-      }
-      client.once('close', finish)
-      client.end()
-      setTimeout(finish, 500)
-    })
-  }
-
-  gatewayTunnelBaseUrl = ''
-  gatewayTunnelSignature = ''
-}
-
-async function ensureGatewayTunnel(
-  config: Partial<GatewaySshTunnelConfig> | undefined,
-  baseUrl: string,
-) {
-  const normalized = normalizeTunnelConfig(config, baseUrl)
-  if (!normalized.enabled) {
-    return normalizeGatewayBaseUrl(baseUrl)
-  }
-
-  if (!normalized.host || !normalized.username || !normalized.privateKeyPath) {
-    throw new Error('SSH tunnel requires host, username, and private key path.')
-  }
-
-  const signature = JSON.stringify({
-    host: normalized.host,
-    port: normalized.port,
-    username: normalized.username,
-    privateKeyPath: normalized.privateKeyPath,
-    remoteHost: normalized.remoteHost,
-    remotePort: normalized.remotePort,
-  })
-
-  if (gatewayTunnelClient && gatewayTunnelServer && gatewayTunnelBaseUrl && gatewayTunnelSignature === signature) {
-    return gatewayTunnelBaseUrl
-  }
-
-  await closeGatewayTunnel()
-
-  const privateKey = fs.readFileSync(normalized.privateKeyPath, 'utf8')
-  const client = new SSHClient()
-  gatewayTunnelClient = client
-  client.on('error', (error: Error) => {
-    console.error('[Gateway SSH tunnel]', error.message)
-  })
-
-  await new Promise<void>((resolve, reject) => {
-    const onReady = () => {
-      client.off('error', onError)
-      resolve()
-    }
-    const onError = (error: Error) => {
-      client.off('ready', onReady)
-      reject(error)
-    }
-
-    client.once('ready', onReady)
-    client.once('error', onError)
-    client.connect({
-      host: normalized.host,
-      port: normalized.port,
-      username: normalized.username,
-      privateKey,
-      readyTimeout: 20000,
-      keepaliveInterval: 15000,
-      keepaliveCountMax: 3,
-    })
-  })
-
-  const server = net.createServer((socket) => {
-    client.forwardOut(
-      socket.remoteAddress || '127.0.0.1',
-      socket.remotePort || 0,
-      normalized.remoteHost || '127.0.0.1',
-      normalized.remotePort || 8080,
-      (error: Error | undefined, stream: (NodeJS.ReadWriteStream & { destroy: () => void }) | undefined) => {
-        if (error || !stream) {
-          socket.destroy(error || new Error('SSH tunnel forwardOut failed'))
-          return
-        }
-        socket.pipe(stream).pipe(socket)
-        socket.once('error', () => stream.destroy())
-        stream.once('error', () => socket.destroy())
-      },
-    )
-  })
-
-  server.once('error', () => {
-    void closeGatewayTunnel()
-  })
-
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => {
-      server.off('error', reject)
-      resolve()
-    })
-  })
-
-  gatewayTunnelServer = server
-  gatewayTunnelSignature = signature
-
-  const address = server.address() as AddressInfo | null
-  if (!address?.port) {
-    throw new Error('Failed to start local SSH tunnel.')
-  }
-
-  gatewayTunnelBaseUrl = `http://127.0.0.1:${address.port}`
-  return gatewayTunnelBaseUrl
-}
-
 async function callGatewayJson(
   config: GatewayConnectionConfig,
   pathName: string,
@@ -244,7 +79,7 @@ async function callGatewayJson(
     throw new Error('Gateway API token is required.')
   }
 
-  const baseUrl = await ensureGatewayTunnel(config?.tunnel, config?.baseUrl || '')
+  const baseUrl = normalizeGatewayBaseUrl(config?.baseUrl || '')
   const requestUrl = new URL(pathName, `${baseUrl}/`).toString()
   const controller = new AbortController()
   const timeoutMs = Math.max(1000, init.timeoutMs ?? 20000)
@@ -718,7 +553,6 @@ function handleDisplayChange(_event: any, display: Electron.Display) {
 
 app.on('before-quit', () => {
   cleanupProcesses()
-  void closeGatewayTunnel()
 })
 
 app.whenReady().then(() => {

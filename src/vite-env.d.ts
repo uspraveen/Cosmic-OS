@@ -1,19 +1,8 @@
 /// <reference types="vite/client" />
 
-interface GatewayTunnelPayload {
-  enabled?: boolean
-  host?: string
-  port?: number
-  username?: string
-  privateKeyPath?: string
-  remoteHost?: string
-  remotePort?: number
-}
-
 interface GatewayConnectionPayload {
   baseUrl: string
   apiToken: string
-  tunnel?: GatewayTunnelPayload
 }
 
 interface Window {
@@ -47,7 +36,6 @@ interface Window {
     saveWhatsAppConfig: (payload: {
       baseUrl: string
       apiToken: string
-      tunnel?: GatewayTunnelPayload
       allowedPhone?: string | null
       selfChatOnly?: boolean | null
     }) => Promise<any>

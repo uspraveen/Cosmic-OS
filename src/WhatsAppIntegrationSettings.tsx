@@ -29,11 +29,6 @@ type BannerTone = 'success' | 'error' | 'info'
 const SETTINGS_KEYS = {
   baseUrl: 'gatewayBaseUrl',
   apiToken: 'gatewayApiToken',
-  sshEnabled: 'gatewaySshTunnelEnabled',
-  sshHost: 'gatewaySshHost',
-  sshPort: 'gatewaySshPort',
-  sshUsername: 'gatewaySshUsername',
-  sshPrivateKeyPath: 'gatewaySshPrivateKeyPath',
 } as const
 
 const WHATSAPP_THEME_STYLE: CSSProperties = {
@@ -64,7 +59,7 @@ function getPairingLabel(status: WhatsAppBridgeStatus | null) {
 
 function getStatusDescription(status: WhatsAppBridgeStatus | null) {
   if (!status) {
-    return 'Enter your VM Gateway URL and local API token below. Cosmic will use the Gateway control routes, not the bridge port directly.'
+    return 'Enter your Gateway URL and API token below to get started.'
   }
 
   if (status.connected) {
@@ -106,30 +101,9 @@ function getErrorMessage(error: unknown, fallback: string) {
   return fallback
 }
 
-function buildTunnelPayload(
-  enabled: boolean,
-  host: string,
-  port: string,
-  username: string,
-  privateKeyPath: string,
-) {
-  return {
-    enabled,
-    host: host.trim(),
-    port: Number.parseInt(port.trim() || '22', 10) || 22,
-    username: username.trim(),
-    privateKeyPath: privateKeyPath.trim(),
-  }
-}
-
 export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrationSettingsProps) {
   const [gatewayBaseUrl, setGatewayBaseUrl] = useState('')
   const [gatewayApiToken, setGatewayApiToken] = useState('')
-  const [sshTunnelEnabled, setSshTunnelEnabled] = useState(false)
-  const [sshHost, setSshHost] = useState('')
-  const [sshPort, setSshPort] = useState('22')
-  const [sshUsername, setSshUsername] = useState('')
-  const [sshPrivateKeyPath, setSshPrivateKeyPath] = useState('')
   const [configLoaded, setConfigLoaded] = useState(false)
   const [status, setStatus] = useState<WhatsAppBridgeStatus | null>(null)
   const [allowedPhone, setAllowedPhone] = useState('')
@@ -143,14 +117,9 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
   const [disconnecting, setDisconnecting] = useState(false)
   const [qrDataUrl, setQrDataUrl] = useState('')
 
-  const sshConfigReady =
-    sshHost.trim().length > 0 &&
-    sshUsername.trim().length > 0 &&
-    sshPrivateKeyPath.trim().length > 0
   const configReady =
     gatewayBaseUrl.trim().length > 0 &&
-    gatewayApiToken.trim().length > 0 &&
-    (!sshTunnelEnabled || sshConfigReady)
+    gatewayApiToken.trim().length > 0
 
   useEffect(() => {
     if (!banner) return
@@ -164,11 +133,6 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
     const offSettings = window.cosmic?.onSettingsUpdate((settings) => {
       setGatewayBaseUrl(String(settings?.[SETTINGS_KEYS.baseUrl] ?? ''))
       setGatewayApiToken(String(settings?.[SETTINGS_KEYS.apiToken] ?? ''))
-      setSshTunnelEnabled(Boolean(settings?.[SETTINGS_KEYS.sshEnabled] ?? false))
-      setSshHost(String(settings?.[SETTINGS_KEYS.sshHost] ?? ''))
-      setSshPort(String(settings?.[SETTINGS_KEYS.sshPort] ?? '22'))
-      setSshUsername(String(settings?.[SETTINGS_KEYS.sshUsername] ?? ''))
-      setSshPrivateKeyPath(String(settings?.[SETTINGS_KEYS.sshPrivateKeyPath] ?? ''))
       setConfigLoaded(true)
     })
 
@@ -228,13 +192,6 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
         const nextStatus = await window.cosmic?.getWhatsAppStatus({
           baseUrl: gatewayBaseUrl,
           apiToken: gatewayApiToken,
-          tunnel: buildTunnelPayload(
-            sshTunnelEnabled,
-            sshHost,
-            sshPort,
-            sshUsername,
-            sshPrivateKeyPath,
-          ),
         })
         if (cancelled) return
         setStatus(nextStatus ?? null)
@@ -269,33 +226,19 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
     configReady,
     gatewayApiToken,
     gatewayBaseUrl,
-    sshHost,
-    sshPort,
-    sshPrivateKeyPath,
-    sshTunnelEnabled,
-    sshUsername,
   ])
 
   const persistGatewayConfig = async (successMessage?: string) => {
     const trimmedBaseUrl = gatewayBaseUrl.trim()
     const trimmedToken = gatewayApiToken.trim()
     if (!trimmedBaseUrl || !trimmedToken) {
-      throw new Error('Gateway URL and local API token are both required.')
-    }
-
-    if (sshTunnelEnabled && !sshConfigReady) {
-      throw new Error('SSH tunnel requires host, username, and private key path.')
+      throw new Error('Gateway URL and API token are both required.')
     }
 
     setSavingConfig(true)
     try {
       window.cosmic?.saveSetting(SETTINGS_KEYS.baseUrl, trimmedBaseUrl)
       window.cosmic?.saveSetting(SETTINGS_KEYS.apiToken, trimmedToken)
-      window.cosmic?.saveSetting(SETTINGS_KEYS.sshEnabled, sshTunnelEnabled)
-      window.cosmic?.saveSetting(SETTINGS_KEYS.sshHost, sshHost.trim())
-      window.cosmic?.saveSetting(SETTINGS_KEYS.sshPort, sshPort.trim() || '22')
-      window.cosmic?.saveSetting(SETTINGS_KEYS.sshUsername, sshUsername.trim())
-      window.cosmic?.saveSetting(SETTINGS_KEYS.sshPrivateKeyPath, sshPrivateKeyPath.trim())
       if (successMessage) {
         setBanner({ tone: 'success', message: successMessage })
       }
@@ -314,13 +257,6 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
       const nextConfig = await window.cosmic?.saveWhatsAppConfig({
         baseUrl: gatewayBaseUrl.trim(),
         apiToken: gatewayApiToken.trim(),
-        tunnel: buildTunnelPayload(
-          sshTunnelEnabled,
-          sshHost,
-          sshPort,
-          sshUsername,
-          sshPrivateKeyPath,
-        ),
         allowedPhone: allowedPhone.trim() || null,
       })
       const persistedAllowedPhone = String(nextConfig?.allowed_phone ?? '')
@@ -348,13 +284,6 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
       const nextStatus = await window.cosmic?.getWhatsAppStatus({
         baseUrl: gatewayBaseUrl,
         apiToken: gatewayApiToken,
-        tunnel: buildTunnelPayload(
-          sshTunnelEnabled,
-          sshHost,
-          sshPort,
-          sshUsername,
-          sshPrivateKeyPath,
-        ),
       })
       setStatus(nextStatus ?? null)
       const config = nextStatus?.bridge_config
@@ -382,13 +311,6 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
       const nextStatus = await window.cosmic?.requestWhatsAppPairingQr({
         baseUrl: gatewayBaseUrl,
         apiToken: gatewayApiToken,
-        tunnel: buildTunnelPayload(
-          sshTunnelEnabled,
-          sshHost,
-          sshPort,
-          sshUsername,
-          sshPrivateKeyPath,
-        ),
         refresh: true,
         waitTimeoutMs: 20000,
       })
@@ -421,13 +343,6 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
       const nextStatus = await window.cosmic?.clearWhatsAppSession({
         baseUrl: gatewayBaseUrl,
         apiToken: gatewayApiToken,
-        tunnel: buildTunnelPayload(
-          sshTunnelEnabled,
-          sshHost,
-          sshPort,
-          sshUsername,
-          sshPrivateKeyPath,
-        ),
       })
       setStatus(nextStatus ?? null)
       setStatusError('')
@@ -496,7 +411,7 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
             </div>
             <div className="cosmic-google-card-info">
               <strong>Gateway connection</strong>
-              <span>Use the public Gateway URL and the desktop local API token from the VM.</span>
+              <span>Your COSMIC VM Gateway URL and API token.</span>
             </div>
           </div>
           <div className="cosmic-google-card-badges">
@@ -519,75 +434,16 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
           </div>
 
           <div className="cosmic-google-field">
-            <label>Gateway Local API Token</label>
+            <label>Gateway API Token</label>
             <input
               className="cosmic-google-input"
               type="password"
               value={gatewayApiToken}
               onChange={(event) => setGatewayApiToken(event.target.value)}
-              placeholder="Paste the desktop/local Gateway token"
+              placeholder="Paste the Gateway API token"
               spellCheck={false}
             />
           </div>
-
-          <div className="cosmic-google-field">
-            <label className="cosmic-google-toggle">
-              <input
-                type="checkbox"
-                checked={sshTunnelEnabled}
-                onChange={(event) => setSshTunnelEnabled(event.target.checked)}
-              />
-              <span>Use SSH tunnel for private VM access</span>
-            </label>
-          </div>
-
-          {sshTunnelEnabled && (
-            <>
-              <div className="cosmic-google-field">
-                <label>SSH Host</label>
-                <input
-                  className="cosmic-google-input"
-                  value={sshHost}
-                  onChange={(event) => setSshHost(event.target.value)}
-                  placeholder="ec2-...compute.amazonaws.com"
-                  spellCheck={false}
-                />
-              </div>
-
-              <div className="cosmic-google-field">
-                <label>SSH Port</label>
-                <input
-                  className="cosmic-google-input"
-                  value={sshPort}
-                  onChange={(event) => setSshPort(event.target.value)}
-                  placeholder="22"
-                  spellCheck={false}
-                />
-              </div>
-
-              <div className="cosmic-google-field">
-                <label>SSH Username</label>
-                <input
-                  className="cosmic-google-input"
-                  value={sshUsername}
-                  onChange={(event) => setSshUsername(event.target.value)}
-                  placeholder="ubuntu"
-                  spellCheck={false}
-                />
-              </div>
-
-              <div className="cosmic-google-field">
-                <label>SSH Private Key Path</label>
-                <input
-                  className="cosmic-google-input"
-                  value={sshPrivateKeyPath}
-                  onChange={(event) => setSshPrivateKeyPath(event.target.value)}
-                  placeholder="C:\\Users\\you\\Downloads\\server-key.pem"
-                  spellCheck={false}
-                />
-              </div>
-            </>
-          )}
 
           <div className="cosmic-google-field">
             <label>Allowed User Phone Number</label>
@@ -604,7 +460,7 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
           </div>
 
           <p className="cosmic-google-apps-hint">
-            Do not enter the WhatsApp bridge port here. The desktop app must talk to the Gateway only, and the Gateway will call the internal bridge. If your VM is not publicly exposing the Gateway, enable the SSH tunnel and point the Gateway Base URL at the VM-local Gateway address such as http://127.0.0.1:8080. If an allowed user phone number is set, the bridge will only accept inbound messages from that number and will only send replies back to it.
+            Enter the public Gateway URL of your COSMIC VM and its API token. If an allowed user phone number is set, the bridge will only accept inbound messages from that number and will only send replies back to it.
           </p>
 
           <div className="cosmic-google-card-actions">
@@ -741,7 +597,7 @@ export default function WhatsAppIntegrationSettings({ active }: WhatsAppIntegrat
               </div>
               <p className="cosmic-google-empty-title">No QR generated yet</p>
               <p className="cosmic-google-empty-desc">
-                Save your VM Gateway connection details, then click Connect WhatsApp. Cosmic will ask the Gateway for a fresh QR and render it here locally.
+                Click Connect WhatsApp above to generate a QR code for pairing.
               </p>
             </div>
           )}

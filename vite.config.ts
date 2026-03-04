@@ -11,13 +11,6 @@ export default defineConfig({
       main: {
         // Shortcut of `build.lib.entry`.
         entry: 'electron/main.ts',
-        vite: {
-          build: {
-            rollupOptions: {
-              external: ['ssh2'],
-            },
-          },
-        },
       },
       preload: {
         // Shortcut of `build.rollupOptions.input`.
