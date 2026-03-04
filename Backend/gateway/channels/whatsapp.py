@@ -629,10 +629,15 @@ class WhatsAppAdapter(ChannelAdapter):
         return headers
 
     async def send_test_message(self, number: str, message: str) -> dict[str, Any]:
+        await self.ensure_ready()
+        if self._http is None:
+            raise RuntimeError("WhatsApp bridge client is not initialized")
+
         return await self._request_bridge_json(
             "POST",
             self.config.send_path,
             json={"number": number, "message": message},
+            headers=self._bridge_headers(),
         )
 
     async def _request_bridge_json(
