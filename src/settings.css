@@ -996,160 +996,176 @@
 }
 
 /* ========== COSMIC WHATSAPP PAGE ========== */
+/* Glass-tile design aligned with Meeting Mode craft                */
 
 .cosmic-wa-page {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
+  position: relative;
   animation: cosmicFadeIn 0.35s cubic-bezier(0.19, 1, 0.22, 1) forwards;
 }
 
-.cosmic-wa-section,
-.cosmic-wa-card-footer {
-  animation: cosmicWaSectionIn 0.4s cubic-bezier(0.19, 1, 0.22, 1) backwards;
+/* Ambient green glow (like meeting mode's selection::before) */
+.cosmic-wa-page::before {
+  content: "";
+  position: absolute;
+  right: -40px;
+  top: -20px;
+  width: 200px;
+  height: 200px;
+  background:
+    radial-gradient(circle at 0% 0%, rgba(37, 211, 102, 0.28), transparent 60%),
+    radial-gradient(circle at 80% 20%, rgba(100, 200, 160, 0.15), transparent 65%);
+  opacity: 0.75;
+  filter: blur(4px);
+  pointer-events: none;
+  z-index: -1;
 }
 
-.cosmic-wa-section:nth-child(3) {
-  animation-delay: 0.05s;
+/* ── Identity (eyebrow pills + gradient hero text) ── */
+
+.cosmic-wa-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
-.cosmic-wa-section:nth-child(4) {
-  animation-delay: 0.10s;
+.cosmic-wa-eyebrow-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
 }
 
-.cosmic-wa-section:nth-child(5) {
-  animation-delay: 0.15s;
+.cosmic-wa-eyebrow {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.1), rgba(40, 50, 70, 0.6));
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: rgba(255, 255, 255, 0.85);
 }
 
-.cosmic-wa-section:nth-child(6) {
-  animation-delay: 0.20s;
+.cosmic-wa-eyebrow.soft {
+  border-color: rgba(37, 211, 102, 0.2);
+  background: rgba(37, 211, 102, 0.1);
+  color: rgba(180, 255, 200, 0.85);
 }
 
-.cosmic-wa-card-footer {
-  animation-delay: 0.25s;
+.cosmic-wa-title {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0;
+  padding-bottom: 2px;
+  background: linear-gradient(135deg, #fff 0%, #86efac 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 
-@keyframes cosmicWaSectionIn {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+.cosmic-wa-subtitle {
+  font-size: 13px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.5);
+  margin: 0;
 }
 
-/* ── Hero ── Liquid Glass style (matches Google) */
-.cosmic-wa-hero {
+/* ── Status strip (live dot + state + CTA) ── */
+
+.cosmic-wa-status-strip {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 20px 22px;
-  border-radius: 16px;
-  background: rgba(20, 20, 22, 0.5);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  transition: transform 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94), box-shadow 0.3s ease;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.02)),
+    rgba(10, 14, 20, 0.5);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
-.cosmic-wa-hero:hover {
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 8px 24px rgba(0, 0, 0, 0.15);
-}
-
-.cosmic-wa-hero-inner {
+.cosmic-wa-status-left {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 10px;
   min-width: 0;
 }
 
-.cosmic-wa-hero-icon {
-  width: 52px;
-  height: 52px;
-  border-radius: 14px;
-  background: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.cosmic-wa-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
   flex-shrink: 0;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+  transition: background 0.3s, box-shadow 0.3s;
 }
 
-.cosmic-wa-hero-text h3 {
-  font-size: 18px;
-  font-weight: 600;
-  color: #fff;
-  margin: 0 0 2px 0;
-  letter-spacing: -0.02em;
+.cosmic-wa-live-dot.on {
+  background: #30d158;
+  box-shadow: 0 0 8px rgba(48, 209, 88, 0.7);
+  animation: cosmicWaPulse 2s ease-in-out infinite;
 }
 
-.cosmic-wa-hero-stat {
-  margin: 0;
+@keyframes cosmicWaPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.cosmic-wa-status-text {
   font-size: 13px;
-  color: rgba(255, 255, 255, 0.55);
-}
-
-.cosmic-wa-hero-desc {
-  margin: 5px 0 0 0;
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.4);
-  line-height: 1.4;
-}
-
-
-.cosmic-wa-beta {
-  font-size: 9px;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: rgba(37, 211, 102, 0.15);
-  color: rgba(255, 255, 255, 0.65);
-  vertical-align: middle;
-  margin-left: 4px;
+  color: rgba(255, 255, 255, 0.85);
 }
 
-/* ── CTA (hero button — matches Google) ── */
+.cosmic-wa-status-jid {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.35);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── CTA button ── */
+
 .cosmic-wa-cta {
-  padding: 10px 20px;
+  padding: 8px 16px;
   border: none;
-  border-radius: 22px;
+  border-radius: 10px;
   background: #fff;
   color: #000;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   flex-shrink: 0;
-  transition: transform 0.25s cubic-bezier(0.19, 1, 0.22, 1), background 0.2s ease, box-shadow 0.2s ease;
+  box-shadow: 0 2px 10px rgba(255, 255, 255, 0.15);
+  transition: all 0.2s;
+  font-family: inherit;
 }
 
 .cosmic-wa-cta:hover:not(:disabled) {
-  background: #f5f5f5;
-  transform: scale(1.03);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 15px rgba(255, 255, 255, 0.25);
 }
 
-.cosmic-wa-cta:active:not(:disabled) {
-  transform: scale(0.98);
-}
-
-.cosmic-wa-cta:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
+.cosmic-wa-cta:active:not(:disabled) { transform: scale(0.97); }
+.cosmic-wa-cta:disabled { opacity: 0.4; cursor: default; transform: none; }
 
 /* ── Banner ── */
+
 .cosmic-wa-banner {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 11px 16px;
-  border-radius: 12px;
-  font-size: 13px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.5;
   animation: cosmicBannerIn 0.3s cubic-bezier(0.19, 1, 0.22, 1);
 }
 
@@ -1166,128 +1182,209 @@
 }
 
 .cosmic-wa-banner.success {
-  background: rgba(48, 209, 88, 0.1);
+  background: rgba(48, 209, 88, 0.12);
   border: 1px solid rgba(48, 209, 88, 0.2);
   color: rgba(200, 255, 220, 0.95);
 }
-
-.cosmic-wa-banner.success .cosmic-wa-banner-icon {
-  background: rgba(48, 209, 88, 0.2);
-  color: #30d158;
-}
+.cosmic-wa-banner.success .cosmic-wa-banner-icon { background: rgba(48, 209, 88, 0.2); color: #30d158; }
 
 .cosmic-wa-banner.error {
-  background: rgba(255, 69, 58, 0.1);
+  background: rgba(255, 69, 58, 0.12);
   border: 1px solid rgba(255, 69, 58, 0.2);
-  color: rgba(255, 214, 210, 0.96);
+  color: #ff9a94;
 }
-
-.cosmic-wa-banner.error .cosmic-wa-banner-icon {
-  background: rgba(255, 69, 58, 0.2);
-  color: #ff453a;
-}
+.cosmic-wa-banner.error .cosmic-wa-banner-icon { background: rgba(255, 69, 58, 0.2); color: #ff453a; }
 
 .cosmic-wa-banner.info {
   background: rgba(0, 122, 255, 0.1);
   border: 1px solid rgba(0, 122, 255, 0.2);
   color: rgba(220, 236, 255, 0.96);
 }
+.cosmic-wa-banner.info .cosmic-wa-banner-icon { background: rgba(0, 122, 255, 0.2); color: #007aff; }
 
-.cosmic-wa-banner.info .cosmic-wa-banner-icon {
-  background: rgba(0, 122, 255, 0.2);
-  color: #007aff;
+/* ── Glass tiles (meeting-mode m-select-tile / m-setup-card craft) ── */
+
+.cosmic-wa-tile {
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background:
+    radial-gradient(circle at 0% 0%, rgba(37, 211, 102, 0.14), transparent 58%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.07) 0%, rgba(255, 255, 255, 0.03) 100%),
+    rgba(10, 14, 20, 0.9);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 14px 28px rgba(0, 0, 0, 0.32);
+  overflow: hidden;
+  position: relative;
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+  animation: cosmicWaTileIn 0.4s cubic-bezier(0.19, 1, 0.22, 1) backwards;
 }
 
-/* ── Section wrappers ── */
-.cosmic-wa-section {
+.cosmic-wa-tile::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.06) 0%, transparent 45%);
+  pointer-events: none;
+}
+
+.cosmic-wa-tile:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.2);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 18px 36px rgba(0, 0, 0, 0.36);
+}
+
+@keyframes cosmicWaTileIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Flush variant (diagnostics — lighter) */
+.cosmic-wa-tile.cosmic-wa-tile-flush {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0.02) 100%),
+    rgba(10, 14, 20, 0.7);
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 8px 16px rgba(0, 0, 0, 0.15);
+}
+.cosmic-wa-tile.cosmic-wa-tile-flush::after { display: none; }
+
+/* Center variant (QR) */
+.cosmic-wa-tile.cosmic-wa-tile-center .cosmic-wa-tile-body { align-items: center; }
+
+/* Tile head */
+.cosmic-wa-tile-head {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.cosmic-wa-tile-head > span:first-child {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* Tile body */
+.cosmic-wa-tile-body {
+  position: relative;
+  z-index: 1;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 14px;
+  padding: 14px 16px;
 }
 
-.cosmic-wa-section-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  padding: 0 2px;
-}
+/* ── Meta pills (meeting-mode m-meta-pill style) ── */
 
-.cosmic-wa-section-label {
-  font-size: 11px;
+.cosmic-wa-meta-pill {
+  height: 20px;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(22, 24, 32, 0.9);
+  font-size: 9px;
   font-weight: 600;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.cosmic-wa-meta-pill.ready {
+  border-color: rgba(37, 211, 102, 0.25);
+  background: rgba(37, 211, 102, 0.1);
+  color: rgba(180, 255, 200, 0.9);
+}
+
+.cosmic-wa-meta-pill.subtle {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(10, 12, 18, 0.95);
   color: rgba(255, 255, 255, 0.45);
 }
 
-.cosmic-wa-section-hint {
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.35);
-}
+/* ── Inner surface (nested frosted glass — m-settings-preview-card) ── */
 
-/* ── Section card ── */
-.cosmic-wa-section-card {
+.cosmic-wa-inner-surface {
   display: flex;
   flex-direction: column;
-  gap: 18px;
-  padding: 18px 20px;
-  border-radius: 14px;
-  background: rgba(20, 20, 22, 0.45);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  transition: box-shadow 0.25s ease;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015)),
+    rgba(10, 14, 20, 0.46);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 6px 14px rgba(0, 0, 0, 0.1);
 }
 
-.cosmic-wa-section-card:hover {
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 6px 20px rgba(0, 0, 0, 0.08);
+/* ── Fields (meeting-mode m-field style) ── */
+
+.cosmic-wa-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
-/* ── Fields ── */
-.cosmic-wa-field label {
-  display: block;
-  margin-bottom: 6px;
-  font-size: 12px;
+.cosmic-wa-field > span {
+  font-size: 11px;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.5);
+  color: rgba(255, 255, 255, 0.45);
 }
 
-.cosmic-wa-input {
+.cosmic-wa-field input {
   width: 100%;
-  padding: 11px 14px;
+  padding: 10px 14px;
   border-radius: 10px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: rgba(0, 0, 0, 0.25);
   color: #fff;
-  font-size: 14px;
+  font-size: 13px;
+  font-family: inherit;
   outline: none;
-  transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
 }
 
-.cosmic-wa-input:focus {
+.cosmic-wa-field input:focus {
   border-color: rgba(37, 211, 102, 0.4);
   background: rgba(0, 0, 0, 0.35);
   box-shadow: 0 0 0 3px rgba(37, 211, 102, 0.1);
 }
 
-.cosmic-wa-input::placeholder {
-  color: rgba(255, 255, 255, 0.28);
+.cosmic-wa-field input::placeholder {
+  color: rgba(255, 255, 255, 0.22);
 }
 
-.cosmic-wa-field-error {
+.cosmic-wa-error {
   margin: 0;
   font-size: 12px;
   color: rgba(255, 100, 90, 0.85);
   line-height: 1.35;
 }
 
-/* ── Section actions ── */
-.cosmic-wa-section-actions {
+/* ── Actions ── */
+
+.cosmic-wa-actions {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
 }
 
-/* ── Buttons ── */
+/* ── Buttons (meeting-mode m-primary-btn / m-ghost-btn) ── */
+
 .cosmic-wa-btn {
   padding: 8px 16px;
   border: none;
@@ -1295,110 +1392,65 @@
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  transition: transform 0.2s cubic-bezier(0.19, 1, 0.22, 1), background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+  font-family: inherit;
+  transition: all 0.2s;
 }
 
-.cosmic-wa-btn:active:not(:disabled) {
-  transform: scale(0.97);
-}
-
-.cosmic-wa-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-  transform: none;
-}
+.cosmic-wa-btn:active:not(:disabled) { transform: scale(0.97); }
+.cosmic-wa-btn:disabled { opacity: 0.4; cursor: default; transform: none; }
 
 .cosmic-wa-btn.ghost {
-  background: transparent;
-  color: rgba(255, 255, 255, 0.6);
-}
-
-.cosmic-wa-btn.ghost:hover:not(:disabled) {
-  color: #fff;
   background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.7);
 }
+.cosmic-wa-btn.ghost:hover:not(:disabled) { background: rgba(255, 255, 255, 0.12); color: #fff; }
 
 .cosmic-wa-btn.secondary {
   background: rgba(255, 255, 255, 0.1);
   color: #fff;
 }
-
-.cosmic-wa-btn.secondary:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.15);
-}
+.cosmic-wa-btn.secondary:hover:not(:disabled) { background: rgba(255, 255, 255, 0.16); }
 
 .cosmic-wa-btn.primary {
-  background: linear-gradient(135deg, #25D366, #1ebe5d);
-  color: #fff;
-  box-shadow: 0 2px 8px rgba(37, 211, 102, 0.2);
+  background: #fff;
+  color: #000;
+  box-shadow: 0 2px 10px rgba(255, 255, 255, 0.15);
 }
-
 .cosmic-wa-btn.primary:hover:not(:disabled) {
-  box-shadow: 0 4px 14px rgba(37, 211, 102, 0.3);
-  transform: scale(1.02);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 15px rgba(255, 255, 255, 0.25);
 }
 
 .cosmic-wa-btn.danger {
   background: rgba(255, 69, 58, 0.12);
-  color: #ff6b6b;
+  color: #ff453a;
 }
+.cosmic-wa-btn.danger:hover:not(:disabled) { background: #ff453a; color: #fff; }
 
-.cosmic-wa-btn.danger:hover:not(:disabled) {
-  background: rgba(255, 69, 58, 0.22);
-}
+/* ── QR pairing ── */
 
-/* ── QR pairing card ── */
-.cosmic-wa-qr-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 24px;
-  padding: 32px 20px;
-  border-radius: 14px;
-  background: rgba(20, 20, 22, 0.45);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  animation: cosmicQrCardIn 0.5s cubic-bezier(0.19, 1, 0.22, 1) backwards;
-}
-
-@keyframes cosmicQrCardIn {
-  from {
-    opacity: 0;
-    transform: scale(0.92) translateY(10px);
-  }
-
-  to {
-    opacity: 1;
-    transform: scale(1) translateY(0);
-  }
-}
-
-.cosmic-wa-qr-frame {
-  width: 260px;
-  padding: 16px;
-  border-radius: 18px;
+.cosmic-wa-qr-well {
+  width: 220px;
+  padding: 14px;
+  border-radius: 16px;
   background: rgba(255, 255, 255, 0.97);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(255, 255, 255, 0.1);
-  animation: cosmicQrFrameIn 0.6s cubic-bezier(0.19, 1, 0.22, 1) 0.15s backwards;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.1),
+    0 12px 40px rgba(0, 0, 0, 0.35),
+    0 0 60px rgba(37, 211, 102, 0.08);
+  animation: cosmicWaQrIn 0.5s cubic-bezier(0.19, 1, 0.22, 1) backwards;
 }
 
-@keyframes cosmicQrFrameIn {
-  from {
-    opacity: 0;
-    transform: scale(0.85);
-  }
-
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
+@keyframes cosmicWaQrIn {
+  from { opacity: 0; transform: scale(0.88); }
+  to   { opacity: 1; transform: scale(1); }
 }
 
-.cosmic-wa-qr-img {
+.cosmic-wa-qr-well img {
   display: block;
   width: 100%;
   height: auto;
-  border-radius: 10px;
+  border-radius: 8px;
 }
 
 .cosmic-wa-qr-steps {
@@ -1409,7 +1461,7 @@
   max-width: 260px;
 }
 
-.cosmic-wa-qr-step {
+.cosmic-wa-qr-steps p {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1419,17 +1471,18 @@
   line-height: 1.4;
 }
 
-.cosmic-wa-qr-step strong {
-  color: rgba(255, 255, 255, 0.75);
+.cosmic-wa-qr-steps strong {
+  color: rgba(255, 255, 255, 0.8);
   font-weight: 600;
 }
 
 .cosmic-wa-step-num {
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   border-radius: 50%;
-  background: rgba(37, 211, 102, 0.15);
-  color: #25D366;
+  border: 1px solid rgba(37, 211, 102, 0.25);
+  background: rgba(37, 211, 102, 0.12);
+  color: rgba(180, 255, 200, 0.9);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1438,108 +1491,114 @@
   flex-shrink: 0;
 }
 
-/* ── Diagnostics toggle ── */
-.cosmic-wa-details-toggle {
+/* ── Diagnostics ── */
+
+.cosmic-wa-diag-toggle {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  padding: 10px 14px;
-  background: rgba(20, 20, 22, 0.3);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 12px;
+  padding: 12px 16px;
+  border: none;
+  background: transparent;
   cursor: pointer;
   color: inherit;
   font: inherit;
   transition: background 0.18s ease;
 }
 
-.cosmic-wa-details-toggle:hover {
-  background: rgba(255, 255, 255, 0.04);
+.cosmic-wa-diag-toggle:hover { background: rgba(255, 255, 255, 0.03); }
+
+.cosmic-wa-diag-toggle > span:first-child {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.5);
 }
 
-.cosmic-wa-details-chevron {
-  color: rgba(255, 255, 255, 0.4);
+.cosmic-wa-diag-chevron {
+  color: rgba(255, 255, 255, 0.35);
   transition: transform 0.2s cubic-bezier(0.2, 0, 0, 1);
   display: flex;
   align-items: center;
 }
 
-.cosmic-wa-details-chevron[data-open="true"] {
-  transform: rotate(90deg);
-}
+.cosmic-wa-diag-chevron[data-open="true"] { transform: rotate(90deg); }
 
-/* ── Details grid ── */
-.cosmic-wa-details-grid {
+.cosmic-wa-diag-grid {
+  position: relative;
+  z-index: 1;
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
+  padding: 0 16px 14px;
 }
 
-.cosmic-wa-detail {
+.cosmic-wa-diag-cell {
   display: flex;
   flex-direction: column;
   gap: 4px;
   padding: 10px 12px;
   border-radius: 10px;
-  background: rgba(20, 20, 22, 0.45);
+  background: rgba(0, 0, 0, 0.2);
   border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
-.cosmic-wa-detail span {
+.cosmic-wa-diag-cell > span {
   font-size: 10px;
-  color: rgba(255, 255, 255, 0.4);
+  color: rgba(255, 255, 255, 0.38);
   text-transform: uppercase;
   letter-spacing: 0.05em;
+  font-weight: 600;
 }
 
-.cosmic-wa-detail strong {
-  font-size: 13px;
-  color: #fff;
+.cosmic-wa-diag-cell > strong {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.9);
   word-break: break-all;
   font-weight: 500;
 }
 
-.cosmic-wa-detail-full {
-  grid-column: 1 / -1;
-}
+.cosmic-wa-diag-cell.full { grid-column: 1 / -1; }
+.cosmic-wa-diag-cell.error > span { color: rgba(255, 138, 132, 0.7); }
+.cosmic-wa-diag-cell.error > strong { color: rgba(255, 138, 132, 0.85); }
 
-.cosmic-wa-detail-error span {
-  color: rgba(255, 138, 132, 0.7);
-}
+/* ── Session strip ── */
 
-.cosmic-wa-detail-error strong {
-  color: rgba(255, 138, 132, 0.85);
-}
-
-/* ── Card footer (Google-style) ── */
-.cosmic-wa-card-footer {
+.cosmic-wa-session-strip {
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 14px;
-  padding: 16px 20px;
+  gap: 12px;
+  padding: 12px 14px;
   border-radius: 14px;
-  background: rgba(0, 0, 0, 0.12);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.01)),
+    rgba(10, 14, 20, 0.5);
+  animation: cosmicWaTileIn 0.4s cubic-bezier(0.19, 1, 0.22, 1) 0.12s backwards;
 }
 
-.cosmic-wa-card-note {
+.cosmic-wa-session-note {
   margin: 0;
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.42);
-  max-width: 240px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+  max-width: 200px;
   line-height: 1.35;
 }
 
-.cosmic-wa-card-actions {
+.cosmic-wa-session-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
 
 /* ── Footer note ── */
+
 .cosmic-wa-footer-note {
   margin: 0;
   font-size: 11px;
