@@ -9,8 +9,10 @@ from .channels.desktop import DesktopAdapter
 from .channels.registry import ChannelAdapterRegistry
 from .channels.whatsapp import WhatsAppAdapter, WhatsAppConfig
 from .config import GatewayConfig
+from .orchestrator_client import OrchestratorClient
 from .router_client import ModelRouterClient
 from .session_store import SessionStore
+from shared import SOURCE_PRIORITY_MAP, TaskEnvelope, generate_task_id, sign_task_envelope, utcnow
 
 
 class GatewayRuntime:
@@ -22,6 +24,11 @@ class GatewayRuntime:
         self.model_router = ModelRouterClient(
             base_url=config.model_router_url,
             timeout_sec=config.model_router_timeout_sec,
+        )
+        self.orchestrator = OrchestratorClient(
+            base_url=config.orchestrator_url,
+            internal_token=config.internal_token,
+            timeout_sec=config.orchestrator_timeout_sec,
         )
         self.session_store = SessionStore(config.sessions_db_path)
         self.gemini_adapter = GeminiAdapter(
@@ -43,12 +50,14 @@ class GatewayRuntime:
     async def start(self) -> None:
         self.session_store.initialize()
         await self.model_router.start()
+        await self.orchestrator.start()
         await self._register_adapters()
         self.started = True
 
     async def stop(self) -> None:
         await self.registry.stop_all()
         await self.model_router.stop()
+        await self.orchestrator.stop()
         await self.gemini_adapter.close()
         await self.perplexity_adapter.close()
         self.started = False
@@ -101,13 +110,17 @@ class GatewayRuntime:
             "channel": channel,
             "conversation_context": conversation_context,
         }
+        assembled_conversation_context = self._build_conversation_context(
+            session_id,
+            fallback_context=conversation_context,
+        )
 
         classification = await self._classify_message(
             session_id=session_id,
             content=content,
             metadata=metadata,
             channel=channel,
-            fallback_context=conversation_context,
+            conversation_context=assembled_conversation_context,
         )
         dispatch_target = "orchestrator" if classification["route"] == "opus" else "gateway"
 
@@ -133,6 +146,7 @@ class GatewayRuntime:
             "dispatch_target": dispatch_target,
             "classification": classification,
             "message": normalized_message,
+            "assembled_conversation_context": assembled_conversation_context,
         }
         self.request_records[request_id] = result
         return result
@@ -194,14 +208,40 @@ class GatewayRuntime:
             )
             return
 
-        await send(
-            {
-                "type": "error",
-                "request_id": request_id,
-                "code": "OPUS_UNAVAILABLE",
-                "message": "Opus/orchestrator dispatch is not implemented in this backend build yet.",
-            }
+        task = self._build_orchestrator_task(
+            request_record=request_record,
+            session_id=session_id,
+            request_id=request_id,
+            channel=channel,
         )
+        self.active_task_channels[task.task_id] = channel
+
+        try:
+            async for event in self.orchestrator.stream_task(task):
+                normalized_event = self._normalize_orchestrator_event(
+                    event,
+                    task_id=task.task_id,
+                    request_id=request_id,
+                    session_id=session_id,
+                    channel=channel,
+                )
+                await self._handle_orchestrator_event(
+                    normalized_event,
+                    send=send,
+                    store_assistant_message=store_assistant_message,
+                )
+        except Exception as exc:
+            self.active_task_channels.pop(task.task_id, None)
+            await send(
+                {
+                    "type": "error",
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "task_id": task.task_id,
+                    "code": "OPUS_UNAVAILABLE",
+                    "message": str(exc),
+                }
+            )
 
     def list_sessions(self) -> list[dict[str, Any]]:
         return self.session_store.list_sessions()
@@ -216,7 +256,7 @@ class GatewayRuntime:
         content: str,
         metadata: dict[str, Any],
         channel: str,
-        fallback_context: list[dict[str, Any]],
+        conversation_context: list[dict[str, Any]],
     ) -> dict[str, Any]:
         sticky_message = self.session_store.get_last_awaiting_reply(session_id, channel)
         if sticky_message:
@@ -243,10 +283,6 @@ class GatewayRuntime:
                 "signals": ["non_text_inbound"],
             }
 
-        conversation_context = self._build_conversation_context(
-            session_id,
-            fallback_context=fallback_context,
-        )
         try:
             classification = await self.model_router.classify(
                 query=content or "[empty message]",
@@ -357,7 +393,7 @@ class GatewayRuntime:
         session_id = self._resolve_session_id(requested_session_id)
         history_tail = self.session_store.get_history_tail(session_id, limit=30)
         pending_inputs = list(self.pending_input_requests.get(channel, []))
-        active_tasks = self._active_task_summaries(channel=channel, known_task_ids=known_task_ids or [])
+        active_tasks = await self._active_task_summaries(session_id=session_id, channel=channel)
         return {
             "type": "resume.ok",
             "request_id": request_id,
@@ -493,6 +529,7 @@ class GatewayRuntime:
         return {
             "status": "ok" if self.started else "starting",
             "model_router_url": self.config.model_router_url,
+            "orchestrator_url": self.config.orchestrator_url,
             "channels": self.list_channels(),
             "current_session_id": self.session_store.current_session_id(),
         }
@@ -504,19 +541,99 @@ class GatewayRuntime:
             "gateway_started": self.started,
             "healthy_channel_count": len(healthy_channels),
             "adapter_errors": self.adapter_errors,
+            "orchestrator_url": self.config.orchestrator_url,
         }
 
-    def _active_task_summaries(self, *, channel: str, known_task_ids: list[str]) -> list[dict[str, Any]]:
-        if not known_task_ids:
+    async def _active_task_summaries(self, *, session_id: str, channel: str) -> list[dict[str, Any]]:
+        try:
+            tasks = await self.orchestrator.list_active_tasks(session_id=session_id, channel=channel)
+        except Exception:
             return []
+        return tasks
 
-        active: list[dict[str, Any]] = []
-        for task_id in known_task_ids:
-            route = self._safe_text(self.active_task_channels.get(task_id))
-            if route != channel:
-                continue
-            active.append({"task_id": task_id, "channel": channel})
-        return active
+    def _build_orchestrator_task(
+        self,
+        *,
+        request_record: dict[str, Any],
+        session_id: str,
+        request_id: str,
+        channel: str,
+    ) -> TaskEnvelope:
+        if not self.config.signing_secret:
+            raise RuntimeError("GATEWAY_SIGNING_SECRET is not configured on the Gateway VM.")
+
+        message = request_record.get("message")
+        if not isinstance(message, dict):
+            raise RuntimeError("Request record is missing the normalized message payload.")
+
+        task = TaskEnvelope(
+            task_id=generate_task_id(),
+            task_list_id=session_id,
+            session_id=session_id,
+            sender="cosmic/gateway:1.0.0",
+            recipient="cosmic/orchestrator:1.0.0",
+            intent="orchestrator.process",
+            input={
+                "query": self._safe_text(message.get("content")) or "[empty message]",
+                "request_id": request_id,
+                "conversation_context": request_record.get("assembled_conversation_context") or [],
+            },
+            idempotency_key=uuid4().hex,
+            priority=SOURCE_PRIORITY_MAP.get(self._safe_text(request_record.get("source")) or "user", "normal"),
+            signature="",
+            created_at=utcnow(),
+            source=self._safe_text(request_record.get("source")) or "user",
+            source_id=self._safe_text(request_record.get("source_id")),
+            channel=channel,
+        )
+        signature = sign_task_envelope(task, self.config.signing_secret)
+        return task.model_copy(update={"signature": signature})
+
+    async def _handle_orchestrator_event(
+        self,
+        event: dict[str, Any],
+        *,
+        send,
+        store_assistant_message,
+    ) -> None:
+        event_type = self._safe_text(event.get("type")) or ""
+        if event_type == "response.complete":
+            store_assistant_message(
+                str(event.get("content") or ""),
+                awaiting_reply=bool(event.get("awaiting_reply")),
+                metadata={
+                    "task_id": self._safe_text(event.get("task_id")),
+                    "metrics": event.get("metrics"),
+                },
+                channel=self._safe_text(event.get("channel")) or "",
+                route="opus",
+            )
+        elif event_type == "task.input_required":
+            channel = self._safe_text(event.get("channel"))
+            if channel:
+                self.pending_input_requests[channel].append(event)
+        elif event_type in {"task.completed", "task.failed", "task.cancelled"}:
+            task_id = self._safe_text(event.get("task_id"))
+            if task_id:
+                self.active_task_channels.pop(task_id, None)
+
+        await send(event)
+
+    def _normalize_orchestrator_event(
+        self,
+        event: dict[str, Any],
+        *,
+        task_id: str,
+        request_id: str,
+        session_id: str,
+        channel: str,
+    ) -> dict[str, Any]:
+        normalized = dict(event)
+        normalized.setdefault("task_id", task_id)
+        normalized.setdefault("request_id", request_id)
+        normalized.setdefault("session_id", session_id)
+        normalized.setdefault("channel", channel)
+        return normalized
 
     def _safe_text(self, value: Any) -> str | None:
         if value is None:

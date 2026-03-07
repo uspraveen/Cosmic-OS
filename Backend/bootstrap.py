@@ -35,6 +35,7 @@ DEFAULT_BRIDGE_DIR = BACKEND_ROOT / "bridges" / "whatsapp_bridge"
 DEFAULT_SYSTEMD_TEMPLATE_DIR = BACKEND_ROOT / "systemd"
 DEFAULT_EDGE_SETUP_SCRIPT = BACKEND_ROOT / "vm_edge_setup.py"
 DEFAULT_GATEWAY_ENV_PATH = BACKEND_ROOT / "gateway.env"
+DEFAULT_ORCHESTRATOR_ENV_PATH = BACKEND_ROOT / "orchestrator.env"
 DEFAULT_ENV_SEARCH_ROOTS = (
     BACKEND_ROOT,
     BACKEND_ROOT / "bridges",
@@ -741,6 +742,7 @@ def service_env_specs(system_env_dir: Optional[Path] = None) -> List[Tuple[Path,
     return [
         (BACKEND_ROOT / "gateway.env", system_env_dir / "gateway.env"),
         (BACKEND_ROOT / "model_router.env", system_env_dir / "model-router.env"),
+        (BACKEND_ROOT / "orchestrator.env", system_env_dir / "orchestrator.env"),
         (DEFAULT_BRIDGE_DIR / ".env", system_env_dir / "whatsapp-bridge.env"),
     ]
 
@@ -750,6 +752,7 @@ def fallback_service_env_specs(system_env_dir: Optional[Path] = None) -> List[Tu
     return [
         (BACKEND_ROOT / "gateway.env.example", system_env_dir / "gateway.env"),
         (BACKEND_ROOT / "model_router.env.example", system_env_dir / "model-router.env"),
+        (BACKEND_ROOT / "orchestrator.env.example", system_env_dir / "orchestrator.env"),
         (DEFAULT_BRIDGE_DIR / ".env.example", system_env_dir / "whatsapp-bridge.env"),
     ]
 
@@ -777,17 +780,29 @@ def build_service_env_overrides(
 ) -> Dict[str, Dict[str, str]]:
     existing_env_by_name = existing_env_by_name or {}
     gateway_source = next(source for source, dest in effective_sources if dest.name == "gateway.env")
+    orchestrator_source = next(source for source, dest in effective_sources if dest.name == "orchestrator.env")
     bridge_source = next(source for source, dest in effective_sources if dest.name == "whatsapp-bridge.env")
     gateway_data = parse_env_text(gateway_source.read_text(encoding="utf-8"))
+    orchestrator_data = parse_env_text(orchestrator_source.read_text(encoding="utf-8"))
     bridge_data = parse_env_text(bridge_source.read_text(encoding="utf-8"))
     gateway_existing = existing_env_by_name.get("gateway.env", {})
+    orchestrator_existing = existing_env_by_name.get("orchestrator.env", {})
     bridge_existing = existing_env_by_name.get("whatsapp-bridge.env", {})
 
     shared_internal_token = first_meaningful_value(
         gateway_existing.get("GATEWAY_INTERNAL_TOKEN"),
         bridge_existing.get("GATEWAY_INTERNAL_TOKEN"),
         gateway_data.get("GATEWAY_INTERNAL_TOKEN"),
+        orchestrator_existing.get("GATEWAY_INTERNAL_TOKEN"),
+        orchestrator_data.get("GATEWAY_INTERNAL_TOKEN"),
         bridge_data.get("GATEWAY_INTERNAL_TOKEN"),
+        secrets.token_urlsafe(32),
+    )
+    signing_secret = first_meaningful_value(
+        gateway_existing.get("GATEWAY_SIGNING_SECRET"),
+        orchestrator_existing.get("GATEWAY_SIGNING_SECRET"),
+        gateway_data.get("GATEWAY_SIGNING_SECRET"),
+        orchestrator_data.get("GATEWAY_SIGNING_SECRET"),
         secrets.token_urlsafe(32),
     )
     bridge_token = first_meaningful_value(
@@ -812,7 +827,12 @@ def build_service_env_overrides(
         "gateway.env": {
             "GATEWAY_INTERNAL_TOKEN": shared_internal_token or secrets.token_urlsafe(32),
             "GATEWAY_LOCAL_API_TOKEN": local_api_token or secrets.token_urlsafe(24),
+            "GATEWAY_SIGNING_SECRET": signing_secret or secrets.token_urlsafe(32),
             "WHATSAPP_BRIDGE_TOKEN": bridge_token or secrets.token_urlsafe(32),
+        },
+        "orchestrator.env": {
+            "GATEWAY_INTERNAL_TOKEN": shared_internal_token or secrets.token_urlsafe(32),
+            "GATEWAY_SIGNING_SECRET": signing_secret or secrets.token_urlsafe(32),
         },
         "whatsapp-bridge.env": {
             "GATEWAY_INTERNAL_TOKEN": shared_internal_token or secrets.token_urlsafe(32),

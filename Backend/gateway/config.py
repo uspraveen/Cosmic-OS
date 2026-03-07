@@ -45,8 +45,11 @@ class GatewayConfig:
     port: int = 8080
     local_api_token: str = ""
     internal_token: str = ""
+    signing_secret: str = ""
     model_router_url: str = "http://127.0.0.1:8742"
     model_router_timeout_sec: float = 15.0
+    orchestrator_url: str = "http://127.0.0.1:8743"
+    orchestrator_timeout_sec: float = 300.0
     enable_whatsapp: bool = True
     sessions_db_path: Path = BACKEND_ROOT / "gateway" / "sessions.db"
     gemini_api_key: str = ""
@@ -66,10 +69,16 @@ class GatewayConfig:
                 or ""
             ),
             internal_token=os.getenv("GATEWAY_INTERNAL_TOKEN", ""),
+            signing_secret=os.getenv("GATEWAY_SIGNING_SECRET", "").strip(),
             model_router_url=os.getenv("MODEL_ROUTER_URL", "http://127.0.0.1:8742").rstrip("/"),
             model_router_timeout_sec=max(
                 1.0,
                 _env_float("MODEL_ROUTER_TIMEOUT_SEC", 15.0),
+            ),
+            orchestrator_url=os.getenv("ORCHESTRATOR_URL", "http://127.0.0.1:8743").rstrip("/"),
+            orchestrator_timeout_sec=max(
+                10.0,
+                _env_float("ORCHESTRATOR_TIMEOUT_SEC", 300.0),
             ),
             enable_whatsapp=_env_bool("WHATSAPP_ENABLED", True),
             sessions_db_path=Path(

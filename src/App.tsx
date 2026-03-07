@@ -17,6 +17,7 @@ export type QueryMode = 'chat' | 'meeting'
 interface Message {
   role: 'user' | 'assistant'
   content: string
+  thinking?: string
   sources?: Array<{ url: string; title?: string; domain?: string } | string>
 }
 
@@ -255,6 +256,24 @@ export default function App() {
         return
       }
 
+      if (eventType === 'response.thinking.chunk') {
+        setMessages((prev) => {
+          const last = prev[prev.length - 1]
+          if (!event.content) return prev
+          if (!last || last.role === 'user') {
+            return [...prev, { role: 'assistant', content: '', thinking: String(event.content) }]
+          }
+          return [
+            ...prev.slice(0, -1),
+            {
+              ...last,
+              thinking: `${last.thinking || ''}${String(event.content)}`,
+            },
+          ]
+        })
+        return
+      }
+
       if (eventType === 'response.complete') {
         setActiveSessionId((prev) => typeof event.session_id === 'string' ? event.session_id : prev)
         setMessages((prev) => {
@@ -270,6 +289,19 @@ export default function App() {
           return [...prev, { role: 'assistant', content: String(event.content || ''), sources }]
         })
         setIsStreaming(false)
+        return
+      }
+
+      if (eventType === 'task.failed') {
+        setIsStreaming(false)
+        const message = String(event?.error?.message || event?.message || 'Opus task failed.')
+        setMessages((prev) => {
+          const last = prev[prev.length - 1]
+          if (last && last.role === 'assistant' && !last.content) {
+            return [...prev.slice(0, -1), { ...last, content: message }]
+          }
+          return [...prev, { role: 'assistant', content: message }]
+        })
         return
       }
 
@@ -561,6 +593,12 @@ export default function App() {
                         </div>
                       ) : (
                         <>
+                          {msg.thinking && (
+                            <div className="thinking-block">
+                              <div className="thinking-label">Thinking</div>
+                              <div className="thinking-text">{msg.thinking}</div>
+                            </div>
+                          )}
                           <ReactMarkdown
                             remarkPlugins={[remarkGfm, remarkMath]}
                             rehypePlugins={[rehypeKatex]}

@@ -58,12 +58,72 @@ class FakeDirectAdapter:
         )
 
 
-def build_runtime(tmp_path) -> GatewayRuntime:
+class FakeOrchestratorClient:
+    async def start(self) -> None:
+        return
+
+    async def stop(self) -> None:
+        return
+
+    async def stream_task(self, task) -> object:
+        yield {
+            "type": "task.created",
+            "task_id": task.task_id,
+            "session_id": task.session_id,
+            "channel": task.channel,
+            "route": "opus",
+            "status": "running",
+        }
+        yield {
+            "type": "response.thinking.chunk",
+            "task_id": task.task_id,
+            "request_id": task.input.get("request_id"),
+            "session_id": task.session_id,
+            "channel": task.channel,
+            "content": "Let me think this through.",
+            "done": False,
+        }
+        yield {
+            "type": "response.chunk",
+            "task_id": task.task_id,
+            "request_id": task.input.get("request_id"),
+            "session_id": task.session_id,
+            "channel": task.channel,
+            "content": "Thin Opus answer",
+            "done": False,
+        }
+        yield {
+            "type": "response.complete",
+            "task_id": task.task_id,
+            "request_id": task.input.get("request_id"),
+            "session_id": task.session_id,
+            "channel": task.channel,
+            "content": "Thin Opus answer",
+            "route": "opus",
+            "awaiting_reply": True,
+            "metrics": {"rtt_ms": 32},
+        }
+        yield {
+            "type": "task.completed",
+            "task_id": task.task_id,
+            "session_id": task.session_id,
+            "channel": task.channel,
+            "route": "opus",
+            "status": "completed",
+        }
+
+    async def list_active_tasks(self, *, session_id: str | None = None, channel: str | None = None) -> list[dict]:
+        return []
+
+
+def build_runtime(tmp_path, *, route: str = "gemini") -> GatewayRuntime:
     runtime = GatewayRuntime(
         GatewayConfig(
             local_api_token="test-token",
             internal_token="internal-token",
+            signing_secret="signing-secret",
             model_router_url="http://127.0.0.1:9999",
+            orchestrator_url="http://127.0.0.1:8743",
             enable_whatsapp=False,
             sessions_db_path=tmp_path / "sessions.db",
         )
@@ -77,11 +137,11 @@ def build_runtime(tmp_path) -> GatewayRuntime:
 
     async def fake_classify(*, query: str, conversation_context, max_completion_tokens: int = 430) -> dict:
         return {
-            "route": "gemini",
+            "route": route,
             "needs_latest": False,
             "needs_citations": False,
-            "is_task": False,
-            "is_continuation": False,
+            "is_task": route == "opus",
+            "is_continuation": route == "opus",
             "confidence": 0.91,
             "signals": ["test"],
         }
@@ -91,6 +151,7 @@ def build_runtime(tmp_path) -> GatewayRuntime:
     runtime.model_router.classify = fake_classify
     runtime.gemini_adapter = FakeDirectAdapter("gemini")
     runtime.perplexity_adapter = FakeDirectAdapter("perplexity")
+    runtime.orchestrator = FakeOrchestratorClient()
     return runtime
 
 
@@ -251,3 +312,52 @@ def test_sessions_endpoints_return_vm_history(test_client: TestClient) -> None:
     history_payload = history_response.json()
     assert history_payload["session_id"] == route_result["session_id"]
     assert [item["role"] for item in history_payload["messages"]] == ["user", "assistant"]
+
+
+def test_desktop_websocket_streams_thin_opus_route(test_client: TestClient, tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws?token=test-token&device_id=desk_opus") as websocket:
+            websocket.send_json(
+                {
+                    "type": "query",
+                    "request_id": "req_opus",
+                    "content": "Plan this for me",
+                }
+            )
+            route_result = websocket.receive_json()
+            assert route_result["type"] == "route_result"
+            assert route_result["route"] == "opus"
+
+            created = websocket.receive_json()
+            assert created["type"] == "task.created"
+            assert created["route"] == "opus"
+
+            thinking = websocket.receive_json()
+            assert thinking["type"] == "response.thinking.chunk"
+            assert thinking["content"] == "Let me think this through."
+
+            chunk = websocket.receive_json()
+            assert chunk["type"] == "response.chunk"
+            assert chunk["content"] == "Thin Opus answer"
+
+            complete = websocket.receive_json()
+            assert complete["type"] == "response.complete"
+            assert complete["route"] == "opus"
+            assert complete["awaiting_reply"] is True
+
+            completed = websocket.receive_json()
+            assert completed["type"] == "task.completed"

@@ -1,6 +1,6 @@
 [Unit]
 Description=COSMIC Gateway
-After=network-online.target cosmic-model-router.service
+After=network-online.target cosmic-model-router.service cosmic-orchestrator.service
 Wants=network-online.target
 
 [Service]

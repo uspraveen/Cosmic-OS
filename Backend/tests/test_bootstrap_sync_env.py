@@ -54,6 +54,12 @@ def test_sync_service_env_files_appends_missing_keys_without_overwriting_values(
         "CLASSIFIER_MODEL=openai/gpt-oss-20b\n",
         encoding="utf-8",
     )
+    (backend_root / "orchestrator.env.example").write_text(
+        "GATEWAY_INTERNAL_TOKEN=<internal-token>\n"
+        "GATEWAY_SIGNING_SECRET=<signing-secret>\n"
+        "ANTHROPIC_API_KEY=<anthropic-api-key>\n",
+        encoding="utf-8",
+    )
     (bridge_dir / ".env.example").write_text(
         "GATEWAY_INTERNAL_TOKEN=<internal-token>\n"
         "WHATSAPP_BRIDGE_TOKEN=<bridge-token>\n"
@@ -63,6 +69,7 @@ def test_sync_service_env_files_appends_missing_keys_without_overwriting_values(
 
     gateway_env_path = system_env_dir / "gateway.env"
     model_router_env_path = system_env_dir / "model-router.env"
+    orchestrator_env_path = system_env_dir / "orchestrator.env"
     bridge_env_path = system_env_dir / "whatsapp-bridge.env"
     gateway_env_path.write_text(
         "GATEWAY_INTERNAL_TOKEN=shared-token\n"
@@ -73,6 +80,10 @@ def test_sync_service_env_files_appends_missing_keys_without_overwriting_values(
     )
     model_router_env_path.write_text(
         "GROQ_API_KEY=groq-real\n",
+        encoding="utf-8",
+    )
+    orchestrator_env_path.write_text(
+        "GATEWAY_INTERNAL_TOKEN=shared-token\n",
         encoding="utf-8",
     )
     bridge_env_path.write_text(
@@ -87,6 +98,8 @@ def test_sync_service_env_files_appends_missing_keys_without_overwriting_values(
             return SimpleNamespace(stdout=gateway_env_path.read_text(encoding="utf-8"), returncode=0)
         if args[:2] == ["cat", str(model_router_env_path)]:
             return SimpleNamespace(stdout=model_router_env_path.read_text(encoding="utf-8"), returncode=0)
+        if args[:2] == ["cat", str(orchestrator_env_path)]:
+            return SimpleNamespace(stdout=orchestrator_env_path.read_text(encoding="utf-8"), returncode=0)
         if args[:2] == ["cat", str(bridge_env_path)]:
             return SimpleNamespace(stdout=bridge_env_path.read_text(encoding="utf-8"), returncode=0)
         if args[0] == "install" and "-d" in args:
@@ -111,17 +124,24 @@ def test_sync_service_env_files_appends_missing_keys_without_overwriting_values(
 
     gateway_rendered = gateway_env_path.read_text(encoding="utf-8")
     model_router_rendered = model_router_env_path.read_text(encoding="utf-8")
+    orchestrator_rendered = orchestrator_env_path.read_text(encoding="utf-8")
     bridge_rendered = bridge_env_path.read_text(encoding="utf-8")
 
     assert gateway_rendered.count("GATEWAY_LOCAL_API_TOKEN=") == 1
     assert "GATEWAY_LOCAL_API_TOKEN=local-real" in gateway_rendered
     assert "GEMINI_API_KEY=<gemini-api-key>" in gateway_rendered
     assert "PERPLEXITY_API_KEY=<perplexity-api-key>" in gateway_rendered
+    assert "GATEWAY_SIGNING_SECRET=" in gateway_rendered
     assert "EXISTING_KEY=keep-me" in gateway_rendered
 
     assert model_router_rendered.count("GROQ_API_KEY=") == 1
     assert "GROQ_API_KEY=groq-real" in model_router_rendered
     assert "CLASSIFIER_MODEL=openai/gpt-oss-20b" in model_router_rendered
+
+    assert orchestrator_rendered.count("GATEWAY_INTERNAL_TOKEN=") == 1
+    assert "GATEWAY_INTERNAL_TOKEN=shared-token" in orchestrator_rendered
+    assert "GATEWAY_SIGNING_SECRET=" in orchestrator_rendered
+    assert "ANTHROPIC_API_KEY=<anthropic-api-key>" in orchestrator_rendered
 
     assert bridge_rendered.count("WHATSAPP_BRIDGE_TOKEN=") == 1
     assert "WHATSAPP_BRIDGE_TOKEN=bridge-real" in bridge_rendered
