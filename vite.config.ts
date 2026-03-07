@@ -11,6 +11,16 @@ export default defineConfig({
       main: {
         // Shortcut of `build.lib.entry`.
         entry: 'electron/main.ts',
+        vite: {
+          build: {
+            rollupOptions: {
+              // Keep Node/Electron runtime modules out of the main bundle.
+              // `ws` has optional native helpers (`bufferutil`, `utf-8-validate`)
+              // that must be resolved by Node at runtime, not inlined by Vite.
+              external: ['ssh2', 'ws', 'bufferutil', 'utf-8-validate'],
+            },
+          },
+        },
       },
       preload: {
         // Shortcut of `build.rollupOptions.input`.
