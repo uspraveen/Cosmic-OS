@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import Store from 'electron-store'
+import { GatewayConnectionManager, type GatewayConnectionConfig as PersistentGatewayConnectionConfig } from './gatewayConnectionManager'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 process.env.APP_ROOT = path.join(__dirname, '..')
@@ -23,15 +24,17 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL
 const store = new Store({
   defaults: {
     preferredDisplayId: null,
-    autoRepositionOnChange: true
+    autoRepositionOnChange: true,
+    cosmicAuth: null,
+    gatewayBaseUrl: '',
+    gatewayApiToken: '',
+    desktopDeviceId: '',
   }
 })
 
 let win: BrowserWindow | null = null
 let mediaProcess: any = null
 let windowProcess: any = null
-let geminiProcess: any = null
-let perplexityProcess: any = null
 let weatherProcess: any = null
 let meetingProcess: any = null
 
@@ -39,10 +42,73 @@ let voiceProcess: any = null
 let voiceActive = false
 let searchVisible = false
 let lastWeatherData: any = null
+let gatewayConnectionManager: GatewayConnectionManager | null = null
 
 interface GatewayConnectionConfig {
   baseUrl: string
   apiToken: string
+}
+
+function getDesktopDeviceId() {
+  const existing = String(store.get('desktopDeviceId') || '').trim()
+  if (existing) {
+    return existing
+  }
+  const generated = `desk_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`
+  store.set('desktopDeviceId', generated)
+  settingsProcess?.stdin.write(`SAVE_SETTING:desktopDeviceId:${generated}\n`)
+  return generated
+}
+
+function getStoredGatewayTransportConfig(): PersistentGatewayConnectionConfig | null {
+  const baseUrl = String(store.get('gatewayBaseUrl') || '').trim()
+  const apiToken = String(store.get('gatewayApiToken') || '').trim()
+  if (!baseUrl || !apiToken) {
+    return null
+  }
+  return {
+    baseUrl,
+    apiToken,
+    deviceId: getDesktopDeviceId(),
+  }
+}
+
+function configureGatewayConnection() {
+  if (!gatewayConnectionManager) {
+    return
+  }
+  gatewayConnectionManager.configure(getStoredGatewayTransportConfig())
+}
+
+function syncGatewaySettingsFromPayload(settings: any) {
+  if (!settings || typeof settings !== 'object') {
+    return
+  }
+
+  const gatewayBaseUrl = String(settings.gatewayBaseUrl || '').trim()
+  const gatewayApiToken = String(settings.gatewayApiToken || '').trim()
+  const desktopDeviceId = String(settings.desktopDeviceId || '').trim()
+  const cosmicAuthRaw = settings.cosmicAuth
+
+  store.set('gatewayBaseUrl', gatewayBaseUrl)
+  store.set('gatewayApiToken', gatewayApiToken)
+  if (desktopDeviceId) {
+    store.set('desktopDeviceId', desktopDeviceId)
+  }
+
+  if (typeof cosmicAuthRaw === 'string' && cosmicAuthRaw.trim()) {
+    try {
+      store.set('cosmicAuth', JSON.parse(cosmicAuthRaw))
+    } catch {
+      store.set('cosmicAuth', cosmicAuthRaw)
+    }
+  } else if (cosmicAuthRaw && typeof cosmicAuthRaw === 'object') {
+    store.set('cosmicAuth', cosmicAuthRaw)
+  } else if (!cosmicAuthRaw) {
+    store.set('cosmicAuth', null)
+  }
+
+  configureGatewayConnection()
 }
 
 function unwrapWhatsAppBridgePayload(payload: any) {
@@ -132,45 +198,6 @@ async function callGatewayJson(
   }
 }
 
-function startGeminiBridge(window: BrowserWindow) {
-  const scriptPath = path.join(process.env.APP_ROOT, 'resources', 'gemini_bridge.py')
-  geminiProcess = spawn('python', ['-u', scriptPath])
-
-  geminiProcess.stderr?.on('data', (d: any) => console.error('[GEMINI ERR]', d.toString()))
-
-  let rawBuffer = ''
-
-  geminiProcess.stdout.on('data', (chunk: any) => {
-    rawBuffer += chunk.toString()
-
-    const regex = /<<([A-Z_]+)>>(.*?)<<END>>/gs
-    let match
-    let lastIndex = 0
-
-    while ((match = regex.exec(rawBuffer)) !== null) {
-      const [, tag, content] = match
-      lastIndex = regex.lastIndex
-
-      try {
-        const json = JSON.parse(content)
-
-        if (tag === 'CHUNK') window.webContents.send('gemini:chunk', json)
-        else if (tag === 'KEY_STATUS') window.webContents.send('key-status', json)
-        else if (tag === 'SESSIONS') window.webContents.send('session-list', json)
-        else if (tag === 'HISTORY') window.webContents.send('history-load', json)
-        else if (tag === 'SESSION_SET') window.webContents.send('session-set', json)
-
-      } catch (e) {
-        console.error("Parse Error:", e)
-      }
-    }
-
-    if (lastIndex > 0) {
-      rawBuffer = rawBuffer.substring(lastIndex)
-    }
-  })
-}
-
 function startMediaBridge(window: BrowserWindow) {
   let scriptName = 'media_bridge_win.py'
   if (process.platform === 'darwin') {
@@ -251,46 +278,6 @@ function startWeatherBridge(window: BrowserWindow) {
   })
 }
 
-function startPerplexityBridge(window: BrowserWindow) {
-  const scriptPath = path.join(process.env.APP_ROOT, 'resources', 'perplexity_bridge.py')
-  perplexityProcess = spawn('python', ['-u', scriptPath])
-
-  perplexityProcess.stderr?.on('data', (d: any) => console.error('[PERPLEXITY ERR]', d.toString()))
-
-  let rawBuffer = ''
-
-  perplexityProcess.stdout.on('data', (chunk: any) => {
-    rawBuffer += chunk.toString()
-
-    const regex = /<<([A-Z_]+)>>(.*?)<<END>>/gs
-    let match
-    let lastIndex = 0
-
-    while ((match = regex.exec(rawBuffer)) !== null) {
-      const [_, tag, content] = match
-      lastIndex = regex.lastIndex
-
-      try {
-        const json = JSON.parse(content)
-
-        if (tag === 'CHUNK') window.webContents.send('perplexity:chunk', json)
-        else if (tag === 'SOURCES') window.webContents.send('perplexity:sources', json)
-        else if (tag === 'KEY_STATUS') window.webContents.send('key-status', json)
-        else if (tag === 'SESSION_SET') window.webContents.send('session-set', json)
-        else if (tag === 'SESSIONS') window.webContents.send('session-list', json)
-        else if (tag === 'HISTORY') window.webContents.send('history-load', json)
-
-      } catch (e) {
-        console.error("Perplexity Parse Error:", e)
-      }
-    }
-
-    if (lastIndex > 0) {
-      rawBuffer = rawBuffer.substring(lastIndex)
-    }
-  })
-}
-
 function startMeetingBridge(window: BrowserWindow) {
   const scriptPath = path.join(process.env.APP_ROOT, 'resources', 'meeting_bridge.py')
   meetingProcess = spawn('python', ['-u', scriptPath])
@@ -352,10 +339,14 @@ function startSettingsBridge(window: BrowserWindow) {
 
       try {
         const json = JSON.parse(content)
-        if (tag === 'SETTINGS') window.webContents.send('settings:all', json)
+        if (tag === 'SETTINGS') {
+          syncGatewaySettingsFromPayload(json)
+          window.webContents.send('settings:all', json)
+        }
         else if (tag === 'INTEGRATIONS') window.webContents.send('integrations:all', json)
         else if (tag === 'CALENDAR_AGENDA') window.webContents.send('calendar:agenda', json)
         else if (tag === 'INTEGRATION_EVENT') window.webContents.send('integration:event', json)
+        else if (tag === 'KEY_STATUS') window.webContents.send('key-status', json)
       } catch (e) {
         console.error('Settings Parse Error:', e)
       }
@@ -538,13 +529,13 @@ function cleanupProcesses() {
 
   kill(mediaProcess); mediaProcess = null
   kill(windowProcess); windowProcess = null
-  kill(geminiProcess); geminiProcess = null
-  kill(perplexityProcess); perplexityProcess = null
   kill(weatherProcess); weatherProcess = null
 
   kill(settingsProcess); settingsProcess = null
   kill(voiceProcess); voiceProcess = null
   kill(meetingProcess); meetingProcess = null
+  gatewayConnectionManager?.stop()
+  gatewayConnectionManager = null
 }
 
 // Monitor change detection
@@ -564,13 +555,16 @@ app.whenReady().then(() => {
   if (win) {
     startMediaBridge(win)
     startWindowBridge(win)
-    startGeminiBridge(win)
-    startPerplexityBridge(win)
     startWeatherBridge(win)
     startMeetingBridge(win)
 
     startSettingsBridge(win)
+    settingsProcess?.stdin.write('GET_ALL_SETTINGS\n')
+    settingsProcess?.stdin.write('GET_KEY_STATUS\n')
     startVoiceBridge(win)
+    gatewayConnectionManager = new GatewayConnectionManager(win)
+    getDesktopDeviceId()
+    configureGatewayConnection()
     sizeToDisplay()
     win.show()
   }
@@ -610,6 +604,14 @@ app.whenReady().then(() => {
 
   ipcMain.on('settings:get-all', () => {
     settingsProcess?.stdin.write('GET_ALL_SETTINGS\n')
+  })
+
+  ipcMain.on('settings:get-key-status', () => {
+    settingsProcess?.stdin.write('GET_KEY_STATUS\n')
+  })
+
+  ipcMain.on('settings:save-api-keys', (_, payload) => {
+    settingsProcess?.stdin.write(`SAVE_API_KEYS:${JSON.stringify(payload || {})}\n`)
   })
 
   ipcMain.on('integrations:get-all', () => {
@@ -687,38 +689,41 @@ app.whenReady().then(() => {
     settingsProcess?.stdin.write(`DISCONNECT_GOOGLE_ACCOUNT:${accountId}\n`)
   })
 
-  ipcMain.on('gemini:send', (_, prompt) => {
-    if (geminiProcess?.stdin) {
-      if (
-        prompt.startsWith("CHECK_KEYS") ||
-        prompt.startsWith("SAVE_KEYS") ||
-        prompt.startsWith("LIST_SESSIONS") ||
-        prompt.startsWith("LOAD_SESSION") ||
-        prompt.startsWith("NEW_CHAT") ||
-        prompt.startsWith("DELETE_SESSION")
-      ) {
-        geminiProcess.stdin.write(`${prompt}\n`)
-      } else {
-        geminiProcess.stdin.write(`PROMPT:${prompt}\n`)
-      }
+  ipcMain.handle('gateway:get-state', () => {
+    return gatewayConnectionManager?.getState() || null
+  })
+
+  ipcMain.handle('gateway:send-query', async (_, payload: { content: string; conversationContext?: any[] }) => {
+    if (!gatewayConnectionManager) {
+      throw new Error('Gateway connection manager is unavailable.')
+    }
+    return {
+      requestId: gatewayConnectionManager.sendQuery(
+        String(payload?.content || ''),
+        Array.isArray(payload?.conversationContext) ? payload.conversationContext : [],
+      ),
     }
   })
 
-  ipcMain.on('perplexity:send', (_, prompt) => {
-    if (perplexityProcess?.stdin) {
-      if (
-        prompt.startsWith("CHECK_KEYS") ||
-        prompt.startsWith("SAVE_KEYS") ||
-        prompt.startsWith("LIST_SESSIONS") ||
-        prompt.startsWith("LOAD_SESSION") ||
-        prompt.startsWith("NEW_CHAT") ||
-        prompt.startsWith("DELETE_SESSION")
-      ) {
-        perplexityProcess.stdin.write(`${prompt}\n`)
-      } else {
-        perplexityProcess.stdin.write(`PROMPT:${prompt}\n`)
-      }
+  ipcMain.handle('gateway:request-resume', () => {
+    gatewayConnectionManager?.requestResume()
+    return { ok: true }
+  })
+
+  ipcMain.handle('gateway:list-sessions', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      return { sessions: [] }
     }
+    return callGatewayJson(config, '/sessions')
+  })
+
+  ipcMain.handle('gateway:get-session-history', async (_, sessionId: string) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, `/sessions/${encodeURIComponent(sessionId)}`)
   })
 
   ipcMain.on('weather:request', (event) => {
@@ -824,12 +829,20 @@ app.whenReady().then(() => {
         vmDns: result.vm.vm_dns,
         authenticatedAt: Date.now(),
       }
+      const deviceId = getDesktopDeviceId()
 
       // Persist auth to SQLite via settings bridge
       const authJson = JSON.stringify(authData)
       settingsProcess?.stdin.write(`SAVE_SETTING:cosmicAuth:${authJson}\n`)
       settingsProcess?.stdin.write(`SAVE_SETTING:gatewayBaseUrl:${result.vm.gateway_url}\n`)
       settingsProcess?.stdin.write(`SAVE_SETTING:gatewayApiToken:${result.vm.api_token}\n`)
+      settingsProcess?.stdin.write(`SAVE_SETTING:desktopDeviceId:${deviceId}\n`)
+      store.set('cosmicAuth', authData)
+      store.set('gatewayBaseUrl', result.vm.gateway_url)
+      store.set('gatewayApiToken', result.vm.api_token)
+      store.set('desktopDeviceId', deviceId)
+      configureGatewayConnection()
+      gatewayConnectionManager?.requestResume()
 
       return { success: true, ...authData }
     } catch (error: any) {
@@ -845,6 +858,10 @@ app.whenReady().then(() => {
     settingsProcess?.stdin.write('SAVE_SETTING:cosmicAuth:\n')
     settingsProcess?.stdin.write('SAVE_SETTING:gatewayBaseUrl:\n')
     settingsProcess?.stdin.write('SAVE_SETTING:gatewayApiToken:\n')
+    store.set('cosmicAuth', null)
+    store.set('gatewayBaseUrl', '')
+    store.set('gatewayApiToken', '')
+    configureGatewayConnection()
     return { success: true }
   })
 

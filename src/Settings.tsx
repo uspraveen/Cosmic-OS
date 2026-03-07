@@ -84,8 +84,6 @@ export default function Settings({
 
   const integrationsPreview = GOOGLE_TOOL_DEFINITIONS.map((tool) => tool.label).join(' • ')
   const allKeysConfigured =
-    Boolean(keyStatus.gemini) &&
-    Boolean(keyStatus.perplexity) &&
     Boolean(keyStatus.deepgram) &&
     Boolean(keyStatus.anthropic)
 
@@ -180,7 +178,7 @@ export default function Settings({
                         {allKeysConfigured ? 'All Set' : 'Action Needed'}
                       </span>
                     </div>
-                    <span className="setting-nav-subcopy">Model, voice, and meeting provider keys.</span>
+                    <span className="setting-nav-subcopy">Local voice and meeting provider keys. Cosmic chat uses your VM backend.</span>
                   </div>
                   <span style={{ opacity: 0.5 }}>›</span>
                 </button>

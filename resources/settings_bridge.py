@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -26,6 +27,24 @@ def emit_settings():
 
 def emit_integrations():
     emit("INTEGRATIONS", db.get_integrations_snapshot())
+
+
+def build_key_status():
+    deepgram = bool(db.get_api_key("deepgram") or os.getenv("DEEPGRAM_API_KEY"))
+    anthropic = bool(db.get_api_key("anthropic") or os.getenv("ANTHROPIC_API_KEY"))
+    groq = bool(db.get_api_key("groq") or os.getenv("GROQ_API_KEY"))
+    return {
+        "hasKeys": deepgram or anthropic or groq,
+        "gemini": False,
+        "perplexity": False,
+        "deepgram": deepgram,
+        "anthropic": anthropic,
+        "groq": groq,
+    }
+
+
+def emit_key_status():
+    emit("KEY_STATUS", build_key_status())
 
 
 def emit_event(event_type, account_id="", provider="google", message="", extra=None):
@@ -163,6 +182,9 @@ def main():
             if line == "GET_ALL_SETTINGS":
                 emit_settings()
 
+            elif line == "GET_KEY_STATUS":
+                emit_key_status()
+
             elif line == "GET_ALL_INTEGRATIONS":
                 emit_integrations()
 
@@ -173,6 +195,16 @@ def main():
                 _, key, value = line.split(":", 2)
                 db.set_setting(key, value)
                 emit_settings()
+
+            elif line.startswith("SAVE_API_KEYS:"):
+                payload = json.loads(line.split(":", 1)[1])
+                if payload.get("deepgram") is not None:
+                    db.set_api_key("deepgram", str(payload.get("deepgram") or "").strip())
+                if payload.get("anthropic") is not None:
+                    db.set_api_key("anthropic", str(payload.get("anthropic") or "").strip())
+                if payload.get("groq") is not None:
+                    db.set_api_key("groq", str(payload.get("groq") or "").strip())
+                emit_key_status()
 
             elif line.startswith("SAVE_INTEGRATION_ACCOUNT:"):
                 payload = json.loads(line.split(":", 1)[1])

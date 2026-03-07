@@ -50,17 +50,6 @@ function formatQrTimestamp(value?: string | null) {
   return `Refreshed ${Math.floor(hours / 24)}d ago`
 }
 
-function getBannerIcon(tone: BannerTone) {
-  switch (tone) {
-    case 'success':
-      return 'OK'
-    case 'error':
-      return '!'
-    default:
-      return 'i'
-  }
-}
-
 export default function WhatsAppIntegrationSettings({ active, cosmicAuth }: WhatsAppIntegrationSettingsProps) {
   const authManaged = !!cosmicAuth
   const [gatewayBaseUrl, setGatewayBaseUrl] = useState('')

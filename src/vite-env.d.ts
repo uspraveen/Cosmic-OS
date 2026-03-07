@@ -5,6 +5,18 @@ interface GatewayConnectionPayload {
   apiToken: string
 }
 
+interface GatewaySocketState {
+  status?: {
+    state: 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error'
+    connected: boolean
+    detail?: string
+    sessionId?: string | null
+  }
+  sessionId?: string | null
+  historyTail?: any[]
+  knownTaskIds?: string[]
+}
+
 interface Window {
   cosmic?: {
     hide: () => void
@@ -17,7 +29,6 @@ interface Window {
     requestWeather: () => void
     controlMedia: (action: 'playpause' | 'next' | 'prev') => void
     setVolume: (level: number) => void
-    sendToGemini: (prompt: string) => void
 
     // Auth
     login: (apiKey: string) => Promise<{ success: boolean; error?: string; message?: string; [key: string]: any }>
@@ -26,6 +37,8 @@ interface Window {
     // Settings
     getSettings: () => void
     saveSetting: (key: string, value: any) => void
+    getLocalKeyStatus: () => void
+    saveLocalApiKeys: (payload: { deepgram?: string; anthropic?: string; groq?: string }) => void
     onSettingsUpdate: (cb: (data: any) => void) => () => void
     getIntegrations: () => void
     getCalendarAgenda: () => void
@@ -48,15 +61,16 @@ interface Window {
     onIntegrationsUpdate: (cb: (data: any) => void) => () => void
     onIntegrationEvent: (cb: (data: any) => void) => () => void
 
-    // Perplexity APIs
-    sendToPerplexity: (prompt: string) => void
-    onPerplexityChunk: (cb: (data: { chunk: string, done: boolean }) => void) => () => void
-    onPerplexitySources: (cb: (data: any[]) => void) => () => void
+    // Gateway chat APIs
+    getGatewayState: () => Promise<GatewaySocketState | null>
+    requestGatewayResume: () => Promise<{ ok: boolean }>
+    sendGatewayQuery: (payload: { content: string; conversationContext?: any[] }) => Promise<{ requestId: string }>
+    listGatewaySessions: () => Promise<{ sessions: any[] }>
+    getGatewaySessionHistory: (sessionId: string) => Promise<{ session_id: string; messages: any[] }>
+    onGatewayEvent: (cb: (data: any) => void) => () => void
+    onGatewayStatus: (cb: (data: GatewaySocketState['status']) => void) => () => void
 
-    // Gemini/LLM APIs
-    onGeminiChunk: (cb: (data: { chunk: string, done: boolean }) => void) => () => void
-
-    // DB / History APIs
+    // Local key status APIs
     onKeyStatus: (
       cb: (data: {
         hasKeys: boolean
@@ -67,9 +81,6 @@ interface Window {
         anthropic?: boolean
       }) => void
     ) => () => void
-    onSessionList: (cb: (data: any[]) => void) => () => void
-    onHistoryLoad: (cb: (data: any[]) => void) => () => void
-    onSessionSet: (cb: (id: string) => void) => () => void
 
     // Calendar APIs
     onCalendarUpdate: (cb: (data: any) => void) => () => void

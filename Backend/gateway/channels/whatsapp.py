@@ -267,7 +267,9 @@ class WhatsAppAdapter(ChannelAdapter):
         if self._callback is None:
             raise RuntimeError("WhatsAppAdapter.on_message() must be registered before handling inbound traffic")
 
-        await self._callback(normalized)
+        processed = await self._callback(normalized)
+        if isinstance(processed, dict):
+            return processed
         return normalized
 
     def normalize_message(self, raw_message: Any) -> NormalizedMessage:
@@ -330,10 +332,10 @@ class WhatsAppAdapter(ChannelAdapter):
             "metadata": metadata,
         }
 
-    async def send(self, message: dict[str, Any]) -> None:
+    async def send(self, message: dict[str, Any], channel: str | None = None) -> None:
         event_type = self._coerce_str(message.get("type")) or ""
-        channel = self._extract_channel(message)
-        if not channel:
+        destination = channel or self._extract_channel(message)
+        if not destination:
             raise ValueError("WhatsApp outbound message missing channel")
 
         if event_type == "response.chunk":
@@ -350,7 +352,7 @@ class WhatsAppAdapter(ChannelAdapter):
         if not rendered:
             return
 
-        await self._send_text(channel, rendered)
+        await self._send_text(destination, rendered)
 
         if event_type == "response.complete":
             request_id = self._coerce_str(message.get("request_id"))

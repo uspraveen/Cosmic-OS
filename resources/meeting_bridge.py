@@ -2270,15 +2270,13 @@ CURRENT_MEETING: Optional[MeetingRuntime] = None
 
 
 def build_key_status() -> Dict[str, Any]:
-    gemini = bool(db.get_api_key("gemini"))
-    perplexity = bool(db.get_api_key("perplexity"))
     deepgram = bool(get_service_key("deepgram", "DEEPGRAM_API_KEY"))
     anthropic = bool(get_service_key("anthropic", "ANTHROPIC_API_KEY"))
     groq = bool(get_service_key("groq", "GROQ_API_KEY"))
     return {
-        "hasKeys": gemini or perplexity or deepgram or anthropic or groq,
-        "gemini": gemini,
-        "perplexity": perplexity,
+        "hasKeys": deepgram or anthropic or groq,
+        "gemini": False,
+        "perplexity": False,
         "deepgram": deepgram,
         "anthropic": anthropic,
         "groq": groq,

@@ -28,7 +28,13 @@ interface DynamicIslandProps {
   islandOpacity: number
   onOpacityChange: (opacity: number) => void
   debug: boolean
-  keyStatus: { gemini: boolean; perplexity: boolean }
+  keyStatus: {
+    gemini: boolean
+    perplexity: boolean
+    deepgram?: boolean
+    groq?: boolean
+    anthropic?: boolean
+  }
   authData?: any
   onLogout?: () => void
 }

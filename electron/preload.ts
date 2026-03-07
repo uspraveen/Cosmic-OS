@@ -86,43 +86,27 @@ contextBridge.exposeInMainWorld('cosmic', {
     return () => ipcRenderer.removeListener('voice:status', listener)
   },
 
-  onGeminiChunk: (cb: (data: { chunk: string, done: boolean }) => void) => {
-    const listener = (_: any, data: { chunk: string, done: boolean }) => cb(data)
-    ipcRenderer.on('gemini:chunk', listener)
-    return () => ipcRenderer.removeListener('gemini:chunk', listener)
-  },
-
-  onPerplexityChunk: (cb: (data: { chunk: string, done: boolean }) => void) => {
-    const listener = (_: any, data: { chunk: string, done: boolean }) => cb(data)
-    ipcRenderer.on('perplexity:chunk', listener)
-    return () => ipcRenderer.removeListener('perplexity:chunk', listener)
-  },
-
-  onPerplexitySources: (cb: (data: any[]) => void) => {
-    const listener = (_: any, data: any[]) => cb(data)
-    ipcRenderer.on('perplexity:sources', listener)
-    return () => ipcRenderer.removeListener('perplexity:sources', listener)
-  },
-
   onKeyStatus: (cb: (data: any) => void) => {
     const listener = (_: any, data: any) => cb(data)
     ipcRenderer.on('key-status', listener)
     return () => ipcRenderer.removeListener('key-status', listener)
   },
-  onSessionList: (cb: (data: any) => void) => {
+  getLocalKeyStatus: () => ipcRenderer.send('settings:get-key-status'),
+  saveLocalApiKeys: (payload: any) => ipcRenderer.send('settings:save-api-keys', payload),
+  getGatewayState: () => ipcRenderer.invoke('gateway:get-state'),
+  requestGatewayResume: () => ipcRenderer.invoke('gateway:request-resume'),
+  sendGatewayQuery: (payload: { content: string; conversationContext?: any[] }) => ipcRenderer.invoke('gateway:send-query', payload),
+  listGatewaySessions: () => ipcRenderer.invoke('gateway:list-sessions'),
+  getGatewaySessionHistory: (sessionId: string) => ipcRenderer.invoke('gateway:get-session-history', sessionId),
+  onGatewayEvent: (cb: (data: any) => void) => {
     const listener = (_: any, data: any) => cb(data)
-    ipcRenderer.on('session-list', listener)
-    return () => ipcRenderer.removeListener('session-list', listener)
+    ipcRenderer.on('gateway:event', listener)
+    return () => ipcRenderer.removeListener('gateway:event', listener)
   },
-  onHistoryLoad: (cb: (data: any) => void) => {
+  onGatewayStatus: (cb: (data: any) => void) => {
     const listener = (_: any, data: any) => cb(data)
-    ipcRenderer.on('history-load', listener)
-    return () => ipcRenderer.removeListener('history-load', listener)
-  },
-  onSessionSet: (cb: (id: string) => void) => {
-    const listener = (_: any, id: string) => cb(id)
-    ipcRenderer.on('session-set', listener)
-    return () => ipcRenderer.removeListener('session-set', listener)
+    ipcRenderer.on('gateway:status', listener)
+    return () => ipcRenderer.removeListener('gateway:status', listener)
   },
 
   // --- MEETING MODE ---
@@ -191,8 +175,6 @@ contextBridge.exposeInMainWorld('cosmic', {
 
   controlMedia: (action: string) => ipcRenderer.send('media:control', action),
   setVolume: (level: number) => ipcRenderer.send('media:set_volume', level),
-  sendToGemini: (prompt: string) => ipcRenderer.send('gemini:send', prompt),
-  sendToPerplexity: (prompt: string) => ipcRenderer.send('perplexity:send', prompt),
   openExternal: (url: string) => ipcRenderer.send('open-external', url),
 
   // SETTINGS

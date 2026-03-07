@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Awaitable, Callable
 
 NormalizedMessage = dict[str, Any]
-MessageCallback = Callable[[NormalizedMessage], Awaitable[None]]
+MessageCallback = Callable[[NormalizedMessage], Awaitable[Any]]
 
 
 class ChannelAdapter(ABC):
@@ -21,7 +21,7 @@ class ChannelAdapter(ABC):
         """Release external resources and stop graceful delivery."""
 
     @abstractmethod
-    async def send(self, message: dict[str, Any]) -> None:
+    async def send(self, message: dict[str, Any], channel: str | None = None) -> None:
         """Deliver a Gateway event back to the originating channel."""
 
     @abstractmethod

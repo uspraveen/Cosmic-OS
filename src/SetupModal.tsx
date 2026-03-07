@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import LiquidGlass from './LiquidGlass'
 import './settings.css'
 
@@ -7,8 +7,6 @@ interface SetupModalProps {
 }
 
 export default function SetupModal({ onComplete }: SetupModalProps) {
-  const [geminiKey, setGeminiKey] = useState('')
-  const [pplxKey, setPplxKey] = useState('')
   const [deepgramKey, setDeepgramKey] = useState('')
   const [anthropicKey, setAnthropicKey] = useState('')
   const [groqKey, setGroqKey] = useState('')
@@ -22,17 +20,21 @@ export default function SetupModal({ onComplete }: SetupModalProps) {
   }, [onComplete])
 
   const handleSave = () => {
-    if (!geminiKey && !pplxKey && !deepgramKey && !anthropicKey && !groqKey) return
-    const payload = JSON.stringify({
-      gemini: geminiKey,
-      perplexity: pplxKey,
+    if (!deepgramKey && !anthropicKey && !groqKey) {
+      onComplete()
+      return
+    }
+
+    window.cosmic?.saveLocalApiKeys({
       deepgram: deepgramKey,
       anthropic: anthropicKey,
-      groq: groqKey
+      groq: groqKey,
     })
-    window.cosmic?.sendToGemini(`SAVE_KEYS:${payload}`)
+    window.cosmic?.getLocalKeyStatus()
     onComplete()
   }
+
+  const isReady = Boolean(deepgramKey || anthropicKey || groqKey)
 
   return (
     <div className="settings-overlay" style={{ backdropFilter: 'blur(20px)', zIndex: 20000 }} onMouseDown={(e) => {
@@ -42,29 +44,13 @@ export default function SetupModal({ onComplete }: SetupModalProps) {
         <LiquidGlass cornerRadius={24}>
           <div className="settings-content" style={{ padding: 32 }}>
             <div style={{ textAlign: 'center', marginBottom: 24 }}>
-              <h2 style={{ color: '#fff', fontSize: 24, marginBottom: 8 }}>Welcome to Cosmic</h2>
+              <h2 style={{ color: '#fff', fontSize: 24, marginBottom: 8 }}>Optional local setup</h2>
               <p style={{ color: 'rgba(255,255,255,0.6)', fontSize: 14 }}>
-                Add your API keys to get started. Keys are stored locally.
+                Cosmic chat is already handled by your VM. Add local meeting keys here only if you want desktop voice and meeting features.
               </p>
             </div>
 
             <div className="setting-row vertical">
-              <span className="setting-label">Google Gemini API Key</span>
-              <input type="password" placeholder="AIzaSy..." value={geminiKey}
-                onChange={(e) => setGeminiKey(e.target.value)}
-                style={{ width: '100%', background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.1)', padding: '10px', borderRadius: 8, color: '#fff', outline: 'none', marginTop: 8 }}
-              />
-            </div>
-
-            <div className="setting-row vertical" style={{ marginTop: 16 }}>
-              <span className="setting-label">Perplexity API Key (Optional)</span>
-              <input type="password" placeholder="pplx-..." value={pplxKey}
-                onChange={(e) => setPplxKey(e.target.value)}
-                style={{ width: '100%', background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.1)', padding: '10px', borderRadius: 8, color: '#fff', outline: 'none', marginTop: 8 }}
-              />
-            </div>
-
-            <div className="setting-row vertical" style={{ marginTop: 16 }}>
               <span className="setting-label">Deepgram API Key (Meeting)</span>
               <input type="password" placeholder="dg_..." value={deepgramKey}
                 onChange={(e) => setDeepgramKey(e.target.value)}
@@ -88,10 +74,10 @@ export default function SetupModal({ onComplete }: SetupModalProps) {
               />
             </div>
 
-            <button onClick={handleSave} disabled={!geminiKey && !pplxKey && !deepgramKey && !anthropicKey && !groqKey}
-              style={{ width: '100%', padding: '12px', background: (geminiKey || pplxKey || deepgramKey || anthropicKey || groqKey) ? '#007AFF' : 'rgba(255,255,255,0.1)', color: '#fff', border: 'none', borderRadius: 12, marginTop: 24, cursor: (geminiKey || pplxKey || deepgramKey || anthropicKey || groqKey) ? 'pointer' : 'not-allowed', opacity: (geminiKey || pplxKey || deepgramKey || anthropicKey || groqKey) ? 1 : 0.5 }}
+            <button onClick={handleSave}
+              style={{ width: '100%', padding: '12px', background: isReady ? '#007AFF' : 'rgba(255,255,255,0.1)', color: '#fff', border: 'none', borderRadius: 12, marginTop: 24, cursor: 'pointer', opacity: isReady ? 1 : 0.75 }}
             >
-              Start Cosmic
+              {isReady ? 'Save and continue' : 'Skip for now'}
             </button>
           </div>
         </LiquidGlass>

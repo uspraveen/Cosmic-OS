@@ -497,15 +497,27 @@ The Gateway is the single entry point for all input sources. It handles authenti
 
 ### 3.2 Connection Model: WebSocket + REST
 
-The desktop app maintains a persistent WebSocket connection for real-time bidirectional communication. REST endpoints are available for stateless operations and health checks.
+The desktop app maintains one persistent WebSocket connection per desktop installation for real-time bidirectional communication. REST endpoints are available for stateless operations and control-plane actions such as authentication, health checks, channel status, and WhatsApp pairing.
 
 **Why WebSocket as primary?** The desktop app is always-on (background process, registered as startup app). A persistent WebSocket connection eliminates connection setup overhead on every query and enables the server to push task events, progress updates, and clarification requests without polling.
 
+**Desktop ownership rule:** The long-lived Gateway connection is owned by the Electron **main process**, not by the renderer. UI reloads, route changes, or renderer crashes must not drop the VM connection. The renderer communicates with the main-process connection manager over IPC.
+
 **Single Gateway server:** The Gateway is one FastAPI service with multiple route surfaces. Desktop chat uses WebSocket. Webhooks, health checks, scheduler/credential APIs, and sidecar-bridge callbacks use REST endpoints on the same Gateway process. New channel adapters do **not** create separate FastAPI servers; they extend the existing Gateway with additional adapter logic and, when needed, internal callback routes.
+
+**Production edge recommendation:** The desktop-facing endpoint should be exposed over HTTPS/WSS on a public hostname. Recommended VM topology: Caddy terminates TLS on `:443` and reverse-proxies to the Gateway on `127.0.0.1:8080`. Simpler deployments may expose the Gateway directly or place it behind a cloud load balancer, but the client-visible endpoint must still be HTTPS/WSS.
 
 ### 3.3 WebSocket Protocol
 
-**Connection:** `ws://localhost:8080/ws?token=<local_api_token>`
+**Production connection:** `wss://gateway.example.com/ws`
+
+**Local development connection:** `ws://127.0.0.1:8080/ws?token=<local_api_token>&device_id=<device_id>`
+
+**Authentication and identity:**
+
+- Preferred production pattern: the Electron main process opens the socket with `Authorization: Bearer <GATEWAY_LOCAL_API_TOKEN>` and `X-Device-Id: <device_id>` headers.
+- Compatibility / local-dev fallback: `token` and `device_id` query params on the WebSocket URL.
+- The Gateway derives the concrete desktop channel from the authenticated connection context as `desktop:<device_id>`. Desktop clients do **not** send arbitrary desktop channel strings inside message bodies.
 
 **Client → Server messages:**
 
@@ -513,7 +525,7 @@ The desktop app maintains a persistent WebSocket connection for real-time bidire
 # Submit a new query
 {
     "type": "query",
-    "session_id": "sess_abc123",        # null for new session
+    "session_id": "sess_abc123",        # null for first message of the day
     "content": "Write a Python script to parse logs",
     "conversation_context": [           # last N messages for model router
         {"role": "user", "content": "I need to analyze server logs"},
@@ -537,11 +549,43 @@ The desktop app maintains a persistent WebSocket connection for real-time bidire
     "task_id": "tsk_abc123",
     "request_id": "req_003"
 }
+
+# Resume after reconnect
+{
+    "type": "resume",
+    "session_id": "sess_20260307",
+    "known_task_ids": ["tsk_abc123", "tsk_def456"],
+    "request_id": "req_resume_001"
+}
+
+# Keepalive
+{
+    "type": "ping",
+    "ts_unix_ms": 1772899200000
+}
 ```
 
 **Server → Client messages:**
 
 ```python
+# Resume acknowledgment + state re-sync after reconnect
+{
+    "type": "resume.ok",
+    "request_id": "req_resume_001",
+    "session_id": "sess_20260307",
+    "channel": "desktop:desk_a1b2c3",
+    "history_tail": [ ... ],
+    "active_tasks": [ ... ],
+    "pending_inputs": [ ... ]
+}
+
+# Keepalive response
+{
+    "type": "pong",
+    "ts_unix_ms": 1772899200000,
+    "server_time": "2026-03-07T12:00:00Z"
+}
+
 # Classification result (sent immediately after model router returns)
 {
     "type": "route_result",
@@ -621,6 +665,25 @@ The desktop app maintains a persistent WebSocket connection for real-time bidire
     "message": "Too many requests. Try again in 5 seconds."
 }
 ```
+
+### 3.3a Desktop Connection Lifecycle
+
+The WebSocket is a **transport**, not the session. Reconnects do not create new conversation sessions.
+
+**Rules:**
+
+1. One live Gateway WebSocket per desktop installation (`device_id`) is owned by the Electron main process.
+2. `device_id` is a stable per-installation identifier generated once and stored locally. The Gateway derives the concrete desktop channel `desktop:<device_id>` from it.
+3. The active conversation session is the current **shared daily session** (`sess_YYYYMMDD`). WebSocket reconnects reattach to that session; they do not create a new one.
+4. The desktop connection manager sends an application-level keepalive (`ping` / `pong`) every 25-30 seconds.
+5. On disconnect, the desktop reconnects with exponential backoff + jitter (for example: `1s, 2s, 4s, 8s, 16s, 30s max`).
+6. Immediately after reconnect, the desktop sends `resume` so the Gateway can re-sync:
+   - tail of the current daily session
+   - active task summaries
+   - pending `task.input_required` items
+7. REST remains the control plane for stateless operations such as `/auth/*`, `/health*`, `/channels/*`, and other non-chat actions.
+
+**Why explicit resume matters:** a live desktop connection can drop because of laptop sleep, Wi-Fi transitions, renderer reloads, Gateway restarts, reverse-proxy idle timeouts, or VM redeploys. The system must recover the user's current shared daily session and in-flight tasks after reconnect rather than pretending this is a brand-new conversation.
 
 ### 3.4 REST Endpoints
 
@@ -845,14 +908,26 @@ async def verify_auth(request: Request):
         raise HTTPException(status_code=401, detail='Invalid token')
 
 async def verify_ws_auth(websocket: WebSocket):
-    token = websocket.query_params.get('token', '')
+    auth_header = websocket.headers.get('authorization', '')
+    token = auth_header.replace('Bearer ', '').strip()
+    if not token:
+        token = websocket.query_params.get('token', '')
+    device_id = (
+        websocket.headers.get('x-device-id', '')
+        or websocket.query_params.get('device_id', '')
+    )
     if not hmac.compare_digest(token, LOCAL_API_TOKEN):
         await websocket.close(code=4001, reason='Invalid token')
         return False
+    if not device_id:
+        await websocket.close(code=4002, reason='Missing device_id')
+        return False
+    websocket.state.device_id = device_id
+    websocket.state.channel = f'desktop:{device_id}'
     return True
 ```
 
-**Desktop → Gateway connectivity:** The desktop app connects directly to the Gateway over HTTPS using the Gateway's public URL (e.g., `http://<vm-ip>:8080`). The Gateway binds to `0.0.0.0` so it is reachable from outside the VM. There is no SSH tunnel or VPN layer between the desktop and Gateway — the local API token provides the authentication boundary. The Gateway port (default `8080`) must be opened in the VM's security group / firewall.
+**Desktop → Gateway connectivity:** The desktop app connects directly to the Gateway's public HTTPS/WSS endpoint using the provisioned `gateway_url` (for example, `https://gateway.user.example.com`). Recommended VM deployment: Caddy listens on `:443`, terminates TLS, and reverse-proxies to the Gateway on `127.0.0.1:8080`. Simpler deployments may terminate TLS at a cloud load balancer or expose the Gateway directly, but the desktop-facing endpoint must still be HTTPS/WSS. There is no SSH tunnel or VPN layer between the desktop and Gateway — the local API token provides the authentication boundary.
 
 **Production auth model:** In production, each user gets a dedicated VM/VPC. The Gateway URL and local API token are auto-provisioned from Supabase during login — the user enters their Cosmic API key once and the desktop app resolves their VM config automatically (see §3.5a for the full Supabase schema, RPC function, and desktop auth flow). The desktop settings UI for WhatsApp reduces to just the user's phone number and a "Connect" button. The token and Gateway URL are injected by the auth system, not entered manually.
 
@@ -901,7 +976,7 @@ Each COSMIC user gets one dedicated VM. The `user_vms` table maps users to their
 CREATE TABLE public.user_vms (
   id          uuid DEFAULT gen_random_uuid() PRIMARY KEY,
   user_id     uuid NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
-  gateway_url text NOT NULL,          -- e.g. 'http://3.137.194.119:8080'
+  gateway_url text NOT NULL,          -- e.g. 'https://gateway.user.example.com'
   api_token   text NOT NULL,          -- the GATEWAY_LOCAL_API_TOKEN value for this user's VM
   vm_ip       text,                   -- e.g. '3.137.194.119'
   vm_dns      text,                   -- e.g. 'ec2-3-137-194-119.us-east-2.compute.amazonaws.com'
@@ -1019,7 +1094,7 @@ $$;
 INSERT INTO public.user_vms (user_id, gateway_url, api_token, vm_ip, vm_dns, vm_region)
 VALUES (
   (SELECT id FROM public.users WHERE email = 'user@example.com'),
-  'http://3.137.194.119:8080',
+  'https://gateway.user.example.com',
   'generated-gateway-api-token-here',
   '3.137.194.119',
   'ec2-3-137-194-119.us-east-2.compute.amazonaws.com',
@@ -1028,7 +1103,7 @@ VALUES (
 
 -- Update an existing user's VM config (e.g. IP changed after VM restart)
 UPDATE public.user_vms
-SET gateway_url = 'http://3.137.194.119:8080',
+SET gateway_url = 'https://gateway.user.example.com',
     vm_ip       = '3.137.194.119',
     vm_dns      = 'ec2-3-137-194-119.us-east-2.compute.amazonaws.com',
     vm_region   = 'us-east-2',
@@ -1056,9 +1131,13 @@ Login:
        - SAVE_SETTING:cosmicAuth:{full auth JSON}
        - SAVE_SETTING:gatewayBaseUrl:{vm.gateway_url}
        - SAVE_SETTING:gatewayApiToken:{vm.api_token}
+       - ENSURE_SETTING:desktopDeviceId:{stable per-installation ID}
     3. Settings bridge persists to SQLite, emits updated settings
     4. Renderer receives updated settings → authState = 'authenticated'
-  → Gateway URL and API token are now auto-configured for all WhatsApp/channel operations
+    5. Main process starts or refreshes the GatewayConnectionManager
+       using (gatewayBaseUrl, gatewayApiToken, desktopDeviceId)
+  → Gateway URL, API token, and desktop device identity are now configured
+    for the persistent VM connection and all channel operations
 
 Logout:
   → window.cosmic.logout()
@@ -1066,10 +1145,11 @@ Logout:
     1. SAVE_SETTING:cosmicAuth:    (empty value — clears the key)
     2. SAVE_SETTING:gatewayBaseUrl:
     3. SAVE_SETTING:gatewayApiToken:
+    4. Close GatewayConnectionManager socket
   → Settings cleared → renderer → authState = 'unauthenticated' → show Login Modal
 ```
 
-**Local storage:** Auth data is stored in the existing `app_settings` table in `resources/user_data.db` (SQLite) under the key `cosmicAuth`. This is the same database used by the settings bridge for all desktop app settings. The database file and its encryption key (`resources/secret.key`) are both gitignored (`*.db`, `*.key`). The Fernet encryption infrastructure in `resources/database.py` is available for future use.
+**Local storage:** Auth data is stored in the existing `app_settings` table in `resources/user_data.db` (SQLite) under the key `cosmicAuth`. This is the same database used by the settings bridge for all desktop app settings. The database file and its encryption key (`resources/secret.key`) are both gitignored (`*.db`, `*.key`). The Fernet encryption infrastructure in `resources/database.py` is available for future use. The desktop also stores a stable `desktopDeviceId` setting in the same SQLite database. It is generated once per installation, reused across logins, and not cleared on logout.
 
 **Auth data shape** (stored as JSON string in `app_settings.value`):
 
@@ -1079,7 +1159,7 @@ Logout:
   "userId": "uuid",
   "fullName": "User Name",
   "isPrivileged": true,
-  "gatewayUrl": "http://3.137.194.119:8080",
+  "gatewayUrl": "https://gateway.user.example.com",
   "gatewayApiToken": "the-gateway-token",
   "vmIp": "3.137.194.119",
   "vmDns": "ec2-3-137-194-119.us-east-2.compute.amazonaws.com",
@@ -1148,7 +1228,8 @@ async def handle_query(session_id: str, content: str, context: list,
 
     # 4. Sticky routing check: awaiting_reply? (see §2.2 Layer 1)
     #    Channel-scoped: only match awaiting_reply from the SAME channel.
-    #    A Desktop awaiting_reply must not capture a WhatsApp message.
+    #    A desktop:macbook-001 awaiting_reply must not capture
+    #    desktop:workstation-002 or WhatsApp messages.
     last_msg = await get_last_assistant_message(session_id, channel=channel)
     used_sticky = last_msg and last_msg.get('awaiting_reply')
     if used_sticky:
@@ -1324,7 +1405,7 @@ Each adapter inherits from `LLMStreamProcessor` which handles:
 
 ### 3.9 Orchestrator Dispatch Path
 
-For `opus` routes, the Gateway creates a TaskEnvelope and dispatches it to the orchestrator via Redis. It then consumes events from `streams:events` and forwards them to the desktop app in real time.
+For `opus` routes, the Gateway creates a TaskEnvelope and dispatches it to the orchestrator via Redis. It then consumes events from `streams:events` and forwards them to the originating channel in real time.
 
 ```python
 async def dispatch_to_orchestrator(session_id, content, context,
@@ -1354,10 +1435,11 @@ async def dispatch_to_orchestrator(session_id, content, context,
     )
     await dispatch(task, redis)
 
-    # Register channel adapter for this task (for response routing)
-    active_task_channels[task_id] = channel_adapter
+    # Register the concrete channel for this task (fast path for response routing)
+    active_task_channels[task_id] = channel
 
-    await channel_adapter.send({'type': 'task.created', 'task_id': task_id, ...})
+    await channel_adapter.send({'type': 'task.created', 'task_id': task_id, ...},
+                               channel=channel)
     # Events are forwarded by the gateway event consumer (see §3.10)
 ```
 
@@ -1384,10 +1466,14 @@ async def gateway_event_consumer():
         for stream, messages in events:
             for msg_id, data in messages:
                 event = EventEnvelope.model_validate_json(data['event'])
-                # Route to the channel adapter that originated this task
-                adapter = active_task_channels.get(event.task_id)
+                # Route to the concrete channel that originated this task.
+                # active_task_channels is a fast-path cache. On reconnect or
+                # Gateway restart, the authoritative route is the persisted
+                # channel string associated with the task/session state.
+                channel = active_task_channels.get(event.task_id) or lookup_task_channel(event.task_id)
+                adapter = channel_registry.get_adapter(channel)
                 if adapter:
-                    await adapter.send(format_event_for_client(event))
+                    await adapter.send(format_event_for_client(event), channel=channel)
                 await redis.xack('streams:events', 'gateway', msg_id)
 ```
 
@@ -1402,7 +1488,7 @@ Both groups receive every event independently. Neither blocks the other.
 
 ### 3.11 Session Management
 
-The Gateway maintains session state in SQLite. A single persistent "main" session per user provides the perpetual conversation feel. Daily sessions reset at 4AM with forced compaction. See §23 for the full Session & Memory Management specification.
+The Gateway maintains session state in SQLite. The user experiences one persistent assistant, implemented as one shared **daily** session across all channels. WebSocket reconnects do not create new sessions. Daily sessions reset at 4AM with forced compaction. See §23 for the full Session & Memory Management specification.
 
 ```sql
 -- gateway/sessions.db
@@ -1422,7 +1508,7 @@ CREATE TABLE messages (
     role TEXT,               -- 'user', 'assistant', 'system'
     content TEXT,
     route TEXT,              -- 'opus', 'gemini', 'perplexity'
-    channel TEXT,            -- originating channel: 'desktop', 'whatsapp:+1234567890', 'telegram:chat_123', etc.
+    channel TEXT,            -- originating channel: 'desktop:desk_a1b2c3', 'whatsapp:+1234567890', 'telegram:chat_123', etc.
     task_id TEXT,            -- null for non-opus messages
     awaiting_reply BOOLEAN DEFAULT FALSE,  -- model expects direct reply (sticky routing)
     created_at TIMESTAMP,
@@ -1450,9 +1536,10 @@ except ResponseError as e:
 async def user_input_consumer():
     """Consumes task input requests from orchestrator, surfaces to UI.
 
-    Only acks after successful WebSocket delivery. If the user is
-    offline, the message stays in Redis's Pending Entries List (PEL).
-    On reconnect, deliver_pending_inputs() drains the PEL first."""
+    Only acks after successful channel delivery. If the target
+    desktop device is offline, the message stays in Redis's Pending
+    Entries List (PEL). On reconnect, deliver_pending_inputs(channel)
+    drains the PEL for that concrete channel first."""
     while True:
         entries = await redis.xreadgroup(
             groupname='gateway',
@@ -1464,37 +1551,42 @@ async def user_input_consumer():
         for stream, messages in entries:
             for msg_id, data in messages:
                 request = json.loads(data['payload'])
-                ws = get_active_websocket()
-                if ws:
-                    await ws.send_json({
+                channel = request.get('channel') or lookup_task_channel(request['task_id'])
+                adapter = channel_registry.get_adapter(channel)
+                if adapter:
+                    await adapter.send({
                         'type': 'task.input_required',
                         **request,
-                    })
+                    }, channel=channel)
                     # Only ack AFTER successful delivery
                     await redis.xack('user_input:requests', 'gateway', msg_id)
                 # else: no ack — stays in PEL, redelivered on reconnect
 
-async def deliver_pending_inputs():
-    """Called on WebSocket reconnect. Drains the Pending Entries List
-    so the user sees any task input requests they missed while offline."""
+async def deliver_pending_inputs(channel: str):
+    """Called when a concrete channel reconnects (for example,
+    desktop:desk_a1b2c3). Drains the Pending Entries List so the user
+    sees any task input requests they missed while offline."""
     pending = await redis.xreadgroup(
         groupname='gateway',
         consumername=GATEWAY_INSTANCE_ID,
         streams={'user_input:requests': '0'},  # '0' = read pending entries
         count=50,
     )
-    ws = get_active_websocket()
-    if not ws:
+    adapter = channel_registry.get_adapter(channel)
+    if not adapter:
         return
     for stream, messages in pending:
         for msg_id, data in messages:
             if not data:      # already acked between check and read
                 continue
             request = json.loads(data['payload'])
-            await ws.send_json({
+            request_channel = request.get('channel') or lookup_task_channel(request['task_id'])
+            if request_channel != channel:
+                continue
+            await adapter.send({
                 'type': 'task.input_required',
                 **request,
-            })
+            }, channel=channel)
             await redis.xack('user_input:requests', 'gateway', msg_id)
 
 async def handle_user_input_reply(input_request_id: str, task_id: str,
@@ -2347,7 +2439,7 @@ class TaskEnvelope(BaseModel):
     created_at: datetime = Field(default_factory=utcnow)
     source: Literal['user', 'cron', 'webhook', 'heartbeat', 'hook', 'agent'] = 'user'
     source_id: str | None = None                    # Origin identifier: 'cron_morning_email', 'wh_gmail_001'
-    channel: str | None = None                      # Platform: 'desktop', 'whatsapp:+1234', 'telegram:chat_123', 'cli'
+    channel: str | None = None                      # Platform: 'desktop:desk_a1b2c3', 'whatsapp:+1234', 'telegram:chat_123', 'cli'
 
     @field_validator('contract_version')
     @classmethod
@@ -2382,7 +2474,7 @@ class TaskEnvelope(BaseModel):
 | `contract_version` | Set from `CURRENT_WRITE_VERSION` config — not a hardcoded literal. Validated on read by `validate_incoming_version()` (see §21) |
 | `source` | Origin type: `user` (human message), `cron` (scheduled job), `webhook` (external system event), `heartbeat` (periodic timer), `hook` (internal state change), `agent` (agent-initiated reverse task). Defaults to `user`. Propagated to child tasks by the orchestrator so the full provenance chain is preserved. |
 | `source_id` | Identifies the specific origin instance: `cron_morning_email`, `wh_gmail_001`, `hook_session_reset`. Null for direct user messages. Propagated to child tasks. Used for log filtering, metrics per-source, and audit trails. |
-| `channel` | Platform/interface the task originated from or should deliver results to: `desktop`, `whatsapp:+1234567890`, `telegram:chat_123`, `slack:C0123456`, `cli`. Null for internal events (hooks, agent-initiated) that don't need user-facing delivery. The Gateway uses this field to route responses back to the correct channel adapter. Format: `{platform}` or `{platform}:{channel_id}`. |
+| `channel` | Platform/interface the task originated from or should deliver results to: `desktop:<device_id>`, `whatsapp:+1234567890`, `telegram:chat_123`, `slack:C0123456`, `cli`. Null for internal events (hooks, agent-initiated) that don't need user-facing delivery. The Gateway uses this field to route responses back to the correct channel adapter. Format is usually `{platform}:{channel_id}`. Bare `desktop` is reserved as a delivery alias meaning "the configured primary desktop device" for non-message sources such as cron, heartbeat, and webhook delivery. |
 
 #### `input.auth` Convention (Credential Passthrough)
 
@@ -3620,6 +3712,7 @@ Full escalation chain:
        'input_request_id': 'uir_001',
        'task_id': 'tsk_abc123',
        'agent': 'cosmic/research-agent:1.0.0',
+       'channel': 'desktop:desk_a1b2c3',
        'question': 'Found conflicting sources. Which to prioritize?',
        'options': ['source_a', 'source_b'],
        'status': 'pending',
@@ -3651,13 +3744,14 @@ Task state throughout: task.suspended
 ```python
 # Orchestrator publishes user input request
 async def request_user_input(task_id: str, agent: str, question: str,
-                               options: list, redis):
+                               options: list, channel: str | None, redis):
     input_request_id = f'uir_{uuid4().hex[:12]}'
     await redis.xadd('user_input:requests', {
         'payload': json.dumps({
             'input_request_id': input_request_id,
             'task_id': task_id,
             'agent': agent,
+            'channel': channel,
             'question': question,
             'options': options,
             'status': 'pending',
@@ -5679,7 +5773,7 @@ async def handle_heartbeat_response(response: str, delivery_channel: str | None)
     if response.strip() == HEARTBEAT_SUPPRESS_TOKEN:
         return  # suppress — nothing to report
     # Something needs attention — deliver to user
-    adapter = channel_registry.get_adapter(delivery_channel or 'desktop')
+    adapter = channel_registry.get_adapter(delivery_channel or 'desktop')  # bare 'desktop' = primary desktop alias
     await adapter.send({
         'type': 'notification',
         'source': 'heartbeat',
@@ -5705,7 +5799,7 @@ CREATE TABLE cron_jobs (
     schedule TEXT NOT NULL,                       -- cron expression: '0 9 * * *'
     prompt TEXT NOT NULL,                         -- what to send to orchestrator
     description TEXT,                             -- human-readable description
-    delivery_channel TEXT DEFAULT 'desktop',      -- where to deliver results: 'desktop', 'whatsapp:+1234', etc.
+    delivery_channel TEXT DEFAULT 'desktop',      -- where to deliver results: 'desktop' (primary desktop alias), 'desktop:<device_id>', 'whatsapp:+1234', etc.
     priority TEXT DEFAULT 'low',                  -- TaskEnvelope priority override
     active_hours TEXT,                            -- '08:00-22:00' or null for always
     enabled BOOLEAN DEFAULT TRUE,
@@ -5721,7 +5815,7 @@ CREATE TABLE heartbeat_config (
     config_id TEXT PRIMARY KEY DEFAULT 'default',
     interval_sec INTEGER DEFAULT 1800,            -- 30 minutes
     prompt TEXT NOT NULL,                          -- heartbeat check prompt
-    delivery_channel TEXT DEFAULT 'desktop',       -- where to deliver results
+    delivery_channel TEXT DEFAULT 'desktop',       -- where to deliver results; bare 'desktop' = primary desktop alias
     active_hours TEXT DEFAULT '08:00-22:00',       -- suppress outside these hours
     priority TEXT DEFAULT 'low',
     enabled BOOLEAN DEFAULT TRUE,
@@ -6043,7 +6137,7 @@ CREATE TABLE webhooks (
     provider TEXT NOT NULL,                        -- 'gmail', 'github', 'jira', 'slack', 'custom'
     description TEXT,                              -- 'Gmail inbox notifications'
     secret TEXT NOT NULL,                           -- provider-specific verification secret
-    delivery_channel TEXT DEFAULT 'desktop',        -- where to deliver results
+    delivery_channel TEXT DEFAULT 'desktop',        -- where to deliver results; bare 'desktop' = primary desktop alias
     priority TEXT DEFAULT 'normal',
     prompt_template TEXT,                           -- how to format the webhook payload for the LLM
     enabled BOOLEAN DEFAULT TRUE,
@@ -6220,11 +6314,14 @@ class ChannelAdapter(ABC):
         ...
 
     @abstractmethod
-    async def send(self, message: dict):
+    async def send(self, message: dict, channel: str | None = None):
         """Send a message/event to the user via this platform.
         The message dict follows the same schema as WebSocket server→client
         messages (§3.3): response.chunk, response.complete, task.created,
-        task.progress, task.completed, task.failed, task.input_required, etc."""
+        task.progress, task.completed, task.failed, task.input_required, etc.
+        `channel` is the fully-qualified concrete destination when the
+        platform supports multiple active endpoints (for example,
+        `desktop:<device_id>` or `whatsapp:+1234567890`)."""
         ...
 
     @abstractmethod
@@ -6236,7 +6333,8 @@ class ChannelAdapter(ABC):
     def channel_id(self, platform_context: dict) -> str:
         """Generate a channel identifier for session routing.
         Format: '{platform}:{platform_specific_id}'
-        Examples: 'whatsapp:+1234567890', 'telegram:chat_123', 'slack:C0123456'"""
+        Examples: 'desktop:desk_a1b2c3', 'whatsapp:+1234567890',
+        'telegram:chat_123', 'slack:C0123456'"""
         return f'{self.platform}:{platform_context.get("id", "default")}'
 
     def normalize_message(self, raw_message: Any) -> dict:
@@ -6262,7 +6360,7 @@ def generate_session_id() -> str:
 # Next day:              sess_20250116
 ```
 
-**Why unified sessions?** COSMIC is a single-user personal assistant. Splitting context by channel fragments the assistant's understanding — it wouldn't know about a task you started on Desktop when you message on WhatsApp. Unified sessions ensure full continuity. Each message stores its originating `channel` so responses route back correctly, and **sticky routing is channel-scoped** (§3.7): an `awaiting_reply` flag on Desktop doesn't capture a WhatsApp message. The Session Manager's memory retrieval (§23.4) and context assembly work across the unified session — all messages from all channels are visible during context assembly, giving the LLM the complete picture.
+**Why unified sessions?** COSMIC is a single-user personal assistant. Splitting context by channel fragments the assistant's understanding — it wouldn't know about a task you started on Desktop when you message on WhatsApp. Unified sessions ensure full continuity. Each message stores its originating `channel` so responses route back correctly, and **sticky routing is channel-scoped** (§3.7): an `awaiting_reply` flag on `desktop:desk_a1b2c3` doesn't capture a WhatsApp message or another desktop device. Concrete desktop message channels use the form `desktop:<device_id>`, where `device_id` is a stable per-installation identifier generated once and stored locally. Bare `desktop` remains a delivery alias for "the configured primary desktop device" in cron / heartbeat / webhook delivery configuration. The Session Manager's memory retrieval (§23.4) and context assembly work across the unified session — all messages from all channels are visible during context assembly, giving the LLM the complete picture.
 
 ### 27.3 Channel Adapter Registry
 
@@ -6282,7 +6380,7 @@ class ChannelAdapterRegistry:
     def get_adapter(self, channel: str) -> ChannelAdapter | None:
         """Look up adapter by channel string.
         'whatsapp:+1234' → WhatsApp adapter
-        'desktop' → Desktop adapter
+        'desktop:desk_a1b2c3' → Desktop adapter
         'cli' → CLI adapter"""
         platform = channel.split(':')[0] if channel else 'desktop'
         return self.adapters.get(platform)
@@ -6311,23 +6409,27 @@ class ChannelAdapterRegistry:
 
 ### 27.5 Response Routing
 
-When the Gateway creates a TaskEnvelope, it registers the originating channel adapter in a lookup table keyed by `task_id`. When events or responses arrive for that task, the Gateway routes them through the registered adapter.
+When the Gateway creates a TaskEnvelope, it registers the originating **channel string** in a lookup table keyed by `task_id`. When events or responses arrive for that task, the Gateway resolves the platform adapter from that channel and sends to the concrete destination.
 
 ```python
 # Gateway maintains task → channel mapping
-active_task_channels: dict[str, ChannelAdapter] = {}
+active_task_channels: dict[str, str] = {}
 
 # On task creation (dispatch_to_orchestrator, stream_from_gemini, etc.):
-active_task_channels[task_id] = channel_adapter
+active_task_channels[task_id] = channel
 
 # On task completion/failure:
 del active_task_channels[task_id]
 
 # For cron/heartbeat results: look up adapter from TaskEnvelope.channel
-adapter = channel_registry.get_adapter(task.channel or 'desktop')
+channel = task.channel or 'desktop'
+adapter = channel_registry.get_adapter(channel)
+await adapter.send(message, channel=channel)
 ```
 
-**Cron/heartbeat delivery:** Cron definitions and heartbeat config include a `delivery_channel` field. When the result comes back, the Gateway uses this field to look up the correct adapter. If the specified channel is unavailable (e.g., user is offline on WhatsApp), the result is held in a pending queue and delivered on reconnect — same mechanism as the `user_input:requests` pending entries list (§3.12).
+**Fast path vs authority:** `active_task_channels` is an in-memory fast path, not the source of truth. The authoritative route is the persisted `channel` associated with the task/session state. After a desktop reconnect or Gateway restart, the concrete `desktop:<device_id>` connection is re-bound during `resume`, and live delivery continues for tasks carrying that channel.
+
+**Cron/heartbeat delivery:** Cron definitions and heartbeat config include a `delivery_channel` field. When the result comes back, the Gateway uses this field to look up the correct adapter. If the specified channel is unavailable (e.g., user is offline on WhatsApp), the result is held in a pending queue and delivered on reconnect — same mechanism as the `user_input:requests` pending entries list (§3.12). Bare `desktop` means "deliver to the configured primary desktop device."
 
 ### 27.5a Channel Management Control Plane
 
@@ -6677,16 +6779,17 @@ These are Bridge implementation details behind `gateway/channels/whatsapp.py`. T
 
 **Desktop → Gateway → Bridge connectivity:**
 
-The desktop app connects directly to the Gateway over HTTP using the Gateway's public URL. There is no SSH tunnel, VPN, or proxy between the desktop and Gateway. The Gateway port (default `8080`) is exposed via the VM's security group / firewall, and the `GATEWAY_LOCAL_API_TOKEN` provides the authentication boundary.
+The desktop app connects directly to the Gateway's public HTTPS/WSS endpoint using the provisioned `gateway_url`. Recommended deployment: Caddy listens publicly on `:443`, terminates TLS, and reverse-proxies to the Gateway. There is no SSH tunnel or VPN layer between the desktop and Gateway. The `GATEWAY_LOCAL_API_TOKEN` provides the authentication boundary.
 
 ```text
 Desktop App (Electron)
-  └── HTTP (direct, over public internet)
-        └── Gateway (FastAPI, 0.0.0.0:8080)
-              └── HTTP (localhost only)
-                    └── WhatsApp Bridge (Express, 127.0.0.1:3000)
-                          └── WebSocket (Baileys)
-                                └── WhatsApp servers
+  └── HTTPS / WSS (direct, over public internet)
+        └── Caddy / TLS edge (:443, public)
+              └── Gateway (FastAPI, 127.0.0.1:8080)
+                    └── HTTP (localhost only)
+                          └── WhatsApp Bridge (Express, 127.0.0.1:3000)
+                                └── WebSocket (Baileys)
+                                      └── WhatsApp servers
 ```
 
 The Gateway → Bridge link is internal-only (`127.0.0.1`). The bridge does not need to be reachable from outside the VM.
@@ -8648,7 +8751,7 @@ def build_tool_definitions(self) -> list[dict]:
 
 | `source` Value | Origin | Typical `source_id` | Typical `channel` | Default Priority |
 |---|---|---|---|---|
-| `user` | Human message from any channel | `null` | `desktop`, `whatsapp:+1234`, `telegram:chat_123`, `slack:C0123`, `cli` | `high` |
+| `user` | Human message from any channel | `null` | `desktop:<device_id>`, `whatsapp:+1234`, `telegram:chat_123`, `slack:C0123`, `cli` | `high` |
 | `cron` | Scheduled job fired by Scheduler | `cron_morning_email`, `cron_weekly_review` | Cron's `delivery_channel` | `low` (configurable) |
 | `heartbeat` | Periodic timer fired by Scheduler | `default` | Heartbeat's `delivery_channel` | `low` |
 | `webhook` | External system callback | `wh_gmail_001`, `wh_github_pr` | Webhook's `delivery_channel` | `normal` |

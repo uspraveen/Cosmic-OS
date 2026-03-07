@@ -5,7 +5,9 @@ Bootstrap helper for COSMIC Backend VM setup.
 This script is meant to be the first thing run on a Linux VM after cloning
 the backend repo. It currently handles Python readiness, pip availability,
 virtual environment creation, backend dependency installation, and WhatsApp
-bridge dependency setup. It is intentionally structured so future setup steps
+bridge dependency setup. It can also invoke the dedicated VM edge setup
+script for Caddy/TLS when a public hostname is configured. It is intentionally
+structured so future setup steps
 can be added without turning it into an unmaintainable script.
 """
 
@@ -31,6 +33,8 @@ DEFAULT_VENV_PATH = BACKEND_ROOT / ".venv"
 DEFAULT_REQUIREMENTS_PATH = BACKEND_ROOT / "requirements.txt"
 DEFAULT_BRIDGE_DIR = BACKEND_ROOT / "bridges" / "whatsapp_bridge"
 DEFAULT_SYSTEMD_TEMPLATE_DIR = BACKEND_ROOT / "systemd"
+DEFAULT_EDGE_SETUP_SCRIPT = BACKEND_ROOT / "vm_edge_setup.py"
+DEFAULT_GATEWAY_ENV_PATH = BACKEND_ROOT / "gateway.env"
 DEFAULT_ENV_SEARCH_ROOTS = (
     BACKEND_ROOT,
     BACKEND_ROOT / "bridges",
@@ -882,10 +886,52 @@ def setup_whatsapp_bridge(bridge_dir: Path) -> None:
     install_whatsapp_bridge_dependencies(bridge_dir)
 
 
-def bootstrap(venv_path: Path, requirements_path: Path, bridge_dir: Path, env_search_roots: Sequence[Path]) -> None:
+def setup_vm_edge(
+    edge_setup_script: Path,
+    gateway_env_path: Path,
+    *,
+    gateway_host: str | None = None,
+    force: bool = False,
+    skip_if_unconfigured: bool = False,
+) -> None:
+    if not is_linux():
+        raise BootstrapError("VM edge setup currently targets Linux VMs only.")
+    if not edge_setup_script.exists():
+        raise BootstrapError("VM edge setup script does not exist: {0}".format(edge_setup_script))
+
+    command = [sys.executable, str(edge_setup_script), "setup", "--gateway-env", str(gateway_env_path)]
+    if gateway_host:
+        command.extend(["--gateway-host", gateway_host])
+    if force:
+        command.append("--force")
+    if skip_if_unconfigured:
+        command.append("--skip-if-unconfigured")
+    run(command)
+
+
+def bootstrap(
+    venv_path: Path,
+    requirements_path: Path,
+    bridge_dir: Path,
+    env_search_roots: Sequence[Path],
+    *,
+    edge_setup_script: Path | None = None,
+    gateway_env_path: Path | None = None,
+    gateway_host: str | None = None,
+    skip_edge: bool = False,
+    force_edge: bool = False,
+) -> None:
     setup_env_files(env_search_roots)
     setup_python(venv_path, requirements_path)
     setup_whatsapp_bridge(bridge_dir)
+    if not skip_edge and edge_setup_script is not None and gateway_env_path is not None:
+        setup_vm_edge(
+            edge_setup_script,
+            gateway_env_path,
+            gateway_host=gateway_host,
+            force=force_edge,
+            skip_if_unconfigured=True,
+        )
 
     print("")
     print("Bootstrap complete")
@@ -905,8 +951,23 @@ def provision_vm(
     *,
     enable_units: bool = True,
     start_units: bool = True,
+    edge_setup_script: Path | None = None,
+    gateway_env_path: Path | None = None,
+    gateway_host: str | None = None,
+    skip_edge: bool = False,
+    force_edge: bool = False,
 ) -> None:
-    bootstrap(venv_path, requirements_path, bridge_dir, env_search_roots)
+    bootstrap(
+        venv_path,
+        requirements_path,
+        bridge_dir,
+        env_search_roots,
+        edge_setup_script=edge_setup_script,
+        gateway_env_path=gateway_env_path,
+        gateway_host=gateway_host,
+        skip_edge=skip_edge,
+        force_edge=force_edge,
+    )
     installed = install_systemd_units(
         systemd_template_dir,
         enable_units=enable_units,
@@ -947,6 +1008,31 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Directory root to scan recursively for *.env.example templates. Can be passed multiple times.",
     )
+    parser.add_argument(
+        "--edge-script",
+        default=str(DEFAULT_EDGE_SETUP_SCRIPT),
+        help="Path to vm_edge_setup.py. Default: %(default)s",
+    )
+    parser.add_argument(
+        "--gateway-env-path",
+        default=str(DEFAULT_GATEWAY_ENV_PATH),
+        help="Path to gateway.env used by vm_edge_setup.py. Default: %(default)s",
+    )
+    parser.add_argument(
+        "--gateway-host",
+        default="",
+        help="Public DNS hostname for the Gateway edge. Overrides GATEWAY_PUBLIC_HOST in gateway.env.",
+    )
+    parser.add_argument(
+        "--skip-edge",
+        action="store_true",
+        help="Skip invoking vm_edge_setup.py during bootstrap/provision-vm.",
+    )
+    parser.add_argument(
+        "--force-edge",
+        action="store_true",
+        help="Pass --force to vm_edge_setup.py when overwriting an existing unmanaged Caddyfile.",
+    )
 
     subparsers = parser.add_subparsers(dest="command")
     subparsers.add_parser("doctor", help="Check current bootstrap prerequisites without changing the system.")
@@ -965,6 +1051,10 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "setup-env",
         help="Create missing env files from committed *.env.example templates.",
+    )
+    subparsers.add_parser(
+        "setup-edge",
+        help="Install/configure the public Caddy/TLS edge using vm_edge_setup.py.",
     )
     install_systemd_parser = subparsers.add_parser(
         "install-systemd",
@@ -995,6 +1085,9 @@ def main() -> int:
     requirements_path = Path(args.requirements).expanduser().resolve()
     bridge_dir = Path(args.bridge_dir).expanduser().resolve()
     systemd_template_dir = Path(args.systemd_template_dir).expanduser().resolve()
+    edge_setup_script = Path(args.edge_script).expanduser().resolve()
+    gateway_env_path = Path(args.gateway_env_path).expanduser().resolve()
+    gateway_host = getattr(args, "gateway_host", "").strip() or None
     env_search_roots = [
         Path(item).expanduser().resolve()
         for item in (args.env_search_root or [])
@@ -1009,6 +1102,14 @@ def main() -> int:
             setup_python(venv_path, requirements_path)
         elif command == "setup-whatsapp-bridge":
             setup_whatsapp_bridge(bridge_dir)
+        elif command == "setup-edge":
+            setup_vm_edge(
+                edge_setup_script,
+                gateway_env_path,
+                gateway_host=gateway_host,
+                force=bool(getattr(args, "force_edge", False)),
+                skip_if_unconfigured=False,
+            )
         elif command == "install-systemd":
             installed = install_systemd_units(
                 systemd_template_dir,
@@ -1025,9 +1126,24 @@ def main() -> int:
                 bridge_dir,
                 env_search_roots,
                 systemd_template_dir,
+                edge_setup_script=edge_setup_script,
+                gateway_env_path=gateway_env_path,
+                gateway_host=gateway_host,
+                skip_edge=bool(getattr(args, "skip_edge", False)),
+                force_edge=bool(getattr(args, "force_edge", False)),
             )
         else:
-            bootstrap(venv_path, requirements_path, bridge_dir, env_search_roots)
+            bootstrap(
+                venv_path,
+                requirements_path,
+                bridge_dir,
+                env_search_roots,
+                edge_setup_script=edge_setup_script,
+                gateway_env_path=gateway_env_path,
+                gateway_host=gateway_host,
+                skip_edge=bool(getattr(args, "skip_edge", False)),
+                force_edge=bool(getattr(args, "force_edge", False)),
+            )
     except BootstrapError as exc:
         print("Bootstrap failed: {0}".format(exc), file=sys.stderr)
         return 1

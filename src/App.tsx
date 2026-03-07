@@ -6,27 +6,48 @@ import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
 import LiquidGlass from './LiquidGlass'
 import DynamicIsland from './DynamicIsland'
-import SetupModal from './SetupModal'
 import CosmicLoginModal from './CosmicLoginModal'
 import LiquidGlassLoader from './LiquidGlassLoader'
 import MeetingMode from './MeetingMode'
 import './spotlight.css'
 
 export type SearchPosition = 'bottom' | 'middle'
-export type QueryMode = 'perplexity' | 'llm' | 'meeting'
-
-
+export type QueryMode = 'chat' | 'meeting'
 
 interface Message {
   role: 'user' | 'assistant'
   content: string
-  sources?: string[]
+  sources?: Array<{ url: string; title?: string; domain?: string } | string>
+}
+
+interface GatewayStatus {
+  state: 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error'
+  connected: boolean
+  detail?: string
+  sessionId?: string | null
 }
 
 // Helper to strip "PROMPT:" from legacy database entries
 const cleanText = (text: string) => {
   if (!text) return ""
   return text.replace(/^PROMPT:/, '')
+}
+
+const historyToMessages = (history: any[] = []): Message[] => {
+  return history
+    .filter((item) => item && (item.role === 'user' || item.role === 'assistant'))
+    .map((item) => ({
+      role: item.role,
+      content: String(item.content || ''),
+      sources: Array.isArray(item?.metadata?.sources) ? item.metadata.sources : undefined,
+    }))
+}
+
+const buildConversationContext = (messages: Message[]) => {
+  return messages.slice(-10).map((message) => ({
+    role: message.role,
+    content: message.content,
+  }))
 }
 
 export default function App() {
@@ -41,8 +62,8 @@ export default function App() {
   const [staybackTime, setStaybackTime] = useState(0)
   const [islandOpacity, setIslandOpacity] = useState(0.85) // Default opacity
 
-  const [mode, setMode] = useState<QueryMode>('llm')
-  const modeRef = useRef<QueryMode>('llm')
+  const [mode, setMode] = useState<QueryMode>('chat')
+  const modeRef = useRef<QueryMode>('chat')
   const [showModeDropdown, setShowModeDropdown] = useState(false)
   const [isInputFocused, setIsInputFocused] = useState(false)
 
@@ -55,9 +76,9 @@ export default function App() {
   // --- AUTH STATE ---
   const [authState, setAuthState] = useState<'loading' | 'unauthenticated' | 'authenticated'>('loading')
   const [authData, setAuthData] = useState<any>(null)
+  const [gatewayStatus, setGatewayStatus] = useState<GatewayStatus>({ state: 'idle', connected: false })
 
   // --- HISTORY / DB STATE ---
-  const [isFirstRun, setIsFirstRun] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
   const [sessions, setSessions] = useState<any[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
@@ -77,7 +98,6 @@ export default function App() {
 
   // --- INIT & MOUSE EVENTS ---
   useEffect(() => {
-    // Check Keys on Load
     const unsubKeys = window.cosmic?.onKeyStatus((status) => {
       setKeyStatus({
         gemini: !!status.gemini,
@@ -86,12 +106,8 @@ export default function App() {
         groq: !!status.groq,
         anthropic: !!status.anthropic,
       })
-      if (!status.hasKeys) {
-        setIsFirstRun(true)
-        setSearchState('visible')
-      }
     })
-    window.cosmic?.sendToGemini("CHECK_KEYS")
+    window.cosmic?.getLocalKeyStatus()
 
     // Load Settings + Auth Check
     window.cosmic?.getSettings()
@@ -118,6 +134,23 @@ export default function App() {
         setAuthState('unauthenticated')
       }
     })
+
+    if (window.cosmic?.getGatewayState) {
+      window.cosmic.getGatewayState()
+        .then((state) => {
+          if (!state) return
+          if (state.status) {
+            setGatewayStatus(state.status)
+          }
+          if (typeof state.sessionId === 'string') {
+            setActiveSessionId(state.sessionId)
+          }
+          if (Array.isArray(state.historyTail) && state.historyTail.length > 0) {
+            setMessages(historyToMessages(state.historyTail))
+          }
+        })
+        .catch(() => { })
+    }
 
     let lastIgnore: boolean | null = null
     let lastIsland: boolean | null = null
@@ -161,7 +194,7 @@ export default function App() {
       setSearchState('hidden')
       setShowModeDropdown(false)
       setShowHistory(false)
-      if (modeRef.current === 'meeting') setMode('llm')
+      if (modeRef.current === 'meeting') setMode('chat')
     }, 250)
   }
 
@@ -199,82 +232,95 @@ export default function App() {
 
   // --- DATA LISTENERS ---
   useEffect(() => {
-    const u1 = window.cosmic?.onSessionList((list) => setSessions(list))
-    const u2 = window.cosmic?.onHistoryLoad((data) => {
-      const uiMsgs = data.map((m: any) => ({ role: m.role, content: m.content }))
-      setMessages(uiMsgs)
-    })
+    const offEvent = window.cosmic?.onGatewayEvent((event) => {
+      const eventType = String(event?.type || '')
+      if (!eventType) return
 
-    const u3 = window.cosmic?.onGeminiChunk((data) => {
-      if (mode !== 'llm') return
-      setMessages(prev => {
-        const last = prev[prev.length - 1]
-        if (data.chunk && (!last || last.role === 'user')) {
-          return [...prev, { role: 'assistant', content: data.chunk }]
-        }
-        if (last && last.role === 'assistant') {
-          return [...prev.slice(0, -1), { ...last, content: last.content + data.chunk }]
-        }
-        return prev
-      })
-      if (data.done) setIsStreaming(false)
-    })
+      if (eventType === 'resume.ok') {
+        setActiveSessionId(typeof event.session_id === 'string' ? event.session_id : null)
+        setMessages(historyToMessages(event.history_tail))
+        setIsStreaming(false)
+        return
+      }
 
-    const u4 = window.cosmic?.onPerplexityChunk((data) => {
-      if (mode !== 'perplexity') return
-      setMessages(prev => {
-        const last = prev[prev.length - 1]
-        if (data.chunk && (!last || last.role === 'user')) {
-          return [...prev, { role: 'assistant', content: data.chunk }]
-        }
-        if (last && last.role === 'assistant') {
-          return [...prev.slice(0, -1), { ...last, content: last.content + data.chunk }]
-        }
-        return prev
-      })
-      if (data.done) setIsStreaming(false)
-    })
+      if (eventType === 'response.chunk') {
+        setMessages((prev) => {
+          const last = prev[prev.length - 1]
+          if (!event.content) return prev
+          if (!last || last.role === 'user') {
+            return [...prev, { role: 'assistant', content: String(event.content) }]
+          }
+          return [...prev.slice(0, -1), { ...last, content: last.content + String(event.content) }]
+        })
+        return
+      }
 
-    const u5 = window.cosmic?.onPerplexitySources((data) => {
-      if (mode !== 'perplexity') return
-      console.log("App: Received sources", data)
-      setMessages(prev => {
-        const last = prev[prev.length - 1]
-        // If the last message is already an assistant message (streaming or empty), attach sources to it
-        if (last && last.role === 'assistant') {
-          return [...prev.slice(0, -1), { ...last, sources: data }]
-        }
-        // Otherwise, start a new assistant message with these sources
-        return [...prev, { role: 'assistant', content: '', sources: data }]
-      })
-    })
+      if (eventType === 'response.complete') {
+        setActiveSessionId((prev) => typeof event.session_id === 'string' ? event.session_id : prev)
+        setMessages((prev) => {
+          const last = prev[prev.length - 1]
+          const sources = Array.isArray(event.sources) ? event.sources : undefined
+          if (last && last.role === 'assistant') {
+            return [...prev.slice(0, -1), {
+              ...last,
+              content: String(event.content || last.content || ''),
+              sources,
+            }]
+          }
+          return [...prev, { role: 'assistant', content: String(event.content || ''), sources }]
+        })
+        setIsStreaming(false)
+        return
+      }
 
-    const u6 = window.cosmic?.onSessionSet((id) => {
-      console.log("Session Synced:", id)
-      if (activeSessionId !== id) {
-        setActiveSessionId(id)
-        // Broadcast to the OTHER model (or all)
-        // If a bridge set the session, we ensure others load it too
-        window.cosmic?.sendToGemini(`LOAD_SESSION:${id}`)
-        window.cosmic?.sendToPerplexity(`LOAD_SESSION:${id}`)
+      if (eventType === 'error') {
+        setIsStreaming(false)
+        if (event.message) {
+          setMessages((prev) => [...prev, { role: 'assistant', content: String(event.message) }])
+        }
       }
     })
 
-    const u7 = window.cosmic?.onHistoryLoad((data) => {
-      console.log("🔍 Session loaded with messages:", data)
-      console.log("🔍 Number of messages:", data?.length)
-      console.log("🔍 First message:", data?.[0])
-      setMessages(data)
+    const offStatus = window.cosmic?.onGatewayStatus((status) => {
+      if (!status) return
+      setGatewayStatus(status)
+      if (typeof status?.sessionId === 'string') {
+        setActiveSessionId(status.sessionId)
+      }
+      if (status?.state === 'error' || status?.state === 'idle') {
+        setIsStreaming(false)
+      }
     })
 
-    return () => { u1?.(); u2?.(); u3?.(); u4?.(); u5?.(); u6?.(); u7?.() }
-  }, [mode])
+    return () => { offEvent?.(); offStatus?.() }
+  }, [])
 
   useEffect(() => {
     if (!isStreaming && searchState === 'visible') {
       setTimeout(() => inputRef.current?.focus(), 10)
     }
   }, [isStreaming, searchState])
+
+  useEffect(() => {
+    if (authState !== 'authenticated') {
+      setMessages([])
+      setSessions([])
+      setActiveSessionId(null)
+      setGatewayStatus({ state: 'idle', connected: false })
+      return
+    }
+
+    if (window.cosmic?.requestGatewayResume) {
+      window.cosmic.requestGatewayResume().catch(() => { })
+    }
+    if (window.cosmic?.listGatewaySessions) {
+      window.cosmic.listGatewaySessions()
+        .then((payload) => {
+          setSessions(Array.isArray(payload?.sessions) ? payload.sessions : [])
+        })
+        .catch(() => { })
+    }
+  }, [authState])
 
   // --- ACTIONS ---
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -298,41 +344,57 @@ export default function App() {
 
     // 1. Add User Message (Optimistic)
     setMessages(prev => [...prev, { role: 'user', content: textToSend }])
-
-    // --- KEY VALIDATION ---
-    if (mode === 'perplexity' && !keyStatus.perplexity) {
-      setTimeout(() => {
-        setMessages(prev => [...prev, {
-          role: 'assistant',
-          content: "**Perplexity API Key Missing**\n\nPlease open Settings (click the island) and configure your API key to use this search mode."
-        }])
-      }, 100)
+    if (authState !== 'authenticated') {
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: "Please sign in to connect this desktop app to your VM."
+      }])
       return
     }
 
-    if (mode === 'llm' && !keyStatus.gemini) {
-      setTimeout(() => {
-        setMessages(prev => [...prev, {
-          role: 'assistant',
-          content: "**Gemini API Key Missing**\n\nPlease open Settings (click the island) and configure your API key to use the chat."
-        }])
-      }, 100)
+    if (!gatewayStatus.connected) {
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: gatewayStatus.detail || "The desktop app is not connected to your VM yet."
+      }])
       return
     }
 
     setIsStreaming(true)
-
-    // FIX: Send raw text. Main process adds the PROMPT: protocol prefix.
-    if (mode === 'llm') {
-      window.cosmic?.sendToGemini(textToSend)
-    } else {
-      window.cosmic?.sendToPerplexity(textToSend)
+    if (!window.cosmic?.sendGatewayQuery) {
+      setIsStreaming(false)
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: "Gateway chat support is unavailable in this desktop build."
+      }])
+      return
     }
+
+    window.cosmic.sendGatewayQuery({
+      content: textToSend,
+      conversationContext: buildConversationContext([...messages, { role: 'user', content: textToSend }]),
+    }).catch((error: any) => {
+      setIsStreaming(false)
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: error?.message || "Unable to send the message to your VM."
+      }])
+    })
   }
 
   const handleHistoryToggle = () => {
     if (!showHistory) {
-      window.cosmic?.sendToGemini("LIST_SESSIONS")
+      if (window.cosmic?.listGatewaySessions) {
+        window.cosmic.listGatewaySessions()
+          .then((payload) => {
+            setSessions(Array.isArray(payload?.sessions) ? payload.sessions : [])
+          })
+          .catch(() => {
+            setSessions([])
+          })
+      } else {
+        setSessions([])
+      }
       setShowHistory(true)
     } else {
       setShowHistory(false)
@@ -340,29 +402,18 @@ export default function App() {
     }
   }
 
-  const handleSelectSession = (id: string) => {
+  const handleSelectSession = async (id: string) => {
     setActiveSessionId(id)
-    window.cosmic?.sendToGemini(`LOAD_SESSION:${id}`)
-    window.cosmic?.sendToPerplexity(`LOAD_SESSION:${id}`)
+    try {
+      const payload = window.cosmic?.getGatewaySessionHistory
+        ? await window.cosmic.getGatewaySessionHistory(id)
+        : null
+      setMessages(historyToMessages(payload?.messages))
+    } catch {
+      setMessages([])
+    }
     setShowHistory(false)
     setSearchState('visible')
-    setTimeout(() => inputRef.current?.focus(), 50)
-  }
-
-  const handleDeleteSession = (e: React.MouseEvent, id: string) => {
-    e.stopPropagation()
-    window.cosmic?.sendToGemini(`DELETE_SESSION:${id}`)
-    window.cosmic?.sendToPerplexity(`DELETE_SESSION:${id}`)
-  }
-
-  const handleNewChat = () => {
-    setActiveSessionId(null)
-    setMessages([])
-    setQuery('')
-
-    window.cosmic?.sendToGemini("NEW_CHAT")
-    window.cosmic?.sendToPerplexity("NEW_CHAT")
-    setShowHistory(false)
     setTimeout(() => inputRef.current?.focus(), 50)
   }
 
@@ -455,16 +506,6 @@ export default function App() {
         />
       )}
 
-      {authState === 'authenticated' && isFirstRun && (
-        <SetupModal
-          onComplete={() => {
-            setIsFirstRun(false);
-            performHide();
-            window.cosmic?.hide();
-          }}
-        />
-      )}
-
       <div
         className={`overlay ${overlayClass}`}
         onDoubleClick={(e) => {
@@ -475,7 +516,7 @@ export default function App() {
         <MeetingMode
           active={mode === 'meeting'}
           keyStatus={keyStatus}
-          onBackToChat={() => setMode('llm')}
+          onBackToChat={() => setMode('chat')}
         />
 
         {/* MESSAGES AREA */}
@@ -639,25 +680,17 @@ export default function App() {
                 <div className="history-container">
                   <div className="history-header">
                     <span className="history-title">Chat History</span>
-                    <div style={{ display: 'flex', gap: 8 }}>
-                      <button className="mode-btn" onClick={handleNewChat} style={{ padding: '6px 12px' }}>
-                        + New Chat
-                      </button>
-                      <button className="clear-btn" onClick={() => setShowHistory(false)}>✕</button>
-                    </div>
+                    <button className="clear-btn" onClick={() => setShowHistory(false)}>✕</button>
                   </div>
                   <div className="history-list">
                     {sessions.length === 0 ? (
                       <div style={{ padding: 20, color: 'rgba(255,255,255,0.4)', textAlign: 'center' }}>No history found</div>
                     ) : sessions.map(session => (
-                      <div key={session.id} className="history-item-row" onClick={() => handleSelectSession(session.id)}>
+                      <div key={session.id} className={`history-item-row ${activeSessionId === session.id ? 'active' : ''}`} onClick={() => handleSelectSession(session.id)}>
                         <div className="history-info">
                           <div className="history-name">{cleanText(session.title || "Untitled Chat")}</div>
-                          <div className="history-time">{new Date(session.created_at * 1000).toLocaleString()}</div>
+                          <div className="history-time">{new Date(session.updated_at || session.created_at).toLocaleString()}</div>
                         </div>
-                        <button className="delete-btn" onClick={(e) => handleDeleteSession(e, session.id)} title="Delete">
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z" /></svg>
-                        </button>
                       </div>
                     ))}
                   </div>
@@ -690,10 +723,10 @@ export default function App() {
                     }}
                     onFocus={() => setIsInputFocused(true)}
                     onBlur={() => setIsInputFocused(false)}
-                    placeholder={mode === 'llm' ? "Ask Gemini..." : "Search Perplexity..."}
+                    placeholder={gatewayStatus.connected ? "Ask Cosmic..." : "Connecting to your VM..."}
                     spellCheck={false}
                     autoComplete="off"
-                    disabled={isStreaming}
+                    disabled={isStreaming || authState !== 'authenticated'}
                   />
 
                   {query && (
@@ -720,7 +753,7 @@ export default function App() {
                     >
                       <ModeIcon mode={mode} />
                       <span className="mode-label">
-                        {mode === 'llm' ? 'Gemini' : mode === 'perplexity' ? 'Perplexity' : 'Meeting'}
+                        {mode === 'chat' ? 'Cosmic' : 'Meeting'}
                       </span>
                       <svg className="chevron" width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
                         <path d="M7 10l5 5 5-5z" />
@@ -729,27 +762,27 @@ export default function App() {
 
                     {showModeDropdown && (
                       <div className="mode-dropdown">
-                        <div className="mode-options">
-                          <button
-                            className={`mode-option ${mode === 'llm' ? 'active' : ''}`}
-                            onClick={() => { setMode('llm'); setShowModeDropdown(false); }}
+                      <div className="mode-options">
+                        <button
+                            className={`mode-option ${mode === 'chat' ? 'active' : ''}`}
+                            onClick={() => { setMode('chat'); setShowModeDropdown(false); }}
                             type="button"
                           >
-                            <ModeIcon mode="llm" />
+                            <ModeIcon mode="chat" />
                             <div className="mode-text">
-                              <span>LLM Mode</span>
-                              <span className="mode-desc">Gemini AI</span>
+                              <span>Cosmic Chat</span>
+                              <span className="mode-desc">Gateway-routed</span>
                             </div>
                           </button>
                           <button
-                            className={`mode-option ${mode === 'perplexity' ? 'active' : ''}`}
-                            onClick={() => { setMode('perplexity'); setShowModeDropdown(false); }}
+                            className={`mode-option ${modeRef.current === 'meeting' ? 'active' : ''}`}
+                            onClick={() => { setMode('meeting'); setShowModeDropdown(false); }}
                             type="button"
                           >
-                            <ModeIcon mode="perplexity" />
+                            <ModeIcon mode="meeting" />
                             <div className="mode-text">
-                              <span>Perplexity</span>
-                              <span className="mode-desc">Sonar Search</span>
+                              <span>Meeting</span>
+                              <span className="mode-desc">Live copilot</span>
                             </div>
                           </button>
                         </div>
@@ -785,7 +818,7 @@ export default function App() {
 }
 
 function ModeIcon({ mode }: { mode: QueryMode }) {
-  if (mode === 'llm') {
+  if (mode === 'chat') {
     return (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
         <path d="M9 2L7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z" />
@@ -799,9 +832,5 @@ function ModeIcon({ mode }: { mode: QueryMode }) {
       </svg>
     )
   }
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-2h2v2zm2.07-7.75l-.9.92C13.45 12.9 13 13.5 13 15h-2v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26c.37-.36.59-.86.59-1.41 0-1.1-.9-2-2-2s-2 .9-2 2H8c0-2.21 1.79-4 4-4s4 1.79 4 4c0 .88-.36 1.68-.93 2.25z" />
-    </svg>
-  )
+  return null
 }
