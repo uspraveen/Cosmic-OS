@@ -7,7 +7,7 @@ from typing import Any, AsyncIterator
 import httpx
 
 from .prompts import DIRECT_ASSISTANT_SYSTEM_PROMPT
-from .response_processor import LLMStreamProcessor
+from .response_processor import LLMStreamProcessor, normalize_conversation_history
 
 
 class GeminiAdapter(LLMStreamProcessor):
@@ -126,7 +126,7 @@ class GeminiAdapter(LLMStreamProcessor):
 
     def _build_contents(self, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
         contents: list[dict[str, Any]] = []
-        for message in history:
+        for message in normalize_conversation_history(history):
             role = "model" if message.get("role") == "assistant" else "user"
             content = str(message.get("content") or "").strip()
             if not content:

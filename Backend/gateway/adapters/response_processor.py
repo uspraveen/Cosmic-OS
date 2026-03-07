@@ -83,3 +83,18 @@ class LLMStreamProcessor:
                 "rtt_ms": max(1, int((time.perf_counter() - started_at) * 1000)),
             },
         )
+
+
+def normalize_conversation_history(history: list[dict[str, object]]) -> list[dict[str, str]]:
+    """Collapse consecutive same-role messages for providers that require turn alternation."""
+    normalized: list[dict[str, str]] = []
+    for message in history:
+        role = str(message.get("role") or "").strip()
+        content = str(message.get("content") or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        if normalized and normalized[-1]["role"] == role:
+            normalized[-1]["content"] += "\n\n" + content
+            continue
+        normalized.append({"role": role, "content": content})
+    return normalized

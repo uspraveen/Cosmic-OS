@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 import httpx
 
 from .prompts import DIRECT_ASSISTANT_SYSTEM_PROMPT
-from .response_processor import LLMStreamProcessor
+from .response_processor import LLMStreamProcessor, normalize_conversation_history
 
 
 class PerplexityAdapter(LLMStreamProcessor):
@@ -130,7 +130,7 @@ class PerplexityAdapter(LLMStreamProcessor):
 
     def _build_messages(self, history: list[dict[str, Any]]) -> list[dict[str, str]]:
         messages = [{"role": "system", "content": DIRECT_ASSISTANT_SYSTEM_PROMPT}]
-        for message in history:
+        for message in normalize_conversation_history(history):
             role = str(message.get("role") or "").strip()
             content = str(message.get("content") or "").strip()
             if role not in {"user", "assistant"} or not content:
