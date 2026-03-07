@@ -50,4 +50,7 @@ class ModelRouterClient:
         payload = response.json()
         if not isinstance(payload, dict):
             raise RuntimeError("Model router returned a non-object response")
-        return payload
+        classification = payload.get("classification", payload)
+        if not isinstance(classification, dict):
+            raise RuntimeError("Model router returned an invalid classification payload")
+        return classification
