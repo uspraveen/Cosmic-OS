@@ -227,6 +227,113 @@ def ensure_env_files(search_roots: Sequence[Path]) -> List[Path]:
     return created
 
 
+def read_text_file(path: Path, *, use_sudo: bool = False) -> str:
+    if use_sudo and not is_root():
+        result = run(["cat", str(path)], use_sudo=True, capture_output=True)
+        return result.stdout
+    return path.read_text(encoding="utf-8")
+
+
+def install_text_file(path: Path, content: str, *, mode: str = "600", use_sudo: bool = False) -> None:
+    with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8", newline="\n") as tmp:
+        tmp.write(content)
+        temp_path = Path(tmp.name)
+    try:
+        run(["install", "-m", mode, str(temp_path), str(path)], use_sudo=use_sudo)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def trim_blank_lines(lines: Sequence[str]) -> List[str]:
+    trimmed = list(lines)
+    while trimmed and not trimmed[0].strip():
+        trimmed.pop(0)
+    while trimmed and not trimmed[-1].strip():
+        trimmed.pop()
+    return trimmed
+
+
+def merge_missing_env_entries(existing_raw: str, source_raw: str) -> Tuple[str, List[str]]:
+    existing_keys = set(parse_env_text(existing_raw))
+    pending_block: list[str] = []
+    missing_blocks: list[Tuple[str, List[str]]] = []
+
+    for line in source_raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            if pending_block and pending_block[-1] != "":
+                pending_block.append("")
+            continue
+
+        if stripped.startswith("#") or "=" not in line:
+            pending_block.append(line)
+            continue
+
+        key, _value = line.split("=", 1)
+        env_key = key.strip()
+        if env_key in existing_keys:
+            pending_block = []
+            continue
+
+        block = trim_blank_lines(pending_block)
+        block.append(line)
+        missing_blocks.append((env_key, block))
+        existing_keys.add(env_key)
+        pending_block = []
+
+    if not missing_blocks:
+        normalized = existing_raw if existing_raw.endswith("\n") or not existing_raw else existing_raw + "\n"
+        return normalized, []
+
+    existing_body = existing_raw.rstrip("\n")
+    appended_sections = ["\n".join(block).rstrip() for _key, block in missing_blocks if block]
+    appended_body = "\n\n".join(section for section in appended_sections if section).strip()
+    if existing_body and appended_body:
+        merged = existing_body + "\n\n" + appended_body + "\n"
+    elif appended_body:
+        merged = appended_body + "\n"
+    else:
+        merged = existing_body + ("\n" if existing_body else "")
+    return merged, [key for key, _block in missing_blocks]
+
+
+def sync_env_file(
+    target_path: Path,
+    *,
+    source_raw: str,
+    create_missing: bool = True,
+    use_sudo: bool = False,
+    mode: str = "600",
+) -> List[str]:
+    if not target_path.exists():
+        if not create_missing:
+            log("Skipping missing env file during sync: {0}".format(target_path))
+            return []
+        if use_sudo:
+            install_text_file(target_path, source_raw, mode=mode, use_sudo=True)
+        else:
+            target_path.write_text(source_raw, encoding="utf-8")
+        log("Created env file during sync: {0}".format(target_path))
+        return list(parse_env_text(source_raw))
+
+    existing_raw = read_text_file(target_path, use_sudo=use_sudo)
+    merged, added_keys = merge_missing_env_entries(existing_raw, source_raw)
+    if not added_keys:
+        log("Env file already has all template keys: {0}".format(target_path))
+        return []
+    if use_sudo:
+        install_text_file(target_path, merged, mode=mode, use_sudo=True)
+    else:
+        target_path.write_text(merged, encoding="utf-8")
+    log(
+        "Appended missing env keys to {0}: {1}".format(
+            target_path,
+            ", ".join(added_keys),
+        )
+    )
+    return added_keys
+
+
 def parse_env_text(raw: str) -> Dict[str, str]:
     parsed: Dict[str, str] = {}
     for line in raw.splitlines():
@@ -629,62 +736,101 @@ def load_package_json(package_json: Path) -> dict:
         raise BootstrapError("Invalid package.json at {0}: {1}".format(package_json, exc)) from exc
 
 
-def service_env_specs() -> List[Tuple[Path, Path]]:
+def service_env_specs(system_env_dir: Optional[Path] = None) -> List[Tuple[Path, Path]]:
+    system_env_dir = system_env_dir or DEFAULT_SYSTEM_ENV_DIR
     return [
-        (BACKEND_ROOT / "gateway.env", DEFAULT_SYSTEM_ENV_DIR / "gateway.env"),
-        (BACKEND_ROOT / "model_router.env", DEFAULT_SYSTEM_ENV_DIR / "model-router.env"),
-        (DEFAULT_BRIDGE_DIR / ".env", DEFAULT_SYSTEM_ENV_DIR / "whatsapp-bridge.env"),
+        (BACKEND_ROOT / "gateway.env", system_env_dir / "gateway.env"),
+        (BACKEND_ROOT / "model_router.env", system_env_dir / "model-router.env"),
+        (DEFAULT_BRIDGE_DIR / ".env", system_env_dir / "whatsapp-bridge.env"),
     ]
 
 
-def fallback_service_env_specs() -> List[Tuple[Path, Path]]:
+def fallback_service_env_specs(system_env_dir: Optional[Path] = None) -> List[Tuple[Path, Path]]:
+    system_env_dir = system_env_dir or DEFAULT_SYSTEM_ENV_DIR
     return [
-        (BACKEND_ROOT / "gateway.env.example", DEFAULT_SYSTEM_ENV_DIR / "gateway.env"),
-        (BACKEND_ROOT / "model_router.env.example", DEFAULT_SYSTEM_ENV_DIR / "model-router.env"),
-        (DEFAULT_BRIDGE_DIR / ".env.example", DEFAULT_SYSTEM_ENV_DIR / "whatsapp-bridge.env"),
+        (BACKEND_ROOT / "gateway.env.example", system_env_dir / "gateway.env"),
+        (BACKEND_ROOT / "model_router.env.example", system_env_dir / "model-router.env"),
+        (DEFAULT_BRIDGE_DIR / ".env.example", system_env_dir / "whatsapp-bridge.env"),
     ]
+
+
+def resolve_effective_service_env_sources(system_env_dir: Optional[Path] = None) -> List[Tuple[Path, Path]]:
+    effective_sources: list[Tuple[Path, Path]] = []
+    fallback_sources = {dest: source for source, dest in fallback_service_env_specs(system_env_dir)}
+    for source, dest in service_env_specs(system_env_dir):
+        effective_sources.append((source if source.exists() else fallback_sources[dest], dest))
+    return effective_sources
+
+
+def first_meaningful_value(*values: Optional[str]) -> Optional[str]:
+    for value in values:
+        normalized = meaningful_env_value(value)
+        if normalized is not None:
+            return normalized
+    return None
+
+
+def build_service_env_overrides(
+    effective_sources: Sequence[Tuple[Path, Path]],
+    *,
+    existing_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Dict[str, Dict[str, str]]:
+    existing_env_by_name = existing_env_by_name or {}
+    gateway_source = next(source for source, dest in effective_sources if dest.name == "gateway.env")
+    bridge_source = next(source for source, dest in effective_sources if dest.name == "whatsapp-bridge.env")
+    gateway_data = parse_env_text(gateway_source.read_text(encoding="utf-8"))
+    bridge_data = parse_env_text(bridge_source.read_text(encoding="utf-8"))
+    gateway_existing = existing_env_by_name.get("gateway.env", {})
+    bridge_existing = existing_env_by_name.get("whatsapp-bridge.env", {})
+
+    shared_internal_token = first_meaningful_value(
+        gateway_existing.get("GATEWAY_INTERNAL_TOKEN"),
+        bridge_existing.get("GATEWAY_INTERNAL_TOKEN"),
+        gateway_data.get("GATEWAY_INTERNAL_TOKEN"),
+        bridge_data.get("GATEWAY_INTERNAL_TOKEN"),
+        secrets.token_urlsafe(32),
+    )
+    bridge_token = first_meaningful_value(
+        gateway_existing.get("WHATSAPP_BRIDGE_TOKEN"),
+        bridge_existing.get("WHATSAPP_BRIDGE_TOKEN"),
+        gateway_data.get("WHATSAPP_BRIDGE_TOKEN"),
+        bridge_data.get("WHATSAPP_BRIDGE_TOKEN"),
+        secrets.token_urlsafe(32),
+    )
+    local_api_token = first_meaningful_value(
+        gateway_existing.get("GATEWAY_LOCAL_API_TOKEN"),
+        gateway_data.get("GATEWAY_LOCAL_API_TOKEN"),
+        secrets.token_urlsafe(24),
+    )
+    whatsapp_auth_dir = first_meaningful_value(
+        bridge_existing.get("WHATSAPP_AUTH_DIR"),
+        bridge_data.get("WHATSAPP_AUTH_DIR"),
+        str(DEFAULT_WHATSAPP_AUTH_DIR),
+    )
+
+    return {
+        "gateway.env": {
+            "GATEWAY_INTERNAL_TOKEN": shared_internal_token or secrets.token_urlsafe(32),
+            "GATEWAY_LOCAL_API_TOKEN": local_api_token or secrets.token_urlsafe(24),
+            "WHATSAPP_BRIDGE_TOKEN": bridge_token or secrets.token_urlsafe(32),
+        },
+        "whatsapp-bridge.env": {
+            "GATEWAY_INTERNAL_TOKEN": shared_internal_token or secrets.token_urlsafe(32),
+            "WHATSAPP_BRIDGE_TOKEN": bridge_token or secrets.token_urlsafe(32),
+            "WHATSAPP_AUTH_DIR": whatsapp_auth_dir or str(DEFAULT_WHATSAPP_AUTH_DIR),
+        },
+    }
 
 
 def install_service_env_files(system_env_dir: Path) -> List[Path]:
     if not is_linux():
         raise BootstrapError("System env provisioning currently targets Linux VMs only.")
 
-    effective_sources: list[Tuple[Path, Path]] = []
-    fallback_sources = {dest: source for source, dest in fallback_service_env_specs()}
-    for source, dest in service_env_specs():
-        effective_sources.append((source if source.exists() else fallback_sources[dest], dest))
+    effective_sources = resolve_effective_service_env_sources(system_env_dir)
 
     validate_required_service_env_files(effective_sources)
 
-    gateway_source = next(source for source, dest in effective_sources if dest.name == "gateway.env")
-    bridge_source = next(source for source, dest in effective_sources if dest.name == "whatsapp-bridge.env")
-    gateway_data = parse_env_text(gateway_source.read_text(encoding="utf-8"))
-    bridge_data = parse_env_text(bridge_source.read_text(encoding="utf-8"))
-
-    shared_internal_token = (
-        meaningful_env_value(gateway_data.get("GATEWAY_INTERNAL_TOKEN"))
-        or meaningful_env_value(bridge_data.get("GATEWAY_INTERNAL_TOKEN"))
-        or secrets.token_urlsafe(32)
-    )
-    bridge_token = (
-        meaningful_env_value(gateway_data.get("WHATSAPP_BRIDGE_TOKEN"))
-        or meaningful_env_value(bridge_data.get("WHATSAPP_BRIDGE_TOKEN"))
-        or secrets.token_urlsafe(32)
-    )
-    local_api_token = meaningful_env_value(gateway_data.get("GATEWAY_LOCAL_API_TOKEN")) or secrets.token_urlsafe(24)
-
-    overrides_by_dest = {
-        "gateway.env": {
-            "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
-            "GATEWAY_LOCAL_API_TOKEN": local_api_token,
-            "WHATSAPP_BRIDGE_TOKEN": bridge_token,
-        },
-        "whatsapp-bridge.env": {
-            "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
-            "WHATSAPP_BRIDGE_TOKEN": bridge_token,
-            "WHATSAPP_AUTH_DIR": str(DEFAULT_WHATSAPP_AUTH_DIR),
-        },
-    }
+    overrides_by_dest = build_service_env_overrides(effective_sources)
 
     run(["install", "-d", "-m", "755", str(system_env_dir)], use_sudo=True)
 
@@ -696,13 +842,7 @@ def install_service_env_files(system_env_dir: Path) -> List[Path]:
 
         raw = source_path.read_text(encoding="utf-8")
         rendered = render_env_with_overrides(raw, overrides_by_dest.get(dest_path.name, {}))
-        with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8", newline="\n") as tmp:
-            tmp.write(rendered)
-            temp_path = Path(tmp.name)
-        try:
-            run(["install", "-m", "600", str(temp_path), str(dest_path)], use_sudo=True)
-        finally:
-            temp_path.unlink(missing_ok=True)
+        install_text_file(dest_path, rendered, mode="600", use_sudo=True)
 
         installed.append(dest_path)
         log("Installed system env file: {0}".format(dest_path))
@@ -839,8 +979,8 @@ def doctor(
     print("  systemd templates  : {0}".format(systemd_template_dir if systemd_template_dir.exists() else "missing"))
 
     effective_sources: list[Tuple[Path, Path]] = []
-    fallback_sources = {dest: source for source, dest in fallback_service_env_specs()}
-    for source, dest in service_env_specs():
+    fallback_sources = {dest: source for source, dest in fallback_service_env_specs(DEFAULT_SYSTEM_ENV_DIR)}
+    for source, dest in service_env_specs(DEFAULT_SYSTEM_ENV_DIR):
         effective_sources.append((source if source.exists() else fallback_sources[dest], dest))
 
     for source_path, dest_path in effective_sources:
@@ -865,6 +1005,58 @@ def setup_env_files(search_roots: Sequence[Path]) -> List[Path]:
     if not created:
         log("No new env files were created from templates.")
     return created
+
+
+def sync_repo_env_files(search_roots: Sequence[Path]) -> List[Path]:
+    synced: list[Path] = []
+    for example_path in discover_env_example_files(search_roots):
+        target_path = example_target_path(example_path)
+        source_raw = example_path.read_text(encoding="utf-8")
+        changed_keys = sync_env_file(target_path, source_raw=source_raw, create_missing=True, use_sudo=False, mode="644")
+        if changed_keys or target_path.exists():
+            synced.append(target_path)
+    return synced
+
+
+def sync_service_env_files(system_env_dir: Path) -> List[Path]:
+    if not is_linux():
+        raise BootstrapError("System env syncing currently targets Linux VMs only.")
+
+    run(["install", "-d", "-m", "755", str(system_env_dir)], use_sudo=True)
+    effective_sources = resolve_effective_service_env_sources(system_env_dir)
+    existing_env_by_name: Dict[str, Dict[str, str]] = {}
+    for _source_path, dest_path in effective_sources:
+        if not dest_path.exists():
+            continue
+        existing_env_by_name[dest_path.name] = parse_env_text(read_text_file(dest_path, use_sudo=True))
+
+    overrides_by_dest = build_service_env_overrides(
+        effective_sources,
+        existing_env_by_name=existing_env_by_name,
+    )
+
+    synced: list[Path] = []
+    for source_path, dest_path in effective_sources:
+        raw = source_path.read_text(encoding="utf-8")
+        rendered = render_env_with_overrides(raw, overrides_by_dest.get(dest_path.name, {}))
+        changed_keys = sync_env_file(
+            dest_path,
+            source_raw=rendered,
+            create_missing=False,
+            use_sudo=True,
+            mode="600",
+        )
+        if changed_keys:
+            synced.append(dest_path)
+    return synced
+
+
+def sync_env(search_roots: Sequence[Path], system_env_dir: Path) -> None:
+    sync_repo_env_files(search_roots)
+    if not is_linux():
+        log("Skipping /etc/cosmic env sync on non-Linux host.")
+        return
+    sync_service_env_files(system_env_dir)
 
 
 def setup_python(venv_path: Path, requirements_path: Path) -> None:
@@ -1053,6 +1245,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Create missing env files from committed *.env.example templates.",
     )
     subparsers.add_parser(
+        "sync-env",
+        help="Append missing keys from committed env templates without overwriting current values. On Linux VMs, also updates existing /etc/cosmic env files.",
+    )
+    subparsers.add_parser(
         "setup-edge",
         help="Install/configure the public Caddy/TLS edge using vm_edge_setup.py.",
     )
@@ -1098,6 +1294,8 @@ def main() -> int:
             doctor(venv_path, requirements_path, bridge_dir, systemd_template_dir, env_search_roots)
         elif command == "setup-env":
             setup_env_files(env_search_roots)
+        elif command == "sync-env":
+            sync_env(env_search_roots, DEFAULT_SYSTEM_ENV_DIR)
         elif command == "setup-python":
             setup_python(venv_path, requirements_path)
         elif command == "setup-whatsapp-bridge":
