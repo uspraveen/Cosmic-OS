@@ -86,6 +86,8 @@ dist-electron
 release
 resources/user_data.db
 *.db
+*.db-shm
+*.db-wal
 resources/secret.key
 
 # OS files
