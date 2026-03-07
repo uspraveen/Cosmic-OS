@@ -995,6 +995,30 @@
   transform: none;
 }
 
+.cosmic-google-action.sending-animation {
+  background: linear-gradient(90deg,
+      rgba(255, 255, 255, 0.9) 0%,
+      rgba(200, 200, 200, 1) 25%,
+      rgba(100, 100, 100, 0.9) 50%,
+      rgba(200, 200, 200, 1) 75%,
+      rgba(255, 255, 255, 0.9) 100%);
+  background-size: 200% 100%;
+  animation: cosmic-slide-gradient 1.5s infinite linear;
+  color: #111 !important;
+  border: none;
+  opacity: 0.95;
+}
+
+@keyframes cosmic-slide-gradient {
+  0% {
+    background-position: 200% 0;
+  }
+
+  100% {
+    background-position: -200% 0;
+  }
+}
+
 /* ========== COSMIC WHATSAPP PAGE ========== */
 /* Glass-tile design aligned with Meeting Mode craft                */
 
@@ -1113,8 +1137,15 @@
 }
 
 @keyframes cosmicWaPulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.4;
+  }
 }
 
 .cosmic-wa-status-text {
@@ -1153,8 +1184,15 @@
   box-shadow: 0 4px 15px rgba(255, 255, 255, 0.25);
 }
 
-.cosmic-wa-cta:active:not(:disabled) { transform: scale(0.97); }
-.cosmic-wa-cta:disabled { opacity: 0.4; cursor: default; transform: none; }
+.cosmic-wa-cta:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.cosmic-wa-cta:disabled {
+  opacity: 0.4;
+  cursor: default;
+  transform: none;
+}
 
 /* ── Banner ── */
 
@@ -1186,21 +1224,33 @@
   border: 1px solid rgba(48, 209, 88, 0.2);
   color: rgba(200, 255, 220, 0.95);
 }
-.cosmic-wa-banner.success .cosmic-wa-banner-icon { background: rgba(48, 209, 88, 0.2); color: #30d158; }
+
+.cosmic-wa-banner.success .cosmic-wa-banner-icon {
+  background: rgba(48, 209, 88, 0.2);
+  color: #30d158;
+}
 
 .cosmic-wa-banner.error {
   background: rgba(255, 69, 58, 0.12);
   border: 1px solid rgba(255, 69, 58, 0.2);
   color: #ff9a94;
 }
-.cosmic-wa-banner.error .cosmic-wa-banner-icon { background: rgba(255, 69, 58, 0.2); color: #ff453a; }
+
+.cosmic-wa-banner.error .cosmic-wa-banner-icon {
+  background: rgba(255, 69, 58, 0.2);
+  color: #ff453a;
+}
 
 .cosmic-wa-banner.info {
   background: rgba(0, 122, 255, 0.1);
   border: 1px solid rgba(0, 122, 255, 0.2);
   color: rgba(220, 236, 255, 0.96);
 }
-.cosmic-wa-banner.info .cosmic-wa-banner-icon { background: rgba(0, 122, 255, 0.2); color: #007aff; }
+
+.cosmic-wa-banner.info .cosmic-wa-banner-icon {
+  background: rgba(0, 122, 255, 0.2);
+  color: #007aff;
+}
 
 /* ── Glass tiles (meeting-mode m-select-tile / m-setup-card craft) ── */
 
@@ -1237,8 +1287,15 @@
 }
 
 @keyframes cosmicWaTileIn {
-  from { opacity: 0; transform: translateY(10px); }
-  to   { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 /* Flush variant (diagnostics — lighter) */
@@ -1251,10 +1308,15 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.04),
     0 8px 16px rgba(0, 0, 0, 0.15);
 }
-.cosmic-wa-tile.cosmic-wa-tile-flush::after { display: none; }
+
+.cosmic-wa-tile.cosmic-wa-tile-flush::after {
+  display: none;
+}
 
 /* Center variant (QR) */
-.cosmic-wa-tile.cosmic-wa-tile-center .cosmic-wa-tile-body { align-items: center; }
+.cosmic-wa-tile.cosmic-wa-tile-center .cosmic-wa-tile-body {
+  align-items: center;
+}
 
 /* Tile head */
 .cosmic-wa-tile-head {
@@ -1267,7 +1329,7 @@
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
-.cosmic-wa-tile-head > span:first-child {
+.cosmic-wa-tile-head>span:first-child {
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.05em;
@@ -1339,7 +1401,7 @@
   gap: 6px;
 }
 
-.cosmic-wa-field > span {
+.cosmic-wa-field>span {
   font-size: 11px;
   font-weight: 500;
   color: rgba(255, 255, 255, 0.45);
@@ -1396,26 +1458,41 @@
   transition: all 0.2s;
 }
 
-.cosmic-wa-btn:active:not(:disabled) { transform: scale(0.97); }
-.cosmic-wa-btn:disabled { opacity: 0.4; cursor: default; transform: none; }
+.cosmic-wa-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.cosmic-wa-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+  transform: none;
+}
 
 .cosmic-wa-btn.ghost {
   background: rgba(255, 255, 255, 0.06);
   color: rgba(255, 255, 255, 0.7);
 }
-.cosmic-wa-btn.ghost:hover:not(:disabled) { background: rgba(255, 255, 255, 0.12); color: #fff; }
+
+.cosmic-wa-btn.ghost:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
 
 .cosmic-wa-btn.secondary {
   background: rgba(255, 255, 255, 0.1);
   color: #fff;
 }
-.cosmic-wa-btn.secondary:hover:not(:disabled) { background: rgba(255, 255, 255, 0.16); }
+
+.cosmic-wa-btn.secondary:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.16);
+}
 
 .cosmic-wa-btn.primary {
   background: #fff;
   color: #000;
   box-shadow: 0 2px 10px rgba(255, 255, 255, 0.15);
 }
+
 .cosmic-wa-btn.primary:hover:not(:disabled) {
   transform: translateY(-1px);
   box-shadow: 0 4px 15px rgba(255, 255, 255, 0.25);
@@ -1425,7 +1502,11 @@
   background: rgba(255, 69, 58, 0.12);
   color: #ff453a;
 }
-.cosmic-wa-btn.danger:hover:not(:disabled) { background: #ff453a; color: #fff; }
+
+.cosmic-wa-btn.danger:hover:not(:disabled) {
+  background: #ff453a;
+  color: #fff;
+}
 
 /* ── QR pairing ── */
 
@@ -1442,8 +1523,15 @@
 }
 
 @keyframes cosmicWaQrIn {
-  from { opacity: 0; transform: scale(0.88); }
-  to   { opacity: 1; transform: scale(1); }
+  from {
+    opacity: 0;
+    transform: scale(0.88);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 .cosmic-wa-qr-well img {
@@ -1509,9 +1597,11 @@
   transition: background 0.18s ease;
 }
 
-.cosmic-wa-diag-toggle:hover { background: rgba(255, 255, 255, 0.03); }
+.cosmic-wa-diag-toggle:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
 
-.cosmic-wa-diag-toggle > span:first-child {
+.cosmic-wa-diag-toggle>span:first-child {
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.05em;
@@ -1526,7 +1616,9 @@
   align-items: center;
 }
 
-.cosmic-wa-diag-chevron[data-open="true"] { transform: rotate(90deg); }
+.cosmic-wa-diag-chevron[data-open="true"] {
+  transform: rotate(90deg);
+}
 
 .cosmic-wa-diag-grid {
   position: relative;
@@ -1547,7 +1639,7 @@
   border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
-.cosmic-wa-diag-cell > span {
+.cosmic-wa-diag-cell>span {
   font-size: 10px;
   color: rgba(255, 255, 255, 0.38);
   text-transform: uppercase;
@@ -1555,16 +1647,24 @@
   font-weight: 600;
 }
 
-.cosmic-wa-diag-cell > strong {
+.cosmic-wa-diag-cell>strong {
   font-size: 12px;
   color: rgba(255, 255, 255, 0.9);
   word-break: break-all;
   font-weight: 500;
 }
 
-.cosmic-wa-diag-cell.full { grid-column: 1 / -1; }
-.cosmic-wa-diag-cell.error > span { color: rgba(255, 138, 132, 0.7); }
-.cosmic-wa-diag-cell.error > strong { color: rgba(255, 138, 132, 0.85); }
+.cosmic-wa-diag-cell.full {
+  grid-column: 1 / -1;
+}
+
+.cosmic-wa-diag-cell.error>span {
+  color: rgba(255, 138, 132, 0.7);
+}
+
+.cosmic-wa-diag-cell.error>strong {
+  color: rgba(255, 138, 132, 0.85);
+}
 
 /* ── Session strip ── */
 
@@ -1605,4 +1705,1727 @@
   color: rgba(255, 255, 255, 0.35);
   text-align: center;
   line-height: 1.4;
+}
+
+/* ========== COSMIC WHATSAPP REDESIGN OVERRIDES ========== */
+
+.cosmic-wa-page {
+  gap: 16px;
+}
+
+.cosmic-wa-shell {
+  position: relative;
+  overflow: hidden;
+  border-radius: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background:
+    radial-gradient(circle at 8% 12%, rgba(37, 211, 102, 0.18), transparent 30%),
+    radial-gradient(circle at 92% 8%, rgba(115, 255, 182, 0.12), transparent 22%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.02)),
+    rgba(6, 10, 15, 0.9);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 24px 60px rgba(0, 0, 0, 0.34);
+}
+
+.cosmic-wa-shell::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(125deg, rgba(255, 255, 255, 0.08), transparent 42%),
+    linear-gradient(315deg, rgba(37, 211, 102, 0.06), transparent 38%);
+  pointer-events: none;
+}
+
+.cosmic-wa-hero {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 18px;
+  padding: 22px;
+}
+
+.cosmic-wa-hero-copy,
+.cosmic-wa-hero-panel {
+  min-width: 0;
+}
+
+.cosmic-wa-hero-title-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.cosmic-wa-orb {
+  position: relative;
+  width: 68px;
+  height: 68px;
+  border-radius: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background:
+    radial-gradient(circle at 35% 30%, rgba(255, 255, 255, 0.22), transparent 48%),
+    linear-gradient(145deg, rgba(37, 211, 102, 0.22), rgba(18, 28, 24, 0.9));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 16px 36px rgba(0, 0, 0, 0.28),
+    0 0 24px rgba(37, 211, 102, 0.18);
+}
+
+.cosmic-wa-orb::after {
+  content: "";
+  position: absolute;
+  inset: 10px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  opacity: 0.8;
+}
+
+.cosmic-wa-status-copy {
+  min-width: 0;
+}
+
+.cosmic-wa-hero-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.cosmic-wa-signal-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.cosmic-wa-signal-card {
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02)),
+    rgba(10, 14, 20, 0.72);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.cosmic-wa-signal-card span {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.cosmic-wa-signal-card strong {
+  display: block;
+  margin-top: 8px;
+  font-size: 18px;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: -0.02em;
+  word-break: break-word;
+}
+
+.cosmic-wa-signal-card p {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.cosmic-wa-hero-note {
+  margin: 0;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.2);
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.cosmic-wa-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.cosmic-wa-main-column,
+.cosmic-wa-side-column {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.cosmic-wa-section-copy h4,
+.cosmic-wa-qr-copy h4 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: #fff;
+}
+
+.cosmic-wa-section-copy p,
+.cosmic-wa-qr-copy>p {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.cosmic-wa-two-up,
+.cosmic-wa-route-grid,
+.cosmic-wa-qr-layout,
+.cosmic-wa-managed-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.cosmic-wa-inner-surface-accent {
+  background:
+    radial-gradient(circle at 100% 0%, rgba(37, 211, 102, 0.14), transparent 45%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015)),
+    rgba(10, 14, 20, 0.46);
+}
+
+.cosmic-wa-mini-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cosmic-wa-mini-stat span,
+.cosmic-wa-managed-label,
+.cosmic-wa-preview-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.cosmic-wa-mini-stat strong,
+.cosmic-wa-managed-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.92);
+  word-break: break-word;
+}
+
+.cosmic-wa-tip-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cosmic-wa-tip {
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.18);
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.cosmic-wa-tip[data-state="done"] {
+  border-color: rgba(37, 211, 102, 0.24);
+  color: rgba(195, 255, 213, 0.9);
+}
+
+.cosmic-wa-tip[data-state="current"] {
+  border-color: rgba(255, 255, 255, 0.18);
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.cosmic-wa-managed-card,
+.cosmic-wa-preview-card {
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02)),
+    rgba(8, 12, 18, 0.78);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.cosmic-wa-preview-card strong {
+  display: block;
+  margin-top: 10px;
+  font-size: 20px;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: -0.03em;
+  word-break: break-word;
+}
+
+.cosmic-wa-preview-card p {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: rgba(255, 255, 255, 0.58);
+}
+
+.cosmic-wa-field-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.48);
+}
+
+.cosmic-wa-qr-layout {
+  align-items: center;
+}
+
+.cosmic-wa-qr-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.cosmic-wa-qr-placeholder {
+  position: relative;
+  width: 220px;
+  height: 220px;
+  border-radius: 28px;
+  border: 1px dashed rgba(255, 255, 255, 0.18);
+  background:
+    radial-gradient(circle at 30% 30%, rgba(37, 211, 102, 0.18), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015)),
+    rgba(7, 12, 16, 0.72);
+  overflow: hidden;
+}
+
+.cosmic-wa-qr-placeholder-orb {
+  position: absolute;
+  inset: 48px;
+  border-radius: 32px;
+  border: 1px solid rgba(37, 211, 102, 0.2);
+  background: radial-gradient(circle at 50% 50%, rgba(37, 211, 102, 0.26), transparent 62%);
+  filter: blur(0.2px);
+}
+
+.cosmic-wa-qr-placeholder-grid {
+  position: absolute;
+  inset: 18px;
+  border-radius: 22px;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+  background-size: 22px 22px;
+  opacity: 0.5;
+  mask-image: radial-gradient(circle at center, black 45%, transparent 90%);
+}
+
+.cosmic-wa-diag-toggle-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cosmic-wa-progress-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cosmic-wa-progress-item {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.cosmic-wa-progress-dot {
+  width: 28px;
+  height: 28px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.68);
+}
+
+.cosmic-wa-progress-copy strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.cosmic-wa-progress-copy p {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.54);
+}
+
+.cosmic-wa-progress-item[data-state="done"] {
+  border-color: rgba(37, 211, 102, 0.2);
+  background: rgba(37, 211, 102, 0.08);
+}
+
+.cosmic-wa-progress-item[data-state="done"] .cosmic-wa-progress-dot {
+  background: rgba(37, 211, 102, 0.18);
+  color: rgba(198, 255, 216, 0.95);
+}
+
+.cosmic-wa-progress-item[data-state="current"] {
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.cosmic-wa-inline-error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: rgba(255, 168, 162, 0.92);
+}
+
+@media (min-width: 960px) {
+  .cosmic-wa-hero {
+    grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.9fr);
+    align-items: stretch;
+  }
+
+  .cosmic-wa-grid {
+    grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.8fr);
+    align-items: start;
+  }
+
+  .cosmic-wa-two-up,
+  .cosmic-wa-route-grid,
+  .cosmic-wa-managed-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .cosmic-wa-qr-layout {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+
+  .cosmic-wa-signal-stack {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .cosmic-wa-hero-panel .cosmic-wa-signal-stack,
+  .cosmic-wa-side-column .cosmic-wa-signal-stack {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 959px) {
+  .cosmic-wa-shell {
+    border-radius: 20px;
+  }
+
+  .cosmic-wa-hero {
+    padding: 18px;
+  }
+
+  .cosmic-wa-hero-title-row {
+    align-items: flex-start;
+  }
+
+  .cosmic-wa-orb {
+    width: 60px;
+    height: 60px;
+    border-radius: 18px;
+  }
+
+  .cosmic-wa-signal-stack {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .cosmic-wa-page {
+    gap: 14px;
+  }
+
+  .cosmic-wa-shell {
+    border-radius: 18px;
+  }
+
+  .cosmic-wa-hero {
+    padding: 16px;
+    gap: 14px;
+  }
+
+  .cosmic-wa-hero-title-row {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .cosmic-wa-status-strip {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .cosmic-wa-status-left {
+    width: 100%;
+  }
+
+  .cosmic-wa-cta,
+  .cosmic-wa-btn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .cosmic-wa-actions,
+  .cosmic-wa-session-actions {
+    flex-direction: column;
+  }
+
+  .cosmic-wa-qr-well,
+  .cosmic-wa-qr-placeholder {
+    width: 100%;
+    max-width: 240px;
+    height: auto;
+    aspect-ratio: 1 / 1;
+  }
+
+  .cosmic-wa-diag-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .cosmic-wa-session-note {
+    max-width: none;
+  }
+}
+
+/* Settings overlay uses a narrow fixed panel, so the WhatsApp view must stay
+   in compact mode regardless of desktop viewport width. */
+.settings-panel .cosmic-wa-hero,
+.settings-panel .cosmic-wa-grid,
+.settings-panel .cosmic-wa-two-up,
+.settings-panel .cosmic-wa-route-grid,
+.settings-panel .cosmic-wa-managed-grid,
+.settings-panel .cosmic-wa-qr-layout,
+.settings-panel .cosmic-wa-signal-stack,
+.settings-panel .cosmic-wa-diag-grid {
+  grid-template-columns: 1fr;
+}
+
+.settings-panel .cosmic-wa-shell {
+  border-radius: 18px;
+}
+
+.settings-panel .cosmic-wa-hero {
+  padding: 16px;
+  gap: 14px;
+}
+
+.settings-panel .cosmic-wa-hero-title-row {
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.settings-panel .cosmic-wa-orb {
+  width: 56px;
+  height: 56px;
+  border-radius: 18px;
+}
+
+.settings-panel .cosmic-wa-title {
+  font-size: 20px;
+}
+
+.settings-panel .cosmic-wa-status-strip {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.settings-panel .cosmic-wa-status-left {
+  width: 100%;
+}
+
+.settings-panel .cosmic-wa-cta,
+.settings-panel .cosmic-wa-btn {
+  width: 100%;
+}
+
+.settings-panel .cosmic-wa-actions,
+.settings-panel .cosmic-wa-session-actions {
+  flex-direction: column;
+}
+
+.settings-panel .cosmic-wa-side-column {
+  display: none;
+}
+
+.settings-panel .cosmic-wa-qr-well,
+.settings-panel .cosmic-wa-qr-placeholder {
+  width: min(100%, 220px);
+  margin: 0 auto;
+}
+
+/* Refine WhatsApp to match the Google settings language more closely. */
+.settings-panel .cosmic-wa-page {
+  gap: 18px;
+}
+
+.settings-panel .cosmic-wa-shell,
+.settings-panel .cosmic-wa-tile {
+  border-radius: 16px;
+  background: rgba(20, 20, 22, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.settings-panel .cosmic-wa-shell::before,
+.settings-panel .cosmic-wa-tile::after {
+  display: none;
+}
+
+.settings-panel .cosmic-wa-tile:hover,
+.settings-panel .cosmic-wa-shell:hover {
+  transform: none;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 8px 24px rgba(0, 0, 0, 0.14);
+}
+
+.settings-panel .cosmic-wa-hero {
+  padding: 20px 22px;
+  gap: 16px;
+}
+
+.settings-panel .cosmic-wa-eyebrow-row {
+  gap: 8px;
+}
+
+.settings-panel .cosmic-wa-eyebrow,
+.settings-panel .cosmic-wa-meta-pill {
+  height: auto;
+  padding: 4px 9px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: none;
+}
+
+.settings-panel .cosmic-wa-eyebrow {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.settings-panel .cosmic-wa-eyebrow.soft {
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.56);
+}
+
+.settings-panel .cosmic-wa-meta-pill.ready {
+  background: rgba(52, 199, 89, 0.18);
+  color: rgba(180, 255, 200, 0.95);
+}
+
+.settings-panel .cosmic-wa-meta-pill.subtle {
+  background: rgba(255, 159, 10, 0.18);
+  color: rgba(255, 230, 180, 0.95);
+}
+
+.settings-panel .cosmic-wa-hero-title-row {
+  gap: 16px;
+  align-items: center;
+}
+
+.settings-panel .cosmic-wa-orb {
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  background: #fff;
+  border: none;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+}
+
+.settings-panel .cosmic-wa-orb::after {
+  display: none;
+}
+
+.settings-panel .cosmic-wa-title {
+  margin: 0 0 2px;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: #fff;
+  background: none;
+  -webkit-text-fill-color: initial;
+}
+
+.settings-panel .cosmic-wa-subtitle {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.settings-panel .cosmic-wa-status-strip {
+  padding: 0;
+  border: none;
+  background: none;
+  box-shadow: none;
+}
+
+.settings-panel .cosmic-wa-status-text {
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.settings-panel .cosmic-wa-status-jid {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.settings-panel .cosmic-wa-live-dot {
+  width: 8px;
+  height: 8px;
+}
+
+.settings-panel .cosmic-wa-cta {
+  padding: 10px 20px;
+  border-radius: 22px;
+  background: #fff;
+  color: #000;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: none;
+}
+
+.settings-panel .cosmic-wa-cta:hover:not(:disabled) {
+  background: #f5f5f5;
+  transform: scale(1.03);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.settings-panel .cosmic-wa-hero-panel .cosmic-wa-signal-stack {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.settings-panel .cosmic-wa-signal-card,
+.settings-panel .cosmic-wa-inner-surface,
+.settings-panel .cosmic-wa-preview-card,
+.settings-panel .cosmic-wa-managed-card {
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.15);
+  box-shadow: none;
+}
+
+.settings-panel .cosmic-wa-signal-card strong {
+  margin-top: 6px;
+  font-size: 15px;
+}
+
+.settings-panel .cosmic-wa-signal-card p,
+.settings-panel .cosmic-wa-hero-note,
+.settings-panel .cosmic-wa-preview-card p,
+.settings-panel .cosmic-wa-field-note,
+.settings-panel .cosmic-wa-section-copy p,
+.settings-panel .cosmic-wa-qr-copy>p,
+.settings-panel .cosmic-wa-progress-copy p {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.settings-panel .cosmic-wa-tile-head {
+  padding: 18px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.settings-panel .cosmic-wa-tile-head>span:first-child {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  color: #fff;
+}
+
+.settings-panel .cosmic-wa-tile-body {
+  padding: 20px;
+  gap: 20px;
+}
+
+.settings-panel .cosmic-wa-section-copy h4,
+.settings-panel .cosmic-wa-qr-copy h4 {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.settings-panel .cosmic-wa-preview-card strong,
+.settings-panel .cosmic-wa-managed-value,
+.settings-panel .cosmic-wa-mini-stat strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.settings-panel .cosmic-wa-tip {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.56);
+}
+
+.settings-panel .cosmic-wa-field>span {
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.settings-panel .cosmic-wa-field input {
+  padding: 11px 14px;
+  border-radius: 10px;
+  font-size: 14px;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.settings-panel .cosmic-wa-field input:focus {
+  border-color: rgba(37, 211, 102, 0.35);
+  background: rgba(0, 0, 0, 0.35);
+  box-shadow: 0 0 0 3px rgba(37, 211, 102, 0.1);
+}
+
+.settings-panel .cosmic-wa-actions,
+.settings-panel .cosmic-wa-session-actions {
+  flex-direction: row;
+}
+
+.settings-panel .cosmic-wa-btn {
+  padding: 8px 14px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.settings-panel .cosmic-wa-btn.ghost {
+  background: transparent;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.settings-panel .cosmic-wa-btn.secondary {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.settings-panel .cosmic-wa-btn.primary {
+  background: #25D366;
+  color: #08110b;
+  box-shadow: none;
+}
+
+.settings-panel .cosmic-wa-btn.primary:hover:not(:disabled) {
+  background: #39db74;
+  transform: scale(1.02);
+}
+
+.settings-panel .cosmic-wa-btn.danger {
+  background: rgba(255, 69, 58, 0.15);
+  color: #ff8f88;
+}
+
+.settings-panel .cosmic-wa-qr-placeholder {
+  border-radius: 16px;
+  border: 1px dashed rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.settings-panel .cosmic-wa-qr-placeholder-orb,
+.settings-panel .cosmic-wa-qr-placeholder-grid {
+  display: none;
+}
+
+.settings-panel .cosmic-wa-qr-steps p {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.58);
+}
+
+.settings-panel .cosmic-wa-step-num {
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.settings-panel .cosmic-wa-diag-toggle {
+  padding: 18px 20px;
+}
+
+.settings-panel .cosmic-wa-diag-toggle:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.settings-panel .cosmic-wa-diag-toggle>span:first-child {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  color: #fff;
+}
+
+.settings-panel .cosmic-wa-diag-cell {
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.settings-panel .cosmic-wa-footer-note {
+  display: none;
+}
+
+/* WhatsApp settings redesign aligned with the Google Workspace card language. */
+.cosmic-wa-google-page {
+  gap: 18px;
+}
+
+.cosmic-wa-google-hero-icon {
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2), inset 0 0 0 1px rgba(37, 211, 102, 0.12);
+}
+
+.cosmic-wa-hero-stat-connected {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 100px;
+  background: rgba(48, 209, 88, 0.14);
+  border: 1px solid rgba(48, 209, 88, 0.22);
+  color: rgba(195, 255, 210, 0.95);
+  font-size: 12px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+
+.cosmic-wa-card-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cosmic-wa-card-title-row .cosmic-google-badge {
+  font-size: 10px;
+  padding: 2px 8px;
+}
+
+.cosmic-wa-google-banner {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  align-self: center;
+  padding: 9px 16px;
+  border-radius: 100px;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+  animation: cosmicToastIn 0.4s cubic-bezier(0.19, 1, 0.22, 1);
+}
+
+.cosmic-wa-google-banner.success {
+  background: rgba(20, 20, 22, 0.88);
+  border: 1px solid rgba(48, 209, 88, 0.22);
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.cosmic-wa-google-banner.info {
+  background: rgba(20, 20, 22, 0.88);
+  border: 1px solid rgba(10, 132, 255, 0.22);
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.cosmic-wa-google-banner.error {
+  background: rgba(20, 20, 22, 0.88);
+  border: 1px solid rgba(255, 69, 58, 0.28);
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.cosmic-wa-google-banner-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.cosmic-wa-google-banner.success .cosmic-wa-google-banner-icon {
+  background: rgba(48, 209, 88, 0.2);
+  color: #30d158;
+}
+
+.cosmic-wa-google-banner.info .cosmic-wa-google-banner-icon {
+  background: rgba(10, 132, 255, 0.2);
+  color: #0a84ff;
+}
+
+.cosmic-wa-google-banner.error .cosmic-wa-google-banner-icon {
+  background: rgba(255, 69, 58, 0.2);
+  color: #ff453a;
+}
+
+@keyframes cosmicToastIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.cosmic-wa-google-sections {
+  gap: 14px;
+}
+
+.cosmic-wa-google-card .cosmic-google-card-info strong,
+.cosmic-wa-google-card .cosmic-google-card-info span {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.cosmic-wa-google-card .cosmic-google-card-badges {
+  flex-wrap: wrap;
+}
+
+.cosmic-wa-google-card .cosmic-google-card-note {
+  max-width: none;
+}
+
+.cosmic-wa-google-avatar.summary {
+  background: linear-gradient(135deg, #25D366, #128C7E);
+}
+
+.cosmic-wa-google-avatar.connection {
+  background: linear-gradient(135deg, #34A853, #4285F4);
+}
+
+.cosmic-wa-google-avatar.phone {
+  background: linear-gradient(135deg, #25D366, #0f9d58);
+}
+
+.cosmic-wa-google-avatar.pairing {
+  background: linear-gradient(135deg, #128C7E, #0B6E4F);
+}
+
+.cosmic-wa-google-avatar.diagnostics {
+  background: linear-gradient(135deg, #5F6368, #202124);
+}
+
+.cosmic-wa-google-overview-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.cosmic-wa-google-overview-item {
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.cosmic-wa-google-overview-item span {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.cosmic-wa-google-overview-item strong {
+  display: block;
+  margin-top: 8px;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: #fff;
+  word-break: break-word;
+}
+
+.cosmic-wa-google-overview-item p {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.cosmic-wa-google-field-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.cosmic-wa-google-info-list {
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.cosmic-wa-google-info-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.cosmic-wa-google-info-row:last-child {
+  border-bottom: none;
+}
+
+.cosmic-wa-google-info-row span {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.cosmic-wa-google-info-row strong {
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  word-break: break-word;
+}
+
+.cosmic-wa-google-info-row-error strong {
+  color: rgba(255, 212, 209, 0.95);
+}
+
+.cosmic-wa-google-pairing {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  align-items: center;
+}
+
+.cosmic-wa-google-qr-frame {
+  width: min(100%, 280px);
+  aspect-ratio: 1 / 1;
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.cosmic-wa-google-qr-frame.live {
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.16);
+}
+
+.cosmic-wa-google-qr-frame img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.cosmic-wa-google-qr-placeholder {
+  width: 100%;
+  height: 100%;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 18px;
+  text-align: center;
+  background: linear-gradient(180deg, rgba(37, 211, 102, 0.08), rgba(0, 0, 0, 0.02));
+}
+
+.cosmic-wa-google-qr-placeholder-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #111827;
+}
+
+.cosmic-wa-google-qr-placeholder-sub {
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(17, 24, 39, 0.65);
+}
+
+.cosmic-wa-google-step-list {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cosmic-wa-google-step {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.cosmic-wa-google-step-index {
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.cosmic-wa-google-step-copy strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.cosmic-wa-google-step-copy p {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+@media (min-width: 760px) {
+  .cosmic-wa-google-overview-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.cosmic-wa-hero-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.cosmic-wa-hero-unlink {
+  padding: 9px 16px;
+  border: 1px solid rgba(255, 69, 58, 0.2);
+  border-radius: 22px;
+  background: rgba(255, 69, 58, 0.08);
+  color: #ff6b6b;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: transform 0.25s cubic-bezier(0.19, 1, 0.22, 1), background 0.2s ease;
+}
+
+.cosmic-wa-hero-unlink:hover:not(:disabled) {
+  background: rgba(255, 69, 58, 0.16);
+  transform: scale(1.03);
+}
+
+.cosmic-wa-hero-unlink:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.cosmic-wa-hero-unlink:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.settings-panel .cosmic-wa-google-hero {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.settings-panel .cosmic-wa-google-hero .cosmic-google-hero-inner {
+  width: 100%;
+}
+
+.settings-panel .cosmic-wa-hero-actions {
+  width: 100%;
+}
+
+.settings-panel .cosmic-wa-google-hero .cosmic-google-cta {
+  flex: 1;
+}
+
+.settings-panel .cosmic-wa-google-card .cosmic-google-card-header {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.settings-panel .cosmic-wa-google-card .cosmic-google-card-badges {
+  justify-content: flex-start;
+}
+
+.settings-panel .cosmic-wa-google-card .cosmic-google-card-footer {
+  align-items: flex-start;
+}
+
+.settings-panel .cosmic-wa-google-card .cosmic-google-card-actions {
+  width: 100%;
+}
+
+.settings-panel .cosmic-wa-google-card .cosmic-google-action {
+  flex: 1 1 160px;
+}
+
+.settings-panel .cosmic-wa-google-pairing {
+  align-items: center;
+}
+
+.settings-panel .cosmic-wa-google-qr-frame {
+  width: min(100%, 280px);
+}
+
+/* Final WhatsApp simplification: compact, quiet, settings-first. */
+.settings-panel .cosmic-wa-page {
+  gap: 14px;
+}
+
+.settings-panel .cosmic-wa-page::before {
+  display: none;
+}
+
+.settings-panel .cosmic-wa-identity {
+  gap: 6px;
+}
+
+.settings-panel .cosmic-wa-eyebrow-row {
+  gap: 8px;
+  margin-bottom: 0;
+}
+
+.settings-panel .cosmic-wa-eyebrow,
+.settings-panel .cosmic-wa-eyebrow.soft,
+.settings-panel .cosmic-wa-meta-pill,
+.settings-panel .cosmic-wa-meta-pill.ready,
+.settings-panel .cosmic-wa-meta-pill.subtle {
+  padding: 4px 9px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.settings-panel .cosmic-wa-meta-pill.ready {
+  background: rgba(52, 199, 89, 0.16);
+  border-color: rgba(52, 199, 89, 0.22);
+  color: rgba(195, 255, 210, 0.95);
+}
+
+.settings-panel .cosmic-wa-meta-pill.subtle {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.58);
+}
+
+.settings-panel .cosmic-wa-title {
+  background: none;
+  -webkit-text-fill-color: initial;
+  color: #fff;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.settings-panel .cosmic-wa-subtitle {
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.settings-panel .cosmic-wa-status-strip,
+.settings-panel .cosmic-wa-tile,
+.settings-panel .cosmic-wa-session-strip {
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(20, 20, 22, 0.45);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.settings-panel .cosmic-wa-tile::after {
+  display: none;
+}
+
+.settings-panel .cosmic-wa-tile:hover,
+.settings-panel .cosmic-wa-status-strip:hover,
+.settings-panel .cosmic-wa-session-strip:hover {
+  transform: none;
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.settings-panel .cosmic-wa-status-strip {
+  padding: 14px 16px;
+  align-items: center;
+}
+
+.settings-panel .cosmic-wa-status-left {
+  min-width: 0;
+  gap: 10px;
+}
+
+.settings-panel .cosmic-wa-status-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-panel .cosmic-wa-status-text {
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.settings-panel .cosmic-wa-status-jid {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.settings-panel .cosmic-wa-live-dot.on {
+  box-shadow: 0 0 0 4px rgba(48, 209, 88, 0.14);
+}
+
+.settings-panel .cosmic-wa-cta,
+.settings-panel .cosmic-wa-btn {
+  border-radius: 10px;
+  box-shadow: none;
+  transform: none;
+}
+
+.settings-panel .cosmic-wa-cta {
+  padding: 9px 16px;
+  background: #fff;
+  color: #000;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.settings-panel .cosmic-wa-cta:hover:not(:disabled),
+.settings-panel .cosmic-wa-btn.primary:hover:not(:disabled),
+.settings-panel .cosmic-wa-btn.secondary:hover:not(:disabled),
+.settings-panel .cosmic-wa-btn.ghost:hover:not(:disabled),
+.settings-panel .cosmic-wa-btn.danger:hover:not(:disabled) {
+  transform: none;
+  box-shadow: none;
+}
+
+.settings-panel .cosmic-wa-banner {
+  padding: 10px 12px;
+  border-radius: 12px;
+}
+
+.settings-panel .cosmic-wa-tile-head {
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.settings-panel .cosmic-wa-tile-head>span:first-child,
+.settings-panel .cosmic-wa-diag-toggle>span:first-child {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  color: #fff;
+}
+
+.settings-panel .cosmic-wa-tile-body {
+  padding: 14px 16px 16px;
+  gap: 12px;
+}
+
+.settings-panel .cosmic-wa-inner-surface,
+.settings-panel .cosmic-wa-diag-cell {
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.16);
+  box-shadow: none;
+}
+
+.settings-panel .cosmic-wa-field input {
+  padding: 11px 13px;
+  font-size: 13px;
+  border-radius: 10px;
+}
+
+.settings-panel .cosmic-wa-actions,
+.settings-panel .cosmic-wa-session-actions {
+  gap: 8px;
+}
+
+.settings-panel .cosmic-wa-btn.secondary {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.settings-panel .cosmic-wa-btn.ghost {
+  background: transparent;
+  color: rgba(255, 255, 255, 0.68);
+}
+
+.settings-panel .cosmic-wa-btn.primary {
+  background: #25D366;
+  color: #08110b;
+}
+
+.settings-panel .cosmic-wa-btn.danger {
+  background: rgba(255, 69, 58, 0.14);
+  color: #ff9a94;
+}
+
+.settings-panel .cosmic-wa-qr-well {
+  width: min(100%, 220px);
+  margin: 0 auto;
+  padding: 14px;
+  border-radius: 16px;
+  box-shadow: none;
+}
+
+.settings-panel .cosmic-wa-qr-steps {
+  max-width: none;
+}
+
+.settings-panel .cosmic-wa-qr-steps p {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.settings-panel .cosmic-wa-step-num {
+  border-radius: 8px;
+  width: 20px;
+  height: 20px;
+}
+
+.settings-panel .cosmic-wa-diag-toggle {
+  padding: 14px 16px;
+}
+
+.settings-panel .cosmic-wa-diag-grid {
+  grid-template-columns: 1fr;
+  padding: 0 16px 16px;
+}
+
+.settings-panel .cosmic-wa-session-strip {
+  padding: 14px 16px;
+}
+
+.settings-panel .cosmic-wa-session-note {
+  max-width: none;
+  font-size: 11px;
+}
+
+.settings-panel .cosmic-wa-footer-note {
+  display: none;
+}
+
+@media (max-width: 720px) {
+  .settings-panel .cosmic-wa-status-strip {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .settings-panel .cosmic-wa-cta,
+  .settings-panel .cosmic-wa-btn {
+    width: 100%;
+  }
+
+  .settings-panel .cosmic-wa-actions,
+  .settings-panel .cosmic-wa-session-actions {
+    flex-direction: column;
+  }
+}
+
+/* Header + bottom breathing room pass */
+.settings-panel .cosmic-wa-page {
+  padding-bottom: 10px;
+}
+
+.settings-panel .cosmic-wa-header {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, rgba(24, 24, 26, 0.62), rgba(14, 14, 16, 0.82));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  overflow: hidden;
+}
+
+.settings-panel .cosmic-wa-header::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 84px;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.34) 58%, rgba(0, 0, 0, 0.82) 100%);
+  pointer-events: none;
+}
+
+.settings-panel .cosmic-wa-header-top,
+.settings-panel .cosmic-wa-header .cosmic-wa-status-strip {
+  position: relative;
+  z-index: 1;
+}
+
+.settings-panel .cosmic-wa-header-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.settings-panel .cosmic-wa-header-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: #fff;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.2);
+}
+
+.settings-panel .cosmic-wa-header .cosmic-wa-identity {
+  min-width: 0;
+}
+
+.settings-panel .cosmic-wa-header .cosmic-wa-eyebrow-row {
+  flex-wrap: wrap;
+}
+
+.settings-panel .cosmic-wa-header .cosmic-wa-status-strip {
+  padding: 12px 14px;
+  border-radius: 14px;
+  border-color: rgba(255, 255, 255, 0.06);
+  background: rgba(0, 0, 0, 0.18);
+  box-shadow: none;
+}
+
+.settings-panel .cosmic-wa-header .cosmic-wa-status-jid {
+  white-space: nowrap;
+}
+
+.settings-panel .cosmic-wa-qr-placeholder-simple {
+  width: min(100%, 220px);
+  min-height: 220px;
+  padding: 18px;
+  border-radius: 16px;
+  border: 1px dashed rgba(255, 255, 255, 0.14);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(0, 0, 0, 0.18));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.settings-panel .cosmic-wa-qr-placeholder-simple strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.settings-panel .cosmic-wa-qr-placeholder-simple p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.settings-panel .cosmic-wa-qr-note {
+  margin: 0 0 2px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.56);
+}
+
+.settings-panel .cosmic-wa-bottom-spacer {
+  height: 56px;
+  margin-top: 4px;
+  border-radius: 0 0 16px 16px;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.46) 58%, rgba(0, 0, 0, 0.95) 100%);
+}
+
+@media (max-width: 720px) {
+  .settings-panel .cosmic-wa-header-top {
+    gap: 12px;
+  }
+
+  .settings-panel .cosmic-wa-header .cosmic-wa-status-jid {
+    white-space: normal;
+  }
+
+  .settings-panel .cosmic-wa-header .cosmic-wa-status-strip,
+  .settings-panel .cosmic-wa-header .cosmic-wa-cta {
+    width: 100%;
+  }
+}
+
+/* Final WhatsApp alignment: same Google settings structure, lighter WhatsApp accents. */
+.settings-panel .cosmic-wa-google-page {
+  padding-bottom: 8px;
+}
+
+.settings-panel .cosmic-wa-google-hero {
+  margin-bottom: 2px;
+}
+
+.settings-panel .cosmic-wa-google-card .cosmic-google-card-footer {
+  justify-content: flex-start;
+}
+
+.settings-panel .cosmic-wa-google-card .cosmic-google-card-note {
+  max-width: none;
+}
+
+.settings-panel .cosmic-wa-google-inline-note {
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.14);
+  font-size: 13px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.settings-panel .cosmic-wa-google-footer-space {
+  width: calc(100% + 48px);
+  height: 96px;
+  margin: 6px -24px -24px;
+  border-radius: 0;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.42) 54%, rgba(0, 0, 0, 0.96) 100%);
 }

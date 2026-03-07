@@ -467,7 +467,7 @@ export default function App() {
 
       <div
         className={`overlay ${overlayClass}`}
-        onMouseDown={(e) => {
+        onDoubleClick={(e) => {
           if (e.target === e.currentTarget) window.cosmic?.hide()
         }}
         style={{ pointerEvents: searchState === 'visible' ? 'auto' : 'none' }}
