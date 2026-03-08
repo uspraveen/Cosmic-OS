@@ -25,6 +25,9 @@ import getpass
 import secrets
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 
 MIN_PYTHON = (3, 10)
@@ -42,6 +45,13 @@ DEFAULT_ENV_SEARCH_ROOTS = (
 )
 DEFAULT_SYSTEM_ENV_DIR = Path("/etc/cosmic")
 DEFAULT_WHATSAPP_AUTH_DIR = Path("/var/lib/cosmic/whatsapp/auth")
+DEFAULT_SUPABASE_URL = "https://hluenippcdiejenmteen.supabase.co"
+DEFAULT_SUPABASE_ANON_KEY = (
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+    "eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhsdWVuaXBwY2RpZWplbm10ZWVuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTE4MzYwOTMsImV4cCI6MjA2NzQxMjA5M30."
+    "dm6YO4B9SAQ8hnGtR-OZS7jn5FcL-zz4s4XxP-TyCpk"
+)
+DEFAULT_SUPABASE_BOOTSTRAP_RPC = "consume_bootstrap_token"
 REQUIRED_SERVICE_ENV_KEYS: Dict[str, Tuple[str, ...]] = {
     "model-router.env": ("GROQ_API_KEY",),
 }
@@ -381,6 +391,19 @@ def meaningful_env_value(value: Optional[str]) -> Optional[str]:
     return normalized
 
 
+def extract_host_from_url(value: Optional[str]) -> Optional[str]:
+    normalized = meaningful_env_value(value)
+    if normalized is None:
+        return None
+    parsed = urlparse(normalized)
+    if parsed.netloc:
+        return parsed.netloc
+    if parsed.path:
+        host = parsed.path.split("/", 1)[0]
+        return host or None
+    return None
+
+
 def missing_required_env_keys(env_path: Path, required_keys: Sequence[str]) -> List[str]:
     if not required_keys:
         return []
@@ -418,6 +441,110 @@ def validate_required_service_env_files(effective_sources: Sequence[Tuple[Path, 
                 "\n  - ".join(failures)
             )
         )
+
+
+def normalize_bootstrap_env_payload(payload: Dict[str, object]) -> Dict[str, Dict[str, str]]:
+    if not isinstance(payload, dict):
+        raise BootstrapError("Supabase bootstrap RPC returned an unexpected payload shape.")
+
+    if payload.get("success") is False:
+        message = payload.get("message") or payload.get("error") or "Unknown bootstrap error."
+        raise BootstrapError("Supabase bootstrap RPC failed: {0}".format(message))
+
+    gateway_env = dict(payload.get("gateway_env") or {}) if isinstance(payload.get("gateway_env"), dict) else {}
+    orchestrator_env = (
+        dict(payload.get("orchestrator_env") or {}) if isinstance(payload.get("orchestrator_env"), dict) else {}
+    )
+    model_router_env = (
+        dict(payload.get("model_router_env") or {}) if isinstance(payload.get("model_router_env"), dict) else {}
+    )
+    meeting_env = dict(payload.get("meeting_env") or {}) if isinstance(payload.get("meeting_env"), dict) else {}
+    vm_payload = dict(payload.get("vm") or {}) if isinstance(payload.get("vm"), dict) else {}
+
+    if meaningful_env_value(model_router_env.get("GROQ_API_KEY")) is None:
+        legacy_groq_api_key = meaningful_env_value(meeting_env.get("GROQ_API_KEY"))
+        if legacy_groq_api_key is not None:
+            model_router_env["GROQ_API_KEY"] = legacy_groq_api_key
+
+    if meaningful_env_value(orchestrator_env.get("ANTHROPIC_MODEL")) is None:
+        legacy_opus_model = meaningful_env_value(orchestrator_env.get("OPUS_MODEL"))
+        if legacy_opus_model is not None:
+            orchestrator_env["ANTHROPIC_MODEL"] = legacy_opus_model
+
+    public_host = first_meaningful_value(
+        gateway_env.get("GATEWAY_PUBLIC_HOST"),
+        vm_payload.get("vm_dns") if isinstance(vm_payload.get("vm_dns"), str) else None,
+        extract_host_from_url(vm_payload.get("gateway_url") if isinstance(vm_payload.get("gateway_url"), str) else None),
+    )
+    if public_host is not None:
+        gateway_env["GATEWAY_PUBLIC_HOST"] = public_host
+
+    normalized = {
+        "gateway.env": gateway_env,
+        "model-router.env": model_router_env,
+        "orchestrator.env": orchestrator_env,
+    }
+    required_fields = {
+        "gateway.env": ("GATEWAY_LOCAL_API_TOKEN", "ANTHROPIC_API_KEY", "PERPLEXITY_API_KEY", "GATEWAY_PUBLIC_HOST"),
+        "model-router.env": ("GROQ_API_KEY",),
+        "orchestrator.env": ("ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"),
+    }
+    missing: list[str] = []
+    for env_name, keys in required_fields.items():
+        env_values = normalized[env_name]
+        for key in keys:
+            if meaningful_env_value(env_values.get(key)) is None:
+                missing.append("{0}.{1}".format(env_name, key))
+    if missing:
+        raise BootstrapError(
+            "Supabase bootstrap payload is missing required env values: {0}".format(", ".join(missing))
+        )
+
+    return normalized
+
+
+def fetch_bootstrap_env_payload(
+    *,
+    bootstrap_token: str,
+    supabase_url: str,
+    supabase_anon_key: str,
+) -> Dict[str, Dict[str, str]]:
+    token = meaningful_env_value(bootstrap_token)
+    supabase_base = meaningful_env_value(supabase_url)
+    anon_key = meaningful_env_value(supabase_anon_key)
+    if token is None:
+        raise BootstrapError("A bootstrap token is required to fetch VM env values.")
+    if supabase_base is None or anon_key is None:
+        raise BootstrapError("Supabase URL and anon key are required to fetch VM env values.")
+
+    rpc_url = "{0}/rest/v1/rpc/{1}".format(supabase_base.rstrip("/"), DEFAULT_SUPABASE_BOOTSTRAP_RPC)
+    request = Request(
+        rpc_url,
+        data=json.dumps({"p_token": token}).encode("utf-8"),
+        headers={
+            "apikey": anon_key,
+            "Authorization": "Bearer {0}".format(anon_key),
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urlopen(request, timeout=30) as response:
+            raw = response.read().decode("utf-8")
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise BootstrapError(
+            "Supabase bootstrap RPC returned HTTP {0}: {1}".format(exc.code, body or exc.reason)
+        ) from exc
+    except URLError as exc:
+        raise BootstrapError("Failed to reach Supabase bootstrap RPC: {0}".format(exc.reason)) from exc
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise BootstrapError("Supabase bootstrap RPC returned invalid JSON.") from exc
+    return normalize_bootstrap_env_payload(payload)
 
 
 def version_for(executable: str) -> Optional[Tuple[int, int, int]]:
@@ -777,17 +904,26 @@ def build_service_env_overrides(
     effective_sources: Sequence[Tuple[Path, Path]],
     *,
     existing_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+    external_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Dict[str, Dict[str, str]]:
     existing_env_by_name = existing_env_by_name or {}
+    external_env_by_name = external_env_by_name or {}
     gateway_source = next(source for source, dest in effective_sources if dest.name == "gateway.env")
+    model_router_source = next(source for source, dest in effective_sources if dest.name == "model-router.env")
     orchestrator_source = next(source for source, dest in effective_sources if dest.name == "orchestrator.env")
     bridge_source = next(source for source, dest in effective_sources if dest.name == "whatsapp-bridge.env")
     gateway_data = parse_env_text(gateway_source.read_text(encoding="utf-8"))
+    model_router_data = parse_env_text(model_router_source.read_text(encoding="utf-8"))
     orchestrator_data = parse_env_text(orchestrator_source.read_text(encoding="utf-8"))
     bridge_data = parse_env_text(bridge_source.read_text(encoding="utf-8"))
     gateway_existing = existing_env_by_name.get("gateway.env", {})
+    model_router_existing = existing_env_by_name.get("model-router.env", {})
     orchestrator_existing = existing_env_by_name.get("orchestrator.env", {})
     bridge_existing = existing_env_by_name.get("whatsapp-bridge.env", {})
+    gateway_external = external_env_by_name.get("gateway.env", {})
+    model_router_external = external_env_by_name.get("model-router.env", {})
+    orchestrator_external = external_env_by_name.get("orchestrator.env", {})
+    bridge_external = external_env_by_name.get("whatsapp-bridge.env", {})
 
     shared_internal_token = first_meaningful_value(
         gateway_existing.get("GATEWAY_INTERNAL_TOKEN"),
@@ -813,22 +949,52 @@ def build_service_env_overrides(
         secrets.token_urlsafe(32),
     )
     local_api_token = first_meaningful_value(
+        gateway_external.get("GATEWAY_LOCAL_API_TOKEN"),
         gateway_existing.get("GATEWAY_LOCAL_API_TOKEN"),
         gateway_data.get("GATEWAY_LOCAL_API_TOKEN"),
         secrets.token_urlsafe(24),
     )
     whatsapp_auth_dir = first_meaningful_value(
+        bridge_external.get("WHATSAPP_AUTH_DIR"),
         bridge_existing.get("WHATSAPP_AUTH_DIR"),
         bridge_data.get("WHATSAPP_AUTH_DIR"),
         str(DEFAULT_WHATSAPP_AUTH_DIR),
     )
     shared_anthropic_api_key = first_meaningful_value(
+        gateway_external.get("ANTHROPIC_API_KEY"),
+        orchestrator_external.get("ANTHROPIC_API_KEY"),
         gateway_existing.get("ANTHROPIC_API_KEY"),
         orchestrator_existing.get("ANTHROPIC_API_KEY"),
         gateway_existing.get("HAIKU_API_KEY"),
         gateway_data.get("ANTHROPIC_API_KEY"),
         orchestrator_data.get("ANTHROPIC_API_KEY"),
         gateway_data.get("HAIKU_API_KEY"),
+    )
+    perplexity_api_key = first_meaningful_value(
+        gateway_external.get("PERPLEXITY_API_KEY"),
+        gateway_existing.get("PERPLEXITY_API_KEY"),
+        gateway_data.get("PERPLEXITY_API_KEY"),
+    )
+    groq_api_key = first_meaningful_value(
+        model_router_external.get("GROQ_API_KEY"),
+        model_router_existing.get("GROQ_API_KEY"),
+        model_router_data.get("GROQ_API_KEY"),
+    )
+    gateway_public_host = first_meaningful_value(
+        gateway_external.get("GATEWAY_PUBLIC_HOST"),
+        gateway_existing.get("GATEWAY_PUBLIC_HOST"),
+        gateway_data.get("GATEWAY_PUBLIC_HOST"),
+    )
+    haiku_model = first_meaningful_value(
+        gateway_external.get("HAIKU_MODEL"),
+        gateway_existing.get("HAIKU_MODEL"),
+        gateway_data.get("HAIKU_MODEL"),
+    )
+    opus_model = first_meaningful_value(
+        orchestrator_external.get("ANTHROPIC_MODEL"),
+        orchestrator_external.get("OPUS_MODEL"),
+        orchestrator_existing.get("ANTHROPIC_MODEL"),
+        orchestrator_data.get("ANTHROPIC_MODEL"),
     )
 
     return {
@@ -838,11 +1004,18 @@ def build_service_env_overrides(
             "GATEWAY_SIGNING_SECRET": signing_secret or secrets.token_urlsafe(32),
             "WHATSAPP_BRIDGE_TOKEN": bridge_token or secrets.token_urlsafe(32),
             "ANTHROPIC_API_KEY": shared_anthropic_api_key or "<anthropic-api-key>",
+            "PERPLEXITY_API_KEY": perplexity_api_key or "<perplexity-api-key>",
+            "GATEWAY_PUBLIC_HOST": gateway_public_host or "<gateway.user.example.com>",
+            "HAIKU_MODEL": haiku_model or "claude-haiku-4-5",
+        },
+        "model-router.env": {
+            "GROQ_API_KEY": groq_api_key or "<groq-api-key>",
         },
         "orchestrator.env": {
             "GATEWAY_INTERNAL_TOKEN": shared_internal_token or secrets.token_urlsafe(32),
             "GATEWAY_SIGNING_SECRET": signing_secret or secrets.token_urlsafe(32),
             "ANTHROPIC_API_KEY": shared_anthropic_api_key or "<anthropic-api-key>",
+            "ANTHROPIC_MODEL": opus_model or "claude-opus-4-6",
         },
         "whatsapp-bridge.env": {
             "GATEWAY_INTERNAL_TOKEN": shared_internal_token or secrets.token_urlsafe(32),
@@ -850,6 +1023,50 @@ def build_service_env_overrides(
             "WHATSAPP_AUTH_DIR": whatsapp_auth_dir or str(DEFAULT_WHATSAPP_AUTH_DIR),
         },
     }
+
+
+def materialize_bootstrap_env_files(
+    search_roots: Sequence[Path],
+    system_env_dir: Path,
+    *,
+    bootstrap_token: str,
+    supabase_url: str,
+    supabase_anon_key: str,
+) -> List[Path]:
+    setup_env_files(search_roots)
+    external_env_by_name = fetch_bootstrap_env_payload(
+        bootstrap_token=bootstrap_token,
+        supabase_url=supabase_url,
+        supabase_anon_key=supabase_anon_key,
+    )
+    effective_sources = resolve_effective_service_env_sources(system_env_dir)
+    repo_source_by_name = {dest.name: source for source, dest in service_env_specs(system_env_dir)}
+    existing_env_by_name: Dict[str, Dict[str, str]] = {}
+    for source_path, dest_path in effective_sources:
+        repo_path = repo_source_by_name[dest_path.name]
+        if repo_path.exists():
+            existing_env_by_name[dest_path.name] = parse_env_text(repo_path.read_text(encoding="utf-8"))
+        elif source_path.exists():
+            existing_env_by_name[dest_path.name] = parse_env_text(source_path.read_text(encoding="utf-8"))
+
+    overrides_by_dest = build_service_env_overrides(
+        effective_sources,
+        existing_env_by_name=existing_env_by_name,
+        external_env_by_name=external_env_by_name,
+    )
+
+    written: list[Path] = []
+    for source_path, dest_path in effective_sources:
+        repo_path = repo_source_by_name[dest_path.name]
+        raw_source_path = repo_path if repo_path.exists() else source_path
+        rendered = render_env_with_overrides(
+            raw_source_path.read_text(encoding="utf-8"),
+            overrides_by_dest.get(dest_path.name, {}),
+        )
+        repo_path.write_text(rendered, encoding="utf-8")
+        written.append(repo_path)
+        log("Materialized repo env file from Supabase bootstrap payload: {0}".format(repo_path))
+    return written
 
 
 def install_service_env_files(system_env_dir: Path) -> List[Path]:
@@ -1081,8 +1298,23 @@ def sync_service_env_files(system_env_dir: Path) -> List[Path]:
     return synced
 
 
-def sync_env(search_roots: Sequence[Path], system_env_dir: Path) -> None:
+def sync_env(
+    search_roots: Sequence[Path],
+    system_env_dir: Path,
+    *,
+    bootstrap_token: Optional[str] = None,
+    supabase_url: str = DEFAULT_SUPABASE_URL,
+    supabase_anon_key: str = DEFAULT_SUPABASE_ANON_KEY,
+) -> None:
     sync_repo_env_files(search_roots)
+    if meaningful_env_value(bootstrap_token) is not None:
+        materialize_bootstrap_env_files(
+            search_roots,
+            system_env_dir,
+            bootstrap_token=bootstrap_token or "",
+            supabase_url=supabase_url,
+            supabase_anon_key=supabase_anon_key,
+        )
     if not is_linux():
         log("Skipping /etc/cosmic env sync on non-Linux host.")
         return
@@ -1142,8 +1374,19 @@ def bootstrap(
     gateway_host: str | None = None,
     skip_edge: bool = False,
     force_edge: bool = False,
+    bootstrap_token: Optional[str] = None,
+    supabase_url: str = DEFAULT_SUPABASE_URL,
+    supabase_anon_key: str = DEFAULT_SUPABASE_ANON_KEY,
 ) -> None:
     setup_env_files(env_search_roots)
+    if meaningful_env_value(bootstrap_token) is not None:
+        materialize_bootstrap_env_files(
+            env_search_roots,
+            DEFAULT_SYSTEM_ENV_DIR,
+            bootstrap_token=bootstrap_token or "",
+            supabase_url=supabase_url,
+            supabase_anon_key=supabase_anon_key,
+        )
     setup_python(venv_path, requirements_path)
     setup_whatsapp_bridge(bridge_dir)
     if not skip_edge and edge_setup_script is not None and gateway_env_path is not None:
@@ -1178,6 +1421,9 @@ def provision_vm(
     gateway_host: str | None = None,
     skip_edge: bool = False,
     force_edge: bool = False,
+    bootstrap_token: Optional[str] = None,
+    supabase_url: str = DEFAULT_SUPABASE_URL,
+    supabase_anon_key: str = DEFAULT_SUPABASE_ANON_KEY,
 ) -> None:
     bootstrap(
         venv_path,
@@ -1189,6 +1435,9 @@ def provision_vm(
         gateway_host=gateway_host,
         skip_edge=skip_edge,
         force_edge=force_edge,
+        bootstrap_token=bootstrap_token,
+        supabase_url=supabase_url,
+        supabase_anon_key=supabase_anon_key,
     )
     installed = install_systemd_units(
         systemd_template_dir,
@@ -1255,6 +1504,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Pass --force to vm_edge_setup.py when overwriting an existing unmanaged Caddyfile.",
     )
+    parser.add_argument(
+        "--bootstrap-token",
+        default="",
+        help="One-time Supabase bootstrap token. Prefer setting COSMIC_BOOTSTRAP_TOKEN to avoid shell history.",
+    )
+    parser.add_argument(
+        "--supabase-url",
+        default=DEFAULT_SUPABASE_URL,
+        help="Supabase base URL used for bootstrap env fetch. Default: %(default)s",
+    )
+    parser.add_argument(
+        "--supabase-anon-key",
+        default=DEFAULT_SUPABASE_ANON_KEY,
+        help="Supabase anon key used for bootstrap env fetch. Defaults to the committed public project key.",
+    )
 
     subparsers = parser.add_subparsers(dest="command")
     subparsers.add_parser("doctor", help="Check current bootstrap prerequisites without changing the system.")
@@ -1277,6 +1541,10 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "sync-env",
         help="Append missing keys from committed env templates without overwriting current values. On Linux VMs, also updates existing /etc/cosmic env files.",
+    )
+    subparsers.add_parser(
+        "fetch-bootstrap-env",
+        help="Fetch per-VM env values from Supabase using a one-time bootstrap token and materialize the repo env files.",
     )
     subparsers.add_parser(
         "setup-edge",
@@ -1314,6 +1582,16 @@ def main() -> int:
     edge_setup_script = Path(args.edge_script).expanduser().resolve()
     gateway_env_path = Path(args.gateway_env_path).expanduser().resolve()
     gateway_host = getattr(args, "gateway_host", "").strip() or None
+    bootstrap_token = (
+        meaningful_env_value(getattr(args, "bootstrap_token", ""))
+        or meaningful_env_value(os.getenv("COSMIC_BOOTSTRAP_TOKEN"))
+    )
+    supabase_url = meaningful_env_value(getattr(args, "supabase_url", "")) or DEFAULT_SUPABASE_URL
+    supabase_anon_key = (
+        meaningful_env_value(getattr(args, "supabase_anon_key", ""))
+        or meaningful_env_value(os.getenv("COSMIC_SUPABASE_ANON_KEY"))
+        or DEFAULT_SUPABASE_ANON_KEY
+    )
     env_search_roots = [
         Path(item).expanduser().resolve()
         for item in (args.env_search_root or [])
@@ -1324,8 +1602,32 @@ def main() -> int:
             doctor(venv_path, requirements_path, bridge_dir, systemd_template_dir, env_search_roots)
         elif command == "setup-env":
             setup_env_files(env_search_roots)
+            if bootstrap_token is not None:
+                materialize_bootstrap_env_files(
+                    env_search_roots,
+                    DEFAULT_SYSTEM_ENV_DIR,
+                    bootstrap_token=bootstrap_token,
+                    supabase_url=supabase_url,
+                    supabase_anon_key=supabase_anon_key,
+                )
         elif command == "sync-env":
-            sync_env(env_search_roots, DEFAULT_SYSTEM_ENV_DIR)
+            sync_env(
+                env_search_roots,
+                DEFAULT_SYSTEM_ENV_DIR,
+                bootstrap_token=bootstrap_token,
+                supabase_url=supabase_url,
+                supabase_anon_key=supabase_anon_key,
+            )
+        elif command == "fetch-bootstrap-env":
+            if bootstrap_token is None:
+                raise BootstrapError("fetch-bootstrap-env requires --bootstrap-token or COSMIC_BOOTSTRAP_TOKEN.")
+            materialize_bootstrap_env_files(
+                env_search_roots,
+                DEFAULT_SYSTEM_ENV_DIR,
+                bootstrap_token=bootstrap_token,
+                supabase_url=supabase_url,
+                supabase_anon_key=supabase_anon_key,
+            )
         elif command == "setup-python":
             setup_python(venv_path, requirements_path)
         elif command == "setup-whatsapp-bridge":
@@ -1359,6 +1661,9 @@ def main() -> int:
                 gateway_host=gateway_host,
                 skip_edge=bool(getattr(args, "skip_edge", False)),
                 force_edge=bool(getattr(args, "force_edge", False)),
+                bootstrap_token=bootstrap_token,
+                supabase_url=supabase_url,
+                supabase_anon_key=supabase_anon_key,
             )
         else:
             bootstrap(
@@ -1371,6 +1676,9 @@ def main() -> int:
                 gateway_host=gateway_host,
                 skip_edge=bool(getattr(args, "skip_edge", False)),
                 force_edge=bool(getattr(args, "force_edge", False)),
+                bootstrap_token=bootstrap_token,
+                supabase_url=supabase_url,
+                supabase_anon_key=supabase_anon_key,
             )
     except BootstrapError as exc:
         print("Bootstrap failed: {0}".format(exc), file=sys.stderr)
