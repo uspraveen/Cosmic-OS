@@ -263,29 +263,28 @@ export default function App() {
     setSurfaceLaunch(null)
   }
 
-  const triggerSurfaceLaunch = (target: 'chat' | 'meeting', originX: number, originY: number) => {
+  const startSurfaceLaunch = (target: 'chat' | 'meeting', originX: number, originY: number) => {
     clearSurfaceLaunch()
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        const composerOffset = measureLaunchOffset(composerSurfaceRef.current, originX, originY)
-        const responseOffset = measureLaunchOffset(chatResponseSurfaceRef.current, originX, originY)
-        const meetingOffset = measureLaunchOffset(meetingSurfaceRef.current, originX, originY)
-        setSurfaceLaunch({
-          target,
-          token: Date.now(),
-          composerOffsetX: composerOffset.x,
-          composerOffsetY: composerOffset.y,
-          responseOffsetX: responseOffset.x,
-          responseOffsetY: responseOffset.y,
-          meetingOffsetX: meetingOffset.x,
-          meetingOffsetY: meetingOffset.y,
-        })
-        surfaceLaunchResetTimeoutRef.current = window.setTimeout(() => {
-          setSurfaceLaunch(null)
-          surfaceLaunchResetTimeoutRef.current = null
-        }, 420)
-      })
+    const composerAnchor = composerSurfaceRef.current
+    const responseAnchor = chatResponseSurfaceRef.current || composerAnchor
+    const meetingAnchor = meetingSurfaceRef.current || composerAnchor
+    const composerOffset = measureLaunchOffset(composerAnchor, originX, originY)
+    const responseOffset = measureLaunchOffset(responseAnchor, originX, originY)
+    const meetingOffset = measureLaunchOffset(meetingAnchor, originX, originY)
+    setSurfaceLaunch({
+      target,
+      token: Date.now(),
+      composerOffsetX: composerOffset.x,
+      composerOffsetY: composerOffset.y,
+      responseOffsetX: responseOffset.x,
+      responseOffsetY: responseOffset.y,
+      meetingOffsetX: meetingOffset.x,
+      meetingOffsetY: meetingOffset.y,
     })
+    surfaceLaunchResetTimeoutRef.current = window.setTimeout(() => {
+      setSurfaceLaunch(null)
+      surfaceLaunchResetTimeoutRef.current = null
+    }, 420)
   }
 
   const bindAssistantMessageToEvent = (event: any, messageId: string) => {
@@ -903,21 +902,20 @@ export default function App() {
     const rect = event.currentTarget.getBoundingClientRect()
     const originX = rect.left + rect.width / 2
     const originY = rect.top + rect.height / 2
+    startSurfaceLaunch(tile === 'meeting' ? 'meeting' : 'chat', originX, originY)
     if (tile === 'meeting') {
       showMeetingSurface()
-      triggerSurfaceLaunch('meeting', originX, originY)
       return
     }
     if (tile === 'task') {
       commitSelectedModel('opus', true)
     }
     showChatComposer()
-    requestAnimationFrame(() => {
-      if (tile === 'task') {
+    if (tile === 'task') {
+      requestAnimationFrame(() => {
         scrollModelDialTo('opus', 'auto')
-      }
-      triggerSurfaceLaunch('chat', originX, originY)
-    })
+      })
+    }
   }
 
   const handleModelDialScroll = () => {

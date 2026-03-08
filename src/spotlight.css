@@ -102,8 +102,10 @@ body,
 
 .response-container.launcher-expand.visible,
 .cosmic.launcher-expand.visible {
-  animation: launcher-surface-expand 0.42s cubic-bezier(0.18, 0.88, 0.2, 1) forwards;
+  animation: launcher-surface-expand 0.46s cubic-bezier(0.16, 0.84, 0.24, 1) both;
   transform-origin: center center;
+  will-change: transform, opacity, filter;
+  backface-visibility: hidden;
 }
 
 @keyframes spring-up {
