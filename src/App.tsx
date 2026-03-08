@@ -85,7 +85,8 @@ export default function App() {
   const modelDialRef = useRef<HTMLDivElement>(null)
   const responseEndRef = useRef<HTMLDivElement>(null)
   const responseContainerRef = useRef<HTMLDivElement>(null)
-  const modelDialSnapTimeoutRef = useRef<number | null>(null)
+  const modelDialSettleTimeoutRef = useRef<number | null>(null)
+  const modelDialWheelLockUntilRef = useRef(0)
   const activeAssistantMessageByRequestRef = useRef<Map<string, string>>(new Map())
   const activeAssistantMessageByTaskRef = useRef<Map<string, string>>(new Map())
   const streamedResponseRequestIdsRef = useRef<Set<string>>(new Set())
@@ -175,10 +176,13 @@ export default function App() {
       return
     }
     const target = viewport.querySelector<HTMLButtonElement>(`[data-model="${model}"]`)
-    target?.scrollIntoView({
+    if (!target) {
+      return
+    }
+    const targetLeft = target.offsetLeft - (viewport.clientWidth - target.offsetWidth) / 2
+    viewport.scrollTo({
+      left: Math.max(0, targetLeft),
       behavior,
-      block: 'nearest',
-      inline: 'center',
     })
   }
 
@@ -212,11 +216,16 @@ export default function App() {
     return closestModel
   }
 
-  const syncSelectedModelFromDial = (persist = true) => {
-    const nextModel = getCenteredModelFromDial()
-    if (nextModel && nextModel !== selectedModelRef.current) {
-      commitSelectedModel(nextModel, persist)
+  const stepModelDial = (direction: -1 | 1) => {
+    const currentModel = getCenteredModelFromDial() || selectedModelRef.current
+    const currentIndex = MODEL_OPTIONS.findIndex((item) => item.id === currentModel)
+    const nextIndex = Math.min(Math.max(currentIndex + direction, 0), MODEL_OPTIONS.length - 1)
+    const nextModel = MODEL_OPTIONS[nextIndex]?.id
+    if (!nextModel) {
+      return
     }
+    commitSelectedModel(nextModel, true)
+    scrollModelDialTo(nextModel, 'smooth')
   }
 
   const bindAssistantMessageToEvent = (event: any, messageId: string) => {
@@ -499,9 +508,9 @@ export default function App() {
 
     return () => {
       cancelAnimationFrame(animationFrame)
-      if (modelDialSnapTimeoutRef.current !== null) {
-        window.clearTimeout(modelDialSnapTimeoutRef.current)
-        modelDialSnapTimeoutRef.current = null
+      if (modelDialSettleTimeoutRef.current !== null) {
+        window.clearTimeout(modelDialSettleTimeoutRef.current)
+        modelDialSettleTimeoutRef.current = null
       }
     }
   }, [])
@@ -837,34 +846,35 @@ export default function App() {
   }
 
   const handleModelDialScroll = () => {
-    syncSelectedModelFromDial(true)
-    if (modelDialSnapTimeoutRef.current !== null) {
-      window.clearTimeout(modelDialSnapTimeoutRef.current)
+    if (modelDialSettleTimeoutRef.current !== null) {
+      window.clearTimeout(modelDialSettleTimeoutRef.current)
     }
-    modelDialSnapTimeoutRef.current = window.setTimeout(() => {
+    modelDialSettleTimeoutRef.current = window.setTimeout(() => {
       const nextModel = getCenteredModelFromDial()
       if (!nextModel) {
         return
       }
+      commitSelectedModel(nextModel, true)
       scrollModelDialTo(nextModel, 'smooth')
-      syncSelectedModelFromDial(true)
-    }, 110)
+    }, 140)
   }
 
   const handleModelDialWheel = (event: React.WheelEvent<HTMLDivElement>) => {
-    const viewport = modelDialRef.current
-    if (!viewport) {
-      return
-    }
     const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
-    if (delta === 0) {
+    if (Math.abs(delta) < 4) {
       return
     }
     event.preventDefault()
-    viewport.scrollLeft += delta
+    const now = Date.now()
+    if (now < modelDialWheelLockUntilRef.current) {
+      return
+    }
+    modelDialWheelLockUntilRef.current = now + 180
+    stepModelDial(delta > 0 ? 1 : -1)
   }
 
   const handleModelDialFocus = (model: GatewayModelSelection) => {
+    commitSelectedModel(model, true)
     scrollModelDialTo(model, 'smooth')
   }
 

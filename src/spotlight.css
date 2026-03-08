@@ -1015,16 +1015,20 @@ kbd {
   height: 40px;
   overflow-x: auto;
   overflow-y: hidden;
-  scroll-snap-type: x mandatory;
-  scroll-behavior: smooth;
+  scroll-snap-type: x proximity;
   scrollbar-width: none;
   overscroll-behavior-x: contain;
   touch-action: pan-x;
-  cursor: ew-resize;
+  -webkit-overflow-scrolling: touch;
+  cursor: grab;
 }
 
 .model-dial-viewport::-webkit-scrollbar {
   display: none;
+}
+
+.model-dial-viewport:active {
+  cursor: grabbing;
 }
 
 .model-dial-btn {
@@ -1040,7 +1044,7 @@ kbd {
   cursor: pointer;
   flex-shrink: 0;
   scroll-snap-align: center;
-  transition: transform 0.18s ease, color 0.18s ease, opacity 0.18s ease, filter 0.18s ease;
+  transition: transform 0.2s ease, color 0.2s ease, opacity 0.2s ease, filter 0.2s ease;
   transform: scale(0.84);
   opacity: 0.44;
   filter: saturate(0.68);
