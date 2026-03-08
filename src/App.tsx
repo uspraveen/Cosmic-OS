@@ -20,6 +20,7 @@ interface Message {
   content: string
   thinking?: string
   sources?: Array<{ url: string; title?: string; domain?: string } | string>
+  stopped?: boolean
 }
 
 interface GatewayStatus {
@@ -44,6 +45,7 @@ const historyToMessages = (history: any[] = []): Message[] => {
       content: String(item.content || ''),
       thinking: typeof item?.metadata?.thinking_text === 'string' ? item.metadata.thinking_text : undefined,
       sources: Array.isArray(item?.metadata?.sources) ? item.metadata.sources : undefined,
+      stopped: Boolean(item?.metadata?.interrupted),
     }))
 }
 
@@ -445,6 +447,7 @@ export default function App() {
             return {
               ...message,
               content: `${message.content}${String(event.content)}`,
+              stopped: false,
             }
           })
         })
@@ -463,6 +466,7 @@ export default function App() {
             return {
               ...message,
               thinking: `${message.thinking || ''}${String(event.content)}`,
+              stopped: false,
             }
           })
         })
@@ -483,6 +487,7 @@ export default function App() {
               ...message,
               content: String(event.content || message.content || ''),
               sources,
+              stopped: false,
             }
           })
           if (!event.task_id) {
@@ -526,6 +531,21 @@ export default function App() {
         forgetAssistantMessageBindings(event)
         if (eventType === 'task.cancelled' && messageId && boundMessage && !String(boundMessage.content || '').trim() && !String(boundMessage.thinking || '').trim()) {
           setMessages((prev) => prev.filter((item) => item.id !== messageId))
+          return
+        }
+        if (eventType === 'task.cancelled' && messageId) {
+          setMessages((prev) => prev.map((item) => {
+            if (item.id !== messageId) {
+              return item
+            }
+            if (!String(item.content || '').trim() && !String(item.thinking || '').trim()) {
+              return item
+            }
+            return {
+              ...item,
+              stopped: true,
+            }
+          }))
           return
         }
         if (shouldRefreshFromHistory) {
@@ -961,6 +981,9 @@ export default function App() {
                                 })}
                               </div>
                             </div>
+                          )}
+                          {msg.role === 'assistant' && msg.stopped && (String(msg.content || '').trim() || String(msg.thinking || '').trim()) && (
+                            <div className="response-stopped-label">Stopped</div>
                           )}
                         </>
                       )}
