@@ -833,8 +833,9 @@ kbd {
   display: flex;
   justify-content: center;
   align-items: flex-end;
-  gap: 14px;
-  padding: 14px 18px 16px;
+  gap: 15px;
+  padding: 12px 18px 17px;
+  perspective: 900px;
 }
 
 .launchpad-tile {
@@ -845,20 +846,23 @@ kbd {
   flex-direction: column;
   align-items: center;
   gap: 8px;
-  color: rgba(255, 255, 255, 0.78);
+  color: rgba(255, 255, 255, 0.82);
   cursor: pointer;
-  transition: transform 0.22s ease, filter 0.22s ease, opacity 0.22s ease;
+  transition: transform 0.24s ease, filter 0.24s ease, opacity 0.24s ease;
   transform-origin: center bottom;
+  position: relative;
 }
 
 .launchpad-icon-shell {
-  width: 58px;
-  height: 58px;
-  border-radius: 18px;
+  width: 60px;
+  height: 60px;
+  border-radius: 19px;
   display: flex;
   align-items: center;
   justify-content: center;
   color: #fff;
+  position: relative;
+  overflow: hidden;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.04)),
     rgba(255, 255, 255, 0.06);
@@ -870,10 +874,67 @@ kbd {
   -webkit-backdrop-filter: blur(18px);
 }
 
+.launchpad-icon-shell::before {
+  content: '';
+  position: absolute;
+  inset: 1px;
+  border-radius: inherit;
+  background:
+    radial-gradient(circle at 28% 18%, rgba(255, 255, 255, 0.28), transparent 40%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.03) 46%, rgba(0, 0, 0, 0.16) 100%);
+  opacity: 0.96;
+}
+
+.launchpad-icon-shell::after {
+  content: '';
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  top: 8px;
+  height: 15px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0));
+  opacity: 0.35;
+}
+
+.launchpad-icon-shell svg {
+  position: relative;
+  z-index: 1;
+}
+
+.launchpad-tile.chat .launchpad-icon-shell {
+  background:
+    radial-gradient(circle at 25% 20%, rgba(99, 191, 255, 0.34), transparent 52%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.05)),
+    rgba(255, 255, 255, 0.06);
+}
+
+.launchpad-tile.meeting .launchpad-icon-shell {
+  background:
+    radial-gradient(circle at 25% 20%, rgba(121, 229, 199, 0.28), transparent 52%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.05)),
+    rgba(255, 255, 255, 0.06);
+}
+
+.launchpad-tile.task .launchpad-icon-shell {
+  background:
+    radial-gradient(circle at 25% 20%, rgba(255, 209, 107, 0.28), transparent 52%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.05)),
+    rgba(255, 255, 255, 0.06);
+}
+
+.launchpad-tile.spaces .launchpad-icon-shell {
+  background:
+    radial-gradient(circle at 25% 20%, rgba(196, 196, 214, 0.2), transparent 52%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.04)),
+    rgba(255, 255, 255, 0.05);
+}
+
 .launchpad-label {
   font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  text-shadow: 0 1px 14px rgba(0, 0, 0, 0.24);
 }
 
 .launchpad-row:hover .launchpad-tile {
@@ -881,8 +942,8 @@ kbd {
 }
 
 .launchpad-row .launchpad-tile:hover {
-  transform: translateY(-10px) scale(1.12);
-  filter: brightness(1.08);
+  transform: translateY(-11px) scale(1.13);
+  filter: brightness(1.11);
 }
 
 .launchpad-row .launchpad-tile:has(+ .launchpad-tile:hover),
@@ -907,43 +968,88 @@ kbd {
 }
 
 .model-dial {
+  width: 92px;
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  max-width: 228px;
-  padding: 0 4px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-bottom: 1px;
 }
 
-.model-dial::-webkit-scrollbar {
+.model-dial-window {
+  position: relative;
+  width: 92px;
+  overflow: hidden;
+  border-radius: 999px;
+  padding: 2px 0 4px;
+}
+
+.model-dial-window::before,
+.model-dial-window::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 18px;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.model-dial-window::before {
+  left: 0;
+  background: linear-gradient(90deg, rgba(19, 22, 29, 0.96), rgba(19, 22, 29, 0));
+}
+
+.model-dial-window::after {
+  right: 0;
+  background: linear-gradient(270deg, rgba(19, 22, 29, 0.96), rgba(19, 22, 29, 0));
+}
+
+.model-dial-viewport {
+  display: flex;
+  gap: 14px;
+  padding: 0 calc((92px - 40px) / 2);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-snap-type: x mandatory;
+  scroll-behavior: smooth;
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
+  touch-action: pan-x;
+  cursor: ew-resize;
+}
+
+.model-dial-viewport::-webkit-scrollbar {
   display: none;
 }
 
 .model-dial-btn {
   background: transparent;
   border: none;
-  min-width: 50px;
+  width: 40px;
+  min-width: 40px;
   padding: 0;
-  display: flex;
-  flex-direction: column;
+  display: inline-flex;
   align-items: center;
-  gap: 6px;
-  color: rgba(255, 255, 255, 0.58);
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.42);
   cursor: pointer;
   flex-shrink: 0;
-  transition: transform 0.18s ease, color 0.18s ease;
+  scroll-snap-align: center;
+  transition: transform 0.18s ease, color 0.18s ease, opacity 0.18s ease, filter 0.18s ease;
+  transform: scale(0.84);
+  opacity: 0.44;
+  filter: saturate(0.68);
 }
 
 .model-dial-btn:hover {
-  transform: translateY(-2px);
   color: rgba(255, 255, 255, 0.86);
 }
 
 .model-dial-knob {
-  width: 36px;
-  height: 36px;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
   display: flex;
   align-items: center;
@@ -972,6 +1078,9 @@ kbd {
 
 .model-dial-btn.active {
   color: #fff;
+  opacity: 1;
+  transform: scale(1);
+  filter: none;
 }
 
 .model-dial-btn.active .model-dial-knob {
@@ -991,8 +1100,10 @@ kbd {
 .model-dial-label {
   font-size: 9px;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.68);
+  line-height: 1;
 }
 
 /* Chat Bubbles */

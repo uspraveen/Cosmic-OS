@@ -14,6 +14,7 @@ import './spotlight.css'
 export type SearchPosition = 'bottom' | 'middle'
 export type QueryMode = 'chat' | 'meeting'
 export type GatewayModelSelection = 'cosmic' | 'haiku' | 'opus' | 'perplexity'
+type LauncherTileId = 'chat' | 'meeting' | 'task' | 'spaces'
 
 interface Message {
   id: string
@@ -65,10 +66,26 @@ const normalizeGatewayModelSelection = (value: unknown): GatewayModelSelection =
   return 'cosmic'
 }
 
+const MODEL_OPTIONS: Array<{ id: GatewayModelSelection; label: string; shortLabel: string }> = [
+  { id: 'cosmic', label: 'Cosmic', shortLabel: 'COSMIC' },
+  { id: 'haiku', label: 'Haiku', shortLabel: 'HAIKU' },
+  { id: 'opus', label: 'Opus', shortLabel: 'OPUS' },
+  { id: 'perplexity', label: 'Perplexity', shortLabel: 'PPLX' },
+]
+
+const LAUNCHPAD_TILES: Array<{ id: LauncherTileId; label: string; locked: boolean }> = [
+  { id: 'chat', label: 'Chat', locked: false },
+  { id: 'meeting', label: 'Meeting', locked: false },
+  { id: 'task', label: 'Task', locked: false },
+  { id: 'spaces', label: 'Spaces', locked: true },
+]
+
 export default function App() {
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const modelDialRef = useRef<HTMLDivElement>(null)
   const responseEndRef = useRef<HTMLDivElement>(null)
   const responseContainerRef = useRef<HTMLDivElement>(null)
+  const modelDialSnapTimeoutRef = useRef<number | null>(null)
   const activeAssistantMessageByRequestRef = useRef<Map<string, string>>(new Map())
   const activeAssistantMessageByTaskRef = useRef<Map<string, string>>(new Map())
   const streamedResponseRequestIdsRef = useRef<Set<string>>(new Set())
@@ -78,6 +95,7 @@ export default function App() {
   const messagesRef = useRef<Message[]>([])
   const activeSessionIdRef = useRef<string | null>(null)
   const shouldAutoScrollRef = useRef(true)
+  const selectedModelRef = useRef<GatewayModelSelection>('cosmic')
 
   const [query, setQuery] = useState('')
   const [searchState, setSearchState] = useState<'hidden' | 'visible' | 'hiding'>('hidden')
@@ -139,6 +157,67 @@ export default function App() {
     role: 'user',
     content,
   })
+
+  const commitSelectedModel = (model: GatewayModelSelection, persist = true) => {
+    if (selectedModelRef.current === model) {
+      return
+    }
+    selectedModelRef.current = model
+    setSelectedModel(model)
+    if (persist) {
+      window.cosmic?.saveSetting('gatewayModelSelection', model)
+    }
+  }
+
+  const scrollModelDialTo = (model: GatewayModelSelection, behavior: ScrollBehavior = 'smooth') => {
+    const viewport = modelDialRef.current
+    if (!viewport) {
+      return
+    }
+    const target = viewport.querySelector<HTMLButtonElement>(`[data-model="${model}"]`)
+    target?.scrollIntoView({
+      behavior,
+      block: 'nearest',
+      inline: 'center',
+    })
+  }
+
+  const getCenteredModelFromDial = (): GatewayModelSelection | null => {
+    const viewport = modelDialRef.current
+    if (!viewport) {
+      return null
+    }
+    const buttons = Array.from(viewport.querySelectorAll<HTMLButtonElement>('[data-model]'))
+    if (buttons.length === 0) {
+      return null
+    }
+
+    const viewportCenter = viewport.scrollLeft + viewport.clientWidth / 2
+    let closestModel: GatewayModelSelection | null = null
+    let smallestDistance = Number.POSITIVE_INFINITY
+
+    for (const button of buttons) {
+      const model = button.dataset.model as GatewayModelSelection | undefined
+      if (!model) {
+        continue
+      }
+      const buttonCenter = button.offsetLeft + button.offsetWidth / 2
+      const distance = Math.abs(buttonCenter - viewportCenter)
+      if (distance < smallestDistance) {
+        smallestDistance = distance
+        closestModel = model
+      }
+    }
+
+    return closestModel
+  }
+
+  const syncSelectedModelFromDial = (persist = true) => {
+    const nextModel = getCenteredModelFromDial()
+    if (nextModel && nextModel !== selectedModelRef.current) {
+      commitSelectedModel(nextModel, persist)
+    }
+  }
 
   const bindAssistantMessageToEvent = (event: any, messageId: string) => {
     const requestId = typeof event?.request_id === 'string' ? event.request_id.trim() : ''
@@ -267,6 +346,10 @@ export default function App() {
     activeSessionIdRef.current = activeSessionId
   }, [activeSessionId])
 
+  useEffect(() => {
+    selectedModelRef.current = selectedModel
+  }, [selectedModel])
+
   const showChatComposer = () => {
     setMode('chat')
     setShowLauncherTray(false)
@@ -307,7 +390,12 @@ export default function App() {
       if (settings['staybackTime']) setStaybackTime(parseInt(settings['staybackTime']))
       if (settings['islandOpacity']) setIslandOpacity(parseFloat(settings['islandOpacity']))
       if (settings['gatewayModelSelection']) {
-        setSelectedModel(normalizeGatewayModelSelection(settings['gatewayModelSelection']))
+        const nextModel = normalizeGatewayModelSelection(settings['gatewayModelSelection'])
+        selectedModelRef.current = nextModel
+        setSelectedModel(nextModel)
+        requestAnimationFrame(() => {
+          scrollModelDialTo(nextModel, 'auto')
+        })
       }
 
       // Check auth from settings
@@ -402,6 +490,20 @@ export default function App() {
     })
 
     return () => { off1?.(); off2?.(); off3?.(); off4?.() }
+  }, [])
+
+  useEffect(() => {
+    const animationFrame = requestAnimationFrame(() => {
+      scrollModelDialTo(selectedModelRef.current, 'auto')
+    })
+
+    return () => {
+      cancelAnimationFrame(animationFrame)
+      if (modelDialSnapTimeoutRef.current !== null) {
+        window.clearTimeout(modelDialSnapTimeoutRef.current)
+        modelDialSnapTimeoutRef.current = null
+      }
+    }
   }, [])
 
   // --- DATA LISTENERS ---
@@ -723,7 +825,7 @@ export default function App() {
     }
   }
 
-  const handleLauncherTileClick = (tile: 'chat' | 'meeting' | 'task' | 'spaces') => {
+  const handleLauncherTileClick = (tile: LauncherTileId) => {
     if (tile === 'spaces') {
       return
     }
@@ -734,9 +836,36 @@ export default function App() {
     showChatComposer()
   }
 
-  const handleModelSelection = (model: GatewayModelSelection) => {
-    setSelectedModel(model)
-    window.cosmic?.saveSetting('gatewayModelSelection', model)
+  const handleModelDialScroll = () => {
+    syncSelectedModelFromDial(true)
+    if (modelDialSnapTimeoutRef.current !== null) {
+      window.clearTimeout(modelDialSnapTimeoutRef.current)
+    }
+    modelDialSnapTimeoutRef.current = window.setTimeout(() => {
+      const nextModel = getCenteredModelFromDial()
+      if (!nextModel) {
+        return
+      }
+      scrollModelDialTo(nextModel, 'smooth')
+      syncSelectedModelFromDial(true)
+    }, 110)
+  }
+
+  const handleModelDialWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    const viewport = modelDialRef.current
+    if (!viewport) {
+      return
+    }
+    const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
+    if (delta === 0) {
+      return
+    }
+    event.preventDefault()
+    viewport.scrollLeft += delta
+  }
+
+  const handleModelDialFocus = (model: GatewayModelSelection) => {
+    scrollModelDialTo(model, 'smooth')
   }
 
   const handleCopy = async (text: string, id: string) => {
@@ -1008,22 +1137,17 @@ export default function App() {
             <div className="glass-content">
               {showLauncherTray ? (
                 <div className="launchpad-row" role="toolbar" aria-label="COSMIC modes">
-                  {[
-                    { id: 'chat', label: 'Chat', locked: false },
-                    { id: 'meeting', label: 'Meeting', locked: false },
-                    { id: 'task', label: 'Task', locked: false },
-                    { id: 'spaces', label: 'Spaces', locked: true },
-                  ].map((tile) => (
+                  {LAUNCHPAD_TILES.map((tile) => (
                     <button
                       key={tile.id}
-                      className={`launchpad-tile ${tile.locked ? 'locked' : ''}`}
-                      onClick={() => handleLauncherTileClick(tile.id as 'chat' | 'meeting' | 'task' | 'spaces')}
+                      className={`launchpad-tile ${tile.id} ${tile.locked ? 'locked' : ''}`}
+                      onClick={() => handleLauncherTileClick(tile.id)}
                       type="button"
                       disabled={tile.locked}
                       title={tile.locked ? `${tile.label} (Locked)` : tile.label}
                     >
                       <div className="launchpad-icon-shell">
-                        <LaunchpadIcon tile={tile.id as 'chat' | 'meeting' | 'task' | 'spaces'} />
+                        <LaunchpadIcon tile={tile.id} />
                       </div>
                       <span className="launchpad-label">{tile.label}</span>
                     </button>
@@ -1080,25 +1204,34 @@ export default function App() {
                   )}
 
                   <div className="model-dial" role="tablist" aria-label="Model selection">
-                    {([
-                      { id: 'cosmic', label: 'Cosmic' },
-                      { id: 'haiku', label: 'Haiku' },
-                      { id: 'opus', label: 'Opus' },
-                      { id: 'perplexity', label: 'PPLX' },
-                    ] as const).map((item) => (
-                      <button
-                        key={item.id}
-                        className={`model-dial-btn ${selectedModel === item.id ? 'active' : ''}`}
-                        onClick={() => handleModelSelection(item.id)}
-                        type="button"
-                        title={item.label}
+                    <div className="model-dial-window">
+                      <div
+                        className="model-dial-viewport"
+                        ref={modelDialRef}
+                        onScroll={handleModelDialScroll}
+                        onWheel={handleModelDialWheel}
                       >
-                        <span className="model-dial-knob">
-                          <ModelDialIcon model={item.id} />
-                        </span>
-                        <span className="model-dial-label">{item.label}</span>
-                      </button>
-                    ))}
+                        {MODEL_OPTIONS.map((item) => (
+                          <button
+                            key={item.id}
+                            data-model={item.id}
+                            className={`model-dial-btn ${selectedModel === item.id ? 'active' : ''}`}
+                            onClick={() => handleModelDialFocus(item.id)}
+                            onFocus={() => handleModelDialFocus(item.id)}
+                            type="button"
+                            title={item.label}
+                            aria-selected={selectedModel === item.id}
+                          >
+                            <span className="model-dial-knob">
+                              <ModelDialIcon model={item.id} />
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <span className="model-dial-label">
+                      {MODEL_OPTIONS.find((item) => item.id === selectedModel)?.shortLabel || 'COSMIC'}
+                    </span>
                   </div>
 
                   {isStreaming ? (
@@ -1133,31 +1266,42 @@ export default function App() {
   )
 }
 
-function LaunchpadIcon({ tile }: { tile: 'chat' | 'meeting' | 'task' | 'spaces' }) {
+function LaunchpadIcon({ tile }: { tile: LauncherTileId }) {
   if (tile === 'chat') {
     return (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-        <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v7A2.5 2.5 0 0 1 17.5 15H9.8l-4.22 3.52A1 1 0 0 1 4 17.75V15.1A2.5 2.5 0 0 1 2 12.5v-7A2.5 2.5 0 0 1 4.5 3H5a1 1 0 1 1 0 2h-.5A.5.5 0 0 0 4 5.5Z" />
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M6.25 6.75h11.5A1.75 1.75 0 0 1 19.5 8.5v6a1.75 1.75 0 0 1-1.75 1.75H11l-3.9 3.08A.65.65 0 0 1 6 18.82v-2.57A1.75 1.75 0 0 1 4.5 14.5v-6A1.75 1.75 0 0 1 6.25 6.75Z" />
+        <path d="M9 11.5h6" />
+        <path d="M9 14h3.5" />
       </svg>
     )
   }
   if (tile === 'meeting') {
     return (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-        <path d="M15 8a3 3 0 1 1-6 0a3 3 0 0 1 6 0Zm-8.5 9.5c0-2.5 2.94-4.5 6.5-4.5s6.5 2 6.5 4.5V19H6.5zM19 8.75l3-1.5v9.5l-3-1.5z" />
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="4.75" y="7.25" width="11.5" height="9.5" rx="2.1" />
+        <path d="M16.5 10.25 20 8.5v7l-3.5-1.75" />
+        <circle cx="9.75" cy="12" r="2" />
       </svg>
     )
   }
   if (tile === 'task') {
     return (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-        <path d="M8 4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2h2.5A2.5 2.5 0 0 1 21 6.5v13A2.5 2.5 0 0 1 18.5 22h-13A2.5 2.5 0 0 1 3 19.5v-13A2.5 2.5 0 0 1 5.5 4Zm2 0v1h4V4Zm6 7H8v2h8Zm-3 4H8v2h5Z" />
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="6" y="4.75" width="12" height="14.5" rx="2.3" />
+        <path d="M9 4.75h6" />
+        <path d="m9.4 11.8 1.7 1.7 3.5-3.5" />
+        <path d="M9 16.4h6" />
       </svg>
     )
   }
   return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-      <path d="M7 10V8a5 5 0 1 1 10 0v2h1a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Zm2 0h6V8a3 3 0 1 0-6 0Z" />
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="5.25" y="5.25" width="5.5" height="5.5" rx="1.4" />
+      <rect x="13.25" y="5.25" width="5.5" height="5.5" rx="1.4" />
+      <rect x="5.25" y="13.25" width="5.5" height="5.5" rx="1.4" />
+      <path d="M16 13.75v3.5" />
+      <path d="M14.25 15.5H17.75" />
     </svg>
   )
 }
