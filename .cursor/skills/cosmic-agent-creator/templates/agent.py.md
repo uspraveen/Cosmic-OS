@@ -184,6 +184,45 @@ class <AgentClass>(AgentRuntime):
         # await self.step_plan.update(1, 'in_progress')
         # ... your logic ...
         # await self.step_plan.update(1, 'completed', 'Done with step 1')
+        #
+        # If this handler makes a metered LLM or embedding API call, emit one
+        # usage event to POST /internal/usage/log using the COSMIC usage
+        # contract. Generate llm_call_id in the outbound call path and record
+        # llm_call_placed_at when the call is initiated.
+        # Preferred shared-helper flow:
+        #   - call shared/usage.py begin_metered_call(...) immediately before
+        #     the outbound provider request
+        #   - after the provider returns or fails, use shared/usage.py to
+        #     normalize raw usage, build exactly one final event, and post it
+        #   - reuse the same llm_call_id if the usage-log write is retried
+        # If you need SDK/base_url/context/pricing metadata for that call or
+        # for estimated_cost_usd/headroom calculations, resolve it from
+        # shared/model_specs.json via shared/model_specs.py and/or
+        # shared/usage.py — do not hardcode it in this agent and do not put it
+        # in agent_card.yaml.
+        #
+        # Optional LangChain/LangGraph pattern:
+        #   - inspect AIMessage.usage_metadata first
+        #   - then fall back to AIMessage.response_metadata['token_usage']
+        #     or ['usage']
+        #   - normalize prompt/input, completion/output, total, cached-input,
+        #     and reasoning tokens before posting the usage event
+        #   - treat alias fields as fallbacks, not additive counts
+        #   - if total_tokens is absent, fall back to input + output
+        #   - clamp cached_input_tokens <= input_tokens and
+        #     reasoning_tokens <= output_tokens
+        #   - use the peak single-call input/prompt tokens for context/headroom
+        #     calculations rather than cumulative task tokens
+        #
+        # If this intent mutates provider-owned remote state:
+        #   - read the latest revision/version/etag/precondition token first
+        #   - send that token on the write when the provider supports it
+        #   - if the caller supplied an expected anchor/snippet/hash, compare it
+        #     against freshly-read state before writing and abort on mismatch
+        #   - verify the change after the write via provider response or re-read
+        #   - for reversible domains, persist an edit ledger row in store/data/
+        #     with target, summary or hashes, revision/version before and after,
+        #     verified flag, and rollback metadata
 
         result_data = {
             'response': f'Processed: {query}',
@@ -211,6 +250,47 @@ class <AgentClass>(AgentRuntime):
         return AgentResult(
             status='completed',
             output=result_data,
+            artifacts=[],
+            error=None,
+        )
+
+    async def handle_<domain>_resolve_resource(self, task: TaskEnvelope) -> AgentResult:
+        """Optional: search provider-owned resources by name within ONE account.
+        Only add this intent when users may name remote resources instead of
+        passing stable IDs directly.
+
+        The orchestrator chooses the account and passes a single credential in
+        self.auth. Never fan out across accounts here and never persist resource
+        bindings locally.
+        """
+        query = task.input.get('query', '')
+        resource_type = task.input.get('resource_type')
+        account_id = task.input.get('account_id')
+
+        if not self.auth:
+            return AgentResult(
+                status='failed',
+                output={},
+                artifacts=[],
+                error=AgentError(
+                    code='AUTH_ERROR',
+                    retryable=False,
+                    message='resolve_resource requires input.auth for the selected account',
+                    next_action='escalate',
+                ),
+            )
+
+        # Use self.auth to query the provider API for this ONE account.
+        matches = []
+
+        return AgentResult(
+            status='completed',
+            output={
+                'query': query,
+                'resource_type': resource_type,
+                'account_id': account_id,
+                'matches': matches,
+            },
             artifacts=[],
             error=None,
         )

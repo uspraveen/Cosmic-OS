@@ -57,6 +57,7 @@ Determine these values:
 - `intents`: What this agent can do (e.g., `research.topic`, `docs.edit`)
 - `tools`: What tools this agent needs (e.g., `web_search`, `playwright_navigate`)
 - `auth_requirements`: Which intents need user OAuth credentials (if any)
+- `resource_resolution`: whether users may name remote provider resources by human label instead of stable IDs (docs, files, repos, issues, calendars, etc.). If yes, add a `<domain>.resolve_resource` intent and schemas.
 
 ### Step 2: Create the Directory Structure
 
@@ -102,6 +103,8 @@ Use the template at `templates/agent_card.yaml.md`. Key rules:
 - Every intent MUST have `input_schema` and `output_schema` pointing to JSON Schema files
 - Every intent MUST have a `timeout_sec` matching the SLA
 - `auth_requirements` ONLY for intents calling external provider APIs on behalf of the user
+- If users may refer to provider-owned resources by name, add a `<domain>.resolve_resource` intent. The orchestrator selects ONE account at a time and passes a single `input.auth`; the agent searches only that account and returns matches. Agents NEVER guess accounts or own resource-binding storage.
+- If an intent mutates provider-owned remote state, implement provider-native precondition / optimistic-concurrency handling when available (`requiredRevisionId`, `etag`, `If-Match`, provider equivalent), plus read-before-write and read-after-write verification logic.
 - `allowed_senders` must include `cosmic/orchestrator:1.0.0`
 - `stream_key` must be `streams:<agent_id>` (no priority suffix — that's added by transport)
 - `retry_policy` must specify retryable vs non-retryable error codes
@@ -223,6 +226,10 @@ class <AgentClass>(AgentRuntime):
 
 Every intent needs input and output JSON Schema files in `schemas/intents/`.
 
+Provider-backed agents that support named remote resources also need:
+- `schemas/intents/<domain>.resolve_resource.input.json`
+- `schemas/intents/<domain>.resolve_resource.output.json`
+
 ```json
 // schemas/intents/<domain>.<action>.input.json
 {
@@ -329,6 +336,8 @@ See `reference/testing-standards.md` for the full testing contract. Minimum requ
 4. **Error path tests** (verify retryable vs non-retryable errors are correctly classified)
 5. **Idempotency tests** (verify same idempotency_key returns cached result)
 6. **Auth isolation tests** (verify credentials never appear in events, artifacts, or store)
+7. **Metered model telemetry tests** (if the agent makes LLM/embedding calls: verify per-call usage normalization, one-event-per-call behavior, and cost/headroom helpers)
+8. **Mutable provider write safety tests** (if the agent edits provider-owned remote state: verify precondition token usage, mismatch aborts, and no false success without verification)
 
 ## Critical Rules — Violations Are Bugs
 
@@ -371,6 +380,24 @@ See `reference/testing-standards.md` for the full testing contract. Minimum requ
 19. **No `redis.keys()`** — use `redis.scan()` instead. `keys()` blocks the Redis event loop.
 
 20. **No direct `sqlite3.connect()`** — use `connect_sync()` or `connect_async()` from `shared/sqlite_client.py`.
+
+21. **Resource resolution ownership** — if users may name provider-owned resources instead of giving stable IDs, implement `<domain>.resolve_resource`. The orchestrator chooses the account and dispatches one account at a time with a single `input.auth` dict. Agents never guess accounts, never fan out across accounts internally, and never own resource-binding storage.
+
+22. **Suspend/resume contract** — for `orchestrator.refresh_credential`, send `credential_ref`, `provider`, and `parent_task_id`. Persist enough state to `runtime/state.db` before suspension. Suspended work resumes via `intent='agent.resume'`; refresh resumes include fresh `input.auth`, and human-input resumes arrive after the orchestrator round-trips through `user_input:requests` and `user_input:replies`.
+
+23. **Usage logging** — any agent that makes a metered LLM or embedding API call must generate `llm_call_id` in the outbound call path, record `llm_call_placed_at`, and emit one usage event to `POST /internal/usage/log`. Do not write the Gateway Usage Ledger directly. If the agent uses LangChain/LangGraph, it is acceptable to normalize token usage from `AIMessage.usage_metadata` plus `AIMessage.response_metadata['token_usage'|'usage']` before posting the COSMIC usage event.
+
+24. **Shared model registry** — do not hardcode provider SDK choice, `base_url`, context-window limits, output limits, or token pricing inside generated agents. Resolve those from `shared/model_specs.json` / `shared/model_specs.py`. This metadata does not belong in `agent_card.yaml`.
+
+25. **Usage normalization and headroom** — when the agent computes local token/cost/context telemetry, normalize provider fields into canonical `input_tokens`, `output_tokens`, `total_tokens`, `cached_input_tokens`, and `reasoning_tokens` via `shared/model_specs.json` `token_field_map`. Equivalent aliases are fallbacks, never additive. If `total_tokens` is absent, use `input_tokens + output_tokens`. Clamp `cached_input_tokens <= input_tokens` and `reasoning_tokens <= output_tokens`. Context pressure is based on the peak single-call prompt/input tokens observed, not cumulative task tokens.
+
+26. **Shared metered-call helper** — if the agent makes metered model/API calls, use `shared/usage.py` (or the repo's exact shared equivalent) rather than hand-rolling `llm_call_id`, token normalization, cost/headroom math, or `/internal/usage/log` payload assembly inside the agent. Capture call metadata immediately before the provider request, then build and post exactly one final usage event after the provider returns or fails.
+
+27. **Mutable provider writes** — when an intent edits provider-owned remote state, read the latest remote revision/version/etag/precondition token first and send it on the write when the provider supports it (`requiredRevisionId`, `etag`, `If-Match`, provider equivalent). If the caller supplied an expected anchor/snippet/hash, compare it against fresh state before writing and abort on mismatch. After the write, inspect the provider response or re-read enough state to verify the change landed; do not claim unconditional success if verification is inconclusive.
+
+28. **Edit ledgers for reversible domains** — if the agent performs meaningful user-facing remote edits, persist an edit ledger in `store/data/` with target, summary or hashes, provider revision/version before and after, verification status, and rollback metadata. Any rollback path must respect the provider's current revision/precondition token and block or downgrade stale reversals rather than blindly replaying them.
+
+29. **Optional workflow frameworks** — LangChain/LangGraph may be used inside an agent as local implementation helpers for tool loops, checkpoints, or state machines, but they do not replace COSMIC contracts. `TaskEnvelope` / `EventEnvelope` / `AgentResult`, `StepPlan`, reverse tasks, suspend/resume, usage logging, auth isolation, artifact rules, and orchestrator-mediated routing remain primary.
 
 ## Reference Files
 

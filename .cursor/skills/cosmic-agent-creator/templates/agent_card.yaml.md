@@ -29,6 +29,15 @@ intents:
     output_schema: schemas/intents/<DOMAIN>.recall_session.output.json
     timeout_sec: 30
 
+  # Add this when users may name remote provider resources instead of passing IDs.
+  # Search exactly ONE account per task — the orchestrator chooses the account and
+  # passes a single input.auth dict.
+  # - name: <DOMAIN>.resolve_resource
+  #   description: Search for a resource by name within one connected account
+  #   input_schema: schemas/intents/<DOMAIN>.resolve_resource.input.json
+  #   output_schema: schemas/intents/<DOMAIN>.resolve_resource.output.json
+  #   timeout_sec: 30
+
 # ONLY declare if the intent calls external provider APIs on behalf of the user.
 # Remove this section entirely if no intents need user OAuth credentials.
 auth_requirements:

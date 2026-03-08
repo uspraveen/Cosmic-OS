@@ -17,6 +17,13 @@ intents:
     priority: normal
     fallback: null
 
+  # Add this for provider-backed agents when users may name remote resources
+  # instead of passing stable IDs directly.
+  <domain>.resolve_resource:
+    agent: cosmic/<agent-name>:<version>
+    priority: normal
+    fallback: null
+
   <domain>.recall_session:
     agent: cosmic/<agent-name>:<version>
     priority: normal
@@ -59,6 +66,10 @@ intents:
   docs.insert_image:
     agent: cosmic/docs-agent:2.1.0
     priority: high
+    fallback: null
+  docs.resolve_resource:
+    agent: cosmic/docs-agent:2.1.0
+    priority: normal
     fallback: null
   docs.recall_session:
     agent: cosmic/docs-agent:2.1.0

@@ -333,6 +333,33 @@ class TestAuthIsolation:
         assert 'secret_token_123' not in content
 ```
 
+### 7. Metered Model Telemetry Tests (Conditional)
+
+If the agent makes metered LLM or embedding calls:
+
+- verify provider usage fields normalize into canonical `input/output/total/cached/reasoning`
+  counts without double-counting alias fields
+- verify `total_tokens` falls back to `input_tokens + output_tokens` when the provider omits it
+- verify cached/reasoning counts are clamped to valid ranges
+- verify `llm_call_id` and `llm_call_placed_at` are captured immediately before the outbound
+  provider call
+- verify one usage event is emitted per outbound metered call
+- verify usage-log retries reuse the same `llm_call_id`
+- verify cost/headroom helpers derive metadata from `shared/model_specs.json`, not agent-local
+  constants
+
+### 8. Mutable Provider Write Safety Tests (Conditional)
+
+If the agent mutates provider-owned remote state:
+
+- verify the latest provider revision/version/etag/precondition token is read and attached to the
+  write call when supported
+- verify expected anchor/snippet/hash mismatches abort the write before mutation
+- verify provider-side revision conflicts surface as safe failures instead of silent overwrites
+- verify post-write verification failures do not claim unconditional success
+- if the agent supports edit ledgers or rollback, verify revision/version before/after and
+  verification metadata are recorded and stale rollback is blocked
+
 ## Shared Fixtures (conftest.py)
 
 ```python
@@ -390,6 +417,8 @@ def make_task():
 | Auth isolation | All 4 leak vectors (events, result, learnings, post-execution) |
 | Idempotency | Cache hit + concurrent execution |
 | Error classification | Every error code in agent_card.yaml retry_policy |
+| Metered model telemetry | Per-call normalization + logging, if the agent makes metered model calls |
+| Mutable provider writes | Preconditions + verification, if the agent edits provider-owned remote state |
 
 ## Running Tests
 

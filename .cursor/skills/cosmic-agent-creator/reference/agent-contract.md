@@ -247,6 +247,113 @@ await self.emit_event(
 The base class calls `self.emit_terminal_event(task.task_id, result)` automatically.
 You just return an `AgentResult` from `execute()`.
 
+## Usage Logging
+
+If the agent makes a metered LLM or embedding API call, usage logging is mandatory:
+
+- Generate `llm_call_id` in the code path that initiates the outbound metered call.
+- Record `llm_call_placed_at` when the outbound call is initiated.
+- After the provider returns or fails, emit exactly one usage event to `POST /internal/usage/log`.
+- Reuse the same `llm_call_id` if the usage log write is retried, so Gateway deduplicates idempotently.
+- Never write `gateway/usage.db` directly from the agent.
+- If the agent computes `estimated_cost_usd`, context headroom, or other model-limit telemetry, resolve
+  SDK/base-URL/limits/pricing metadata from `shared/model_specs.json` rather than agent-local
+  constants.
+- Prefer the shared metered-call helper (`shared/usage.py`) when available. It should own
+  `begin_metered_call(...)`, `normalize_usage(...)`, `build_usage_event(...)`, and
+  `post_usage_event(...)`.
+- Capture `llm_call_id` and `llm_call_placed_at` before the provider request, then build and post
+  exactly one final usage event after the provider returns or fails.
+- Do not hand-roll per-agent token normalization, pricing, or `/internal/usage/log` payload
+  assembly when the shared helper exists.
+
+When the agent computes local telemetry before posting the usage event or for task-local
+observability:
+
+- normalize provider payloads into `input_tokens`, `output_tokens`, `total_tokens`,
+  `cached_input_tokens`, and `reasoning_tokens`
+- use `shared/model_specs.json` `token_field_map` to interpret provider-specific field names
+- treat equivalent aliases as fallbacks for the same metric, never as additive fields
+- if `total_tokens` is absent, fall back to `input_tokens + output_tokens`
+- clamp `cached_input_tokens <= input_tokens` and `reasoning_tokens <= output_tokens`
+- emit one usage event per outbound metered call; per-task or per-session totals are local
+  aggregates only
+
+If the agent uses LangChain or LangGraph, a common extraction pattern is:
+
+- read `AIMessage.usage_metadata` first
+- then fall back to `AIMessage.response_metadata['token_usage']` or `AIMessage.response_metadata['usage']`
+- normalize `input_tokens`, `output_tokens`, `total_tokens`, and, when present, cached-input and reasoning token details
+
+Treat this LangChain/LangGraph note as a suggestion, not a mandatory implementation detail. The
+hard requirement is that the final usage event matches the COSMIC usage contract.
+
+## Shared Model Registry
+
+Generated agents must treat `shared/model_specs.json` as the global source of truth for metered
+model metadata:
+
+- provider/model -> SDK family
+- provider/model -> default `base_url`
+- context-window and max-output limits
+- recommended reserve/headroom
+- pricing used for cost estimation
+
+Do not duplicate this metadata inside:
+
+- `agent_card.yaml`
+- agent-local constants
+- per-agent pricing tables
+
+If the agent needs model metadata at runtime, load it through `shared/model_specs.py` or an
+equivalent shared helper.
+
+If the project includes `shared/usage.py`, generated agents should consume model specs through that
+shared metered-call helper for token normalization, cost estimation, and headroom math rather than
+duplicating registry lookups inside intent handlers.
+
+Recommended helper behavior when deriving cost/headroom from the registry:
+
+- use the peak single-call prompt/input tokens observed for the task as `peak_input_tokens`
+- `prompt_context_left_tokens = max(context_window_tokens - peak_input_tokens, 0)`
+- `safe_headroom_left_tokens = max((context_window_tokens - recommended_headroom_reserve_tokens) - peak_input_tokens, 0)`
+- `estimated_cost_usd = ((input_tokens - cached_input_tokens) * input_per_1m_usd + cached_input_tokens * cached_input_per_1m_usd + output_tokens * output_per_1m_usd) / 1_000_000`
+- if pricing or context limits are `null`, leave the corresponding telemetry unset rather than
+  inventing values
+
+## Mutable Provider Write Safety
+
+If an intent edits provider-owned remote state (Docs, Drive, calendars, tickets, issues, etc.):
+
+- read the latest remote revision / version / ETag / precondition token before writing when the
+  provider offers one
+- send that token on the mutation call (`requiredRevisionId`, `etag`, `If-Match`, or provider
+  equivalent)
+- if the caller supplied an expected anchor/snippet/hash, compare it against freshly-read remote
+  state before mutating and abort on mismatch
+- inspect the provider response or re-read enough state after the write to verify the intended
+  change landed
+- do not claim unconditional success if verification is inconclusive
+
+For reversible user-facing edit domains, persist an edit ledger in `store/data/` with target,
+summary or hashes, provider revision/version before and after, verification status, and rollback
+metadata. Rollback must respect the provider's current revision/precondition token and block or
+downgrade stale reversals rather than blindly replaying them.
+
+## Optional Workflow Frameworks (LangChain / LangGraph)
+
+LangChain or LangGraph may be used inside a generated agent as an internal implementation detail
+for local tool loops, checkpoints, or state machines.
+
+They do **not** replace COSMIC requirements:
+
+- `TaskEnvelope`, `EventEnvelope`, and `AgentResult` remain the runtime contracts
+- the orchestrator still owns cross-agent planning and delegation
+- `StepPlan` remains the COSMIC tool for agent-level execution tracking
+- reverse tasks, suspend/resume, usage logging, auth isolation, and artifact/event rules still
+  apply exactly as specified here
+- framework memory/checkpointer state is local convenience state, not COSMIC's source of truth
+
 ## Reverse Tasks (Agent -> Orchestrator)
 
 When the agent needs help, it creates a reverse task:
@@ -299,6 +406,41 @@ await dispatch(reverse, self.redis)
 | `orchestrator.delegate` | Agent needs another agent's output |
 | `orchestrator.escalate` | Push to gateway for human input |
 | `orchestrator.refresh_credential` | Access token expired mid-task |
+
+### Credential Refresh Suspension Contract
+
+When a provider rejects with an expired-token auth error, suspend and request a refresh:
+
+```python
+await self._send_reverse_task(
+    intent='orchestrator.refresh_credential',
+    input={
+        'credential_ref': self.auth['credential_ref'],
+        'provider': self.auth['provider'],
+        'parent_task_id': current_task.task_id,
+    },
+)
+```
+
+Rules:
+- Use the existing credential reference. The orchestrator refreshes via the Gateway's dedicated `/internal/credentials/refresh` endpoint.
+- Persist enough execution state to `runtime/state.db` before suspension so the task can continue after resume.
+- Expect the continuation as a resume envelope: `intent='agent.resume'`, with `input={'task_id': <suspended_task_id>, 'auth': {...fresh token...}}`.
+- Treat the resumed work as the same suspended task, not as a fresh multi-account dispatch.
+
+### Human-Input Resume Contract
+
+If the agent asks the orchestrator for clarification/approval/decision and the orchestrator cannot answer itself:
+- The orchestrator publishes a task input request to `user_input:requests`
+- The Gateway/UI collects the reply and publishes it to `user_input:replies`
+- The orchestrator resumes the suspended agent with `intent='agent.resume'`
+
+Agent responsibilities:
+- Emit `task.suspended`
+- Serialize resumable state to `runtime/state.db`
+- Wait for resume via the runtime reply loop
+
+Agents do NOT publish directly to `user_input:requests` or consume `user_input:replies`.
 
 ## Learnings Management
 

@@ -1697,6 +1697,7 @@ cosmic-agents/
 │   ├── artifact_security.py    # Path allowlist + integrity checks
 │   ├── model_specs.py          # Loader/lookup helpers for shared/model_specs.json
 │   ├── model_specs.json        # Global metered-model registry: SDK, base URL, limits, pricing
+│   ├── usage.py                # Shared metered-call helpers: ids, normalization, cost, events
 │   └── config.py               # TTL tunables, constants
 │
 ├── agents/                     # One folder per agent
@@ -2220,6 +2221,38 @@ API call. It is not optional, and it is not defined separately by each agent.
 - If the agent computes `estimated_cost_usd`, context-headroom telemetry, or other model-limit
   analytics, it resolves provider/model metadata from `shared/model_specs.json` (see §7.2c).
 
+**Canonical shared helper (`shared/usage.py`):**
+
+To avoid per-agent drift, metered call paths SHOULD use a small shared helper instead of
+hand-rolling `llm_call_id`, token normalization, cost/headroom math, and usage-event payload
+assembly independently in each component.
+
+Recommended responsibilities:
+
+- `begin_metered_call(...)` — allocate `llm_call_id`, capture `llm_call_placed_at`, and start a
+  local monotonic timer for latency measurement
+- `normalize_usage(model_key, raw_usage)` — use `shared/model_specs.json` `token_field_map` to
+  return canonical `input_tokens`, `output_tokens`, `total_tokens`, `cached_input_tokens`, and
+  `reasoning_tokens`
+- `build_usage_event(...)` — construct the exact `/internal/usage/log` request body, including
+  correlation fields, provider/model/usage kind, success/failure, latency, and optional
+  cost/headroom telemetry
+- `post_usage_event(...)` — write the event through the Gateway with idempotent retry that reuses
+  the same `llm_call_id`
+
+Recommended call flow:
+
+1. Call `begin_metered_call(...)` immediately before the outbound provider request.
+2. After the provider returns or fails, build exactly one final usage event for that call.
+3. Post that event once the provider outcome is known.
+4. If the usage-log write is retried, reuse the same `llm_call_id`.
+
+This helper is a caller-side convenience layer. The authoritative runtime contract remains §3.4a
+and `POST /internal/usage/log`.
+
+Gateway direct LLM adapters may persist locally via `gateway/usage.py` instead of self-calling
+HTTP, but they SHOULD reuse the same shared normalization and event-building logic.
+
 **Optional implementation note (LangChain / LangGraph):**
 
 If an agent is built with LangChain or LangGraph, it is acceptable to derive usage from the
@@ -2233,6 +2266,24 @@ returned `AIMessage` before posting the COSMIC usage event:
 
 This is only a suggested extraction pattern. The hard requirement is that the final event sent to
 `POST /internal/usage/log` matches the COSMIC usage contract in §3.4a.
+
+**Canonical local telemetry guidance:**
+
+When a code path computes local token/cost/headroom telemetry before posting the usage event, or
+for task/session-local observability:
+
+- Normalize provider payloads into one canonical shape:
+  `input_tokens`, `output_tokens`, `total_tokens`, `cached_input_tokens`, `reasoning_tokens`.
+- Use `shared/model_specs.json` `token_field_map` to interpret provider-specific field names.
+- Equivalent aliases are fallback names for the same metric, never additive fields. If an SDK
+  wrapper exposes the same count in multiple places, normalize to one value rather than summing
+  aliases.
+- If `total_tokens` is absent, fall back to `input_tokens + output_tokens`.
+- Clamp `cached_input_tokens <= input_tokens` and `reasoning_tokens <= output_tokens`.
+- Emit one usage event per outbound metered call. Per-task or per-session totals are local
+  aggregates only; they do not replace per-call Usage Ledger events.
+- Context-pressure telemetry is based on the **peak single-call prompt/input tokens observed**
+  during the task. Do not use cumulative tokens across multiple calls as a context-window measure.
 
 This requirement applies to:
 
@@ -2251,7 +2302,7 @@ It does not apply to:
 All metered model definitions live in one shared declarative registry:
 
 - file: `shared/model_specs.json`
-- optional helper loader: `shared/model_specs.py`
+- optional helper loaders: `shared/model_specs.py`, `shared/usage.py`
 - ownership: shared runtime layer, not any individual agent
 
 This registry is the single source of truth for:
@@ -2410,8 +2461,23 @@ contracts; `shared/model_specs.json` declares runtime model metadata.
   allowed for testing or self-hosted proxies, but the registry remains the canonical default.
 - Provider-reported token counts are authoritative when present. `token_field_map` exists for
   normalization and fallback extraction across SDK/provider response shapes.
+- Callers SHOULD consume this registry through `shared/model_specs.py` and `shared/usage.py`
+  rather than re-implementing token normalization, cost estimation, or headroom math separately in
+  each component.
 - Pricing fields may be `null` when not yet tracked, but the entry must still exist if the model is
   used for metered work or context-budget calculations.
+- A shared helper SHOULD normalize provider usage payloads into:
+  `input_tokens`, `output_tokens`, `total_tokens`, `cached_input_tokens`, and `reasoning_tokens`.
+- If the provider omits `total_tokens`, the shared helper SHOULD fall back to
+  `input_tokens + output_tokens`.
+- Cost telemetry SHOULD use:
+  `((input_tokens - cached_input_tokens) * input_per_1m_usd + cached_input_tokens * cached_input_per_1m_usd + output_tokens * output_per_1m_usd) / 1_000_000`
+  when pricing metadata is available.
+- Context telemetry SHOULD use `peak_input_tokens` for the task's heaviest single metered call:
+  - `prompt_context_left_tokens = max(context_window_tokens - peak_input_tokens, 0)`
+  - `safe_headroom_left_tokens = max((context_window_tokens - recommended_headroom_reserve_tokens) - peak_input_tokens, 0)`
+- If pricing or context-limit fields are `null`, raw token usage still logs normally, but the
+  corresponding local cost/headroom telemetry stays unset rather than inventing values.
 
 ### 7.3 TaskEnvelope (Bidirectional)
 
@@ -3321,15 +3387,23 @@ CREATE TABLE edit_sessions (
     session_id TEXT,
     task_id TEXT,
     doc_id TEXT,
-    edit_type TEXT,          -- 'insert', 'delete', 'reformat'
-    section TEXT,
+    operation TEXT,          -- 'insert', 'delete', 'reformat', 'rollback'
+    target TEXT,             -- block ID, document range, table cell, etc.
     summary TEXT,
     before_hash TEXT,
     after_hash TEXT,
+    revision_before TEXT,    -- provider version / revision / etag before write
+    revision_after TEXT,     -- provider version / revision / etag after write
+    verified INTEGER DEFAULT 0,
+    metadata_json TEXT,      -- provider-specific rollback / audit metadata
     created_at TIMESTAMP,
     PRIMARY KEY (session_id, task_id)
 );
 ```
+
+Docs agents that support rollback often also persist enough `before` / `after` material or
+provider-native patch metadata to safely reverse prior edits. The exact shape remains
+domain-specific.
 
 Example: research agent's schema:
 
@@ -3346,6 +3420,29 @@ CREATE TABLE research_sessions (
     PRIMARY KEY (session_id, task_id)
 );
 ```
+
+### 12.2a Mutable Provider Resource Safety
+
+Agents that mutate provider-owned remote state (Docs, Drive, calendars, tickets, issues, etc.)
+must use provider-native optimistic concurrency or precondition tokens when the provider offers
+them.
+
+**Rules:**
+
+- Read the target object's latest version / revision / ETag / precondition token immediately before
+  the write when available.
+- Send that token on the mutation call (`requiredRevisionId`, `etag`, `If-Match`, or provider
+  equivalent) so concurrent remote edits fail closed instead of silently overwriting.
+- If the caller supplied an expected anchor/snippet/hash for the remote object, compare it against
+  freshly-read provider state before writing and abort on mismatch.
+- After the write, inspect the provider response or re-read enough state to verify the intended
+  change landed. If verification is inconclusive, do not claim unconditional success.
+- Domains with meaningful user-facing edits SHOULD persist an edit ledger in `store/data/` with
+  before/after summary or hashes, provider revision/version before and after, verification status,
+  and metadata needed for recall or rollback.
+- Best-effort rollback is allowed, but rollback must also respect the provider's current
+  revision/precondition token. If the remote object has changed since the recorded edit, block or
+  downgrade the rollback rather than blindly replaying stale inverse operations.
 
 ### 12.3 Session Context Flow
 
@@ -8194,6 +8291,15 @@ StepPlan is a lightweight, single-task planning tool that prevents LLM drift dur
 | **Persistence** | SQLite ledger (survives crashes) | In-memory during task, emitted via events |
 | **Visibility** | Orchestrator's own state + UI progress | Auto-emits progress events to orchestrator |
 | **Complexity** | Full planning loop, synthesis, failure handling | Single tool, three operations |
+
+**Optional implementation note (LangChain / LangGraph):**
+
+LangChain or LangGraph may be used inside an individual agent as a local implementation detail for
+tool loops, checkpoints, or state machines. They do **not** replace COSMIC's contracts:
+`TaskEnvelope`, `EventEnvelope`, `AgentResult`, `StepPlan`, reverse tasks, suspend/resume, usage
+logging, auth isolation, artifact rules, and orchestrator-mediated routing remain authoritative.
+Cross-agent planning still belongs to the orchestrator. Any framework memory/checkpointer is
+agent-local convenience state, not COSMIC's system of record.
 
 **Tool specification:**
 

@@ -1,0 +1,27 @@
+ I verified on the VM that both routes were still healthy after the Perplexity fix:
+
+  - Haiku completed with route="haiku" and streamed thinking + response chunks.
+  - Opus completed with route="opus" and streamed thinking + response chunks.
+  - Perplexity also worked with the real provider call after the normalization fix.
+
+  So the regression was back in the desktop renderer. The issue was a race in App.tsx: Haiku and Opus emit response.thinking.chunk early, and the UI was
+  still waiting for Electron main to generate/return the request_id. That let early thinking events bind to the wrong assistant bubble before the new turn
+  had a reserved slot. Perplexity was less affected because its stream shape is different.
+
+  I fixed it by making the desktop reserve the assistant slot before the stream starts:
+
+  - renderer now creates the request_id itself
+  - it creates and binds the assistant placeholder immediately
+  - Electron main / preload / connection manager now accept a caller-provided request_id
+
+  Touched files:
+
+  - App.tsx
+  - gatewayConnectionManager.ts
+  - main.ts
+  - preload.ts
+  - vite-env.d.ts
+
+  Sync state:
+
+  - local, origin/main, and VM repo are all at 15648f2

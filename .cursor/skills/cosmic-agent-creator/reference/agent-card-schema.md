@@ -27,6 +27,15 @@ intents:
     output_schema: schemas/intents/<domain>.recall_session.output.json
     timeout_sec: 30
 
+  # Add this intent when users may name provider-owned resources instead of
+  # passing stable IDs directly. Search exactly ONE account per task — the
+  # orchestrator chooses the account and passes a single input.auth dict.
+  - name: <domain>.resolve_resource
+    description: Search for a resource by name within one connected account
+    input_schema: schemas/intents/<domain>.resolve_resource.input.json
+    output_schema: schemas/intents/<domain>.resolve_resource.output.json
+    timeout_sec: 30
+
 # Only declare auth_requirements for intents that call external provider APIs
 # on behalf of the user. Intents using agent-local tools or store/ do NOT declare them.
 auth_requirements:
@@ -119,6 +128,17 @@ Only for intents calling external provider APIs on behalf of the user:
 |---|---|
 | `provider` | OAuth provider name: `google`, `github`, `slack`, `microsoft`, etc. |
 | `scopes` | List of OAuth scope URLs required. |
+
+### Resource Resolution Intent
+
+Add `<domain>.resolve_resource` when the user may refer to provider-owned resources
+by human name rather than stable IDs.
+
+Rules:
+- Search one account per task. The orchestrator decides which account to search and passes a single `input.auth`.
+- Return matches with stable resource identifiers and enough metadata for the orchestrator to create or reuse a binding.
+- Do not guess accounts in the agent.
+- Do not persist resource bindings in the agent's own `store/data/`; binding ownership lives in the Gateway/orchestrator credential flow.
 
 ### Policies
 
