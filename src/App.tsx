@@ -15,6 +15,7 @@ export type SearchPosition = 'bottom' | 'middle'
 export type QueryMode = 'chat' | 'meeting'
 
 interface Message {
+  id: string
   role: 'user' | 'assistant'
   content: string
   thinking?: string
@@ -37,7 +38,8 @@ const cleanText = (text: string) => {
 const historyToMessages = (history: any[] = []): Message[] => {
   return history
     .filter((item) => item && (item.role === 'user' || item.role === 'assistant'))
-    .map((item) => ({
+    .map((item, index) => ({
+      id: String(item.message_id || `${item.role}-${index}-${crypto.randomUUID()}`),
       role: item.role,
       content: String(item.content || ''),
       sources: Array.isArray(item?.metadata?.sources) ? item.metadata.sources : undefined,
@@ -55,6 +57,11 @@ export default function App() {
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const responseEndRef = useRef<HTMLDivElement>(null)
   const responseContainerRef = useRef<HTMLDivElement>(null)
+  const activeAssistantMessageByRequestRef = useRef<Map<string, string>>(new Map())
+  const activeAssistantMessageByTaskRef = useRef<Map<string, string>>(new Map())
+  const messagesRef = useRef<Message[]>([])
+  const activeSessionIdRef = useRef<string | null>(null)
+  const shouldAutoScrollRef = useRef(true)
 
   const [query, setQuery] = useState('')
   const [searchState, setSearchState] = useState<'hidden' | 'visible' | 'hiding'>('hidden')
@@ -93,9 +100,123 @@ export default function App() {
     anthropic: false,
   })
 
+  const resetInFlightAssistantMaps = () => {
+    activeAssistantMessageByRequestRef.current.clear()
+    activeAssistantMessageByTaskRef.current.clear()
+  }
+
+  const createAssistantMessageId = () => `assistant_${crypto.randomUUID()}`
+
+  const createAssistantMessage = (overrides: Partial<Message> = {}): Message => ({
+    id: overrides.id || createAssistantMessageId(),
+    role: 'assistant',
+    content: '',
+    thinking: '',
+    ...overrides,
+  })
+
+  const createUserMessage = (content: string): Message => ({
+    id: `user_${crypto.randomUUID()}`,
+    role: 'user',
+    content,
+  })
+
+  const bindAssistantMessageToEvent = (event: any, messageId: string) => {
+    const requestId = typeof event?.request_id === 'string' ? event.request_id.trim() : ''
+    const taskId = typeof event?.task_id === 'string' ? event.task_id.trim() : ''
+    if (requestId) {
+      activeAssistantMessageByRequestRef.current.set(requestId, messageId)
+    }
+    if (taskId) {
+      activeAssistantMessageByTaskRef.current.set(taskId, messageId)
+    }
+  }
+
+  const findAssistantMessageIdForEvent = (event: any) => {
+    const requestId = typeof event?.request_id === 'string' ? event.request_id.trim() : ''
+    const taskId = typeof event?.task_id === 'string' ? event.task_id.trim() : ''
+    if (taskId) {
+      const taskBoundId = activeAssistantMessageByTaskRef.current.get(taskId)
+      if (taskBoundId) {
+        return taskBoundId
+      }
+    }
+    if (requestId) {
+      const requestBoundId = activeAssistantMessageByRequestRef.current.get(requestId)
+      if (requestBoundId) {
+        return requestBoundId
+      }
+    }
+    return null
+  }
+
+  const forgetAssistantMessageBindings = (event: any) => {
+    const requestId = typeof event?.request_id === 'string' ? event.request_id.trim() : ''
+    const taskId = typeof event?.task_id === 'string' ? event.task_id.trim() : ''
+    if (requestId) {
+      activeAssistantMessageByRequestRef.current.delete(requestId)
+    }
+    if (taskId) {
+      activeAssistantMessageByTaskRef.current.delete(taskId)
+    }
+  }
+
+  const ensureAssistantMessageForEvent = (messages: Message[], event: any) => {
+    const boundId = findAssistantMessageIdForEvent(event)
+    if (boundId) {
+      bindAssistantMessageToEvent(event, boundId)
+      return {
+        messages,
+        messageId: boundId,
+      }
+    }
+
+    const last = messages[messages.length - 1]
+    if (last?.role === 'assistant') {
+      bindAssistantMessageToEvent(event, last.id)
+      return {
+        messages,
+        messageId: last.id,
+      }
+    }
+
+    const messageId = createAssistantMessageId()
+    bindAssistantMessageToEvent(event, messageId)
+    return {
+      messages: [...messages, createAssistantMessage({ id: messageId })],
+      messageId,
+    }
+  }
+
+  const refreshSessionFromGateway = async (sessionId?: string | null) => {
+    const targetSessionId = typeof sessionId === 'string' && sessionId.trim()
+      ? sessionId.trim()
+      : activeSessionIdRef.current
+    if (!targetSessionId || !window.cosmic?.getGatewaySessionHistory) {
+      return
+    }
+
+    try {
+      const payload = await window.cosmic.getGatewaySessionHistory(targetSessionId)
+      resetInFlightAssistantMaps()
+      setMessages(historyToMessages(payload?.messages))
+      setActiveSessionId(targetSessionId)
+    } catch {
+      return
+    }
+  }
+
   useEffect(() => {
     modeRef.current = mode
   }, [mode])
+
+  useEffect(() => {
+    messagesRef.current = messages
+  }, [messages])
+
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId
+  }, [activeSessionId])
 
   // --- INIT & MOUSE EVENTS ---
   useEffect(() => {
@@ -239,37 +360,64 @@ export default function App() {
 
       if (eventType === 'resume.ok') {
         setActiveSessionId(typeof event.session_id === 'string' ? event.session_id : null)
+        resetInFlightAssistantMaps()
         setMessages(historyToMessages(event.history_tail))
         setIsStreaming(false)
         return
       }
 
+      if (eventType === 'route_result') {
+        setActiveSessionId((prev) => typeof event.session_id === 'string' ? event.session_id : prev)
+        setMessages((prev) => {
+          const existingId = findAssistantMessageIdForEvent(event)
+          if (existingId) {
+            return prev
+          }
+          const messageId = createAssistantMessageId()
+          bindAssistantMessageToEvent(event, messageId)
+          return [...prev, createAssistantMessage({ id: messageId })]
+        })
+        return
+      }
+
+      if (eventType === 'task.created') {
+        setMessages((prev) => {
+          const { messages: nextMessages } = ensureAssistantMessageForEvent(prev, event)
+          return nextMessages
+        })
+        return
+      }
+
       if (eventType === 'response.chunk') {
         setMessages((prev) => {
-          const last = prev[prev.length - 1]
           if (!event.content) return prev
-          if (!last || last.role === 'user') {
-            return [...prev, { role: 'assistant', content: String(event.content) }]
-          }
-          return [...prev.slice(0, -1), { ...last, content: last.content + String(event.content) }]
+          const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
+          return nextMessages.map((message) => {
+            if (message.id !== messageId) {
+              return message
+            }
+            return {
+              ...message,
+              content: `${message.content}${String(event.content)}`,
+            }
+          })
         })
         return
       }
 
       if (eventType === 'response.thinking.chunk') {
         setMessages((prev) => {
-          const last = prev[prev.length - 1]
           if (!event.content) return prev
-          if (!last || last.role === 'user') {
-            return [...prev, { role: 'assistant', content: '', thinking: String(event.content) }]
-          }
-          return [
-            ...prev.slice(0, -1),
-            {
-              ...last,
-              thinking: `${last.thinking || ''}${String(event.content)}`,
-            },
-          ]
+          const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
+          return nextMessages.map((message) => {
+            if (message.id !== messageId) {
+              return message
+            }
+            return {
+              ...message,
+              thinking: `${message.thinking || ''}${String(event.content)}`,
+            }
+          })
         })
         return
       }
@@ -277,16 +425,22 @@ export default function App() {
       if (eventType === 'response.complete') {
         setActiveSessionId((prev) => typeof event.session_id === 'string' ? event.session_id : prev)
         setMessages((prev) => {
-          const last = prev[prev.length - 1]
           const sources = Array.isArray(event.sources) ? event.sources : undefined
-          if (last && last.role === 'assistant') {
-            return [...prev.slice(0, -1), {
-              ...last,
-              content: String(event.content || last.content || ''),
+          const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
+          const updatedMessages = nextMessages.map((message) => {
+            if (message.id !== messageId) {
+              return message
+            }
+            return {
+              ...message,
+              content: String(event.content || message.content || ''),
               sources,
-            }]
+            }
+          })
+          if (!event.task_id) {
+            forgetAssistantMessageBindings(event)
           }
-          return [...prev, { role: 'assistant', content: String(event.content || ''), sources }]
+          return updatedMessages
         })
         setIsStreaming(false)
         return
@@ -296,19 +450,40 @@ export default function App() {
         setIsStreaming(false)
         const message = String(event?.error?.message || event?.message || 'Opus task failed.')
         setMessages((prev) => {
-          const last = prev[prev.length - 1]
-          if (last && last.role === 'assistant' && !last.content) {
-            return [...prev.slice(0, -1), { ...last, content: message }]
-          }
-          return [...prev, { role: 'assistant', content: message }]
+          const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
+          return nextMessages.map((item) => {
+            if (item.id !== messageId) {
+              return item
+            }
+            return { ...item, content: message }
+          })
         })
+        forgetAssistantMessageBindings(event)
+        return
+      }
+
+      if (eventType === 'task.completed' || eventType === 'task.cancelled') {
+        const messageId = findAssistantMessageIdForEvent(event)
+        const boundMessage = messageId
+          ? messagesRef.current.find((item) => item.id === messageId)
+          : null
+        const shouldRefreshFromHistory =
+          eventType === 'task.completed' &&
+          (!boundMessage || !String(boundMessage.content || '').trim())
+        forgetAssistantMessageBindings(event)
+        if (shouldRefreshFromHistory) {
+          void refreshSessionFromGateway(typeof event.session_id === 'string' ? event.session_id : null)
+        }
         return
       }
 
       if (eventType === 'error') {
         setIsStreaming(false)
         if (event.message) {
-          setMessages((prev) => [...prev, { role: 'assistant', content: String(event.message) }])
+          setMessages((prev) => [...prev, {
+            ...createAssistantMessage(),
+            content: String(event.message),
+          }])
         }
       }
     })
@@ -335,6 +510,7 @@ export default function App() {
 
   useEffect(() => {
     if (authState !== 'authenticated') {
+      resetInFlightAssistantMaps()
       setMessages([])
       setSessions([])
       setActiveSessionId(null)
@@ -373,12 +549,13 @@ export default function App() {
     const textToSend = query
     setQuery('')
     if (inputRef.current) inputRef.current.style.height = '24px'
+    shouldAutoScrollRef.current = true
 
     // 1. Add User Message (Optimistic)
-    setMessages(prev => [...prev, { role: 'user', content: textToSend }])
+    setMessages(prev => [...prev, createUserMessage(textToSend)])
     if (authState !== 'authenticated') {
       setMessages(prev => [...prev, {
-        role: 'assistant',
+        ...createAssistantMessage(),
         content: "Please sign in to connect this desktop app to your VM."
       }])
       return
@@ -386,7 +563,7 @@ export default function App() {
 
     if (!gatewayStatus.connected) {
       setMessages(prev => [...prev, {
-        role: 'assistant',
+        ...createAssistantMessage(),
         content: gatewayStatus.detail || "The desktop app is not connected to your VM yet."
       }])
       return
@@ -396,7 +573,7 @@ export default function App() {
     if (!window.cosmic?.sendGatewayQuery) {
       setIsStreaming(false)
       setMessages(prev => [...prev, {
-        role: 'assistant',
+        ...createAssistantMessage(),
         content: "Gateway chat support is unavailable in this desktop build."
       }])
       return
@@ -404,11 +581,11 @@ export default function App() {
 
     window.cosmic.sendGatewayQuery({
       content: textToSend,
-      conversationContext: buildConversationContext([...messages, { role: 'user', content: textToSend }]),
+      conversationContext: buildConversationContext([...messages, createUserMessage(textToSend)]),
     }).catch((error: any) => {
       setIsStreaming(false)
       setMessages(prev => [...prev, {
-        role: 'assistant',
+        ...createAssistantMessage(),
         content: error?.message || "Unable to send the message to your VM."
       }])
     })
@@ -440,8 +617,10 @@ export default function App() {
       const payload = window.cosmic?.getGatewaySessionHistory
         ? await window.cosmic.getGatewaySessionHistory(id)
         : null
+      resetInFlightAssistantMaps()
       setMessages(historyToMessages(payload?.messages))
     } catch {
+      resetInFlightAssistantMaps()
       setMessages([])
     }
     setShowHistory(false)
@@ -467,14 +646,16 @@ export default function App() {
     if (!responseContainerRef.current) return
     const { scrollTop, scrollHeight, clientHeight } = responseContainerRef.current
     const distanceFromBottom = scrollHeight - scrollTop - clientHeight
-    console.log('🔍 Scroll Debug:', { scrollTop, scrollHeight, clientHeight, distanceFromBottom })
     const isNearBottom = distanceFromBottom < 50
+    shouldAutoScrollRef.current = isNearBottom
     setShowScrollButton(!isNearBottom && messages.length > 1)
   }
 
   useEffect(() => {
-    responseEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages.length])
+    if (shouldAutoScrollRef.current || isStreaming) {
+      responseEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [messages, isStreaming])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -563,7 +744,7 @@ export default function App() {
 
                   {/* MESSAGES */}
                   {messages.map((msg, idx) => (
-                    <div key={idx} className={`message-row ${msg.role}`} style={{ marginBottom: 24, display: 'flex', flexDirection: 'column', alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
+                    <div key={msg.id} className={`message-row ${msg.role}`} style={{ marginBottom: 24, display: 'flex', flexDirection: 'column', alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
 
                       {msg.role === 'user' ? (
                         <div className="query-pill" style={{ maxWidth: '70%', alignSelf: 'flex-end', position: 'relative' }}>
