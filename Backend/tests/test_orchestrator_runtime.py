@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
@@ -113,4 +114,56 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
         "channel": "desktop:desk_test",
         "route": "opus",
         "status": "completed",
+    }
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_runtime_can_cancel_active_task(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_cancel.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    task = _signed_task("signing-secret")
+    created = asyncio.Event()
+    streamed_events: list[dict[str, object]] = []
+
+    async def endless_stream(_task: TaskEnvelope):
+        while True:
+            await asyncio.sleep(60)
+            yield None
+
+    runtime._stream_anthropic_events = endless_stream  # type: ignore[method-assign]
+
+    async def consume() -> None:
+        async for event in runtime.stream_task(task):
+            streamed_events.append(event)
+            if event["type"] == "task.created":
+                created.set()
+
+    await runtime.start()
+    consumer = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(created.wait(), timeout=2)
+        assert runtime.cancel_task(task.task_id) is True
+        await asyncio.wait_for(consumer, timeout=2)
+    finally:
+        if not consumer.done():
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+        await runtime.stop()
+
+    assert streamed_events[-1] == {
+        "type": "task.cancelled",
+        "task_id": "tsk_test123",
+        "request_id": "req_test123",
+        "session_id": "sess_20260307",
+        "channel": "desktop:desk_test",
+        "route": "opus",
+        "status": "cancelled",
+        "message": "Response stopped.",
     }

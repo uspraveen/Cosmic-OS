@@ -166,6 +166,28 @@ class TaskLedger:
             )
             connection.commit()
 
+    def mark_cancelled(self, task_id: str, *, message: str) -> None:
+        completed_at = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status = 'cancelled',
+                    error_code = 'CANCELLED',
+                    error_message = ?,
+                    updated_at = ?,
+                    completed_at = ?
+                WHERE task_id = ?
+                """,
+                (
+                    message,
+                    completed_at,
+                    completed_at,
+                    task_id,
+                ),
+            )
+            connection.commit()
+
     def list_active_tasks(
         self,
         *,

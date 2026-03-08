@@ -633,6 +633,28 @@ body,
   color: rgba(255, 255, 255, 0.5);
 }
 
+.stream-stop-btn {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: 999px;
+  transition: transform 0.18s ease, filter 0.18s ease;
+}
+
+.stream-stop-btn:hover {
+  transform: scale(1.05);
+  filter: brightness(1.06);
+}
+
+.stream-stop-btn:active {
+  transform: scale(0.97);
+}
+
 .divider {
   height: 1px;
   width: 100%;

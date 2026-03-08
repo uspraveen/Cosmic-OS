@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 import pytest
@@ -114,6 +115,89 @@ class FakeOrchestratorClient:
 
     async def list_active_tasks(self, *, session_id: str | None = None, channel: str | None = None) -> list[dict]:
         return []
+
+    async def cancel_task(self, task_id: str) -> bool:
+        return False
+
+
+class FakeCancellableDirectAdapter:
+    def __init__(self, route: str) -> None:
+        self.route = route
+        self.started = asyncio.Event()
+
+    async def close(self) -> None:
+        return
+
+    async def stream(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        history,
+        send,
+        store_assistant_message,
+        channel: str,
+    ) -> None:
+        assert history[-1]["role"] == "user"
+        self.started.set()
+        await send(
+            {
+                "type": "response.chunk",
+                "request_id": request_id,
+                "session_id": session_id,
+                "content": "Partial answer",
+                "done": False,
+            }
+        )
+        await asyncio.sleep(60)
+
+
+class FakeCancellableOrchestratorClient:
+    def __init__(self) -> None:
+        self._cancellations: dict[str, asyncio.Event] = {}
+
+    async def start(self) -> None:
+        return
+
+    async def stop(self) -> None:
+        return
+
+    async def stream_task(self, task) -> object:
+        cancel_event = asyncio.Event()
+        self._cancellations[task.task_id] = cancel_event
+        try:
+            yield {
+                "type": "task.created",
+                "task_id": task.task_id,
+                "request_id": task.input.get("request_id"),
+                "session_id": task.session_id,
+                "channel": task.channel,
+                "route": "opus",
+                "status": "running",
+            }
+            await cancel_event.wait()
+            yield {
+                "type": "task.cancelled",
+                "task_id": task.task_id,
+                "request_id": task.input.get("request_id"),
+                "session_id": task.session_id,
+                "channel": task.channel,
+                "route": "opus",
+                "status": "cancelled",
+                "message": "Response stopped.",
+            }
+        finally:
+            self._cancellations.pop(task.task_id, None)
+
+    async def list_active_tasks(self, *, session_id: str | None = None, channel: str | None = None) -> list[dict]:
+        return []
+
+    async def cancel_task(self, task_id: str) -> bool:
+        cancel_event = self._cancellations.get(task_id)
+        if cancel_event is None:
+            return False
+        cancel_event.set()
+        return True
 
 
 def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
@@ -361,3 +445,93 @@ def test_desktop_websocket_streams_thin_opus_route(test_client: TestClient, tmp_
 
             completed = websocket.receive_json()
             assert completed["type"] == "task.completed"
+
+
+def test_desktop_websocket_cancel_stops_direct_stream(test_client: TestClient, tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="haiku")
+    runtime.haiku_adapter = FakeCancellableDirectAdapter("haiku")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws?token=test-token&device_id=desk_cancel_direct") as websocket:
+            websocket.send_json(
+                {
+                    "type": "query",
+                    "request_id": "req_cancel_direct",
+                    "content": "Start a long answer",
+                }
+            )
+            route_result = websocket.receive_json()
+            assert route_result["type"] == "route_result"
+            chunk = websocket.receive_json()
+            assert chunk["type"] == "response.chunk"
+            assert chunk["content"] == "Partial answer"
+
+            websocket.send_json(
+                {
+                    "type": "cancel",
+                    "request_id": "cancel_direct_001",
+                    "target_request_id": "req_cancel_direct",
+                }
+            )
+            cancelled = websocket.receive_json()
+            assert cancelled["type"] == "task.cancelled"
+            assert cancelled["request_id"] == "req_cancel_direct"
+            assert cancelled["task_id"] is None
+            assert cancelled["route"] == "haiku"
+
+
+def test_desktop_websocket_cancel_stops_opus_stream(test_client: TestClient, tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    runtime.orchestrator = FakeCancellableOrchestratorClient()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws?token=test-token&device_id=desk_cancel_opus") as websocket:
+            websocket.send_json(
+                {
+                    "type": "query",
+                    "request_id": "req_cancel_opus",
+                    "content": "Start an opus task",
+                }
+            )
+            route_result = websocket.receive_json()
+            assert route_result["type"] == "route_result"
+            created = websocket.receive_json()
+            assert created["type"] == "task.created"
+
+            websocket.send_json(
+                {
+                    "type": "cancel",
+                    "request_id": "cancel_opus_001",
+                    "task_id": created["task_id"],
+                    "target_request_id": "req_cancel_opus",
+                }
+            )
+            cancelled = websocket.receive_json()
+            assert cancelled["type"] == "task.cancelled"
+            assert cancelled["task_id"] == created["task_id"]
+            assert cancelled["request_id"] == "req_cancel_opus"
+            assert cancelled["route"] == "opus"

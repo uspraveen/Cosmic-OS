@@ -80,6 +80,22 @@ class OrchestratorClient:
             return []
         return [item for item in tasks if isinstance(item, dict)]
 
+    async def cancel_task(self, task_id: str) -> bool:
+        normalized_task_id = str(task_id or "").strip()
+        if not normalized_task_id:
+            return False
+        headers = {
+            "X-Internal-Token": self.internal_token,
+        }
+        response = await self._client.post(
+            f"{self.base_url}/internal/tasks/{normalized_task_id}/cancel",
+            headers=headers,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(self._error_from_response(response.content, response.status_code))
+        payload = response.json()
+        return bool(payload.get("cancelled"))
+
     def _error_from_response(self, body: bytes, status_code: int) -> str:
         try:
             payload = json.loads(body.decode("utf-8"))

@@ -62,6 +62,8 @@ export default function App() {
   const activeAssistantMessageByTaskRef = useRef<Map<string, string>>(new Map())
   const streamedResponseRequestIdsRef = useRef<Set<string>>(new Set())
   const streamedResponseTaskIdsRef = useRef<Set<string>>(new Set())
+  const activeStreamingRequestIdRef = useRef<string | null>(null)
+  const activeStreamingTaskIdRef = useRef<string | null>(null)
   const messagesRef = useRef<Message[]>([])
   const activeSessionIdRef = useRef<string | null>(null)
   const shouldAutoScrollRef = useRef(true)
@@ -108,6 +110,8 @@ export default function App() {
     activeAssistantMessageByTaskRef.current.clear()
     streamedResponseRequestIdsRef.current.clear()
     streamedResponseTaskIdsRef.current.clear()
+    activeStreamingRequestIdRef.current = null
+    activeStreamingTaskIdRef.current = null
   }
 
   const createAssistantMessageId = () => `assistant_${crypto.randomUUID()}`
@@ -177,6 +181,11 @@ export default function App() {
     if (taskId) {
       streamedResponseTaskIdsRef.current.add(taskId)
     }
+  }
+
+  const clearActiveStreamingRefs = () => {
+    activeStreamingRequestIdRef.current = null
+    activeStreamingTaskIdRef.current = null
   }
 
   const hasStreamedResponse = (event: any) => {
@@ -397,6 +406,9 @@ export default function App() {
       }
 
       if (eventType === 'route_result') {
+        if (typeof event.request_id === 'string' && event.request_id.trim()) {
+          activeStreamingRequestIdRef.current = event.request_id.trim()
+        }
         setActiveSessionId((prev) => typeof event.session_id === 'string' ? event.session_id : prev)
         setMessages((prev) => {
           const existingId = findAssistantMessageIdForEvent(event)
@@ -411,6 +423,9 @@ export default function App() {
       }
 
       if (eventType === 'task.created') {
+        if (typeof event.task_id === 'string' && event.task_id.trim()) {
+          activeStreamingTaskIdRef.current = event.task_id.trim()
+        }
         setMessages((prev) => {
           const { messages: nextMessages } = ensureAssistantMessageForEvent(prev, event)
           return nextMessages
@@ -476,11 +491,13 @@ export default function App() {
           return updatedMessages
         })
         setIsStreaming(false)
+        clearActiveStreamingRefs()
         return
       }
 
       if (eventType === 'task.failed') {
         setIsStreaming(false)
+        clearActiveStreamingRefs()
         const message = String(event?.error?.message || event?.message || 'Opus task failed.')
         setMessages((prev) => {
           const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
@@ -496,6 +513,8 @@ export default function App() {
       }
 
       if (eventType === 'task.completed' || eventType === 'task.cancelled') {
+        setIsStreaming(false)
+        clearActiveStreamingRefs()
         const messageId = findAssistantMessageIdForEvent(event)
         const boundMessage = messageId
           ? messagesRef.current.find((item) => item.id === messageId)
@@ -505,6 +524,10 @@ export default function App() {
           !hasStreamedResponse(event) &&
           (!boundMessage || !String(boundMessage.content || '').trim())
         forgetAssistantMessageBindings(event)
+        if (eventType === 'task.cancelled' && messageId && boundMessage && !String(boundMessage.content || '').trim() && !String(boundMessage.thinking || '').trim()) {
+          setMessages((prev) => prev.filter((item) => item.id !== messageId))
+          return
+        }
         if (shouldRefreshFromHistory) {
           void refreshSessionFromGateway(typeof event.session_id === 'string' ? event.session_id : null)
         }
@@ -513,6 +536,7 @@ export default function App() {
 
       if (eventType === 'error') {
         setIsStreaming(false)
+        clearActiveStreamingRefs()
         if (event.message) {
           setMessages((prev) => [...prev, {
             ...createAssistantMessage(),
@@ -530,6 +554,7 @@ export default function App() {
       }
       if (status?.state === 'error' || status?.state === 'idle') {
         setIsStreaming(false)
+        clearActiveStreamingRefs()
       }
     })
 
@@ -604,6 +629,8 @@ export default function App() {
 
     const requestId = `req_${crypto.randomUUID()}`
     const assistantMessageId = createAssistantMessageId()
+    activeStreamingRequestIdRef.current = requestId
+    activeStreamingTaskIdRef.current = null
     activeAssistantMessageByRequestRef.current.set(requestId, assistantMessageId)
 
     // Reserve the assistant slot before the first streaming event arrives.
@@ -632,9 +659,11 @@ export default function App() {
       if (confirmedRequestId && confirmedRequestId !== requestId) {
         activeAssistantMessageByRequestRef.current.delete(requestId)
         activeAssistantMessageByRequestRef.current.set(confirmedRequestId, assistantMessageId)
+        activeStreamingRequestIdRef.current = confirmedRequestId
       }
     }).catch((error: any) => {
       setIsStreaming(false)
+      clearActiveStreamingRefs()
       activeAssistantMessageByRequestRef.current.delete(requestId)
       setMessages(prev => prev.map((message) => {
         if (message.id !== assistantMessageId) {
@@ -646,6 +675,19 @@ export default function App() {
         }
       }))
     })
+  }
+
+  const handleStopStreaming = () => {
+    const requestId = activeStreamingRequestIdRef.current
+    const taskId = activeStreamingTaskIdRef.current
+    if (!requestId && !taskId) {
+      return
+    }
+    const cancelPromise = window.cosmic?.cancelGatewayResponse?.({
+      requestId: requestId || undefined,
+      taskId: taskId || undefined,
+    })
+    cancelPromise?.catch(() => { })
   }
 
   const handleHistoryToggle = () => {
@@ -1067,7 +1109,15 @@ export default function App() {
                   </div>
 
                   {isStreaming ? (
-                    <LiquidGlassLoader />
+                    <button
+                      className="stream-stop-btn"
+                      onClick={handleStopStreaming}
+                      type="button"
+                      title="Stop response"
+                      aria-label="Stop response"
+                    >
+                      <LiquidGlassLoader />
+                    </button>
                   ) : (
                     <button
                       className={`send-btn ${query.trim() ? 'active' : ''}`}

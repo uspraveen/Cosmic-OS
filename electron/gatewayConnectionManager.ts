@@ -214,6 +214,21 @@ export class GatewayConnectionManager {
     return effectiveRequestId
   }
 
+  cancelResponse(requestId?: string, taskId?: string) {
+    const normalizedRequestId = String(requestId || '').trim()
+    const normalizedTaskId = String(taskId || '').trim()
+    if (!normalizedRequestId && !normalizedTaskId) {
+      throw new Error('A requestId or taskId is required to stop a response.')
+    }
+    this.sendJson({
+      type: 'cancel',
+      request_id: `cancel_${crypto.randomUUID()}`,
+      target_request_id: normalizedRequestId || undefined,
+      task_id: normalizedTaskId || undefined,
+    })
+    return { ok: true }
+  }
+
   getState() {
     return {
       status: this.status,

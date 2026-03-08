@@ -23,6 +23,16 @@ class SSEEvent:
     data: str
 
 
+@dataclass(slots=True)
+class ActiveTaskRun:
+    runner_task: asyncio.Task[Any] | None
+    request_id: str | None
+    session_id: str | None
+    channel: str | None
+    cancel_requested: bool = False
+    cancel_message: str = "Response stopped."
+
+
 class OrchestratorRuntime:
     def __init__(
         self,
@@ -36,6 +46,7 @@ class OrchestratorRuntime:
         self._owns_client = client is None
         self.task_ledger = TaskLedger(config.task_ledger_db_path)
         self.started = False
+        self._active_runs: dict[str, ActiveTaskRun] = {}
 
     async def start(self) -> None:
         self.task_ledger.initialize()
@@ -62,6 +73,12 @@ class OrchestratorRuntime:
             raise RuntimeError("TaskEnvelope.input.query is required for orchestrator.process")
 
         self.task_ledger.create_task(task)
+        self._active_runs[task.task_id] = ActiveTaskRun(
+            runner_task=asyncio.current_task(),
+            request_id=request_id,
+            session_id=session_id,
+            channel=channel,
+        )
         yield {
             "type": "task.created",
             "task_id": task.task_id,
@@ -208,6 +225,23 @@ class OrchestratorRuntime:
                 "route": "opus",
                 "status": "completed",
             }
+        except asyncio.CancelledError:
+            run_state = self._active_runs.get(task.task_id)
+            if run_state and run_state.cancel_requested:
+                message = run_state.cancel_message
+                self.task_ledger.mark_cancelled(task.task_id, message=message)
+                yield {
+                    "type": "task.cancelled",
+                    "task_id": task.task_id,
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "channel": channel,
+                    "route": "opus",
+                    "status": "cancelled",
+                    "message": message,
+                }
+                return
+            raise
         except Exception as exc:
             message = str(exc).strip() or "Orchestrator processing failed."
             self.task_ledger.mark_failed(task.task_id, code="OPUS_UPSTREAM_ERROR", message=message)
@@ -225,6 +259,8 @@ class OrchestratorRuntime:
                     "retryable": False,
                 },
             }
+        finally:
+            self._active_runs.pop(task.task_id, None)
 
     def list_active_tasks(
         self,
@@ -233,6 +269,20 @@ class OrchestratorRuntime:
         channel: str | None = None,
     ) -> list[dict[str, Any]]:
         return self.task_ledger.list_active_tasks(session_id=session_id, channel=channel)
+
+    def cancel_task(self, task_id: str, *, message: str = "Response stopped.") -> bool:
+        normalized_task_id = str(task_id or "").strip()
+        if not normalized_task_id:
+            return False
+        run_state = self._active_runs.get(normalized_task_id)
+        if run_state is None:
+            return False
+        run_state.cancel_requested = True
+        run_state.cancel_message = message
+        runner_task = run_state.runner_task
+        if runner_task is not None and not runner_task.done():
+            runner_task.cancel()
+        return True
 
     async def _stream_anthropic_events(self, task: TaskEnvelope) -> AsyncIterator[SSEEvent]:
         url = "https://api.anthropic.com/v1/messages"

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
@@ -13,6 +15,20 @@ from .orchestrator_client import OrchestratorClient
 from .router_client import ModelRouterClient
 from .session_store import SessionStore
 from shared import SOURCE_PRIORITY_MAP, TaskEnvelope, generate_task_id, sign_task_envelope, utcnow
+
+
+@dataclass(slots=True)
+class ActiveRequest:
+    request_id: str
+    session_id: str
+    channel: str
+    route: str
+    worker: asyncio.Task[None] | None = None
+    task_id: str | None = None
+    cancel_requested: bool = False
+    partial_content: str = ""
+    partial_thinking: str = ""
+    completed: bool = False
 
 
 class GatewayRuntime:
@@ -49,6 +65,8 @@ class GatewayRuntime:
         self.active_task_channels: dict[str, str] = {}
         self.request_records: dict[str, dict[str, Any]] = {}
         self.pending_input_requests: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        self.active_requests: dict[str, ActiveRequest] = {}
+        self.active_requests_by_task: dict[str, str] = {}
 
     async def start(self) -> None:
         self.session_store.initialize()
@@ -58,6 +76,13 @@ class GatewayRuntime:
         self.started = True
 
     async def stop(self) -> None:
+        workers = [state.worker for state in self.active_requests.values() if state.worker is not None]
+        for worker in workers:
+            worker.cancel()
+        if workers:
+            await asyncio.gather(*workers, return_exceptions=True)
+        self.active_requests.clear()
+        self.active_requests_by_task.clear()
         await self.registry.stop_all()
         await self.model_router.stop()
         await self.orchestrator.stop()
@@ -167,8 +192,11 @@ class GatewayRuntime:
             raise ValueError(f"No adapter registered for channel: {channel!r}")
 
         history = self.session_store.get_pruned_history(session_id)
+        active_request = self.active_requests.get(request_id)
 
         async def send(event: dict[str, Any]) -> None:
+            if active_request is not None:
+                self._track_partial_stream(active_request, event)
             await channel_adapter.send(event, channel=channel)
 
         def store_assistant_message(
@@ -218,6 +246,9 @@ class GatewayRuntime:
             channel=channel,
         )
         self.active_task_channels[task.task_id] = channel
+        if active_request is not None:
+            active_request.task_id = task.task_id
+            self.active_requests_by_task[task.task_id] = request_id
 
         try:
             async for event in self.orchestrator.stream_task(task):
@@ -235,6 +266,8 @@ class GatewayRuntime:
                 )
         except Exception as exc:
             self.active_task_channels.pop(task.task_id, None)
+            if active_request is not None:
+                self.active_requests_by_task.pop(task.task_id, None)
             await send(
                 {
                     "type": "error",
@@ -245,6 +278,81 @@ class GatewayRuntime:
                     "message": str(exc),
                 }
             )
+
+    def start_request_fulfillment(self, request_record: dict[str, Any]) -> None:
+        request_id = self._safe_text(request_record.get("request_id"))
+        session_id = self._safe_text(request_record.get("session_id"))
+        channel = self._safe_text(request_record.get("channel"))
+        route = self._safe_text(request_record.get("route")) or "opus"
+        if not request_id or not session_id or not channel:
+            raise ValueError("Request record is missing channel, request_id, or session_id")
+
+        state = ActiveRequest(
+            request_id=request_id,
+            session_id=session_id,
+            channel=channel,
+            route=route,
+        )
+        self.active_requests[request_id] = state
+        state.worker = asyncio.create_task(self._run_request_fulfillment(state, request_record))
+
+    async def cancel_active_fulfillment(
+        self,
+        *,
+        channel: str,
+        request_id: str | None = None,
+        target_request_id: str | None = None,
+        task_id: str | None = None,
+    ) -> bool:
+        normalized_channel = self._safe_text(channel)
+        normalized_task_id = self._safe_text(task_id)
+        normalized_request_id = self._safe_text(target_request_id) or self._safe_text(request_id)
+        if not normalized_channel:
+            raise ValueError("cancel requires a channel")
+        if not normalized_task_id and not normalized_request_id:
+            raise ValueError("cancel requires task_id or target_request_id")
+
+        state: ActiveRequest | None = None
+        if normalized_task_id:
+            bound_request_id = self.active_requests_by_task.get(normalized_task_id)
+            if bound_request_id:
+                state = self.active_requests.get(bound_request_id)
+        if state is None and normalized_request_id:
+            state = self.active_requests.get(normalized_request_id)
+
+        if state is not None and state.channel != normalized_channel:
+            state = None
+
+        if state is None and normalized_task_id:
+            cancelled = await self.orchestrator.cancel_task(normalized_task_id)
+            if cancelled:
+                await self.deliver_channel_event(
+                    {
+                        "type": "task.cancelled",
+                        "task_id": normalized_task_id,
+                        "request_id": normalized_request_id,
+                        "channel": normalized_channel,
+                        "route": "opus",
+                        "status": "cancelled",
+                        "message": "Response stopped.",
+                    }
+                )
+            return cancelled
+
+        if state is None:
+            return False
+
+        state.cancel_requested = True
+        if state.route == "opus" and state.task_id:
+            cancelled = await self.orchestrator.cancel_task(state.task_id)
+            if cancelled:
+                return True
+
+        worker = state.worker
+        if worker is not None and not worker.done():
+            worker.cancel()
+            return True
+        return False
 
     def list_sessions(self) -> list[dict[str, Any]]:
         return self.session_store.list_sessions()
@@ -600,6 +708,13 @@ class GatewayRuntime:
         store_assistant_message,
     ) -> None:
         event_type = self._safe_text(event.get("type")) or ""
+        request_id = self._safe_text(event.get("request_id"))
+        task_id = self._safe_text(event.get("task_id"))
+        if request_id and task_id:
+            self.active_requests_by_task[task_id] = request_id
+            active_request = self.active_requests.get(request_id)
+            if active_request is not None:
+                active_request.task_id = task_id
         if event_type == "response.complete":
             store_assistant_message(
                 str(event.get("content") or ""),
@@ -617,9 +732,9 @@ class GatewayRuntime:
             if channel:
                 self.pending_input_requests[channel].append(event)
         elif event_type in {"task.completed", "task.failed", "task.cancelled"}:
-            task_id = self._safe_text(event.get("task_id"))
             if task_id:
                 self.active_task_channels.pop(task_id, None)
+                self.active_requests_by_task.pop(task_id, None)
 
         await send(event)
 
@@ -660,3 +775,86 @@ class GatewayRuntime:
         if normalized in {"opus", "haiku", "perplexity"}:
             return normalized
         return "opus"
+
+    async def _run_request_fulfillment(
+        self,
+        state: ActiveRequest,
+        request_record: dict[str, Any],
+    ) -> None:
+        try:
+            await self.fulfill_processed_message(request_record)
+        except asyncio.CancelledError:
+            if state.cancel_requested:
+                await self._emit_cancelled_event(state)
+                return
+            raise
+        except Exception as exc:
+            adapter = self.registry.get_adapter(state.channel)
+            if adapter is not None:
+                await adapter.send(
+                    {
+                        "type": "error",
+                        "request_id": state.request_id,
+                        "session_id": state.session_id,
+                        "task_id": state.task_id,
+                        "code": "UPSTREAM_ERROR",
+                        "message": str(exc),
+                    },
+                    channel=state.channel,
+                )
+        finally:
+            if state.cancel_requested and state.partial_content and not state.completed:
+                self._append_session_message(
+                    state.session_id,
+                    role="assistant",
+                    content=state.partial_content,
+                    route=state.route,
+                    channel=state.channel,
+                    metadata={
+                        "thinking_text": state.partial_thinking or None,
+                        "interrupted": True,
+                    },
+                )
+            self._finalize_active_request(state)
+
+    async def _emit_cancelled_event(self, state: ActiveRequest) -> None:
+        adapter = self.registry.get_adapter(state.channel)
+        if adapter is None:
+            return
+        await adapter.send(
+            {
+                "type": "task.cancelled",
+                "request_id": state.request_id,
+                "session_id": state.session_id,
+                "task_id": state.task_id,
+                "route": state.route,
+                "channel": state.channel,
+                "status": "cancelled",
+                "message": "Response stopped.",
+            },
+            channel=state.channel,
+        )
+
+    def _finalize_active_request(self, state: ActiveRequest) -> None:
+        current = self.active_requests.get(state.request_id)
+        if current is state:
+            self.active_requests.pop(state.request_id, None)
+        if state.task_id:
+            bound_request_id = self.active_requests_by_task.get(state.task_id)
+            if bound_request_id == state.request_id:
+                self.active_requests_by_task.pop(state.task_id, None)
+
+    def _track_partial_stream(self, state: ActiveRequest, event: dict[str, Any]) -> None:
+        event_type = self._safe_text(event.get("type")) or ""
+        if event_type == "response.thinking.chunk":
+            state.partial_thinking += str(event.get("content") or "")
+            return
+        if event_type == "response.chunk":
+            state.partial_content += str(event.get("content") or "")
+            return
+        if event_type == "response.complete":
+            state.completed = True
+            state.partial_content = str(event.get("content") or state.partial_content)
+            thinking_text = self._safe_text(event.get("thinking_text"))
+            if thinking_text is not None:
+                state.partial_thinking = thinking_text

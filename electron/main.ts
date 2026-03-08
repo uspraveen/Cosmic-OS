@@ -706,6 +706,16 @@ app.whenReady().then(() => {
     }
   })
 
+  ipcMain.handle('gateway:cancel-response', async (_, payload: { requestId?: string; taskId?: string }) => {
+    if (!gatewayConnectionManager) {
+      throw new Error('Gateway connection manager is unavailable.')
+    }
+    return gatewayConnectionManager.cancelResponse(
+      String(payload?.requestId || ''),
+      String(payload?.taskId || ''),
+    )
+  })
+
   ipcMain.handle('gateway:request-resume', () => {
     gatewayConnectionManager?.requestResume()
     return { ok: true }

@@ -186,7 +186,7 @@ async def _handle_desktop_websocket_message(
             channel=channel,
         )
         try:
-            await runtime.fulfill_processed_message(result)
+            runtime.start_request_fulfillment(result)
         except Exception as exc:
             await adapter.send(
                 _error_payload(
@@ -210,14 +210,24 @@ async def _handle_desktop_websocket_message(
         return
 
     if message_type == "cancel":
-        await adapter.send(
-            _error_payload(
-                request_id,
-                "NOT_IMPLEMENTED",
-                "cancel is not implemented in this backend build yet.",
-            ),
-            channel=channel,
-        )
+        task_id = str(payload.get("task_id") or "").strip() or None
+        target_request_id = str(payload.get("target_request_id") or "").strip() or None
+        try:
+            await runtime.cancel_active_fulfillment(
+                channel=channel,
+                request_id=request_id,
+                target_request_id=target_request_id,
+                task_id=task_id,
+            )
+        except ValueError as exc:
+            await adapter.send(
+                _error_payload(
+                    request_id,
+                    "INVALID_CANCEL",
+                    str(exc),
+                ),
+                channel=channel,
+            )
         return
 
     await adapter.send(

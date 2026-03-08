@@ -79,6 +79,20 @@ async def list_active_tasks(
     }
 
 
+@app.post("/internal/tasks/{task_id}/cancel")
+async def cancel_task(
+    task_id: str,
+    _: None = Depends(require_internal_token),
+    runtime: OrchestratorRuntime = Depends(get_runtime),
+) -> dict[str, object]:
+    cancelled = runtime.cancel_task(task_id)
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "cancelled": cancelled,
+    }
+
+
 @app.post("/internal/process/stream")
 async def process_stream(
     task: TaskEnvelope,
