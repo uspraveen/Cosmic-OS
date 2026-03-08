@@ -86,7 +86,14 @@ class LLMStreamProcessor:
 
 
 def normalize_conversation_history(history: list[dict[str, object]]) -> list[dict[str, str]]:
-    """Collapse consecutive same-role messages for providers that require turn alternation."""
+    """Collapse same-role runs and trim orphaned assistant turns.
+
+    History is pruned by a character budget before it reaches direct adapters.
+    That means the retained suffix can begin midway through a conversation on an
+    assistant turn. Providers like Perplexity reject `system -> assistant`
+    openings, so we normalize to a valid alternating chat transcript that starts
+    with `user` and, for query-time history, also ends with `user`.
+    """
     normalized: list[dict[str, str]] = []
     for message in history:
         role = str(message.get("role") or "").strip()
@@ -97,4 +104,11 @@ def normalize_conversation_history(history: list[dict[str, object]]) -> list[dic
             normalized[-1]["content"] += "\n\n" + content
             continue
         normalized.append({"role": role, "content": content})
+
+    while normalized and normalized[0]["role"] != "user":
+        normalized.pop(0)
+
+    while normalized and normalized[-1]["role"] != "user":
+        normalized.pop()
+
     return normalized
