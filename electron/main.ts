@@ -693,7 +693,7 @@ app.whenReady().then(() => {
     return gatewayConnectionManager?.getState() || null
   })
 
-  ipcMain.handle('gateway:send-query', async (_, payload: { content: string; conversationContext?: any[] }) => {
+  ipcMain.handle('gateway:send-query', async (_, payload: { content: string; conversationContext?: any[]; requestId?: string }) => {
     if (!gatewayConnectionManager) {
       throw new Error('Gateway connection manager is unavailable.')
     }
@@ -701,6 +701,7 @@ app.whenReady().then(() => {
       requestId: gatewayConnectionManager.sendQuery(
         String(payload?.content || ''),
         Array.isArray(payload?.conversationContext) ? payload.conversationContext : [],
+        String(payload?.requestId || ''),
       ),
     }
   })

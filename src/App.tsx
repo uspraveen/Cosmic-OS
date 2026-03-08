@@ -585,7 +585,6 @@ export default function App() {
     if (inputRef.current) inputRef.current.style.height = '24px'
     shouldAutoScrollRef.current = true
 
-    // 1. Add User Message (Optimistic)
     setMessages(prev => [...prev, createUserMessage(textToSend)])
     if (authState !== 'authenticated') {
       setMessages(prev => [...prev, {
@@ -603,9 +602,20 @@ export default function App() {
       return
     }
 
+    const requestId = `req_${crypto.randomUUID()}`
+    const assistantMessageId = createAssistantMessageId()
+    activeAssistantMessageByRequestRef.current.set(requestId, assistantMessageId)
+
+    // Reserve the assistant slot before the first streaming event arrives.
+    setMessages(prev => [
+      ...prev,
+      createAssistantMessage({ id: assistantMessageId }),
+    ])
+
     setIsStreaming(true)
     if (!window.cosmic?.sendGatewayQuery) {
       setIsStreaming(false)
+      activeAssistantMessageByRequestRef.current.delete(requestId)
       setMessages(prev => [...prev, {
         ...createAssistantMessage(),
         content: "Gateway chat support is unavailable in this desktop build."
@@ -614,14 +624,27 @@ export default function App() {
     }
 
     window.cosmic.sendGatewayQuery({
+      requestId,
       content: textToSend,
       conversationContext: buildConversationContext([...messages, createUserMessage(textToSend)]),
+    }).then((result) => {
+      const confirmedRequestId = typeof result?.requestId === 'string' ? result.requestId.trim() : ''
+      if (confirmedRequestId && confirmedRequestId !== requestId) {
+        activeAssistantMessageByRequestRef.current.delete(requestId)
+        activeAssistantMessageByRequestRef.current.set(confirmedRequestId, assistantMessageId)
+      }
     }).catch((error: any) => {
       setIsStreaming(false)
-      setMessages(prev => [...prev, {
-        ...createAssistantMessage(),
-        content: error?.message || "Unable to send the message to your VM."
-      }])
+      activeAssistantMessageByRequestRef.current.delete(requestId)
+      setMessages(prev => prev.map((message) => {
+        if (message.id !== assistantMessageId) {
+          return message
+        }
+        return {
+          ...message,
+          content: error?.message || "Unable to send the message to your VM.",
+        }
+      }))
     })
   }
 

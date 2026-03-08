@@ -64,7 +64,7 @@ interface Window {
     // Gateway chat APIs
     getGatewayState: () => Promise<GatewaySocketState | null>
     requestGatewayResume: () => Promise<{ ok: boolean }>
-    sendGatewayQuery: (payload: { content: string; conversationContext?: any[] }) => Promise<{ requestId: string }>
+    sendGatewayQuery: (payload: { content: string; conversationContext?: any[]; requestId?: string }) => Promise<{ requestId: string }>
     listGatewaySessions: () => Promise<{ sessions: any[] }>
     getGatewaySessionHistory: (sessionId: string) => Promise<{ session_id: string; messages: any[] }>
     onGatewayEvent: (cb: (data: any) => void) => () => void

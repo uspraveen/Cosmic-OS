@@ -95,7 +95,7 @@ contextBridge.exposeInMainWorld('cosmic', {
   saveLocalApiKeys: (payload: any) => ipcRenderer.send('settings:save-api-keys', payload),
   getGatewayState: () => ipcRenderer.invoke('gateway:get-state'),
   requestGatewayResume: () => ipcRenderer.invoke('gateway:request-resume'),
-  sendGatewayQuery: (payload: { content: string; conversationContext?: any[] }) => ipcRenderer.invoke('gateway:send-query', payload),
+  sendGatewayQuery: (payload: { content: string; conversationContext?: any[]; requestId?: string }) => ipcRenderer.invoke('gateway:send-query', payload),
   listGatewaySessions: () => ipcRenderer.invoke('gateway:list-sessions'),
   getGatewaySessionHistory: (sessionId: string) => ipcRenderer.invoke('gateway:get-session-history', sessionId),
   onGatewayEvent: (cb: (data: any) => void) => {
