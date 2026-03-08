@@ -59,6 +59,8 @@ export default function App() {
   const responseContainerRef = useRef<HTMLDivElement>(null)
   const activeAssistantMessageByRequestRef = useRef<Map<string, string>>(new Map())
   const activeAssistantMessageByTaskRef = useRef<Map<string, string>>(new Map())
+  const streamedResponseRequestIdsRef = useRef<Set<string>>(new Set())
+  const streamedResponseTaskIdsRef = useRef<Set<string>>(new Set())
   const messagesRef = useRef<Message[]>([])
   const activeSessionIdRef = useRef<string | null>(null)
   const shouldAutoScrollRef = useRef(true)
@@ -103,6 +105,8 @@ export default function App() {
   const resetInFlightAssistantMaps = () => {
     activeAssistantMessageByRequestRef.current.clear()
     activeAssistantMessageByTaskRef.current.clear()
+    streamedResponseRequestIdsRef.current.clear()
+    streamedResponseTaskIdsRef.current.clear()
   }
 
   const createAssistantMessageId = () => `assistant_${crypto.randomUUID()}`
@@ -155,10 +159,35 @@ export default function App() {
     const taskId = typeof event?.task_id === 'string' ? event.task_id.trim() : ''
     if (requestId) {
       activeAssistantMessageByRequestRef.current.delete(requestId)
+      streamedResponseRequestIdsRef.current.delete(requestId)
     }
     if (taskId) {
       activeAssistantMessageByTaskRef.current.delete(taskId)
+      streamedResponseTaskIdsRef.current.delete(taskId)
     }
+  }
+
+  const markResponseStreamSeen = (event: any) => {
+    const requestId = typeof event?.request_id === 'string' ? event.request_id.trim() : ''
+    const taskId = typeof event?.task_id === 'string' ? event.task_id.trim() : ''
+    if (requestId) {
+      streamedResponseRequestIdsRef.current.add(requestId)
+    }
+    if (taskId) {
+      streamedResponseTaskIdsRef.current.add(taskId)
+    }
+  }
+
+  const hasStreamedResponse = (event: any) => {
+    const requestId = typeof event?.request_id === 'string' ? event.request_id.trim() : ''
+    const taskId = typeof event?.task_id === 'string' ? event.task_id.trim() : ''
+    if (taskId && streamedResponseTaskIdsRef.current.has(taskId)) {
+      return true
+    }
+    if (requestId && streamedResponseRequestIdsRef.current.has(requestId)) {
+      return true
+    }
+    return false
   }
 
   const ensureAssistantMessageForEvent = (messages: Message[], event: any) => {
@@ -389,6 +418,7 @@ export default function App() {
       }
 
       if (eventType === 'response.chunk') {
+        markResponseStreamSeen(event)
         setMessages((prev) => {
           if (!event.content) return prev
           const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
@@ -406,6 +436,7 @@ export default function App() {
       }
 
       if (eventType === 'response.thinking.chunk') {
+        markResponseStreamSeen(event)
         setMessages((prev) => {
           if (!event.content) return prev
           const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
@@ -423,6 +454,7 @@ export default function App() {
       }
 
       if (eventType === 'response.complete') {
+        markResponseStreamSeen(event)
         setActiveSessionId((prev) => typeof event.session_id === 'string' ? event.session_id : prev)
         setMessages((prev) => {
           const sources = Array.isArray(event.sources) ? event.sources : undefined
@@ -469,6 +501,7 @@ export default function App() {
           : null
         const shouldRefreshFromHistory =
           eventType === 'task.completed' &&
+          !hasStreamedResponse(event) &&
           (!boundMessage || !String(boundMessage.content || '').trim())
         forgetAssistantMessageBindings(event)
         if (shouldRefreshFromHistory) {
