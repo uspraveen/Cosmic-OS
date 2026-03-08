@@ -122,6 +122,9 @@ class GatewayRuntime:
             metadata = {}
         if not isinstance(conversation_context, list):
             conversation_context = []
+        route_override = self._normalize_route_override(
+            message.get("route_override") if message.get("route_override") is not None else metadata.get("route_override")
+        )
 
         session_id = self._resolve_session_id(message.get("session_id"))
         source_id = (
@@ -149,6 +152,7 @@ class GatewayRuntime:
             metadata=metadata,
             channel=channel,
             conversation_context=assembled_conversation_context,
+            route_override=route_override,
         )
         dispatch_target = "orchestrator" if classification["route"] == "opus" else "gateway"
 
@@ -368,7 +372,19 @@ class GatewayRuntime:
         metadata: dict[str, Any],
         channel: str,
         conversation_context: list[dict[str, Any]],
+        route_override: str | None = None,
     ) -> dict[str, Any]:
+        if route_override:
+            return {
+                "route": route_override,
+                "needs_latest": route_override == "perplexity",
+                "needs_citations": route_override == "perplexity",
+                "is_task": False,
+                "is_continuation": False,
+                "confidence": 1.0,
+                "signals": ["manual_route_override"],
+            }
+
         sticky_message = self.session_store.get_last_awaiting_reply(session_id, channel)
         if sticky_message:
             self.session_store.clear_awaiting_reply(sticky_message["message_id"])
@@ -775,6 +791,19 @@ class GatewayRuntime:
         if normalized in {"opus", "haiku", "perplexity"}:
             return normalized
         return "opus"
+
+    def _normalize_route_override(self, route_override: Any) -> str | None:
+        route = self._safe_text(route_override)
+        if route is None:
+            return None
+        normalized = route.strip().lower()
+        if normalized in {"cosmic", "auto", "default"}:
+            return None
+        if normalized == "gemini":
+            return "haiku"
+        if normalized in {"opus", "haiku", "perplexity"}:
+            return normalized
+        return None
 
     async def _run_request_fulfillment(
         self,

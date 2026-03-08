@@ -145,12 +145,14 @@ class DesktopAdapter(ChannelAdapter):
             conversation_context = []
 
         request_id = self._coerce_str(raw_message.get("request_id"))
+        route_override = self._coerce_str(raw_message.get("route_override"))
         device_id = channel.split(":", 1)[1]
         metadata = {
             "platform": self.platform,
             "message_type": message_type,
             "device_id": device_id,
             "request_id": request_id,
+            "route_override": route_override,
             "conversation_context": conversation_context,
         }
 
@@ -159,6 +161,7 @@ class DesktopAdapter(ChannelAdapter):
             "session_id": self._coerce_str(raw_message.get("session_id")),
             "channel": channel,
             "request_id": request_id,
+            "route_override": route_override,
             "conversation_context": conversation_context,
             "metadata": metadata,
         }

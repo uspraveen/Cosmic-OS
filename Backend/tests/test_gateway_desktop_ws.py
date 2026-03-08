@@ -447,6 +447,44 @@ def test_desktop_websocket_streams_thin_opus_route(test_client: TestClient, tmp_
             assert completed["type"] == "task.completed"
 
 
+def test_desktop_websocket_route_override_bypasses_classifier(test_client: TestClient, tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws?token=test-token&device_id=desk_override") as websocket:
+            websocket.send_json(
+                {
+                    "type": "query",
+                    "request_id": "req_override",
+                    "content": "Force Perplexity",
+                    "route_override": "perplexity",
+                }
+            )
+            route_result = websocket.receive_json()
+            assert route_result["type"] == "route_result"
+            assert route_result["route"] == "perplexity"
+            assert route_result["classification"]["signals"] == ["manual_route_override"]
+
+            chunk = websocket.receive_json()
+            assert chunk["type"] == "response.chunk"
+
+            complete = websocket.receive_json()
+            assert complete["type"] == "response.complete"
+            assert complete["route"] == "perplexity"
+
+
 def test_desktop_websocket_cancel_stops_direct_stream(test_client: TestClient, tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="haiku")
     runtime.haiku_adapter = FakeCancellableDirectAdapter("haiku")

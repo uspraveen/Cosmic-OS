@@ -13,6 +13,7 @@ import './spotlight.css'
 
 export type SearchPosition = 'bottom' | 'middle'
 export type QueryMode = 'chat' | 'meeting'
+export type GatewayModelSelection = 'cosmic' | 'haiku' | 'opus' | 'perplexity'
 
 interface Message {
   id: string
@@ -56,6 +57,14 @@ const buildConversationContext = (messages: Message[]) => {
   }))
 }
 
+const normalizeGatewayModelSelection = (value: unknown): GatewayModelSelection => {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'haiku' || normalized === 'opus' || normalized === 'perplexity') {
+    return normalized
+  }
+  return 'cosmic'
+}
+
 export default function App() {
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const responseEndRef = useRef<HTMLDivElement>(null)
@@ -79,8 +88,9 @@ export default function App() {
 
   const [mode, setMode] = useState<QueryMode>('chat')
   const modeRef = useRef<QueryMode>('chat')
-  const [showModeDropdown, setShowModeDropdown] = useState(false)
   const [isInputFocused, setIsInputFocused] = useState(false)
+  const [showLauncherTray, setShowLauncherTray] = useState(false)
+  const [selectedModel, setSelectedModel] = useState<GatewayModelSelection>('cosmic')
 
   // --- CHAT STATE ---
   const [messages, setMessages] = useState<Message[]>([])
@@ -94,8 +104,6 @@ export default function App() {
   const [gatewayStatus, setGatewayStatus] = useState<GatewayStatus>({ state: 'idle', connected: false })
 
   // --- HISTORY / DB STATE ---
-  const [showHistory, setShowHistory] = useState(false)
-  const [sessions, setSessions] = useState<any[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
 
   // Track key status for SetupModal
@@ -259,6 +267,25 @@ export default function App() {
     activeSessionIdRef.current = activeSessionId
   }, [activeSessionId])
 
+  const showChatComposer = () => {
+    setMode('chat')
+    setShowLauncherTray(false)
+    setSearchState('visible')
+    setIsInputFocused(true)
+    setTimeout(() => {
+      if (!inputRef.current) return
+      inputRef.current.style.height = '24px'
+      inputRef.current.focus()
+    }, 10)
+  }
+
+  const showMeetingSurface = () => {
+    setSearchState('visible')
+    setMode('meeting')
+    setShowLauncherTray(false)
+    setIsInputFocused(false)
+  }
+
   // --- INIT & MOUSE EVENTS ---
   useEffect(() => {
     const unsubKeys = window.cosmic?.onKeyStatus((status) => {
@@ -279,6 +306,9 @@ export default function App() {
       if (settings['searchPosition']) setSearchPosition(settings['searchPosition'])
       if (settings['staybackTime']) setStaybackTime(parseInt(settings['staybackTime']))
       if (settings['islandOpacity']) setIslandOpacity(parseFloat(settings['islandOpacity']))
+      if (settings['gatewayModelSelection']) {
+        setSelectedModel(normalizeGatewayModelSelection(settings['gatewayModelSelection']))
+      }
 
       // Check auth from settings
       if (settings['cosmicAuth']) {
@@ -324,9 +354,8 @@ export default function App() {
       const island = !!el.closest('.island')
       const settings = !!el.closest('.settings-overlay')
       const overlay = searchState !== 'hidden' && !!el.closest('.overlay')
-      const modeDropdown = !!el.closest('.mode-dropdown')
 
-      const isInteractive = island || settings || overlay || modeDropdown || showHistory
+      const isInteractive = island || settings || overlay
 
       if (lastIsland !== isInteractive) {
         lastIsland = isInteractive
@@ -347,7 +376,7 @@ export default function App() {
       unsubSettings?.()
       window.removeEventListener('mousemove', handleMouseMove)
     }
-  }, [searchState, showHistory])
+  }, [searchState])
 
   // --- VISIBILITY HANDLERS ---
   const performHide = () => {
@@ -355,39 +384,21 @@ export default function App() {
     setIsInputFocused(false)
     setTimeout(() => {
       setSearchState('hidden')
-      setShowModeDropdown(false)
-      setShowHistory(false)
+      setShowLauncherTray(false)
       if (modeRef.current === 'meeting') setMode('chat')
     }, 250)
   }
 
   useEffect(() => {
-    const handleShown = () => {
-      setSearchState('visible')
-      setIsInputFocused(true)
-      if (inputRef.current) {
-        inputRef.current.style.height = '24px'
-        inputRef.current.focus()
-      }
-    }
-
-    const handleMeetingInvoke = () => {
-      setSearchState('visible')
-      setMode('meeting')
-      setShowModeDropdown(false)
-      setShowHistory(false)
-      setIsInputFocused(false)
-    }
-
-    const off1 = window.cosmic?.onShown(handleShown)
+    const off1 = window.cosmic?.onShown(showChatComposer)
     const off2 = window.cosmic?.onHiding(performHide)
-    const off3 = window.cosmic?.onMeetingInvoke(handleMeetingInvoke)
+    const off3 = window.cosmic?.onMeetingInvoke(showMeetingSurface)
     const off4 = window.cosmic?.onMeetingToggle(() => {
       if (modeRef.current === 'meeting') {
         window.cosmic?.hide()
         return
       }
-      handleMeetingInvoke()
+      showMeetingSurface()
     })
 
     return () => { off1?.(); off2?.(); off3?.(); off4?.() }
@@ -582,30 +593,23 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    if (!isStreaming && searchState === 'visible') {
+    if (!isStreaming && searchState === 'visible' && !showLauncherTray && mode !== 'meeting') {
       setTimeout(() => inputRef.current?.focus(), 10)
     }
-  }, [isStreaming, searchState])
+  }, [isStreaming, mode, searchState, showLauncherTray])
 
   useEffect(() => {
     if (authState !== 'authenticated') {
       resetInFlightAssistantMaps()
       setMessages([])
-      setSessions([])
       setActiveSessionId(null)
       setGatewayStatus({ state: 'idle', connected: false })
+      setShowLauncherTray(false)
       return
     }
 
     if (window.cosmic?.requestGatewayResume) {
       window.cosmic.requestGatewayResume().catch(() => { })
-    }
-    if (window.cosmic?.listGatewaySessions) {
-      window.cosmic.listGatewaySessions()
-        .then((payload) => {
-          setSessions(Array.isArray(payload?.sessions) ? payload.sessions : [])
-        })
-        .catch(() => { })
     }
   }, [authState])
 
@@ -674,6 +678,7 @@ export default function App() {
       requestId,
       content: textToSend,
       conversationContext: buildConversationContext([...messages, createUserMessage(textToSend)]),
+      routeOverride: selectedModel === 'cosmic' ? undefined : selectedModel,
     }).then((result) => {
       const confirmedRequestId = typeof result?.requestId === 'string' ? result.requestId.trim() : ''
       if (confirmedRequestId && confirmedRequestId !== requestId) {
@@ -710,41 +715,28 @@ export default function App() {
     cancelPromise?.catch(() => { })
   }
 
-  const handleHistoryToggle = () => {
-    if (!showHistory) {
-      if (window.cosmic?.listGatewaySessions) {
-        window.cosmic.listGatewaySessions()
-          .then((payload) => {
-            setSessions(Array.isArray(payload?.sessions) ? payload.sessions : [])
-          })
-          .catch(() => {
-            setSessions([])
-          })
-      } else {
-        setSessions([])
-      }
-      setShowHistory(true)
-    } else {
-      setShowHistory(false)
-      setTimeout(() => inputRef.current?.focus(), 50)
+  const handleShowLauncherTray = () => {
+    setShowLauncherTray(true)
+    setIsInputFocused(false)
+    if (inputRef.current) {
+      inputRef.current.blur()
     }
   }
 
-  const handleSelectSession = async (id: string) => {
-    setActiveSessionId(id)
-    try {
-      const payload = window.cosmic?.getGatewaySessionHistory
-        ? await window.cosmic.getGatewaySessionHistory(id)
-        : null
-      resetInFlightAssistantMaps()
-      setMessages(historyToMessages(payload?.messages))
-    } catch {
-      resetInFlightAssistantMaps()
-      setMessages([])
+  const handleLauncherTileClick = (tile: 'chat' | 'meeting' | 'task' | 'spaces') => {
+    if (tile === 'spaces') {
+      return
     }
-    setShowHistory(false)
-    setSearchState('visible')
-    setTimeout(() => inputRef.current?.focus(), 50)
+    if (tile === 'meeting') {
+      showMeetingSurface()
+      return
+    }
+    showChatComposer()
+  }
+
+  const handleModelSelection = (model: GatewayModelSelection) => {
+    setSelectedModel(model)
+    window.cosmic?.saveSetting('gatewayModelSelection', model)
   }
 
   const handleCopy = async (text: string, id: string) => {
@@ -779,24 +771,23 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        if (showModeDropdown) setShowModeDropdown(false)
-        else if (showHistory) setShowHistory(false)
-        else if (searchState === 'visible') {
+        if (searchState === 'visible') {
           window.cosmic?.hide()
         }
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [searchState, showModeDropdown, showHistory])
+  }, [searchState])
 
   // Render Classes
+  const isChatSurfaceVisible = mode !== 'meeting' && !showLauncherTray
   const effectivePosition = messages.length > 0 ? 'bottom' : searchPosition
   const overlayClass = [
     searchState === 'hidden' ? '' : 'visible',
     effectivePosition === 'middle' ? 'position-middle' : '',
-    messages.length > 0 ? 'has-response' : '',
-    (isInputFocused || messages.length > 0 || isStreaming || mode === 'meeting') ? 'focused' : ''
+    isChatSurfaceVisible && messages.length > 0 ? 'has-response' : '',
+    (isInputFocused || (isChatSurfaceVisible && messages.length > 0) || isStreaming || mode === 'meeting') ? 'focused' : ''
   ].join(' ')
 
   return (
@@ -848,11 +839,11 @@ export default function App() {
         <MeetingMode
           active={mode === 'meeting'}
           keyStatus={keyStatus}
-          onBackToChat={() => setMode('chat')}
+          onBackToChat={showChatComposer}
         />
 
         {/* MESSAGES AREA */}
-        {mode !== 'meeting' && messages.length > 0 && (
+        {isChatSurfaceVisible && messages.length > 0 && (
           <div className={`response-container ${searchState === 'visible' ? 'visible' : ''}`}>
             <LiquidGlass disableTilt={true} cornerRadius={32} style={{ width: '100%', height: '100%' }}>
               <div className="response-wrapper">
@@ -1003,7 +994,7 @@ export default function App() {
         )}
 
         {/* SCROLL TO BOTTOM BUTTON */}
-        {mode !== 'meeting' && showScrollButton && (
+        {isChatSurfaceVisible && showScrollButton && (
           <button className="scroll-to-bottom" onClick={scrollToBottom}>
             <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
               <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z" />
@@ -1011,42 +1002,44 @@ export default function App() {
           </button>
         )}
 
-        {/* INPUT BAR / HISTORY CONTAINER */}
-        {mode !== 'meeting' && <div className={`cosmic ${searchState === 'visible' ? 'visible' : searchState === 'hiding' ? 'hiding' : ''} ${showHistory ? 'history-open' : ''}`}>
+        {/* INPUT BAR / LAUNCHER */}
+        {mode !== 'meeting' && <div className={`cosmic ${searchState === 'visible' ? 'visible' : searchState === 'hiding' ? 'hiding' : ''} ${showLauncherTray ? 'launchpad-open' : ''}`}>
           <LiquidGlass cornerRadius={24} style={{ width: '100%', height: '100%' }}>
             <div className="glass-content">
-
-              {showHistory ? (
-                /* --- EXPANDED HISTORY VIEW --- */
-                <div className="history-container">
-                  <div className="history-header">
-                    <span className="history-title">Chat History</span>
-                    <button className="clear-btn" onClick={() => setShowHistory(false)}>✕</button>
-                  </div>
-                  <div className="history-list">
-                    {sessions.length === 0 ? (
-                      <div style={{ padding: 20, color: 'rgba(255,255,255,0.4)', textAlign: 'center' }}>No history found</div>
-                    ) : sessions.map(session => (
-                      <div key={session.id} className={`history-item-row ${activeSessionId === session.id ? 'active' : ''}`} onClick={() => handleSelectSession(session.id)}>
-                        <div className="history-info">
-                          <div className="history-name">{cleanText(session.title || "Untitled Chat")}</div>
-                          <div className="history-time">{new Date(session.updated_at || session.created_at).toLocaleString()}</div>
-                        </div>
+              {showLauncherTray ? (
+                <div className="launchpad-row" role="toolbar" aria-label="COSMIC modes">
+                  {[
+                    { id: 'chat', label: 'Chat', locked: false },
+                    { id: 'meeting', label: 'Meeting', locked: false },
+                    { id: 'task', label: 'Task', locked: false },
+                    { id: 'spaces', label: 'Spaces', locked: true },
+                  ].map((tile) => (
+                    <button
+                      key={tile.id}
+                      className={`launchpad-tile ${tile.locked ? 'locked' : ''}`}
+                      onClick={() => handleLauncherTileClick(tile.id as 'chat' | 'meeting' | 'task' | 'spaces')}
+                      type="button"
+                      disabled={tile.locked}
+                      title={tile.locked ? `${tile.label} (Locked)` : tile.label}
+                    >
+                      <div className="launchpad-icon-shell">
+                        <LaunchpadIcon tile={tile.id as 'chat' | 'meeting' | 'task' | 'spaces'} />
                       </div>
-                    ))}
-                  </div>
+                      <span className="launchpad-label">{tile.label}</span>
+                    </button>
+                  ))}
                 </div>
               ) : (
-                /* --- STANDARD INPUT VIEW --- */
                 <div className="input-row">
                   <button
-                    className={`history-btn ${showHistory ? 'active' : ''}`}
-                    onClick={handleHistoryToggle}
-                    title="History"
+                    className="back-btn"
+                    onClick={handleShowLauncherTray}
+                    title="Modes"
                     style={{ marginRight: 8 }}
+                    type="button"
                   >
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z" />
+                      <path d="M14.71 6.71a1 1 0 0 1 0 1.41L10.83 12l3.88 3.88a1 1 0 0 1-1.41 1.41l-4.59-4.59a1 1 0 0 1 0-1.41l4.59-4.59a1 1 0 0 1 1.41 0z" />
                     </svg>
                   </button>
 
@@ -1086,49 +1079,26 @@ export default function App() {
                     </button>
                   )}
 
-                  <div className="mode-selector">
-                    <button
-                      className="mode-btn"
-                      onClick={() => setShowModeDropdown(!showModeDropdown)}
-                      type="button"
-                    >
-                      <ModeIcon mode={mode} />
-                      <span className="mode-label">
-                        {mode === 'chat' ? 'Cosmic' : 'Meeting'}
-                      </span>
-                      <svg className="chevron" width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M7 10l5 5 5-5z" />
-                      </svg>
-                    </button>
-
-                    {showModeDropdown && (
-                      <div className="mode-dropdown">
-                      <div className="mode-options">
-                        <button
-                            className={`mode-option ${mode === 'chat' ? 'active' : ''}`}
-                            onClick={() => { setMode('chat'); setShowModeDropdown(false); }}
-                            type="button"
-                          >
-                            <ModeIcon mode="chat" />
-                            <div className="mode-text">
-                              <span>Cosmic Chat</span>
-                              <span className="mode-desc">Gateway-routed</span>
-                            </div>
-                          </button>
-                          <button
-                            className={`mode-option ${modeRef.current === 'meeting' ? 'active' : ''}`}
-                            onClick={() => { setMode('meeting'); setShowModeDropdown(false); }}
-                            type="button"
-                          >
-                            <ModeIcon mode="meeting" />
-                            <div className="mode-text">
-                              <span>Meeting</span>
-                              <span className="mode-desc">Live copilot</span>
-                            </div>
-                          </button>
-                        </div>
-                      </div>
-                    )}
+                  <div className="model-dial" role="tablist" aria-label="Model selection">
+                    {([
+                      { id: 'cosmic', label: 'Cosmic' },
+                      { id: 'haiku', label: 'Haiku' },
+                      { id: 'opus', label: 'Opus' },
+                      { id: 'perplexity', label: 'PPLX' },
+                    ] as const).map((item) => (
+                      <button
+                        key={item.id}
+                        className={`model-dial-btn ${selectedModel === item.id ? 'active' : ''}`}
+                        onClick={() => handleModelSelection(item.id)}
+                        type="button"
+                        title={item.label}
+                      >
+                        <span className="model-dial-knob">
+                          <ModelDialIcon model={item.id} />
+                        </span>
+                        <span className="model-dial-label">{item.label}</span>
+                      </button>
+                    ))}
                   </div>
 
                   {isStreaming ? (
@@ -1155,9 +1125,6 @@ export default function App() {
                   )}
                 </div>
               )}
-
-              {/* Footer (Hide in History Mode) */}
-
             </div>
           </LiquidGlass>
         </div>}
@@ -1166,20 +1133,36 @@ export default function App() {
   )
 }
 
-function ModeIcon({ mode }: { mode: QueryMode }) {
-  if (mode === 'chat') {
+function LaunchpadIcon({ tile }: { tile: 'chat' | 'meeting' | 'task' | 'spaces' }) {
+  if (tile === 'chat') {
     return (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-        <path d="M9 2L7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z" />
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v7A2.5 2.5 0 0 1 17.5 15H9.8l-4.22 3.52A1 1 0 0 1 4 17.75V15.1A2.5 2.5 0 0 1 2 12.5v-7A2.5 2.5 0 0 1 4.5 3H5a1 1 0 1 1 0 2h-.5A.5.5 0 0 0 4 5.5Z" />
       </svg>
     )
   }
-  if (mode === 'meeting') {
+  if (tile === 'meeting') {
     return (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-        <path d="M17 10.5V7c0-2.76-2.24-5-5-5S7 4.24 7 7v3.5C5.21 11.41 4 13.11 4 15c0 2.76 3.58 5 8 5s8-2.24 8-5c0-1.89-1.21-3.59-3-4.5zM9 7c0-1.65 1.35-3 3-3s3 1.35 3 3v2.74c-.94-.47-1.99-.74-3-.74s-2.06.27-3 .74V7zm3 11c-3.31 0-6-1.34-6-3 0-1.66 2.69-3 6-3s6 1.34 6 3c0 1.66-2.69 3-6 3z" />
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M15 8a3 3 0 1 1-6 0a3 3 0 0 1 6 0Zm-8.5 9.5c0-2.5 2.94-4.5 6.5-4.5s6.5 2 6.5 4.5V19H6.5zM19 8.75l3-1.5v9.5l-3-1.5z" />
       </svg>
     )
   }
-  return null
+  if (tile === 'task') {
+    return (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M8 4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2h2.5A2.5 2.5 0 0 1 21 6.5v13A2.5 2.5 0 0 1 18.5 22h-13A2.5 2.5 0 0 1 3 19.5v-13A2.5 2.5 0 0 1 5.5 4Zm2 0v1h4V4Zm6 7H8v2h8Zm-3 4H8v2h5Z" />
+      </svg>
+    )
+  }
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M7 10V8a5 5 0 1 1 10 0v2h1a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Zm2 0h6V8a3 3 0 1 0-6 0Z" />
+    </svg>
+  )
+}
+
+function ModelDialIcon({ model }: { model: GatewayModelSelection }) {
+  const label = model === 'perplexity' ? 'P' : model === 'cosmic' ? 'C' : model === 'haiku' ? 'H' : 'O'
+  return <span className="model-dial-glyph">{label}</span>
 }

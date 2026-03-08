@@ -202,14 +202,16 @@ export class GatewayConnectionManager {
     this.connect()
   }
 
-  sendQuery(content: string, conversationContext: any[] = [], requestId?: string) {
+  sendQuery(content: string, conversationContext: any[] = [], requestId?: string, routeOverride?: string) {
     const effectiveRequestId = String(requestId || '').trim() || `req_${crypto.randomUUID()}`
+    const normalizedRouteOverride = String(routeOverride || '').trim()
     this.sendJson({
       type: 'query',
       request_id: effectiveRequestId,
       session_id: this.currentSessionId,
       content,
       conversation_context: Array.isArray(conversationContext) ? conversationContext : [],
+      route_override: normalizedRouteOverride || undefined,
     })
     return effectiveRequestId
   }
