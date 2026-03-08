@@ -264,8 +264,36 @@ def trim_blank_lines(lines: Sequence[str]) -> List[str]:
     return trimmed
 
 
+def replace_placeholder_env_entries(existing_raw: str, source_raw: str) -> Tuple[str, List[str]]:
+    source_values = parse_env_text(source_raw)
+    replaced_keys: list[str] = []
+    rendered_lines: list[str] = []
+
+    for line in existing_raw.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            rendered_lines.append(line)
+            continue
+
+        key, value = line.split("=", 1)
+        env_key = key.strip()
+        source_value = meaningful_env_value(source_values.get(env_key))
+        existing_value = meaningful_env_value(value.strip())
+        if source_value is not None and existing_value is None:
+            rendered_lines.append("{0}={1}".format(key, source_value))
+            replaced_keys.append(env_key)
+        else:
+            rendered_lines.append(line)
+
+    merged = "\n".join(rendered_lines).rstrip()
+    if merged:
+        merged += "\n"
+    return merged, replaced_keys
+
+
 def merge_missing_env_entries(existing_raw: str, source_raw: str) -> Tuple[str, List[str]]:
-    existing_keys = set(parse_env_text(existing_raw))
+    existing_reconciled, replaced_keys = replace_placeholder_env_entries(existing_raw, source_raw)
+    existing_keys = set(parse_env_text(existing_reconciled))
     pending_block: list[str] = []
     missing_blocks: list[Tuple[str, List[str]]] = []
 
@@ -293,10 +321,14 @@ def merge_missing_env_entries(existing_raw: str, source_raw: str) -> Tuple[str, 
         pending_block = []
 
     if not missing_blocks:
-        normalized = existing_raw if existing_raw.endswith("\n") or not existing_raw else existing_raw + "\n"
-        return normalized, []
+        normalized = (
+            existing_reconciled
+            if existing_reconciled.endswith("\n") or not existing_reconciled
+            else existing_reconciled + "\n"
+        )
+        return normalized, replaced_keys
 
-    existing_body = existing_raw.rstrip("\n")
+    existing_body = existing_reconciled.rstrip("\n")
     appended_sections = ["\n".join(block).rstrip() for _key, block in missing_blocks if block]
     appended_body = "\n\n".join(section for section in appended_sections if section).strip()
     if existing_body and appended_body:
@@ -305,7 +337,7 @@ def merge_missing_env_entries(existing_raw: str, source_raw: str) -> Tuple[str, 
         merged = appended_body + "\n"
     else:
         merged = existing_body + ("\n" if existing_body else "")
-    return merged, [key for key, _block in missing_blocks]
+    return merged, replaced_keys + [key for key, _block in missing_blocks]
 
 
 def sync_env_file(
@@ -337,7 +369,7 @@ def sync_env_file(
     else:
         target_path.write_text(merged, encoding="utf-8")
     log(
-        "Appended missing env keys to {0}: {1}".format(
+        "Updated env file {0}: {1}".format(
             target_path,
             ", ".join(added_keys),
         )

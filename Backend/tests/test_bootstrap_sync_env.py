@@ -44,12 +44,24 @@ def test_sync_service_env_files_appends_missing_keys_without_overwriting_values(
 
     (backend_root / "gateway.env.example").write_text(
         "GATEWAY_HOST=0.0.0.0\n"
+        "GATEWAY_PUBLIC_HOST=<gateway.user.example.com>\n"
         "GATEWAY_INTERNAL_TOKEN=<internal-token>\n"
         "GATEWAY_LOCAL_API_TOKEN=<local-token>\n"
         "WHATSAPP_BRIDGE_TOKEN=<bridge-token>\n"
         "ANTHROPIC_API_KEY=<anthropic-api-key>\n"
         "HAIKU_MODEL=claude-haiku-4-5\n"
         "PERPLEXITY_API_KEY=<perplexity-api-key>\n",
+        encoding="utf-8",
+    )
+    (backend_root / "gateway.env").write_text(
+        "GATEWAY_HOST=0.0.0.0\n"
+        "GATEWAY_PUBLIC_HOST=ec2-3-137-194-119.us-east-2.compute.amazonaws.com\n"
+        "GATEWAY_INTERNAL_TOKEN=shared-token\n"
+        "GATEWAY_LOCAL_API_TOKEN=local-real\n"
+        "WHATSAPP_BRIDGE_TOKEN=bridge-real\n"
+        "ANTHROPIC_API_KEY=anthropic-real\n"
+        "HAIKU_MODEL=claude-haiku-4-5\n"
+        "PERPLEXITY_API_KEY=perplexity-real\n",
         encoding="utf-8",
     )
     (backend_root / "model_router.env.example").write_text(
@@ -75,6 +87,7 @@ def test_sync_service_env_files_appends_missing_keys_without_overwriting_values(
     orchestrator_env_path = system_env_dir / "orchestrator.env"
     bridge_env_path = system_env_dir / "whatsapp-bridge.env"
     gateway_env_path.write_text(
+        "GATEWAY_PUBLIC_HOST=<gateway.user.example.com>\n"
         "GATEWAY_INTERNAL_TOKEN=shared-token\n"
         "GATEWAY_LOCAL_API_TOKEN=local-real\n"
         "WHATSAPP_BRIDGE_TOKEN=bridge-real\n"
@@ -133,9 +146,10 @@ def test_sync_service_env_files_appends_missing_keys_without_overwriting_values(
 
     assert gateway_rendered.count("GATEWAY_LOCAL_API_TOKEN=") == 1
     assert "GATEWAY_LOCAL_API_TOKEN=local-real" in gateway_rendered
+    assert "GATEWAY_PUBLIC_HOST=ec2-3-137-194-119.us-east-2.compute.amazonaws.com" in gateway_rendered
     assert "ANTHROPIC_API_KEY=anthropic-real" in gateway_rendered
     assert "HAIKU_MODEL=claude-haiku-4-5" in gateway_rendered
-    assert "PERPLEXITY_API_KEY=<perplexity-api-key>" in gateway_rendered
+    assert "PERPLEXITY_API_KEY=perplexity-real" in gateway_rendered
     assert "GATEWAY_SIGNING_SECRET=" in gateway_rendered
     assert "EXISTING_KEY=keep-me" in gateway_rendered
 
