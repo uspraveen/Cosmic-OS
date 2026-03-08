@@ -1,0 +1,267 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from dataclasses import dataclass
+from typing import Any, AsyncIterator
+
+import httpx
+
+from .prompts import DIRECT_ASSISTANT_SYSTEM_PROMPT
+from .response_processor import LLMStreamProcessor, normalize_conversation_history
+
+
+@dataclass(slots=True)
+class SSEEvent:
+    event: str
+    data: str
+
+
+class HaikuAdapter(LLMStreamProcessor):
+    """Direct Claude Haiku 4.5 streaming adapter for Gateway-routed chat."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        anthropic_version: str,
+        max_tokens: int,
+        thinking_budget_tokens: int,
+        timeout_sec: float,
+    ) -> None:
+        self.api_key = api_key.strip()
+        self.model = model.strip()
+        self.anthropic_version = anthropic_version.strip() or "2023-06-01"
+        self.max_tokens = max(1024, int(max_tokens))
+        self.thinking_budget_tokens = max(0, int(thinking_budget_tokens))
+        self.timeout = httpx.Timeout(timeout_sec, connect=min(timeout_sec, 10.0))
+        self._client = httpx.AsyncClient(timeout=self.timeout, http2=True)
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+    async def stream(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        history: list[dict[str, Any]],
+        send,
+        store_assistant_message,
+        channel: str,
+    ) -> None:
+        if not self.api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is not configured on the Gateway VM.")
+        if not self.model:
+            raise RuntimeError("HAIKU_MODEL is not configured on the Gateway VM.")
+
+        usage: dict[str, int] = {}
+        stop_reason: str | None = None
+        thinking_text = ""
+
+        async def text_stream() -> AsyncIterator[str]:
+            nonlocal stop_reason, thinking_text, usage
+            async for payload in self._stream_events(history):
+                payload_type = str(payload.get("type") or "").strip()
+                if payload_type == "usage":
+                    usage = self._merge_usage(usage, payload.get("usage"))
+                    continue
+                if payload_type == "stop_reason":
+                    candidate = str(payload.get("stop_reason") or "").strip()
+                    if candidate:
+                        stop_reason = candidate
+                    continue
+                if payload_type == "thinking":
+                    chunk = str(payload.get("content") or "")
+                    if not chunk:
+                        continue
+                    thinking_text += chunk
+                    await send(
+                        {
+                            "type": "response.thinking.chunk",
+                            "request_id": request_id,
+                            "session_id": session_id,
+                            "content": chunk,
+                            "done": False,
+                        }
+                    )
+                    continue
+                if payload_type == "text":
+                    chunk = str(payload.get("content") or "")
+                    if chunk:
+                        yield chunk
+
+        result = await self.process_stream(
+            text_stream(),
+            request_id=request_id,
+            session_id=session_id,
+            send=send,
+        )
+
+        metadata: dict[str, Any] | None = None
+        if thinking_text or stop_reason:
+            metadata = {}
+            if thinking_text:
+                metadata["thinking_text"] = thinking_text
+            if stop_reason:
+                metadata["stop_reason"] = stop_reason
+
+        await send(
+            {
+                "type": "response.complete",
+                "request_id": request_id,
+                "session_id": session_id,
+                "content": result.content,
+                "route": "haiku",
+                "awaiting_reply": result.awaiting_reply,
+                "thinking_text": thinking_text,
+                "metrics": {
+                    **result.metrics,
+                    **usage,
+                },
+            }
+        )
+        store_assistant_message(
+            result.content,
+            awaiting_reply=result.awaiting_reply,
+            metadata=metadata,
+            channel=channel,
+            route="haiku",
+        )
+
+    async def _stream_events(self, history: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
+        url = "https://api.anthropic.com/v1/messages"
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "stream": True,
+            "system": DIRECT_ASSISTANT_SYSTEM_PROMPT,
+            "messages": self._build_messages(history),
+        }
+        if self.thinking_budget_tokens > 0:
+            payload["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": self.thinking_budget_tokens,
+            }
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": self.anthropic_version,
+            "content-type": "application/json",
+            "accept": "text/event-stream",
+        }
+
+        for attempt in range(3):
+            yielded_any = False
+            try:
+                async with self._client.stream("POST", url, headers=headers, json=payload) as response:
+                    if response.status_code >= 400:
+                        body = await response.aread()
+                        raise RuntimeError(self._error_from_response(body, response.status_code))
+
+                    async for item in self._iter_sse(response):
+                        if item.event == "ping":
+                            continue
+                        if not item.data:
+                            continue
+
+                        yielded_any = True
+                        parsed = json.loads(item.data)
+                        payload_type = str(parsed.get("type") or "").strip()
+
+                        if payload_type == "message_start":
+                            message = parsed.get("message")
+                            if isinstance(message, dict):
+                                yield {"type": "usage", "usage": message.get("usage")}
+                            continue
+
+                        if payload_type == "message_delta":
+                            yield {"type": "usage", "usage": parsed.get("usage")}
+                            delta = parsed.get("delta")
+                            if isinstance(delta, dict):
+                                stop_reason = str(delta.get("stop_reason") or "").strip()
+                                if stop_reason:
+                                    yield {"type": "stop_reason", "stop_reason": stop_reason}
+                            continue
+
+                        if payload_type == "error":
+                            error = parsed.get("error")
+                            if isinstance(error, dict):
+                                message = str(error.get("message") or "").strip() or "Anthropic stream error"
+                            else:
+                                message = "Anthropic stream error"
+                            raise RuntimeError(message)
+
+                        if payload_type != "content_block_delta":
+                            continue
+
+                        delta = parsed.get("delta")
+                        if not isinstance(delta, dict):
+                            continue
+
+                        delta_type = str(delta.get("type") or "").strip()
+                        if delta_type == "thinking_delta":
+                            yield {"type": "thinking", "content": str(delta.get("thinking") or "")}
+                            continue
+                        if delta_type == "text_delta":
+                            yield {"type": "text", "content": str(delta.get("text") or "")}
+                            continue
+                return
+            except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+                if yielded_any or attempt == 2:
+                    raise RuntimeError(f"Anthropic Haiku API error: {exc}") from exc
+                await asyncio.sleep(0.5 * (2**attempt))
+
+    async def _iter_sse(self, response: httpx.Response) -> AsyncIterator[SSEEvent]:
+        event_name = "message"
+        data_lines: list[str] = []
+        async for raw_line in response.aiter_lines():
+            line = raw_line.rstrip("\r")
+            if not line:
+                if data_lines:
+                    yield SSEEvent(event=event_name, data="\n".join(data_lines))
+                event_name = "message"
+                data_lines = []
+                continue
+            if line.startswith(":"):
+                continue
+            if line.startswith("event:"):
+                event_name = line[6:].strip() or "message"
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line[5:].strip())
+        if data_lines:
+            yield SSEEvent(event=event_name, data="\n".join(data_lines))
+
+    def _build_messages(self, history: list[dict[str, Any]]) -> list[dict[str, str]]:
+        messages: list[dict[str, str]] = []
+        for message in normalize_conversation_history(history):
+            role = str(message.get("role") or "").strip()
+            content = str(message.get("content") or "").strip()
+            if role not in {"user", "assistant"} or not content:
+                continue
+            messages.append({"role": role, "content": content})
+        return messages
+
+    def _merge_usage(self, existing: dict[str, int], usage: Any) -> dict[str, int]:
+        if not isinstance(usage, dict):
+            return existing
+        merged = dict(existing)
+        for key, value in usage.items():
+            if isinstance(value, (int, float)):
+                merged[key] = int(value)
+        return merged
+
+    def _error_from_response(self, body: bytes, status_code: int) -> str:
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            return f"status={status_code}"
+
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                message = str(error.get("message") or "").strip()
+                if message:
+                    return message
+        return f"status={status_code}"

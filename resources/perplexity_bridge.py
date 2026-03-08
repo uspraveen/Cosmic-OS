@@ -178,7 +178,7 @@ async def handle_command(cmd: str):
     elif cmd.startswith("DELETE_SESSION:"):
         sess_id = cmd.split(":", 1)[1]
         db.delete_session(sess_id)
-        # No need to send session list, Gemini bridge usually handles the UI list update
+        # No need to send session list, the direct chat bridge usually handles the UI list update
 
 
 def input_listener(loop):

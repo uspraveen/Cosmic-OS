@@ -5,7 +5,7 @@ COSMIC model router classifier service.
 Production runtime:
 - Standalone FastAPI microservice behind the Gateway
 - Internal-only HTTP surface: /health, /health/ready, /classify
-- Three possible routes only: opus, gemini, perplexity
+- Three possible routes only: opus, haiku, perplexity
 
 Developer utilities remain available for local validation:
 - Single query:
@@ -88,7 +88,7 @@ DEFAULT_MAX_COMPLETION_TOKENS = max(1, env_int("MODEL_ROUTER_DEFAULT_MAX_COMPLET
 LOW_CONFIDENCE_THRESHOLD = min(1.0, max(0.0, env_float("MODEL_ROUTER_LOW_CONFIDENCE_THRESHOLD", 0.5)))
 LOG_LEVEL = os.getenv("MODEL_ROUTER_LOG_LEVEL", "INFO").upper()
 
-ALLOWED_ROUTES = {"opus", "gemini", "perplexity"}
+ALLOWED_ROUTES = {"opus", "haiku", "perplexity"}
 ALLOWED_CONTEXT_ROLES = {"user", "assistant"}
 
 logging.basicConfig(
@@ -162,15 +162,19 @@ def extract_json_object(raw: str) -> Optional[Dict[str, Any]]:
 
 def normalize_route(route: Any) -> str:
     if not isinstance(route, str):
-        return "gemini"
+        return "haiku"
     normalized = route.strip().lower()
-    return normalized if normalized in ALLOWED_ROUTES else "gemini"
+    if normalized == "gemini":
+        return "haiku"
+    return normalized if normalized in ALLOWED_ROUTES else "haiku"
 
 
 def optional_route(route: Any) -> Optional[str]:
     if not isinstance(route, str):
         return None
     normalized = route.strip().lower()
+    if normalized == "gemini":
+        return "haiku"
     return normalized if normalized in ALLOWED_ROUTES else None
 
 
@@ -204,7 +208,7 @@ def normalize_signals(value: Any) -> List[str]:
 
 def default_classifier_output(signal: str) -> Dict[str, Any]:
     return {
-        "route": "gemini",
+        "route": "haiku",
         "needs_latest": False,
         "needs_citations": False,
         "is_task": False,
@@ -257,10 +261,10 @@ def build_messages(
         "Decide which backend should answer:\n"
         '  - "opus": tasks, continuations, ambiguous inputs, tool-use, coding, drafting, execution, workflow help.\n'
         '  - "perplexity": time-sensitive or verification-heavy questions that need current information or citations.\n'
-        '  - "gemini": timeless/general explanations, brainstorming, concepts, theory, non-time-sensitive knowledge.\n\n'
+        '  - "haiku": timeless/general explanations, brainstorming, concepts, theory, non-time-sensitive knowledge.\n\n'
         "Output schema (keys must match):\n"
         "{\n"
-        '  "route": "opus|perplexity|gemini",\n'
+        '  "route": "opus|perplexity|haiku",\n'
         '  "needs_latest": true|false,\n'
         '  "needs_citations": true|false,\n'
         '  "is_task": true|false,\n'
@@ -279,7 +283,7 @@ def build_messages(
         "- Else if is_continuation is true, route MUST be opus.\n"
         "- Else if needs_latest OR needs_citations is true, route MUST be perplexity.\n"
         f"- Else if confidence < {LOW_CONFIDENCE_THRESHOLD:.2f}, route MUST be opus.\n"
-        "- Else route MUST be gemini.\n"
+        "- Else route MUST be haiku.\n"
         "- There is NO unknown route.\n"
     )
 
@@ -323,7 +327,7 @@ def enforce_rules(parsed: Dict[str, Any]) -> Dict[str, Any]:
     elif out["confidence"] < LOW_CONFIDENCE_THRESHOLD:
         out["route"] = "opus"
     else:
-        out["route"] = "gemini"
+        out["route"] = "haiku"
 
     return out
 

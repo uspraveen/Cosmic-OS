@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from gateway.adapters.gemini import GeminiAdapter
+from gateway.adapters.haiku import HaikuAdapter
 from gateway.adapters.perplexity import PerplexityAdapter
 
 
@@ -38,26 +38,33 @@ def test_perplexity_adapter_merges_consecutive_turns() -> None:
     }
 
 
-def test_gemini_adapter_merges_consecutive_turns() -> None:
-    adapter = GeminiAdapter(api_key="test-key", model="gemini-3-flash-preview", timeout_sec=5.0)
+def test_haiku_adapter_merges_consecutive_turns() -> None:
+    adapter = HaikuAdapter(
+        api_key="test-key",
+        model="claude-haiku-4-5",
+        anthropic_version="2023-06-01",
+        max_tokens=16000,
+        thinking_budget_tokens=10000,
+        timeout_sec=5.0,
+    )
     try:
-        contents = adapter._build_contents(sample_history())  # noqa: SLF001 - direct unit seam
+        messages = adapter._build_messages(sample_history())  # noqa: SLF001 - direct unit seam
     finally:
         import asyncio
 
         asyncio.run(adapter.close())
 
-    assert contents == [
+    assert messages == [
         {
             "role": "user",
-            "parts": [{"text": "First question\n\nFollow-up after an error"}],
+            "content": "First question\n\nFollow-up after an error",
         },
         {
-            "role": "model",
-            "parts": [{"text": "Prior answer\n\nExtra assistant note"}],
+            "role": "assistant",
+            "content": "Prior answer\n\nExtra assistant note",
         },
         {
             "role": "user",
-            "parts": [{"text": "Latest question"}],
+            "content": "Latest question",
         },
     ]

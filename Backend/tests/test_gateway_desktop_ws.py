@@ -116,7 +116,7 @@ class FakeOrchestratorClient:
         return []
 
 
-def build_runtime(tmp_path, *, route: str = "gemini") -> GatewayRuntime:
+def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
     runtime = GatewayRuntime(
         GatewayConfig(
             local_api_token="test-token",
@@ -149,7 +149,7 @@ def build_runtime(tmp_path, *, route: str = "gemini") -> GatewayRuntime:
     runtime.model_router.start = fake_start
     runtime.model_router.stop = fake_stop
     runtime.model_router.classify = fake_classify
-    runtime.gemini_adapter = FakeDirectAdapter("gemini")
+    runtime.haiku_adapter = FakeDirectAdapter("haiku")
     runtime.perplexity_adapter = FakeDirectAdapter("perplexity")
     runtime.orchestrator = FakeOrchestratorClient()
     return runtime
@@ -227,7 +227,7 @@ def test_desktop_websocket_supports_ping_query_and_resume(test_client: TestClien
         route_result = websocket.receive_json()
         assert route_result["type"] == "route_result"
         assert route_result["request_id"] == "req_001"
-        assert route_result["route"] == "gemini"
+        assert route_result["route"] == "haiku"
         assert route_result["channel"] == "desktop:desk_a1b2"
 
         chunk = websocket.receive_json()
@@ -243,7 +243,7 @@ def test_desktop_websocket_supports_ping_query_and_resume(test_client: TestClien
         assert complete["type"] == "response.complete"
         assert complete["request_id"] == "req_001"
         assert complete["session_id"] == route_result["session_id"]
-        assert complete["route"] == "gemini"
+        assert complete["route"] == "haiku"
         assert complete["content"] == "Hello from fake adapter"
 
         websocket.send_json(

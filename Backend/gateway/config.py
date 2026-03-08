@@ -52,8 +52,11 @@ class GatewayConfig:
     orchestrator_timeout_sec: float = 300.0
     enable_whatsapp: bool = True
     sessions_db_path: Path = BACKEND_ROOT / "gateway" / "sessions.db"
-    gemini_api_key: str = ""
-    gemini_model: str = "gemini-3-flash-preview"
+    haiku_api_key: str = ""
+    haiku_model: str = "claude-haiku-4-5"
+    anthropic_version: str = "2023-06-01"
+    haiku_max_tokens: int = 16000
+    haiku_thinking_budget_tokens: int = 10000
     perplexity_api_key: str = ""
     perplexity_model: str = "sonar"
     direct_llm_timeout_sec: float = 90.0
@@ -84,8 +87,23 @@ class GatewayConfig:
             sessions_db_path=Path(
                 os.getenv("GATEWAY_SESSIONS_DB_PATH", str(BACKEND_ROOT / "gateway" / "sessions.db"))
             ).expanduser(),
-            gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip(),
-            gemini_model=os.getenv("GEMINI_MODEL", "gemini-3-flash-preview").strip(),
+            haiku_api_key=(
+                os.getenv("HAIKU_API_KEY")
+                or os.getenv("ANTHROPIC_API_KEY")
+                or os.getenv("GEMINI_API_KEY")
+                or ""
+            ).strip(),
+            haiku_model=(
+                os.getenv("HAIKU_MODEL")
+                or os.getenv("GEMINI_MODEL")
+                or "claude-haiku-4-5"
+            ).strip(),
+            anthropic_version=os.getenv("ANTHROPIC_VERSION", "2023-06-01").strip(),
+            haiku_max_tokens=max(1024, _env_int("HAIKU_MAX_TOKENS", 16000)),
+            haiku_thinking_budget_tokens=max(
+                0,
+                _env_int("HAIKU_THINKING_BUDGET_TOKENS", 10000),
+            ),
             perplexity_api_key=os.getenv("PERPLEXITY_API_KEY", "").strip(),
             perplexity_model=os.getenv("PERPLEXITY_MODEL", "sonar").strip(),
             direct_llm_timeout_sec=max(

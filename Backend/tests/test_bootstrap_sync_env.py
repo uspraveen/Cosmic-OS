@@ -15,7 +15,8 @@ def test_sync_repo_env_files_appends_missing_keys_without_overwriting_values(tmp
     example_path.write_text(
         "# Gateway settings\n"
         "EXISTING_TOKEN=<placeholder>\n"
-        "GEMINI_API_KEY=<gemini-api-key>\n"
+        "ANTHROPIC_API_KEY=<anthropic-api-key>\n"
+        "HAIKU_MODEL=claude-haiku-4-5\n"
         "PERPLEXITY_API_KEY=<perplexity-api-key>\n",
         encoding="utf-8",
     )
@@ -29,7 +30,8 @@ def test_sync_repo_env_files_appends_missing_keys_without_overwriting_values(tmp
     rendered = target_path.read_text(encoding="utf-8")
     assert rendered.count("EXISTING_TOKEN=") == 1
     assert "EXISTING_TOKEN=real-token" in rendered
-    assert "GEMINI_API_KEY=<gemini-api-key>" in rendered
+    assert "ANTHROPIC_API_KEY=<anthropic-api-key>" in rendered
+    assert "HAIKU_MODEL=claude-haiku-4-5" in rendered
     assert "PERPLEXITY_API_KEY=<perplexity-api-key>" in rendered
 
 
@@ -45,7 +47,8 @@ def test_sync_service_env_files_appends_missing_keys_without_overwriting_values(
         "GATEWAY_INTERNAL_TOKEN=<internal-token>\n"
         "GATEWAY_LOCAL_API_TOKEN=<local-token>\n"
         "WHATSAPP_BRIDGE_TOKEN=<bridge-token>\n"
-        "GEMINI_API_KEY=<gemini-api-key>\n"
+        "ANTHROPIC_API_KEY=<anthropic-api-key>\n"
+        "HAIKU_MODEL=claude-haiku-4-5\n"
         "PERPLEXITY_API_KEY=<perplexity-api-key>\n",
         encoding="utf-8",
     )
@@ -75,6 +78,7 @@ def test_sync_service_env_files_appends_missing_keys_without_overwriting_values(
         "GATEWAY_INTERNAL_TOKEN=shared-token\n"
         "GATEWAY_LOCAL_API_TOKEN=local-real\n"
         "WHATSAPP_BRIDGE_TOKEN=bridge-real\n"
+        "ANTHROPIC_API_KEY=anthropic-real\n"
         "EXISTING_KEY=keep-me\n",
         encoding="utf-8",
     )
@@ -129,7 +133,8 @@ def test_sync_service_env_files_appends_missing_keys_without_overwriting_values(
 
     assert gateway_rendered.count("GATEWAY_LOCAL_API_TOKEN=") == 1
     assert "GATEWAY_LOCAL_API_TOKEN=local-real" in gateway_rendered
-    assert "GEMINI_API_KEY=<gemini-api-key>" in gateway_rendered
+    assert "ANTHROPIC_API_KEY=anthropic-real" in gateway_rendered
+    assert "HAIKU_MODEL=claude-haiku-4-5" in gateway_rendered
     assert "PERPLEXITY_API_KEY=<perplexity-api-key>" in gateway_rendered
     assert "GATEWAY_SIGNING_SECRET=" in gateway_rendered
     assert "EXISTING_KEY=keep-me" in gateway_rendered
@@ -141,7 +146,7 @@ def test_sync_service_env_files_appends_missing_keys_without_overwriting_values(
     assert orchestrator_rendered.count("GATEWAY_INTERNAL_TOKEN=") == 1
     assert "GATEWAY_INTERNAL_TOKEN=shared-token" in orchestrator_rendered
     assert "GATEWAY_SIGNING_SECRET=" in orchestrator_rendered
-    assert "ANTHROPIC_API_KEY=<anthropic-api-key>" in orchestrator_rendered
+    assert "ANTHROPIC_API_KEY=anthropic-real" in orchestrator_rendered
 
     assert bridge_rendered.count("WHATSAPP_BRIDGE_TOKEN=") == 1
     assert "WHATSAPP_BRIDGE_TOKEN=bridge-real" in bridge_rendered

@@ -29,7 +29,7 @@ interface DynamicIslandProps {
   onOpacityChange: (opacity: number) => void
   debug: boolean
   keyStatus: {
-    gemini: boolean
+    haiku: boolean
     perplexity: boolean
     deepgram?: boolean
     groq?: boolean

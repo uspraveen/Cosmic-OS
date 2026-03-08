@@ -35,7 +35,7 @@ def build_key_status():
     groq = bool(db.get_api_key("groq") or os.getenv("GROQ_API_KEY"))
     return {
         "hasKeys": deepgram or anthropic or groq,
-        "gemini": False,
+        "haiku": False,
         "perplexity": False,
         "deepgram": deepgram,
         "anthropic": anthropic,

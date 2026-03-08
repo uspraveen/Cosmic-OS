@@ -822,6 +822,14 @@ def build_service_env_overrides(
         bridge_data.get("WHATSAPP_AUTH_DIR"),
         str(DEFAULT_WHATSAPP_AUTH_DIR),
     )
+    shared_anthropic_api_key = first_meaningful_value(
+        gateway_existing.get("ANTHROPIC_API_KEY"),
+        orchestrator_existing.get("ANTHROPIC_API_KEY"),
+        gateway_existing.get("HAIKU_API_KEY"),
+        gateway_data.get("ANTHROPIC_API_KEY"),
+        orchestrator_data.get("ANTHROPIC_API_KEY"),
+        gateway_data.get("HAIKU_API_KEY"),
+    )
 
     return {
         "gateway.env": {
@@ -829,10 +837,12 @@ def build_service_env_overrides(
             "GATEWAY_LOCAL_API_TOKEN": local_api_token or secrets.token_urlsafe(24),
             "GATEWAY_SIGNING_SECRET": signing_secret or secrets.token_urlsafe(32),
             "WHATSAPP_BRIDGE_TOKEN": bridge_token or secrets.token_urlsafe(32),
+            "ANTHROPIC_API_KEY": shared_anthropic_api_key or "<anthropic-api-key>",
         },
         "orchestrator.env": {
             "GATEWAY_INTERNAL_TOKEN": shared_internal_token or secrets.token_urlsafe(32),
             "GATEWAY_SIGNING_SECRET": signing_secret or secrets.token_urlsafe(32),
+            "ANTHROPIC_API_KEY": shared_anthropic_api_key or "<anthropic-api-key>",
         },
         "whatsapp-bridge.env": {
             "GATEWAY_INTERNAL_TOKEN": shared_internal_token or secrets.token_urlsafe(32),

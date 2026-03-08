@@ -3,7 +3,7 @@ import './settings.css'
 
 interface ApiConfigurationProps {
   keyStatus: {
-    gemini: boolean
+    haiku: boolean
     perplexity: boolean
     deepgram?: boolean
     groq?: boolean

@@ -193,6 +193,7 @@ class OrchestratorRuntime:
                 "content": display_text,
                 "route": "opus",
                 "awaiting_reply": awaiting_reply,
+                "thinking_text": full_reasoning,
                 "metrics": {
                     "rtt_ms": elapsed_ms,
                     **usage,

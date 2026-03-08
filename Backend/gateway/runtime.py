@@ -4,7 +4,7 @@ from collections import defaultdict
 from typing import Any
 from uuid import uuid4
 
-from .adapters import GeminiAdapter, PerplexityAdapter
+from .adapters import HaikuAdapter, PerplexityAdapter
 from .channels.desktop import DesktopAdapter
 from .channels.registry import ChannelAdapterRegistry
 from .channels.whatsapp import WhatsAppAdapter, WhatsAppConfig
@@ -31,9 +31,12 @@ class GatewayRuntime:
             timeout_sec=config.orchestrator_timeout_sec,
         )
         self.session_store = SessionStore(config.sessions_db_path)
-        self.gemini_adapter = GeminiAdapter(
-            api_key=config.gemini_api_key,
-            model=config.gemini_model,
+        self.haiku_adapter = HaikuAdapter(
+            api_key=config.haiku_api_key,
+            model=config.haiku_model,
+            anthropic_version=config.anthropic_version,
+            max_tokens=config.haiku_max_tokens,
+            thinking_budget_tokens=config.haiku_thinking_budget_tokens,
             timeout_sec=config.direct_llm_timeout_sec,
         )
         self.perplexity_adapter = PerplexityAdapter(
@@ -58,7 +61,7 @@ class GatewayRuntime:
         await self.registry.stop_all()
         await self.model_router.stop()
         await self.orchestrator.stop()
-        await self.gemini_adapter.close()
+        await self.haiku_adapter.close()
         await self.perplexity_adapter.close()
         self.started = False
 
@@ -186,8 +189,8 @@ class GatewayRuntime:
                 metadata=metadata,
             )
 
-        if route == "gemini":
-            await self.gemini_adapter.stream(
+        if route in {"haiku", "gemini"}:
+            await self.haiku_adapter.stream(
                 request_id=request_id,
                 session_id=session_id,
                 history=history,
@@ -262,7 +265,7 @@ class GatewayRuntime:
         if sticky_message:
             self.session_store.clear_awaiting_reply(sticky_message["message_id"])
             return {
-                "route": self._safe_text(sticky_message.get("route")) or "opus",
+                "route": self._normalize_route(self._safe_text(sticky_message.get("route")) or "opus"),
                 "needs_latest": False,
                 "needs_citations": False,
                 "is_task": False,
@@ -301,7 +304,7 @@ class GatewayRuntime:
             }
 
         return {
-            "route": self._safe_text(classification.get("route")) or "opus",
+            "route": self._normalize_route(self._safe_text(classification.get("route")) or "opus"),
             "needs_latest": bool(classification.get("needs_latest")),
             "needs_citations": bool(classification.get("needs_citations")),
             "is_task": bool(classification.get("is_task")),
@@ -604,6 +607,7 @@ class GatewayRuntime:
                 metadata={
                     "task_id": self._safe_text(event.get("task_id")),
                     "metrics": event.get("metrics"),
+                    "thinking_text": self._safe_text(event.get("thinking_text")),
                 },
                 channel=self._safe_text(event.get("channel")) or "",
                 route="opus",
@@ -648,3 +652,11 @@ class GatewayRuntime:
             return float(value)
         except (TypeError, ValueError):
             return default
+
+    def _normalize_route(self, route: str) -> str:
+        normalized = route.strip().lower()
+        if normalized == "gemini":
+            return "haiku"
+        if normalized in {"opus", "haiku", "perplexity"}:
+            return normalized
+        return "opus"

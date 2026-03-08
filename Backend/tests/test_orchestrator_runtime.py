@@ -102,6 +102,7 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
     assert "Rayleigh scattering" in streamed_events[4]["content"]
     assert streamed_events[5]["type"] == "response.complete"
     assert streamed_events[5]["route"] == "opus"
+    assert streamed_events[5]["thinking_text"] == "Thinking..."
     assert streamed_events[5]["metrics"]["input_tokens"] == 123
     assert streamed_events[5]["metrics"]["output_tokens"] == 27
     assert streamed_events[6] == {

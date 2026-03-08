@@ -6,7 +6,7 @@
 |---|---|
 | Deployment Model | **Single-user-per-instance.** Each user gets their own VM/VPC with a dedicated backend. User isolation is infrastructure-level (VM boundary), not application-level. |
 | Transport | Redis Streams |
-| Routing | Model Router (Groq classifier) — three routes: opus, gemini, perplexity |
+| Routing | Model Router (Groq classifier) — three routes: opus, haiku, perplexity |
 | Session & Memory | Session Manager (Gateway) + Qdrant local (hybrid: dense + sparse vectors) + .md file store |
 | Embeddings | Dense: Qwen3-embedding-8b via OpenRouter. Sparse: FastEmbed BM25 (local). |
 | Credentials | Gateway Credential Manager (OAuth PKCE, encrypted token store) |
@@ -94,12 +94,12 @@ Every design decision flows from one mental model. Keep these three layers stric
 │  Lightweight classifier (Groq). Decides which backend handles    │
 │  each query. Called by Gateway after context assembly.            │
 ├──────────────┬──────────────────┬────────────────────────────────┤
-│ opus         │ gemini           │ perplexity                     │
+│ opus         │ haiku            │ perplexity                     │
 │ (task/cont.) │ (GK)             │ (search)                       │
 ├──────────────┼──────────────────┴────────────────────────────────┤
 │              │                                                    │
 │  ORCHESTRATOR              Direct LLM APIs                       │
-│  Brain. Grounds            Gateway calls Gemini / Perplexity     │
+│  Brain. Grounds            Gateway calls Haiku / Perplexity      │
 │  context, decomposes       directly — no orchestrator overhead.  │
 │  goals, routes by                                                │
 │  capability, retries,      Propagates source, source_id, and    │
@@ -133,7 +133,7 @@ Every design decision flows from one mental model. Keep these three layers stric
 | **Scheduler** | Gateway module that manages crons and heartbeats. Stores cron definitions and heartbeat config in SQLite. Runs a polling loop that fires TaskEnvelopes to the orchestrator when jobs are due. Exposes internal API for CRUD operations. The orchestrator creates and manages crons via this API. See §25. |
 | **Webhook Handler** | Gateway module that receives HTTP POST callbacks from external systems (Gmail, GitHub, Jira, Slack). Verifies provider-specific signatures, converts payloads into TaskEnvelopes tagged with `source='webhook'`, and dispatches to the orchestrator. See §26. |
 | **Hooks Engine** | Gateway module that fires TaskEnvelopes in response to internal state changes: gateway startup/shutdown, session reset, compaction, agent registration/deregistration. Configurable hook definitions stored alongside the Gateway. See §28. |
-| **Model Router** | Lightweight stateless classifier. Determines which backend handles a query: `opus` (orchestrator — tasks, continuations, ambiguous input), `gemini` (direct API), or `perplexity` (direct API). Called by Gateway after context assembly — unless `awaiting_reply` sticky routing triggers first (§3.7), which skips the classifier entirely. No `unknown` route — `opus` is the fallback. |
+| **Model Router** | Lightweight stateless classifier. Determines which backend handles a query: `opus` (orchestrator — tasks, continuations, ambiguous input), `haiku` (direct API), or `perplexity` (direct API). Called by Gateway after context assembly — unless `awaiting_reply` sticky routing triggers first (§3.7), which skips the classifier entirely. No `unknown` route — `opus` is the fallback. |
 | **Orchestrator** | Reads context, decomposes goals into subtasks via the Task Planner (§31), queries registry for capable healthy agents, resolves credentials via Gateway internal API when intents require provider access, dispatches via Redis, merges results. Classifies requests as simple (direct dispatch) or complex (structured plan with steps, dependencies, synthesis). Manages multiple concurrent plans. Propagates `source`, `source_id`, and `channel` from parent TaskEnvelope to all child tasks. Creates and manages cron jobs via the Gateway Scheduler internal API. Powered by Claude Opus. |
 | **Sub-Agent Worker** | Single-domain specialist. Consumes Task Envelopes from its Redis stream, emits Event Envelopes, writes artifacts, sends heartbeats. Has access to universal tools (StepPlan, MemoryRead, MemoryWrite — see §32) injected by the agent runtime. |
 | **Browser Agent** | Specialist agent for browser automation via Playwright. Navigates pages, fills forms, clicks elements, extracts content, takes screenshots. Runs in a sandboxed browser context. See §29. |
@@ -176,10 +176,10 @@ FIVE INPUT SOURCES
     │                         │
     │         ┌───────────────┼───────────────┐
     │         ▼               ▼               ▼
-    │     route=opus      route=gemini   route=perplexity
+    │     route=opus      route=haiku    route=perplexity
     │         │               │               │
     │         ▼               ▼               ▼
-    │    Orchestrator     Gemini API     Perplexity API
+    │    Orchestrator     Haiku API      Perplexity API
     │    → Agents         (direct)       (direct)
     │    → Redis
     │         │               │               │
@@ -192,7 +192,7 @@ FIVE INPUT SOURCES
 
 **Source-to-priority mapping:** User messages dispatch at `high` priority. Webhooks dispatch at `normal`. Crons and heartbeats dispatch at `low` (configurable per-cron). This ensures user queries always process first under full-bandwidth operation, while the aging mechanism (§18) prevents background tasks from starving.
 
-**Why three paths?** A simple general knowledge question ("What is a knowledge graph?") does not need Claude Opus, agent decomposition, or Redis task envelopes. Routing it directly to Gemini saves cost and latency. Only genuine tasks ("Draft an email to my team"), continuations, and ambiguous inputs go through the orchestrator. There is no `unknown` route — the orchestrator handles anything the classifier can't confidently categorize. All three paths receive the same assembled session context (today's conversation + retrieved memories) from the Session Manager (see §23).
+**Why three paths?** A simple general knowledge question ("What is a knowledge graph?") does not need Claude Opus, agent decomposition, or Redis task envelopes. Routing it directly to Claude Haiku 4.5 saves cost and latency. Only genuine tasks ("Draft an email to my team"), continuations, and ambiguous inputs go through the orchestrator. There is no `unknown` route — the orchestrator handles anything the classifier can't confidently categorize. All three paths receive the same assembled session context (today's conversation + retrieved memories) from the Session Manager (see §23).
 
 **Why sticky routing before the classifier?** When a model asks the user a question (and emits `<awaiting_reply/>`), the user's response must go back to that same model — regardless of what the classifier would have chosen. A short reply like "B" has no context for the classifier to work with, and would be misrouted. Checking the `awaiting_reply` flag first is a zero-cost Gateway-level check that avoids an unnecessary Groq API call. See §3.7 and §3.8 for the full mechanism.
 
@@ -210,7 +210,7 @@ The Model Router is a lightweight classification service that determines which b
 |---|---|---|---|
 | `opus` | Orchestrator (Claude Opus) | Tasks, continuations, ambiguous input, progress queries, anything referencing prior work | High |
 | `perplexity` | Perplexity API (direct) | Real-time info, citations, current events, verification | Medium |
-| `gemini` | Gemini API (direct) | General knowledge, explanations, theory, brainstorming | Low |
+| `haiku` | Claude Haiku 4.5 API (direct) | General knowledge, explanations, theory, brainstorming | Low |
 
 ### 2.2 Hard Routing Rules
 
@@ -226,7 +226,7 @@ If the last stored assistant message has `awaiting_reply = true`, the Gateway sk
 2. If input is a continuation or ambiguous (`go on`, `ok`, `why?`, progress queries) → `opus` (the orchestrator is smart enough to handle these — it has full session context and task state)
 3. Else if `needs_latest` OR `needs_citations` → `perplexity`
 4. Else if `confidence < 0.5` → `opus` (low confidence fallback)
-5. Else → `gemini`
+5. Else → `haiku`
 
 **Effective priority order (both layers combined):**
 
@@ -236,7 +236,7 @@ If the last stored assistant message has `awaiting_reply = true`, the Gateway sk
 3. is_continuation            → opus        (post-classification)
 4. needs_latest/citations     → perplexity  (post-classification)
 5. confidence < 0.5           → opus        (post-classification)
-6. default                    → gemini      (post-classification)
+6. default                    → haiku       (post-classification)
 ```
 
 **There is no `unknown` route.** A personal assistant should never bounce back "please clarify." The orchestrator (Opus) handles ambiguous inputs — it can respond conversationally, ask a specific clarifying question, or take action based on context. This is a UX decision: the smartest model handles the hardest-to-classify inputs.
@@ -246,7 +246,7 @@ def enforce_rules(parsed: dict) -> dict:
     """Post-classification rule enforcement. Called only when Gateway
     pre-check did NOT trigger sticky routing (no awaiting_reply flag)."""
     out = {
-        'route': parsed.get('route', 'gemini'),
+        'route': parsed.get('route', 'haiku'),
         'needs_latest': bool(parsed.get('needs_latest')),
         'needs_citations': bool(parsed.get('needs_citations')),
         'is_task': bool(parsed.get('is_task')),
@@ -264,7 +264,7 @@ def enforce_rules(parsed: dict) -> dict:
     elif out['confidence'] < 0.5:
         out['route'] = 'opus'       # low confidence → let Opus decide
     else:
-        out['route'] = 'gemini'
+        out['route'] = 'haiku'
 
     return out
 ```
@@ -326,7 +326,7 @@ The Model Router runs as a standalone FastAPI microservice, called by the Gatewa
 
 The Model Router accepts optional conversation history for better classification. The Gateway attaches the last N messages from the session to the classification request, along with the route used for each message. The Model Router does not maintain any session state itself.
 
-With context, the classifier can distinguish between a continuation of a task discussion (`opus`) vs a follow-up to a knowledge question (`gemini`). Without context, ambiguous inputs like `"go on"` default to `opus` — the orchestrator has session state and task context to handle them intelligently.
+With context, the classifier can distinguish between a continuation of a task discussion (`opus`) vs a follow-up to a knowledge question (`haiku`). Without context, ambiguous inputs like `"go on"` default to `opus` — the orchestrator has session state and task context to handle them intelligently.
 
 **Note:** The `awaiting_reply` sticky routing check happens at the Gateway level BEFORE this classification call. If the last assistant message has `awaiting_reply = true`, the classifier is never called — the Gateway routes directly to `last_route`. The Model Router only sees queries that passed through the pre-check without triggering sticky routing. See §3.7.
 
@@ -350,7 +350,7 @@ async def classify_query(query: str, context: list) -> dict:
 
 ### 2.6a Circuit Breaker: External LLM APIs
 
-The Gateway calls three external LLM APIs (Groq for Model Router, Gemini, Perplexity). Without a circuit breaker, if an API goes down, every request to that route hangs for the full timeout before failing — then the next request does the same. Under sustained failure, the system appears frozen for all queries routed to the failing API.
+The Gateway calls three external LLM APIs (Groq for Model Router, Claude Haiku 4.5, Perplexity). Without a circuit breaker, if an API goes down, every request to that route hangs for the full timeout before failing — then the next request does the same. Under sustained failure, the system appears frozen for all queries routed to the failing API.
 
 **Pattern:** Per-API circuit breaker with three states: `closed` (healthy — requests flow normally), `open` (unhealthy — requests fail immediately with fallback), `half_open` (probe — one request passes through to test recovery).
 
@@ -395,7 +395,7 @@ class CircuitBreaker:
             self.opened_at = time.time()
 
 # One breaker per external API
-gemini_breaker = CircuitBreaker('gemini', failure_threshold=3, recovery_timeout_sec=30)
+haiku_breaker = CircuitBreaker('haiku', failure_threshold=3, recovery_timeout_sec=30)
 perplexity_breaker = CircuitBreaker('perplexity', failure_threshold=3, recovery_timeout_sec=30)
 model_router_breaker = CircuitBreaker('model_router', failure_threshold=3, recovery_timeout_sec=15)
 ```
@@ -403,17 +403,17 @@ model_router_breaker = CircuitBreaker('model_router', failure_threshold=3, recov
 **Gateway integration (extends §3.7 route handling):**
 
 ```python
-async def stream_from_gemini(session_id, content, context, channel_adapter, **kwargs):
-    if not gemini_breaker.should_allow():
-        # Gemini is down — reroute to opus (safe fallback, same as §2.6 logic)
-        logger.warning('Gemini circuit open — rerouting to opus')
+async def stream_from_haiku(session_id, content, context, channel_adapter, **kwargs):
+    if not haiku_breaker.should_allow():
+        # Haiku is down — reroute to opus (safe fallback, same as §2.6 logic)
+        logger.warning('Haiku circuit open — rerouting to opus')
         await dispatch_to_orchestrator(session_id, content, context, channel_adapter, **kwargs)
         return
     try:
-        await _stream_gemini_impl(session_id, content, context, channel_adapter, **kwargs)
-        gemini_breaker.record_success()
+        await _stream_haiku_impl(session_id, content, context, channel_adapter, **kwargs)
+        haiku_breaker.record_success()
     except Exception:
-        gemini_breaker.record_failure()
+        haiku_breaker.record_failure()
         # Fallback to opus for this request
         await dispatch_to_orchestrator(session_id, content, context, channel_adapter, **kwargs)
 ```
@@ -422,7 +422,7 @@ async def stream_from_gemini(session_id, content, context, channel_adapter, **kw
 
 | API Down | Fallback Route | Rationale |
 |---|---|---|
-| Gemini | `opus` | Orchestrator (Opus) can handle any query, including general knowledge |
+| Haiku | `opus` | Orchestrator (Opus) can handle any query, including general knowledge |
 | Perplexity | `opus` | Orchestrator can delegate to research agent for web search |
 | Model Router (Groq) | `opus` (already in §2.6) | Same existing fallback — orchestrator handles everything |
 
@@ -484,7 +484,7 @@ The Gateway is the single entry point for all input sources. It handles authenti
 | Model routing | Checks `awaiting_reply` flag for sticky routing (skips classifier), otherwise calls Model Router to classify each query |
 | Reply routing | Sticky routing: if last assistant message has `awaiting_reply` flag, routes user's reply directly to the model that asked — no classifier call |
 | Task dispatch | For `opus` route: creates TaskEnvelope, dispatches to orchestrator via Redis |
-| Direct LLM proxy | For `gemini`/`perplexity` routes: calls LLM API directly, streams response, strips control tags |
+| Direct LLM proxy | For `haiku`/`perplexity` routes: calls LLM API directly, streams response, strips control tags |
 | Event streaming | Streams task progress events and task input requests to the originating channel adapter |
 | Task input relay | Consumes `user_input:requests` from orchestrator, surfaces to UI via the appropriate channel; collects user replies, publishes to `user_input:replies` |
 | Rate limiting | Token-bucket rate limiting per session |
@@ -594,7 +594,7 @@ The desktop app maintains one persistent WebSocket connection per desktop instal
     "classification": { ... }
 }
 
-# Streaming tokens (gemini/perplexity direct response)
+# Streaming tokens (haiku/perplexity direct response)
 {
     "type": "response.chunk",
     "request_id": "req_001",
@@ -603,13 +603,13 @@ The desktop app maintains one persistent WebSocket connection per desktop instal
     "done": false
 }
 
-# Final response (gemini/perplexity/opus conversational complete)
+# Final response (haiku/perplexity/opus conversational complete)
 {
     "type": "response.complete",
     "request_id": "req_001",
     "session_id": "sess_abc123",
     "content": "Full response text...",
-    "route": "gemini",
+    "route": "haiku",
     "awaiting_reply": true,             # set if model emitted <awaiting_reply/> tag
     "metrics": { "rtt_ms": 450 }
 }
@@ -689,7 +689,7 @@ The WebSocket is a **transport**, not the session. Reconnects do not create new 
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/query` | Submit query (returns task_id for opus, or streams response for gemini/perplexity) |
+| `POST` | `/query` | Submit query (returns task_id for opus, or streams response for haiku/perplexity) |
 | `GET` | `/tasks/{task_id}` | Get task status and result |
 | `GET` | `/tasks/{task_id}/events` | SSE stream of task events |
 | `POST` | `/tasks/{task_id}/input-reply/{input_request_id}` | Reply to a task input request (alternative to WebSocket `task.input_reply`) |
@@ -761,14 +761,14 @@ CREATE TABLE usage_events (
     user_id TEXT NOT NULL,                  -- always same value per VM today; future-proof
 
     source_component TEXT NOT NULL,         -- 'gateway', 'orchestrator', 'agent', 'session_manager', 'model_router'
-    source_id TEXT,                         -- 'cosmic/orchestrator:1.0.0', 'cosmic/research-agent:1.0.0', 'gateway:gemini'
+    source_id TEXT,                         -- 'cosmic/orchestrator:1.0.0', 'cosmic/research-agent:1.0.0', 'gateway:haiku'
 
     task_id TEXT,                           -- NULL for non-task calls
     plan_id TEXT,
     parent_task_id TEXT,
     session_id TEXT,
 
-    route TEXT,                             -- 'opus', 'gemini', 'perplexity', nullable
+    route TEXT,                             -- 'opus', 'haiku', 'perplexity', nullable
     operation TEXT NOT NULL,                -- 'orchestrator.process', 'research.topic', 'model_router.classify'
     usage_kind TEXT NOT NULL,               -- 'chat_completion', 'classifier', 'embedding', 'rerank', 'other'
 
@@ -814,7 +814,7 @@ CREATE INDEX idx_usage_provider_model
 
 - The table is append-only. Never update token counts after insert; corrections are separate admin events.
 - `llm_call_placed_at` is the UTC timestamp when the outbound LLM/API call was initiated.
-- The Gateway logs direct Gemini/Perplexity usage itself.
+- The Gateway logs direct Haiku/Perplexity usage itself.
 - The orchestrator logs its own Opus/task-planning usage via `/internal/usage/log`.
 - Agents log their own model usage via `/internal/usage/log` when they call LLMs or embedding APIs.
 - The Model Router logs classifier usage via `/internal/usage/log`.
@@ -1270,8 +1270,8 @@ async def handle_query(session_id: str, content: str, context: list,
             session_id, content, assembled_context, channel_adapter,
             source=source, source_id=source_id, channel=channel,
         )
-    elif route == 'gemini':
-        await stream_from_gemini(
+    elif route == 'haiku':
+        await stream_from_haiku(
             session_id, content, assembled_context, channel_adapter,
             source=source, source_id=source_id, channel=channel,
         )
@@ -1288,17 +1288,17 @@ async def handle_query(session_id: str, content: str, context: list,
 
 **Message storage ordering rationale:** The user's message is stored in `sessions.db` (step 6) **before** dispatch (step 7). This is a deliberate crash-safety choice. If the Gateway crashes between dispatch and storage, the session would permanently lose the message — the LLM received a task referencing context it can never reconstruct. Storing first makes the session always-consistent: if dispatch fails after storage, the user sees an error and retries; if the Gateway crashes after storage but before dispatch, the message is preserved for the next attempt. The cost is that a message might be stored for a dispatch that immediately fails — this is acceptable because the message reflects what the user actually said, regardless of dispatch success.
 
-**Sticky routing design rationale:** When a model (Opus, Gemini, or Perplexity) is in a conversational exchange and asks the user a question, the user's reply must go back to that same model. Without this, a short reply like "B" would be classified as low-confidence or continuation and routed to Opus, even if Gemini asked the question. The `awaiting_reply` flag is the model's own declaration that it expects a direct response — no heuristics, no guessing. See §3.8 for how the flag is detected from model output.
+**Sticky routing design rationale:** When a model (Opus, Haiku, or Perplexity) is in a conversational exchange and asks the user a question, the user's reply must go back to that same model. Without this, a short reply like "B" would be classified as low-confidence or continuation and routed to Opus, even if Haiku asked the question. The `awaiting_reply` flag is the model's own declaration that it expects a direct response — no heuristics, no guessing. See §3.8 for how the flag is detected from model output.
 
 **Channel entry-point rule:** `handle_query(...)` is the common post-normalization path for user-originated messages regardless of channel. The Desktop adapter reaches it from the WebSocket handler. A sidecar-backed adapter such as WhatsApp reaches it from an internal REST route after the Bridge payload has been authenticated and normalized by `gateway/channels/whatsapp.py`.
 
-**Routing nuance:** not every incoming user message becomes a Redis-dispatched orchestrator task. Only `route='opus'` results in TaskEnvelope creation and Redis dispatch to the orchestrator. `gemini` and `perplexity` remain on the Gateway's direct LLM proxy path.
+**Routing nuance:** not every incoming user message becomes a Redis-dispatched orchestrator task. Only `route='opus'` results in TaskEnvelope creation and Redis dispatch to the orchestrator. `haiku` and `perplexity` remain on the Gateway's direct LLM proxy path.
 
 ### 3.8 Direct LLM Routing & Response Control Tags
 
-For `gemini` and `perplexity` routes, the Gateway acts as a streaming proxy. For conversational `opus` responses (non-task), the orchestrator streams through the same path. This avoids orchestrator overhead for simple questions while maintaining consistent response processing.
+For `haiku` and `perplexity` routes, the Gateway acts as a streaming proxy. For conversational `opus` responses (non-task), the orchestrator streams through the same path. This avoids orchestrator overhead for simple questions while maintaining consistent response processing.
 
-**The `<awaiting_reply/>` control tag:** All three LLM backends (Opus, Gemini, Perplexity) receive a system prompt instruction to emit `<awaiting_reply/>` at the end of their response when they genuinely expect a direct user reply (e.g., they asked a question, presented options, or need confirmation before proceeding). The Gateway strips this tag before forwarding to the UI and sets a flag on the stored message.
+**The `<awaiting_reply/>` control tag:** All three LLM backends (Opus, Haiku, Perplexity) receive a system prompt instruction to emit `<awaiting_reply/>` at the end of their response when they genuinely expect a direct user reply (e.g., they asked a question, presented options, or need confirmation before proceeding). The Gateway strips this tag before forwarding to the UI and sets a flag on the stored message.
 
 **System prompt instruction (included in all three model prompts):**
 
@@ -1381,12 +1381,12 @@ class LLMStreamProcessor:
             route=route, awaiting_reply=awaiting_reply,
         )
 
-class GeminiAdapter(LLMStreamProcessor):
-    """Streams responses from Google Gemini API."""
+class HaikuAdapter(LLMStreamProcessor):
+    """Streams responses from Anthropic Claude Haiku 4.5 API."""
     async def stream(self, query: str, context: list, session_id: str,
                       ws: WebSocket):
-        stream = self._call_gemini_streaming(query, context)
-        await self.process_stream(stream, session_id, 'gemini', ws)
+        stream = self._call_haiku_streaming(query, context)
+        await self.process_stream(stream, session_id, 'haiku', ws)
 
 class PerplexityAdapter(LLMStreamProcessor):
     """Streams responses from Perplexity API with citations."""
@@ -1507,7 +1507,7 @@ CREATE TABLE messages (
     session_id TEXT,
     role TEXT,               -- 'user', 'assistant', 'system'
     content TEXT,
-    route TEXT,              -- 'opus', 'gemini', 'perplexity'
+    route TEXT,              -- 'opus', 'haiku', 'perplexity'
     channel TEXT,            -- originating channel: 'desktop:desk_a1b2c3', 'whatsapp:+1234567890', 'telegram:chat_123', etc.
     task_id TEXT,            -- null for non-opus messages
     awaiting_reply BOOLEAN DEFAULT FALSE,  -- model expects direct reply (sticky routing)
@@ -1717,8 +1717,8 @@ cosmic-agents/
 │   ├── main.py                 # Gateway entry point + WebSocket handler
 │   ├── routes/                 # REST endpoint modules
 │   ├── circuit_breaker.py      # Per-API circuit breaker for external LLM APIs (§2.6a)
-│   ├── adapters/               # Direct LLM adapters (Gemini, Perplexity)
-│   │   ├── gemini.py
+│   ├── adapters/               # Direct LLM adapters (Haiku, Perplexity)
+│   │   ├── haiku.py
 │   │   └── perplexity.py
 │   ├── channels/               # Channel Adapter Registry (see §27)
 │   │   ├── base.py             # ChannelAdapter base class (interface contract)
@@ -2340,12 +2340,12 @@ contracts; `shared/model_specs.json` declares runtime model metadata.
       },
       "status": "active"
     },
-    "google:gemini-flash": {
-      "provider": "google",
-      "model": "gemini-flash",
-      "sdk": "google_genai",
-      "base_url": "https://generativelanguage.googleapis.com",
-      "usage_kind": "chat_completion",
+    "anthropic:claude-haiku-4-5": {
+      "provider": "anthropic",
+      "model": "claude-haiku-4-5",
+      "sdk": "anthropic",
+      "base_url": "https://api.anthropic.com",
+      "usage_kind": "messages",
       "context_window_tokens": null,
       "max_output_tokens": null,
       "recommended_headroom_reserve_tokens": 8000,
@@ -3005,7 +3005,7 @@ WantedBy=multi-user.target
 
 **Gateway example:**
 
-- `gateway.env` contains Gateway-owned config such as `GEMINI_API_KEY`, `PERPLEXITY_API_KEY`, `GATEWAY_INTERNAL_TOKEN`, `GATEWAY_SIGNING_SECRET`, `CREDENTIAL_ENCRYPTION_KEY`, `OPENROUTER_API_KEY`, and session/memory tunables.
+- `gateway.env` contains Gateway-owned config such as `ANTHROPIC_API_KEY`, `HAIKU_MODEL`, `PERPLEXITY_API_KEY`, `GATEWAY_INTERNAL_TOKEN`, `GATEWAY_SIGNING_SECRET`, `CREDENTIAL_ENCRYPTION_KEY`, `OPENROUTER_API_KEY`, and session/memory tunables.
 - It may also include references to other internal services such as `MODEL_ROUTER_URL`, but it should not carry Model Router-only provider secrets like `GROQ_API_KEY` unless the Gateway itself truly needs them.
 
 **Shared-secret note:** some values will appear in multiple files by design:
@@ -3857,11 +3857,11 @@ GATEWAY (FastAPI :8080)
     │  Session Manager assembles context (conversation + memories)
     ↕  HTTP (internal)
 MODEL ROUTER (FastAPI :8742)
-    │  classifies → route (opus / gemini / perplexity)
+    │  classifies → route (opus / haiku / perplexity)
     │
     ├─ route=opus ──────────────────────────────────────┐
     │  (tasks, continuations, ambiguous, fallback)      │
-    ├─ route=gemini ──► Gemini API (direct, streamed)   │
+    ├─ route=haiku ──► Claude Haiku 4.5 API (direct)    │
     │  (response may contain <awaiting_reply/> tag)     │
     └─ route=perplexity ──► Perplexity API (direct)     │
        (response may contain <awaiting_reply/> tag)     │
@@ -4107,7 +4107,7 @@ All API keys and secrets **must** be externalized to environment variables. Neve
 | Secret | Owner | Environment Variable |
 |---|---|---|
 | Groq API key | Model Router | `GROQ_API_KEY` |
-| Gemini API key | Gateway (Gemini adapter) | `GEMINI_API_KEY` |
+| Anthropic API key | Gateway (Haiku adapter) + Orchestrator (Opus) | `ANTHROPIC_API_KEY` |
 | Perplexity API key | Gateway (Perplexity adapter) | `PERPLEXITY_API_KEY` |
 | Gateway local API token | Gateway + Desktop App | `GATEWAY_LOCAL_API_TOKEN` |
 | Per-agent HMAC secrets | Orchestrator (all), Agents (own) | `AGENT_SECRET` / `AGENT_SECRETS` |
@@ -5056,7 +5056,7 @@ These rules are non-negotiable. Violating any of them is a security incident.
 
 The Session Manager is a module inside the Gateway that creates a perpetual conversational experience. It assembles context for every query by combining today's conversation with retrieved long-term memories, manages daily session lifecycles, and handles context window pruning and compaction.
 
-**Design principle:** Three separate memory layers with different lifecycles — today's conversation (short-term, compactable), retrieved memories (long-term, never compacted, retrieved fresh each turn), and task execution (isolated, retrievable on demand). All LLM backends (Opus, Gemini, Perplexity) receive the same assembled context — the user gets a consistent assistant regardless of which model answers. The entire memory store (SQLite, .md files, Qdrant) serves a single user per the deployment model — no user-scoped queries or tenant filtering needed.
+**Design principle:** Three separate memory layers with different lifecycles — today's conversation (short-term, compactable), retrieved memories (long-term, never compacted, retrieved fresh each turn), and task execution (isolated, retrievable on demand). All LLM backends (Opus, Haiku, Perplexity) receive the same assembled context — the user gets a consistent assistant regardless of which model answers. The entire memory store (SQLite, .md files, Qdrant) serves a single user per the deployment model — no user-scoped queries or tenant filtering needed.
 
 ### 23.1 Architecture Overview
 
@@ -5088,7 +5088,7 @@ Session Manager: assemble_context()
 Model Router classifies (using assembled context)
     │
     ▼
-Route to Opus / Gemini / Perplexity
+Route to Opus / Haiku / Perplexity
     (all receive the same assembled_context)
 ```
 
@@ -5131,7 +5131,7 @@ Two mechanisms keep the context window under control:
 **Compaction (triggered):** When context usage hits 70% of the target model's context window, compaction runs:
 
 1. Extract memories from the conversation before summarizing (important facts, decisions, outcomes are written to the memory store at full fidelity)
-2. Send the older conversation messages to a fast/cheap model (Gemini Flash or Sonnet — not Opus) with a summarization prompt
+2. Send the older conversation messages to a fast/cheap model (Claude Haiku 4.5 or Sonnet — not Opus) with a summarization prompt
 3. The summary replaces the older messages in the session context
 4. Conversation continues with: `[compacted summary] + [recent messages since compaction]`
 
@@ -5628,7 +5628,7 @@ Agent learnings (`agents/*/store/learnings.md`) are the agents' own persistent m
 # Session Manager configuration (gateway environment)
 SESSION_RESET_HOUR=4                          # daily reset at 4:00 AM local time
 COMPACTION_THRESHOLD=0.70                     # compact at 70% context usage
-COMPACTION_MODEL=gemini-flash                 # cheap/fast model for summarization
+COMPACTION_MODEL=claude-haiku-4-5             # cheap/fast model for summarization
 MEMORY_TOKEN_BUDGET=12000                     # max tokens for retrieved memories
 MEMORY_MAX_RESULTS=20                         # max memories per retrieval
 EMBEDDING_MODEL=qwen3-embedding-8b            # dense vectors — via OpenRouter
@@ -5696,13 +5696,13 @@ cost estimation rather than maintaining a second copy of model metadata.
 
 ### 23.10 Hard Rules
 
-1. **All LLM backends receive the same assembled context.** Whether the query routes to Opus, Gemini, or Perplexity, the Session Manager provides identical context. The user gets a consistent assistant.
+1. **All LLM backends receive the same assembled context.** Whether the query routes to Opus, Haiku, or Perplexity, the Session Manager provides identical context. The user gets a consistent assistant.
 2. **Memories are never compacted.** The memory block is stripped before compaction input. Memories persist at source fidelity and are re-retrieved each turn.
 3. **Each memory has a unique `memory_id`.** No memory is repeated within the same context window. The Session Manager tracks which IDs are in context.
 4. **Task execution is isolated from the main session.** Only final task results enter the main session as messages. Full task details are retrievable via recall intents and the memory store.
 5. **Agent notes have priority over user data** in memory ranking. Curated, task-proven facts outrank bulk external data.
 6. **.md files are the source of truth.** Qdrant is the index (dense + sparse vectors). If Qdrant is lost, `full_rebuild()` re-generates both vector types from `memory/` (see §23.5a). Startup consistency check detects and repairs drift automatically.
-7. **Compaction uses a cheap model.** Never use Opus for summarization. Gemini Flash or Sonnet — fast, cheap, good enough.
+7. **Compaction uses a cheap model.** Never use Opus for summarization. Claude Haiku 4.5 or Sonnet — fast, cheap, good enough.
 8. **Daily reset is transparent to the user.** Session boundaries at 4AM are invisible. The compacted summary becomes a retrievable memory. The user sees one perpetual conversation.
 9. **Conversational replies use sticky routing, task input uses queues.** Two separate mechanisms for two separate problems. `<awaiting_reply/>` tag + `last_route` for inline conversation (§3.7). `user_input:requests/replies` Redis streams for async background task input (§13.2). They never overlap.
 10. **`awaiting_reply` flag is cleared on first use.** Once the user replies and sticky routing fires, the flag is cleared. The next message goes through normal classification. No sticky routing chains.
@@ -5713,7 +5713,7 @@ cost estimation rather than maintaining a second copy of model metadata.
 
 COSMIC accepts five types of input. When combined, they create a system that acts proactively without any autonomous reasoning — it is purely reactive to events that the user has preconfigured. Every input source is normalized and tagged at the Gateway boundary with `source`, `source_id`, and `channel`, then enters the same processing pipeline through the Gateway.
 
-**Important nuance for message sources:** infrastructure-driven inputs (heartbeats, crons, hooks, webhooks) become TaskEnvelopes immediately. Human messages first enter the Gateway's session/routing path. Only the `opus` route is converted into a TaskEnvelope and dispatched to the orchestrator; `gemini` and `perplexity` are handled directly by the Gateway.
+**Important nuance for message sources:** infrastructure-driven inputs (heartbeats, crons, hooks, webhooks) become TaskEnvelopes immediately. Human messages first enter the Gateway's session/routing path. Only the `opus` route is converted into a TaskEnvelope and dispatched to the orchestrator; `haiku` and `perplexity` are handled directly by the Gateway.
 
 ### 24.1 Input Source Overview
 
@@ -5738,7 +5738,7 @@ COSMIC accepts five types of input. When combined, they create a system that act
                                               Same processing pipeline:
                                               Session Manager → sticky route / Model Router
                                                            │
-                                                           ├── gemini/perplexity → direct Gateway LLM path
+                                                           ├── haiku/perplexity → direct Gateway LLM path
                                                            └── opus → TaskEnvelope → orchestrator
 ```
 
@@ -6415,7 +6415,7 @@ When the Gateway creates a TaskEnvelope, it registers the originating **channel 
 # Gateway maintains task → channel mapping
 active_task_channels: dict[str, str] = {}
 
-# On task creation (dispatch_to_orchestrator, stream_from_gemini, etc.):
+# On task creation (dispatch_to_orchestrator, stream_from_haiku, etc.):
 active_task_channels[task_id] = channel
 
 # On task completion/failure:
@@ -6446,7 +6446,7 @@ Channel integrations have two distinct planes. They must not be conflated.
   - Adapter normalizes it to `{ content, session_id, channel, metadata }`
   - Gateway applies session assembly, sticky routing, and model routing
   - `route='opus'` → TaskEnvelope → Redis → orchestrator
-  - `route='gemini'|'perplexity'` → direct Gateway LLM path
+  - `route='haiku'|'perplexity'` → direct Gateway LLM path
 
 **2. Channel management / control plane**
 
@@ -6492,7 +6492,7 @@ WhatsApp user message
               └── Gateway authenticates bridge token
                     └── WhatsApp adapter normalizes payload
                           └── handle_query(...)
-                                ├── gemini/perplexity → direct Gateway route
+                                ├── haiku/perplexity → direct Gateway route
                                 └── opus → TaskEnvelope → Redis → orchestrator
 ```
 
@@ -8145,7 +8145,7 @@ Not every request needs a plan. The orchestrator classifies complexity first.
 
 ```
 "Send this email"                    → simple: docs.edit, one agent
-"What time is it in Tokyo?"          → simple: not even opus — routes to gemini
+"What time is it in Tokyo?"          → simple: not even opus — routes to haiku
 "Research X and then write a report" → complex: research.topic → docs.create
 "Check my email and calendar,        → complex: research (email) + research (calendar)
  then draft a summary"                          → docs.create (depends on both)

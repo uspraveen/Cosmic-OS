@@ -61,7 +61,7 @@ DG_WS = "wss://api.deepgram.com/v1/listen"
 DG_MODEL = os.getenv("DG_MODEL", "nova-3")
 
 # Claude Haiku 4.5 — minimal thinking for speed (https://docs.anthropic.com/en/api/messages)
-ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MEETING_MODEL", "claude-haiku-4-5-20251001")
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MEETING_MODEL", "claude-haiku-4-5")
 ANTHROPIC_API_VERSION = "2023-06-01"
 ANTHROPIC_BASE = "https://api.anthropic.com/v1"
 
@@ -2275,7 +2275,7 @@ def build_key_status() -> Dict[str, Any]:
     groq = bool(get_service_key("groq", "GROQ_API_KEY"))
     return {
         "hasKeys": deepgram or anthropic or groq,
-        "gemini": False,
+        "haiku": False,
         "perplexity": False,
         "deepgram": deepgram,
         "anthropic": anthropic,

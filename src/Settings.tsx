@@ -16,7 +16,7 @@ interface SettingsProps {
   onStaybackChange: (time: number) => void
   onClose: () => void
   keyStatus: {
-    gemini: boolean
+    haiku: boolean
     perplexity: boolean
     deepgram?: boolean
     groq?: boolean

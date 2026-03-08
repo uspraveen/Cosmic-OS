@@ -74,7 +74,7 @@ interface Window {
     onKeyStatus: (
       cb: (data: {
         hasKeys: boolean
-        gemini: boolean
+        haiku: boolean
         perplexity: boolean
         deepgram?: boolean
         groq?: boolean

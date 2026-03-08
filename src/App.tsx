@@ -42,6 +42,7 @@ const historyToMessages = (history: any[] = []): Message[] => {
       id: String(item.message_id || `${item.role}-${index}-${crypto.randomUUID()}`),
       role: item.role,
       content: String(item.content || ''),
+      thinking: typeof item?.metadata?.thinking_text === 'string' ? item.metadata.thinking_text : undefined,
       sources: Array.isArray(item?.metadata?.sources) ? item.metadata.sources : undefined,
     }))
 }
@@ -95,7 +96,7 @@ export default function App() {
 
   // Track key status for SetupModal
   const [keyStatus, setKeyStatus] = useState({
-    gemini: false,
+    haiku: false,
     perplexity: false,
     deepgram: false,
     groq: false,
@@ -251,7 +252,7 @@ export default function App() {
   useEffect(() => {
     const unsubKeys = window.cosmic?.onKeyStatus((status) => {
       setKeyStatus({
-        gemini: !!status.gemini,
+        haiku: !!status.haiku,
         perplexity: !!status.perplexity,
         deepgram: !!status.deepgram,
         groq: !!status.groq,

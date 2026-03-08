@@ -11,7 +11,7 @@ type MeetingPage = 'selection' | 'setup' | 'active' | 'ended'
 type MeetingType = 'online' | 'physical'
 
 interface KeyStatus {
-  gemini: boolean
+  haiku: boolean
   perplexity: boolean
   deepgram?: boolean
   groq?: boolean
