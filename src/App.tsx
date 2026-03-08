@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -1491,9 +1492,9 @@ export default function App() {
           </LiquidGlass>
         </div>}
       </div>
-      {hoverTooltip && (
+      {hoverTooltip && createPortal(
         <div
-          className={`cosmic-hover-tooltip ${hoverTooltip.tone}`}
+          className="cosmic-hover-tooltip"
           style={{
             left: `${hoverTooltip.x}px`,
             top: `${hoverTooltip.y}px`,
@@ -1501,7 +1502,8 @@ export default function App() {
           role="tooltip"
         >
           {hoverTooltip.label}
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   )
