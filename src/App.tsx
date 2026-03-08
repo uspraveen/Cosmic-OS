@@ -99,6 +99,7 @@ export default function App() {
   const responseEndRef = useRef<HTMLDivElement>(null)
   const responseContainerRef = useRef<HTMLDivElement>(null)
   const modelDialSettleTimeoutRef = useRef<number | null>(null)
+  const modelDialPulseTimeoutRef = useRef<number | null>(null)
   const modelDialWheelLockUntilRef = useRef(0)
   const surfaceLaunchResetTimeoutRef = useRef<number | null>(null)
   const meetingSurfaceRef = useRef<HTMLDivElement>(null)
@@ -125,6 +126,7 @@ export default function App() {
   const [isInputFocused, setIsInputFocused] = useState(false)
   const [showLauncherTray, setShowLauncherTray] = useState(false)
   const [selectedModel, setSelectedModel] = useState<GatewayModelSelection>('cosmic')
+  const [modelPulseModel, setModelPulseModel] = useState<GatewayModelSelection | null>(null)
   const [surfaceLaunch, setSurfaceLaunch] = useState<SurfaceLaunchState | null>(null)
 
   // --- CHAT STATE ---
@@ -175,12 +177,29 @@ export default function App() {
     content,
   })
 
-  const commitSelectedModel = (model: GatewayModelSelection, persist = true) => {
+  const triggerModelDialPulse = (model: GatewayModelSelection) => {
+    if (modelDialPulseTimeoutRef.current !== null) {
+      window.clearTimeout(modelDialPulseTimeoutRef.current)
+    }
+    setModelPulseModel(model)
+    modelDialPulseTimeoutRef.current = window.setTimeout(() => {
+      setModelPulseModel((current) => (current === model ? null : current))
+      modelDialPulseTimeoutRef.current = null
+    }, 260)
+  }
+
+  const commitSelectedModel = (model: GatewayModelSelection, persist = true, withPulse = false) => {
     if (selectedModelRef.current === model) {
+      if (withPulse) {
+        triggerModelDialPulse(model)
+      }
       return
     }
     selectedModelRef.current = model
     setSelectedModel(model)
+    if (withPulse) {
+      triggerModelDialPulse(model)
+    }
     if (persist) {
       window.cosmic?.saveSetting('gatewayModelSelection', model)
     }
@@ -240,7 +259,7 @@ export default function App() {
     if (!nextModel) {
       return
     }
-    commitSelectedModel(nextModel, true)
+    commitSelectedModel(nextModel, true, true)
     scrollModelDialTo(nextModel, 'smooth')
   }
 
@@ -417,6 +436,14 @@ export default function App() {
   useEffect(() => {
     selectedModelRef.current = selectedModel
   }, [selectedModel])
+
+  useEffect(() => {
+    return () => {
+      if (modelDialPulseTimeoutRef.current !== null) {
+        window.clearTimeout(modelDialPulseTimeoutRef.current)
+      }
+    }
+  }, [])
 
   const showChatComposer = () => {
     setMode('chat')
@@ -908,7 +935,7 @@ export default function App() {
       return
     }
     if (tile === 'task') {
-      commitSelectedModel('opus', true)
+      commitSelectedModel('opus', true, true)
     }
     showChatComposer()
     if (tile === 'task') {
@@ -927,7 +954,7 @@ export default function App() {
       if (!nextModel) {
         return
       }
-      commitSelectedModel(nextModel, true)
+      commitSelectedModel(nextModel, true, true)
       scrollModelDialTo(nextModel, 'smooth')
     }, 140)
   }
@@ -947,7 +974,7 @@ export default function App() {
   }
 
   const handleModelDialFocus = (model: GatewayModelSelection) => {
-    commitSelectedModel(model, true)
+    commitSelectedModel(model, true, true)
     scrollModelDialTo(model, 'smooth')
   }
 
@@ -1330,7 +1357,7 @@ export default function App() {
                           <button
                             key={item.id}
                             data-model={item.id}
-                            className={`model-dial-btn ${selectedModel === item.id ? 'active' : ''}`}
+                            className={`model-dial-btn ${selectedModel === item.id ? 'active' : ''} ${modelPulseModel === item.id ? 'pulse' : ''}`}
                             onClick={() => handleModelDialFocus(item.id)}
                             onFocus={() => handleModelDialFocus(item.id)}
                             type="button"
