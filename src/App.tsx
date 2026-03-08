@@ -43,6 +43,15 @@ interface SurfaceLaunchState {
   meetingOffsetY: number
 }
 
+type HoverTooltipTone = 'launcher' | 'model' | 'control'
+
+interface HoverTooltipState {
+  label: string
+  x: number
+  y: number
+  tone: HoverTooltipTone
+}
+
 // Helper to strip "PROMPT:" from legacy database entries
 const cleanText = (text: string) => {
   if (!text) return ""
@@ -127,6 +136,7 @@ export default function App() {
   const [showLauncherTray, setShowLauncherTray] = useState(false)
   const [selectedModel, setSelectedModel] = useState<GatewayModelSelection>('cosmic')
   const [modelPulseModel, setModelPulseModel] = useState<GatewayModelSelection | null>(null)
+  const [hoverTooltip, setHoverTooltip] = useState<HoverTooltipState | null>(null)
   const [surfaceLaunch, setSurfaceLaunch] = useState<SurfaceLaunchState | null>(null)
 
   // --- CHAT STATE ---
@@ -263,6 +273,24 @@ export default function App() {
     scrollModelDialTo(nextModel, 'smooth')
   }
 
+  const showHoverTooltipForElement = (
+    label: string,
+    element: HTMLElement,
+    tone: HoverTooltipTone,
+  ) => {
+    const rect = element.getBoundingClientRect()
+    setHoverTooltip({
+      label,
+      x: rect.left + rect.width / 2,
+      y: rect.top - 10,
+      tone,
+    })
+  }
+
+  const hideHoverTooltip = () => {
+    setHoverTooltip(null)
+  }
+
   const measureLaunchOffset = (element: HTMLElement | null, originX: number, originY: number) => {
     if (!element) {
       return { x: 0, y: 0 }
@@ -364,6 +392,26 @@ export default function App() {
     activeStreamingTaskIdRef.current = null
   }
 
+  const resetDesktopVmSessionState = (detail = 'Signed out from your VM.') => {
+    hideHoverTooltip()
+    clearSurfaceLaunch()
+    resetInFlightAssistantMaps()
+    clearActiveStreamingRefs()
+    setMessages([])
+    setActiveSessionId(null)
+    setIsStreaming(false)
+    setGatewayStatus({ state: 'idle', connected: false, detail, sessionId: null })
+    setShowLauncherTray(false)
+    setMode('chat')
+    setQuery('')
+    setIsInputFocused(false)
+    shouldAutoScrollRef.current = true
+    if (inputRef.current) {
+      inputRef.current.style.height = '24px'
+      inputRef.current.blur()
+    }
+  }
+
   const hasStreamedResponse = (event: any) => {
     const requestId = typeof event?.request_id === 'string' ? event.request_id.trim() : ''
     const taskId = typeof event?.task_id === 'string' ? event.task_id.trim() : ''
@@ -446,6 +494,7 @@ export default function App() {
   }, [])
 
   const showChatComposer = () => {
+    hideHoverTooltip()
     setMode('chat')
     setShowLauncherTray(false)
     setSearchState('visible')
@@ -458,6 +507,7 @@ export default function App() {
   }
 
   const showMeetingSurface = () => {
+    hideHoverTooltip()
     setSearchState('visible')
     setMode('meeting')
     setShowLauncherTray(false)
@@ -563,6 +613,7 @@ export default function App() {
 
   // --- VISIBILITY HANDLERS ---
   const performHide = () => {
+    hideHoverTooltip()
     setSearchState('hiding')
     setIsInputFocused(false)
     clearSurfaceLaunch()
@@ -799,11 +850,7 @@ export default function App() {
 
   useEffect(() => {
     if (authState !== 'authenticated') {
-      resetInFlightAssistantMaps()
-      setMessages([])
-      setActiveSessionId(null)
-      setGatewayStatus({ state: 'idle', connected: false })
-      setShowLauncherTray(false)
+      resetDesktopVmSessionState('Desktop is signed out from your VM.')
       return
     }
 
@@ -915,6 +962,7 @@ export default function App() {
   }
 
   const handleShowLauncherTray = () => {
+    hideHoverTooltip()
     setShowLauncherTray(true)
     setIsInputFocused(false)
     if (inputRef.current) {
@@ -923,6 +971,7 @@ export default function App() {
   }
 
   const handleLauncherTileClick = (tile: LauncherTileId, event: React.MouseEvent<HTMLButtonElement>) => {
+    hideHoverTooltip()
     if (tile === 'spaces') {
       return
     }
@@ -946,6 +995,7 @@ export default function App() {
   }
 
   const handleModelDialScroll = () => {
+    hideHoverTooltip()
     if (modelDialSettleTimeoutRef.current !== null) {
       window.clearTimeout(modelDialSettleTimeoutRef.current)
     }
@@ -965,6 +1015,7 @@ export default function App() {
       return
     }
     event.preventDefault()
+    hideHoverTooltip()
     const now = Date.now()
     if (now < modelDialWheelLockUntilRef.current) {
       return
@@ -976,6 +1027,32 @@ export default function App() {
   const handleModelDialFocus = (model: GatewayModelSelection) => {
     commitSelectedModel(model, true, true)
     scrollModelDialTo(model, 'smooth')
+  }
+
+  const handleVmLogout = async () => {
+    hideHoverTooltip()
+    const requestId = activeStreamingRequestIdRef.current
+    const taskId = activeStreamingTaskIdRef.current
+    if (requestId || taskId) {
+      try {
+        await window.cosmic?.cancelGatewayResponse?.({
+          requestId: requestId || undefined,
+          taskId: taskId || undefined,
+        })
+      } catch {
+        // Best-effort cancellation before transport teardown.
+      }
+    }
+
+    try {
+      await window.cosmic?.logout?.()
+    } catch {
+      // Local UI still needs to reset even if IPC logout fails.
+    }
+
+    setAuthState('unauthenticated')
+    setAuthData(null)
+    resetDesktopVmSessionState('Signed out from your VM.')
   }
 
   const handleCopy = async (text: string, id: string) => {
@@ -1073,11 +1150,7 @@ export default function App() {
         }}
         keyStatus={keyStatus}
         authData={authData}
-        onLogout={() => {
-          window.cosmic?.logout()
-          setAuthState('unauthenticated')
-          setAuthData(null)
-        }}
+        onLogout={handleVmLogout}
       />
 
       {authState === 'unauthenticated' && (
@@ -1284,9 +1357,13 @@ export default function App() {
                       key={tile.id}
                       className={`launchpad-tile ${tile.id} ${tile.locked ? 'locked' : ''}`}
                       onClick={(event) => handleLauncherTileClick(tile.id, event)}
+                      onMouseEnter={(event) => showHoverTooltipForElement(tile.locked ? `${tile.label} locked` : tile.label, event.currentTarget, 'launcher')}
+                      onMouseLeave={hideHoverTooltip}
+                      onFocus={(event) => showHoverTooltipForElement(tile.locked ? `${tile.label} locked` : tile.label, event.currentTarget, 'launcher')}
+                      onBlur={hideHoverTooltip}
                       type="button"
                       disabled={tile.locked}
-                      title={tile.locked ? `${tile.label} (Locked)` : tile.label}
+                      aria-label={tile.locked ? `${tile.label} locked` : tile.label}
                     >
                       <div className="launchpad-icon-shell">
                         <LaunchpadIcon tile={tile.id} />
@@ -1300,7 +1377,11 @@ export default function App() {
                   <button
                     className="back-btn"
                     onClick={handleShowLauncherTray}
-                    title="Modes"
+                    onMouseEnter={(event) => showHoverTooltipForElement('Modes', event.currentTarget, 'control')}
+                    onMouseLeave={hideHoverTooltip}
+                    onFocus={(event) => showHoverTooltipForElement('Modes', event.currentTarget, 'control')}
+                    onBlur={hideHoverTooltip}
+                    aria-label="Modes"
                     style={{ marginRight: 8 }}
                     type="button"
                   >
@@ -1359,9 +1440,15 @@ export default function App() {
                             data-model={item.id}
                             className={`model-dial-btn ${selectedModel === item.id ? 'active' : ''} ${modelPulseModel === item.id ? 'pulse' : ''}`}
                             onClick={() => handleModelDialFocus(item.id)}
-                            onFocus={() => handleModelDialFocus(item.id)}
+                            onMouseEnter={(event) => showHoverTooltipForElement(item.label, event.currentTarget, 'model')}
+                            onMouseLeave={hideHoverTooltip}
+                            onFocus={(event) => {
+                              handleModelDialFocus(item.id)
+                              showHoverTooltipForElement(item.label, event.currentTarget, 'model')
+                            }}
+                            onBlur={hideHoverTooltip}
                             type="button"
-                            title={item.label}
+                            aria-label={item.label}
                             aria-selected={selectedModel === item.id}
                           >
                             <span className="model-dial-knob">
@@ -1377,8 +1464,11 @@ export default function App() {
                     <button
                       className="stream-stop-btn"
                       onClick={handleStopStreaming}
+                      onMouseEnter={(event) => showHoverTooltipForElement('Stop response', event.currentTarget, 'control')}
+                      onMouseLeave={hideHoverTooltip}
+                      onFocus={(event) => showHoverTooltipForElement('Stop response', event.currentTarget, 'control')}
+                      onBlur={hideHoverTooltip}
                       type="button"
-                      title="Stop response"
                       aria-label="Stop response"
                     >
                       <LiquidGlassLoader />
@@ -1401,6 +1491,18 @@ export default function App() {
           </LiquidGlass>
         </div>}
       </div>
+      {hoverTooltip && (
+        <div
+          className={`cosmic-hover-tooltip ${hoverTooltip.tone}`}
+          style={{
+            left: `${hoverTooltip.x}px`,
+            top: `${hoverTooltip.y}px`,
+          }}
+          role="tooltip"
+        >
+          {hoverTooltip.label}
+        </div>
+      )}
     </>
   )
 }

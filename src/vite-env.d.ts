@@ -32,7 +32,17 @@ interface Window {
 
     // Auth
     login: (apiKey: string) => Promise<{ success: boolean; error?: string; message?: string; [key: string]: any }>
-    logout: () => Promise<{ success: boolean }>
+    logout: () => Promise<{
+      success: boolean
+      scopes?: {
+        clearedAuth: boolean
+        clearedGatewayTransport: boolean
+        websocketClosed: boolean
+        sessionCacheCleared: boolean
+        reconnectStopped: boolean
+        deviceIdRetained: boolean
+      }
+    }>
 
     // Settings
     getSettings: () => void

@@ -867,6 +867,7 @@ app.whenReady().then(() => {
   })
 
   ipcMain.handle('auth:logout', () => {
+    gatewayConnectionManager?.stop()
     settingsProcess?.stdin.write('SAVE_SETTING:cosmicAuth:\n')
     settingsProcess?.stdin.write('SAVE_SETTING:gatewayBaseUrl:\n')
     settingsProcess?.stdin.write('SAVE_SETTING:gatewayApiToken:\n')
@@ -874,7 +875,17 @@ app.whenReady().then(() => {
     store.set('gatewayBaseUrl', '')
     store.set('gatewayApiToken', '')
     configureGatewayConnection()
-    return { success: true }
+    return {
+      success: true,
+      scopes: {
+        clearedAuth: true,
+        clearedGatewayTransport: true,
+        websocketClosed: true,
+        sessionCacheCleared: true,
+        reconnectStopped: true,
+        deviceIdRetained: true,
+      },
+    }
   })
 
   // Multi-monitor IPC handlers
