@@ -65,10 +65,10 @@ def test_bootstrap_setup_vm_edge_invokes_script(monkeypatch, tmp_path) -> None:
         str(edge_script),
         "--gateway-env",
         str(gateway_env),
-        "setup",
         "--gateway-host",
         "gateway.user.example.com",
         "--force",
         "--skip-if-unconfigured",
+        "setup",
     ]
     assert captured["kwargs"] == {}
