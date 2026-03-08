@@ -1385,7 +1385,7 @@ def setup_vm_edge(
     if not edge_setup_script.exists():
         raise BootstrapError("VM edge setup script does not exist: {0}".format(edge_setup_script))
 
-    command = [sys.executable, str(edge_setup_script), "setup", "--gateway-env", str(gateway_env_path)]
+    command = [sys.executable, str(edge_setup_script), "--gateway-env", str(gateway_env_path), "setup"]
     if gateway_host:
         command.extend(["--gateway-host", gateway_host])
     if force:

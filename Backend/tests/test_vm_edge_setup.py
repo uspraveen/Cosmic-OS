@@ -63,9 +63,9 @@ def test_bootstrap_setup_vm_edge_invokes_script(monkeypatch, tmp_path) -> None:
     assert captured["command"] == [
         bootstrap.sys.executable,
         str(edge_script),
-        "setup",
         "--gateway-env",
         str(gateway_env),
+        "setup",
         "--gateway-host",
         "gateway.user.example.com",
         "--force",
