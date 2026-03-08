@@ -1229,9 +1229,6 @@ export default function App() {
                         ))}
                       </div>
                     </div>
-                    <span className="model-dial-label">
-                      {MODEL_OPTIONS.find((item) => item.id === selectedModel)?.shortLabel || 'COSMIC'}
-                    </span>
                   </div>
 
                   {isStreaming ? (

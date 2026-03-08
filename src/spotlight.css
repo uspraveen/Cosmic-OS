@@ -970,19 +970,20 @@ kbd {
 .model-dial {
   width: 92px;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
   flex-shrink: 0;
-  margin-bottom: 1px;
+  height: 40px;
+  margin-bottom: 0;
 }
 
 .model-dial-window {
   position: relative;
   width: 92px;
+  height: 40px;
   overflow: hidden;
   border-radius: 999px;
-  padding: 2px 0 4px;
+  padding: 0;
 }
 
 .model-dial-window::before,
@@ -1008,8 +1009,10 @@ kbd {
 
 .model-dial-viewport {
   display: flex;
+  align-items: center;
   gap: 14px;
   padding: 0 calc((92px - 40px) / 2);
+  height: 40px;
   overflow-x: auto;
   overflow-y: hidden;
   scroll-snap-type: x mandatory;
@@ -1090,20 +1093,10 @@ kbd {
     0 0 20px rgba(122, 202, 255, 0.2),
     inset 0 1px 0 rgba(255, 255, 255, 0.18);
 }
-
 .model-dial-glyph {
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.08em;
-}
-
-.model-dial-label {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.68);
-  line-height: 1;
 }
 
 /* Chat Bubbles */
