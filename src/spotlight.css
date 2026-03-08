@@ -100,6 +100,12 @@ body,
   animation: spring-up 0.5s cubic-bezier(0.19, 1, 0.22, 1) forwards;
 }
 
+.response-container.launcher-expand.visible,
+.cosmic.launcher-expand.visible {
+  animation: launcher-surface-expand 0.42s cubic-bezier(0.18, 0.88, 0.2, 1) forwards;
+  transform-origin: center center;
+}
+
 @keyframes spring-up {
   0% {
     opacity: 0;
@@ -109,6 +115,24 @@ body,
   100% {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes launcher-surface-expand {
+  0% {
+    opacity: 0.2;
+    transform: translate(var(--launch-offset-x, 0px), var(--launch-offset-y, 0px)) scale(0.16);
+    filter: saturate(1.12) blur(8px);
+  }
+
+  55% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+    filter: none;
   }
 }
 

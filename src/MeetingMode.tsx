@@ -22,6 +22,9 @@ interface MeetingModeProps {
   active: boolean
   keyStatus: KeyStatus
   onBackToChat: () => void
+  containerRef?: React.RefObject<HTMLDivElement | null>
+  containerClassName?: string
+  containerStyle?: React.CSSProperties
 }
 
 interface TranscriptSegment {
@@ -209,7 +212,14 @@ function normalizeAnswerReferences(raw: unknown, answer: string): AnswerReferenc
   return references
 }
 
-export default function MeetingMode({ active, keyStatus, onBackToChat }: MeetingModeProps) {
+export default function MeetingMode({
+  active,
+  keyStatus,
+  onBackToChat,
+  containerRef,
+  containerClassName,
+  containerStyle,
+}: MeetingModeProps) {
   const [page, setPage] = useState<MeetingPage>('selection')
   const [meetingType, setMeetingType] = useState<MeetingType>('online')
 
@@ -1208,7 +1218,12 @@ export default function MeetingMode({ active, keyStatus, onBackToChat }: Meeting
   // Shell — mirrors response-container + LiquidGlass exactly
   // ---------------------------------------------------------------------------
   return (
-    <div className={`response-container ${active ? 'visible' : ''}`} style={{ display: active ? 'flex' : 'none' }} aria-hidden={!active}>
+    <div
+      ref={containerRef}
+      className={`response-container ${active ? 'visible' : ''} ${containerClassName || ''}`}
+      style={{ display: active ? 'flex' : 'none', ...containerStyle }}
+      aria-hidden={!active}
+    >
       <LiquidGlass disableTilt={true} cornerRadius={32} style={{ width: '100%', height: '100%' }}>
         <div className="response-wrapper">
           <div className="m-root">

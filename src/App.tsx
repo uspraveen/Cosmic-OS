@@ -32,6 +32,17 @@ interface GatewayStatus {
   sessionId?: string | null
 }
 
+interface SurfaceLaunchState {
+  target: 'chat' | 'meeting'
+  token: number
+  composerOffsetX: number
+  composerOffsetY: number
+  responseOffsetX: number
+  responseOffsetY: number
+  meetingOffsetX: number
+  meetingOffsetY: number
+}
+
 // Helper to strip "PROMPT:" from legacy database entries
 const cleanText = (text: string) => {
   if (!text) return ""
@@ -83,10 +94,14 @@ const LAUNCHPAD_TILES: Array<{ id: LauncherTileId; label: string; locked: boolea
 export default function App() {
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const modelDialRef = useRef<HTMLDivElement>(null)
+  const composerSurfaceRef = useRef<HTMLDivElement>(null)
+  const chatResponseSurfaceRef = useRef<HTMLDivElement>(null)
   const responseEndRef = useRef<HTMLDivElement>(null)
   const responseContainerRef = useRef<HTMLDivElement>(null)
   const modelDialSettleTimeoutRef = useRef<number | null>(null)
   const modelDialWheelLockUntilRef = useRef(0)
+  const surfaceLaunchResetTimeoutRef = useRef<number | null>(null)
+  const meetingSurfaceRef = useRef<HTMLDivElement>(null)
   const activeAssistantMessageByRequestRef = useRef<Map<string, string>>(new Map())
   const activeAssistantMessageByTaskRef = useRef<Map<string, string>>(new Map())
   const streamedResponseRequestIdsRef = useRef<Set<string>>(new Set())
@@ -110,6 +125,7 @@ export default function App() {
   const [isInputFocused, setIsInputFocused] = useState(false)
   const [showLauncherTray, setShowLauncherTray] = useState(false)
   const [selectedModel, setSelectedModel] = useState<GatewayModelSelection>('cosmic')
+  const [surfaceLaunch, setSurfaceLaunch] = useState<SurfaceLaunchState | null>(null)
 
   // --- CHAT STATE ---
   const [messages, setMessages] = useState<Message[]>([])
@@ -226,6 +242,50 @@ export default function App() {
     }
     commitSelectedModel(nextModel, true)
     scrollModelDialTo(nextModel, 'smooth')
+  }
+
+  const measureLaunchOffset = (element: HTMLElement | null, originX: number, originY: number) => {
+    if (!element) {
+      return { x: 0, y: 0 }
+    }
+    const rect = element.getBoundingClientRect()
+    return {
+      x: originX - (rect.left + rect.width / 2),
+      y: originY - (rect.top + rect.height / 2),
+    }
+  }
+
+  const clearSurfaceLaunch = () => {
+    if (surfaceLaunchResetTimeoutRef.current !== null) {
+      window.clearTimeout(surfaceLaunchResetTimeoutRef.current)
+      surfaceLaunchResetTimeoutRef.current = null
+    }
+    setSurfaceLaunch(null)
+  }
+
+  const triggerSurfaceLaunch = (target: 'chat' | 'meeting', originX: number, originY: number) => {
+    clearSurfaceLaunch()
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const composerOffset = measureLaunchOffset(composerSurfaceRef.current, originX, originY)
+        const responseOffset = measureLaunchOffset(chatResponseSurfaceRef.current, originX, originY)
+        const meetingOffset = measureLaunchOffset(meetingSurfaceRef.current, originX, originY)
+        setSurfaceLaunch({
+          target,
+          token: Date.now(),
+          composerOffsetX: composerOffset.x,
+          composerOffsetY: composerOffset.y,
+          responseOffsetX: responseOffset.x,
+          responseOffsetY: responseOffset.y,
+          meetingOffsetX: meetingOffset.x,
+          meetingOffsetY: meetingOffset.y,
+        })
+        surfaceLaunchResetTimeoutRef.current = window.setTimeout(() => {
+          setSurfaceLaunch(null)
+          surfaceLaunchResetTimeoutRef.current = null
+        }, 420)
+      })
+    })
   }
 
   const bindAssistantMessageToEvent = (event: any, messageId: string) => {
@@ -479,6 +539,7 @@ export default function App() {
   const performHide = () => {
     setSearchState('hiding')
     setIsInputFocused(false)
+    clearSurfaceLaunch()
     setTimeout(() => {
       setSearchState('hidden')
       setShowLauncherTray(false)
@@ -508,6 +569,7 @@ export default function App() {
 
     return () => {
       cancelAnimationFrame(animationFrame)
+      clearSurfaceLaunch()
       if (modelDialSettleTimeoutRef.current !== null) {
         window.clearTimeout(modelDialSettleTimeoutRef.current)
         modelDialSettleTimeoutRef.current = null
@@ -834,15 +896,28 @@ export default function App() {
     }
   }
 
-  const handleLauncherTileClick = (tile: LauncherTileId) => {
+  const handleLauncherTileClick = (tile: LauncherTileId, event: React.MouseEvent<HTMLButtonElement>) => {
     if (tile === 'spaces') {
       return
     }
+    const rect = event.currentTarget.getBoundingClientRect()
+    const originX = rect.left + rect.width / 2
+    const originY = rect.top + rect.height / 2
     if (tile === 'meeting') {
       showMeetingSurface()
+      triggerSurfaceLaunch('meeting', originX, originY)
       return
     }
+    if (tile === 'task') {
+      commitSelectedModel('opus', true)
+    }
     showChatComposer()
+    requestAnimationFrame(() => {
+      if (tile === 'task') {
+        scrollModelDialTo('opus', 'auto')
+      }
+      triggerSurfaceLaunch('chat', originX, originY)
+    })
   }
 
   const handleModelDialScroll = () => {
@@ -928,6 +1003,27 @@ export default function App() {
     isChatSurfaceVisible && messages.length > 0 ? 'has-response' : '',
     (isInputFocused || (isChatSurfaceVisible && messages.length > 0) || isStreaming || mode === 'meeting') ? 'focused' : ''
   ].join(' ')
+  const composerLaunchClass = surfaceLaunch?.target === 'chat' ? 'launcher-expand' : ''
+  const composerLaunchStyle = surfaceLaunch?.target === 'chat'
+    ? ({
+      ['--launch-offset-x' as string]: `${surfaceLaunch.composerOffsetX}px`,
+      ['--launch-offset-y' as string]: `${surfaceLaunch.composerOffsetY}px`,
+    } as React.CSSProperties)
+    : undefined
+  const responseLaunchClass = surfaceLaunch?.target === 'chat' ? 'launcher-expand' : ''
+  const responseLaunchStyle = surfaceLaunch?.target === 'chat'
+    ? ({
+      ['--launch-offset-x' as string]: `${surfaceLaunch.responseOffsetX}px`,
+      ['--launch-offset-y' as string]: `${surfaceLaunch.responseOffsetY}px`,
+    } as React.CSSProperties)
+    : undefined
+  const meetingLaunchClass = surfaceLaunch?.target === 'meeting' ? 'launcher-expand' : ''
+  const meetingLaunchStyle = surfaceLaunch?.target === 'meeting'
+    ? ({
+      ['--launch-offset-x' as string]: `${surfaceLaunch.meetingOffsetX}px`,
+      ['--launch-offset-y' as string]: `${surfaceLaunch.meetingOffsetY}px`,
+    } as React.CSSProperties)
+    : undefined
 
   return (
     <>
@@ -979,11 +1075,18 @@ export default function App() {
           active={mode === 'meeting'}
           keyStatus={keyStatus}
           onBackToChat={showChatComposer}
+          containerRef={meetingSurfaceRef}
+          containerClassName={meetingLaunchClass}
+          containerStyle={meetingLaunchStyle}
         />
 
         {/* MESSAGES AREA */}
         {isChatSurfaceVisible && messages.length > 0 && (
-          <div className={`response-container ${searchState === 'visible' ? 'visible' : ''}`}>
+          <div
+            ref={chatResponseSurfaceRef}
+            className={`response-container ${searchState === 'visible' ? 'visible' : ''} ${responseLaunchClass}`}
+            style={responseLaunchStyle}
+          >
             <LiquidGlass disableTilt={true} cornerRadius={32} style={{ width: '100%', height: '100%' }}>
               <div className="response-wrapper">
                 <div className="response-content" style={{ paddingTop: 24 }} ref={responseContainerRef} onScroll={handleScroll}>
@@ -1142,7 +1245,11 @@ export default function App() {
         )}
 
         {/* INPUT BAR / LAUNCHER */}
-        {mode !== 'meeting' && <div className={`cosmic ${searchState === 'visible' ? 'visible' : searchState === 'hiding' ? 'hiding' : ''} ${showLauncherTray ? 'launchpad-open' : ''}`}>
+        {mode !== 'meeting' && <div
+          ref={composerSurfaceRef}
+          className={`cosmic ${searchState === 'visible' ? 'visible' : searchState === 'hiding' ? 'hiding' : ''} ${showLauncherTray ? 'launchpad-open' : ''} ${composerLaunchClass}`}
+          style={composerLaunchStyle}
+        >
           <LiquidGlass cornerRadius={24} style={{ width: '100%', height: '100%' }}>
             <div className="glass-content">
               {showLauncherTray ? (
@@ -1151,7 +1258,7 @@ export default function App() {
                     <button
                       key={tile.id}
                       className={`launchpad-tile ${tile.id} ${tile.locked ? 'locked' : ''}`}
-                      onClick={() => handleLauncherTileClick(tile.id)}
+                      onClick={(event) => handleLauncherTileClick(tile.id, event)}
                       type="button"
                       disabled={tile.locked}
                       title={tile.locked ? `${tile.label} (Locked)` : tile.label}
