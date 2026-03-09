@@ -32,6 +32,23 @@ class ModelRouterClient:
         conversation_context: list[dict[str, str]],
         max_completion_tokens: int = 430,
     ) -> dict[str, Any]:
+        payload = await self.classify_with_metadata(
+            query=query,
+            conversation_context=conversation_context,
+            max_completion_tokens=max_completion_tokens,
+        )
+        classification = payload.get("classification")
+        if not isinstance(classification, dict):
+            raise RuntimeError("Model router returned an invalid classification payload")
+        return classification
+
+    async def classify_with_metadata(
+        self,
+        *,
+        query: str,
+        conversation_context: list[dict[str, str]],
+        max_completion_tokens: int = 430,
+    ) -> dict[str, Any]:
         if self._client is None:
             await self.start()
 
@@ -53,4 +70,10 @@ class ModelRouterClient:
         classification = payload.get("classification", payload)
         if not isinstance(classification, dict):
             raise RuntimeError("Model router returned an invalid classification payload")
-        return classification
+        return {
+            "classification": classification,
+            "metrics": payload.get("metrics") if isinstance(payload.get("metrics"), dict) else None,
+            "classifier_model": payload.get("classifier_model"),
+            "raw_classifier_output": payload.get("raw_classifier_output"),
+            "http2_enabled": payload.get("http2_enabled"),
+        }

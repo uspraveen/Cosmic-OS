@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from dataclasses import dataclass
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -13,6 +14,7 @@ from .channels.whatsapp import WhatsAppAdapter, WhatsAppConfig
 from .config import GatewayConfig
 from .orchestrator_client import OrchestratorClient
 from .router_client import ModelRouterClient
+from .routing_audit_store import RoutingAuditStore
 from .session_store import SessionStore
 from shared import SOURCE_PRIORITY_MAP, TaskEnvelope, generate_task_id, sign_task_envelope, utcnow
 
@@ -31,6 +33,20 @@ class ActiveRequest:
     completed: bool = False
 
 
+@dataclass(slots=True)
+class RoutingDecision:
+    classification: dict[str, Any]
+    decision_source: str
+    route_override: str | None = None
+    sticky_hit: bool = False
+    classifier_payload: dict[str, Any] | None = None
+    classifier_metrics: dict[str, Any] | None = None
+    classifier_model: str | None = None
+    classifier_latency_ms: float | None = None
+    raw_classifier_output: str | None = None
+    error_text: str | None = None
+
+
 class GatewayRuntime:
     """Single-process Gateway runtime for channel ingress and control-plane routes."""
 
@@ -47,6 +63,7 @@ class GatewayRuntime:
             timeout_sec=config.orchestrator_timeout_sec,
         )
         self.session_store = SessionStore(config.sessions_db_path)
+        self.routing_audit_store = RoutingAuditStore(config.routing_audit_db_path)
         self.haiku_adapter = HaikuAdapter(
             api_key=config.haiku_api_key,
             model=config.haiku_model,
@@ -70,6 +87,7 @@ class GatewayRuntime:
 
     async def start(self) -> None:
         self.session_store.initialize()
+        self.routing_audit_store.initialize()
         await self.model_router.start()
         await self.orchestrator.start()
         await self._register_adapters()
@@ -146,7 +164,8 @@ class GatewayRuntime:
             fallback_context=conversation_context,
         )
 
-        classification = await self._classify_message(
+        decision_started_at = time.perf_counter()
+        routing_decision = await self._classify_message(
             session_id=session_id,
             content=content,
             metadata=metadata,
@@ -154,6 +173,8 @@ class GatewayRuntime:
             conversation_context=assembled_conversation_context,
             route_override=route_override,
         )
+        decision_latency_ms = (time.perf_counter() - decision_started_at) * 1000.0
+        classification = routing_decision.classification
         dispatch_target = "orchestrator" if classification["route"] == "opus" else "gateway"
 
         self._append_session_message(
@@ -179,8 +200,32 @@ class GatewayRuntime:
             "classification": classification,
             "message": normalized_message,
             "assembled_conversation_context": assembled_conversation_context,
+            "routing_decision_source": routing_decision.decision_source,
         }
         self.request_records[request_id] = result
+        self.routing_audit_store.append(
+            request_id=request_id,
+            session_id=session_id,
+            channel=channel,
+            source="user",
+            source_id=source_id,
+            query_text=content or "[non-text inbound message]",
+            route_override=routing_decision.route_override,
+            sticky_hit=routing_decision.sticky_hit,
+            decision_source=routing_decision.decision_source,
+            classifier_route=self._safe_text(classification.get("route")),
+            final_route=self._safe_text(classification.get("route")) or "opus",
+            dispatch_target=dispatch_target,
+            confidence=self._coerce_float(classification.get("confidence"), 0.0),
+            signals=classification.get("signals") if isinstance(classification.get("signals"), list) else [],
+            conversation_context=assembled_conversation_context,
+            classifier_payload=routing_decision.classifier_payload,
+            classifier_metrics=routing_decision.classifier_metrics,
+            classifier_model=routing_decision.classifier_model,
+            classifier_latency_ms=routing_decision.classifier_latency_ms,
+            decision_latency_ms=decision_latency_ms,
+            error_text=routing_decision.error_text,
+        )
         return result
 
     async def fulfill_processed_message(self, request_record: dict[str, Any]) -> None:
@@ -364,6 +409,9 @@ class GatewayRuntime:
     def get_session_history(self, session_id: str) -> list[dict[str, Any]]:
         return self.session_store.get_history(session_id)
 
+    def list_routing_audit(self, limit: int = 50) -> list[dict[str, Any]]:
+        return self.routing_audit_store.list_entries(limit=limit)
+
     async def _classify_message(
         self,
         *,
@@ -373,61 +421,80 @@ class GatewayRuntime:
         channel: str,
         conversation_context: list[dict[str, Any]],
         route_override: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> RoutingDecision:
         if route_override:
-            return {
-                "route": route_override,
-                "needs_latest": route_override == "perplexity",
-                "needs_citations": route_override == "perplexity",
-                "is_task": False,
-                "is_continuation": False,
-                "confidence": 1.0,
-                "signals": ["manual_route_override"],
-            }
+            return RoutingDecision(
+                classification={
+                    "route": route_override,
+                    "needs_latest": route_override == "perplexity",
+                    "needs_citations": route_override == "perplexity",
+                    "is_task": False,
+                    "is_continuation": False,
+                    "confidence": 1.0,
+                    "signals": ["manual_route_override"],
+                },
+                decision_source="manual_override",
+                route_override=route_override,
+            )
 
         sticky_message = self.session_store.get_last_awaiting_reply(session_id, channel)
         if sticky_message:
             self.session_store.clear_awaiting_reply(sticky_message["message_id"])
-            return {
-                "route": self._normalize_route(self._safe_text(sticky_message.get("route")) or "opus"),
-                "needs_latest": False,
-                "needs_citations": False,
-                "is_task": False,
-                "is_continuation": True,
-                "confidence": 1.0,
-                "signals": ["awaiting_reply"],
-            }
+            return RoutingDecision(
+                classification={
+                    "route": self._normalize_route(self._safe_text(sticky_message.get("route")) or "opus"),
+                    "needs_latest": False,
+                    "needs_citations": False,
+                    "is_task": False,
+                    "is_continuation": True,
+                    "confidence": 1.0,
+                    "signals": ["awaiting_reply"],
+                },
+                decision_source="sticky_awaiting_reply",
+                sticky_hit=True,
+            )
 
         attachments = metadata.get("attachments")
         if (not content or content.startswith("[")) and isinstance(attachments, list) and attachments:
-            return {
-                "route": "opus",
-                "needs_latest": False,
-                "needs_citations": False,
-                "is_task": False,
-                "is_continuation": False,
-                "confidence": 1.0,
-                "signals": ["non_text_inbound"],
-            }
+            return RoutingDecision(
+                classification={
+                    "route": "opus",
+                    "needs_latest": False,
+                    "needs_citations": False,
+                    "is_task": False,
+                    "is_continuation": False,
+                    "confidence": 1.0,
+                    "signals": ["non_text_inbound"],
+                },
+                decision_source="non_text_inbound",
+            )
 
         try:
-            classification = await self.model_router.classify(
+            router_response = await self.model_router.classify_with_metadata(
                 query=content or "[empty message]",
                 conversation_context=conversation_context,
             )
         except Exception as exc:  # pragma: no cover - depends on external service availability
-            return {
-                "route": "opus",
-                "needs_latest": False,
-                "needs_citations": False,
-                "is_task": False,
-                "is_continuation": False,
-                "confidence": 0.0,
-                "signals": ["router_unavailable"],
-                "error": str(exc),
-            }
+            return RoutingDecision(
+                classification={
+                    "route": "opus",
+                    "needs_latest": False,
+                    "needs_citations": False,
+                    "is_task": False,
+                    "is_continuation": False,
+                    "confidence": 0.0,
+                    "signals": ["router_unavailable"],
+                    "error": str(exc),
+                },
+                decision_source="router_unavailable",
+                error_text=str(exc),
+            )
 
-        return {
+        classification = router_response.get("classification")
+        if not isinstance(classification, dict):
+            raise RuntimeError("Model router returned an invalid classification payload")
+
+        normalized_classification = {
             "route": self._normalize_route(self._safe_text(classification.get("route")) or "opus"),
             "needs_latest": bool(classification.get("needs_latest")),
             "needs_citations": bool(classification.get("needs_citations")),
@@ -436,6 +503,24 @@ class GatewayRuntime:
             "confidence": self._coerce_float(classification.get("confidence"), 0.0),
             "signals": classification.get("signals") if isinstance(classification.get("signals"), list) else [],
         }
+        classifier_metrics = router_response.get("metrics")
+        classifier_latency_ms = None
+        if isinstance(classifier_metrics, dict):
+            classifier_latency_ms = self._coerce_float(classifier_metrics.get("rtt_ms"), 0.0)
+
+        return RoutingDecision(
+            classification=normalized_classification,
+            decision_source="model_router",
+            classifier_payload={
+                "classification": classification,
+                "raw_classifier_output": router_response.get("raw_classifier_output"),
+                "http2_enabled": router_response.get("http2_enabled"),
+            },
+            classifier_metrics=classifier_metrics if isinstance(classifier_metrics, dict) else None,
+            classifier_model=self._safe_text(router_response.get("classifier_model")) or None,
+            classifier_latency_ms=classifier_latency_ms,
+            raw_classifier_output=self._safe_text(router_response.get("raw_classifier_output")) or None,
+        )
 
     def _resolve_session_id(self, requested_session_id: Any) -> str:
         current_session_id = self.session_store.current_session_id()

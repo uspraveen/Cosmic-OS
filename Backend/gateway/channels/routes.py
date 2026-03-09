@@ -395,6 +395,15 @@ async def get_session_history(
     return {"session_id": session_id, "messages": runtime.get_session_history(session_id)}
 
 
+@router.get("/routing-audit")
+async def list_routing_audit(
+    limit: int = 50,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return {"entries": runtime.list_routing_audit(limit=max(1, min(limit, 500)))}
+
+
 @router.get("/channels")
 async def list_channels(
     _: None = Depends(require_local_api_token),

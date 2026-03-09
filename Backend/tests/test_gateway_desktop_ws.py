@@ -250,6 +250,7 @@ def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
             orchestrator_url="http://127.0.0.1:8743",
             enable_whatsapp=False,
             sessions_db_path=tmp_path / "sessions.db",
+            routing_audit_db_path=tmp_path / "routing_audit.db",
         )
     )
 
@@ -270,9 +271,23 @@ def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
             "signals": ["test"],
         }
 
+    async def fake_classify_with_metadata(*, query: str, conversation_context, max_completion_tokens: int = 430) -> dict:
+        return {
+            "classification": await fake_classify(
+                query=query,
+                conversation_context=conversation_context,
+                max_completion_tokens=max_completion_tokens,
+            ),
+            "metrics": {"rtt_ms": 18.5},
+            "classifier_model": "openai/gpt-oss-20b",
+            "raw_classifier_output": '{"route":"%s"}' % route,
+            "http2_enabled": True,
+        }
+
     runtime.model_router.start = fake_start
     runtime.model_router.stop = fake_stop
     runtime.model_router.classify = fake_classify
+    runtime.model_router.classify_with_metadata = fake_classify_with_metadata
     runtime.haiku_adapter = FakeDirectAdapter("haiku")
     runtime.perplexity_adapter = FakeDirectAdapter("perplexity")
     runtime.orchestrator = FakeOrchestratorClient()
@@ -438,6 +453,37 @@ def test_sessions_endpoints_return_vm_history(test_client: TestClient) -> None:
     assert [item["role"] for item in history_payload["messages"]] == ["user", "assistant"]
 
 
+def test_routing_audit_endpoint_returns_effective_route_details(test_client: TestClient) -> None:
+    with test_client.websocket_connect("/ws?token=test-token&device_id=desk_audit") as websocket:
+        websocket.send_json(
+            {
+                "type": "query",
+                "request_id": "req_audit",
+                "content": "what is usd to inr today?",
+            }
+        )
+        websocket.receive_json()
+        websocket.receive_json()
+        websocket.receive_json()
+
+    response = test_client.get(
+        "/routing-audit?limit=5",
+        headers={"Authorization": "Bearer test-token"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["entries"]) == 1
+    entry = payload["entries"][0]
+    assert entry["request_id"] == "req_audit"
+    assert entry["decision_source"] == "model_router"
+    assert entry["final_route"] == "haiku"
+    assert entry["classifier_route"] == "haiku"
+    assert entry["classifier_model"] == "openai/gpt-oss-20b"
+    assert entry["classifier_metrics"] == {"rtt_ms": 18.5}
+    assert entry["query_text"] == "what is usd to inr today?"
+
+
 def test_whatsapp_incoming_emits_route_result_before_async_fulfillment(tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="haiku")
     whatsapp_adapter = FakeWhatsAppChannelAdapter()
@@ -567,6 +613,18 @@ def test_desktop_websocket_route_override_bypasses_classifier(test_client: TestC
             complete = websocket.receive_json()
             assert complete["type"] == "response.complete"
             assert complete["route"] == "perplexity"
+
+        response = client.get(
+            "/routing-audit?limit=5",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert response.status_code == 200
+        entry = response.json()["entries"][0]
+        assert entry["request_id"] == "req_override"
+        assert entry["decision_source"] == "manual_override"
+        assert entry["route_override"] == "perplexity"
+        assert entry["final_route"] == "perplexity"
+        assert entry["sticky_hit"] is False
 
 
 def test_desktop_websocket_cancel_stops_direct_stream(test_client: TestClient, tmp_path) -> None:
