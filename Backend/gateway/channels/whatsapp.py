@@ -44,6 +44,7 @@ class WhatsAppConfig:
     text_chunk_limit: int = DEFAULT_TEXT_CHUNK_LIMIT
     chunk_mode: str = "newline"
     send_delay_ms: int = 200
+    ack_delay_sec: float = 3.5
     progress_min_interval_sec: float = 8.0
     health_path: str = "/health"
     status_path: str = "/status"
@@ -89,6 +90,7 @@ class WhatsAppConfig:
             text_chunk_limit=max(500, env_int("WHATSAPP_TEXT_CHUNK_LIMIT", DEFAULT_TEXT_CHUNK_LIMIT)),
             chunk_mode=chunk_mode,
             send_delay_ms=max(0, env_int("WHATSAPP_SEND_DELAY_MS", 200)),
+            ack_delay_sec=max(0.0, env_float("WHATSAPP_ACK_DELAY_SEC", 3.5)),
             progress_min_interval_sec=max(
                 0.0,
                 env_float("WHATSAPP_PROGRESS_MIN_INTERVAL_SEC", 8.0),
@@ -148,6 +150,9 @@ class WhatsAppAdapter(ChannelAdapter):
         self._owns_http_client = http_client is None
         self._callback: MessageCallback | None = None
         self._stream_buffers: dict[str, list[str]] = {}
+        self._pending_ack_tasks: dict[str, asyncio.Task[None]] = {}
+        self._sent_ack_request_ids: set[str] = set()
+        self._completed_response_request_ids: set[str] = set()
         self._channel_locks: dict[str, asyncio.Lock] = {}
         self._last_progress_sent: dict[str, float] = {}
 
@@ -167,6 +172,11 @@ class WhatsAppAdapter(ChannelAdapter):
 
     async def stop(self) -> None:
         self._stream_buffers.clear()
+        for task in self._pending_ack_tasks.values():
+            task.cancel()
+        self._pending_ack_tasks.clear()
+        self._sent_ack_request_ids.clear()
+        self._completed_response_request_ids.clear()
         self._last_progress_sent.clear()
 
         if self._owns_http_client and self._http is not None:
@@ -337,27 +347,56 @@ class WhatsAppAdapter(ChannelAdapter):
         destination = channel or self._extract_channel(message)
         if not destination:
             raise ValueError("WhatsApp outbound message missing channel")
+        request_id = self._coerce_str(message.get("request_id"))
+
+        if event_type == "route_result" and request_id:
+            self._schedule_delayed_ack(request_id, destination)
+            return
+
+        if event_type == "response.thinking.chunk":
+            return
+
+        if event_type == "task.created":
+            if request_id:
+                self._schedule_delayed_ack(request_id, destination)
+            return
 
         if event_type == "response.chunk":
-            request_id = self._coerce_str(message.get("request_id"))
             content = self._coerce_str(message.get("content"))
             if request_id and content:
+                self._cancel_delayed_ack(request_id)
                 self._stream_buffers.setdefault(request_id, []).append(content)
             return
 
-        if event_type == "task.progress" and not self._should_send_progress(message):
+        if event_type == "task.progress":
             return
+
+        if event_type in {
+            "response.complete",
+            "task.input_required",
+            "task.completed",
+            "task.failed",
+            "task.cancelled",
+            "error",
+        } and request_id:
+            self._cancel_delayed_ack(request_id)
 
         rendered = self._render_gateway_event(message)
         if not rendered:
+            if event_type in {"task.completed", "task.failed", "task.cancelled", "error"} and request_id:
+                self._completed_response_request_ids.discard(request_id)
             return
 
         await self._send_text(destination, rendered)
 
         if event_type == "response.complete":
-            request_id = self._coerce_str(message.get("request_id"))
             if request_id:
                 self._stream_buffers.pop(request_id, None)
+                self._sent_ack_request_ids.discard(request_id)
+                self._completed_response_request_ids.add(request_id)
+        elif event_type in {"task.failed", "task.cancelled", "error", "task.completed"} and request_id:
+            self._sent_ack_request_ids.discard(request_id)
+            self._completed_response_request_ids.discard(request_id)
 
     def _render_gateway_event(self, message: dict[str, Any]) -> str | None:
         event_type = self._coerce_str(message.get("type")) or ""
@@ -365,11 +404,12 @@ class WhatsAppAdapter(ChannelAdapter):
         if event_type == "response.complete":
             content = self._coerce_str(message.get("content"))
             if content:
-                return content
+                return self._render_whatsapp_text(content)
 
             request_id = self._coerce_str(message.get("request_id"))
             if request_id:
-                return "".join(self._stream_buffers.get(request_id, [])) or None
+                buffered = "".join(self._stream_buffers.get(request_id, []))
+                return self._render_whatsapp_text(buffered) if buffered else None
             return None
 
         if event_type == "task.input_required":
@@ -380,45 +420,39 @@ class WhatsAppAdapter(ChannelAdapter):
                 lines.append("")
                 for index, option in enumerate(options, start=1):
                     lines.append(f"{index}. {self._coerce_str(option) or 'Option'}")
-            return "\n".join(lines)
-
-        if event_type == "task.progress":
-            payload = message.get("payload")
-            if isinstance(payload, dict):
-                return (
-                    self._coerce_str(payload.get("message"))
-                    or self._coerce_str(payload.get("summary"))
-                    or self._coerce_str(message.get("content"))
-                    or "Working on it..."
-                )
-            return self._coerce_str(message.get("content")) or "Working on it..."
+            return self._render_whatsapp_text("\n".join(lines))
 
         if event_type == "task.completed":
+            request_id = self._coerce_str(message.get("request_id"))
+            if request_id and request_id in self._completed_response_request_ids:
+                return None
             result = message.get("result")
             if isinstance(result, dict):
                 for key in ("content", "text", "summary", "message"):
                     value = self._coerce_str(result.get(key))
                     if value:
-                        return value
+                        return self._render_whatsapp_text(value)
             if isinstance(result, str) and result.strip():
-                return result.strip()
-            return self._coerce_str(message.get("content")) or "Task completed."
+                return self._render_whatsapp_text(result.strip())
+            fallback = self._coerce_str(message.get("content")) or "Task completed."
+            return self._render_whatsapp_text(fallback)
 
         if event_type == "task.failed":
             error = message.get("error")
             if isinstance(error, dict):
                 error_message = self._coerce_str(error.get("message"))
                 if error_message:
-                    return f"Task failed: {error_message}"
-            return self._coerce_str(message.get("message")) or "Task failed."
+                    return self._render_whatsapp_text(f"Task failed: {error_message}")
+            return self._render_whatsapp_text(self._coerce_str(message.get("message")) or "Task failed.")
+
+        if event_type == "task.cancelled":
+            return self._render_whatsapp_text(self._coerce_str(message.get("message")) or "Stopped.")
 
         if event_type == "error":
-            return self._coerce_str(message.get("message")) or "An error occurred."
+            return self._render_whatsapp_text(self._coerce_str(message.get("message")) or "An error occurred.")
 
-        if event_type == "task.created":
-            return "Working on it..."
-
-        return self._coerce_str(message.get("content"))
+        content = self._coerce_str(message.get("content"))
+        return self._render_whatsapp_text(content) if content else None
 
     async def _send_text(self, channel: str, text: str) -> None:
         if self._http is None:
@@ -427,6 +461,7 @@ class WhatsAppAdapter(ChannelAdapter):
         chunks = self._chunk_text(text)
         if not chunks:
             return
+        chunks = self._label_chunk_sequence(chunks)
 
         lock = self._channel_locks.setdefault(channel, asyncio.Lock())
         recipient = self._channel_to_bridge_recipient(channel)
@@ -442,6 +477,35 @@ class WhatsAppAdapter(ChannelAdapter):
                 response.raise_for_status()
                 if index + 1 < len(chunks) and self.config.send_delay_ms > 0:
                     await asyncio.sleep(self.config.send_delay_ms / 1000.0)
+
+    def _schedule_delayed_ack(self, request_id: str, channel: str) -> None:
+        if not request_id or request_id in self._pending_ack_tasks or request_id in self._sent_ack_request_ids:
+            return
+        if self.config.ack_delay_sec <= 0:
+            return
+
+        self._pending_ack_tasks[request_id] = asyncio.create_task(
+            self._send_delayed_ack(request_id, channel),
+            name=f"whatsapp-ack:{request_id}",
+        )
+
+    def _cancel_delayed_ack(self, request_id: str) -> None:
+        task = self._pending_ack_tasks.pop(request_id, None)
+        if task is not None:
+            task.cancel()
+
+    async def _send_delayed_ack(self, request_id: str, channel: str) -> None:
+        current_task = asyncio.current_task()
+        try:
+            await asyncio.sleep(self.config.ack_delay_sec)
+            await self._send_text(channel, "Thinking...")
+            self._sent_ack_request_ids.add(request_id)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            current = self._pending_ack_tasks.get(request_id)
+            if current is current_task:
+                self._pending_ack_tasks.pop(request_id, None)
 
     def _chunk_text(self, text: str) -> list[str]:
         text = (text or "").replace("\r\n", "\n").strip()
@@ -610,6 +674,29 @@ class WhatsAppAdapter(ChannelAdapter):
             chunks.append(remaining[:split_at].strip())
             remaining = remaining[split_at:].strip()
         return [chunk for chunk in chunks if chunk]
+
+    def _label_chunk_sequence(self, chunks: list[str]) -> list[str]:
+        if len(chunks) <= 1:
+            return chunks
+        total = len(chunks)
+        return [f"Part {index}/{total}\n\n{chunk}" for index, chunk in enumerate(chunks, start=1)]
+
+    def _render_whatsapp_text(self, text: str | None) -> str | None:
+        normalized = self._coerce_str(text)
+        if not normalized:
+            return None
+
+        normalized = normalized.replace("<awaiting_reply/>", "")
+        normalized = re.sub(r"```[a-zA-Z0-9_+-]+\n", "```\n", normalized)
+        normalized = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1: \2", normalized)
+        normalized = re.sub(r"(?m)^#{1,6}\s+(.+?)\s*$", lambda m: f"*{m.group(1).strip()}*", normalized)
+        normalized = re.sub(r"\*\*(.+?)\*\*", r"*\1*", normalized)
+        normalized = re.sub(r"__(.+?)__", r"*\1*", normalized)
+        normalized = re.sub(r"(?m)^-\s+", "• ", normalized)
+        normalized = re.sub(r"(?m)^\*\s+", "• ", normalized)
+        normalized = re.sub(r"(?m)^---+$", "────────", normalized)
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        return normalized.strip() or None
 
     def _should_send_progress(self, message: dict[str, Any]) -> bool:
         task_id = self._coerce_str(message.get("task_id"))
