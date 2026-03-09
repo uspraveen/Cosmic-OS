@@ -44,7 +44,7 @@ class WhatsAppConfig:
     text_chunk_limit: int = DEFAULT_TEXT_CHUNK_LIMIT
     chunk_mode: str = "newline"
     send_delay_ms: int = 200
-    ack_delay_sec: float = 3.5
+    ack_delay_sec: float = 0.0
     progress_min_interval_sec: float = 8.0
     health_path: str = "/health"
     status_path: str = "/status"
@@ -90,7 +90,7 @@ class WhatsAppConfig:
             text_chunk_limit=max(500, env_int("WHATSAPP_TEXT_CHUNK_LIMIT", DEFAULT_TEXT_CHUNK_LIMIT)),
             chunk_mode=chunk_mode,
             send_delay_ms=max(0, env_int("WHATSAPP_SEND_DELAY_MS", 200)),
-            ack_delay_sec=max(0.0, env_float("WHATSAPP_ACK_DELAY_SEC", 3.5)),
+            ack_delay_sec=max(0.0, env_float("WHATSAPP_ACK_DELAY_SEC", 0.0)),
             progress_min_interval_sec=max(
                 0.0,
                 env_float("WHATSAPP_PROGRESS_MIN_INTERVAL_SEC", 8.0),
@@ -481,8 +481,6 @@ class WhatsAppAdapter(ChannelAdapter):
     def _schedule_delayed_ack(self, request_id: str, channel: str) -> None:
         if not request_id or request_id in self._pending_ack_tasks or request_id in self._sent_ack_request_ids:
             return
-        if self.config.ack_delay_sec <= 0:
-            return
 
         self._pending_ack_tasks[request_id] = asyncio.create_task(
             self._send_delayed_ack(request_id, channel),
@@ -497,7 +495,8 @@ class WhatsAppAdapter(ChannelAdapter):
     async def _send_delayed_ack(self, request_id: str, channel: str) -> None:
         current_task = asyncio.current_task()
         try:
-            await asyncio.sleep(self.config.ack_delay_sec)
+            if self.config.ack_delay_sec > 0:
+                await asyncio.sleep(self.config.ack_delay_sec)
             await self._send_text(channel, "Thinking...")
             self._sent_ack_request_ids.add(request_id)
         except asyncio.CancelledError:

@@ -106,14 +106,14 @@ async def test_whatsapp_adapter_buffers_chunks_and_formats_final_text() -> None:
 @pytest.mark.asyncio
 async def test_whatsapp_adapter_sends_delayed_ack_for_slow_requests() -> None:
     sent_payloads: list[dict[str, str]] = []
-    adapter = build_adapter(sent_payloads, ack_delay_sec=0.01)
+    adapter = build_adapter(sent_payloads, ack_delay_sec=0.0)
 
     try:
         await adapter.send(
             {"type": "route_result", "request_id": "req_wa_slow", "channel": "whatsapp:+12153079021"},
             channel="whatsapp:+12153079021",
         )
-        await asyncio.sleep(0.03)
+        await asyncio.sleep(0)
         await adapter.send(
             {
                 "type": "response.complete",
