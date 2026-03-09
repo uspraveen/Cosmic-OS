@@ -511,11 +511,7 @@ class GatewayRuntime:
         return RoutingDecision(
             classification=normalized_classification,
             decision_source="model_router",
-            classifier_payload={
-                "classification": classification,
-                "raw_classifier_output": router_response.get("raw_classifier_output"),
-                "http2_enabled": router_response.get("http2_enabled"),
-            },
+            classifier_payload=router_response,
             classifier_metrics=classifier_metrics if isinstance(classifier_metrics, dict) else None,
             classifier_model=self._safe_text(router_response.get("classifier_model")) or None,
             classifier_latency_ms=classifier_latency_ms,

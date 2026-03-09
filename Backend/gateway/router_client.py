@@ -71,9 +71,6 @@ class ModelRouterClient:
         if not isinstance(classification, dict):
             raise RuntimeError("Model router returned an invalid classification payload")
         return {
+            **payload,
             "classification": classification,
-            "metrics": payload.get("metrics") if isinstance(payload.get("metrics"), dict) else None,
-            "classifier_model": payload.get("classifier_model"),
-            "raw_classifier_output": payload.get("raw_classifier_output"),
-            "http2_enabled": payload.get("http2_enabled"),
         }
