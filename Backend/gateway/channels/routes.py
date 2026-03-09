@@ -6,6 +6,7 @@ import re
 import time
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field
@@ -303,12 +304,40 @@ async def whatsapp_incoming(
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
+    request_id = str(result.get("request_id") or "").strip() or uuid4().hex
+    result["request_id"] = request_id
+
     logger.info(
         "whatsapp.incoming normalized channel=%s message_id=%s elapsed_ms=%.1f",
         result.get("channel"),
         result.get("metadata", {}).get("message_id") if isinstance(result.get("metadata"), dict) else None,
         (time.perf_counter() - started_at) * 1000.0,
     )
+
+    try:
+        await adapter.send(
+            {
+                "type": "route_result",
+                "request_id": request_id,
+                "session_id": None,
+                "channel": result["channel"],
+                "route": "pending",
+                "classification": None,
+            },
+            channel=result["channel"],
+        )
+        logger.info(
+            "whatsapp.incoming immediate_ack_sent request_id=%s elapsed_ms=%.1f",
+            request_id,
+            (time.perf_counter() - started_at) * 1000.0,
+        )
+    except Exception as exc:
+        logger.exception(
+            "whatsapp.incoming immediate_ack_failed request_id=%s elapsed_ms=%.1f",
+            request_id,
+            (time.perf_counter() - started_at) * 1000.0,
+        )
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     processed = await runtime.process_incoming_user_message(result)
     logger.info(
@@ -317,26 +346,6 @@ async def whatsapp_incoming(
         processed.get("route"),
         (time.perf_counter() - started_at) * 1000.0,
     )
-
-    try:
-        await adapter.send(
-            {
-                "type": "route_result",
-                "request_id": processed["request_id"],
-                "session_id": processed["session_id"],
-                "channel": processed["channel"],
-                "route": processed["route"],
-                "classification": processed["classification"],
-            },
-            channel=processed["channel"],
-        )
-        logger.info(
-            "whatsapp.incoming route_result_sent request_id=%s elapsed_ms=%.1f",
-            processed.get("request_id"),
-            (time.perf_counter() - started_at) * 1000.0,
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     try:
         runtime.start_request_fulfillment(processed)

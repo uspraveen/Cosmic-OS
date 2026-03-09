@@ -215,12 +215,8 @@ async def test_whatsapp_adapter_formats_markdown_tables_as_monospace_blocks() ->
             "number": "12153079021",
             "message": (
                 "Here is the comparison:\n\n"
-                "```\n"
-                "Model | Speed\n"
-                "------+------\n"
-                "Haiku | Fast \n"
-                "Opus  | Deep\n"
-                "```"
+                "• Model: Haiku | Speed: Fast\n"
+                "• Model: Opus | Speed: Deep"
             ),
         }
     ]

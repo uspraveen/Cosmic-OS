@@ -753,20 +753,21 @@ class WhatsAppAdapter(ChannelAdapter):
         if column_count == 0:
             return "\n".join(table_lines)
 
-        normalized_rows = [self._normalize_table_cells(header, column_count)]
-        normalized_rows.extend(self._normalize_table_cells(row, column_count) for row in data_rows)
-        widths = [
-            max(len(row[column_index]) for row in normalized_rows)
-            for column_index in range(column_count)
-        ]
+        normalized_header = self._normalize_table_cells(header, column_count)
+        normalized_rows = [self._normalize_table_cells(row, column_count) for row in data_rows]
 
-        def render_row(row: list[str]) -> str:
-            return " | ".join(cell.ljust(widths[idx]) for idx, cell in enumerate(row))
+        rendered_lines: list[str] = []
+        for row in normalized_rows:
+            parts: list[str] = []
+            for index, cell in enumerate(row):
+                if not cell:
+                    continue
+                column_name = normalized_header[index] or f"Column {index + 1}"
+                parts.append(f"{column_name}: {cell}")
+            if parts:
+                rendered_lines.append("• " + " | ".join(parts))
 
-        separator = "-+-".join("-" * width for width in widths)
-        rendered_lines = [render_row(normalized_rows[0]), separator]
-        rendered_lines.extend(render_row(row) for row in normalized_rows[1:])
-        return "```\n" + "\n".join(rendered_lines).rstrip() + "\n```"
+        return "\n".join(rendered_lines) if rendered_lines else "\n".join(table_lines)
 
     def _parse_markdown_table_row(self, line: str) -> list[str]:
         stripped = line.strip()
