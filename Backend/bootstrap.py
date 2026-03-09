@@ -23,8 +23,9 @@ import sys
 import tempfile
 import getpass
 import secrets
+import time
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -63,6 +64,8 @@ PYTHON_CANDIDATES = [
     "python3",
 ]
 MIN_NODE_MAJOR = 20
+DEFAULT_RETRY_ATTEMPTS = 4
+DEFAULT_RETRY_INITIAL_DELAY_SEC = 1.5
 PACKAGE_NAMES: Dict[str, Dict[str, str]] = {
     "python": {
         "apt-get": "python3",
@@ -99,6 +102,9 @@ PACKAGE_NAMES: Dict[str, Dict[str, str]] = {
 
 class BootstrapError(RuntimeError):
     pass
+
+
+RetryResult = TypeVar("RetryResult")
 
 
 def log(message: str) -> None:
@@ -147,6 +153,74 @@ def run(
     )
 
 
+def retry_call(
+    operation_label: str,
+    action: Callable[[], RetryResult],
+    *,
+    attempts: int = DEFAULT_RETRY_ATTEMPTS,
+    initial_delay_sec: float = DEFAULT_RETRY_INITIAL_DELAY_SEC,
+    max_delay_sec: float = 15.0,
+    retry_exceptions: Tuple[type[BaseException], ...],
+    should_retry: Optional[Callable[[BaseException], bool]] = None,
+) -> RetryResult:
+    normalized_attempts = max(1, attempts)
+    delay_sec = max(0.0, initial_delay_sec)
+    for attempt in range(1, normalized_attempts + 1):
+        try:
+            return action()
+        except retry_exceptions as exc:
+            if should_retry is not None and not should_retry(exc):
+                raise
+            if attempt >= normalized_attempts:
+                raise
+            log(
+                "{0} failed on attempt {1}/{2}: {3}. Retrying in {4:.1f}s.".format(
+                    operation_label,
+                    attempt,
+                    normalized_attempts,
+                    exc,
+                    delay_sec,
+                )
+            )
+            time.sleep(delay_sec)
+            delay_sec = min(max_delay_sec, max(delay_sec * 2, 0.5))
+
+    raise AssertionError("retry_call exhausted without returning or raising")
+
+
+def run_with_retry(
+    command: Sequence[str],
+    *,
+    attempts: int = DEFAULT_RETRY_ATTEMPTS,
+    initial_delay_sec: float = DEFAULT_RETRY_INITIAL_DELAY_SEC,
+    use_sudo: bool = False,
+    capture_output: bool = False,
+    check: bool = True,
+    cwd: Optional[Path] = None,
+) -> subprocess.CompletedProcess:
+    return retry_call(
+        "Command failed: {0}".format(command_str(command)),
+        lambda: run(
+            command,
+            use_sudo=use_sudo,
+            capture_output=capture_output,
+            check=check,
+            cwd=cwd,
+        ),
+        attempts=attempts,
+        initial_delay_sec=initial_delay_sec,
+        retry_exceptions=(subprocess.CalledProcessError,),
+    )
+
+
+def should_retry_bootstrap_http_error(exc: BaseException) -> bool:
+    if isinstance(exc, HTTPError):
+        return exc.code >= 500 or exc.code in (408, 425, 429)
+    if isinstance(exc, URLError):
+        return True
+    return False
+
+
 def detect_package_manager() -> Optional[str]:
     for manager in ("apt-get", "dnf", "yum", "apk"):
         if shutil.which(manager):
@@ -181,17 +255,17 @@ def install_system_packages(manager: str, packages: Iterable[str]) -> None:
         return
 
     if manager == "apt-get":
-        run(["apt-get", "update"], use_sudo=True)
-        run(["apt-get", "install", "-y", *package_list], use_sudo=True)
+        run_with_retry(["apt-get", "update"], use_sudo=True)
+        run_with_retry(["apt-get", "install", "-y", *package_list], use_sudo=True)
         return
     if manager == "dnf":
-        run(["dnf", "install", "-y", *package_list], use_sudo=True)
+        run_with_retry(["dnf", "install", "-y", *package_list], use_sudo=True)
         return
     if manager == "yum":
-        run(["yum", "install", "-y", *package_list], use_sudo=True)
+        run_with_retry(["yum", "install", "-y", *package_list], use_sudo=True)
         return
     if manager == "apk":
-        run(["apk", "add", "--no-cache", *package_list], use_sudo=True)
+        run_with_retry(["apk", "add", "--no-cache", *package_list], use_sudo=True)
         return
 
     raise BootstrapError("Unsupported package manager: {0}".format(manager))
@@ -561,9 +635,17 @@ def fetch_bootstrap_env_payload(
         method="POST",
     )
 
-    try:
+    def perform_request() -> str:
         with urlopen(request, timeout=30) as response:
-            raw = response.read().decode("utf-8")
+            return response.read().decode("utf-8")
+
+    try:
+        raw = retry_call(
+            "Supabase bootstrap RPC request",
+            perform_request,
+            retry_exceptions=(HTTPError, URLError),
+            should_retry=should_retry_bootstrap_http_error,
+        )
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise BootstrapError(
@@ -794,7 +876,7 @@ def upgrade_venv_pip(venv_path: Path) -> None:
         if not venv_has_pip(venv_path):
             raise BootstrapError("pip is still unavailable inside the virtual environment at {0}".format(venv_path))
 
-    run([str(python_path), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])
+    run_with_retry([str(python_path), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])
 
 
 def install_python_requirements(venv_path: Path, requirements_path: Path) -> None:
@@ -805,7 +887,7 @@ def install_python_requirements(venv_path: Path, requirements_path: Path) -> Non
         raise BootstrapError("Missing requirements file at {0}".format(requirements_path))
 
     log("Installing backend Python dependencies from {0}".format(requirements_path))
-    run([str(python_path), "-m", "pip", "install", "-r", str(requirements_path)])
+    run_with_retry([str(python_path), "-m", "pip", "install", "-r", str(requirements_path)])
 
 
 def has_node() -> bool:
@@ -839,9 +921,9 @@ def ensure_node_toolchain() -> None:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".sh") as temp_script:
             setup_script = Path(temp_script.name)
         try:
-            run(["curl", "-fsSL", "https://deb.nodesource.com/setup_20.x", "-o", str(setup_script)])
+            run_with_retry(["curl", "-fsSL", "https://deb.nodesource.com/setup_20.x", "-o", str(setup_script)])
             run(["bash", str(setup_script)], use_sudo=True)
-            run(["apt-get", "install", "-y", "nodejs"], use_sudo=True)
+            run_with_retry(["apt-get", "install", "-y", "nodejs"], use_sudo=True)
         finally:
             setup_script.unlink(missing_ok=True)
 
@@ -1147,7 +1229,7 @@ def install_whatsapp_bridge_dependencies(bridge_dir: Path) -> None:
         install_command = ["npm", "ci"]
 
     log("Installing WhatsApp bridge dependencies in {0}".format(bridge_dir))
-    run(install_command, check=True, capture_output=False, cwd=bridge_dir)
+    run_with_retry(install_command, check=True, capture_output=False, cwd=bridge_dir)
 
     scripts = package_data.get("scripts") if isinstance(package_data.get("scripts"), dict) else {}
     if "build" in scripts:

@@ -958,6 +958,12 @@ Desktop App (Electron)
         └── Returns: user profile + VM config (gateway_url, api_token, vm_ip, vm_dns)
               └── Desktop stores auth data in local SQLite (resources/user_data.db)
               └── Auto-configures Gateway URL + API token for all downstream connections
+
+VM Bootstrap (Linux VM)
+  └── Supabase RPC (consume_bootstrap_token)
+        └── Returns: env payload for gateway/model-router/orchestrator
+              └── bootstrap.py materializes repo env files
+              └── bootstrap.py syncs /etc/cosmic/*.env
 ```
 
 **Supabase project constants** (public — safe to commit, RLS-protected):
@@ -971,6 +977,10 @@ Anon Key: eyJhbGciOi...  (standard Supabase anon key — only allows RLS-protect
 
 Each COSMIC user gets one dedicated VM. The `user_vms` table maps users to their VM infrastructure.
 
+**Source-of-truth rule:** `public.user_vms.api_token` is the canonical desktop-facing `GATEWAY_LOCAL_API_TOKEN` for that VM. Desktop login reads this value through `authenticate_with_api_key(...)`, and VM bootstrap installs this exact same value into `gateway.env`. `bootstrap.py` must not invent a different desktop/local token.
+
+**Public-host rule:** `public.user_vms.vm_dns` must be the final public COSMIC hostname for that VM (for example, `<user_id>.thelearnchain.com`), not the raw cloud-provider hostname. The current bootstrap/Caddy flow maps `vm_dns` into `GATEWAY_PUBLIC_HOST`, and ACME/TLS issuance depends on that hostname being cert-eligible and publicly resolvable.
+
 ```sql
 -- Create user_vms table
 CREATE TABLE public.user_vms (
@@ -979,7 +989,7 @@ CREATE TABLE public.user_vms (
   gateway_url text NOT NULL,          -- e.g. 'https://gateway.user.example.com'
   api_token   text NOT NULL,          -- the GATEWAY_LOCAL_API_TOKEN value for this user's VM
   vm_ip       text,                   -- e.g. '3.137.194.119'
-  vm_dns      text,                   -- e.g. 'ec2-3-137-194-119.us-east-2.compute.amazonaws.com'
+  vm_dns      text,                   -- e.g. 'c2ece0ad-....thelearnchain.com'
   vm_region   text DEFAULT 'us-east-2',
   status      text DEFAULT 'active' CHECK (status IN ('active','suspended','terminated')),
   created_at  timestamptz DEFAULT now(),
@@ -1090,28 +1100,343 @@ $$;
 **Example: provisioning a user's VM row:**
 
 ```sql
--- Insert a new user's VM config
-INSERT INTO public.user_vms (user_id, gateway_url, api_token, vm_ip, vm_dns, vm_region)
-VALUES (
-  (SELECT id FROM public.users WHERE email = 'user@example.com'),
-  'https://gateway.user.example.com',
-  'generated-gateway-api-token-here',
-  '3.137.194.119',
-  'ec2-3-137-194-119.us-east-2.compute.amazonaws.com',
-  'us-east-2'
-);
+CREATE OR REPLACE FUNCTION public.provision_user_vm(
+  p_user_email text,
+  p_gateway_url text,
+  p_vm_ip text,
+  p_vm_dns text,
+  p_vm_region text default 'us-east-2'
+)
+RETURNS TABLE (
+  out_user_id uuid,
+  out_vm_id uuid,
+  out_gateway_api_token text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_user_id uuid;
+  v_vm_id uuid;
+  v_existing_token text;
+  v_new_token text;
+BEGIN
+  SELECT u.id
+    INTO v_user_id
+    FROM public.users AS u
+   WHERE u.email = p_user_email;
 
--- Update an existing user's VM config (e.g. IP changed after VM restart)
-UPDATE public.user_vms
-SET gateway_url = 'https://gateway.user.example.com',
-    vm_ip       = '3.137.194.119',
-    vm_dns      = 'ec2-3-137-194-119.us-east-2.compute.amazonaws.com',
-    vm_region   = 'us-east-2',
-    updated_at  = now()
-WHERE user_id = (SELECT id FROM public.users WHERE email = 'user@example.com');
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'No user found for %', p_user_email;
+  END IF;
+
+  SELECT uv.id, uv.api_token
+    INTO v_vm_id, v_existing_token
+    FROM public.user_vms AS uv
+   WHERE uv.user_id = v_user_id
+   LIMIT 1;
+
+  v_new_token := coalesce(
+    nullif(v_existing_token, ''),
+    'glt_' || encode(extensions.gen_random_bytes(24), 'hex')
+  );
+
+  INSERT INTO public.user_vms (
+    user_id,
+    gateway_url,
+    api_token,
+    vm_ip,
+    vm_dns,
+    vm_region,
+    status
+  )
+  VALUES (
+    v_user_id,
+    p_gateway_url,
+    v_new_token,
+    p_vm_ip,
+    p_vm_dns,
+    p_vm_region,
+    'active'
+  )
+  ON CONFLICT (user_id)
+  DO UPDATE SET
+    gateway_url = excluded.gateway_url,
+    api_token = public.user_vms.api_token,
+    vm_ip = excluded.vm_ip,
+    vm_dns = excluded.vm_dns,
+    vm_region = excluded.vm_region,
+    status = 'active',
+    updated_at = now()
+  RETURNING public.user_vms.id, public.user_vms.api_token
+    INTO v_vm_id, v_new_token;
+
+  RETURN QUERY
+  SELECT v_user_id, v_vm_id, v_new_token;
+END;
+$$;
 ```
 
-#### 3.5a.3 Desktop App Auth Flow
+**Operational rule:** re-running `provision_user_vm(...)` for an existing VM preserves the current `api_token`. This keeps desktop login stable while allowing `gateway_url`, IP, and DNS metadata to change.
+
+#### 3.5a.3 Supabase Bootstrap Token Table
+
+VM bootstrap uses one-time tokens stored as hashes in a private schema. This is separate from desktop login.
+
+```sql
+CREATE SCHEMA IF NOT EXISTS app_private;
+
+CREATE TABLE IF NOT EXISTS app_private.vm_bootstrap_tokens (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  vm_id uuid NOT NULL REFERENCES public.user_vms(id) ON DELETE CASCADE,
+  token_hash text NOT NULL UNIQUE,
+  expires_at timestamptz NOT NULL,
+  used_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  note text
+);
+
+REVOKE ALL ON SCHEMA app_private FROM public;
+REVOKE ALL ON ALL TABLES IN SCHEMA app_private FROM public;
+```
+
+#### 3.5a.4 Supabase RPC: `issue_vm_bootstrap_token`
+
+Operators mint a one-time bootstrap token immediately before provisioning or syncing a VM. The raw token is returned once; the database stores only its SHA-256 hash.
+
+```sql
+CREATE OR REPLACE FUNCTION app_private.issue_vm_bootstrap_token(
+  p_user_email text,
+  p_ttl_minutes integer default 20
+)
+RETURNS TABLE (
+  raw_token text,
+  expires_at timestamptz,
+  vm_id uuid
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, app_private
+AS $$
+DECLARE
+  v_vm_id uuid;
+  v_raw_token text;
+  v_expiry timestamptz;
+BEGIN
+  SELECT uv.id
+    INTO v_vm_id
+    FROM public.user_vms uv
+    JOIN public.users u ON u.id = uv.user_id
+   WHERE u.email = p_user_email
+     AND uv.status = 'active'
+   LIMIT 1;
+
+  IF v_vm_id IS NULL THEN
+    RAISE EXCEPTION 'No active VM found for %', p_user_email;
+  END IF;
+
+  v_raw_token := 'bs_' || encode(extensions.gen_random_bytes(24), 'hex');
+  v_expiry := now() + make_interval(mins => p_ttl_minutes);
+
+  INSERT INTO app_private.vm_bootstrap_tokens (vm_id, token_hash, expires_at)
+  VALUES (
+    v_vm_id,
+    encode(extensions.digest(v_raw_token, 'sha256'), 'hex'),
+    v_expiry
+  );
+
+  RETURN QUERY
+  SELECT v_raw_token, v_expiry, v_vm_id;
+END;
+$$;
+```
+
+#### 3.5a.5 Supabase RPC: `consume_bootstrap_token`
+
+`bootstrap.py` calls this RPC over Supabase REST using the public anon key plus the one-time bootstrap token. The RPC validates the token, reads the VM metadata from `public.user_vms`, reads shared provider secrets from Supabase Vault, marks the token as used, and returns the env bundle required by the VM.
+
+```sql
+CREATE OR REPLACE FUNCTION public.consume_bootstrap_token(p_token text)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, app_private, vault
+AS $$
+DECLARE
+  v_token_hash text;
+  v_token_row record;
+  v_anthropic text;
+  v_perplexity text;
+  v_deepgram text;
+  v_groq text;
+BEGIN
+  IF p_token IS NULL OR length(trim(p_token)) < 20 THEN
+    RETURN jsonb_build_object(
+      'success', false,
+      'error', 'invalid_token',
+      'message', 'Bootstrap token missing or malformed.'
+    );
+  END IF;
+
+  v_token_hash := encode(extensions.digest(trim(p_token), 'sha256'), 'hex');
+
+  SELECT
+    t.id AS token_id,
+    uv.id AS vm_id,
+    uv.gateway_url,
+    uv.api_token,
+    uv.vm_ip,
+    uv.vm_dns,
+    uv.vm_region
+  INTO v_token_row
+  FROM app_private.vm_bootstrap_tokens t
+  JOIN public.user_vms uv ON uv.id = t.vm_id
+  WHERE t.token_hash = v_token_hash
+    AND t.used_at IS NULL
+    AND t.expires_at > now()
+    AND uv.status = 'active'
+  LIMIT 1;
+
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object(
+      'success', false,
+      'error', 'invalid_or_expired_token',
+      'message', 'Bootstrap token is invalid, expired, or already used.'
+    );
+  END IF;
+
+  SELECT decrypted_secret
+    INTO v_anthropic
+    FROM vault.decrypted_secrets
+   WHERE name = 'platform_anthropic_api_key'
+   ORDER BY created_at DESC
+   LIMIT 1;
+
+  SELECT decrypted_secret
+    INTO v_perplexity
+    FROM vault.decrypted_secrets
+   WHERE name = 'platform_perplexity_api_key'
+   ORDER BY created_at DESC
+   LIMIT 1;
+
+  SELECT decrypted_secret
+    INTO v_deepgram
+    FROM vault.decrypted_secrets
+   WHERE name = 'platform_deepgram_api_key'
+   ORDER BY created_at DESC
+   LIMIT 1;
+
+  SELECT decrypted_secret
+    INTO v_groq
+    FROM vault.decrypted_secrets
+   WHERE name = 'platform_groq_api_key'
+   ORDER BY created_at DESC
+   LIMIT 1;
+
+  IF v_anthropic IS NULL OR v_perplexity IS NULL THEN
+    RETURN jsonb_build_object(
+      'success', false,
+      'error', 'missing_platform_secrets',
+      'message', 'Required platform secrets are missing from Vault.'
+    );
+  END IF;
+
+  UPDATE app_private.vm_bootstrap_tokens
+     SET used_at = now()
+   WHERE id = v_token_row.token_id
+     AND used_at IS NULL;
+
+  RETURN jsonb_build_object(
+    'success', true,
+    'vm', jsonb_build_object(
+      'vm_id', v_token_row.vm_id,
+      'gateway_url', v_token_row.gateway_url,
+      'vm_ip', v_token_row.vm_ip,
+      'vm_dns', v_token_row.vm_dns,
+      'vm_region', v_token_row.vm_region
+    ),
+    'gateway_env', jsonb_build_object(
+      'GATEWAY_LOCAL_API_TOKEN', v_token_row.api_token,
+      'GATEWAY_PUBLIC_HOST', v_token_row.vm_dns,
+      'ANTHROPIC_API_KEY', v_anthropic,
+      'PERPLEXITY_API_KEY', v_perplexity,
+      'HAIKU_MODEL', 'claude-haiku-4-5'
+    ),
+    'orchestrator_env', jsonb_build_object(
+      'ANTHROPIC_API_KEY', v_anthropic,
+      'OPUS_MODEL', 'claude-opus-4-6'
+    ),
+    'meeting_env', jsonb_build_object(
+      'DEEPGRAM_API_KEY', coalesce(v_deepgram, ''),
+      'GROQ_API_KEY', coalesce(v_groq, '')
+    )
+  );
+END;
+$$;
+```
+
+**Current implementation note:** the current RPC shape returns `meeting_env.GROQ_API_KEY` and `orchestrator_env.OPUS_MODEL`. `bootstrap.py` normalizes these into the actual backend env files:
+
+- `meeting_env.GROQ_API_KEY` -> `model_router.env:GROQ_API_KEY`
+- `orchestrator_env.OPUS_MODEL` -> `orchestrator.env:ANTHROPIC_MODEL`
+
+This is acceptable for the current system, though a future cleanup may return `model_router_env` and `orchestrator_env.ANTHROPIC_MODEL` directly.
+
+**Secret storage:** shared provider keys live once in Supabase Vault under names such as `platform_anthropic_api_key`, `platform_perplexity_api_key`, `platform_deepgram_api_key`, and `platform_groq_api_key`. They are not duplicated into `public.user_vms`.
+
+#### 3.5a.5a Production Bare-VM Provisioning Sequence
+
+For the current production-ready bare-VM flow, the operator sequence is:
+
+1. Create the VM and open inbound `80/tcp` and `443/tcp` in the attached security group before running bootstrap. Keep `8080/tcp` only if you want a temporary rollback/debug path during rollout.
+2. Add a public DNS record for the VM under the COSMIC-owned base domain (for example, Squarespace-managed `thelearnchain.com`):
+   - `A <user_id>.thelearnchain.com -> <vm_public_ip>`
+3. Create/update the Supabase VM row with the final public HTTPS hostname and the same hostname in `vm_dns`:
+
+```sql
+SELECT *
+FROM public.provision_user_vm(
+  'user@example.com',
+  'https://<user_id>.thelearnchain.com',
+  '3.137.194.119',
+  '<user_id>.thelearnchain.com',
+  'us-east-2'
+);
+```
+
+4. Mint a one-time bootstrap token:
+
+```sql
+SELECT *
+FROM app_private.issue_vm_bootstrap_token('user@example.com', 20);
+```
+
+5. Copy `Backend/` to the VM and run:
+
+```bash
+cd ~/Cosmic-OS/Backend
+export COSMIC_BOOTSTRAP_TOKEN='<one-time bootstrap token>'
+python3 bootstrap.py provision-vm
+```
+
+That flow fetches the env payload from Supabase, installs/syncs the backend env files, installs dependencies, installs systemd units, starts the backend services, installs/configures Caddy, and lets Caddy obtain the TLS certificate automatically.
+
+6. Verify the public edge:
+
+```bash
+curl -fsS https://<user_id>.thelearnchain.com/health
+```
+
+If DNS or security-group ingress was fixed only after Caddy had already entered ACME retry backoff, force an immediate retry with:
+
+```bash
+sudo systemctl restart caddy
+```
+
+**Operational note:** the same base domain may be reused for all users, but each VM still needs a unique hostname (for example, `<user_id>.thelearnchain.com`) because the current architecture connects the desktop directly to that user's VM edge.
+
+#### 3.5a.6 Desktop App Auth Flow
 
 The desktop app (Electron) implements a login gate that runs before the main UI loads:
 
@@ -1162,7 +1487,7 @@ Logout:
   "gatewayUrl": "https://gateway.user.example.com",
   "gatewayApiToken": "the-gateway-token",
   "vmIp": "3.137.194.119",
-  "vmDns": "ec2-3-137-194-119.us-east-2.compute.amazonaws.com",
+  "vmDns": "c2ece0ad-4b2d-4af4-ae65-1b07660550dc.thelearnchain.com",
   "authenticatedAt": 1709500000000
 }
 ```
@@ -1189,6 +1514,9 @@ Logout:
 3. The `authenticate_with_api_key` function is `SECURITY DEFINER` — it runs with elevated privileges to read across tables regardless of RLS. The function itself validates the API key and checks privileges.
 4. The desktop app never stores auth data in `electron-store` / APPDATA / `localStorage`. All auth persistence goes through the SQLite settings bridge pipeline.
 5. On logout, all three settings keys (`cosmicAuth`, `gatewayBaseUrl`, `gatewayApiToken`) are cleared. The app returns to the login modal.
+6. VM bootstrap uses `consume_bootstrap_token(...)`, not `authenticate_with_api_key(...)`. Desktop login and VM bootstrap are separate flows.
+7. Bootstrap tokens are one-time, expire quickly, and must not be manually consumed before the VM uses them.
+8. `public.user_vms.api_token` and the VM's `GATEWAY_LOCAL_API_TOKEN` must stay aligned. If they drift apart, desktop auth breaks.
 
 ### 3.6 Rate Limiting
 
@@ -1860,7 +2188,7 @@ COSMIC uses **one Python runtime environment for the entire Python backend** and
 
 **Top-level Python dependency files:**
 
-- `bootstrap.py`: First-run provisioning helper for Linux VM deployments. It prepares Python, `pip`, `venv`, installs backend Python dependencies, and can provision sidecar runtimes such as the WhatsApp bridge.
+- `bootstrap.py`: First-run provisioning helper for Linux VM deployments. It prepares Python, `pip`, `venv`, installs backend Python dependencies, can fetch a per-VM env bundle from Supabase using a one-time bootstrap token, and can provision sidecar runtimes such as the WhatsApp bridge.
 - `requirements.txt`: Runtime dependency manifest for all Python services in this repository: Gateway, Model Router, Orchestrator, and agents.
 - `requirements-dev.txt`: Development-only extension of `requirements.txt` for linting, tests, and local verification. Production process managers do **not** install or depend on it.
 
@@ -1880,24 +2208,33 @@ COSMIC uses **one Python runtime environment for the entire Python backend** and
 - idempotent where practical
 - subcommand-based rather than one monolithic setup function
 - limited to provisioning/setup concerns, not application runtime behavior
+- capable of reconciling placeholders in existing env files without clobbering live non-placeholder secrets
 
 **Canonical commands:**
 
 ```bash
 python bootstrap.py doctor
+python bootstrap.py fetch-bootstrap-env
 python bootstrap.py setup-python
 python bootstrap.py setup-whatsapp-bridge
+python bootstrap.py sync-env
 python bootstrap.py bootstrap
+python bootstrap.py provision-vm
+python bootstrap.py provision-vm --skip-edge
 ```
 
 **Current command meanings:**
 
 - `doctor`: Read-only prerequisite check. Reports Python, `pip`, `venv`, requirements-file, Node/npm, and bridge-manifest state.
+- `fetch-bootstrap-env`: Requires `COSMIC_BOOTSTRAP_TOKEN` or `--bootstrap-token`; fetches the one-time Supabase bootstrap payload and materializes the repo env files.
 - `setup-python`: Ensures Python `3.10+`, `pip`, and `venv`; creates/updates `.venv`; installs `requirements.txt`.
 - `setup-whatsapp-bridge`: Installs the Node.js dependency set for `bridges/whatsapp_bridge/`.
-- `bootstrap`: Runs the full first-pass provisioning flow for the backend VM by executing both Python and bridge setup.
+- `sync-env`: Appends missing keys from committed env templates and, on Linux VMs, also updates existing `/etc/cosmic` env files. If a bootstrap token is present, it first refreshes the repo env files from Supabase and then reconciles placeholder values in `/etc/cosmic`.
+- `bootstrap`: Runs the first-pass provisioning flow for the backend VM by materializing env files (optionally from Supabase), then executing both Python and bridge setup.
+- `provision-vm`: Full production bare-VM flow for a host whose DNS and ingress are already ready. Materializes envs, installs Python and bridge deps, installs systemd units, starts the backend target, and invokes Caddy/TLS edge setup.
+- `provision-vm --skip-edge`: Full bare-VM flow for an already-networked host. Materializes envs, installs Python and bridge deps, installs systemd units, and starts the backend target without forcing Caddy/TLS edge setup.
 
-**Operational note:** `bootstrap.py` is intended to be the first backend command after clone on a Linux VM image that already has a callable Python interpreter. If the base image has no Python at all, a minimal cloud-init/scripted OS bootstrap may install Python first and then hand off to `bootstrap.py`.
+**Operational note:** `bootstrap.py` is intended to be the first backend command after clone on a Linux VM image that already has a callable Python interpreter. In the current production flow, operators mint a one-time Supabase bootstrap token and export it as `COSMIC_BOOTSTRAP_TOKEN` before running `bootstrap.py provision-vm`. Use `--skip-edge` only when the public DNS record and/or inbound `80/443` are not ready yet, or when you intentionally want an internal-only/non-TLS rollout first. If the base image has no Python at all, a minimal cloud-init/scripted OS bootstrap may install Python first and then hand off to `bootstrap.py`.
 
 ### 5.2 Per-Agent Folder (Every Agent Is Identical in Shape)
 
@@ -2889,10 +3226,11 @@ supervisord manages long-running COSMIC processes in containerized deployments: 
 **Provisioning before process start:** dependency/bootstrap work happens **before** `systemd` or `supervisord` takes over. On VM deployments, the expected first backend command after cloning is:
 
 ```bash
-python bootstrap.py bootstrap
+export COSMIC_BOOTSTRAP_TOKEN='<one-time bootstrap token>'
+python bootstrap.py provision-vm
 ```
 
-That command prepares the shared Python virtual environment from `requirements.txt` and installs bridge-local dependencies such as `bridges/whatsapp_bridge/package.json`. After provisioning completes, the selected process manager (`systemd` on VMs, `supervisord` in containers) owns long-running service lifecycle.
+That flow assumes the VM already has a public DNS record and open inbound `80/443`, fetches the per-VM env payload from Supabase, installs the shared Python virtual environment from `requirements.txt`, installs bridge-local dependencies such as `bridges/whatsapp_bridge/package.json`, syncs `/etc/cosmic/*.env`, configures the Caddy/TLS edge, and then hands long-running service lifecycle to the selected process manager (`systemd` on VMs, `supervisord` in containers). If DNS or ingress are not ready yet, operators may temporarily use `python bootstrap.py provision-vm --skip-edge` and finish the edge later with `python bootstrap.py setup-edge`.
 
 For containerized deployments, the image/Dockerfile should bake in the equivalent of `bootstrap.py setup-python` and any required bridge dependency installation during build time. Do not rely on an interactive bootstrap step at container start.
 
@@ -4214,7 +4552,7 @@ All API keys and secrets **must** be externalized to environment variables. Neve
 | OAuth client secrets (per provider) | Gateway (Credential Manager) | `OAUTH_GOOGLE_CLIENT_SECRET`, `OAUTH_GITHUB_CLIENT_SECRET`, etc. |
 | OpenRouter API key | Gateway (Session Manager — embeddings) | `OPENROUTER_API_KEY` |
 
-**Storage:** In development, secrets live in `.env` files (gitignored). In production, use a secrets manager or encrypted environment injection (Docker secrets, Kubernetes secrets, systemd `CredentialDirectory`).
+**Storage:** In development, secrets live in `.env` files (gitignored). In production, use a secrets manager or encrypted environment injection (Docker secrets, Kubernetes secrets, systemd `CredentialDirectory`). In the current bare-VM Supabase flow, shared provider keys are stored centrally in Supabase Vault and materialized into per-service env files at bootstrap time. The per-VM desktop-facing `GATEWAY_LOCAL_API_TOKEN` is stored in `public.user_vms.api_token` and installed into `gateway.env` by bootstrap.
 
 **Scoping rule:** production env injection is per service/process, not one backend-wide env blob. Gateway, Model Router, Bridges, Orchestrator, and agents should each receive the smallest env surface they require. This reduces accidental secret exposure and matches the process boundaries defined in §9.
 
@@ -8813,8 +9151,13 @@ def build_tool_definitions(self) -> list[dict]:
 | Table / Function | Location | Owner | Contents |
 |---|---|---|---|
 | `public.users` | Supabase | Platform | User accounts, API keys, privilege flags |
-| `public.user_vms` | Supabase | Platform | Per-user VM provisioning: gateway URL, API token, VM IP/DNS, region, status. RLS-protected — users can only read their own row (§3.5a.1) |
+| `public.user_vms` | Supabase | Platform | Per-user VM provisioning: gateway URL, API token, VM IP/DNS, region, status. `api_token` is the source of truth for the VM's `GATEWAY_LOCAL_API_TOKEN`. RLS-protected — users can only read their own row (§3.5a.1) |
 | `public.authenticate_with_api_key()` | Supabase RPC | Platform | SECURITY DEFINER function — validates Cosmic API key, returns user profile + VM config (§3.5a.2) |
+| `public.provision_user_vm()` | Supabase RPC | Platform | SECURITY DEFINER provisioning helper — creates/updates a VM row while preserving the current gateway API token for an existing VM (§3.5a.2) |
+| `app_private.vm_bootstrap_tokens` | Supabase | Platform | One-time bootstrap token hashes, expiry timestamps, and consumed-at markers for VM provisioning/sync (§3.5a.3) |
+| `app_private.issue_vm_bootstrap_token()` | Supabase RPC | Platform | SECURITY DEFINER helper — issues a short-lived raw bootstrap token for an active VM and stores only its hash (§3.5a.4) |
+| `public.consume_bootstrap_token()` | Supabase RPC | Platform | SECURITY DEFINER bootstrap RPC — validates one-time token, reads `user_vms`, reads shared provider secrets from Vault, marks the token as used, and returns the env payload for the VM (§3.5a.5) |
+| `vault.decrypted_secrets` | Supabase Vault | Platform | Shared platform provider secrets used during VM bootstrap, such as Anthropic, Perplexity, Deepgram, and Groq API keys (§3.5a.5) |
 
 ## Appendix B: Quick Reference — All Pydantic Models
 

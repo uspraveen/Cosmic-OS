@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import io
+import json
+import subprocess
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
+from urllib.error import HTTPError, URLError
 
 import bootstrap
 
@@ -290,3 +294,109 @@ def test_materialize_bootstrap_env_files_updates_repo_envs(monkeypatch, tmp_path
     assert "GROQ_API_KEY=groq-live" in model_router_rendered
     assert "ANTHROPIC_MODEL=claude-opus-4-6" in orchestrator_rendered
     assert "WHATSAPP_AUTH_DIR=/var/lib/cosmic/whatsapp/auth" in bridge_rendered
+
+
+def test_fetch_bootstrap_env_payload_retries_transient_urlerror(monkeypatch) -> None:
+    attempts = {"count": 0}
+    payload = {
+        "success": True,
+        "vm": {
+            "gateway_url": "https://user.thelearnchain.com",
+            "vm_dns": "user.thelearnchain.com",
+        },
+        "gateway_env": {
+            "GATEWAY_LOCAL_API_TOKEN": "pg_live_token",
+            "ANTHROPIC_API_KEY": "anthropic-live",
+            "PERPLEXITY_API_KEY": "perplexity-live",
+            "HAIKU_MODEL": "claude-haiku-4-5",
+        },
+        "orchestrator_env": {
+            "ANTHROPIC_API_KEY": "anthropic-live",
+            "OPUS_MODEL": "claude-opus-4-6",
+        },
+        "meeting_env": {
+            "GROQ_API_KEY": "groq-live",
+        },
+    }
+
+    class FakeResponse:
+        def __init__(self, body: str) -> None:
+            self.body = body.encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return self.body
+
+    def fake_urlopen(request, timeout=30):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise URLError("temporary network issue")
+        return FakeResponse(json.dumps(payload))
+
+    monkeypatch.setattr(bootstrap, "urlopen", fake_urlopen)
+    monkeypatch.setattr(bootstrap.time, "sleep", lambda _seconds: None)
+
+    normalized = bootstrap.fetch_bootstrap_env_payload(
+        bootstrap_token="bs_live_token",
+        supabase_url="https://example.supabase.co",
+        supabase_anon_key="anon",
+    )
+
+    assert attempts["count"] == 2
+    assert normalized["gateway.env"]["GATEWAY_LOCAL_API_TOKEN"] == "pg_live_token"
+    assert normalized["gateway.env"]["GATEWAY_PUBLIC_HOST"] == "user.thelearnchain.com"
+    assert normalized["model-router.env"]["GROQ_API_KEY"] == "groq-live"
+    assert normalized["orchestrator.env"]["ANTHROPIC_MODEL"] == "claude-opus-4-6"
+
+
+def test_fetch_bootstrap_env_payload_does_not_retry_http_400(monkeypatch) -> None:
+    attempts = {"count": 0}
+
+    def fake_urlopen(request, timeout=30):
+        attempts["count"] += 1
+        raise HTTPError(
+            url=request.full_url,
+            code=400,
+            msg="Bad Request",
+            hdrs=None,
+            fp=io.BytesIO(b'{"message":"invalid bootstrap token"}'),
+        )
+
+    monkeypatch.setattr(bootstrap, "urlopen", fake_urlopen)
+    monkeypatch.setattr(bootstrap.time, "sleep", lambda _seconds: None)
+
+    try:
+        bootstrap.fetch_bootstrap_env_payload(
+            bootstrap_token="bs_live_token",
+            supabase_url="https://example.supabase.co",
+            supabase_anon_key="anon",
+        )
+    except bootstrap.BootstrapError as exc:
+        assert "HTTP 400" in str(exc)
+    else:
+        raise AssertionError("Expected BootstrapError for HTTP 400 response")
+
+    assert attempts["count"] == 1
+
+
+def test_run_with_retry_retries_subprocess_failure(monkeypatch) -> None:
+    attempts = {"count": 0}
+
+    def fake_run(command, **kwargs):
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise subprocess.CalledProcessError(returncode=1, cmd=command)
+        return SimpleNamespace(stdout="", returncode=0)
+
+    monkeypatch.setattr(bootstrap, "run", fake_run)
+    monkeypatch.setattr(bootstrap.time, "sleep", lambda _seconds: None)
+
+    result = bootstrap.run_with_retry(["python", "--version"], attempts=3, initial_delay_sec=0.01)
+
+    assert attempts["count"] == 3
+    assert result.returncode == 0

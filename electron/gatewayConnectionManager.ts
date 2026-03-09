@@ -16,6 +16,12 @@ export interface GatewayConnectionStatus {
   sessionId?: string | null
 }
 
+const CONNECT_TIMEOUT_MS = 15000
+const HEARTBEAT_INTERVAL_MS = 25000
+const HEARTBEAT_STALE_MS = 70000
+const RESUME_TIMEOUT_MS = 10000
+const MAX_RESUME_ATTEMPTS = 2
+
 function normalizeGatewayBaseUrl(rawBaseUrl: string) {
   const trimmed = String(rawBaseUrl || '').trim()
   if (!trimmed) {
@@ -44,6 +50,13 @@ function buildGatewayWebSocketUrl(config: GatewayConnectionConfig) {
   return wsUrl.toString()
 }
 
+function buildGatewayWebSocketHeaders(config: GatewayConnectionConfig) {
+  return {
+    Authorization: `Bearer ${config.apiToken}`,
+    'X-Device-Id': config.deviceId,
+  }
+}
+
 function toEventPayload(data: RawData) {
   if (typeof data === 'string') {
     return data
@@ -65,9 +78,13 @@ export class GatewayConnectionManager {
   private socket: WebSocket | null = null
   private reconnectTimer: NodeJS.Timeout | null = null
   private heartbeatTimer: NodeJS.Timeout | null = null
+  private connectTimeoutTimer: NodeJS.Timeout | null = null
+  private resumeTimer: NodeJS.Timeout | null = null
   private reconnectAttempt = 0
   private manuallyStopped = false
-  private resumeRequested = true
+  private pendingResumeRequestId: string | null = null
+  private resumeAttemptCount = 0
+  private lastSocketActivityAt = 0
   private currentSessionId: string | null = null
   private historyTail: any[] = []
   private knownTaskIds = new Set<string>()
@@ -115,7 +132,6 @@ export class GatewayConnectionManager {
     }
 
     if (changed) {
-      this.resumeRequested = true
       this.manuallyStopped = false
       this.connect()
     }
@@ -130,37 +146,58 @@ export class GatewayConnectionManager {
     }
 
     this.clearReconnectTimer()
+    this.clearConnectTimeout()
+    this.clearResumeTimeout()
     this.manuallyStopped = false
     this.setStatus(this.reconnectAttempt > 0 ? 'reconnecting' : 'connecting', {
       attempt: this.reconnectAttempt || undefined,
       detail: this.reconnectAttempt > 0 ? 'Reconnecting to your VM.' : 'Connecting to your VM.',
     })
 
-    const ws = new WebSocket(buildGatewayWebSocketUrl(this.config))
+    const ws = new WebSocket(buildGatewayWebSocketUrl(this.config), {
+      headers: buildGatewayWebSocketHeaders(this.config),
+    })
     this.socket = ws
+    this.startConnectTimeout(ws)
 
     ws.on('open', () => {
       if (this.socket !== ws) return
+      this.clearConnectTimeout()
       this.reconnectAttempt = 0
+      this.lastSocketActivityAt = Date.now()
       this.startHeartbeat()
       this.setStatus('connected', { detail: 'Connected to your VM.' })
-      if (this.resumeRequested) {
+      this.resumeAttemptCount = 0
+      try {
         this.sendResume()
+      } catch (error) {
+        this.setStatus('reconnecting', {
+          detail: error instanceof Error ? error.message : 'Failed to resume your VM session.',
+        })
+        ws.terminate()
       }
     })
 
     ws.on('message', (data: RawData) => {
+      if (this.socket !== ws) return
+      this.lastSocketActivityAt = Date.now()
       void this.handleMessage(data)
     })
 
-    ws.on('error', () => {
-      this.setStatus('error', { detail: 'Gateway socket error.' })
+    ws.on('error', (error) => {
+      if (this.socket !== ws) return
+      this.setStatus('error', {
+        detail: error instanceof Error && error.message ? `Gateway socket error: ${error.message}` : 'Gateway socket error.',
+      })
     })
 
     ws.on('close', () => {
-      if (this.socket === ws) {
-        this.socket = null
-      }
+      if (this.socket !== ws) return
+      this.socket = null
+      this.clearConnectTimeout()
+      this.clearResumeTimeout()
+      this.pendingResumeRequestId = null
+      this.resumeAttemptCount = 0
       this.stopHeartbeat()
       if (this.manuallyStopped || !this.config) {
         this.setStatus('idle', { detail: 'Gateway socket stopped.' })
@@ -179,7 +216,12 @@ export class GatewayConnectionManager {
   stop() {
     this.manuallyStopped = true
     this.clearReconnectTimer()
+    this.clearConnectTimeout()
+    this.clearResumeTimeout()
     this.stopHeartbeat()
+    this.pendingResumeRequestId = null
+    this.resumeAttemptCount = 0
+    this.lastSocketActivityAt = 0
     this.currentSessionId = null
     this.historyTail = []
     this.knownTaskIds.clear()
@@ -194,9 +236,13 @@ export class GatewayConnectionManager {
   }
 
   requestResume() {
-    this.resumeRequested = true
+    this.resumeAttemptCount = 0
     if (this.socket?.readyState === WebSocket.OPEN) {
-      this.sendResume()
+      try {
+        this.sendResume()
+      } catch {
+        this.socket.terminate()
+      }
       return
     }
     this.connect()
@@ -249,6 +295,9 @@ export class GatewayConnectionManager {
       session_id: this.currentSessionId,
       known_task_ids: Array.from(this.knownTaskIds),
     })
+    this.pendingResumeRequestId = requestId
+    this.resumeAttemptCount += 1
+    this.scheduleResumeTimeout(requestId)
   }
 
   private sendPing() {
@@ -285,8 +334,17 @@ export class GatewayConnectionManager {
     if (payload.session_id) {
       this.currentSessionId = String(payload.session_id)
     }
+    if (eventType === 'pong') {
+      this.lastSocketActivityAt = Date.now()
+    }
     if (eventType === 'resume.ok') {
-      this.resumeRequested = false
+      const responseRequestId = String(payload.request_id || '').trim()
+      if (this.pendingResumeRequestId && responseRequestId && responseRequestId !== this.pendingResumeRequestId) {
+        return
+      }
+      this.clearResumeTimeout()
+      this.pendingResumeRequestId = null
+      this.resumeAttemptCount = 0
       this.historyTail = Array.isArray(payload.history_tail) ? payload.history_tail : []
       this.currentSessionId = typeof payload.session_id === 'string' ? payload.session_id : this.currentSessionId
       this.knownTaskIds = new Set(
@@ -326,17 +384,76 @@ export class GatewayConnectionManager {
     }
   }
 
+  private startConnectTimeout(ws: WebSocket) {
+    this.clearConnectTimeout()
+    this.connectTimeoutTimer = setTimeout(() => {
+      if (this.socket !== ws || ws.readyState !== WebSocket.CONNECTING) {
+        return
+      }
+      this.setStatus('reconnecting', { detail: 'Gateway connection timed out. Retrying your VM connection.' })
+      ws.terminate()
+    }, CONNECT_TIMEOUT_MS)
+  }
+
+  private clearConnectTimeout() {
+    if (this.connectTimeoutTimer) {
+      clearTimeout(this.connectTimeoutTimer)
+      this.connectTimeoutTimer = null
+    }
+  }
+
+  private scheduleResumeTimeout(requestId: string) {
+    this.clearResumeTimeout()
+    this.resumeTimer = setTimeout(() => {
+      if (
+        !this.socket ||
+        this.socket.readyState !== WebSocket.OPEN ||
+        this.pendingResumeRequestId !== requestId
+      ) {
+        return
+      }
+
+      if (this.resumeAttemptCount < MAX_RESUME_ATTEMPTS) {
+        this.setStatus('connected', { detail: 'Re-syncing your VM session.' })
+        try {
+          this.sendResume()
+          return
+        } catch (error) {
+          this.setStatus('reconnecting', {
+            detail: error instanceof Error ? error.message : 'Failed to resume your VM session.',
+          })
+        }
+      }
+
+      this.setStatus('reconnecting', { detail: 'Session resume stalled. Reconnecting to your VM.' })
+      this.socket.terminate()
+    }, RESUME_TIMEOUT_MS)
+  }
+
+  private clearResumeTimeout() {
+    if (this.resumeTimer) {
+      clearTimeout(this.resumeTimer)
+      this.resumeTimer = null
+    }
+  }
+
   private startHeartbeat() {
     this.stopHeartbeat()
+    this.lastSocketActivityAt = Date.now()
     this.heartbeatTimer = setInterval(() => {
       if (this.socket?.readyState === WebSocket.OPEN) {
+        if (Date.now() - this.lastSocketActivityAt > HEARTBEAT_STALE_MS) {
+          this.setStatus('reconnecting', { detail: 'Connection stalled. Reconnecting to your VM.' })
+          this.socket.terminate()
+          return
+        }
         try {
           this.sendPing()
         } catch {
           return
         }
       }
-    }, 25000)
+    }, HEARTBEAT_INTERVAL_MS)
   }
 
   private stopHeartbeat() {

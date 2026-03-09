@@ -1,0 +1,484 @@
+SUPABASE SETUP NOTES
+====================
+
+Purpose
+-------
+This file documents the exact Supabase-side setup sequence we executed for:
+
+1. desktop auth -> VM resolution
+2. central source-of-truth for GATEWAY_LOCAL_API_TOKEN
+3. one-time bootstrap token issuance
+4. secure provider-secret delivery to the VM during bootstrap
+
+Important
+---------
+- Raw API keys are intentionally redacted in this notes file.
+- Raw bootstrap tokens are intentionally redacted in this notes file.
+- The actual live values were entered during setup and are already stored in Supabase Vault / database.
+
+
+0. Enable Required Database Extensions
+--------------------------------------
+Run in Supabase SQL Editor:
+
+```sql
+create extension if not exists pgcrypto;
+```
+
+Enable Vault in the Supabase Dashboard:
+
+- Database
+- Extensions
+- enable Vault
+
+
+1. Recreate `public.provision_user_vm(...)`
+-------------------------------------------
+This is the corrected version with non-conflicting output names and `extensions.gen_random_bytes(...)`.
+
+Run in Supabase SQL Editor:
+
+```sql
+drop function if exists public.provision_user_vm(text, text, text, text, text);
+
+create or replace function public.provision_user_vm(
+  p_user_email text,
+  p_gateway_url text,
+  p_vm_ip text,
+  p_vm_dns text,
+  p_vm_region text default 'us-east-2'
+)
+returns table (
+  out_user_id uuid,
+  out_vm_id uuid,
+  out_gateway_api_token text
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_user_id uuid;
+  v_vm_id uuid;
+  v_existing_token text;
+  v_new_token text;
+begin
+  select u.id
+    into v_user_id
+    from public.users as u
+   where u.email = p_user_email;
+
+  if v_user_id is null then
+    raise exception 'No user found for %', p_user_email;
+  end if;
+
+  select uv.id, uv.api_token
+    into v_vm_id, v_existing_token
+    from public.user_vms as uv
+   where uv.user_id = v_user_id
+   limit 1;
+
+  v_new_token := coalesce(
+    nullif(v_existing_token, ''),
+    'glt_' || encode(extensions.gen_random_bytes(24), 'hex')
+  );
+
+  insert into public.user_vms (
+    user_id,
+    gateway_url,
+    api_token,
+    vm_ip,
+    vm_dns,
+    vm_region,
+    status
+  )
+  values (
+    v_user_id,
+    p_gateway_url,
+    v_new_token,
+    p_vm_ip,
+    p_vm_dns,
+    p_vm_region,
+    'active'
+  )
+  on conflict (user_id)
+  do update set
+    gateway_url = excluded.gateway_url,
+    api_token = public.user_vms.api_token,
+    vm_ip = excluded.vm_ip,
+    vm_dns = excluded.vm_dns,
+    vm_region = excluded.vm_region,
+    status = 'active',
+    updated_at = now()
+  returning public.user_vms.id, public.user_vms.api_token
+    into v_vm_id, v_new_token;
+
+  return query
+  select v_user_id, v_vm_id, v_new_token;
+end;
+$$;
+```
+
+
+2. Sync the Existing Live VM Gateway Token into `public.user_vms`
+-----------------------------------------------------------------
+We first copied the live `GATEWAY_LOCAL_API_TOKEN` from the VM and made Supabase the source of truth for it.
+
+Run in Supabase SQL Editor:
+
+```sql
+update public.user_vms
+set api_token = '<CURRENT_VM_GATEWAY_LOCAL_API_TOKEN>',
+    updated_at = now()
+where user_id = (
+  select id
+  from public.users
+  where email = 'uspraveenraj@gmail.com'
+);
+```
+
+
+3. Normalize / Provision the Current VM Row
+-------------------------------------------
+Run in Supabase SQL Editor:
+
+```sql
+select * from public.provision_user_vm(
+  'uspraveenraj@gmail.com',
+  'http://3.137.194.119:8080',
+  '3.137.194.119',
+  'ec2-3-137-194-119.us-east-2.compute.amazonaws.com',
+  'us-east-2'
+);
+```
+
+This returned:
+
+- `out_user_id = c2ece0ad-4b2d-4af4-ae65-1b07660550dc`
+- `out_vm_id = c9c74d7c-b417-4cce-adf3-2cb75b9f5cd1`
+- `out_gateway_api_token = <redacted>`
+
+
+4. Verify the `public.user_vms` Row
+-----------------------------------
+Run in Supabase SQL Editor:
+
+```sql
+select
+  id,
+  user_id,
+  gateway_url,
+  api_token,
+  vm_ip,
+  vm_dns,
+  vm_region,
+  status,
+  updated_at
+from public.user_vms
+where user_id = (
+  select id
+  from public.users
+  where email = 'uspraveenraj@gmail.com'
+);
+```
+
+Expected row after setup:
+
+- `id = c9c74d7c-b417-4cce-adf3-2cb75b9f5cd1`
+- `user_id = c2ece0ad-4b2d-4af4-ae65-1b07660550dc`
+- `gateway_url = http://3.137.194.119:8080`
+- `api_token = <redacted>`
+- `vm_ip = 3.137.194.119`
+- `vm_dns = ec2-3-137-194-119.us-east-2.compute.amazonaws.com`
+- `vm_region = us-east-2`
+- `status = active`
+
+
+5. Create the Private Bootstrap Token Store
+-------------------------------------------
+Run in Supabase SQL Editor:
+
+```sql
+create schema if not exists app_private;
+
+create table if not exists app_private.vm_bootstrap_tokens (
+  id uuid primary key default gen_random_uuid(),
+  vm_id uuid not null references public.user_vms(id) on delete cascade,
+  token_hash text not null unique,
+  expires_at timestamptz not null,
+  used_at timestamptz,
+  created_at timestamptz not null default now(),
+  note text
+);
+```
+
+
+6. Lock Down the Private Schema
+-------------------------------
+Run in Supabase SQL Editor:
+
+```sql
+revoke all on schema app_private from public;
+revoke all on all tables in schema app_private from public;
+```
+
+
+7. Create `app_private.issue_vm_bootstrap_token(...)`
+-----------------------------------------------------
+This mints a one-time bootstrap token for an active VM.
+
+Run in Supabase SQL Editor:
+
+```sql
+create or replace function app_private.issue_vm_bootstrap_token(
+  p_user_email text,
+  p_ttl_minutes integer default 20
+)
+returns table (
+  raw_token text,
+  expires_at timestamptz,
+  vm_id uuid
+)
+language plpgsql
+security definer
+set search_path = public, app_private
+as $$
+declare
+  v_vm_id uuid;
+  v_raw_token text;
+  v_expiry timestamptz;
+begin
+  select uv.id
+    into v_vm_id
+    from public.user_vms uv
+    join public.users u on u.id = uv.user_id
+   where u.email = p_user_email
+     and uv.status = 'active'
+   limit 1;
+
+  if v_vm_id is null then
+    raise exception 'No active VM found for %', p_user_email;
+  end if;
+
+  v_raw_token := 'bs_' || encode(extensions.gen_random_bytes(24), 'hex');
+  v_expiry := now() + make_interval(mins => p_ttl_minutes);
+
+  insert into app_private.vm_bootstrap_tokens (vm_id, token_hash, expires_at)
+  values (
+    v_vm_id,
+    encode(extensions.digest(v_raw_token, 'sha256'), 'hex'),
+    v_expiry
+  );
+
+  return query
+  select v_raw_token, v_expiry, v_vm_id;
+end;
+$$;
+```
+
+
+8. Store Shared Platform Keys in Supabase Vault
+-----------------------------------------------
+We executed `vault.create_secret(...)` for the four shared provider keys.
+
+Run in Supabase SQL Editor:
+
+```sql
+select vault.create_secret(
+  '<ANTHROPIC_API_KEY>',
+  'platform_anthropic_api_key',
+  'Shared Anthropic key for COSMIC VMs'
+);
+
+select vault.create_secret(
+  '<PERPLEXITY_API_KEY>',
+  'platform_perplexity_api_key',
+  'Shared Perplexity key for COSMIC VMs'
+);
+
+select vault.create_secret(
+  '<DEEPGRAM_API_KEY>',
+  'platform_deepgram_api_key',
+  'Shared Deepgram key for COSMIC VMs'
+);
+
+select vault.create_secret(
+  '<GROQ_API_KEY>',
+  'platform_groq_api_key',
+  'Shared Groq key for COSMIC VMs'
+);
+```
+
+Vault secret names used:
+
+- `platform_anthropic_api_key`
+- `platform_perplexity_api_key`
+- `platform_deepgram_api_key`
+- `platform_groq_api_key`
+
+
+9. Create `public.consume_bootstrap_token(p_token text)`
+--------------------------------------------------------
+This is the RPC that `bootstrap.py` calls from the VM.
+
+Run in Supabase SQL Editor:
+
+```sql
+create or replace function public.consume_bootstrap_token(p_token text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, app_private, vault
+as $$
+declare
+  v_token_hash text;
+  v_token_row record;
+  v_anthropic text;
+  v_perplexity text;
+  v_deepgram text;
+  v_groq text;
+begin
+  if p_token is null or length(trim(p_token)) < 20 then
+    return jsonb_build_object(
+      'success', false,
+      'error', 'invalid_token',
+      'message', 'Bootstrap token missing or malformed.'
+    );
+  end if;
+
+  v_token_hash := encode(extensions.digest(trim(p_token), 'sha256'), 'hex');
+
+  select
+    t.id as token_id,
+    uv.id as vm_id,
+    uv.gateway_url,
+    uv.api_token,
+    uv.vm_ip,
+    uv.vm_dns,
+    uv.vm_region
+  into v_token_row
+  from app_private.vm_bootstrap_tokens t
+  join public.user_vms uv on uv.id = t.vm_id
+  where t.token_hash = v_token_hash
+    and t.used_at is null
+    and t.expires_at > now()
+    and uv.status = 'active'
+  limit 1;
+
+  if not found then
+    return jsonb_build_object(
+      'success', false,
+      'error', 'invalid_or_expired_token',
+      'message', 'Bootstrap token is invalid, expired, or already used.'
+    );
+  end if;
+
+  select decrypted_secret
+    into v_anthropic
+    from vault.decrypted_secrets
+   where name = 'platform_anthropic_api_key'
+   order by created_at desc
+   limit 1;
+
+  select decrypted_secret
+    into v_perplexity
+    from vault.decrypted_secrets
+   where name = 'platform_perplexity_api_key'
+   order by created_at desc
+   limit 1;
+
+  select decrypted_secret
+    into v_deepgram
+    from vault.decrypted_secrets
+   where name = 'platform_deepgram_api_key'
+   order by created_at desc
+   limit 1;
+
+  select decrypted_secret
+    into v_groq
+    from vault.decrypted_secrets
+   where name = 'platform_groq_api_key'
+   order by created_at desc
+   limit 1;
+
+  if v_anthropic is null or v_perplexity is null then
+    return jsonb_build_object(
+      'success', false,
+      'error', 'missing_platform_secrets',
+      'message', 'Required platform secrets are missing from Vault.'
+    );
+  end if;
+
+  update app_private.vm_bootstrap_tokens
+     set used_at = now()
+   where id = v_token_row.token_id
+     and used_at is null;
+
+  return jsonb_build_object(
+    'success', true,
+    'vm', jsonb_build_object(
+      'vm_id', v_token_row.vm_id,
+      'gateway_url', v_token_row.gateway_url,
+      'vm_ip', v_token_row.vm_ip,
+      'vm_dns', v_token_row.vm_dns,
+      'vm_region', v_token_row.vm_region
+    ),
+    'gateway_env', jsonb_build_object(
+      'GATEWAY_LOCAL_API_TOKEN', v_token_row.api_token,
+      'GATEWAY_PUBLIC_HOST', v_token_row.vm_dns,
+      'ANTHROPIC_API_KEY', v_anthropic,
+      'PERPLEXITY_API_KEY', v_perplexity,
+      'HAIKU_MODEL', 'claude-haiku-4-5'
+    ),
+    'orchestrator_env', jsonb_build_object(
+      'ANTHROPIC_API_KEY', v_anthropic,
+      'OPUS_MODEL', 'claude-opus-4-6'
+    ),
+    'meeting_env', jsonb_build_object(
+      'DEEPGRAM_API_KEY', coalesce(v_deepgram, ''),
+      'GROQ_API_KEY', coalesce(v_groq, '')
+    )
+  );
+end;
+$$;
+```
+
+Note:
+
+- `consume_bootstrap_token(...)` currently returns `meeting_env.GROQ_API_KEY` and `orchestrator_env.OPUS_MODEL`.
+- The current `bootstrap.py` implementation normalizes that into the actual backend env files:
+  - `meeting_env.GROQ_API_KEY` -> `model_router.env:GROQ_API_KEY`
+  - `orchestrator_env.OPUS_MODEL` -> `orchestrator.env:ANTHROPIC_MODEL`
+
+
+10. Grant Anon Access to the Bootstrap RPC
+------------------------------------------
+Run in Supabase SQL Editor:
+
+```sql
+revoke all on function public.consume_bootstrap_token(text) from public;
+grant execute on function public.consume_bootstrap_token(text) to anon;
+grant execute on function public.authenticate_with_api_key(text) to anon;
+```
+
+
+11. Mint a Fresh Bootstrap Token
+--------------------------------
+Run this whenever you are about to provision or sync a VM:
+
+```sql
+select * from app_private.issue_vm_bootstrap_token('uspraveenraj@gmail.com', 20);
+```
+
+We issued multiple tokens during setup. They were one-time and eventually expired or were consumed.
+
+Do not store them here permanently.
+
+
+12. Important Operational Notes
+-------------------------------
+- Do not manually run `select public.consume_bootstrap_token('<raw_token>');` unless you are intentionally burning a token for debugging.
+- `public.user_vms.api_token` must always match the VM's live `GATEWAY_LOCAL_API_TOKEN`.
+- Shared provider keys are intentionally platform-wide, not per-user.
+- Current live `gateway_url` is still `http://3.137.194.119:8080`. This should eventually move to the final HTTPS/WSS edge host.
+
