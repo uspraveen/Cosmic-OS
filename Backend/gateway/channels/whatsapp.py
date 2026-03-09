@@ -694,8 +694,92 @@ class WhatsAppAdapter(ChannelAdapter):
         normalized = re.sub(r"(?m)^-\s+", "• ", normalized)
         normalized = re.sub(r"(?m)^\*\s+", "• ", normalized)
         normalized = re.sub(r"(?m)^---+$", "────────", normalized)
+        normalized = self._render_markdown_tables(normalized)
         normalized = re.sub(r"\n{3,}", "\n\n", normalized)
         return normalized.strip() or None
+
+    def _render_markdown_tables(self, text: str) -> str:
+        lines = text.splitlines()
+        rendered: list[str] = []
+        index = 0
+        in_fenced_block = False
+
+        while index < len(lines):
+            line = lines[index]
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                in_fenced_block = not in_fenced_block
+                rendered.append(line)
+                index += 1
+                continue
+
+            if (
+                not in_fenced_block
+                and index + 1 < len(lines)
+                and self._looks_like_table_row(line)
+                and self._is_markdown_table_separator(lines[index + 1])
+            ):
+                table_lines = [line, lines[index + 1]]
+                index += 2
+                while index < len(lines) and self._looks_like_table_row(lines[index]):
+                    table_lines.append(lines[index])
+                    index += 1
+                rendered.append(self._format_markdown_table(table_lines))
+                continue
+
+            rendered.append(line)
+            index += 1
+
+        return "\n".join(rendered)
+
+    def _looks_like_table_row(self, line: str) -> bool:
+        stripped = line.strip()
+        return bool(stripped) and "|" in stripped
+
+    def _is_markdown_table_separator(self, line: str) -> bool:
+        stripped = line.strip()
+        return bool(
+            re.fullmatch(r"\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?", stripped)
+        )
+
+    def _format_markdown_table(self, table_lines: list[str]) -> str:
+        rows = [self._parse_markdown_table_row(line) for line in table_lines]
+        if len(rows) < 2 or not rows[0]:
+            return "\n".join(table_lines)
+
+        header = rows[0]
+        data_rows = [row for row in rows[2:] if any(cell for cell in row)]
+        column_count = max(len(header), *(len(row) for row in data_rows)) if data_rows else len(header)
+        if column_count == 0:
+            return "\n".join(table_lines)
+
+        normalized_rows = [self._normalize_table_cells(header, column_count)]
+        normalized_rows.extend(self._normalize_table_cells(row, column_count) for row in data_rows)
+        widths = [
+            max(len(row[column_index]) for row in normalized_rows)
+            for column_index in range(column_count)
+        ]
+
+        def render_row(row: list[str]) -> str:
+            return " | ".join(cell.ljust(widths[idx]) for idx, cell in enumerate(row))
+
+        separator = "-+-".join("-" * width for width in widths)
+        rendered_lines = [render_row(normalized_rows[0]), separator]
+        rendered_lines.extend(render_row(row) for row in normalized_rows[1:])
+        return "```\n" + "\n".join(rendered_lines).rstrip() + "\n```"
+
+    def _parse_markdown_table_row(self, line: str) -> list[str]:
+        stripped = line.strip()
+        if stripped.startswith("|"):
+            stripped = stripped[1:]
+        if stripped.endswith("|"):
+            stripped = stripped[:-1]
+        return [cell.strip() for cell in stripped.split("|")]
+
+    def _normalize_table_cells(self, row: list[str], column_count: int) -> list[str]:
+        if len(row) < column_count:
+            row = row + [""] * (column_count - len(row))
+        return row[:column_count]
 
     def _should_send_progress(self, message: dict[str, Any]) -> bool:
         task_id = self._coerce_str(message.get("task_id"))

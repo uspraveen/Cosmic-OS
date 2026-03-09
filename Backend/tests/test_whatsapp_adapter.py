@@ -184,3 +184,43 @@ async def test_whatsapp_adapter_skips_task_completed_after_response_complete() -
         await adapter.stop()
 
     assert sent_payloads == [{"number": "12153079021", "message": "Final answer"}]
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_adapter_formats_markdown_tables_as_monospace_blocks() -> None:
+    sent_payloads: list[dict[str, str]] = []
+    adapter = build_adapter(sent_payloads, ack_delay_sec=0.2)
+
+    try:
+        await adapter.send(
+            {
+                "type": "response.complete",
+                "request_id": "req_wa_table",
+                "content": (
+                    "Here is the comparison:\n\n"
+                    "| Model | Speed |\n"
+                    "| --- | --- |\n"
+                    "| Haiku | Fast |\n"
+                    "| Opus | Deep |"
+                ),
+                "channel": "whatsapp:+12153079021",
+            },
+            channel="whatsapp:+12153079021",
+        )
+    finally:
+        await adapter.stop()
+
+    assert sent_payloads == [
+        {
+            "number": "12153079021",
+            "message": (
+                "Here is the comparison:\n\n"
+                "```\n"
+                "Model | Speed\n"
+                "------+------\n"
+                "Haiku | Fast \n"
+                "Opus  | Deep\n"
+                "```"
+            ),
+        }
+    ]

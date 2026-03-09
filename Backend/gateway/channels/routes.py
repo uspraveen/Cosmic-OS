@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hmac
+import logging
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -12,6 +14,7 @@ from ..runtime import GatewayRuntime
 from .desktop import DesktopAdapter
 
 router = APIRouter(tags=["channels"])
+logger = logging.getLogger(__name__)
 
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
@@ -288,6 +291,7 @@ async def whatsapp_incoming(
     _: None = Depends(require_internal_token),
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
+    started_at = time.perf_counter()
     adapter = runtime.registry.adapters.get("whatsapp")
     if adapter is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="WhatsApp adapter is not registered")
@@ -299,11 +303,69 @@ async def whatsapp_incoming(
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
+    logger.info(
+        "whatsapp.incoming normalized channel=%s message_id=%s elapsed_ms=%.1f",
+        result.get("channel"),
+        result.get("metadata", {}).get("message_id") if isinstance(result.get("metadata"), dict) else None,
+        (time.perf_counter() - started_at) * 1000.0,
+    )
+
     processed = await runtime.process_incoming_user_message(result)
+    logger.info(
+        "whatsapp.incoming classified request_id=%s route=%s elapsed_ms=%.1f",
+        processed.get("request_id"),
+        processed.get("route"),
+        (time.perf_counter() - started_at) * 1000.0,
+    )
+
     try:
-        await runtime.fulfill_processed_message(processed)
+        await adapter.send(
+            {
+                "type": "route_result",
+                "request_id": processed["request_id"],
+                "session_id": processed["session_id"],
+                "channel": processed["channel"],
+                "route": processed["route"],
+                "classification": processed["classification"],
+            },
+            channel=processed["channel"],
+        )
+        logger.info(
+            "whatsapp.incoming route_result_sent request_id=%s elapsed_ms=%.1f",
+            processed.get("request_id"),
+            (time.perf_counter() - started_at) * 1000.0,
+        )
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    try:
+        runtime.start_request_fulfillment(processed)
+    except Exception as exc:
+        logger.exception(
+            "whatsapp.incoming fulfillment_start_failed request_id=%s elapsed_ms=%.1f",
+            processed.get("request_id"),
+            (time.perf_counter() - started_at) * 1000.0,
+        )
+        try:
+            await adapter.send(
+                _error_payload(
+                    processed.get("request_id"),
+                    "UPSTREAM_ERROR",
+                    str(exc),
+                ),
+                channel=processed["channel"],
+            )
+        except Exception:
+            logger.exception(
+                "whatsapp.incoming error_delivery_failed request_id=%s",
+                processed.get("request_id"),
+            )
+    else:
+        logger.info(
+            "whatsapp.incoming fulfillment_started request_id=%s elapsed_ms=%.1f",
+            processed.get("request_id"),
+            (time.perf_counter() - started_at) * 1000.0,
+        )
     return processed
 
 

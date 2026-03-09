@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import asynccontextmanager
 
 import pytest
@@ -200,6 +201,45 @@ class FakeCancellableOrchestratorClient:
         return True
 
 
+class FakeWhatsAppChannelAdapter:
+    platform = "whatsapp"
+
+    def __init__(self) -> None:
+        self.sent_events: list[dict[str, object]] = []
+
+    async def start(self) -> None:
+        return
+
+    async def stop(self) -> None:
+        return
+
+    async def on_message(self, callback) -> None:
+        self._callback = callback
+
+    def normalize_message(self, payload: dict[str, object]) -> dict[str, object]:
+        sender = payload.get("sender")
+        phone = None
+        if isinstance(sender, dict):
+            phone = sender.get("phone")
+        return {
+            "content": str(payload.get("text") or ""),
+            "session_id": None,
+            "channel": f"whatsapp:{phone or '+15551234567'}",
+            "metadata": {
+                "platform": "whatsapp",
+                "message_id": "wamid_test_1",
+            },
+        }
+
+    async def send(self, message: dict[str, object], channel: str | None = None) -> None:
+        self.sent_events.append(
+            {
+                **message,
+                "channel": channel or message.get("channel"),
+            }
+        )
+
+
 def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
     runtime = GatewayRuntime(
         GatewayConfig(
@@ -396,6 +436,50 @@ def test_sessions_endpoints_return_vm_history(test_client: TestClient) -> None:
     history_payload = history_response.json()
     assert history_payload["session_id"] == route_result["session_id"]
     assert [item["role"] for item in history_payload["messages"]] == ["user", "assistant"]
+
+
+def test_whatsapp_incoming_emits_route_result_before_async_fulfillment(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="haiku")
+    whatsapp_adapter = FakeWhatsAppChannelAdapter()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        runtime.registry.register(whatsapp_adapter)
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/internal/channels/whatsapp/incoming",
+            headers={"X-Internal-Token": "internal-token"},
+            json={
+                "sender": {"phone": "+12153079021"},
+                "text": "hello from whatsapp",
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "accepted"
+        assert payload["route"] == "haiku"
+
+        deadline = time.time() + 2.0
+        while len(whatsapp_adapter.sent_events) < 3 and time.time() < deadline:
+            time.sleep(0.01)
+
+    assert [event["type"] for event in whatsapp_adapter.sent_events[:3]] == [
+        "route_result",
+        "response.chunk",
+        "response.complete",
+    ]
+    assert whatsapp_adapter.sent_events[0]["request_id"] == payload["request_id"]
 
 
 def test_desktop_websocket_streams_thin_opus_route(test_client: TestClient, tmp_path) -> None:
