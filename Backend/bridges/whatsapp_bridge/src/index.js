@@ -13,6 +13,12 @@ import makeWASocket, {
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
 
+import {
+  normalizePhoneFromJid,
+  normalizePhoneValue,
+  resolveInboundSenderIdentity,
+} from './whatsapp_identity.js';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const BRIDGE_ROOT = path.resolve(__dirname, '..');
@@ -138,15 +144,6 @@ function setConnectionState(patch) {
 function clearQrState() {
   latestQr = null;
   qrUpdatedAt = null;
-}
-
-function normalizePhoneValue(rawValue) {
-  const text = String(rawValue ?? '').trim();
-  if (!text) {
-    return '';
-  }
-  const digits = text.replace(/\D/g, '');
-  return digits ? `+${digits}` : '';
 }
 
 function normalizeBridgeRecipient(rawValue) {
@@ -287,16 +284,6 @@ function coerceNumber(value) {
 
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
-}
-
-function normalizePhoneFromJid(jid) {
-  if (!jid || jid.endsWith('@g.us')) {
-    return null;
-  }
-
-  const local = jid.split('@')[0] ?? '';
-  const digits = local.replace(/\D/g, '');
-  return digits ? `+${digits}` : null;
 }
 
 function unwrapMessageContent(message) {
@@ -530,9 +517,10 @@ function extractMessageDetails(message) {
 
 function buildInboundPayload(msg) {
   const messageId = msg?.key?.id ?? `msg_${Date.now()}`;
-  const senderJid = msg?.key?.participant ?? msg?.key?.remoteJid ?? null;
+  const identity = resolveInboundSenderIdentity(msg);
+  const senderJid = identity.senderJid;
   const chatJid = msg?.key?.remoteJid ?? senderJid;
-  const senderPhone = normalizePhoneFromJid(senderJid);
+  const senderPhone = identity.senderPhone;
   const details = extractMessageDetails(msg?.message);
   const attachments = details.attachments.map((attachment, index) => ({
     id: `att_${index + 1}`,
