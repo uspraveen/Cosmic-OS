@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from dataclasses import dataclass
+import logging
 import time
 from typing import Any
 from uuid import uuid4
 
 from .adapters import HaikuAdapter, PerplexityAdapter
+from .artifact_store import ArtifactStore
 from .channels.desktop import DesktopAdapter
 from .channels.registry import ChannelAdapterRegistry
 from .channels.whatsapp import WhatsAppAdapter, WhatsAppConfig
@@ -17,6 +19,8 @@ from .router_client import ModelRouterClient
 from .routing_audit_store import RoutingAuditStore
 from .session_store import SessionStore
 from shared import SOURCE_PRIORITY_MAP, TaskEnvelope, generate_task_id, sign_task_envelope, utcnow
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -64,6 +68,7 @@ class GatewayRuntime:
         )
         self.session_store = SessionStore(config.sessions_db_path)
         self.routing_audit_store = RoutingAuditStore(config.routing_audit_db_path)
+        self.artifact_store = ArtifactStore(config.artifacts_db_path)
         self.haiku_adapter = HaikuAdapter(
             api_key=config.haiku_api_key,
             model=config.haiku_model,
@@ -88,6 +93,7 @@ class GatewayRuntime:
     async def start(self) -> None:
         self.session_store.initialize()
         self.routing_audit_store.initialize()
+        self.artifact_store.initialize()
         await self.model_router.start()
         await self.orchestrator.start()
         await self._register_adapters()
@@ -176,6 +182,12 @@ class GatewayRuntime:
         decision_latency_ms = (time.perf_counter() - decision_started_at) * 1000.0
         classification = routing_decision.classification
         dispatch_target = "orchestrator" if classification["route"] == "opus" else "gateway"
+        input_artifacts = self._persist_inbound_artifacts(
+            request_id=request_id,
+            session_id=session_id,
+            channel=channel,
+            metadata=metadata,
+        )
 
         self._append_session_message(
             session_id,
@@ -185,6 +197,9 @@ class GatewayRuntime:
             metadata={
                 "request_id": request_id,
                 "platform": metadata.get("platform"),
+                "message_type": metadata.get("message_type"),
+                "attachments": metadata.get("attachments"),
+                "input_artifacts": input_artifacts,
             },
         )
 
@@ -201,6 +216,7 @@ class GatewayRuntime:
             "message": normalized_message,
             "assembled_conversation_context": assembled_conversation_context,
             "routing_decision_source": routing_decision.decision_source,
+            "input_artifacts": input_artifacts,
         }
         self.request_records[request_id] = result
         self.routing_audit_store.append(
@@ -786,6 +802,7 @@ class GatewayRuntime:
                 "request_id": request_id,
                 "conversation_context": request_record.get("assembled_conversation_context") or [],
             },
+            input_artifacts=request_record.get("input_artifacts") or [],
             idempotency_key=uuid4().hex,
             priority=SOURCE_PRIORITY_MAP.get(self._safe_text(request_record.get("source")) or "user", "normal"),
             signature="",
@@ -796,6 +813,35 @@ class GatewayRuntime:
         )
         signature = sign_task_envelope(task, self.config.signing_secret)
         return task.model_copy(update={"signature": signature})
+
+    def _persist_inbound_artifacts(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        channel: str,
+        metadata: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        attachments = metadata.get("attachments")
+        if not isinstance(attachments, list) or not attachments:
+            return []
+        try:
+            return self.artifact_store.persist_inbound_attachments(
+                request_id=request_id,
+                session_id=session_id,
+                source_channel=channel,
+                source_platform=self._safe_text(metadata.get("platform")),
+                source_message_id=self._safe_text(metadata.get("message_id")),
+                attachments=attachments,
+            )
+        except Exception:
+            logger.exception(
+                "gateway.artifact_persist_failed request_id=%s channel=%s attachment_count=%s",
+                request_id,
+                channel,
+                len(attachments),
+            )
+            return []
 
     async def _handle_orchestrator_event(
         self,

@@ -61,6 +61,9 @@ class FakeDirectAdapter:
 
 
 class FakeOrchestratorClient:
+    def __init__(self) -> None:
+        self.last_task = None
+
     async def start(self) -> None:
         return
 
@@ -68,6 +71,7 @@ class FakeOrchestratorClient:
         return
 
     async def stream_task(self, task) -> object:
+        self.last_task = task
         yield {
             "type": "task.created",
             "task_id": task.task_id,
@@ -251,6 +255,7 @@ def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
             enable_whatsapp=False,
             sessions_db_path=tmp_path / "sessions.db",
             routing_audit_db_path=tmp_path / "routing_audit.db",
+            artifacts_db_path=tmp_path / "artifacts.db",
         )
     )
 
@@ -322,6 +327,64 @@ async def test_runtime_uses_shared_daily_session_across_channels(tmp_path) -> No
             "desktop:desk_a",
             "whatsapp:+15551234567",
         ]
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_non_text_inbound_persists_artifacts_and_passes_them_to_opus(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    await runtime.start()
+    try:
+        result = await runtime.process_incoming_user_message(
+            {
+                "content": "[image]",
+                "channel": "whatsapp:+12153079021",
+                "metadata": {
+                    "platform": "whatsapp",
+                    "message_id": "wamid_img_1",
+                    "message_type": "image",
+                    "attachments": [
+                        {
+                            "id": "att_1",
+                            "kind": "image",
+                            "mime_type": "image/jpeg",
+                            "filename": "photo.jpg",
+                            "caption": "look at this",
+                            "size_bytes": 183920,
+                            "width": 1280,
+                            "height": 720,
+                            "sha256": "abc123",
+                            "bridge_media_ref": "wamid_img_1:att_1",
+                            "download_url": "http://127.0.0.1:8091/media/wamid_img_1/att_1",
+                        }
+                    ],
+                },
+            }
+        )
+
+        assert result["route"] == "opus"
+        assert len(result["input_artifacts"]) == 1
+        assert result["input_artifacts"][0]["kind"] == "image"
+        assert result["input_artifacts"][0]["bridge_media_ref"] == "wamid_img_1:att_1"
+
+        stored_artifacts = runtime.artifact_store.list_for_request(result["request_id"])
+        assert len(stored_artifacts) == 1
+        assert stored_artifacts[0]["mime"] == "image/jpeg"
+        assert stored_artifacts[0]["source_message_id"] == "wamid_img_1"
+
+        task = runtime._build_orchestrator_task(  # noqa: SLF001 - direct unit seam
+            request_record=result,
+            session_id=result["session_id"],
+            request_id=result["request_id"],
+            channel=result["channel"],
+        )
+        assert len(task.input_artifacts) == 1
+        assert task.input_artifacts[0]["caption"] == "look at this"
+
+        history_tail = runtime.session_store.get_history_tail(result["session_id"])
+        assert history_tail[-1]["metadata"]["message_type"] == "image"
+        assert history_tail[-1]["metadata"]["attachments"][0]["bridge_media_ref"] == "wamid_img_1:att_1"
     finally:
         await runtime.stop()
 

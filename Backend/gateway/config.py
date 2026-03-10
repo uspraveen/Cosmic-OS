@@ -53,6 +53,7 @@ class GatewayConfig:
     enable_whatsapp: bool = True
     sessions_db_path: Path = BACKEND_ROOT / "gateway" / "sessions.db"
     routing_audit_db_path: Path = BACKEND_ROOT / "gateway" / "routing_audit.db"
+    artifacts_db_path: Path = BACKEND_ROOT / "gateway" / "artifacts.db"
     haiku_api_key: str = ""
     haiku_model: str = "claude-haiku-4-5"
     anthropic_version: str = "2023-06-01"
@@ -92,6 +93,12 @@ class GatewayConfig:
                 os.getenv(
                     "GATEWAY_ROUTING_AUDIT_DB_PATH",
                     str(BACKEND_ROOT / "gateway" / "routing_audit.db"),
+                )
+            ).expanduser(),
+            artifacts_db_path=Path(
+                os.getenv(
+                    "GATEWAY_ARTIFACTS_DB_PATH",
+                    str(BACKEND_ROOT / "gateway" / "artifacts.db"),
                 )
             ).expanduser(),
             haiku_api_key=(

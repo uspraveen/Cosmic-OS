@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import time
@@ -10,6 +11,8 @@ from typing import Any
 import httpx
 
 from .base import ChannelAdapter, MessageCallback, NormalizedMessage
+
+logger = logging.getLogger(__name__)
 
 
 WHATSAPP_DM_SUFFIX = "@s.whatsapp.net"
@@ -350,6 +353,12 @@ class WhatsAppAdapter(ChannelAdapter):
         request_id = self._coerce_str(message.get("request_id"))
 
         if event_type == "route_result" and request_id:
+            logger.info(
+                "whatsapp.send schedule_ack request_id=%s channel=%s route=%s",
+                request_id,
+                destination,
+                self._coerce_str(message.get("route")) or "pending",
+            )
             self._schedule_delayed_ack(request_id, destination)
             return
 
@@ -387,7 +396,12 @@ class WhatsAppAdapter(ChannelAdapter):
                 self._completed_response_request_ids.discard(request_id)
             return
 
-        await self._send_text(destination, rendered)
+        await self._send_text(
+            destination,
+            rendered,
+            request_id=request_id,
+            event_type=event_type or "unknown",
+        )
 
         if event_type == "response.complete":
             if request_id:
@@ -454,7 +468,14 @@ class WhatsAppAdapter(ChannelAdapter):
         content = self._coerce_str(message.get("content"))
         return self._render_whatsapp_text(content) if content else None
 
-    async def _send_text(self, channel: str, text: str) -> None:
+    async def _send_text(
+        self,
+        channel: str,
+        text: str,
+        *,
+        request_id: str | None = None,
+        event_type: str | None = None,
+    ) -> None:
         if self._http is None:
             raise RuntimeError("WhatsAppAdapter.start() must be called before send()")
 
@@ -468,6 +489,16 @@ class WhatsAppAdapter(ChannelAdapter):
         headers = self._bridge_headers()
 
         async with lock:
+            started_at = time.perf_counter()
+            logger.info(
+                "whatsapp.send start request_id=%s event_type=%s channel=%s recipient=%s chunks=%s chars=%s",
+                request_id,
+                event_type,
+                channel,
+                recipient,
+                len(chunks),
+                len(text),
+            )
             for index, chunk in enumerate(chunks):
                 response = await self._http.post(
                     self.config.send_path,
@@ -477,6 +508,13 @@ class WhatsAppAdapter(ChannelAdapter):
                 response.raise_for_status()
                 if index + 1 < len(chunks) and self.config.send_delay_ms > 0:
                     await asyncio.sleep(self.config.send_delay_ms / 1000.0)
+            logger.info(
+                "whatsapp.send complete request_id=%s event_type=%s channel=%s elapsed_ms=%.1f",
+                request_id,
+                event_type,
+                channel,
+                (time.perf_counter() - started_at) * 1000.0,
+            )
 
     def _schedule_delayed_ack(self, request_id: str, channel: str) -> None:
         if not request_id or request_id in self._pending_ack_tasks or request_id in self._sent_ack_request_ids:
@@ -497,8 +535,20 @@ class WhatsAppAdapter(ChannelAdapter):
         try:
             if self.config.ack_delay_sec > 0:
                 await asyncio.sleep(self.config.ack_delay_sec)
-            await self._send_text(channel, "Thinking...")
+            ack_started_at = time.perf_counter()
+            await self._send_text(
+                channel,
+                "Thinking...",
+                request_id=request_id,
+                event_type="thinking_ack",
+            )
             self._sent_ack_request_ids.add(request_id)
+            logger.info(
+                "whatsapp.send ack_complete request_id=%s channel=%s elapsed_ms=%.1f",
+                request_id,
+                channel,
+                (time.perf_counter() - ack_started_at) * 1000.0,
+            )
         except asyncio.CancelledError:
             raise
         finally:

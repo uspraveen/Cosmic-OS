@@ -564,7 +564,13 @@ async function forwardIncomingMessage(payload) {
     headers['X-Internal-Token'] = config.gatewayInternalToken;
   }
 
-  return axios.post(config.gatewayUrl, payload, { headers });
+  const startedAt = Date.now();
+  const response = await axios.post(config.gatewayUrl, payload, { headers });
+  const elapsedMs = Date.now() - startedAt;
+  const messageId = payload?.message?.id ?? 'unknown';
+  const type = payload?.message?.type ?? 'unknown';
+  console.log(`Forwarded inbound WhatsApp message ${messageId} type=${type} to Gateway in ${elapsedMs}ms`);
+  return response;
 }
 
 async function closeSocket({ logout = false } = {}) {
@@ -923,8 +929,10 @@ async function handleSend(req, res) {
   const jid = `${normalizedPhone.replace(/\D/g, '')}@s.whatsapp.net`;
 
   try {
+    const startedAt = Date.now();
     await sock.sendMessage(jid, { text: message });
-    console.log(`Outgoing WhatsApp message to ${normalizedPhone}: ${message}`);
+    const elapsedMs = Date.now() - startedAt;
+    console.log(`Outgoing WhatsApp message to ${normalizedPhone} in ${elapsedMs}ms: ${message}`);
     res.json({ status: 'success' });
   } catch (error) {
     console.error('Failed to send WhatsApp message:', error?.message ?? error);

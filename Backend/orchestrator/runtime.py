@@ -350,7 +350,40 @@ class OrchestratorRuntime:
             if role not in {"user", "assistant"} or not content:
                 continue
             messages.append({"role": role, "content": content})
-        messages.append({"role": "user", "content": str(task.input.get("query") or "").strip()})
+        user_query = str(task.input.get("query") or "").strip()
+        input_artifacts = task.input_artifacts if isinstance(task.input_artifacts, list) else []
+        if input_artifacts:
+            manifest_lines = [
+                "The user attached media/artifacts with metadata below.",
+                "You have metadata and references only. Do not claim to have directly viewed or listened to the bytes unless a tool actually loads them.",
+                "",
+                "Attachment manifest:",
+            ]
+            for index, artifact in enumerate(input_artifacts, start=1):
+                if not isinstance(artifact, dict):
+                    continue
+                summary_parts = [
+                    f"kind={str(artifact.get('kind') or 'unknown').strip()}",
+                    f"mime={str(artifact.get('mime') or 'application/octet-stream').strip()}",
+                ]
+                filename = str(artifact.get("filename") or "").strip()
+                caption = str(artifact.get("caption") or "").strip()
+                bridge_media_ref = str(artifact.get("bridge_media_ref") or "").strip()
+                download_url = str(artifact.get("download_url") or "").strip()
+                size_bytes = artifact.get("size_bytes")
+                if filename:
+                    summary_parts.append(f"filename={filename}")
+                if caption:
+                    summary_parts.append(f"caption={caption}")
+                if size_bytes:
+                    summary_parts.append(f"size_bytes={size_bytes}")
+                if bridge_media_ref:
+                    summary_parts.append(f"bridge_media_ref={bridge_media_ref}")
+                if download_url:
+                    summary_parts.append(f"download_url={download_url}")
+                manifest_lines.append(f"{index}. " + "; ".join(summary_parts))
+            user_query = user_query + "\n\n" + "\n".join(manifest_lines) if user_query else "\n".join(manifest_lines)
+        messages.append({"role": "user", "content": user_query})
         return messages
 
     def _merge_usage(self, existing: dict[str, Any], usage: Any) -> dict[str, Any]:

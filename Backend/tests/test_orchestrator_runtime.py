@@ -167,3 +167,36 @@ async def test_orchestrator_runtime_can_cancel_active_task(tmp_path) -> None:
         "status": "cancelled",
         "message": "Response stopped.",
     }
+
+
+def test_orchestrator_build_messages_includes_attachment_manifest(tmp_path) -> None:
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_artifacts.db",
+    )
+    runtime = OrchestratorRuntime(config, client=httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200))))
+    task = _signed_task("signing-secret").model_copy(
+        update={
+            "input_artifacts": [
+                {
+                    "artifact_id": "art_001",
+                    "kind": "image",
+                    "mime": "image/jpeg",
+                    "filename": "photo.jpg",
+                    "caption": "look at this",
+                    "bridge_media_ref": "wamid_abc:att_1",
+                    "download_url": "http://127.0.0.1:8091/media/wamid_abc/att_1",
+                }
+            ]
+        }
+    )
+
+    messages = runtime._build_messages(task)  # noqa: SLF001 - direct unit seam
+
+    assert messages[-1]["role"] == "user"
+    assert "Attachment manifest:" in messages[-1]["content"]
+    assert "bridge_media_ref=wamid_abc:att_1" in messages[-1]["content"]
+    assert "Do not claim to have directly viewed" in messages[-1]["content"]
