@@ -58,6 +58,18 @@ class SessionStore:
 
                 CREATE INDEX IF NOT EXISTS idx_messages_awaiting_reply
                     ON messages(session_id, channel, awaiting_reply, created_at);
+
+                CREATE TABLE IF NOT EXISTS channel_links (
+                    channel TEXT PRIMARY KEY,
+                    platform TEXT NOT NULL,
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    greeting_state TEXT NOT NULL DEFAULT 'new',
+                    metadata_json TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_channel_links_platform
+                    ON channel_links(platform, last_seen_at);
                 """
             )
             connection.commit()
@@ -315,6 +327,93 @@ class SessionStore:
             connection.execute(
                 "UPDATE messages SET awaiting_reply = 0 WHERE message_id = ?",
                 (message_id,),
+            )
+            connection.commit()
+
+    def claim_channel_greeting(
+        self,
+        *,
+        channel: str,
+        platform: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        if not channel or not platform:
+            return False
+
+        now = utcnow_iso()
+        metadata_json = json.dumps(metadata) if metadata is not None else None
+
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO channel_links (
+                    channel,
+                    platform,
+                    first_seen_at,
+                    last_seen_at,
+                    greeting_state,
+                    metadata_json
+                )
+                VALUES (?, ?, ?, ?, 'new', ?)
+                ON CONFLICT(channel) DO UPDATE SET
+                    platform = excluded.platform,
+                    last_seen_at = excluded.last_seen_at,
+                    metadata_json = excluded.metadata_json
+                """,
+                (
+                    channel,
+                    platform,
+                    now,
+                    now,
+                    metadata_json,
+                ),
+            )
+            updated = connection.execute(
+                """
+                UPDATE channel_links
+                SET greeting_state = 'sending',
+                    last_seen_at = ?,
+                    metadata_json = ?
+                WHERE channel = ?
+                  AND greeting_state = 'new'
+                """,
+                (
+                    now,
+                    metadata_json,
+                    channel,
+                ),
+            )
+            connection.commit()
+            return updated.rowcount > 0
+
+    def mark_channel_greeting_sent(self, channel: str) -> None:
+        if not channel:
+            return
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE channel_links
+                SET greeting_state = 'sent',
+                    last_seen_at = ?
+                WHERE channel = ?
+                """,
+                (utcnow_iso(), channel),
+            )
+            connection.commit()
+
+    def release_channel_greeting_claim(self, channel: str) -> None:
+        if not channel:
+            return
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE channel_links
+                SET greeting_state = 'new',
+                    last_seen_at = ?
+                WHERE channel = ?
+                  AND greeting_state = 'sending'
+                """,
+                (utcnow_iso(), channel),
             )
             connection.commit()
 

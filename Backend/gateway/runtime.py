@@ -23,6 +23,11 @@ from shared import SOURCE_PRIORITY_MAP, TaskEnvelope, generate_task_id, sign_tas
 
 logger = logging.getLogger(__name__)
 
+CHANNEL_WELCOME_MESSAGES = {
+    "whatsapp": "COSMIC is connected on WhatsApp. You can message me here anytime.",
+    "telegram": "COSMIC is connected on Telegram. You can message me here anytime.",
+}
+
 
 @dataclass(slots=True)
 class ActiveRequest:
@@ -232,6 +237,20 @@ class GatewayRuntime:
             "routing_decision_source": routing_decision.decision_source,
             "input_artifacts": input_artifacts,
         }
+        channel_platform = self._platform_for_channel(channel=channel, metadata=metadata)
+        if channel_platform in CHANNEL_WELCOME_MESSAGES:
+            should_send_welcome = self.session_store.claim_channel_greeting(
+                channel=channel,
+                platform=channel_platform,
+                metadata={
+                    "platform": channel_platform,
+                    "source_id": source_id,
+                },
+            )
+            if should_send_welcome:
+                result["send_channel_welcome"] = True
+                result["channel_welcome_platform"] = channel_platform
+                result["channel_welcome_message"] = CHANNEL_WELCOME_MESSAGES[channel_platform]
         self.request_records[request_id] = result
         self.routing_audit_store.append(
             request_id=request_id,
@@ -272,6 +291,12 @@ class GatewayRuntime:
 
         history = self.session_store.get_pruned_history(session_id)
         active_request = self.active_requests.get(request_id)
+        await self._deliver_channel_welcome_if_needed(
+            request_record=request_record,
+            session_id=session_id,
+            channel=channel,
+            channel_adapter=channel_adapter,
+        )
 
         async def send(event: dict[str, Any]) -> None:
             if active_request is not None:
@@ -619,6 +644,72 @@ class GatewayRuntime:
             channel=channel,
             metadata=metadata,
         )
+
+    def _platform_for_channel(self, *, channel: str, metadata: dict[str, Any]) -> str | None:
+        platform = self._safe_text(metadata.get("platform"))
+        if platform in CHANNEL_WELCOME_MESSAGES:
+            return platform
+        if channel.startswith("whatsapp:"):
+            return "whatsapp"
+        if channel.startswith("telegram:"):
+            return "telegram"
+        return None
+
+    async def _deliver_channel_welcome_if_needed(
+        self,
+        *,
+        request_record: dict[str, Any],
+        session_id: str,
+        channel: str,
+        channel_adapter: Any,
+    ) -> None:
+        if not bool(request_record.get("send_channel_welcome")):
+            return
+
+        welcome_message = self._safe_text(request_record.get("channel_welcome_message"))
+        platform = self._safe_text(request_record.get("channel_welcome_platform"))
+        request_id = self._safe_text(request_record.get("request_id"))
+        if not welcome_message or not platform:
+            self.session_store.release_channel_greeting_claim(channel)
+            return
+
+        try:
+            await channel_adapter.send(
+                {
+                    "type": "channel.welcome",
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "channel": channel,
+                    "content": welcome_message,
+                    "platform": platform,
+                },
+                channel=channel,
+            )
+        except Exception:
+            self.session_store.release_channel_greeting_claim(channel)
+            logger.exception(
+                "gateway.channel_welcome failed request_id=%s channel=%s platform=%s",
+                request_id,
+                channel,
+                platform,
+            )
+            return
+
+        self._append_session_message(
+            session_id,
+            role="assistant",
+            content=welcome_message,
+            route="system",
+            awaiting_reply=False,
+            channel=channel,
+            metadata={
+                "system_generated": True,
+                "channel_welcome": True,
+                "platform": platform,
+                "request_id": request_id,
+            },
+        )
+        self.session_store.mark_channel_greeting_sent(channel)
 
     async def build_resume_payload(
         self,
