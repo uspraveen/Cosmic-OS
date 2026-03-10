@@ -58,6 +58,10 @@ function loadEnvFile(filePath) {
 
 loadEnvFile(path.resolve(BRIDGE_ROOT, '.env'));
 
+const originalConsoleLog = console.log.bind(console);
+const originalConsoleWarn = console.warn.bind(console);
+const originalConsoleError = console.error.bind(console);
+
 function envInt(name, fallback) {
   const raw = process.env[name];
   if (!raw) return fallback;
@@ -100,6 +104,19 @@ const config = {
   gatewayInternalToken: process.env.GATEWAY_INTERNAL_TOKEN ?? '',
 };
 
+const sessionHealthConfig = {
+  faultWindowMs: Math.max(1000, envInt('WHATSAPP_SESSION_FAULT_WINDOW_MS', 45000)),
+  selfHealThreshold: Math.max(1, envInt('WHATSAPP_SESSION_SELF_HEAL_THRESHOLD', 5)),
+  minSelfHealIntervalMs: Math.max(
+    1000,
+    envInt('WHATSAPP_SESSION_SELF_HEAL_INTERVAL_MS', 120000),
+  ),
+  reconnectDelayMs: Math.max(
+    0,
+    envInt('WHATSAPP_SESSION_SELF_HEAL_RECONNECT_DELAY_MS', 1500),
+  ),
+};
+
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 
@@ -115,9 +132,265 @@ let connectionState = {
   authDir: config.authDir,
   connectedJid: null,
 };
+let bridgeMetrics = {
+  sessionFaultsTotal: 0,
+  badMacErrorsTotal: 0,
+  decryptFailuresTotal: 0,
+  retryReceiptsTotal: 0,
+  prekeyBundleResetsTotal: 0,
+  sessionFaultWindowCount: 0,
+  lastSessionFaultAt: null,
+  lastSessionFaultKind: null,
+  lastSessionFaultMessage: null,
+  selfHealTriggeredTotal: 0,
+  selfHealCompletedTotal: 0,
+  selfHealFailedTotal: 0,
+  selfHealInFlight: false,
+  lastSelfHealAt: null,
+  lastSelfHealReason: null,
+  lastInboundForwardAt: null,
+  lastInboundForwardMs: null,
+  lastOutboundSendAt: null,
+  lastOutboundSendMs: null,
+};
+let sessionFaultTimestamps = [];
+let selfHealPromise = null;
+let selfHealPendingOpen = false;
 let bridgeConfig = {
   allowedPhone: normalizePhoneValue(process.env.WHATSAPP_ALLOWED_PHONE ?? ''),
   selfChatOnly: envBool('WHATSAPP_SELF_CHAT_ONLY', false),
+};
+
+function isoNow() {
+  return new Date().toISOString();
+}
+
+function pruneSessionFaultWindow(now = Date.now()) {
+  sessionFaultTimestamps = sessionFaultTimestamps.filter(
+    (timestamp) => now - timestamp <= sessionHealthConfig.faultWindowMs,
+  );
+  bridgeMetrics.sessionFaultWindowCount = sessionFaultTimestamps.length;
+}
+
+function resetSessionFaultWindow() {
+  sessionFaultTimestamps = [];
+  bridgeMetrics.sessionFaultWindowCount = 0;
+}
+
+function noteInboundForwardLatency(elapsedMs) {
+  bridgeMetrics.lastInboundForwardAt = isoNow();
+  bridgeMetrics.lastInboundForwardMs = elapsedMs;
+}
+
+function noteOutboundSendLatency(elapsedMs) {
+  bridgeMetrics.lastOutboundSendAt = isoNow();
+  bridgeMetrics.lastOutboundSendMs = elapsedMs;
+}
+
+async function maybeTriggerSessionSelfHeal(reason) {
+  const now = Date.now();
+  pruneSessionFaultWindow(now);
+  if (sessionFaultTimestamps.length < sessionHealthConfig.selfHealThreshold) {
+    return;
+  }
+  if (selfHealPromise || bridgeMetrics.selfHealInFlight) {
+    return;
+  }
+  if (
+    bridgeMetrics.lastSelfHealAt &&
+    now - Date.parse(bridgeMetrics.lastSelfHealAt) < sessionHealthConfig.minSelfHealIntervalMs
+  ) {
+    return;
+  }
+  if (connectionState.pairingState === 'logged_out' || connectionState.pairingState === 'qr_ready') {
+    return;
+  }
+
+  const authExists = await hasExistingAuthState().catch(() => false);
+  if (!authExists) {
+    return;
+  }
+
+  bridgeMetrics.selfHealTriggeredTotal += 1;
+  bridgeMetrics.selfHealInFlight = true;
+  bridgeMetrics.lastSelfHealAt = isoNow();
+  bridgeMetrics.lastSelfHealReason = reason;
+  selfHealPendingOpen = true;
+
+  originalConsoleWarn(
+    `[bridge] Triggering WhatsApp session self-heal after ${sessionFaultTimestamps.length} faults in ${sessionHealthConfig.faultWindowMs}ms (${reason})`,
+  );
+
+  selfHealPromise = (async () => {
+    if (sessionHealthConfig.reconnectDelayMs > 0) {
+      await sleep(sessionHealthConfig.reconnectDelayMs);
+    }
+    await ensureSocketConnected({ refresh: true });
+  })()
+    .catch((error) => {
+      bridgeMetrics.selfHealFailedTotal += 1;
+      bridgeMetrics.selfHealInFlight = false;
+      selfHealPendingOpen = false;
+      lastError = error?.message ?? String(error);
+      originalConsoleError(
+        `[bridge] WhatsApp session self-heal failed: ${error?.message ?? error}`,
+      );
+    })
+    .finally(() => {
+      selfHealPromise = null;
+    });
+}
+
+function recordSessionFault(kind, message) {
+  const now = Date.now();
+  sessionFaultTimestamps.push(now);
+  pruneSessionFaultWindow(now);
+
+  bridgeMetrics.sessionFaultsTotal += 1;
+  bridgeMetrics.lastSessionFaultAt = isoNow();
+  bridgeMetrics.lastSessionFaultKind = kind;
+  bridgeMetrics.lastSessionFaultMessage = message ?? null;
+
+  if (kind === 'bad_mac') {
+    bridgeMetrics.badMacErrorsTotal += 1;
+  } else if (kind === 'decrypt_failure') {
+    bridgeMetrics.decryptFailuresTotal += 1;
+  } else if (kind === 'retry_receipt') {
+    bridgeMetrics.retryReceiptsTotal += 1;
+  } else if (kind === 'prekey_bundle_reset') {
+    bridgeMetrics.prekeyBundleResetsTotal += 1;
+  }
+
+  void maybeTriggerSessionSelfHeal(kind);
+}
+
+function sanitizeLogValue(value, seen = new WeakSet()) {
+  if (value instanceof Error) {
+    return {
+      type: value.name,
+      message: value.message,
+      stack: value.stack,
+    };
+  }
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+  if (Buffer.isBuffer(value)) {
+    return `<Buffer length=${value.length}>`;
+  }
+  if (seen.has(value)) {
+    return '[Circular]';
+  }
+  seen.add(value);
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeLogValue(item, seen));
+  }
+  const output = {};
+  for (const [key, entry] of Object.entries(value)) {
+    output[key] = sanitizeLogValue(entry, seen);
+  }
+  return output;
+}
+
+function normalizeLoggerArgs(args) {
+  if (!args.length) {
+    return { fields: {}, message: '' };
+  }
+  if (typeof args[0] === 'string') {
+    return { fields: {}, message: args[0] };
+  }
+  const fields = args[0] && typeof args[0] === 'object' ? sanitizeLogValue(args[0]) : {};
+  const message =
+    typeof args[1] === 'string'
+      ? args[1]
+      : typeof args[0] === 'string'
+        ? args[0]
+        : '';
+  return { fields, message };
+}
+
+function observeBridgeLog(message, fields) {
+  if (message === 'failed to decrypt message') {
+    const errMessage = fields?.err?.message ?? message;
+    recordSessionFault(
+      String(errMessage).includes('Bad MAC') ? 'bad_mac' : 'decrypt_failure',
+      String(errMessage),
+    );
+    return;
+  }
+
+  if (message === 'sent retry receipt') {
+    recordSessionFault('retry_receipt', message);
+    return;
+  }
+
+  if (message === 'Closing open session in favor of incoming prekey bundle') {
+    recordSessionFault('prekey_bundle_reset', message);
+  }
+}
+
+function writeBridgeLog(level, bindings, args) {
+  const { fields, message } = normalizeLoggerArgs(args);
+  const payload = {
+    level,
+    time: isoNow(),
+    ...bindings,
+    ...fields,
+    ...(message ? { msg: message } : {}),
+  };
+  observeBridgeLog(message, payload);
+  const text = JSON.stringify(payload);
+  if (level === 'error') {
+    originalConsoleError(text);
+  } else if (level === 'warn') {
+    originalConsoleWarn(text);
+  } else {
+    originalConsoleLog(text);
+  }
+}
+
+function createBridgeLogger(bindings = {}) {
+  return {
+    level: process.env.WHATSAPP_BRIDGE_LOG_LEVEL ?? 'info',
+    child(childBindings = {}) {
+      return createBridgeLogger({ ...bindings, ...childBindings });
+    },
+    trace(...args) {
+      writeBridgeLog('trace', bindings, args);
+    },
+    debug(...args) {
+      writeBridgeLog('debug', bindings, args);
+    },
+    info(...args) {
+      writeBridgeLog('info', bindings, args);
+    },
+    warn(...args) {
+      writeBridgeLog('warn', bindings, args);
+    },
+    error(...args) {
+      writeBridgeLog('error', bindings, args);
+    },
+  };
+}
+
+console.error = (...args) => {
+  try {
+    const message = args
+      .map((value) => {
+        if (value instanceof Error) {
+          return `${value.name}: ${value.message}`;
+        }
+        return String(value);
+      })
+      .join(' ');
+    if (message.includes('Session error:')) {
+      recordSessionFault(
+        message.includes('Bad MAC') ? 'bad_mac' : 'decrypt_failure',
+        message,
+      );
+    }
+  } catch {}
+  originalConsoleError(...args);
 };
 
 async function ensureAuthDir() {
@@ -249,6 +522,27 @@ async function buildStatusPayload() {
     connected_jid: connectionState.connectedJid,
     last_error: lastError,
     bridge_config: buildBridgeConfigPayload(),
+    bridge_metrics: {
+      session_faults_total: bridgeMetrics.sessionFaultsTotal,
+      bad_mac_errors_total: bridgeMetrics.badMacErrorsTotal,
+      decrypt_failures_total: bridgeMetrics.decryptFailuresTotal,
+      retry_receipts_total: bridgeMetrics.retryReceiptsTotal,
+      prekey_bundle_resets_total: bridgeMetrics.prekeyBundleResetsTotal,
+      session_fault_window_count: bridgeMetrics.sessionFaultWindowCount,
+      last_session_fault_at: bridgeMetrics.lastSessionFaultAt,
+      last_session_fault_kind: bridgeMetrics.lastSessionFaultKind,
+      last_session_fault_message: bridgeMetrics.lastSessionFaultMessage,
+      self_heal_triggered_total: bridgeMetrics.selfHealTriggeredTotal,
+      self_heal_completed_total: bridgeMetrics.selfHealCompletedTotal,
+      self_heal_failed_total: bridgeMetrics.selfHealFailedTotal,
+      self_heal_in_flight: bridgeMetrics.selfHealInFlight,
+      last_self_heal_at: bridgeMetrics.lastSelfHealAt,
+      last_self_heal_reason: bridgeMetrics.lastSelfHealReason,
+      last_inbound_forward_at: bridgeMetrics.lastInboundForwardAt,
+      last_inbound_forward_ms: bridgeMetrics.lastInboundForwardMs,
+      last_outbound_send_at: bridgeMetrics.lastOutboundSendAt,
+      last_outbound_send_ms: bridgeMetrics.lastOutboundSendMs,
+    },
   };
 }
 
@@ -567,6 +861,7 @@ async function forwardIncomingMessage(payload) {
   const startedAt = Date.now();
   const response = await axios.post(config.gatewayUrl, payload, { headers });
   const elapsedMs = Date.now() - startedAt;
+  noteInboundForwardLatency(elapsedMs);
   const messageId = payload?.message?.id ?? 'unknown';
   const type = payload?.message?.type ?? 'unknown';
   console.log(`Forwarded inbound WhatsApp message ${messageId} type=${type} to Gateway in ${elapsedMs}ms`);
@@ -644,6 +939,12 @@ function bindSocketEvents(currentSock, saveCreds) {
     if (connection === 'open') {
       clearQrState();
       lastError = null;
+      resetSessionFaultWindow();
+      if (selfHealPendingOpen) {
+        bridgeMetrics.selfHealCompletedTotal += 1;
+        bridgeMetrics.selfHealInFlight = false;
+        selfHealPendingOpen = false;
+      }
       setConnectionState({
         connected: true,
         pairingState: 'connected',
@@ -670,6 +971,8 @@ function bindSocketEvents(currentSock, saveCreds) {
 
     if (loggedOut) {
       clearQrState();
+      bridgeMetrics.selfHealInFlight = false;
+      selfHealPendingOpen = false;
     }
 
     if (loggedOut) {
@@ -710,6 +1013,7 @@ function bindSocketEvents(currentSock, saveCreds) {
 
       try {
         await forwardIncomingMessage(payload);
+        resetSessionFaultWindow();
       } catch (error) {
         const message = error?.response?.data ?? error?.message ?? error;
         console.error('Failed to forward incoming WhatsApp message:', message);
@@ -753,6 +1057,7 @@ async function ensureSocketConnected({ refresh = false } = {}) {
       auth: state,
       ...(waVersion ? { version: waVersion } : {}),
       browser: Browsers.macOS('Google Chrome'),
+      logger: createBridgeLogger({ class: 'baileys' }),
       markOnlineOnConnect: false,
       printQRInTerminal: false,
       connectTimeoutMs: 60000,
@@ -932,6 +1237,7 @@ async function handleSend(req, res) {
     const startedAt = Date.now();
     await sock.sendMessage(jid, { text: message });
     const elapsedMs = Date.now() - startedAt;
+    noteOutboundSendLatency(elapsedMs);
     console.log(`Outgoing WhatsApp message to ${normalizedPhone} in ${elapsedMs}ms: ${message}`);
     res.json({ status: 'success' });
   } catch (error) {
