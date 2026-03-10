@@ -128,6 +128,12 @@ class TelegramAdapter(ChannelAdapter):
                 )
             )
         self._bot_info = await self._call_api("getMe")
+        logger.info(
+            "telegram.adapter started bot_id=%s username=%s webhook_url=%s",
+            self._bot_info.get("id") if isinstance(self._bot_info, dict) else None,
+            self._bot_info.get("username") if isinstance(self._bot_info, dict) else None,
+            self.config.webhook_url,
+        )
         if self.config.auto_configure_webhook and self.config.webhook_url:
             await self.sync_webhook()
 
@@ -197,6 +203,7 @@ class TelegramAdapter(ChannelAdapter):
         webhook_url = self.config.webhook_url
         if not webhook_url:
             raise RuntimeError("Cannot sync Telegram webhook without GATEWAY_PUBLIC_HOST / TELEGRAM_WEBHOOK_BASE_URL.")
+        started_at = time.perf_counter()
         await self._call_api(
             "setWebhook",
             json={
@@ -206,17 +213,31 @@ class TelegramAdapter(ChannelAdapter):
                 "drop_pending_updates": False,
             },
         )
-        return await self._call_api("getWebhookInfo")
+        webhook_info = await self._call_api("getWebhookInfo")
+        logger.info(
+            "telegram.webhook synced url=%s elapsed_ms=%.1f",
+            webhook_info.get("url") if isinstance(webhook_info, dict) else webhook_url,
+            (time.perf_counter() - started_at) * 1000.0,
+        )
+        return webhook_info
 
     async def delete_webhook(self, *, drop_pending_updates: bool = False) -> dict[str, Any]:
+        started_at = time.perf_counter()
         await self._call_api(
             "deleteWebhook",
             json={"drop_pending_updates": bool(drop_pending_updates)},
         )
-        return await self._call_api("getWebhookInfo")
+        webhook_info = await self._call_api("getWebhookInfo")
+        logger.info(
+            "telegram.webhook deleted drop_pending_updates=%s elapsed_ms=%.1f",
+            bool(drop_pending_updates),
+            (time.perf_counter() - started_at) * 1000.0,
+        )
+        return webhook_info
 
     async def send_test_message(self, *, chat_id: int, message: str) -> dict[str, Any]:
-        return await self._call_api(
+        started_at = time.perf_counter()
+        result = await self._call_api(
             "sendMessage",
             json={
                 "chat_id": chat_id,
@@ -224,8 +245,16 @@ class TelegramAdapter(ChannelAdapter):
                 "disable_web_page_preview": True,
             },
         )
+        logger.info(
+            "telegram.send_test chat_id=%s chars=%s elapsed_ms=%.1f",
+            chat_id,
+            len(message or ""),
+            (time.perf_counter() - started_at) * 1000.0,
+        )
+        return result
 
     async def download_file(self, file_id: str) -> tuple[bytes, str | None]:
+        started_at = time.perf_counter()
         file_info = await self._call_api("getFile", json={"file_id": file_id})
         file_path = self._coerce_str(file_info.get("file_path"))
         if not file_path:
@@ -235,7 +264,16 @@ class TelegramAdapter(ChannelAdapter):
         url = "{0}/file/bot{1}/{2}".format(self.config.api_base_url, self.config.bot_token, file_path.lstrip("/"))
         response = await self._http.get(url)
         response.raise_for_status()
-        return response.content, self._coerce_str(response.headers.get("content-type"))
+        content = response.content
+        media_type = self._coerce_str(response.headers.get("content-type"))
+        logger.info(
+            "telegram.media downloaded file_id=%s bytes=%s content_type=%s elapsed_ms=%.1f",
+            file_id,
+            len(content),
+            media_type,
+            (time.perf_counter() - started_at) * 1000.0,
+        )
+        return content, media_type
 
     async def handle_webhook_update(
         self,
@@ -310,6 +348,14 @@ class TelegramAdapter(ChannelAdapter):
             "first_name": self._coerce_str(sender.get("first_name")),
             "language_code": self._coerce_str(sender.get("language_code")),
         }
+        logger.info(
+            "telegram.incoming accepted chat_id=%s user_id=%s message_type=%s attachments=%s message_id=%s",
+            chat_id,
+            user_id,
+            message_type,
+            len(attachments),
+            metadata.get("message_id"),
+        )
         return {
             "content": content,
             "session_id": None,
@@ -325,6 +371,7 @@ class TelegramAdapter(ChannelAdapter):
         lock = self._channel_locks.setdefault(chat_id, asyncio.Lock())
         async with lock:
             for index, chunk in enumerate(chunks):
+                started_at = time.perf_counter()
                 await self._call_api(
                     "sendMessage",
                     json={
@@ -332,6 +379,14 @@ class TelegramAdapter(ChannelAdapter):
                         "text": chunk,
                         "disable_web_page_preview": True,
                     },
+                )
+                logger.info(
+                    "telegram.send_text chat_id=%s part=%s/%s chars=%s elapsed_ms=%.1f",
+                    chat_id,
+                    index + 1,
+                    len(chunks),
+                    len(chunk),
+                    (time.perf_counter() - started_at) * 1000.0,
                 )
                 if index + 1 < len(chunks) and self.config.send_delay_ms > 0:
                     await asyncio.sleep(self.config.send_delay_ms / 1000.0)
@@ -341,11 +396,17 @@ class TelegramAdapter(ChannelAdapter):
         last_sent = self._last_chat_action_sent.get(chat_id)
         if last_sent is not None and (now - last_sent) < self.config.chat_action_min_interval_sec:
             return
+        started_at = time.perf_counter()
         await self._call_api(
             "sendChatAction",
             json={"chat_id": chat_id, "action": "typing"},
         )
         self._last_chat_action_sent[chat_id] = now
+        logger.info(
+            "telegram.chat_action chat_id=%s action=typing elapsed_ms=%.1f",
+            chat_id,
+            (time.perf_counter() - started_at) * 1000.0,
+        )
 
     async def _call_api(self, method: str, *, json: dict[str, Any] | None = None) -> dict[str, Any]:
         if self._http is None:
