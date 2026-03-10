@@ -148,12 +148,14 @@ let bridgeMetrics = {
   selfHealInFlight: false,
   lastSelfHealAt: null,
   lastSelfHealReason: null,
+  lastSelfHealRecoveredAt: null,
+  lastSelfHealRecoveredBy: null,
   lastInboundForwardAt: null,
   lastInboundForwardMs: null,
   lastOutboundSendAt: null,
   lastOutboundSendMs: null,
 };
-let sessionFaultTimestamps = [];
+let severeSessionFaultTimestamps = [];
 let selfHealPromise = null;
 let selfHealPendingOpen = false;
 let bridgeConfig = {
@@ -166,31 +168,45 @@ function isoNow() {
 }
 
 function pruneSessionFaultWindow(now = Date.now()) {
-  sessionFaultTimestamps = sessionFaultTimestamps.filter(
+  severeSessionFaultTimestamps = severeSessionFaultTimestamps.filter(
     (timestamp) => now - timestamp <= sessionHealthConfig.faultWindowMs,
   );
-  bridgeMetrics.sessionFaultWindowCount = sessionFaultTimestamps.length;
+  bridgeMetrics.sessionFaultWindowCount = severeSessionFaultTimestamps.length;
 }
 
 function resetSessionFaultWindow() {
-  sessionFaultTimestamps = [];
+  severeSessionFaultTimestamps = [];
   bridgeMetrics.sessionFaultWindowCount = 0;
+}
+
+function markSelfHealRecovered(source) {
+  if (!selfHealPendingOpen && !bridgeMetrics.selfHealInFlight) {
+    return;
+  }
+  bridgeMetrics.selfHealCompletedTotal += 1;
+  bridgeMetrics.selfHealInFlight = false;
+  bridgeMetrics.lastSelfHealRecoveredAt = isoNow();
+  bridgeMetrics.lastSelfHealRecoveredBy = source;
+  selfHealPendingOpen = false;
+  resetSessionFaultWindow();
 }
 
 function noteInboundForwardLatency(elapsedMs) {
   bridgeMetrics.lastInboundForwardAt = isoNow();
   bridgeMetrics.lastInboundForwardMs = elapsedMs;
+  markSelfHealRecovered('inbound_forward');
 }
 
 function noteOutboundSendLatency(elapsedMs) {
   bridgeMetrics.lastOutboundSendAt = isoNow();
   bridgeMetrics.lastOutboundSendMs = elapsedMs;
+  markSelfHealRecovered('outbound_send');
 }
 
 async function maybeTriggerSessionSelfHeal(reason) {
   const now = Date.now();
   pruneSessionFaultWindow(now);
-  if (sessionFaultTimestamps.length < sessionHealthConfig.selfHealThreshold) {
+  if (severeSessionFaultTimestamps.length < sessionHealthConfig.selfHealThreshold) {
     return;
   }
   if (selfHealPromise || bridgeMetrics.selfHealInFlight) {
@@ -218,7 +234,7 @@ async function maybeTriggerSessionSelfHeal(reason) {
   selfHealPendingOpen = true;
 
   originalConsoleWarn(
-    `[bridge] Triggering WhatsApp session self-heal after ${sessionFaultTimestamps.length} faults in ${sessionHealthConfig.faultWindowMs}ms (${reason})`,
+    `[bridge] Triggering WhatsApp session self-heal after ${severeSessionFaultTimestamps.length} severe faults in ${sessionHealthConfig.faultWindowMs}ms (${reason})`,
   );
 
   selfHealPromise = (async () => {
@@ -243,7 +259,9 @@ async function maybeTriggerSessionSelfHeal(reason) {
 
 function recordSessionFault(kind, message) {
   const now = Date.now();
-  sessionFaultTimestamps.push(now);
+  if (kind !== 'retry_receipt') {
+    severeSessionFaultTimestamps.push(now);
+  }
   pruneSessionFaultWindow(now);
 
   bridgeMetrics.sessionFaultsTotal += 1;
@@ -538,6 +556,8 @@ async function buildStatusPayload() {
       self_heal_in_flight: bridgeMetrics.selfHealInFlight,
       last_self_heal_at: bridgeMetrics.lastSelfHealAt,
       last_self_heal_reason: bridgeMetrics.lastSelfHealReason,
+      last_self_heal_recovered_at: bridgeMetrics.lastSelfHealRecoveredAt,
+      last_self_heal_recovered_by: bridgeMetrics.lastSelfHealRecoveredBy,
       last_inbound_forward_at: bridgeMetrics.lastInboundForwardAt,
       last_inbound_forward_ms: bridgeMetrics.lastInboundForwardMs,
       last_outbound_send_at: bridgeMetrics.lastOutboundSendAt,
@@ -939,12 +959,7 @@ function bindSocketEvents(currentSock, saveCreds) {
     if (connection === 'open') {
       clearQrState();
       lastError = null;
-      resetSessionFaultWindow();
-      if (selfHealPendingOpen) {
-        bridgeMetrics.selfHealCompletedTotal += 1;
-        bridgeMetrics.selfHealInFlight = false;
-        selfHealPendingOpen = false;
-      }
+      markSelfHealRecovered('connection_open');
       setConnectionState({
         connected: true,
         pairingState: 'connected',
@@ -973,6 +988,7 @@ function bindSocketEvents(currentSock, saveCreds) {
       clearQrState();
       bridgeMetrics.selfHealInFlight = false;
       selfHealPendingOpen = false;
+      bridgeMetrics.lastSelfHealRecoveredBy = null;
     }
 
     if (loggedOut) {
@@ -1013,7 +1029,6 @@ function bindSocketEvents(currentSock, saveCreds) {
 
       try {
         await forwardIncomingMessage(payload);
-        resetSessionFaultWindow();
       } catch (error) {
         const message = error?.response?.data ?? error?.message ?? error;
         console.error('Failed to forward incoming WhatsApp message:', message);
