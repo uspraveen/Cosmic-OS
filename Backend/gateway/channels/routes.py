@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field
 
 from ..runtime import GatewayRuntime
@@ -32,6 +32,11 @@ class WhatsAppConfigUpdateRequest(BaseModel):
 
 class WhatsAppSendRequest(BaseModel):
     number: str = Field(..., min_length=1, max_length=32)
+    message: str = Field(..., min_length=1, max_length=8000)
+
+
+class TelegramSendRequest(BaseModel):
+    chat_id: int
     message: str = Field(..., min_length=1, max_length=8000)
 
 
@@ -378,6 +383,106 @@ async def whatsapp_incoming(
     return processed
 
 
+@router.post("/channels/telegram/webhook")
+async def telegram_webhook(
+    request: Request,
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    adapter = runtime.registry.adapters.get("telegram")
+    if adapter is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Telegram adapter is not registered")
+
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid Telegram JSON payload") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Telegram update payload must be a JSON object")
+
+    header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    try:
+        adapter.verify_webhook_secret(header_secret)  # type: ignore[attr-defined]
+        normalized = adapter.normalize_message(payload)  # type: ignore[attr-defined]
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+
+    if normalized is None:
+        return {"ok": True, "status": "ignored"}
+
+    started_at = time.perf_counter()
+    request_id = str(normalized.get("request_id") or "").strip() or uuid4().hex
+    normalized["request_id"] = request_id
+
+    try:
+        await adapter.send(  # type: ignore[attr-defined]
+            {
+                "type": "route_result",
+                "request_id": request_id,
+                "session_id": None,
+                "channel": normalized["channel"],
+                "route": "pending",
+                "classification": None,
+            },
+            channel=normalized["channel"],
+        )
+    except Exception:
+        logger.exception(
+            "telegram.webhook immediate_ack_failed request_id=%s elapsed_ms=%.1f",
+            request_id,
+            (time.perf_counter() - started_at) * 1000.0,
+        )
+
+    processed = await runtime.process_incoming_user_message(normalized)
+    logger.info(
+        "telegram.webhook classified request_id=%s route=%s elapsed_ms=%.1f",
+        processed.get("request_id"),
+        processed.get("route"),
+        (time.perf_counter() - started_at) * 1000.0,
+    )
+    try:
+        runtime.start_request_fulfillment(processed)
+    except Exception as exc:
+        logger.exception(
+            "telegram.webhook fulfillment_start_failed request_id=%s elapsed_ms=%.1f",
+            processed.get("request_id"),
+            (time.perf_counter() - started_at) * 1000.0,
+        )
+        try:
+            await adapter.send(  # type: ignore[attr-defined]
+                _error_payload(processed.get("request_id"), "UPSTREAM_ERROR", str(exc)),
+                channel=processed["channel"],
+            )
+        except Exception:
+            logger.exception(
+                "telegram.webhook error_delivery_failed request_id=%s",
+                processed.get("request_id"),
+            )
+    else:
+        logger.info(
+            "telegram.webhook fulfillment_started request_id=%s elapsed_ms=%.1f",
+            processed.get("request_id"),
+            (time.perf_counter() - started_at) * 1000.0,
+        )
+    return {"ok": True, "status": "accepted", "request_id": processed["request_id"]}
+
+
+@router.get("/internal/channels/telegram/media/{file_id}")
+async def download_telegram_media(
+    file_id: str,
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> Response:
+    try:
+        content, media_type = await runtime.download_telegram_media(file_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Telegram adapter is not registered") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    return Response(content=content, media_type=media_type or "application/octet-stream")
+
+
 @router.get("/sessions")
 async def list_sessions(
     _: None = Depends(require_local_api_token),
@@ -489,6 +594,50 @@ async def send_whatsapp_message(
         )
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="WhatsApp adapter is not registered") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    return payload
+
+
+@router.post("/channels/telegram/webhook/sync")
+async def sync_telegram_webhook(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        payload = await runtime.sync_telegram_webhook()
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Telegram adapter is not registered") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    return payload
+
+
+@router.delete("/channels/telegram/webhook")
+async def clear_telegram_webhook(
+    drop_pending_updates: bool = False,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        payload = await runtime.clear_telegram_webhook(drop_pending_updates=drop_pending_updates)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Telegram adapter is not registered") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    return payload
+
+
+@router.post("/channels/telegram/send")
+async def send_telegram_message(
+    body: TelegramSendRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        payload = await runtime.send_telegram_test(chat_id=body.chat_id, message=body.message)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Telegram adapter is not registered") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
     return payload

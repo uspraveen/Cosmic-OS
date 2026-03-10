@@ -12,6 +12,7 @@ from .adapters import HaikuAdapter, PerplexityAdapter
 from .artifact_store import ArtifactStore
 from .channels.desktop import DesktopAdapter
 from .channels.registry import ChannelAdapterRegistry
+from .channels.telegram import TelegramAdapter, TelegramConfig
 from .channels.whatsapp import WhatsAppAdapter, WhatsAppConfig
 from .config import GatewayConfig
 from .orchestrator_client import OrchestratorClient
@@ -123,6 +124,19 @@ class GatewayRuntime:
 
         if self.config.enable_whatsapp and "whatsapp" not in self.registry.adapters:
             adapter = WhatsAppAdapter(WhatsAppConfig.from_env())
+            await adapter.on_message(self._handle_normalized_incoming_message)
+            self.registry.register(adapter)
+
+            try:
+                await adapter.start()
+                self.adapter_errors.pop(adapter.platform, None)
+            except Exception as exc:  # pragma: no cover - startup health is environment-dependent
+                self.adapter_errors[adapter.platform] = str(exc)
+
+        if self.config.enable_telegram and "telegram" not in self.registry.adapters:
+            adapter = TelegramAdapter(
+                TelegramConfig.from_env(gateway_public_host=self.config.public_host)
+            )
             await adapter.on_message(self._handle_normalized_incoming_message)
             self.registry.register(adapter)
 
@@ -668,6 +682,21 @@ class GatewayRuntime:
                 "bridge": status,
             }
 
+        if platform == "telegram":
+            try:
+                status = await adapter.get_status()  # type: ignore[attr-defined]
+                self.adapter_errors.pop(platform, None)
+            except Exception as exc:
+                self.adapter_errors[platform] = str(exc)
+                status = {"status": "error", "error": str(exc)}
+            return {
+                "platform": platform,
+                "configured": True,
+                "healthy": platform not in self.adapter_errors,
+                "last_error": self.adapter_errors.get(platform),
+                "bot": status,
+            }
+
         if platform == "desktop":
             status = await adapter.get_status()  # type: ignore[attr-defined]
             return {
@@ -747,6 +776,48 @@ class GatewayRuntime:
             message=message,
         )
         self.adapter_errors.pop("whatsapp", None)
+        return response
+
+    async def sync_telegram_webhook(self) -> dict[str, Any]:
+        adapter = self.registry.adapters.get("telegram")
+        if adapter is None:
+            raise KeyError("telegram")
+        response = await adapter.sync_webhook()  # type: ignore[attr-defined]
+        self.adapter_errors.pop("telegram", None)
+        return response
+
+    async def clear_telegram_webhook(self, *, drop_pending_updates: bool = False) -> dict[str, Any]:
+        adapter = self.registry.adapters.get("telegram")
+        if adapter is None:
+            raise KeyError("telegram")
+        response = await adapter.delete_webhook(  # type: ignore[attr-defined]
+            drop_pending_updates=drop_pending_updates
+        )
+        self.adapter_errors.pop("telegram", None)
+        return response
+
+    async def send_telegram_test(
+        self,
+        *,
+        chat_id: int,
+        message: str,
+    ) -> dict[str, Any]:
+        adapter = self.registry.adapters.get("telegram")
+        if adapter is None:
+            raise KeyError("telegram")
+        response = await adapter.send_test_message(  # type: ignore[attr-defined]
+            chat_id=chat_id,
+            message=message,
+        )
+        self.adapter_errors.pop("telegram", None)
+        return response
+
+    async def download_telegram_media(self, file_id: str) -> tuple[bytes, str | None]:
+        adapter = self.registry.adapters.get("telegram")
+        if adapter is None:
+            raise KeyError("telegram")
+        response = await adapter.download_file(file_id)  # type: ignore[attr-defined]
+        self.adapter_errors.pop("telegram", None)
         return response
 
     async def health_payload(self) -> dict[str, Any]:

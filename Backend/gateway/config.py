@@ -43,6 +43,7 @@ def _env_float(name: str, default: float) -> float:
 class GatewayConfig:
     host: str = "0.0.0.0"
     port: int = 8080
+    public_host: str = ""
     local_api_token: str = ""
     internal_token: str = ""
     signing_secret: str = ""
@@ -51,6 +52,7 @@ class GatewayConfig:
     orchestrator_url: str = "http://127.0.0.1:8743"
     orchestrator_timeout_sec: float = 300.0
     enable_whatsapp: bool = True
+    enable_telegram: bool = False
     sessions_db_path: Path = BACKEND_ROOT / "gateway" / "sessions.db"
     routing_audit_db_path: Path = BACKEND_ROOT / "gateway" / "routing_audit.db"
     artifacts_db_path: Path = BACKEND_ROOT / "gateway" / "artifacts.db"
@@ -68,6 +70,7 @@ class GatewayConfig:
         return cls(
             host=os.getenv("GATEWAY_HOST", "0.0.0.0"),
             port=_env_int("GATEWAY_PORT", 8080),
+            public_host=os.getenv("GATEWAY_PUBLIC_HOST", "").strip(),
             local_api_token=(
                 os.getenv("GATEWAY_LOCAL_API_TOKEN")
                 or os.getenv("LOCAL_API_TOKEN")
@@ -86,6 +89,7 @@ class GatewayConfig:
                 _env_float("ORCHESTRATOR_TIMEOUT_SEC", 300.0),
             ),
             enable_whatsapp=_env_bool("WHATSAPP_ENABLED", True),
+            enable_telegram=_env_bool("TELEGRAM_ENABLED", False),
             sessions_db_path=Path(
                 os.getenv("GATEWAY_SESSIONS_DB_PATH", str(BACKEND_ROOT / "gateway" / "sessions.db"))
             ).expanduser(),
