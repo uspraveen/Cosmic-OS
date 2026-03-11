@@ -198,6 +198,10 @@ contextBridge.exposeInMainWorld('cosmic', {
   clearWhatsAppSession: (payload: any) => ipcRenderer.invoke('whatsapp:clear-session', payload),
   saveWhatsAppConfig: (payload: any) => ipcRenderer.invoke('whatsapp:save-config', payload),
   sendWhatsAppTest: (payload: any) => ipcRenderer.invoke('whatsapp:send-test', payload),
+  getTelegramStatus: (payload: any) => ipcRenderer.invoke('telegram:get-status', payload),
+  syncTelegramWebhook: (payload: any) => ipcRenderer.invoke('telegram:sync-webhook', payload),
+  clearTelegramWebhook: (payload: any) => ipcRenderer.invoke('telegram:clear-webhook', payload),
+  sendTelegramTest: (payload: any) => ipcRenderer.invoke('telegram:send-test', payload),
   onCalendarAgendaUpdate: (cb: (data: any) => void) => {
     const listener = (_: any, data: any) => cb(data)
     ipcRenderer.on('calendar:agenda', listener)

@@ -803,6 +803,33 @@ app.whenReady().then(() => {
     })
   })
 
+  ipcMain.handle('telegram:get-status', async (_, payload: GatewayConnectionConfig) => {
+    return callGatewayJson(payload, '/channels/telegram/status')
+  })
+
+  ipcMain.handle('telegram:sync-webhook', async (_, payload: GatewayConnectionConfig) => {
+    return callGatewayJson(payload, '/channels/telegram/webhook/sync', {
+      method: 'POST',
+    })
+  })
+
+  ipcMain.handle('telegram:clear-webhook', async (_, payload: GatewayConnectionConfig & { dropPendingUpdates?: boolean }) => {
+    const dropPendingUpdates = payload?.dropPendingUpdates ? 'true' : 'false'
+    return callGatewayJson(payload, `/channels/telegram/webhook?drop_pending_updates=${dropPendingUpdates}`, {
+      method: 'DELETE',
+    })
+  })
+
+  ipcMain.handle('telegram:send-test', async (_, payload: GatewayConnectionConfig & { chatId: number; message: string }) => {
+    return callGatewayJson(payload, '/channels/telegram/send', {
+      method: 'POST',
+      body: {
+        chat_id: payload.chatId,
+        message: payload.message,
+      },
+    })
+  })
+
 
   // --- AUTH IPC HANDLERS ---
   ipcMain.handle('auth:login', async (_, apiKey: string) => {

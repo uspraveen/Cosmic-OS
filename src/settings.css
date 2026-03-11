@@ -2728,6 +2728,30 @@
   background: linear-gradient(135deg, #5F6368, #202124);
 }
 
+.cosmic-tg-google-hero-icon {
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2), inset 0 0 0 1px rgba(34, 158, 217, 0.14);
+}
+
+.cosmic-tg-hero-stat-connected {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 100px;
+  background: rgba(10, 132, 255, 0.14);
+  border: 1px solid rgba(10, 132, 255, 0.22);
+  color: rgba(205, 236, 255, 0.96);
+  font-size: 12px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+
+.cosmic-tg-google-avatar.bot {
+  background: linear-gradient(135deg, #229ED9, #0A84FF);
+}
+
+.cosmic-tg-google-avatar.webhook {
+  background: linear-gradient(135deg, #0A84FF, #4F46E5);
+}
+
 .cosmic-wa-google-overview-grid {
   display: grid;
   gap: 10px;

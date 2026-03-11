@@ -4,6 +4,7 @@ import MonitorSelector from './MonitorSelector'
 import ApiConfiguration from './ApiConfiguration'
 import GoogleIntegrationsSettings from './GoogleIntegrationsSettings'
 import WhatsAppIntegrationSettings from './WhatsAppIntegrationSettings'
+import TelegramIntegrationSettings from './TelegramIntegrationSettings'
 import { GOOGLE_TOOL_DEFINITIONS } from './integrations'
 import type { SearchPosition } from './App'
 import './settings.css'
@@ -28,7 +29,15 @@ interface SettingsProps {
   onLogout?: () => void
 }
 
-type SettingsView = 'main' | 'monitors' | 'api' | 'ui' | 'integrations' | 'integrations-google' | 'integrations-whatsapp'
+type SettingsView =
+  | 'main'
+  | 'monitors'
+  | 'api'
+  | 'ui'
+  | 'integrations'
+  | 'integrations-google'
+  | 'integrations-whatsapp'
+  | 'integrations-telegram'
 
 export default function Settings({
   isOpen,
@@ -72,10 +81,16 @@ export default function Settings({
               ? 'Integrations'
               : currentView === 'integrations-whatsapp'
                 ? 'WhatsApp'
+                : currentView === 'integrations-telegram'
+                  ? 'Telegram'
                 : 'Google'
 
   const handleBack = () => {
-    if (currentView === 'integrations-google' || currentView === 'integrations-whatsapp') {
+    if (
+      currentView === 'integrations-google' ||
+      currentView === 'integrations-whatsapp' ||
+      currentView === 'integrations-telegram'
+    ) {
       setCurrentView('integrations')
       return
     }
@@ -239,6 +254,21 @@ export default function Settings({
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
                   </div>
                 </button>
+
+                <button className="prx-provider-card" onClick={() => setCurrentView('integrations-telegram')} style={{ marginTop: '12px' }}>
+                  <div className="prx-provider-icon" style={{ background: '#229ED9' }}>
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M21.944 4.507c.315-.982-.278-1.506-1.22-1.167L3.54 10.016c-.953.37-.939.902-.173 1.137l4.422 1.38 10.233-6.456c.483-.294.925-.136.563.186l-8.292 7.483-.311 4.469c.456 0 .657-.208.912-.454l2.21-2.148 4.598 3.395c.847.468 1.457.227 1.669-.786l2.573-12.215z" />
+                    </svg>
+                  </div>
+                  <div className="prx-provider-info">
+                    <strong>Telegram</strong>
+                    <span>Manage the per-VM bot, webhook health, and linked private DM.</span>
+                  </div>
+                  <div className="prx-provider-arrow">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
+                  </div>
+                </button>
               </div>
             )}
 
@@ -249,6 +279,13 @@ export default function Settings({
             {currentView === 'integrations-whatsapp' && (
               <WhatsAppIntegrationSettings
                 active={currentView === 'integrations-whatsapp'}
+                cosmicAuth={authData ? { gatewayUrl: authData.gatewayUrl, gatewayApiToken: authData.gatewayApiToken } : undefined}
+              />
+            )}
+
+            {currentView === 'integrations-telegram' && (
+              <TelegramIntegrationSettings
+                active={currentView === 'integrations-telegram'}
                 cosmicAuth={authData ? { gatewayUrl: authData.gatewayUrl, gatewayApiToken: authData.gatewayApiToken } : undefined}
               />
             )}
