@@ -51,22 +51,6 @@ function getErrorMessage(error: unknown, fallback: string) {
   return fallback
 }
 
-function formatUnixSeconds(value?: number | null) {
-  if (!value) return 'No recent errors'
-  const ms = value * 1000
-  if (!Number.isFinite(ms)) return 'No recent errors'
-  return new Date(ms).toLocaleString()
-}
-
-function describeWebhookState(webhook?: TelegramWebhookInfo | null) {
-  if (!webhook?.url) return 'Webhook not configured yet.'
-  if (webhook.last_error_message) return 'Webhook is registered but Telegram reported an error.'
-  if ((webhook.pending_update_count ?? 0) > 0) {
-    return `Webhook active with ${webhook.pending_update_count} pending update${webhook.pending_update_count === 1 ? '' : 's'}.`
-  }
-  return 'Webhook is active and Telegram is delivering updates here.'
-}
-
 export default function TelegramIntegrationSettings({ active, cosmicAuth }: TelegramIntegrationSettingsProps) {
   const authManaged = !!cosmicAuth
   const [gatewayBaseUrl, setGatewayBaseUrl] = useState('')
@@ -255,19 +239,20 @@ export default function TelegramIntegrationSettings({ active, cosmicAuth }: Tele
     { label: 'Allowed chat ID', value: linkedChatId ? String(linkedChatId) : 'Waiting for /start' },
   ]
 
-  const webhookRows = [
-    { label: 'Webhook URL', value: webhook?.url || botStatus?.webhook_url || 'Not configured' },
-    { label: 'Pending updates', value: String(webhook?.pending_update_count ?? 0) },
-    { label: 'Last Telegram error', value: webhook?.last_error_message || 'None' },
-    { label: 'Last error time', value: webhook?.last_error_date ? formatUnixSeconds(webhook.last_error_date) : 'No recent errors' },
-  ]
-
   const activationNote = useMemo(() => {
     if (linkedChatId && linkedUserId) {
       return 'This VM is locked to the linked private Telegram chat. Bot token, webhook secret, and allowlist are managed on the VM.'
     }
     return 'Ask the user to send /start to the bot once. After the VM captures the Telegram user/chat IDs, keep those IDs locked in gateway.env.'
   }, [linkedChatId, linkedUserId])
+
+  const quietStatusNote = isHealthy
+    ? linkedChatId
+      ? 'Telegram is connected and ready to use through your private chat.'
+      : 'Telegram bot is live. Send /start once to finish linking your private chat.'
+    : webhookConfigured
+      ? 'Telegram is configured, but it needs attention before the bot can be used normally.'
+      : 'Telegram webhook has not been synced yet for this VM.'
 
   return (
     <div className="setting-subpage cosmic-wa-google-page cosmic-tg-google-page">
@@ -361,6 +346,14 @@ export default function TelegramIntegrationSettings({ active, cosmicAuth }: Tele
           <div className="cosmic-google-card-footer">
             <p className="cosmic-google-card-note">{activationNote}</p>
             <div className="cosmic-google-card-actions">
+              <button
+                type="button"
+                className="cosmic-google-action secondary"
+                onClick={() => void refreshStatusOnce('Telegram status refreshed.')}
+                disabled={loadingStatus || !configReady}
+              >
+                {loadingStatus ? 'Refreshing...' : 'Refresh status'}
+              </button>
               {botLink && (
                 <button
                   type="button"
@@ -381,59 +374,10 @@ export default function TelegramIntegrationSettings({ active, cosmicAuth }: Tele
             </div>
           </div>
         </section>
+      </div>
 
-        <section className="cosmic-google-card cosmic-wa-google-card" style={{ animationDelay: '0.08s' }}>
-          <div className="cosmic-google-card-header">
-            <div className="cosmic-google-card-profile">
-              <div className="cosmic-google-avatar cosmic-tg-google-avatar webhook" aria-hidden="true">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-                  <path d="M5 12h14M12 5v14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </div>
-              <div className="cosmic-google-card-info">
-                <strong>Webhook & delivery</strong>
-                <span>{describeWebhookState(webhook)}</span>
-              </div>
-            </div>
-            <div className="cosmic-google-card-badges">
-              <span className={`cosmic-google-badge ${webhookConfigured ? 'status-connected' : 'status-needs_auth'}`}>
-                {webhookConfigured ? 'Configured' : 'Missing'}
-              </span>
-            </div>
-          </div>
-
-          <div className="cosmic-google-card-body">
-            <div className="cosmic-wa-google-info-list">
-              {webhookRows.map((row) => (
-                <div key={row.label} className={`cosmic-wa-google-info-row ${row.label === 'Last Telegram error' && row.value !== 'None' ? 'cosmic-wa-google-info-row-error' : ''}`}>
-                  <span>{row.label}</span>
-                  <strong>{row.value}</strong>
-                </div>
-              ))}
-            </div>
-            {Array.isArray(webhook?.allowed_updates) && webhook.allowed_updates.length > 0 && (
-              <div className="cosmic-wa-google-inline-note">
-                Allowed updates: {webhook.allowed_updates.join(', ')}
-              </div>
-            )}
-          </div>
-
-          <div className="cosmic-google-card-footer">
-            <p className="cosmic-google-card-note">
-              Telegram webhook secret, bot token, and allowlist live in VM env. This panel only verifies the active bot runtime against the Gateway.
-            </p>
-            <div className="cosmic-google-card-actions">
-              <button
-                type="button"
-                className="cosmic-google-action secondary"
-                onClick={() => void refreshStatusOnce('Telegram status refreshed.')}
-                disabled={loadingStatus || !configReady}
-              >
-                {loadingStatus ? 'Refreshing...' : 'Refresh status'}
-              </button>
-            </div>
-          </div>
-        </section>
+      <div className="cosmic-wa-google-inline-note">
+        {quietStatusNote}
       </div>
 
       <div className="cosmic-wa-google-footer-space" aria-hidden="true" />
