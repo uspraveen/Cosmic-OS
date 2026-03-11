@@ -357,7 +357,7 @@ export default function TelegramIntegrationSettings({ active, cosmicAuth }: Tele
               {botLink && (
                 <button
                   type="button"
-                  className="cosmic-google-action ghost"
+                  className="cosmic-google-action secondary"
                   onClick={() => window.cosmic?.openExternal(botLink)}
                 >
                   Open bot
