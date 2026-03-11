@@ -60,9 +60,6 @@ class SessionStore:
                 CREATE INDEX IF NOT EXISTS idx_messages_awaiting_reply
                     ON messages(session_id, channel, awaiting_reply, created_at);
 
-                CREATE INDEX IF NOT EXISTS idx_messages_session_request_role
-                    ON messages(session_id, request_id, role, created_at);
-
                 CREATE TABLE IF NOT EXISTS channel_links (
                     channel TEXT PRIMARY KEY,
                     platform TEXT NOT NULL,
@@ -104,6 +101,12 @@ class SessionStore:
                 """
             )
             self._ensure_column(connection, "messages", "request_id", "TEXT")
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_messages_session_request_role
+                    ON messages(session_id, request_id, role, created_at)
+                """
+            )
             connection.commit()
 
     def current_session_id(self, now: datetime | None = None) -> str:
