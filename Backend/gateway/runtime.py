@@ -103,6 +103,7 @@ class GatewayRuntime:
         await self.model_router.start()
         await self.orchestrator.start()
         await self._register_adapters()
+        await self._send_channel_activation_greetings()
         self.started = True
 
     async def stop(self) -> None:
@@ -237,20 +238,6 @@ class GatewayRuntime:
             "routing_decision_source": routing_decision.decision_source,
             "input_artifacts": input_artifacts,
         }
-        channel_platform = self._platform_for_channel(channel=channel, metadata=metadata)
-        if channel_platform in CHANNEL_WELCOME_MESSAGES:
-            should_send_welcome = self.session_store.claim_channel_greeting(
-                channel=channel,
-                platform=channel_platform,
-                metadata={
-                    "platform": channel_platform,
-                    "source_id": source_id,
-                },
-            )
-            if should_send_welcome:
-                result["send_channel_welcome"] = True
-                result["channel_welcome_platform"] = channel_platform
-                result["channel_welcome_message"] = CHANNEL_WELCOME_MESSAGES[channel_platform]
         self.request_records[request_id] = result
         self.routing_audit_store.append(
             request_id=request_id,
@@ -291,12 +278,6 @@ class GatewayRuntime:
 
         history = self.session_store.get_pruned_history(session_id)
         active_request = self.active_requests.get(request_id)
-        await self._deliver_channel_welcome_if_needed(
-            request_record=request_record,
-            session_id=session_id,
-            channel=channel,
-            channel_adapter=channel_adapter,
-        )
 
         async def send(event: dict[str, Any]) -> None:
             if active_request is not None:
@@ -645,34 +626,90 @@ class GatewayRuntime:
             metadata=metadata,
         )
 
-    def _platform_for_channel(self, *, channel: str, metadata: dict[str, Any]) -> str | None:
-        platform = self._safe_text(metadata.get("platform"))
-        if platform in CHANNEL_WELCOME_MESSAGES:
-            return platform
-        if channel.startswith("whatsapp:"):
-            return "whatsapp"
-        if channel.startswith("telegram:"):
-            return "telegram"
-        return None
+    async def _send_channel_activation_greetings(self) -> None:
+        await self._maybe_send_whatsapp_activation_greeting()
+        await self._maybe_send_telegram_activation_greeting()
 
-    async def _deliver_channel_welcome_if_needed(
+    async def _maybe_send_whatsapp_activation_greeting(self, allowed_phone: str | None = None) -> None:
+        adapter = self.registry.adapters.get("whatsapp")
+        if adapter is None:
+            return
+
+        try:
+            status = await adapter.get_status()  # type: ignore[attr-defined]
+            config = await adapter.get_config()  # type: ignore[attr-defined]
+        except Exception:
+            logger.exception("gateway.channel_activation whatsapp status/config lookup failed")
+            return
+
+        if not bool(status.get("connected")):
+            return
+
+        normalized_phone = self._safe_text(allowed_phone or config.get("allowed_phone"))
+        if not normalized_phone:
+            return
+
+        await self._send_channel_activation_greeting(
+            platform="whatsapp",
+            channel="whatsapp:{0}".format(normalized_phone),
+            channel_adapter=adapter,
+            metadata={
+                "connected": bool(status.get("connected")),
+                "allowed_phone": normalized_phone,
+            },
+        )
+
+    async def _maybe_send_telegram_activation_greeting(self) -> None:
+        adapter = self.registry.adapters.get("telegram")
+        if adapter is None:
+            return
+
+        try:
+            status = await adapter.get_status()  # type: ignore[attr-defined]
+        except Exception:
+            logger.exception("gateway.channel_activation telegram status lookup failed")
+            return
+
+        bot_status = status.get("bot")
+        if isinstance(bot_status, dict) and bot_status.get("status") == "error":
+            return
+
+        allowed_chat_id = self._coerce_int(status.get("allowed_chat_id"))
+        if allowed_chat_id is None:
+            return
+
+        await self._send_channel_activation_greeting(
+            platform="telegram",
+            channel="telegram:chat_{0}".format(allowed_chat_id),
+            channel_adapter=adapter,
+            metadata={
+                "allowed_chat_id": allowed_chat_id,
+                "allowed_user_id": self._coerce_int(status.get("allowed_user_id")),
+            },
+        )
+
+    async def _send_channel_activation_greeting(
         self,
         *,
-        request_record: dict[str, Any],
-        session_id: str,
+        platform: str,
         channel: str,
         channel_adapter: Any,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
-        if not bool(request_record.get("send_channel_welcome")):
+        welcome_message = CHANNEL_WELCOME_MESSAGES.get(platform)
+        if not welcome_message:
             return
 
-        welcome_message = self._safe_text(request_record.get("channel_welcome_message"))
-        platform = self._safe_text(request_record.get("channel_welcome_platform"))
-        request_id = self._safe_text(request_record.get("request_id"))
-        if not welcome_message or not platform:
-            self.session_store.release_channel_greeting_claim(channel)
+        claimed = self.session_store.claim_channel_greeting(
+            channel=channel,
+            platform=platform,
+            metadata=metadata,
+        )
+        if not claimed:
             return
 
+        session_id = self.session_store.current_session_id()
+        request_id = "channel_welcome_{0}".format(uuid4().hex)
         try:
             await channel_adapter.send(
                 {
@@ -688,10 +725,9 @@ class GatewayRuntime:
         except Exception:
             self.session_store.release_channel_greeting_claim(channel)
             logger.exception(
-                "gateway.channel_welcome failed request_id=%s channel=%s platform=%s",
-                request_id,
-                channel,
+                "gateway.channel_activation failed platform=%s channel=%s",
                 platform,
+                channel,
             )
             return
 
@@ -851,6 +887,9 @@ class GatewayRuntime:
             self_chat_only=self_chat_only,
         )
         self.adapter_errors.pop("whatsapp", None)
+        await self._maybe_send_whatsapp_activation_greeting(
+            allowed_phone=self._safe_text(response.get("allowed_phone")) or allowed_phone
+        )
         return response
 
     async def send_whatsapp_test(
@@ -875,6 +914,7 @@ class GatewayRuntime:
             raise KeyError("telegram")
         response = await adapter.sync_webhook()  # type: ignore[attr-defined]
         self.adapter_errors.pop("telegram", None)
+        await self._maybe_send_telegram_activation_greeting()
         return response
 
     async def clear_telegram_webhook(self, *, drop_pending_updates: bool = False) -> dict[str, Any]:
@@ -1072,6 +1112,14 @@ class GatewayRuntime:
             return float(value)
         except (TypeError, ValueError):
             return default
+
+    def _coerce_int(self, value: Any) -> int | None:
+        try:
+            if value is None:
+                return None
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     def _normalize_route(self, route: str) -> str:
         normalized = route.strip().lower()

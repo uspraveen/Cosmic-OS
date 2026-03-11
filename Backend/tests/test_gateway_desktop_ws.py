@@ -210,6 +210,8 @@ class FakeWhatsAppChannelAdapter:
 
     def __init__(self) -> None:
         self.sent_events: list[dict[str, object]] = []
+        self.allowed_phone = "+12153079021"
+        self.connected = True
 
     async def start(self) -> None:
         return
@@ -243,12 +245,38 @@ class FakeWhatsAppChannelAdapter:
             }
         )
 
+    async def get_status(self) -> dict[str, object]:
+        return {
+            "connected": self.connected,
+        }
+
+    async def get_config(self) -> dict[str, object]:
+        return {
+            "allowed_phone": self.allowed_phone,
+            "self_chat_only": False,
+        }
+
+    async def update_config(
+        self,
+        *,
+        allowed_phone: str | None = None,
+        self_chat_only: bool | None = None,
+    ) -> dict[str, object]:
+        if allowed_phone is not None:
+            self.allowed_phone = allowed_phone
+        return {
+            "allowed_phone": self.allowed_phone,
+            "self_chat_only": bool(self_chat_only),
+        }
+
 
 class FakeTelegramChannelAdapter:
     platform = "telegram"
 
     def __init__(self) -> None:
         self.sent_events: list[dict[str, object]] = []
+        self.allowed_chat_id = 12345
+        self.allowed_user_id = 12345
 
     async def start(self) -> None:
         return
@@ -295,7 +323,11 @@ class FakeTelegramChannelAdapter:
         )
 
     async def get_status(self) -> dict[str, object]:
-        return {"status": "connected"}
+        return {
+            "status": "connected",
+            "allowed_chat_id": self.allowed_chat_id,
+            "allowed_user_id": self.allowed_user_id,
+        }
 
     async def sync_webhook(self) -> dict[str, object]:
         return {"url": "https://example.com/channels/telegram/webhook"}
@@ -646,12 +678,11 @@ def test_whatsapp_incoming_emits_route_result_before_async_fulfillment(tmp_path)
         assert payload["route"] == "haiku"
 
         deadline = time.time() + 2.0
-        while len(whatsapp_adapter.sent_events) < 4 and time.time() < deadline:
+        while len(whatsapp_adapter.sent_events) < 3 and time.time() < deadline:
             time.sleep(0.01)
 
-    assert [event["type"] for event in whatsapp_adapter.sent_events[:4]] == [
+    assert [event["type"] for event in whatsapp_adapter.sent_events[:3]] == [
         "route_result",
-        "channel.welcome",
         "response.chunk",
         "response.complete",
     ]
@@ -695,131 +726,43 @@ def test_telegram_webhook_emits_route_result_before_async_fulfillment(tmp_path) 
         assert payload["status"] == "accepted"
 
         deadline = time.time() + 2.0
-        while len(telegram_adapter.sent_events) < 4 and time.time() < deadline:
+        while len(telegram_adapter.sent_events) < 3 and time.time() < deadline:
             time.sleep(0.01)
 
-        assert [event["type"] for event in telegram_adapter.sent_events[:4]] == [
+        assert [event["type"] for event in telegram_adapter.sent_events[:3]] == [
             "route_result",
-            "channel.welcome",
             "response.chunk",
             "response.complete",
         ]
         assert telegram_adapter.sent_events[0]["request_id"] == payload["request_id"]
 
 
-def test_whatsapp_first_contact_welcome_is_only_sent_once(tmp_path) -> None:
+def test_whatsapp_activation_sends_welcome_once_on_runtime_start(tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="haiku")
     whatsapp_adapter = FakeWhatsAppChannelAdapter()
-
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        app.state.gateway_runtime = runtime
-        await runtime.start()
-        runtime.registry.register(whatsapp_adapter)
-        try:
-            yield
-        finally:
-            await runtime.stop()
-
-    app = FastAPI(lifespan=lifespan)
-    app.include_router(channel_router)
-
-    with TestClient(app) as client:
-        first = client.post(
-            "/internal/channels/whatsapp/incoming",
-            headers={"X-Internal-Token": "internal-token"},
-            json={
-                "sender": {"phone": "+12153079021"},
-                "text": "hello cosmic",
-            },
-        )
-        assert first.status_code == 200
-
-        deadline = time.time() + 2.0
-        while len(whatsapp_adapter.sent_events) < 4 and time.time() < deadline:
-            time.sleep(0.01)
-
-        second = client.post(
-            "/internal/channels/whatsapp/incoming",
-            headers={"X-Internal-Token": "internal-token"},
-            json={
-                "sender": {"phone": "+12153079021"},
-                "text": "second hello",
-            },
-        )
-        assert second.status_code == 200
-
-        deadline = time.time() + 2.0
-        while len(whatsapp_adapter.sent_events) < 7 and time.time() < deadline:
-            time.sleep(0.01)
-
-    welcome_events = [event for event in whatsapp_adapter.sent_events if event.get("type") == "channel.welcome"]
-    assert len(welcome_events) == 1
-    assert welcome_events[0]["content"] == "COSMIC is connected on WhatsApp. You can message me here anytime."
+    runtime.registry.register(whatsapp_adapter)
+    asyncio.run(runtime.start())
+    try:
+        welcome_events = [event for event in whatsapp_adapter.sent_events if event.get("type") == "channel.welcome"]
+        assert len(welcome_events) == 1
+        assert welcome_events[0]["channel"] == "whatsapp:+12153079021"
+        assert welcome_events[0]["content"] == "COSMIC is connected on WhatsApp. You can message me here anytime."
+    finally:
+        asyncio.run(runtime.stop())
 
 
-def test_telegram_first_contact_welcome_is_only_sent_once(tmp_path) -> None:
+def test_telegram_activation_sends_welcome_once_on_runtime_start(tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="haiku")
     telegram_adapter = FakeTelegramChannelAdapter()
-
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        app.state.gateway_runtime = runtime
-        await runtime.start()
-        runtime.registry.register(telegram_adapter)
-        try:
-            yield
-        finally:
-            await runtime.stop()
-
-    app = FastAPI(lifespan=lifespan)
-    app.include_router(channel_router)
-
-    webhook_payload = {
-        "update_id": 1,
-        "message": {
-            "message_id": 42,
-            "chat": {"id": 12345, "type": "private"},
-            "from": {"id": 12345},
-            "text": "hello from telegram",
-        },
-    }
-
-    with TestClient(app) as client:
-        first = client.post(
-            "/channels/telegram/webhook",
-            headers={"X-Telegram-Bot-Api-Secret-Token": "telegram-secret"},
-            json=webhook_payload,
-        )
-        assert first.status_code == 200
-
-        deadline = time.time() + 2.0
-        while len(telegram_adapter.sent_events) < 4 and time.time() < deadline:
-            time.sleep(0.01)
-
-        second_payload = {
-            "update_id": 2,
-            "message": {
-                "message_id": 43,
-                "chat": {"id": 12345, "type": "private"},
-                "from": {"id": 12345},
-                "text": "second hello from telegram",
-            },
-        }
-        second = client.post(
-            "/channels/telegram/webhook",
-            headers={"X-Telegram-Bot-Api-Secret-Token": "telegram-secret"},
-            json=second_payload,
-        )
-        assert second.status_code == 200
-
-        deadline = time.time() + 2.0
-        while len(telegram_adapter.sent_events) < 7 and time.time() < deadline:
-            time.sleep(0.01)
-
-    welcome_events = [event for event in telegram_adapter.sent_events if event.get("type") == "channel.welcome"]
-    assert len(welcome_events) == 1
-    assert welcome_events[0]["content"] == "COSMIC is connected on Telegram. You can message me here anytime."
+    runtime.registry.register(telegram_adapter)
+    asyncio.run(runtime.start())
+    try:
+        welcome_events = [event for event in telegram_adapter.sent_events if event.get("type") == "channel.welcome"]
+        assert len(welcome_events) == 1
+        assert welcome_events[0]["channel"] == "telegram:chat_12345"
+        assert welcome_events[0]["content"] == "COSMIC is connected on Telegram. You can message me here anytime."
+    finally:
+        asyncio.run(runtime.stop())
 
 
 def test_internal_telegram_media_route_uses_internal_token(tmp_path) -> None:
