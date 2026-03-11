@@ -7,6 +7,22 @@ NormalizedMessage = dict[str, Any]
 MessageCallback = Callable[[NormalizedMessage], Awaitable[Any]]
 
 
+class ChannelDeliveryError(Exception):
+    """Base class for adapter delivery failures."""
+
+
+class ChannelUnavailableError(ChannelDeliveryError):
+    """Raised when the concrete channel is currently unavailable."""
+
+
+class RetryableDeliveryError(ChannelDeliveryError):
+    """Raised when delivery failed transiently and should be retried."""
+
+
+class PermanentDeliveryError(ChannelDeliveryError):
+    """Raised when delivery failed permanently and should not be retried."""
+
+
 class ChannelAdapter(ABC):
     """Base class for Gateway channel adapters."""
 

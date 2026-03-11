@@ -10,7 +10,13 @@ from typing import Any
 
 import httpx
 
-from .base import ChannelAdapter, MessageCallback, NormalizedMessage
+from .base import (
+    ChannelAdapter,
+    MessageCallback,
+    NormalizedMessage,
+    PermanentDeliveryError,
+    RetryableDeliveryError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -477,7 +483,7 @@ class WhatsAppAdapter(ChannelAdapter):
         event_type: str | None = None,
     ) -> None:
         if self._http is None:
-            raise RuntimeError("WhatsAppAdapter.start() must be called before send()")
+            raise RetryableDeliveryError("WhatsApp bridge client is not initialized")
 
         chunks = self._chunk_text(text)
         if not chunks:
@@ -500,12 +506,24 @@ class WhatsAppAdapter(ChannelAdapter):
                 len(text),
             )
             for index, chunk in enumerate(chunks):
-                response = await self._http.post(
-                    self.config.send_path,
-                    json={"number": recipient, "message": chunk},
-                    headers=headers,
-                )
-                response.raise_for_status()
+                try:
+                    response = await self._http.post(
+                        self.config.send_path,
+                        json={"number": recipient, "message": chunk},
+                        headers=headers,
+                    )
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    status_code = exc.response.status_code
+                    if 400 <= status_code < 500 and status_code != 429:
+                        raise PermanentDeliveryError(
+                            f"WhatsApp bridge rejected outbound send with status {status_code}"
+                        ) from exc
+                    raise RetryableDeliveryError(
+                        f"WhatsApp bridge send failed with status {status_code}"
+                    ) from exc
+                except httpx.HTTPError as exc:
+                    raise RetryableDeliveryError("WhatsApp bridge send failed") from exc
                 if index + 1 < len(chunks) and self.config.send_delay_ms > 0:
                     await asyncio.sleep(self.config.send_delay_ms / 1000.0)
             logger.info(

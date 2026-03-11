@@ -260,6 +260,7 @@ async def desktop_websocket(websocket: WebSocket) -> None:
     channel = websocket.state.channel
     device_id = websocket.state.device_id
     await adapter.register_connection(websocket, device_id=device_id, channel=channel)
+    runtime.notify_channel_active(channel)
 
     try:
         while True:
@@ -345,6 +346,7 @@ async def whatsapp_incoming(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     processed = await runtime.process_incoming_user_message(result)
+    runtime.notify_channel_active(processed["channel"])
     logger.info(
         "whatsapp.incoming classified request_id=%s route=%s elapsed_ms=%.1f",
         processed.get("request_id"),
@@ -435,6 +437,7 @@ async def telegram_webhook(
         )
 
     processed = await runtime.process_incoming_user_message(normalized)
+    runtime.notify_channel_active(processed["channel"])
     logger.info(
         "telegram.webhook classified request_id=%s route=%s elapsed_ms=%.1f",
         processed.get("request_id"),

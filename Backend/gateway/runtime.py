@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 import logging
 import time
 from typing import Any
@@ -10,11 +13,13 @@ from uuid import uuid4
 
 from .adapters import HaikuAdapter, PerplexityAdapter
 from .artifact_store import ArtifactStore
+from .channels.base import ChannelUnavailableError, PermanentDeliveryError, RetryableDeliveryError
 from .channels.desktop import DesktopAdapter
 from .channels.registry import ChannelAdapterRegistry
 from .channels.telegram import TelegramAdapter, TelegramConfig
 from .channels.whatsapp import WhatsAppAdapter, WhatsAppConfig
 from .config import GatewayConfig
+from .delivery_queue_store import DeliveryQueueStore, utcnow_iso
 from .orchestrator_client import OrchestratorClient
 from .router_client import ModelRouterClient
 from .routing_audit_store import RoutingAuditStore
@@ -26,6 +31,13 @@ logger = logging.getLogger(__name__)
 CHANNEL_WELCOME_MESSAGES = {
     "whatsapp": "COSMIC is connected on WhatsApp. You can message me here anytime.",
     "telegram": "COSMIC is connected on Telegram. You can message me here anytime.",
+}
+EPHEMERAL_CHANNEL_EVENT_TYPES = {
+    "route_result",
+    "response.chunk",
+    "response.thinking.chunk",
+    "task.created",
+    "task.progress",
 }
 
 
@@ -75,6 +87,7 @@ class GatewayRuntime:
         self.session_store = SessionStore(config.sessions_db_path)
         self.routing_audit_store = RoutingAuditStore(config.routing_audit_db_path)
         self.artifact_store = ArtifactStore(config.artifacts_db_path)
+        self.delivery_queue_store = DeliveryQueueStore(config.delivery_queue_db_path)
         self.haiku_adapter = HaikuAdapter(
             api_key=config.haiku_api_key,
             model=config.haiku_model,
@@ -95,18 +108,29 @@ class GatewayRuntime:
         self.pending_input_requests: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self.active_requests: dict[str, ActiveRequest] = {}
         self.active_requests_by_task: dict[str, str] = {}
+        self._delivery_worker: asyncio.Task[None] | None = None
+        self._delivery_wakeup = asyncio.Event()
 
     async def start(self) -> None:
         self.session_store.initialize()
         self.routing_audit_store.initialize()
         self.artifact_store.initialize()
+        self.delivery_queue_store.initialize()
         await self.model_router.start()
         await self.orchestrator.start()
         await self._register_adapters()
+        self._delivery_worker = asyncio.create_task(
+            self._delivery_worker_loop(),
+            name="gateway-delivery-worker",
+        )
         await self._send_channel_activation_greetings()
         self.started = True
 
     async def stop(self) -> None:
+        if self._delivery_worker is not None:
+            self._delivery_worker.cancel()
+            await asyncio.gather(self._delivery_worker, return_exceptions=True)
+            self._delivery_worker = None
         workers = [state.worker for state in self.active_requests.values() if state.worker is not None]
         for worker in workers:
             worker.cancel()
@@ -282,7 +306,13 @@ class GatewayRuntime:
         async def send(event: dict[str, Any]) -> None:
             if active_request is not None:
                 self._track_partial_stream(active_request, event)
-            await channel_adapter.send(event, channel=channel)
+            await self._deliver_or_queue_channel_event(
+                {
+                    **event,
+                    "channel": channel,
+                },
+                channel=channel,
+            )
 
         def store_assistant_message(
             content: str,
@@ -757,7 +787,7 @@ class GatewayRuntime:
     ) -> dict[str, Any]:
         session_id = self._resolve_session_id(requested_session_id)
         history_tail = self.session_store.get_history_tail(session_id, limit=30)
-        pending_inputs = list(self.pending_input_requests.get(channel, []))
+        pending_inputs = self._pending_inputs_for_channel(channel)
         active_tasks = await self._active_task_summaries(session_id=session_id, channel=channel)
         return {
             "type": "resume.ok",
@@ -769,12 +799,244 @@ class GatewayRuntime:
             "pending_inputs": pending_inputs,
         }
 
+    def notify_channel_active(self, channel: str | None) -> None:
+        if not channel:
+            return
+        self._delivery_wakeup.set()
+
     async def deliver_channel_event(self, event: dict[str, Any]) -> None:
         channel = self._safe_text(event.get("channel"))
+        await self._deliver_or_queue_channel_event(event, channel=channel)
+
+    def _pending_inputs_for_channel(self, channel: str) -> list[dict[str, Any]]:
+        pending = list(self.pending_input_requests.get(channel, []))
+        persisted = self.delivery_queue_store.list_pending_inputs(channel)
+        if not persisted:
+            return pending
+
+        seen: set[tuple[str | None, str | None]] = set()
+        merged: list[dict[str, Any]] = []
+        for item in pending + persisted:
+            key = (
+                self._safe_text(item.get("task_id")),
+                self._safe_text(item.get("request_id")),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+        return merged
+
+    async def _delivery_worker_loop(self) -> None:
+        while True:
+            processed = await self._process_pending_deliveries_once()
+            if processed > 0:
+                continue
+            try:
+                await asyncio.wait_for(self._delivery_wakeup.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            finally:
+                self._delivery_wakeup.clear()
+
+    async def _process_pending_deliveries_once(self, *, limit: int = 25) -> int:
+        deliveries = self.delivery_queue_store.fetch_due(limit=limit)
+        for record in deliveries:
+            await self._attempt_pending_delivery(record)
+        return len(deliveries)
+
+    async def _attempt_pending_delivery(self, record: dict[str, Any]) -> None:
+        delivery_id = self._safe_text(record.get("delivery_id")) or ""
+        channel = self._safe_text(record.get("channel"))
+        payload = record.get("payload")
+        attempts = int(record.get("attempts") or 0)
+        event_type = self._safe_text(record.get("event_type")) or "unknown"
+        if not delivery_id or not channel or not isinstance(payload, dict):
+            return
+
+        try:
+            await self._send_channel_event_now(payload, channel)
+        except PermanentDeliveryError as exc:
+            self.delivery_queue_store.mark_dead_letter(
+                delivery_id,
+                attempts=attempts + 1,
+                last_error=str(exc),
+            )
+            logger.warning(
+                "gateway.delivery deadlettered delivery_id=%s channel=%s event_type=%s reason=%s",
+                delivery_id,
+                channel,
+                event_type,
+                exc,
+            )
+            return
+        except Exception as exc:
+            next_attempts = attempts + 1
+            if next_attempts >= self.config.delivery_max_attempts:
+                self.delivery_queue_store.mark_dead_letter(
+                    delivery_id,
+                    attempts=next_attempts,
+                    last_error=str(exc),
+                )
+                logger.warning(
+                    "gateway.delivery deadlettered delivery_id=%s channel=%s event_type=%s attempts=%s reason=%s",
+                    delivery_id,
+                    channel,
+                    event_type,
+                    next_attempts,
+                    exc,
+                )
+                return
+
+            self.delivery_queue_store.reschedule(
+                delivery_id,
+                next_attempts=next_attempts,
+                available_at=self._delivery_available_at(next_attempts),
+                last_error=str(exc),
+            )
+            logger.info(
+                "gateway.delivery rescheduled delivery_id=%s channel=%s event_type=%s attempts=%s reason=%s",
+                delivery_id,
+                channel,
+                event_type,
+                next_attempts,
+                exc,
+            )
+            return
+
+        self.delivery_queue_store.mark_delivered(delivery_id)
+        logger.info(
+            "gateway.delivery delivered delivery_id=%s channel=%s event_type=%s",
+            delivery_id,
+            channel,
+            event_type,
+        )
+
+    async def _deliver_or_queue_channel_event(
+        self,
+        event: dict[str, Any],
+        *,
+        channel: str | None = None,
+    ) -> str:
+        resolved_channel = self._safe_text(channel or event.get("channel"))
+        if not resolved_channel:
+            raise ValueError("Outbound event is missing channel")
+        event_type = self._safe_text(event.get("type")) or "unknown"
+        dedupe_key = self._delivery_dedupe_key(event, resolved_channel)
+
+        try:
+            await self._send_channel_event_now(event, resolved_channel)
+            return "sent"
+        except PermanentDeliveryError as exc:
+            if dedupe_key is not None:
+                self.delivery_queue_store.mark_dead_letter(
+                    self.delivery_queue_store.enqueue(
+                        dedupe_key=dedupe_key,
+                        channel=resolved_channel,
+                        event_type=event_type,
+                        payload={**event, "channel": resolved_channel},
+                        last_error=str(exc),
+                    ),
+                    attempts=1,
+                    last_error=str(exc),
+                )
+            logger.warning(
+                "gateway.delivery permanent_failure channel=%s event_type=%s reason=%s",
+                resolved_channel,
+                event_type,
+                exc,
+            )
+            return "deadlettered"
+        except Exception as exc:
+            if dedupe_key is None:
+                logger.info(
+                    "gateway.delivery dropped_ephemeral channel=%s event_type=%s reason=%s",
+                    resolved_channel,
+                    event_type,
+                    exc,
+                )
+                return "dropped"
+
+            self.delivery_queue_store.enqueue(
+                dedupe_key=dedupe_key,
+                channel=resolved_channel,
+                event_type=event_type,
+                payload={**event, "channel": resolved_channel},
+                last_error=str(exc),
+            )
+            self._delivery_wakeup.set()
+            logger.info(
+                "gateway.delivery queued channel=%s event_type=%s reason=%s",
+                resolved_channel,
+                event_type,
+                exc,
+            )
+            return "queued"
+
+    async def _send_channel_event_now(self, event: dict[str, Any], channel: str) -> None:
         adapter = self.registry.get_adapter(channel)
         if adapter is None:
-            raise ValueError(f"No adapter registered for channel: {channel!r}")
+            raise ChannelUnavailableError(f"No adapter registered for channel: {channel!r}")
         await adapter.send(event, channel=channel)
+
+    def _delivery_dedupe_key(self, event: dict[str, Any], channel: str) -> str | None:
+        event_type = self._safe_text(event.get("type")) or ""
+        if event_type in EPHEMERAL_CHANNEL_EVENT_TYPES:
+            return None
+
+        request_id = self._safe_text(event.get("request_id"))
+        task_id = self._safe_text(event.get("task_id"))
+        session_id = self._safe_text(event.get("session_id"))
+
+        if event_type == "response.complete":
+            if channel.startswith("desktop:"):
+                return None
+            if request_id:
+                return f"{channel}:{event_type}:{request_id}"
+            return None
+
+        if event_type == "task.input_required":
+            identifier = task_id or request_id or session_id
+            return f"{channel}:{event_type}:{identifier}" if identifier else self._event_fingerprint(event, channel)
+
+        if event_type == "task.completed":
+            if not self._task_completed_has_visible_output(event):
+                return None
+            identifier = task_id or request_id or session_id
+            return f"{channel}:{event_type}:{identifier}" if identifier else self._event_fingerprint(event, channel)
+
+        if event_type in {"task.failed", "task.cancelled", "error"}:
+            identifier = task_id or request_id or session_id
+            return f"{channel}:{event_type}:{identifier}" if identifier else self._event_fingerprint(event, channel)
+
+        return None
+
+    def _task_completed_has_visible_output(self, event: dict[str, Any]) -> bool:
+        result = event.get("result")
+        if isinstance(result, dict):
+            for key in ("content", "text", "summary", "message"):
+                if self._safe_text(result.get(key)):
+                    return True
+        elif isinstance(result, str) and result.strip():
+            return True
+        return bool(self._safe_text(event.get("content")) or self._safe_text(event.get("message")))
+
+    def _event_fingerprint(self, event: dict[str, Any], channel: str) -> str:
+        payload = {
+            "channel": channel,
+            "event": event,
+        }
+        digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        return f"{channel}:fingerprint:{digest}"
+
+    def _delivery_available_at(self, attempts: int) -> str:
+        backoff = min(
+            self.config.delivery_retry_max_sec,
+            self.config.delivery_retry_base_sec * (2 ** max(0, attempts - 1)),
+        )
+        if backoff <= 0:
+            return utcnow_iso()
+        return (datetime.now(timezone.utc) + timedelta(seconds=backoff)).isoformat().replace("+00:00", "Z")
 
     def list_channels(self) -> list[dict[str, Any]]:
         channels: list[dict[str, Any]] = []
@@ -958,6 +1220,7 @@ class GatewayRuntime:
             "orchestrator_url": self.config.orchestrator_url,
             "channels": self.list_channels(),
             "current_session_id": self.session_store.current_session_id(),
+            "delivery_queue": self.delivery_queue_store.summary(),
         }
 
     async def readiness_payload(self) -> dict[str, Any]:
@@ -968,6 +1231,7 @@ class GatewayRuntime:
             "healthy_channel_count": len(healthy_channels),
             "adapter_errors": self.adapter_errors,
             "orchestrator_url": self.config.orchestrator_url,
+            "delivery_queue": self.delivery_queue_store.summary(),
         }
 
     async def _active_task_summaries(self, *, session_id: str, channel: str) -> list[dict[str, Any]]:
@@ -1155,19 +1419,18 @@ class GatewayRuntime:
                 return
             raise
         except Exception as exc:
-            adapter = self.registry.get_adapter(state.channel)
-            if adapter is not None:
-                await adapter.send(
-                    {
-                        "type": "error",
-                        "request_id": state.request_id,
-                        "session_id": state.session_id,
-                        "task_id": state.task_id,
-                        "code": "UPSTREAM_ERROR",
-                        "message": str(exc),
-                    },
-                    channel=state.channel,
-                )
+            await self._deliver_or_queue_channel_event(
+                {
+                    "type": "error",
+                    "request_id": state.request_id,
+                    "session_id": state.session_id,
+                    "task_id": state.task_id,
+                    "channel": state.channel,
+                    "code": "UPSTREAM_ERROR",
+                    "message": str(exc),
+                },
+                channel=state.channel,
+            )
         finally:
             if state.cancel_requested and state.partial_content and not state.completed:
                 self._append_session_message(
@@ -1184,10 +1447,7 @@ class GatewayRuntime:
             self._finalize_active_request(state)
 
     async def _emit_cancelled_event(self, state: ActiveRequest) -> None:
-        adapter = self.registry.get_adapter(state.channel)
-        if adapter is None:
-            return
-        await adapter.send(
+        await self._deliver_or_queue_channel_event(
             {
                 "type": "task.cancelled",
                 "request_id": state.request_id,

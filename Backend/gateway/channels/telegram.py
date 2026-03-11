@@ -11,7 +11,13 @@ from typing import Any
 
 import httpx
 
-from .base import ChannelAdapter, MessageCallback, NormalizedMessage
+from .base import (
+    ChannelAdapter,
+    MessageCallback,
+    NormalizedMessage,
+    PermanentDeliveryError,
+    RetryableDeliveryError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -410,15 +416,39 @@ class TelegramAdapter(ChannelAdapter):
 
     async def _call_api(self, method: str, *, json: dict[str, Any] | None = None) -> dict[str, Any]:
         if self._http is None:
-            raise RuntimeError("Telegram adapter HTTP client is not initialized")
-        response = await self._http.post("{0}/{1}".format(self.config.bot_api_base, method), json=json or {})
-        response.raise_for_status()
+            raise RetryableDeliveryError("Telegram adapter HTTP client is not initialized")
+        try:
+            response = await self._http.post("{0}/{1}".format(self.config.bot_api_base, method), json=json or {})
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            if 400 <= status_code < 500 and status_code != 429:
+                raise PermanentDeliveryError(
+                    f"Telegram Bot API rejected {method} with status {status_code}"
+                ) from exc
+            raise RetryableDeliveryError(
+                f"Telegram Bot API {method} failed with status {status_code}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise RetryableDeliveryError(f"Telegram Bot API {method} request failed") from exc
         payload = response.json()
         if not isinstance(payload, dict):
-            raise RuntimeError("Telegram Bot API returned a non-object payload")
+            raise RetryableDeliveryError("Telegram Bot API returned a non-object payload")
         if not payload.get("ok", False):
             description = self._coerce_str(payload.get("description")) or "Telegram Bot API request failed"
-            raise RuntimeError(description)
+            lowered = description.lower()
+            if any(
+                marker in lowered
+                for marker in (
+                    "chat not found",
+                    "bot was blocked",
+                    "forbidden",
+                    "user is deactivated",
+                    "have no rights",
+                )
+            ):
+                raise PermanentDeliveryError(description)
+            raise RetryableDeliveryError(description)
         result = payload.get("result")
         if isinstance(result, dict):
             return result

@@ -56,6 +56,10 @@ class GatewayConfig:
     sessions_db_path: Path = BACKEND_ROOT / "gateway" / "sessions.db"
     routing_audit_db_path: Path = BACKEND_ROOT / "gateway" / "routing_audit.db"
     artifacts_db_path: Path = BACKEND_ROOT / "gateway" / "artifacts.db"
+    delivery_queue_db_path: Path = BACKEND_ROOT / "gateway" / "delivery_queue.db"
+    delivery_retry_base_sec: float = 1.0
+    delivery_retry_max_sec: float = 120.0
+    delivery_max_attempts: int = 12
     haiku_api_key: str = ""
     haiku_model: str = "claude-haiku-4-5"
     anthropic_version: str = "2023-06-01"
@@ -105,6 +109,24 @@ class GatewayConfig:
                     str(BACKEND_ROOT / "gateway" / "artifacts.db"),
                 )
             ).expanduser(),
+            delivery_queue_db_path=Path(
+                os.getenv(
+                    "GATEWAY_DELIVERY_QUEUE_DB_PATH",
+                    str(BACKEND_ROOT / "gateway" / "delivery_queue.db"),
+                )
+            ).expanduser(),
+            delivery_retry_base_sec=max(
+                0.25,
+                _env_float("GATEWAY_DELIVERY_RETRY_BASE_SEC", 1.0),
+            ),
+            delivery_retry_max_sec=max(
+                1.0,
+                _env_float("GATEWAY_DELIVERY_RETRY_MAX_SEC", 120.0),
+            ),
+            delivery_max_attempts=max(
+                1,
+                _env_int("GATEWAY_DELIVERY_MAX_ATTEMPTS", 12),
+            ),
             haiku_api_key=(
                 os.getenv("HAIKU_API_KEY")
                 or os.getenv("ANTHROPIC_API_KEY")

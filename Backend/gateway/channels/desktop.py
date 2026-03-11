@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import WebSocket
 
-from .base import ChannelAdapter, MessageCallback, NormalizedMessage
+from .base import ChannelAdapter, ChannelUnavailableError, MessageCallback, NormalizedMessage
 
 
 @dataclass(slots=True)
@@ -90,12 +90,15 @@ class DesktopAdapter(ChannelAdapter):
     async def send(self, message: dict[str, Any], channel: str | None = None) -> None:
         connection = await self._resolve_connection(channel)
         if connection is None:
-            return
+            raise ChannelUnavailableError(f"Desktop channel is not connected: {channel or self.platform!r}")
 
         try:
             await connection.websocket.send_json(message)
-        except Exception:
+        except Exception as exc:
             await self.unregister_connection(connection.channel, connection.websocket)
+            raise ChannelUnavailableError(
+                f"Desktop channel became unavailable during delivery: {connection.channel!r}"
+            ) from exc
 
     async def get_status(self) -> dict[str, Any]:
         async with self._lock:

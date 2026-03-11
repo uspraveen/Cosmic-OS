@@ -8,6 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from gateway.channels.base import ChannelUnavailableError
 from gateway.channels.routes import router as channel_router
 from gateway.config import GatewayConfig
 from gateway.runtime import GatewayRuntime
@@ -342,6 +343,39 @@ class FakeTelegramChannelAdapter:
         return (b"telegram-media", "image/jpeg")
 
 
+class FlakyWhatsAppChannelAdapter(FakeWhatsAppChannelAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_response_complete = True
+
+    async def send(self, message: dict[str, object], channel: str | None = None) -> None:
+        if self.fail_response_complete and message.get("type") == "response.complete":
+            raise ChannelUnavailableError("bridge temporarily unavailable")
+        await super().send(message, channel=channel)
+
+
+class FlakyDesktopChannelAdapter:
+    platform = "desktop"
+
+    def __init__(self) -> None:
+        self.sent_events: list[dict[str, object]] = []
+        self.available = False
+
+    async def start(self) -> None:
+        return
+
+    async def stop(self) -> None:
+        return
+
+    async def on_message(self, callback) -> None:
+        self._callback = callback
+
+    async def send(self, message: dict[str, object], channel: str | None = None) -> None:
+        if not self.available:
+            raise ChannelUnavailableError("desktop socket offline")
+        self.sent_events.append({**message, "channel": channel or message.get("channel")})
+
+
 def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
     runtime = GatewayRuntime(
         GatewayConfig(
@@ -354,6 +388,7 @@ def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
             sessions_db_path=tmp_path / "sessions.db",
             routing_audit_db_path=tmp_path / "routing_audit.db",
             artifacts_db_path=tmp_path / "artifacts.db",
+            delivery_queue_db_path=tmp_path / "delivery_queue.db",
         )
     )
 
@@ -763,6 +798,83 @@ def test_telegram_activation_sends_welcome_once_on_runtime_start(tmp_path) -> No
         assert welcome_events[0]["content"] == "COSMIC is connected on Telegram. You can message me here anytime."
     finally:
         asyncio.run(runtime.stop())
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_final_response_is_queued_and_retried_when_channel_send_fails(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="haiku")
+    flaky_adapter = FlakyWhatsAppChannelAdapter()
+    runtime.registry.register(flaky_adapter)
+    await runtime.start()
+    try:
+        processed = await runtime.process_incoming_user_message(
+            {
+                "content": "hello from whatsapp",
+                "channel": "whatsapp:+12153079021",
+                "metadata": {"platform": "whatsapp"},
+            }
+        )
+        runtime.start_request_fulfillment(processed)
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            if any(event.get("type") == "response.chunk" for event in flaky_adapter.sent_events):
+                break
+            await asyncio.sleep(0.01)
+
+        assert any(event.get("type") == "response.chunk" for event in flaky_adapter.sent_events)
+        assert not any(event.get("type") == "response.complete" for event in flaky_adapter.sent_events)
+        assert runtime.delivery_queue_store.summary()["pending_count"] == 1
+
+        flaky_adapter.fail_response_complete = False
+        runtime.notify_channel_active("whatsapp:+12153079021")
+
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            if any(event.get("type") == "response.complete" for event in flaky_adapter.sent_events):
+                break
+            await asyncio.sleep(0.05)
+
+        assert any(event.get("type") == "response.complete" for event in flaky_adapter.sent_events)
+        assert runtime.delivery_queue_store.summary()["pending_count"] == 0
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_offline_desktop_task_input_is_held_until_channel_returns(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="haiku")
+    desktop_adapter = FlakyDesktopChannelAdapter()
+    runtime.registry.register(desktop_adapter)
+    await runtime.start()
+    try:
+        event = {
+            "type": "task.input_required",
+            "request_id": "req_input_hold",
+            "task_id": "tsk_input_hold",
+            "session_id": "sess_20260310",
+            "channel": "desktop:desk_hold",
+            "question": "Pick one option.",
+            "options": ["A", "B"],
+        }
+
+        await runtime.deliver_channel_event(event)
+        assert runtime.delivery_queue_store.summary()["pending_count"] == 1
+        assert desktop_adapter.sent_events == []
+
+        desktop_adapter.available = True
+        runtime.notify_channel_active("desktop:desk_hold")
+
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            if desktop_adapter.sent_events:
+                break
+            await asyncio.sleep(0.05)
+
+        assert desktop_adapter.sent_events[0]["type"] == "task.input_required"
+        assert runtime.delivery_queue_store.summary()["pending_count"] == 0
+    finally:
+        await runtime.stop()
 
 
 def test_internal_telegram_media_route_uses_internal_token(tmp_path) -> None:
