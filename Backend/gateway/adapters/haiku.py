@@ -7,7 +7,7 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from .prompts import DIRECT_ASSISTANT_SYSTEM_PROMPT
+from .prompts import build_direct_assistant_system_prompt
 from .response_processor import LLMStreamProcessor, normalize_conversation_history
 
 
@@ -50,6 +50,7 @@ class HaikuAdapter(LLMStreamProcessor):
         send,
         store_assistant_message,
         channel: str,
+        memory_context: str | None = None,
     ) -> None:
         if not self.api_key:
             raise RuntimeError("ANTHROPIC_API_KEY is not configured on the Gateway VM.")
@@ -62,7 +63,7 @@ class HaikuAdapter(LLMStreamProcessor):
 
         async def text_stream() -> AsyncIterator[str]:
             nonlocal stop_reason, thinking_text, usage
-            async for payload in self._stream_events(history):
+            async for payload in self._stream_events(history, memory_context=memory_context):
                 payload_type = str(payload.get("type") or "").strip()
                 if payload_type == "usage":
                     usage = self._merge_usage(usage, payload.get("usage"))
@@ -130,13 +131,67 @@ class HaikuAdapter(LLMStreamProcessor):
             route="haiku",
         )
 
-    async def _stream_events(self, history: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
+    async def generate_text(
+        self,
+        *,
+        system_prompt: str,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+    ) -> tuple[str, dict[str, int], str | None]:
+        if not self.api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is not configured on the Gateway VM.")
+        if not self.model:
+            raise RuntimeError("HAIKU_MODEL is not configured on the Gateway VM.")
+
+        url = "https://api.anthropic.com/v1/messages"
+        payload = {
+            "model": self.model,
+            "max_tokens": max(256, int(max_tokens)),
+            "system": system_prompt,
+            "messages": messages,
+        }
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": self.anthropic_version,
+            "content-type": "application/json",
+        }
+
+        response = await self._client.post(url, headers=headers, json=payload)
+        if response.status_code >= 400:
+            raise RuntimeError(self._error_from_response(response.content, response.status_code))
+
+        body = response.json()
+        if not isinstance(body, dict):
+            raise RuntimeError("Anthropic Haiku API returned a non-object response")
+
+        content_blocks = body.get("content")
+        text_parts: list[str] = []
+        if isinstance(content_blocks, list):
+            for block in content_blocks:
+                if not isinstance(block, dict):
+                    continue
+                if str(block.get("type") or "").strip() != "text":
+                    continue
+                text = str(block.get("text") or "")
+                if text:
+                    text_parts.append(text)
+
+        usage = self._merge_usage({}, body.get("usage"))
+        stop_reason = str(body.get("stop_reason") or "").strip() or None
+        return "".join(text_parts).strip(), usage, stop_reason
+
+    async def _stream_events(
+        self,
+        history: list[dict[str, Any]],
+        *,
+        memory_context: str | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
         url = "https://api.anthropic.com/v1/messages"
         payload: dict[str, Any] = {
             "model": self.model,
             "max_tokens": self.max_tokens,
             "stream": True,
-            "system": DIRECT_ASSISTANT_SYSTEM_PROMPT,
+            "system": build_direct_assistant_system_prompt(memory_context),
             "messages": self._build_messages(history),
         }
         if self.thinking_budget_tokens > 0:

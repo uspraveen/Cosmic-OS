@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from .prompts import DIRECT_ASSISTANT_SYSTEM_PROMPT
+from .prompts import build_direct_assistant_system_prompt
 from .response_processor import LLMStreamProcessor, normalize_conversation_history
 
 
@@ -39,6 +39,7 @@ class PerplexityAdapter(LLMStreamProcessor):
         send,
         store_assistant_message,
         channel: str,
+        memory_context: str | None = None,
     ) -> None:
         if not self.api_key:
             raise RuntimeError("PERPLEXITY_API_KEY is not configured on the Gateway VM.")
@@ -50,7 +51,7 @@ class PerplexityAdapter(LLMStreamProcessor):
 
         async def stream_text() -> AsyncIterator[str]:
             nonlocal source_task, citations
-            async for text, citation_batch in self._stream_events(history):
+            async for text, citation_batch in self._stream_events(history, memory_context=memory_context):
                 if citation_batch and not source_task:
                     citations = citation_batch
                     source_task = asyncio.create_task(self._enrich_sources(citation_batch))
@@ -87,11 +88,16 @@ class PerplexityAdapter(LLMStreamProcessor):
             route="perplexity",
         )
 
-    async def _stream_events(self, history: list[dict[str, Any]]) -> AsyncIterator[tuple[str, list[str]]]:
+    async def _stream_events(
+        self,
+        history: list[dict[str, Any]],
+        *,
+        memory_context: str | None = None,
+    ) -> AsyncIterator[tuple[str, list[str]]]:
         url = "https://api.perplexity.ai/chat/completions"
         payload = {
             "model": self.model,
-            "messages": self._build_messages(history),
+            "messages": self._build_messages(history, memory_context=memory_context),
             "stream": True,
         }
         headers = {
@@ -128,8 +134,13 @@ class PerplexityAdapter(LLMStreamProcessor):
                     raise RuntimeError(f"Perplexity API error: {exc}") from exc
                 await asyncio.sleep(0.5 * (2**attempt))
 
-    def _build_messages(self, history: list[dict[str, Any]]) -> list[dict[str, str]]:
-        messages = [{"role": "system", "content": DIRECT_ASSISTANT_SYSTEM_PROMPT}]
+    def _build_messages(
+        self,
+        history: list[dict[str, Any]],
+        *,
+        memory_context: str | None = None,
+    ) -> list[dict[str, str]]:
+        messages = [{"role": "system", "content": build_direct_assistant_system_prompt(memory_context)}]
         for message in normalize_conversation_history(history):
             role = str(message.get("role") or "").strip()
             content = str(message.get("content") or "").strip()

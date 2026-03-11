@@ -14,3 +14,11 @@ Response rules:
 - When you genuinely expect a direct user reply before proceeding, append <awaiting_reply/> on its own final line.
 - Never mention the control tag itself.
 """
+
+
+def build_thin_orchestrator_system_prompt(memory_context: str | None = None) -> str:
+    prompt = THIN_ORCHESTRATOR_SYSTEM_PROMPT
+    context = str(memory_context or "").strip()
+    if not context:
+        return prompt
+    return f"{prompt}\n\n{context}"

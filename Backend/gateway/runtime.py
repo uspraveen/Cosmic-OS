@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
+from pathlib import Path
 import time
 from typing import Any
 from uuid import uuid4
@@ -20,6 +21,7 @@ from .channels.telegram import TelegramAdapter, TelegramConfig
 from .channels.whatsapp import WhatsAppAdapter, WhatsAppConfig
 from .config import GatewayConfig
 from .delivery_queue_store import DeliveryQueueStore, utcnow_iso
+from .memory_client import CosmicMemoryClient, MemoryPromptContext
 from .orchestrator_client import OrchestratorClient
 from .router_client import ModelRouterClient
 from .routing_audit_store import RoutingAuditStore
@@ -32,6 +34,8 @@ CHANNEL_WELCOME_MESSAGES = {
     "whatsapp": "COSMIC is connected on WhatsApp. You can message me here anytime.",
     "telegram": "COSMIC is connected on Telegram. You can message me here anytime.",
 }
+MEMORY_HEALTH_REFRESH_SEC = 30.0
+SESSION_SUMMARY_SOURCE_CHAR_LIMIT = 60_000
 EPHEMERAL_CHANNEL_EVENT_TYPES = {
     "route_result",
     "response.chunk",
@@ -88,6 +92,11 @@ class GatewayRuntime:
         self.routing_audit_store = RoutingAuditStore(config.routing_audit_db_path)
         self.artifact_store = ArtifactStore(config.artifacts_db_path)
         self.delivery_queue_store = DeliveryQueueStore(config.delivery_queue_db_path)
+        self.memory_client = CosmicMemoryClient(
+            base_url=config.cosmic_memory_url,
+            timeout_sec=config.cosmic_memory_timeout_sec,
+            internal_token=config.internal_token,
+        )
         self.haiku_adapter = HaikuAdapter(
             api_key=config.haiku_api_key,
             model=config.haiku_model,
@@ -108,8 +117,15 @@ class GatewayRuntime:
         self.pending_input_requests: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self.active_requests: dict[str, ActiveRequest] = {}
         self.active_requests_by_task: dict[str, str] = {}
+        self._background_tasks: set[asyncio.Task[Any]] = set()
         self._delivery_worker: asyncio.Task[None] | None = None
         self._delivery_wakeup = asyncio.Event()
+        self._rollover_finalize_lock = asyncio.Lock()
+        self._memory_health_worker: asyncio.Task[None] | None = None
+        self._memory_health_snapshot: dict[str, Any] = {
+            "enabled": self.memory_client.enabled,
+            "status": "disabled" if not self.memory_client.enabled else "starting",
+        }
 
     async def start(self) -> None:
         self.session_store.initialize()
@@ -118,15 +134,27 @@ class GatewayRuntime:
         self.delivery_queue_store.initialize()
         await self.model_router.start()
         await self.orchestrator.start()
+        await self.memory_client.start()
+        if self.memory_client.enabled:
+            await self._refresh_memory_health()
+            self._memory_health_worker = asyncio.create_task(
+                self._memory_health_loop(),
+                name="gateway-memory-health",
+            )
         await self._register_adapters()
         self._delivery_worker = asyncio.create_task(
             self._delivery_worker_loop(),
             name="gateway-delivery-worker",
         )
+        await self._finalize_rollover_sessions()
         await self._send_channel_activation_greetings()
         self.started = True
 
     async def stop(self) -> None:
+        if self._memory_health_worker is not None:
+            self._memory_health_worker.cancel()
+            await asyncio.gather(self._memory_health_worker, return_exceptions=True)
+            self._memory_health_worker = None
         if self._delivery_worker is not None:
             self._delivery_worker.cancel()
             await asyncio.gather(self._delivery_worker, return_exceptions=True)
@@ -136,11 +164,18 @@ class GatewayRuntime:
             worker.cancel()
         if workers:
             await asyncio.gather(*workers, return_exceptions=True)
+        background_tasks = list(self._background_tasks)
+        for task in background_tasks:
+            task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+        self._background_tasks.clear()
         self.active_requests.clear()
         self.active_requests_by_task.clear()
         await self.registry.stop_all()
         await self.model_router.stop()
         await self.orchestrator.stop()
+        await self.memory_client.stop()
         await self.haiku_adapter.close()
         await self.perplexity_adapter.close()
         self.started = False
@@ -209,18 +244,26 @@ class GatewayRuntime:
             "channel": channel,
             "conversation_context": conversation_context,
         }
+        await self._finalize_rollover_sessions(current_session_id=session_id)
         assembled_conversation_context = self._build_conversation_context(
             session_id,
             fallback_context=conversation_context,
         )
 
         decision_started_at = time.perf_counter()
+        memory_context_task = asyncio.create_task(
+            self._assemble_memory_prompt_context(
+                query=content,
+            )
+        )
+        memory_prompt_context = await memory_context_task
         routing_decision = await self._classify_message(
             session_id=session_id,
             content=content,
             metadata=metadata,
             channel=channel,
             conversation_context=assembled_conversation_context,
+            memory_context=memory_prompt_context.rendered,
             route_override=route_override,
         )
         decision_latency_ms = (time.perf_counter() - decision_started_at) * 1000.0
@@ -259,6 +302,13 @@ class GatewayRuntime:
             "classification": classification,
             "message": normalized_message,
             "assembled_conversation_context": assembled_conversation_context,
+            "memory_context": memory_prompt_context.rendered,
+            "memory_context_payload": {
+                "core_facts_rendered": memory_prompt_context.core_facts_rendered,
+                "items": memory_prompt_context.recall_items,
+                "total_token_count": memory_prompt_context.total_token_count,
+                "diagnostics": memory_prompt_context.diagnostics,
+            },
             "routing_decision_source": routing_decision.decision_source,
             "input_artifacts": input_artifacts,
         }
@@ -301,17 +351,32 @@ class GatewayRuntime:
             raise ValueError(f"No adapter registered for channel: {channel!r}")
 
         history = self.session_store.get_pruned_history(session_id)
+        memory_context = self._safe_text(request_record.get("memory_context"))
         active_request = self.active_requests.get(request_id)
 
         async def send(event: dict[str, Any]) -> None:
             if active_request is not None:
                 self._track_partial_stream(active_request, event)
-            await self._deliver_or_queue_channel_event(
+            delivery_status = await self._deliver_or_queue_channel_event(
                 {
                     **event,
                     "channel": channel,
                 },
                 channel=channel,
+            )
+            await self._maybe_schedule_delivered_memory_ingest(
+                {
+                    **event,
+                    "channel": channel,
+                },
+                delivery_status=delivery_status,
+            )
+            await self._maybe_schedule_delivered_task_summary_write(
+                {
+                    **event,
+                    "channel": channel,
+                },
+                delivery_status=delivery_status,
             )
 
         def store_assistant_message(
@@ -322,6 +387,8 @@ class GatewayRuntime:
             channel: str,
             route: str,
         ) -> None:
+            assistant_metadata = dict(metadata or {})
+            assistant_metadata.setdefault("request_id", request_id)
             self._append_session_message(
                 session_id,
                 role="assistant",
@@ -329,7 +396,7 @@ class GatewayRuntime:
                 route=route,
                 awaiting_reply=awaiting_reply,
                 channel=channel,
-                metadata=metadata,
+                metadata=assistant_metadata,
             )
 
         if route in {"haiku", "gemini"}:
@@ -340,6 +407,7 @@ class GatewayRuntime:
                 send=send,
                 store_assistant_message=store_assistant_message,
                 channel=channel,
+                memory_context=memory_context,
             )
             return
 
@@ -351,6 +419,7 @@ class GatewayRuntime:
                 send=send,
                 store_assistant_message=store_assistant_message,
                 channel=channel,
+                memory_context=memory_context,
             )
             return
 
@@ -486,6 +555,7 @@ class GatewayRuntime:
         metadata: dict[str, Any],
         channel: str,
         conversation_context: list[dict[str, Any]],
+        memory_context: str | None = None,
         route_override: str | None = None,
     ) -> RoutingDecision:
         if route_override:
@@ -539,6 +609,7 @@ class GatewayRuntime:
             router_response = await self.model_router.classify_with_metadata(
                 query=content or "[empty message]",
                 conversation_context=conversation_context,
+                memory_context=memory_context,
             )
         except Exception as exc:  # pragma: no cover - depends on external service availability
             return RoutingDecision(
@@ -655,6 +726,284 @@ class GatewayRuntime:
             channel=channel,
             metadata=metadata,
         )
+
+    async def _assemble_memory_prompt_context(self, *, query: str) -> MemoryPromptContext:
+        normalized_query = str(query or "").strip()
+        if not normalized_query:
+            return MemoryPromptContext()
+        if normalized_query.startswith("[") and normalized_query.endswith("]"):
+            return MemoryPromptContext()
+        if not self.memory_client.enabled:
+            return MemoryPromptContext()
+        try:
+            return await self.memory_client.build_prompt_context(
+                query=normalized_query,
+                max_results=self.config.cosmic_memory_passive_max_results,
+                token_budget=self.config.cosmic_memory_passive_token_budget,
+                core_fact_max_chars=self.config.cosmic_memory_core_fact_max_chars,
+                kinds=self.config.cosmic_memory_passive_kinds,
+            )
+        except Exception:
+            logger.exception("gateway.memory_context_failed query=%r", normalized_query[:160])
+            return MemoryPromptContext()
+
+    def _schedule_background_task(self, coroutine, *, name: str) -> None:
+        task = asyncio.create_task(coroutine, name=name)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _maybe_schedule_delivered_memory_ingest(
+        self,
+        event: dict[str, Any],
+        *,
+        delivery_status: str,
+    ) -> None:
+        if delivery_status != "sent":
+            return
+        if not self.config.cosmic_memory_ingest_transcripts or not self.memory_client.enabled:
+            return
+        if self._safe_text(event.get("type")) != "response.complete":
+            return
+        request_id = self._safe_text(event.get("request_id"))
+        session_id = self._safe_text(event.get("session_id"))
+        if not request_id or not session_id:
+            return
+        if not self.session_store.claim_memory_episode_ingest(
+            request_id=request_id,
+            session_id=session_id,
+        ):
+            return
+        self._schedule_background_task(
+            self._ingest_conversation_episode_from_delivery(
+                event=event,
+            ),
+            name="gateway-memory-episode-ingest",
+        )
+
+    async def _ingest_conversation_episode_from_delivery(
+        self,
+        *,
+        event: dict[str, Any],
+    ) -> None:
+        request_id = self._safe_text(event.get("request_id"))
+        session_id = self._safe_text(event.get("session_id"))
+        channel = self._safe_text(event.get("channel"))
+        assistant_content = self._safe_text(event.get("content"))
+        if not request_id or not session_id or not channel or not assistant_content:
+            if request_id:
+                self.session_store.release_memory_episode_ingest_claim(
+                    request_id,
+                    error_text="missing delivery event fields",
+                )
+            return
+
+        user_message = self.session_store.find_message_by_request_id(
+            session_id,
+            request_id=request_id,
+            role="user",
+        )
+        if user_message is None:
+            self.session_store.release_memory_episode_ingest_claim(
+                request_id,
+                error_text="user message not found for delivered response",
+            )
+            return
+
+        user_metadata = user_message.get("metadata") if isinstance(user_message.get("metadata"), dict) else {}
+        assistant_meta = {
+            "request_id": request_id,
+            "route": self._safe_text(event.get("route")) or "opus",
+            "awaiting_reply": bool(event.get("awaiting_reply")),
+            "thinking_text": self._safe_text(event.get("thinking_text")),
+            "metrics": event.get("metrics"),
+        }
+
+        try:
+            response = await self.memory_client.ingest_episode(
+                {
+                    "observations": [
+                        {
+                            "role": "user",
+                            "content": str(user_message.get("content") or "[empty message]"),
+                            "metadata": user_metadata,
+                        },
+                        {
+                            "role": "assistant",
+                            "content": assistant_content,
+                            "metadata": assistant_meta,
+                        },
+                    ],
+                    "provenance": {
+                        "source_kind": "gateway",
+                        "source_id": request_id,
+                        "created_by": "cosmic/gateway:1.0.0",
+                        "session_id": session_id,
+                        "channel": channel,
+                    },
+                    "kind": "transcript",
+                    "title": f"Conversation turn {request_id}",
+                    "tags": [
+                        "conversation_turn",
+                        self._safe_text(channel.split(":", 1)[0] if channel else None) or "unknown_channel",
+                    ],
+                    "metadata": {
+                        "request_id": request_id,
+                        "assistant_route": assistant_meta["route"],
+                        "channel": channel,
+                    },
+                    "episode_type": "conversation_turn",
+                    "extract_graph": self.config.cosmic_memory_episode_extract_graph,
+                }
+            )
+        except Exception as exc:
+            self.session_store.release_memory_episode_ingest_claim(
+                request_id,
+                error_text=str(exc),
+            )
+            logger.exception(
+                "gateway.memory_episode_ingest_failed request_id=%s session_id=%s",
+                request_id,
+                session_id,
+            )
+            return
+
+        memory_id = None
+        if isinstance(response, dict):
+            record = response.get("record")
+            if isinstance(record, dict):
+                memory_id = self._safe_text(record.get("memory_id"))
+        self.session_store.mark_memory_episode_ingested(request_id, memory_id=memory_id)
+
+    async def _maybe_schedule_delivered_task_summary_write(
+        self,
+        event: dict[str, Any],
+        *,
+        delivery_status: str,
+    ) -> None:
+        if delivery_status != "sent" or not self.memory_client.enabled:
+            return
+        if self._safe_text(event.get("type")) != "response.complete":
+            return
+        if (self._safe_text(event.get("route")) or "").strip().lower() != "opus":
+            return
+
+        request_id = self._safe_text(event.get("request_id"))
+        session_id = self._safe_text(event.get("session_id"))
+        task_id = self._safe_text(event.get("task_id"))
+        if not request_id or not session_id or not task_id:
+            return
+        if not self.session_store.claim_task_summary_write(
+            task_id=task_id,
+            request_id=request_id,
+            session_id=session_id,
+        ):
+            return
+        self._schedule_background_task(
+            self._write_task_summary_from_delivery(event=event),
+            name="gateway-memory-task-summary-write",
+        )
+
+    async def _write_task_summary_from_delivery(
+        self,
+        *,
+        event: dict[str, Any],
+    ) -> None:
+        request_id = self._safe_text(event.get("request_id"))
+        session_id = self._safe_text(event.get("session_id"))
+        task_id = self._safe_text(event.get("task_id"))
+        channel = self._safe_text(event.get("channel"))
+        assistant_content = self._safe_text(event.get("content"))
+        if not request_id or not session_id or not task_id or not channel or not assistant_content:
+            if task_id:
+                self.session_store.release_task_summary_write_claim(
+                    task_id,
+                    error_text="missing task summary delivery fields",
+                )
+            return
+
+        user_message = self.session_store.find_message_by_request_id(
+            session_id,
+            request_id=request_id,
+            role="user",
+        )
+        if user_message is None:
+            self.session_store.release_task_summary_write_claim(
+                task_id,
+                error_text="user message not found for task summary",
+            )
+            return
+
+        try:
+            response = await self.memory_client.write_memory(
+                self._build_task_summary_memory_payload(
+                    task_id=task_id,
+                    request_id=request_id,
+                    session_id=session_id,
+                    channel=channel,
+                    user_message=user_message,
+                    event=event,
+                )
+            )
+        except Exception as exc:
+            self.session_store.release_task_summary_write_claim(
+                task_id,
+                error_text=str(exc),
+            )
+            logger.exception(
+                "gateway.task_summary_memory_write_failed task_id=%s request_id=%s session_id=%s",
+                task_id,
+                request_id,
+                session_id,
+            )
+            return
+
+        memory_id = self._extract_memory_id(response)
+        self.session_store.mark_task_summary_written(task_id, memory_id=memory_id)
+
+    async def memory_search(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self.memory_client.passive_search(payload)
+
+    async def memory_active_search(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self.memory_client.active_search(payload)
+
+    async def memory_schema_context(self) -> dict[str, Any]:
+        return await self.memory_client.get_schema_context()
+
+    async def memory_plan(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self.memory_client.plan_query(payload)
+
+    async def memory_resolve_identity(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self.memory_client.resolve_identity(payload)
+
+    async def memory_current_state(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self.memory_client.current_state(payload)
+
+    async def memory_temporal_facts(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self.memory_client.temporal_facts(payload)
+
+    async def memory_brief(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self.memory_client.memory_brief(payload)
+
+    async def memory_write(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self.memory_client.write_memory(payload)
+
+    async def memory_write_core_fact(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self.memory_client.write_core_fact(payload)
+
+    async def memory_ingest_episode(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self.memory_client.ingest_episode(payload)
+
+    async def memory_core_facts(self, *, max_chars: int = 1500) -> dict[str, Any]:
+        return await self.memory_client.get_core_fact_block(max_chars=max_chars)
+
+    async def memory_index_status(self) -> dict[str, Any]:
+        return await self.memory_client.index_status()
+
+    async def memory_index_sync(self) -> dict[str, Any]:
+        return await self.memory_client.index_sync()
+
+    async def memory_index_rebuild(self) -> dict[str, Any]:
+        return await self.memory_client.index_rebuild()
 
     async def _send_channel_activation_greetings(self) -> None:
         await self._maybe_send_whatsapp_activation_greeting()
@@ -905,6 +1254,8 @@ class GatewayRuntime:
             return
 
         self.delivery_queue_store.mark_delivered(delivery_id)
+        await self._maybe_schedule_delivered_memory_ingest(payload, delivery_status="sent")
+        await self._maybe_schedule_delivered_task_summary_write(payload, delivery_status="sent")
         logger.info(
             "gateway.delivery delivered delivery_id=%s channel=%s event_type=%s",
             delivery_id,
@@ -1214,10 +1565,14 @@ class GatewayRuntime:
         return response
 
     async def health_payload(self) -> dict[str, Any]:
+        memory = dict(self._memory_health_snapshot)
+        memory.setdefault("enabled", self.memory_client.enabled)
         return {
-            "status": "ok" if self.started else "starting",
+            "status": self._health_status_from_memory(memory),
             "model_router_url": self.config.model_router_url,
             "orchestrator_url": self.config.orchestrator_url,
+            "cosmic_memory_url": self.config.cosmic_memory_url,
+            "memory": memory,
             "channels": self.list_channels(),
             "current_session_id": self.session_store.current_session_id(),
             "delivery_queue": self.delivery_queue_store.summary(),
@@ -1225,12 +1580,17 @@ class GatewayRuntime:
 
     async def readiness_payload(self) -> dict[str, Any]:
         healthy_channels = [item for item in self.list_channels() if item["healthy"]]
+        memory = dict(self._memory_health_snapshot)
+        memory.setdefault("enabled", self.memory_client.enabled)
+        ready = self.started and memory.get("status") not in {"starting", "error"}
         return {
-            "status": "ready" if self.started else "starting",
+            "status": "ready" if ready else ("starting" if not self.started else "degraded"),
             "gateway_started": self.started,
             "healthy_channel_count": len(healthy_channels),
             "adapter_errors": self.adapter_errors,
             "orchestrator_url": self.config.orchestrator_url,
+            "cosmic_memory_url": self.config.cosmic_memory_url,
+            "memory": memory,
             "delivery_queue": self.delivery_queue_store.summary(),
         }
 
@@ -1267,6 +1627,7 @@ class GatewayRuntime:
                 "query": self._safe_text(message.get("content")) or "[empty message]",
                 "request_id": request_id,
                 "conversation_context": request_record.get("assembled_conversation_context") or [],
+                "memory_context": self._safe_text(request_record.get("memory_context")),
             },
             input_artifacts=request_record.get("input_artifacts") or [],
             idempotency_key=uuid4().hex,
@@ -1465,6 +1826,7 @@ class GatewayRuntime:
         current = self.active_requests.get(state.request_id)
         if current is state:
             self.active_requests.pop(state.request_id, None)
+        self.request_records.pop(state.request_id, None)
         if state.task_id:
             bound_request_id = self.active_requests_by_task.get(state.task_id)
             if bound_request_id == state.request_id:
@@ -1484,3 +1846,317 @@ class GatewayRuntime:
             thinking_text = self._safe_text(event.get("thinking_text"))
             if thinking_text is not None:
                 state.partial_thinking = thinking_text
+
+    def _health_status_from_memory(self, memory: dict[str, Any]) -> str:
+        if not self.started:
+            return "starting"
+        if memory.get("status") == "error":
+            return "degraded"
+        return "ok"
+
+    async def _refresh_memory_health(self) -> None:
+        if not self.memory_client.enabled:
+            self._memory_health_snapshot = {
+                "enabled": False,
+                "status": "disabled",
+                "checked_at": utcnow_iso(),
+            }
+            return
+
+        try:
+            payload = await self.memory_client.health()
+        except Exception as exc:  # pragma: no cover - defensive network guard
+            payload = {
+                "enabled": True,
+                "status": "error",
+                "error": str(exc),
+            }
+
+        snapshot = payload if isinstance(payload, dict) else {"enabled": True, "status": "ok"}
+        snapshot.setdefault("enabled", True)
+        snapshot["checked_at"] = utcnow_iso()
+        self._memory_health_snapshot = snapshot
+
+    async def _memory_health_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(MEMORY_HEALTH_REFRESH_SEC)
+                await self._refresh_memory_health()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # pragma: no cover - defensive loop guard
+                logger.exception("gateway.memory_health_loop_failed")
+                self._memory_health_snapshot = {
+                    "enabled": self.memory_client.enabled,
+                    "status": "error" if self.memory_client.enabled else "disabled",
+                    "error": "memory health refresh loop failed",
+                    "checked_at": utcnow_iso(),
+                }
+
+    async def _finalize_rollover_sessions(self, current_session_id: str | None = None) -> None:
+        resolved_current_session_id = current_session_id or self.session_store.current_session_id()
+        async with self._rollover_finalize_lock:
+            candidates = self.session_store.list_rollover_candidates(
+                current_session_id=resolved_current_session_id
+            )
+            for candidate in candidates:
+                await self._finalize_single_rollover_session(candidate)
+
+    async def _finalize_single_rollover_session(self, candidate: dict[str, Any]) -> None:
+        session_id = self._safe_text(candidate.get("session_id"))
+        if not session_id:
+            return
+
+        history = self.session_store.get_history(session_id)
+        if not history:
+            self.session_store.mark_session_rollover_finalized(
+                session_id,
+                summary_status="empty",
+            )
+            return
+
+        transcript_markdown = self._render_session_transcript_markdown(candidate, history)
+        transcript_path = self._write_session_transcript(session_id, transcript_markdown)
+
+        summary_text: str | None = None
+        summary_status = "skipped"
+        summary_memory_id: str | None = None
+
+        try:
+            summary_text = await self._summarize_completed_session(
+                session_id=session_id,
+                transcript_markdown=transcript_markdown,
+                history=history,
+            )
+        except Exception:
+            logger.exception("gateway.session_rollover_summary_failed session_id=%s", session_id)
+            summary_status = "summary_failed"
+        else:
+            if summary_text:
+                summary_status = "generated"
+                if self.memory_client.enabled:
+                    try:
+                        memory_response = await self.memory_client.write_memory(
+                            self._build_session_summary_memory_payload(
+                                session_id=session_id,
+                                transcript_path=transcript_path,
+                                summary_text=summary_text,
+                                history=history,
+                            )
+                        )
+                    except Exception:
+                        logger.exception(
+                            "gateway.session_rollover_memory_write_failed session_id=%s",
+                            session_id,
+                        )
+                        summary_status = "memory_write_failed"
+                    else:
+                        summary_memory_id = self._extract_memory_id(memory_response)
+                        summary_status = "stored"
+
+        self.session_store.mark_session_rollover_finalized(
+            session_id,
+            transcript_path=transcript_path,
+            summary_memory_id=summary_memory_id,
+            summary_status=summary_status,
+            compacted_summary=summary_text,
+        )
+
+    def _render_session_transcript_markdown(
+        self,
+        candidate: dict[str, Any],
+        history: list[dict[str, Any]],
+    ) -> str:
+        session_id = self._safe_text(candidate.get("session_id")) or "unknown_session"
+        created_at = self._safe_text(candidate.get("created_at")) or ""
+        updated_at = self._safe_text(candidate.get("updated_at")) or ""
+        lines = [
+            f"# Session Transcript: {session_id}",
+            "",
+            f"- Created: {created_at}",
+            f"- Updated: {updated_at}",
+            f"- Message count: {len(history)}",
+            "",
+        ]
+
+        for item in history:
+            role = str(item.get("role") or "unknown").strip().capitalize()
+            channel = self._safe_text(item.get("channel"))
+            route = self._safe_text(item.get("route"))
+            created = self._safe_text(item.get("created_at"))
+            meta_parts: list[str] = []
+            if channel:
+                meta_parts.append(f"channel `{channel}`")
+            if route and str(item.get("role") or "") == "assistant":
+                meta_parts.append(f"route `{route}`")
+            if created:
+                meta_parts.append(created)
+
+            lines.append(f"## {role}")
+            if meta_parts:
+                lines.append("_" + " | ".join(meta_parts) + "_")
+            lines.append("")
+            lines.append(str(item.get("content") or "").strip() or "[empty]")
+            lines.append("")
+
+        return "\n".join(lines).strip() + "\n"
+
+    def _write_session_transcript(self, session_id: str, transcript_markdown: str) -> str:
+        transcript_dir = self.config.session_transcript_dir
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+        transcript_path = transcript_dir / f"{session_id}.md"
+        transcript_path.write_text(transcript_markdown, encoding="utf-8")
+        return str(transcript_path)
+
+    async def _summarize_completed_session(
+        self,
+        *,
+        session_id: str,
+        transcript_markdown: str,
+        history: list[dict[str, Any]],
+    ) -> str | None:
+        if not history:
+            return None
+        if not self.haiku_adapter.api_key or not self.haiku_adapter.model:
+            return None
+
+        transcript_source = self._session_summary_source_text(transcript_markdown)
+        system_prompt = (
+            "You are summarizing a completed COSMIC daily session for long-term memory.\n"
+            "Capture durable context the assistant should remember tomorrow.\n"
+            "Prioritize stable user preferences, notable facts learned, important decisions, current projects, open loops, and concrete follow-ups.\n"
+            "Exclude filler chatter, acknowledgements, and repeated back-and-forth.\n"
+            "Write concise Markdown with these sections when relevant:\n"
+            "## Summary\n"
+            "## Durable Facts\n"
+            "## Open Loops\n"
+            "## Follow-ups\n"
+            "Do not mention hidden system internals or implementation details."
+        )
+        user_message = (
+            f"Session ID: {session_id}\n"
+            f"Message count: {len(history)}\n\n"
+            "Transcript:\n\n"
+            f"{transcript_source}"
+        )
+        summary_text, _usage, _stop_reason = await self.haiku_adapter.generate_text(
+            system_prompt=system_prompt,
+            messages=[{"role": "user", "content": user_message}],
+            max_tokens=self.config.session_summary_max_output_tokens,
+        )
+        normalized = summary_text.strip()
+        return normalized or None
+
+    def _session_summary_source_text(self, transcript_markdown: str) -> str:
+        normalized = transcript_markdown.strip()
+        if len(normalized) <= SESSION_SUMMARY_SOURCE_CHAR_LIMIT:
+            return normalized
+
+        half_limit = SESSION_SUMMARY_SOURCE_CHAR_LIMIT // 2
+        head = normalized[:half_limit].rstrip()
+        tail = normalized[-half_limit:].lstrip()
+        return head + "\n\n[... transcript truncated for summarization ...]\n\n" + tail
+
+    def _build_session_summary_memory_payload(
+        self,
+        *,
+        session_id: str,
+        transcript_path: str,
+        summary_text: str,
+        history: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return {
+            "kind": "session_summary",
+            "title": f"Session summary {session_id}",
+            "content": summary_text,
+            "tags": ["session_rollover", "daily_session"],
+            "metadata": {
+                "session_id": session_id,
+                "message_count": len(history),
+                "transcript_path": transcript_path,
+            },
+            "provenance": {
+                "source_kind": "gateway_rollover",
+                "source_id": session_id,
+                "created_by": "cosmic/gateway:1.0.0",
+                "session_id": session_id,
+            },
+        }
+
+    def _build_task_summary_memory_payload(
+        self,
+        *,
+        task_id: str,
+        request_id: str,
+        session_id: str,
+        channel: str,
+        user_message: dict[str, Any],
+        event: dict[str, Any],
+    ) -> dict[str, Any]:
+        user_content = self._safe_text(user_message.get("content")) or "[empty message]"
+        assistant_content = self._safe_text(event.get("content")) or "[empty response]"
+        route = self._safe_text(event.get("route")) or "opus"
+        metrics = event.get("metrics") if isinstance(event.get("metrics"), dict) else None
+        input_artifacts = user_message.get("metadata", {}).get("input_artifacts") if isinstance(user_message.get("metadata"), dict) else None
+
+        content_lines = [
+            f"# Task Summary: {task_id}",
+            "",
+            "## Request",
+            user_content,
+            "",
+            "## Result",
+            assistant_content,
+        ]
+        if metrics:
+            content_lines.extend(
+                [
+                    "",
+                    "## Metrics",
+                    "```json",
+                    json.dumps(metrics, ensure_ascii=False, indent=2, sort_keys=True),
+                    "```",
+                ]
+            )
+
+        metadata: dict[str, Any] = {
+            "task_id": task_id,
+            "request_id": request_id,
+            "session_id": session_id,
+            "channel": channel,
+            "route": route,
+            "source_message_id": self._safe_text(user_message.get("message_id")),
+        }
+        if input_artifacts:
+            metadata["input_artifacts"] = input_artifacts
+
+        return {
+            "kind": "task_summary",
+            "title": f"Task summary {task_id}",
+            "content": "\n".join(content_lines).strip(),
+            "tags": [
+                "task_summary",
+                route,
+                self._safe_text(channel.split(":", 1)[0] if channel else None) or "unknown_channel",
+            ],
+            "metadata": metadata,
+            "provenance": {
+                "source_kind": "gateway_task_completion",
+                "source_id": request_id,
+                "created_by": "cosmic/gateway:1.0.0",
+                "session_id": session_id,
+                "task_id": task_id,
+                "channel": channel,
+            },
+        }
+
+    def _extract_memory_id(self, payload: Any) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        direct_id = self._safe_text(payload.get("memory_id"))
+        if direct_id:
+            return direct_id
+        record = payload.get("record")
+        if isinstance(record, dict):
+            return self._safe_text(record.get("memory_id"))
+        return None

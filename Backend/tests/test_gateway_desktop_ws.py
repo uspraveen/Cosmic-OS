@@ -11,12 +11,16 @@ from fastapi.testclient import TestClient
 from gateway.channels.base import ChannelUnavailableError
 from gateway.channels.routes import router as channel_router
 from gateway.config import GatewayConfig
+from gateway.memory_client import MemoryPromptContext
 from gateway.runtime import GatewayRuntime
 
 
 class FakeDirectAdapter:
     def __init__(self, route: str) -> None:
         self.route = route
+        self.last_memory_context: str | None = None
+        self.api_key = "test-anthropic-key"
+        self.model = "claude-haiku-4-5"
 
     async def close(self) -> None:
         return
@@ -30,7 +34,9 @@ class FakeDirectAdapter:
         send,
         store_assistant_message,
         channel: str,
+        memory_context: str | None = None,
     ) -> None:
+        self.last_memory_context = memory_context
         assert history[-1]["role"] == "user"
         await send(
             {
@@ -58,6 +64,19 @@ class FakeDirectAdapter:
             metadata=None,
             channel=channel,
             route=self.route,
+        )
+
+    async def generate_text(
+        self,
+        *,
+        system_prompt: str,
+        messages,
+        max_tokens: int,
+    ) -> tuple[str, dict[str, object], str]:
+        return (
+            "## Summary\n- Daily summary generated for testing.\n",
+            {"output_tokens": 64},
+            "end_turn",
         )
 
 
@@ -130,6 +149,7 @@ class FakeCancellableDirectAdapter:
     def __init__(self, route: str) -> None:
         self.route = route
         self.started = asyncio.Event()
+        self.last_memory_context: str | None = None
 
     async def close(self) -> None:
         return
@@ -143,7 +163,9 @@ class FakeCancellableDirectAdapter:
         send,
         store_assistant_message,
         channel: str,
+        memory_context: str | None = None,
     ) -> None:
+        self.last_memory_context = memory_context
         assert history[-1]["role"] == "user"
         self.started.set()
         await send(
@@ -376,6 +398,119 @@ class FlakyDesktopChannelAdapter:
         self.sent_events.append({**message, "channel": channel or message.get("channel")})
 
 
+class FakeMemoryClient:
+    def __init__(self, *, enabled: bool = False) -> None:
+        self.enabled = enabled
+        self.started = False
+        self.prompt_context_calls: list[dict[str, object]] = []
+        self.search_calls: list[dict[str, object]] = []
+        self.active_search_calls: list[dict[str, object]] = []
+        self.write_calls: list[dict[str, object]] = []
+        self.core_fact_write_calls: list[dict[str, object]] = []
+        self.episode_calls: list[dict[str, object]] = []
+        self.core_fact_requests: list[int] = []
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def stop(self) -> None:
+        self.started = False
+
+    async def health(self) -> dict[str, object]:
+        return {
+            "enabled": self.enabled,
+            "status": "ok" if self.enabled else "disabled",
+        }
+
+    async def build_prompt_context(
+        self,
+        *,
+        query: str,
+        max_results: int,
+        token_budget: int,
+        core_fact_max_chars: int,
+        kinds: tuple[str, ...],
+        include_diagnostics: bool = False,
+    ) -> MemoryPromptContext:
+        self.prompt_context_calls.append(
+            {
+                "query": query,
+                "max_results": max_results,
+                "token_budget": token_budget,
+                "core_fact_max_chars": core_fact_max_chars,
+                "kinds": kinds,
+                "include_diagnostics": include_diagnostics,
+            }
+        )
+        if not self.enabled:
+            return MemoryPromptContext()
+        return MemoryPromptContext(
+            core_facts_rendered="- User prefers concise technical answers.",
+            recall_items=[
+                {
+                    "memory_id": "mem_task_1",
+                    "kind": "task_summary",
+                    "title": "Memory integration work",
+                    "content": "We are integrating cosmic-memory into Gateway and should keep the runtime HTTP boundary internal-only.",
+                }
+            ],
+            total_token_count=42,
+            rendered=(
+                "Relevant long-term memory context for this request.\n"
+                "Always-on core facts:\n"
+                "- User prefers concise technical answers.\n\n"
+                "Retrieved long-term memories:\n"
+                "1. [task_summary] Memory integration work\n"
+                "We are integrating cosmic-memory into Gateway and should keep the runtime HTTP boundary internal-only."
+            ),
+        )
+
+    async def passive_search(self, payload: dict[str, object]) -> dict[str, object]:
+        self.search_calls.append(payload)
+        return {
+            "items": [
+                {
+                    "memory_id": "mem_search_1",
+                    "kind": "task_summary",
+                    "title": "Search hit",
+                    "content": "Gateway should use passive recall.",
+                    "score": 0.91,
+                }
+            ],
+            "total_token_count": 32,
+        }
+
+    async def active_search(self, payload: dict[str, object]) -> dict[str, object]:
+        self.active_search_calls.append(payload)
+        return {
+            "items": [],
+            "entities": [],
+            "relations": [],
+            "episodes": [],
+            "search_plan": [],
+        }
+
+    async def write_memory(self, payload: dict[str, object]) -> dict[str, object]:
+        self.write_calls.append(payload)
+        return {"memory_id": "mem_write_1"}
+
+    async def write_core_fact(self, payload: dict[str, object]) -> dict[str, object]:
+        self.core_fact_write_calls.append(payload)
+        return {"memory_id": "mem_core_1"}
+
+    async def ingest_episode(self, payload: dict[str, object]) -> dict[str, object]:
+        self.episode_calls.append(payload)
+        return {
+            "record": {"memory_id": "mem_episode_1"},
+            "observation_count": len(payload.get("observations", [])) if isinstance(payload, dict) else 0,
+            "graph_episode_id": "ep_1",
+        }
+
+    async def get_core_fact_block(self, *, max_chars: int = 1500) -> dict[str, object]:
+        self.core_fact_requests.append(max_chars)
+        return {"items": [], "rendered": "- User prefers concise technical answers."}
+
+
 def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
     runtime = GatewayRuntime(
         GatewayConfig(
@@ -398,7 +533,13 @@ def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
     async def fake_stop() -> None:
         return
 
-    async def fake_classify(*, query: str, conversation_context, max_completion_tokens: int = 430) -> dict:
+    async def fake_classify(
+        *,
+        query: str,
+        conversation_context,
+        memory_context: str | None = None,
+        max_completion_tokens: int = 430,
+    ) -> dict:
         return {
             "route": route,
             "needs_latest": False,
@@ -409,11 +550,18 @@ def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
             "signals": ["test"],
         }
 
-    async def fake_classify_with_metadata(*, query: str, conversation_context, max_completion_tokens: int = 430) -> dict:
+    async def fake_classify_with_metadata(
+        *,
+        query: str,
+        conversation_context,
+        memory_context: str | None = None,
+        max_completion_tokens: int = 430,
+    ) -> dict:
         return {
             "classification": await fake_classify(
                 query=query,
                 conversation_context=conversation_context,
+                memory_context=memory_context,
                 max_completion_tokens=max_completion_tokens,
             ),
             "metrics": {"rtt_ms": 18.5},
@@ -429,6 +577,7 @@ def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
     runtime.haiku_adapter = FakeDirectAdapter("haiku")
     runtime.perplexity_adapter = FakeDirectAdapter("perplexity")
     runtime.orchestrator = FakeOrchestratorClient()
+    runtime.memory_client = FakeMemoryClient(enabled=False)
     return runtime
 
 
@@ -522,6 +671,166 @@ async def test_non_text_inbound_persists_artifacts_and_passes_them_to_opus(tmp_p
         await runtime.stop()
 
 
+@pytest.mark.asyncio
+async def test_runtime_adds_memory_context_to_direct_and_orchestrator_paths(tmp_path) -> None:
+    direct_runtime = build_runtime(tmp_path / "direct", route="haiku")
+    direct_runtime.memory_client = FakeMemoryClient(enabled=True)
+    await direct_runtime.start()
+    try:
+        direct_result = await direct_runtime.process_incoming_user_message(
+            {
+                "content": "What do you remember about the memory integration?",
+                "channel": "desktop:desk_a",
+                "metadata": {"platform": "desktop"},
+            }
+        )
+        assert "Relevant long-term memory context" in direct_result["memory_context"]
+
+        await direct_runtime.fulfill_processed_message(direct_result)
+        assert "Memory integration work" in (
+            direct_runtime.haiku_adapter.last_memory_context or ""
+        )
+    finally:
+        await direct_runtime.stop()
+
+    opus_runtime = build_runtime(tmp_path / "opus", route="opus")
+    opus_runtime.memory_client = FakeMemoryClient(enabled=True)
+    await opus_runtime.start()
+    try:
+        opus_result = await opus_runtime.process_incoming_user_message(
+            {
+                "content": "Continue the integration plan.",
+                "channel": "desktop:desk_b",
+                "metadata": {"platform": "desktop"},
+            }
+        )
+        task = opus_runtime._build_orchestrator_task(  # noqa: SLF001 - intentional unit seam
+            request_record=opus_result,
+            session_id=opus_result["session_id"],
+            request_id=opus_result["request_id"],
+            channel=opus_result["channel"],
+        )
+        assert "Relevant long-term memory context" in str(task.input.get("memory_context") or "")
+    finally:
+        await opus_runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_ingests_completed_turn_as_episode(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="haiku")
+    fake_memory = FakeMemoryClient(enabled=True)
+    whatsapp_adapter = FakeWhatsAppChannelAdapter()
+    runtime.memory_client = fake_memory
+    runtime.registry.register(whatsapp_adapter)
+    await whatsapp_adapter.start()
+    await runtime.start()
+    try:
+        result = await runtime.process_incoming_user_message(
+            {
+                "content": "Remember this exchange.",
+                "channel": "whatsapp:+12153079021",
+                "metadata": {"platform": "whatsapp"},
+            }
+        )
+        await runtime.fulfill_processed_message(result)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert len(fake_memory.episode_calls) == 1
+        episode_payload = fake_memory.episode_calls[0]
+        observations = episode_payload["observations"]
+        assert observations[0]["role"] == "user"
+        assert observations[0]["content"] == "Remember this exchange."
+        assert observations[1]["role"] == "assistant"
+        assert observations[1]["content"] == "Hello from fake adapter"
+        assert episode_payload["kind"] == "transcript"
+        assert episode_payload["episode_type"] == "conversation_turn"
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_only_ingests_episode_after_delivered_response(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="haiku")
+    fake_memory = FakeMemoryClient(enabled=True)
+    flaky_channel = FlakyWhatsAppChannelAdapter()
+    runtime.memory_client = fake_memory
+    runtime.registry.register(flaky_channel)
+    await flaky_channel.start()
+    await runtime.start()
+    try:
+        result = await runtime.process_incoming_user_message(
+            {
+                "content": "Remember this only after delivery.",
+                "channel": "whatsapp:+12153079021",
+                "metadata": {"platform": "whatsapp"},
+            }
+        )
+        await runtime.fulfill_processed_message(result)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert fake_memory.episode_calls == []
+
+        flaky_channel.fail_response_complete = False
+        runtime.notify_channel_active("whatsapp:+12153079021")
+
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            if fake_memory.episode_calls:
+                break
+            await asyncio.sleep(0.05)
+
+        assert len(fake_memory.episode_calls) == 1
+        assert fake_memory.episode_calls[0]["metadata"]["request_id"] == result["request_id"]
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_rollover_writes_session_summary_to_memory(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="haiku")
+    fake_memory = FakeMemoryClient(enabled=True)
+    runtime.memory_client = fake_memory
+    await runtime.start()
+    try:
+        old_session_id = "sess_20000101"
+        runtime.session_store.append_message(
+            old_session_id,
+            role="user",
+            content="We decided to ship the memory service.",
+            channel="desktop:desk_a",
+            metadata={"platform": "desktop"},
+        )
+        runtime.session_store.append_message(
+            old_session_id,
+            role="assistant",
+            content="I will remember that and follow up tomorrow.",
+            route="haiku",
+            channel="desktop:desk_a",
+            metadata={"platform": "desktop"},
+        )
+
+        await runtime._finalize_rollover_sessions(  # noqa: SLF001 - targeted rollover seam
+            current_session_id=runtime.session_store.current_session_id()
+        )
+
+        transcript_path = runtime.config.session_transcript_dir / f"{old_session_id}.md"
+        assert transcript_path.exists()
+        assert len(fake_memory.write_calls) == 1
+        summary_payload = fake_memory.write_calls[0]
+        assert summary_payload["kind"] == "session_summary"
+        assert summary_payload["metadata"]["session_id"] == old_session_id
+        assert old_session_id not in {
+            item["session_id"]
+            for item in runtime.session_store.list_rollover_candidates(
+                current_session_id=runtime.session_store.current_session_id()
+            )
+        }
+    finally:
+        await runtime.stop()
+
+
 @pytest.fixture
 def test_client(tmp_path):
     runtime = build_runtime(tmp_path)
@@ -540,6 +849,49 @@ def test_client(tmp_path):
 
     with TestClient(app) as client:
         yield client
+
+
+def test_internal_memory_routes_proxy_to_memory_service(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+    runtime.memory_client = FakeMemoryClient(enabled=True)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+    from gateway.memory_routes import router as memory_router
+
+    app.include_router(memory_router)
+
+    with TestClient(app) as client:
+        search_response = client.post(
+            "/internal/memory/search",
+            headers={"X-Internal-Token": "internal-token"},
+            json={
+                "query": "memory integration",
+                "kinds": ["task_summary"],
+                "max_results": 4,
+            },
+        )
+        assert search_response.status_code == 200
+        payload = search_response.json()
+        assert payload["items"][0]["memory_id"] == "mem_search_1"
+        assert runtime.memory_client.search_calls[0]["query"] == "memory integration"
+
+        core_fact_response = client.get(
+            "/internal/memory/core-facts",
+            headers={"X-Internal-Token": "internal-token"},
+            params={"max_chars": 900},
+        )
+        assert core_fact_response.status_code == 200
+        assert runtime.memory_client.core_fact_requests == [900]
 
 
 def test_desktop_websocket_supports_ping_query_and_resume(test_client: TestClient) -> None:
@@ -566,13 +918,12 @@ def test_desktop_websocket_supports_ping_query_and_resume(test_client: TestClien
         assert route_result["channel"] == "desktop:desk_a1b2"
 
         chunk = websocket.receive_json()
-        assert chunk == {
-            "type": "response.chunk",
-            "request_id": "req_001",
-            "session_id": route_result["session_id"],
-            "content": "Hello",
-            "done": False,
-        }
+        assert chunk["type"] == "response.chunk"
+        assert chunk["request_id"] == "req_001"
+        assert chunk["session_id"] == route_result["session_id"]
+        assert chunk["content"] == "Hello"
+        assert chunk["done"] is False
+        assert chunk["channel"] == "desktop:desk_a1b2"
 
         complete = websocket.receive_json()
         assert complete["type"] == "response.complete"

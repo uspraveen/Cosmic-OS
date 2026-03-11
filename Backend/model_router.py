@@ -112,6 +112,7 @@ class ConversationContextMessage(BaseModel):
 class ClassifyRequest(BaseModel):
     query: str = Field(min_length=1)
     conversation_context: List[ConversationContextMessage] = Field(default_factory=list)
+    memory_context: str | None = None
     max_completion_tokens: int = Field(default=DEFAULT_MAX_COMPLETION_TOKENS, ge=1, le=4096)
 
 
@@ -254,6 +255,7 @@ def normalize_context_messages(conversation_context: Optional[Sequence[Any]]) ->
 def build_messages(
     user_text: str,
     conversation_context: Optional[Sequence[Any]] = None,
+    memory_context: Optional[str] = None,
 ) -> List[Dict[str, str]]:
     system = (
         "You are a STRICT JSON-only classifier for the COSMIC model router.\n"
@@ -288,6 +290,15 @@ def build_messages(
     )
 
     context_messages = normalize_context_messages(conversation_context)
+    memory_text = str(memory_context or "").strip()
+    if memory_text:
+        context_messages = [
+            {
+                "role": "assistant",
+                "content": "[long_term_memory]\n" + memory_text,
+            },
+            *context_messages,
+        ]
     return [
         {"role": "system", "content": system},
         *context_messages,
@@ -350,13 +361,14 @@ def classify_fast_cli(
     reasoning_effort: str,
     max_completion_tokens: int,
     conversation_context: Optional[Sequence[Any]] = None,
+    memory_context: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], str]:
     from groq import Groq
 
     client = Groq(api_key=GROQ_API_KEY)
     completion = client.chat.completions.create(
         model=CLASSIFIER_MODEL,
-        messages=build_messages(user_text, conversation_context),
+        messages=build_messages(user_text, conversation_context, memory_context),
         temperature=0.0,
         max_completion_tokens=max_completion_tokens,
         reasoning_effort=reasoning_effort,
@@ -373,6 +385,7 @@ def classify_with_timing_cli(
     reasoning_effort: str,
     max_completion_tokens: int,
     conversation_context: Optional[Sequence[Any]] = None,
+    memory_context: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, float], str]:
     from groq import Groq
 
@@ -383,7 +396,7 @@ def classify_with_timing_cli(
 
     completion = client.chat.completions.create(
         model=CLASSIFIER_MODEL,
-        messages=build_messages(user_text, conversation_context),
+        messages=build_messages(user_text, conversation_context, memory_context),
         temperature=0.0,
         max_completion_tokens=max_completion_tokens,
         reasoning_effort=reasoning_effort,
@@ -469,6 +482,7 @@ async def prewarm_connection() -> float:
 async def classify_async(
     user_text: str,
     conversation_context: Optional[Sequence[Any]] = None,
+    memory_context: Optional[str] = None,
     max_completion_tokens: int = DEFAULT_MAX_COMPLETION_TOKENS,
 ) -> Tuple[Dict[str, Any], Dict[str, float], str]:
     global _http_client
@@ -483,7 +497,7 @@ async def classify_async(
         f"{GROQ_API_BASE}/chat/completions",
         json={
             "model": CLASSIFIER_MODEL,
-            "messages": build_messages(user_text, conversation_context),
+            "messages": build_messages(user_text, conversation_context, memory_context),
             "temperature": 0.0,
             "max_tokens": max_completion_tokens,
         },
@@ -568,6 +582,7 @@ def create_app() -> FastAPI:
             classification, metrics, raw = await classify_async(
                 user_text=body.query,
                 conversation_context=body.conversation_context,
+                memory_context=body.memory_context,
                 max_completion_tokens=body.max_completion_tokens,
             )
         except RuntimeError as exc:
@@ -604,6 +619,7 @@ def create_app() -> FastAPI:
             classification, metrics, raw = await classify_async(
                 user_text=item.query,
                 conversation_context=item.conversation_context,
+                memory_context=item.memory_context,
                 max_completion_tokens=item.max_completion_tokens,
             )
             return {

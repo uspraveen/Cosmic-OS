@@ -43,6 +43,7 @@ class SessionStore:
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
                     route TEXT,
+                    request_id TEXT,
                     awaiting_reply INTEGER NOT NULL DEFAULT 0,
                     channel TEXT,
                     created_at TEXT NOT NULL,
@@ -59,6 +60,9 @@ class SessionStore:
                 CREATE INDEX IF NOT EXISTS idx_messages_awaiting_reply
                     ON messages(session_id, channel, awaiting_reply, created_at);
 
+                CREATE INDEX IF NOT EXISTS idx_messages_session_request_role
+                    ON messages(session_id, request_id, role, created_at);
+
                 CREATE TABLE IF NOT EXISTS channel_links (
                     channel TEXT PRIMARY KEY,
                     platform TEXT NOT NULL,
@@ -70,8 +74,36 @@ class SessionStore:
 
                 CREATE INDEX IF NOT EXISTS idx_channel_links_platform
                     ON channel_links(platform, last_seen_at);
+
+                CREATE TABLE IF NOT EXISTS memory_episode_links (
+                    request_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'new',
+                    memory_id TEXT,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_memory_episode_links_session
+                    ON memory_episode_links(session_id, updated_at);
+
+                CREATE TABLE IF NOT EXISTS task_summary_links (
+                    task_id TEXT PRIMARY KEY,
+                    request_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'new',
+                    memory_id TEXT,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_task_summary_links_session
+                    ON task_summary_links(session_id, updated_at);
                 """
             )
+            self._ensure_column(connection, "messages", "request_id", "TEXT")
             connection.commit()
 
     def current_session_id(self, now: datetime | None = None) -> str:
@@ -98,6 +130,11 @@ class SessionStore:
         created_at = utcnow_iso()
         message_id = f"msg_{uuid4().hex}"
         metadata_json = json.dumps(metadata) if metadata is not None else None
+        request_id = None
+        if isinstance(metadata, dict):
+            value = metadata.get("request_id")
+            if value is not None:
+                request_id = str(value).strip() or None
 
         with self._lock, self._connect() as connection:
             self._ensure_session(connection, session_id=session_id, created_at=created_at)
@@ -109,12 +146,13 @@ class SessionStore:
                     role,
                     content,
                     route,
+                    request_id,
                     awaiting_reply,
                     channel,
                     created_at,
                     metadata_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message_id,
@@ -122,6 +160,7 @@ class SessionStore:
                     role,
                     content,
                     route,
+                    request_id,
                     1 if awaiting_reply else 0,
                     channel,
                     created_at,
@@ -144,6 +183,7 @@ class SessionStore:
                     role,
                     content,
                     route,
+                    request_id,
                     awaiting_reply,
                     channel,
                     created_at,
@@ -165,6 +205,7 @@ class SessionStore:
                     "role": row["role"],
                     "content": row["content"],
                     "route": row["route"],
+                    "request_id": row["request_id"],
                     "awaiting_reply": bool(row["awaiting_reply"]),
                     "channel": row["channel"],
                     "created_at": row["created_at"],
@@ -182,6 +223,7 @@ class SessionStore:
                     role,
                     content,
                     route,
+                    request_id,
                     awaiting_reply,
                     channel,
                     created_at,
@@ -202,6 +244,7 @@ class SessionStore:
                     "role": row["role"],
                     "content": row["content"],
                     "route": row["route"],
+                    "request_id": row["request_id"],
                     "awaiting_reply": bool(row["awaiting_reply"]),
                     "channel": row["channel"],
                     "created_at": row["created_at"],
@@ -292,6 +335,7 @@ class SessionStore:
                     role,
                     content,
                     route,
+                    request_id,
                     awaiting_reply,
                     channel,
                     created_at,
@@ -316,6 +360,7 @@ class SessionStore:
             "role": row["role"],
             "content": row["content"],
             "route": row["route"],
+            "request_id": row["request_id"],
             "awaiting_reply": bool(row["awaiting_reply"]),
             "channel": row["channel"],
             "created_at": row["created_at"],
@@ -327,6 +372,327 @@ class SessionStore:
             connection.execute(
                 "UPDATE messages SET awaiting_reply = 0 WHERE message_id = ?",
                 (message_id,),
+            )
+            connection.commit()
+
+    def find_message_by_request_id(
+        self,
+        session_id: str,
+        *,
+        request_id: str,
+        role: str,
+    ) -> dict[str, Any] | None:
+        if not session_id or not request_id or role not in {"user", "assistant"}:
+            return None
+
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    message_id,
+                    role,
+                    content,
+                    route,
+                    request_id,
+                    awaiting_reply,
+                    channel,
+                    created_at,
+                    metadata_json
+                FROM messages
+                WHERE session_id = ?
+                  AND role = ?
+                  AND request_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (session_id, role, request_id),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else None
+        return {
+            "message_id": row["message_id"],
+            "role": row["role"],
+            "content": row["content"],
+            "route": row["route"],
+            "request_id": row["request_id"],
+            "awaiting_reply": bool(row["awaiting_reply"]),
+            "channel": row["channel"],
+            "created_at": row["created_at"],
+            "metadata": metadata,
+        }
+
+    def claim_memory_episode_ingest(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        stale_after_seconds: int = 900,
+    ) -> bool:
+        if not request_id or not session_id:
+            return False
+
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT state, updated_at
+                FROM memory_episode_links
+                WHERE request_id = ?
+                """,
+                (request_id,),
+            ).fetchone()
+
+            if row is None:
+                connection.execute(
+                    """
+                    INSERT INTO memory_episode_links (
+                        request_id,
+                        session_id,
+                        state,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, 'ingesting', ?, ?)
+                    """,
+                    (request_id, session_id, now, now),
+                )
+                connection.commit()
+                return True
+
+            state = str(row["state"] or "").strip().lower()
+            if state == "ingested":
+                return False
+
+            if state == "ingesting":
+                updated_at = self._parse_utc(row["updated_at"])
+                if updated_at is not None:
+                    age_seconds = (self._parse_utc(now) - updated_at).total_seconds()
+                    if age_seconds < max(1, stale_after_seconds):
+                        return False
+
+            connection.execute(
+                """
+                UPDATE memory_episode_links
+                SET session_id = ?,
+                    state = 'ingesting',
+                    updated_at = ?,
+                    last_error = NULL
+                WHERE request_id = ?
+                """,
+                (session_id, now, request_id),
+            )
+            connection.commit()
+            return True
+
+    def mark_memory_episode_ingested(self, request_id: str, *, memory_id: str | None = None) -> None:
+        if not request_id:
+            return
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE memory_episode_links
+                SET state = 'ingested',
+                    memory_id = ?,
+                    last_error = NULL,
+                    updated_at = ?
+                WHERE request_id = ?
+                """,
+                (memory_id, utcnow_iso(), request_id),
+            )
+            connection.commit()
+
+    def release_memory_episode_ingest_claim(self, request_id: str, *, error_text: str | None = None) -> None:
+        if not request_id:
+            return
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE memory_episode_links
+                SET state = 'failed',
+                    last_error = ?,
+                    updated_at = ?
+                WHERE request_id = ?
+                """,
+                (error_text, utcnow_iso(), request_id),
+            )
+            connection.commit()
+
+    def claim_task_summary_write(
+        self,
+        *,
+        task_id: str,
+        request_id: str,
+        session_id: str,
+        stale_after_seconds: int = 900,
+    ) -> bool:
+        if not task_id or not request_id or not session_id:
+            return False
+
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT state, updated_at
+                FROM task_summary_links
+                WHERE task_id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+
+            if row is None:
+                connection.execute(
+                    """
+                    INSERT INTO task_summary_links (
+                        task_id,
+                        request_id,
+                        session_id,
+                        state,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, 'writing', ?, ?)
+                    """,
+                    (task_id, request_id, session_id, now, now),
+                )
+                connection.commit()
+                return True
+
+            state = str(row["state"] or "").strip().lower()
+            if state == "written":
+                return False
+
+            if state == "writing":
+                updated_at = self._parse_utc(row["updated_at"])
+                if updated_at is not None:
+                    age_seconds = (self._parse_utc(now) - updated_at).total_seconds()
+                    if age_seconds < max(1, stale_after_seconds):
+                        return False
+
+            connection.execute(
+                """
+                UPDATE task_summary_links
+                SET request_id = ?,
+                    session_id = ?,
+                    state = 'writing',
+                    updated_at = ?,
+                    last_error = NULL
+                WHERE task_id = ?
+                """,
+                (request_id, session_id, now, task_id),
+            )
+            connection.commit()
+            return True
+
+    def mark_task_summary_written(self, task_id: str, *, memory_id: str | None = None) -> None:
+        if not task_id:
+            return
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE task_summary_links
+                SET state = 'written',
+                    memory_id = ?,
+                    last_error = NULL,
+                    updated_at = ?
+                WHERE task_id = ?
+                """,
+                (memory_id, utcnow_iso(), task_id),
+            )
+            connection.commit()
+
+    def release_task_summary_write_claim(self, task_id: str, *, error_text: str | None = None) -> None:
+        if not task_id:
+            return
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE task_summary_links
+                SET state = 'failed',
+                    last_error = ?,
+                    updated_at = ?
+                WHERE task_id = ?
+                """,
+                (error_text, utcnow_iso(), task_id),
+            )
+            connection.commit()
+
+    def list_rollover_candidates(self, *, current_session_id: str) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    session_id,
+                    created_at,
+                    updated_at,
+                    compacted_summary,
+                    metadata_json
+                FROM sessions
+                WHERE session_id != ?
+                ORDER BY created_at ASC
+                """,
+                (current_session_id,),
+            ).fetchall()
+
+        candidates: list[dict[str, Any]] = []
+        for row in rows:
+            metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            summary_status = str(metadata.get("summary_status") or "").strip()
+            if metadata.get("rollover_finalized_at") and summary_status not in {
+                "summary_failed",
+                "memory_write_failed",
+            }:
+                continue
+            candidates.append(
+                {
+                    "session_id": row["session_id"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                    "compacted_summary": row["compacted_summary"],
+                    "metadata": metadata,
+                }
+            )
+        return candidates
+
+    def mark_session_rollover_finalized(
+        self,
+        session_id: str,
+        *,
+        transcript_path: str | None = None,
+        summary_memory_id: str | None = None,
+        summary_status: str | None = None,
+        compacted_summary: str | None = None,
+    ) -> None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT metadata_json FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                return
+            metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata["rollover_finalized_at"] = utcnow_iso()
+            if transcript_path:
+                metadata["transcript_path"] = transcript_path
+            if summary_memory_id:
+                metadata["summary_memory_id"] = summary_memory_id
+            if summary_status:
+                metadata["summary_status"] = summary_status
+            connection.execute(
+                """
+                UPDATE sessions
+                SET metadata_json = ?,
+                    compacted_summary = COALESCE(?, compacted_summary),
+                    updated_at = ?
+                WHERE session_id = ?
+                """,
+                (json.dumps(metadata), compacted_summary, utcnow_iso(), session_id),
             )
             connection.commit()
 
@@ -422,6 +788,21 @@ class SessionStore:
         connection.row_factory = sqlite3.Row
         return connection
 
+    def _ensure_column(
+        self,
+        connection: sqlite3.Connection,
+        table_name: str,
+        column_name: str,
+        column_type: str,
+    ) -> None:
+        columns = {
+            str(row["name"] or "").strip()
+            for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if column_name in columns:
+            return
+        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+
     def _ensure_session(
         self,
         connection: sqlite3.Connection,
@@ -450,3 +831,11 @@ class SessionStore:
         if len(normalized) <= limit:
             return normalized
         return f"{normalized[: limit - 3].rstrip()}..."
+
+    def _parse_utc(self, raw: str | None) -> datetime | None:
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            return None

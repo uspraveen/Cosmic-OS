@@ -40,12 +40,14 @@ DEFAULT_SYSTEMD_TEMPLATE_DIR = BACKEND_ROOT / "systemd"
 DEFAULT_EDGE_SETUP_SCRIPT = BACKEND_ROOT / "vm_edge_setup.py"
 DEFAULT_GATEWAY_ENV_PATH = BACKEND_ROOT / "gateway.env"
 DEFAULT_ORCHESTRATOR_ENV_PATH = BACKEND_ROOT / "orchestrator.env"
+DEFAULT_MEMORY_ENV_PATH = BACKEND_ROOT / "memory.env"
 DEFAULT_ENV_SEARCH_ROOTS = (
     BACKEND_ROOT,
     BACKEND_ROOT / "bridges",
 )
 DEFAULT_SYSTEM_ENV_DIR = Path("/etc/cosmic")
 DEFAULT_WHATSAPP_AUTH_DIR = Path("/var/lib/cosmic/whatsapp/auth")
+DEFAULT_MEMORY_DATA_DIR = Path("/var/lib/cosmic/memory")
 DEFAULT_SUPABASE_URL = "https://hluenippcdiejenmteen.supabase.co"
 DEFAULT_SUPABASE_ANON_KEY = (
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
@@ -56,6 +58,7 @@ DEFAULT_SUPABASE_BOOTSTRAP_RPC = "consume_bootstrap_token"
 REQUIRED_SERVICE_ENV_KEYS: Dict[str, Tuple[str, ...]] = {
     "model-router.env": ("GROQ_API_KEY",),
 }
+OPTIONAL_SYSTEMD_TEMPLATES = frozenset({"cosmic-memory.service.example"})
 PYTHON_CANDIDATES = [
     "python3.13",
     "python3.12",
@@ -978,30 +981,54 @@ def load_package_json(package_json: Path) -> dict:
         raise BootstrapError("Invalid package.json at {0}: {1}".format(package_json, exc)) from exc
 
 
-def service_env_specs(system_env_dir: Optional[Path] = None) -> List[Tuple[Path, Path]]:
+def service_env_specs(
+    system_env_dir: Optional[Path] = None,
+    *,
+    include_memory: bool = False,
+) -> List[Tuple[Path, Path]]:
     system_env_dir = system_env_dir or DEFAULT_SYSTEM_ENV_DIR
-    return [
+    specs = [
         (BACKEND_ROOT / "gateway.env", system_env_dir / "gateway.env"),
         (BACKEND_ROOT / "model_router.env", system_env_dir / "model-router.env"),
         (BACKEND_ROOT / "orchestrator.env", system_env_dir / "orchestrator.env"),
         (DEFAULT_BRIDGE_DIR / ".env", system_env_dir / "whatsapp-bridge.env"),
     ]
+    if include_memory:
+        specs.append((BACKEND_ROOT / "memory.env", system_env_dir / "memory.env"))
+    return specs
 
 
-def fallback_service_env_specs(system_env_dir: Optional[Path] = None) -> List[Tuple[Path, Path]]:
+def fallback_service_env_specs(
+    system_env_dir: Optional[Path] = None,
+    *,
+    include_memory: bool = False,
+) -> List[Tuple[Path, Path]]:
     system_env_dir = system_env_dir or DEFAULT_SYSTEM_ENV_DIR
-    return [
+    specs = [
         (BACKEND_ROOT / "gateway.env.example", system_env_dir / "gateway.env"),
         (BACKEND_ROOT / "model_router.env.example", system_env_dir / "model-router.env"),
         (BACKEND_ROOT / "orchestrator.env.example", system_env_dir / "orchestrator.env"),
         (DEFAULT_BRIDGE_DIR / ".env.example", system_env_dir / "whatsapp-bridge.env"),
     ]
+    if include_memory:
+        specs.append((BACKEND_ROOT / "memory.env.example", system_env_dir / "memory.env"))
+    return specs
 
 
-def resolve_effective_service_env_sources(system_env_dir: Optional[Path] = None) -> List[Tuple[Path, Path]]:
+def resolve_effective_service_env_sources(
+    system_env_dir: Optional[Path] = None,
+    *,
+    include_memory: bool = False,
+) -> List[Tuple[Path, Path]]:
     effective_sources: list[Tuple[Path, Path]] = []
-    fallback_sources = {dest: source for source, dest in fallback_service_env_specs(system_env_dir)}
-    for source, dest in service_env_specs(system_env_dir):
+    fallback_sources = {
+        dest: source
+        for source, dest in fallback_service_env_specs(
+            system_env_dir,
+            include_memory=include_memory,
+        )
+    }
+    for source, dest in service_env_specs(system_env_dir, include_memory=include_memory):
         effective_sources.append((source if source.exists() else fallback_sources[dest], dest))
     return effective_sources
 
@@ -1017,6 +1044,7 @@ def first_meaningful_value(*values: Optional[str]) -> Optional[str]:
 def build_service_env_overrides(
     effective_sources: Sequence[Tuple[Path, Path]],
     *,
+    include_memory: bool = False,
     existing_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
     external_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Dict[str, Dict[str, str]]:
@@ -1026,29 +1054,43 @@ def build_service_env_overrides(
     model_router_source = next(source for source, dest in effective_sources if dest.name == "model-router.env")
     orchestrator_source = next(source for source, dest in effective_sources if dest.name == "orchestrator.env")
     bridge_source = next(source for source, dest in effective_sources if dest.name == "whatsapp-bridge.env")
+    memory_source = None
+    if include_memory:
+        memory_source = next(source for source, dest in effective_sources if dest.name == "memory.env")
     gateway_data = parse_env_text(gateway_source.read_text(encoding="utf-8"))
     model_router_data = parse_env_text(model_router_source.read_text(encoding="utf-8"))
     orchestrator_data = parse_env_text(orchestrator_source.read_text(encoding="utf-8"))
     bridge_data = parse_env_text(bridge_source.read_text(encoding="utf-8"))
+    memory_data = parse_env_text(memory_source.read_text(encoding="utf-8")) if memory_source is not None else {}
     gateway_existing = existing_env_by_name.get("gateway.env", {})
     model_router_existing = existing_env_by_name.get("model-router.env", {})
     orchestrator_existing = existing_env_by_name.get("orchestrator.env", {})
     bridge_existing = existing_env_by_name.get("whatsapp-bridge.env", {})
+    memory_existing = existing_env_by_name.get("memory.env", {})
     gateway_external = external_env_by_name.get("gateway.env", {})
     model_router_external = external_env_by_name.get("model-router.env", {})
     orchestrator_external = external_env_by_name.get("orchestrator.env", {})
     bridge_external = external_env_by_name.get("whatsapp-bridge.env", {})
+    memory_external = external_env_by_name.get("memory.env", {})
 
     shared_internal_token = first_meaningful_value(
+        gateway_external.get("GATEWAY_INTERNAL_TOKEN"),
+        orchestrator_external.get("GATEWAY_INTERNAL_TOKEN"),
+        bridge_external.get("GATEWAY_INTERNAL_TOKEN"),
+        memory_external.get("GATEWAY_INTERNAL_TOKEN"),
         gateway_existing.get("GATEWAY_INTERNAL_TOKEN"),
         bridge_existing.get("GATEWAY_INTERNAL_TOKEN"),
         gateway_data.get("GATEWAY_INTERNAL_TOKEN"),
         orchestrator_existing.get("GATEWAY_INTERNAL_TOKEN"),
         orchestrator_data.get("GATEWAY_INTERNAL_TOKEN"),
         bridge_data.get("GATEWAY_INTERNAL_TOKEN"),
+        memory_existing.get("GATEWAY_INTERNAL_TOKEN"),
+        memory_data.get("GATEWAY_INTERNAL_TOKEN"),
         secrets.token_urlsafe(32),
     )
     signing_secret = first_meaningful_value(
+        gateway_external.get("GATEWAY_SIGNING_SECRET"),
+        orchestrator_external.get("GATEWAY_SIGNING_SECRET"),
         gateway_existing.get("GATEWAY_SIGNING_SECRET"),
         orchestrator_existing.get("GATEWAY_SIGNING_SECRET"),
         gateway_data.get("GATEWAY_SIGNING_SECRET"),
@@ -1056,6 +1098,8 @@ def build_service_env_overrides(
         secrets.token_urlsafe(32),
     )
     bridge_token = first_meaningful_value(
+        gateway_external.get("WHATSAPP_BRIDGE_TOKEN"),
+        bridge_external.get("WHATSAPP_BRIDGE_TOKEN"),
         gateway_existing.get("WHATSAPP_BRIDGE_TOKEN"),
         bridge_existing.get("WHATSAPP_BRIDGE_TOKEN"),
         gateway_data.get("WHATSAPP_BRIDGE_TOKEN"),
@@ -1110,8 +1154,44 @@ def build_service_env_overrides(
         orchestrator_existing.get("ANTHROPIC_MODEL"),
         orchestrator_data.get("ANTHROPIC_MODEL"),
     )
+    memory_url = first_meaningful_value(
+        gateway_external.get("COSMIC_MEMORY_URL"),
+        gateway_existing.get("COSMIC_MEMORY_URL"),
+        gateway_data.get("COSMIC_MEMORY_URL"),
+    )
+    memory_perplexity_api_key = first_meaningful_value(
+        memory_external.get("PERPLEXITY_API_KEY"),
+        memory_existing.get("PERPLEXITY_API_KEY"),
+        memory_data.get("PERPLEXITY_API_KEY"),
+        gateway_external.get("PERPLEXITY_API_KEY"),
+        gateway_existing.get("PERPLEXITY_API_KEY"),
+        gateway_data.get("PERPLEXITY_API_KEY"),
+    )
+    memory_xai_api_key = first_meaningful_value(
+        memory_external.get("XAI_API_KEY"),
+        memory_existing.get("XAI_API_KEY"),
+        memory_data.get("XAI_API_KEY"),
+    )
+    memory_data_dir = first_meaningful_value(
+        memory_external.get("COSMIC_MEMORY_DATA_DIR"),
+        memory_existing.get("COSMIC_MEMORY_DATA_DIR"),
+        memory_data.get("COSMIC_MEMORY_DATA_DIR"),
+        str(DEFAULT_MEMORY_DATA_DIR),
+    )
+    memory_sync_on_startup = first_meaningful_value(
+        memory_external.get("COSMIC_MEMORY_SYNC_ON_STARTUP"),
+        memory_existing.get("COSMIC_MEMORY_SYNC_ON_STARTUP"),
+        memory_data.get("COSMIC_MEMORY_SYNC_ON_STARTUP"),
+        "true",
+    )
+    memory_graph_extract_enabled = first_meaningful_value(
+        memory_external.get("COSMIC_MEMORY_GRAPH_EXTRACT_ENABLED"),
+        memory_existing.get("COSMIC_MEMORY_GRAPH_EXTRACT_ENABLED"),
+        memory_data.get("COSMIC_MEMORY_GRAPH_EXTRACT_ENABLED"),
+        "false",
+    )
 
-    return {
+    overrides = {
         "gateway.env": {
             "GATEWAY_INTERNAL_TOKEN": shared_internal_token or secrets.token_urlsafe(32),
             "GATEWAY_LOCAL_API_TOKEN": local_api_token or secrets.token_urlsafe(24),
@@ -1137,6 +1217,18 @@ def build_service_env_overrides(
             "WHATSAPP_AUTH_DIR": whatsapp_auth_dir or str(DEFAULT_WHATSAPP_AUTH_DIR),
         },
     }
+    if include_memory:
+        overrides["gateway.env"]["COSMIC_MEMORY_URL"] = memory_url or "http://127.0.0.1:8090"
+        overrides["memory.env"] = {
+            "PERPLEXITY_API_KEY": memory_perplexity_api_key or "<perplexity-api-key>",
+            "XAI_API_KEY": memory_xai_api_key or "",
+            "GATEWAY_INTERNAL_TOKEN": shared_internal_token or secrets.token_urlsafe(32),
+            "COSMIC_MEMORY_INTERNAL_TOKEN": shared_internal_token or secrets.token_urlsafe(32),
+            "COSMIC_MEMORY_DATA_DIR": memory_data_dir or str(DEFAULT_MEMORY_DATA_DIR),
+            "COSMIC_MEMORY_SYNC_ON_STARTUP": memory_sync_on_startup or "true",
+            "COSMIC_MEMORY_GRAPH_EXTRACT_ENABLED": memory_graph_extract_enabled or "false",
+        }
+    return overrides
 
 
 def materialize_bootstrap_env_files(
@@ -1146,6 +1238,7 @@ def materialize_bootstrap_env_files(
     bootstrap_token: str,
     supabase_url: str,
     supabase_anon_key: str,
+    include_memory: bool = False,
 ) -> List[Path]:
     setup_env_files(search_roots)
     external_env_by_name = fetch_bootstrap_env_payload(
@@ -1153,8 +1246,17 @@ def materialize_bootstrap_env_files(
         supabase_url=supabase_url,
         supabase_anon_key=supabase_anon_key,
     )
-    effective_sources = resolve_effective_service_env_sources(system_env_dir)
-    repo_source_by_name = {dest.name: source for source, dest in service_env_specs(system_env_dir)}
+    effective_sources = resolve_effective_service_env_sources(
+        system_env_dir,
+        include_memory=include_memory,
+    )
+    repo_source_by_name = {
+        dest.name: source
+        for source, dest in service_env_specs(
+            system_env_dir,
+            include_memory=include_memory,
+        )
+    }
     existing_env_by_name: Dict[str, Dict[str, str]] = {}
     for source_path, dest_path in effective_sources:
         repo_path = repo_source_by_name[dest_path.name]
@@ -1165,6 +1267,7 @@ def materialize_bootstrap_env_files(
 
     overrides_by_dest = build_service_env_overrides(
         effective_sources,
+        include_memory=include_memory,
         existing_env_by_name=existing_env_by_name,
         external_env_by_name=external_env_by_name,
     )
@@ -1183,15 +1286,21 @@ def materialize_bootstrap_env_files(
     return written
 
 
-def install_service_env_files(system_env_dir: Path) -> List[Path]:
+def install_service_env_files(system_env_dir: Path, *, include_memory: bool = False) -> List[Path]:
     if not is_linux():
         raise BootstrapError("System env provisioning currently targets Linux VMs only.")
 
-    effective_sources = resolve_effective_service_env_sources(system_env_dir)
+    effective_sources = resolve_effective_service_env_sources(
+        system_env_dir,
+        include_memory=include_memory,
+    )
 
     validate_required_service_env_files(effective_sources)
 
-    overrides_by_dest = build_service_env_overrides(effective_sources)
+    overrides_by_dest = build_service_env_overrides(
+        effective_sources,
+        include_memory=include_memory,
+    )
 
     run(["install", "-d", "-m", "755", str(system_env_dir)], use_sudo=True)
 
@@ -1246,6 +1355,9 @@ def install_systemd_units(
     *,
     enable_units: bool = False,
     start_units: bool = False,
+    include_optional_templates: Optional[Sequence[str]] = None,
+    extra_enable_units: Optional[Sequence[str]] = None,
+    include_memory_env: bool = False,
 ) -> List[str]:
     if not is_linux():
         raise BootstrapError("Systemd install currently targets Linux VMs only.")
@@ -1254,11 +1366,20 @@ def install_systemd_units(
     if not template_dir.exists():
         raise BootstrapError("Systemd template directory does not exist: {0}".format(template_dir))
 
-    templates = sorted(path for path in template_dir.glob("*.example") if path.is_file())
+    selected_optional_templates = set(include_optional_templates or [])
+    templates = sorted(
+        path
+        for path in template_dir.glob("*.example")
+        if path.is_file()
+        and (
+            path.name not in OPTIONAL_SYSTEMD_TEMPLATES
+            or path.name in selected_optional_templates
+        )
+    )
     if not templates:
         raise BootstrapError("No systemd template files found in {0}".format(template_dir))
 
-    install_service_env_files(DEFAULT_SYSTEM_ENV_DIR)
+    install_service_env_files(DEFAULT_SYSTEM_ENV_DIR, include_memory=include_memory_env)
 
     installed_names: list[str] = []
     service_user = current_service_user()
@@ -1298,9 +1419,10 @@ def install_systemd_units(
 
     if enable_units and installed_names:
         preferred_units = [name for name in installed_names if name.endswith(".target")] or installed_names
-        run(["systemctl", "enable", *preferred_units], use_sudo=True)
+        additional_units = [name for name in (extra_enable_units or []) if name]
+        run(["systemctl", "enable", *preferred_units, *additional_units], use_sudo=True)
         if start_units:
-            run(["systemctl", "restart", *preferred_units], use_sudo=True)
+            run(["systemctl", "restart", *preferred_units, *additional_units], use_sudo=True)
 
     return installed_names
 
@@ -1379,12 +1501,15 @@ def sync_repo_env_files(search_roots: Sequence[Path]) -> List[Path]:
     return synced
 
 
-def sync_service_env_files(system_env_dir: Path) -> List[Path]:
+def sync_service_env_files(system_env_dir: Path, *, include_memory: bool = False) -> List[Path]:
     if not is_linux():
         raise BootstrapError("System env syncing currently targets Linux VMs only.")
 
     run(["install", "-d", "-m", "755", str(system_env_dir)], use_sudo=True)
-    effective_sources = resolve_effective_service_env_sources(system_env_dir)
+    effective_sources = resolve_effective_service_env_sources(
+        system_env_dir,
+        include_memory=include_memory,
+    )
     existing_env_by_name: Dict[str, Dict[str, str]] = {}
     for _source_path, dest_path in effective_sources:
         if not dest_path.exists():
@@ -1393,6 +1518,7 @@ def sync_service_env_files(system_env_dir: Path) -> List[Path]:
 
     overrides_by_dest = build_service_env_overrides(
         effective_sources,
+        include_memory=include_memory,
         existing_env_by_name=existing_env_by_name,
     )
 
@@ -1419,6 +1545,7 @@ def sync_env(
     bootstrap_token: Optional[str] = None,
     supabase_url: str = DEFAULT_SUPABASE_URL,
     supabase_anon_key: str = DEFAULT_SUPABASE_ANON_KEY,
+    include_memory: bool = False,
 ) -> None:
     sync_repo_env_files(search_roots)
     if meaningful_env_value(bootstrap_token) is not None:
@@ -1428,11 +1555,12 @@ def sync_env(
             bootstrap_token=bootstrap_token or "",
             supabase_url=supabase_url,
             supabase_anon_key=supabase_anon_key,
+            include_memory=include_memory,
         )
     if not is_linux():
         log("Skipping /etc/cosmic env sync on non-Linux host.")
         return
-    sync_service_env_files(system_env_dir)
+    sync_service_env_files(system_env_dir, include_memory=include_memory)
 
 
 def setup_python(venv_path: Path, requirements_path: Path) -> None:
@@ -1452,6 +1580,37 @@ def setup_whatsapp_bridge(bridge_dir: Path) -> None:
         raise BootstrapError("This bootstrap flow currently targets Linux VMs only.")
 
     install_whatsapp_bridge_dependencies(bridge_dir)
+
+
+def resolve_memory_repo_dir(configured_path: Path | None) -> Path | None:
+    if configured_path is None:
+        return None
+    resolved = configured_path.expanduser().resolve()
+    if not resolved.exists():
+        raise BootstrapError("cosmic-memory repo directory does not exist: {0}".format(resolved))
+    if not (resolved / "pyproject.toml").exists():
+        raise BootstrapError("cosmic-memory repo is missing pyproject.toml: {0}".format(resolved))
+    return resolved
+
+
+def setup_cosmic_memory(venv_path: Path, memory_repo_dir: Path) -> None:
+    if not is_linux():
+        raise BootstrapError("This bootstrap flow currently targets Linux VMs only.")
+
+    python_path = venv_python_path(venv_path)
+    if not python_path.exists():
+        raise BootstrapError("Missing venv python executable at {0}".format(python_path))
+
+    memory_repo = resolve_memory_repo_dir(memory_repo_dir)
+    if memory_repo is None:
+        return
+
+    install_target = "{0}[qdrant-local,graph,llm]".format(memory_repo)
+    log("Installing cosmic-memory package from {0}".format(memory_repo))
+    run_with_retry(
+        [str(python_path), "-m", "pip", "install", "--upgrade", install_target],
+        cwd=memory_repo,
+    )
 
 
 def setup_vm_edge(
@@ -1492,7 +1651,9 @@ def bootstrap(
     bootstrap_token: Optional[str] = None,
     supabase_url: str = DEFAULT_SUPABASE_URL,
     supabase_anon_key: str = DEFAULT_SUPABASE_ANON_KEY,
+    memory_repo_dir: Path | None = None,
 ) -> None:
+    enable_memory = memory_repo_dir is not None
     setup_env_files(env_search_roots)
     if meaningful_env_value(bootstrap_token) is not None:
         materialize_bootstrap_env_files(
@@ -1501,8 +1662,11 @@ def bootstrap(
             bootstrap_token=bootstrap_token or "",
             supabase_url=supabase_url,
             supabase_anon_key=supabase_anon_key,
+            include_memory=enable_memory,
         )
     setup_python(venv_path, requirements_path)
+    if memory_repo_dir is not None:
+        setup_cosmic_memory(venv_path, memory_repo_dir)
     setup_whatsapp_bridge(bridge_dir)
     if not skip_edge and edge_setup_script is not None and gateway_env_path is not None:
         setup_vm_edge(
@@ -1539,7 +1703,9 @@ def provision_vm(
     bootstrap_token: Optional[str] = None,
     supabase_url: str = DEFAULT_SUPABASE_URL,
     supabase_anon_key: str = DEFAULT_SUPABASE_ANON_KEY,
+    memory_repo_dir: Path | None = None,
 ) -> None:
+    enable_memory = memory_repo_dir is not None
     bootstrap(
         venv_path,
         requirements_path,
@@ -1553,11 +1719,30 @@ def provision_vm(
         bootstrap_token=bootstrap_token,
         supabase_url=supabase_url,
         supabase_anon_key=supabase_anon_key,
+        memory_repo_dir=memory_repo_dir,
     )
+    if enable_memory:
+        run(
+            [
+                "install",
+                "-d",
+                "-m",
+                "700",
+                "-o",
+                current_service_user(),
+                "-g",
+                current_service_user(),
+                str(DEFAULT_MEMORY_DATA_DIR),
+            ],
+            use_sudo=True,
+        )
     installed = install_systemd_units(
         systemd_template_dir,
         enable_units=enable_units,
         start_units=start_units,
+        include_optional_templates=["cosmic-memory.service.example"] if enable_memory else [],
+        extra_enable_units=["cosmic-memory.service"] if enable_units and enable_memory else [],
+        include_memory_env=enable_memory,
     )
 
     print("")
@@ -1608,6 +1793,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--gateway-host",
         default="",
         help="Public DNS hostname for the Gateway edge. Overrides GATEWAY_PUBLIC_HOST in gateway.env.",
+    )
+    parser.add_argument(
+        "--memory-repo-dir",
+        default="",
+        help="Optional local path to the cosmic-memory repo. When set, bootstrap installs the package, materializes memory.env, and provisions cosmic-memory.service.",
     )
     parser.add_argument(
         "--skip-edge",
@@ -1697,6 +1887,11 @@ def main() -> int:
     edge_setup_script = Path(args.edge_script).expanduser().resolve()
     gateway_env_path = Path(args.gateway_env_path).expanduser().resolve()
     gateway_host = getattr(args, "gateway_host", "").strip() or None
+    memory_repo_dir = (
+        resolve_memory_repo_dir(Path(args.memory_repo_dir))
+        if meaningful_env_value(getattr(args, "memory_repo_dir", "")) is not None
+        else None
+    )
     bootstrap_token = (
         meaningful_env_value(getattr(args, "bootstrap_token", ""))
         or meaningful_env_value(os.getenv("COSMIC_BOOTSTRAP_TOKEN"))
@@ -1724,6 +1919,7 @@ def main() -> int:
                     bootstrap_token=bootstrap_token,
                     supabase_url=supabase_url,
                     supabase_anon_key=supabase_anon_key,
+                    include_memory=memory_repo_dir is not None,
                 )
         elif command == "sync-env":
             sync_env(
@@ -1732,6 +1928,7 @@ def main() -> int:
                 bootstrap_token=bootstrap_token,
                 supabase_url=supabase_url,
                 supabase_anon_key=supabase_anon_key,
+                include_memory=memory_repo_dir is not None,
             )
         elif command == "fetch-bootstrap-env":
             if bootstrap_token is None:
@@ -1742,9 +1939,12 @@ def main() -> int:
                 bootstrap_token=bootstrap_token,
                 supabase_url=supabase_url,
                 supabase_anon_key=supabase_anon_key,
+                include_memory=memory_repo_dir is not None,
             )
         elif command == "setup-python":
             setup_python(venv_path, requirements_path)
+            if memory_repo_dir is not None:
+                setup_cosmic_memory(venv_path, memory_repo_dir)
         elif command == "setup-whatsapp-bridge":
             setup_whatsapp_bridge(bridge_dir)
         elif command == "setup-edge":
@@ -1760,6 +1960,9 @@ def main() -> int:
                 systemd_template_dir,
                 enable_units=bool(getattr(args, "enable", False)),
                 start_units=bool(getattr(args, "start", False)),
+                include_optional_templates=["cosmic-memory.service.example"] if memory_repo_dir is not None else [],
+                extra_enable_units=["cosmic-memory.service"] if memory_repo_dir is not None and bool(getattr(args, "enable", False)) else [],
+                include_memory_env=memory_repo_dir is not None,
             )
             print("Installed systemd units:")
             for unit_name in installed:
@@ -1779,6 +1982,7 @@ def main() -> int:
                 bootstrap_token=bootstrap_token,
                 supabase_url=supabase_url,
                 supabase_anon_key=supabase_anon_key,
+                memory_repo_dir=memory_repo_dir,
             )
         else:
             bootstrap(
@@ -1794,6 +1998,7 @@ def main() -> int:
                 bootstrap_token=bootstrap_token,
                 supabase_url=supabase_url,
                 supabase_anon_key=supabase_anon_key,
+                memory_repo_dir=memory_repo_dir,
             )
     except BootstrapError as exc:
         print("Bootstrap failed: {0}".format(exc), file=sys.stderr)

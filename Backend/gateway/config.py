@@ -39,6 +39,14 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_csv(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    values = tuple(item.strip() for item in raw.split(",") if item.strip())
+    return values or default
+
+
 @dataclass(slots=True)
 class GatewayConfig:
     host: str = "0.0.0.0"
@@ -57,6 +65,7 @@ class GatewayConfig:
     routing_audit_db_path: Path = BACKEND_ROOT / "gateway" / "routing_audit.db"
     artifacts_db_path: Path = BACKEND_ROOT / "gateway" / "artifacts.db"
     delivery_queue_db_path: Path = BACKEND_ROOT / "gateway" / "delivery_queue.db"
+    session_transcript_dir: Path = BACKEND_ROOT / "logs" / "sessions"
     delivery_retry_base_sec: float = 1.0
     delivery_retry_max_sec: float = 120.0
     delivery_max_attempts: int = 12
@@ -68,6 +77,20 @@ class GatewayConfig:
     perplexity_api_key: str = ""
     perplexity_model: str = "sonar"
     direct_llm_timeout_sec: float = 90.0
+    cosmic_memory_url: str = ""
+    cosmic_memory_timeout_sec: float = 12.0
+    cosmic_memory_core_fact_max_chars: int = 1500
+    cosmic_memory_passive_max_results: int = 8
+    cosmic_memory_passive_token_budget: int = 12000
+    cosmic_memory_passive_kinds: tuple[str, ...] = (
+        "session_summary",
+        "task_summary",
+        "agent_note",
+        "user_data",
+    )
+    cosmic_memory_ingest_transcripts: bool = True
+    cosmic_memory_episode_extract_graph: bool = False
+    session_summary_max_output_tokens: int = 2500
 
     @classmethod
     def from_env(cls) -> "GatewayConfig":
@@ -115,6 +138,12 @@ class GatewayConfig:
                     str(BACKEND_ROOT / "gateway" / "delivery_queue.db"),
                 )
             ).expanduser(),
+            session_transcript_dir=Path(
+                os.getenv(
+                    "GATEWAY_SESSION_TRANSCRIPT_DIR",
+                    str(BACKEND_ROOT / "logs" / "sessions"),
+                )
+            ).expanduser(),
             delivery_retry_base_sec=max(
                 0.25,
                 _env_float("GATEWAY_DELIVERY_RETRY_BASE_SEC", 1.0),
@@ -149,5 +178,40 @@ class GatewayConfig:
             direct_llm_timeout_sec=max(
                 5.0,
                 _env_float("DIRECT_LLM_TIMEOUT_SEC", 90.0),
+            ),
+            cosmic_memory_url=os.getenv("COSMIC_MEMORY_URL", "").rstrip("/"),
+            cosmic_memory_timeout_sec=max(
+                1.0,
+                _env_float("COSMIC_MEMORY_TIMEOUT_SEC", 12.0),
+            ),
+            cosmic_memory_core_fact_max_chars=max(
+                250,
+                _env_int("COSMIC_MEMORY_CORE_FACT_MAX_CHARS", 1500),
+            ),
+            cosmic_memory_passive_max_results=max(
+                1,
+                _env_int("COSMIC_MEMORY_PASSIVE_MAX_RESULTS", 8),
+            ),
+            cosmic_memory_passive_token_budget=max(
+                256,
+                _env_int("COSMIC_MEMORY_PASSIVE_TOKEN_BUDGET", 12000),
+            ),
+            cosmic_memory_passive_kinds=_env_csv(
+                "COSMIC_MEMORY_PASSIVE_KINDS",
+                (
+                    "session_summary",
+                    "task_summary",
+                    "agent_note",
+                    "user_data",
+                ),
+            ),
+            cosmic_memory_ingest_transcripts=_env_bool("COSMIC_MEMORY_INGEST_TRANSCRIPTS", True),
+            cosmic_memory_episode_extract_graph=_env_bool(
+                "COSMIC_MEMORY_EPISODE_EXTRACT_GRAPH",
+                False,
+            ),
+            session_summary_max_output_tokens=max(
+                512,
+                _env_int("GATEWAY_SESSION_SUMMARY_MAX_OUTPUT_TOKENS", 2500),
             ),
         )

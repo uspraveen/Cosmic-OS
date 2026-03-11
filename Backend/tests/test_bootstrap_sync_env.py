@@ -296,6 +296,87 @@ def test_materialize_bootstrap_env_files_updates_repo_envs(monkeypatch, tmp_path
     assert "WHATSAPP_AUTH_DIR=/var/lib/cosmic/whatsapp/auth" in bridge_rendered
 
 
+def test_materialize_bootstrap_env_files_can_render_memory_env(monkeypatch, tmp_path) -> None:
+    backend_root = tmp_path / "Backend"
+    bridge_dir = backend_root / "bridges" / "whatsapp_bridge"
+    system_env_dir = tmp_path / "etc" / "cosmic"
+    bridge_dir.mkdir(parents=True)
+    system_env_dir.mkdir(parents=True)
+
+    (backend_root / "gateway.env.example").write_text(
+        "COSMIC_MEMORY_URL=\n"
+        "PERPLEXITY_API_KEY=<perplexity-api-key>\n"
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n",
+        encoding="utf-8",
+    )
+    (backend_root / "model_router.env.example").write_text(
+        "GROQ_API_KEY=<groq-api-key>\n",
+        encoding="utf-8",
+    )
+    (backend_root / "orchestrator.env.example").write_text(
+        "ANTHROPIC_API_KEY=<anthropic-api-key>\n"
+        "ANTHROPIC_MODEL=claude-opus-4-6\n",
+        encoding="utf-8",
+    )
+    (backend_root / "memory.env.example").write_text(
+        "PERPLEXITY_API_KEY=<perplexity-api-key>\n"
+        "XAI_API_KEY=\n"
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "COSMIC_MEMORY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "COSMIC_MEMORY_DATA_DIR=/var/lib/cosmic/memory\n",
+        encoding="utf-8",
+    )
+    (bridge_dir / ".env.example").write_text(
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "WHATSAPP_BRIDGE_TOKEN=<whatsapp-bridge-token>\n"
+        "WHATSAPP_AUTH_DIR=<auth-dir>\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(bootstrap, "BACKEND_ROOT", backend_root)
+    monkeypatch.setattr(bootstrap, "DEFAULT_BRIDGE_DIR", bridge_dir)
+    monkeypatch.setattr(bootstrap, "DEFAULT_SYSTEM_ENV_DIR", system_env_dir)
+    monkeypatch.setattr(bootstrap, "DEFAULT_WHATSAPP_AUTH_DIR", PurePosixPath("/var/lib/cosmic/whatsapp/auth"))
+    monkeypatch.setattr(bootstrap, "DEFAULT_MEMORY_DATA_DIR", PurePosixPath("/var/lib/cosmic/memory"))
+    monkeypatch.setattr(
+        bootstrap,
+        "fetch_bootstrap_env_payload",
+        lambda **kwargs: {
+            "gateway.env": {
+                "GATEWAY_INTERNAL_TOKEN": "shared-token",
+                "PERPLEXITY_API_KEY": "perplexity-live",
+            },
+            "model-router.env": {
+                "GROQ_API_KEY": "groq-live",
+            },
+            "orchestrator.env": {
+                "ANTHROPIC_API_KEY": "anthropic-live",
+                "ANTHROPIC_MODEL": "claude-opus-4-6",
+            },
+        },
+    )
+
+    written = bootstrap.materialize_bootstrap_env_files(
+        [backend_root, backend_root / "bridges"],
+        system_env_dir,
+        bootstrap_token="bs_live_token",
+        supabase_url="https://example.supabase.co",
+        supabase_anon_key="anon",
+        include_memory=True,
+    )
+
+    memory_env_path = backend_root / "memory.env"
+    gateway_env_path = backend_root / "gateway.env"
+
+    assert memory_env_path in written
+    assert "COSMIC_MEMORY_URL=http://127.0.0.1:8090" in gateway_env_path.read_text(encoding="utf-8")
+    memory_rendered = memory_env_path.read_text(encoding="utf-8")
+    assert "PERPLEXITY_API_KEY=perplexity-live" in memory_rendered
+    assert "GATEWAY_INTERNAL_TOKEN=shared-token" in memory_rendered
+    assert "COSMIC_MEMORY_INTERNAL_TOKEN=shared-token" in memory_rendered
+    assert "COSMIC_MEMORY_DATA_DIR=/var/lib/cosmic/memory" in memory_rendered
+
+
 def test_fetch_bootstrap_env_payload_retries_transient_urlerror(monkeypatch) -> None:
     attempts = {"count": 0}
     payload = {

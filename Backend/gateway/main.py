@@ -7,6 +7,7 @@ import uvicorn
 
 from .channels.routes import router as channel_router
 from .config import GatewayConfig
+from .memory_routes import router as memory_router
 from .runtime import GatewayRuntime
 
 
@@ -28,6 +29,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(channel_router)
+app.include_router(memory_router)
 
 
 @app.get("/health")

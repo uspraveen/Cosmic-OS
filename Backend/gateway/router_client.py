@@ -30,11 +30,13 @@ class ModelRouterClient:
         *,
         query: str,
         conversation_context: list[dict[str, str]],
+        memory_context: str | None = None,
         max_completion_tokens: int = 430,
     ) -> dict[str, Any]:
         payload = await self.classify_with_metadata(
             query=query,
             conversation_context=conversation_context,
+            memory_context=memory_context,
             max_completion_tokens=max_completion_tokens,
         )
         classification = payload.get("classification")
@@ -47,6 +49,7 @@ class ModelRouterClient:
         *,
         query: str,
         conversation_context: list[dict[str, str]],
+        memory_context: str | None = None,
         max_completion_tokens: int = 430,
     ) -> dict[str, Any]:
         if self._client is None:
@@ -60,6 +63,7 @@ class ModelRouterClient:
             json={
                 "query": query,
                 "conversation_context": conversation_context,
+                "memory_context": memory_context,
                 "max_completion_tokens": max_completion_tokens,
             },
         )

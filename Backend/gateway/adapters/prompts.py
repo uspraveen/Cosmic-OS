@@ -18,3 +18,11 @@ DIRECT_ASSISTANT_SYSTEM_PROMPT = (
     "say so plainly instead of pretending to know.\n\n"
     f"{AWAITING_REPLY_INSTRUCTION}"
 )
+
+
+def build_direct_assistant_system_prompt(memory_context: str | None = None) -> str:
+    prompt = DIRECT_ASSISTANT_SYSTEM_PROMPT
+    context = str(memory_context or "").strip()
+    if not context:
+        return prompt
+    return f"{prompt}\n\n{context}"

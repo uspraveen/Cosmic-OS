@@ -14,7 +14,7 @@ from shared import TaskEnvelope, verify_task_envelope
 
 from .config import OrchestratorConfig
 from .ledger import TaskLedger
-from .prompts import THIN_ORCHESTRATOR_SYSTEM_PROMPT
+from .prompts import build_thin_orchestrator_system_prompt
 
 
 @dataclass(slots=True)
@@ -291,7 +291,9 @@ class OrchestratorRuntime:
             "max_tokens": self.config.max_tokens,
             "stream": True,
             "thinking": {"type": "adaptive"},
-            "system": THIN_ORCHESTRATOR_SYSTEM_PROMPT,
+            "system": build_thin_orchestrator_system_prompt(
+                str(task.input.get("memory_context") or "").strip() or None
+            ),
             "messages": self._build_messages(task),
         }
         headers = {
