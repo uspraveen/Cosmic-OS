@@ -2734,12 +2734,12 @@
 
 .cosmic-tg-hero-stat-connected {
   display: inline-block;
-  padding: 3px 10px;
+  padding: 2px 8px;
   border-radius: 100px;
   background: rgba(10, 132, 255, 0.14);
   border: 1px solid rgba(10, 132, 255, 0.22);
   color: rgba(205, 236, 255, 0.96);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   vertical-align: middle;
 }
