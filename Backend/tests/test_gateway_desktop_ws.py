@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 import pytest
 from fastapi import FastAPI
@@ -12,7 +13,7 @@ from gateway.channels.base import ChannelUnavailableError
 from gateway.channels.routes import router as channel_router
 from gateway.config import GatewayConfig
 from gateway.memory_client import MemoryPromptContext
-from gateway.runtime import GatewayRuntime
+from gateway.runtime import SYSTEM_CRON_DAILY_ROLLOVER, GatewayRuntime
 from gateway.session_store import utcnow_iso
 
 
@@ -525,6 +526,7 @@ def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
             routing_audit_db_path=tmp_path / "routing_audit.db",
             artifacts_db_path=tmp_path / "artifacts.db",
             delivery_queue_db_path=tmp_path / "delivery_queue.db",
+            scheduler_db_path=tmp_path / "scheduler.db",
         )
     )
 
@@ -813,7 +815,7 @@ async def test_runtime_rollover_writes_session_summary_to_memory(tmp_path) -> No
         )
 
         await runtime._finalize_rollover_sessions(  # noqa: SLF001 - targeted rollover seam
-            current_session_id=runtime.session_store.current_session_id()
+            current_session_id=runtime._current_session_id()
         )
 
         transcript_path = runtime.config.session_transcript_dir / f"{old_session_id}.md"
@@ -825,7 +827,7 @@ async def test_runtime_rollover_writes_session_summary_to_memory(tmp_path) -> No
         assert old_session_id not in {
             item["session_id"]
             for item in runtime.session_store.list_rollover_candidates(
-                current_session_id=runtime.session_store.current_session_id()
+                current_session_id=runtime._current_session_id()
             )
         }
     finally:
@@ -837,7 +839,7 @@ async def test_active_working_set_only_keeps_unresolved_open_loops(tmp_path) -> 
     runtime = build_runtime(tmp_path, route="haiku")
     await runtime.start()
     try:
-        session_id = runtime.session_store.current_session_id()
+        session_id = runtime._current_session_id()
         request_id = "req_open_loop_1"
         channel = "desktop:desk_a"
         assistant_text = "Can you clarify which repository you want me to use?"
@@ -944,7 +946,7 @@ async def test_session_compaction_only_summarizes_newly_eligible_turns(tmp_path,
 
     await runtime.start()
     try:
-        session_id = runtime.session_store.current_session_id()
+        session_id = runtime._current_session_id()
         add_turn(1)
         add_turn(2)
         add_turn(3)
@@ -1048,7 +1050,7 @@ def test_internal_session_routes_expose_state_turns_and_revisit(tmp_path) -> Non
     app.include_router(memory_router)
 
     with TestClient(app) as client:
-        session_id = runtime.session_store.current_session_id()
+        session_id = runtime._current_session_id()
         runtime.session_store.update_session_metadata(
             session_id,
             {
@@ -1203,7 +1205,52 @@ def test_desktop_websocket_supports_ping_query_and_resume(test_client: TestClien
         assert resume["request_id"] == "resume_001"
         assert resume["session_id"] == route_result["session_id"]
         assert resume["channel"] == "desktop:desk_a1b2"
+        assert resume["user_timezone"] == "America/Chicago"
         assert resume["history_tail"][-1]["content"] == "Hello from fake adapter"
+
+
+@pytest.mark.asyncio
+async def test_runtime_uses_reported_desktop_timezone_for_session_rollover_and_cron(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+    await runtime.start()
+    try:
+        await runtime.update_user_timezone("Asia/Kolkata", source="desktop")
+
+        session_id = runtime._current_session_id(
+            datetime(2026, 3, 12, 1, 0, tzinfo=timezone.utc)
+        )
+        assert session_id == "sess_20260312"
+
+        profile = runtime.scheduler_store.get_profile()
+        assert profile["user_timezone"] == "Asia/Kolkata"
+        assert profile["timezone_source"] == "desktop"
+
+        rollover_cron = runtime.scheduler_store.get_cron(SYSTEM_CRON_DAILY_ROLLOVER)
+        assert rollover_cron is not None
+        assert rollover_cron["timezone"] == "Asia/Kolkata"
+        assert rollover_cron["cron_expr"] == "0 4 * * *"
+    finally:
+        await runtime.stop()
+
+
+def test_desktop_resume_updates_scheduler_timezone_profile(test_client: TestClient) -> None:
+    runtime = test_client.app.state.gateway_runtime
+
+    with test_client.websocket_connect("/ws?token=test-token&device_id=desk_tz") as websocket:
+        websocket.send_json(
+            {
+                "type": "resume",
+                "request_id": "resume_tz_001",
+                "timezone": "Asia/Kolkata",
+                "session_id": "",
+                "known_task_ids": [],
+            }
+        )
+        resume = websocket.receive_json()
+
+    assert resume["type"] == "resume.ok"
+    assert resume["user_timezone"] == "Asia/Kolkata"
+    assert runtime.scheduler_store.get_profile()["user_timezone"] == "Asia/Kolkata"
 
 
 def test_channels_endpoint_lists_desktop(test_client: TestClient) -> None:
@@ -1287,6 +1334,47 @@ def test_routing_audit_endpoint_returns_effective_route_details(test_client: Tes
     assert entry["classifier_model"] == "openai/gpt-oss-20b"
     assert entry["classifier_metrics"] == {"rtt_ms": 18.5}
     assert entry["query_text"] == "what is usd to inr today?"
+
+
+def test_scheduler_endpoints_list_and_pause_resume_system_cron(test_client: TestClient) -> None:
+    overview = test_client.get(
+        "/scheduler/overview",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert overview.status_code == 200
+    overview_payload = overview.json()
+    assert overview_payload["profile"]["user_timezone"] == "America/Chicago"
+    assert any(item["cron_id"] == SYSTEM_CRON_DAILY_ROLLOVER for item in overview_payload["crons"])
+
+    cron_response = test_client.get(
+        f"/scheduler/crons/{SYSTEM_CRON_DAILY_ROLLOVER}",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert cron_response.status_code == 200
+    assert cron_response.json()["cron_id"] == SYSTEM_CRON_DAILY_ROLLOVER
+
+    paused = test_client.post(
+        f"/scheduler/crons/{SYSTEM_CRON_DAILY_ROLLOVER}/pause",
+        headers={"Authorization": "Bearer test-token"},
+        json={"reason": "testing"},
+    )
+    assert paused.status_code == 200
+    assert paused.json()["paused"] is True
+    assert paused.json()["pause_reason"] == "testing"
+
+    resumed = test_client.post(
+        f"/scheduler/crons/{SYSTEM_CRON_DAILY_ROLLOVER}/resume",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert resumed.status_code == 200
+    assert resumed.json()["paused"] is False
+
+    heartbeat = test_client.get(
+        "/scheduler/heartbeat",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert heartbeat.status_code == 200
+    assert heartbeat.json()["timezone"] == "America/Chicago"
 
 
 def test_whatsapp_incoming_emits_route_result_before_async_fulfillment(tmp_path) -> None:

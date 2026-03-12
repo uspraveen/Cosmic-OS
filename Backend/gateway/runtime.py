@@ -11,6 +11,7 @@ from pathlib import Path
 import time
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .adapters import HaikuAdapter, PerplexityAdapter
 from .artifact_store import ArtifactStore
@@ -25,6 +26,7 @@ from .memory_client import CosmicMemoryClient, MemoryPromptContext
 from .orchestrator_client import OrchestratorClient
 from .router_client import ModelRouterClient
 from .routing_audit_store import RoutingAuditStore
+from .scheduler_store import SchedulerStore
 from .session_store import SessionStore
 from shared import SOURCE_PRIORITY_MAP, TaskEnvelope, generate_task_id, sign_task_envelope, utcnow
 
@@ -39,6 +41,7 @@ SESSION_SUMMARY_SOURCE_CHAR_LIMIT = 60_000
 COMPACTION_TRIGGER_CHAR_THRESHOLD = 33_600
 COMPACTION_RECENT_WINDOW_MESSAGES = 12
 COMPACTION_RAW_MESSAGE_CHAR_LIMIT = 24_000
+SYSTEM_CRON_DAILY_ROLLOVER = "system.daily_rollover"
 TURN_LEDGER_WINDOW_SIZE = 10
 TASK_NOTEBOOK_WINDOW_SIZE = 5
 EPHEMERAL_CHANNEL_EVENT_TYPES = {
@@ -97,6 +100,7 @@ class GatewayRuntime:
         self.routing_audit_store = RoutingAuditStore(config.routing_audit_db_path)
         self.artifact_store = ArtifactStore(config.artifacts_db_path)
         self.delivery_queue_store = DeliveryQueueStore(config.delivery_queue_db_path)
+        self.scheduler_store = SchedulerStore(config.scheduler_db_path)
         self.memory_client = CosmicMemoryClient(
             base_url=config.cosmic_memory_url,
             timeout_sec=config.cosmic_memory_timeout_sec,
@@ -125,6 +129,8 @@ class GatewayRuntime:
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._delivery_worker: asyncio.Task[None] | None = None
         self._delivery_wakeup = asyncio.Event()
+        self._scheduler_worker: asyncio.Task[None] | None = None
+        self._scheduler_wakeup = asyncio.Event()
         self._rollover_finalize_lock = asyncio.Lock()
         self._session_compaction_lock = asyncio.Lock()
         self._memory_health_worker: asyncio.Task[None] | None = None
@@ -138,6 +144,8 @@ class GatewayRuntime:
         self.routing_audit_store.initialize()
         self.artifact_store.initialize()
         self.delivery_queue_store.initialize()
+        self.scheduler_store.initialize(default_timezone=self.config.user_timezone_fallback)
+        self._sync_system_crons()
         await self.model_router.start()
         await self.orchestrator.start()
         await self.memory_client.start()
@@ -152,6 +160,10 @@ class GatewayRuntime:
             self._delivery_worker_loop(),
             name="gateway-delivery-worker",
         )
+        self._scheduler_worker = asyncio.create_task(
+            self._scheduler_loop(),
+            name="gateway-scheduler",
+        )
         await self._finalize_rollover_sessions()
         await self._send_channel_activation_greetings()
         self.started = True
@@ -165,6 +177,10 @@ class GatewayRuntime:
             self._delivery_worker.cancel()
             await asyncio.gather(self._delivery_worker, return_exceptions=True)
             self._delivery_worker = None
+        if self._scheduler_worker is not None:
+            self._scheduler_worker.cancel()
+            await asyncio.gather(self._scheduler_worker, return_exceptions=True)
+            self._scheduler_worker = None
         workers = [state.worker for state in self.active_requests.values() if state.worker is not None]
         for worker in workers:
             worker.cancel()
@@ -185,6 +201,169 @@ class GatewayRuntime:
         await self.haiku_adapter.close()
         await self.perplexity_adapter.close()
         self.started = False
+
+    def _normalize_timezone_name(self, value: Any) -> str | None:
+        text = self._safe_text(value)
+        if not text:
+            return None
+        try:
+            ZoneInfo(text)
+        except ZoneInfoNotFoundError:
+            return None
+        return text
+
+    def current_user_timezone(self) -> str:
+        profile = self.scheduler_store.get_profile()
+        timezone_name = self._normalize_timezone_name(profile.get("user_timezone"))
+        if timezone_name:
+            return timezone_name
+        fallback = self._normalize_timezone_name(self.config.user_timezone_fallback)
+        return fallback or "UTC"
+
+    async def update_user_timezone(
+        self,
+        timezone_name: str | None,
+        *,
+        source: str = "desktop",
+    ) -> dict[str, Any] | None:
+        normalized = self._normalize_timezone_name(timezone_name)
+        if not normalized:
+            return None
+        profile = self.scheduler_store.update_user_timezone(normalized, source=source)
+        self._sync_system_crons()
+        self._scheduler_wakeup.set()
+        return profile
+
+    def _current_session_id(self, now: datetime | None = None) -> str:
+        return self.session_store.current_session_id(
+            now,
+            timezone_name=self.current_user_timezone(),
+            reset_hour=self.config.session_reset_hour,
+        )
+
+    def _next_rollover_fire_at(self, *, timezone_name: str, now: datetime | None = None) -> str:
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        local_now = current.astimezone(ZoneInfo(timezone_name))
+        target = local_now.replace(
+            hour=self.config.session_reset_hour,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        if local_now >= target:
+            target += timedelta(days=1)
+        return target.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _sync_system_crons(self) -> None:
+        timezone_name = self.current_user_timezone()
+        existing = self.scheduler_store.get_cron(SYSTEM_CRON_DAILY_ROLLOVER)
+        cron_expr = f"0 {self.config.session_reset_hour} * * *"
+        next_fire_at = self._next_rollover_fire_at(timezone_name=timezone_name)
+        if (
+            existing is not None
+            and self._safe_text(existing.get("timezone")) == timezone_name
+            and self._safe_text(existing.get("cron_expr")) == cron_expr
+            and self._safe_text(existing.get("next_fire_at"))
+        ):
+            next_fire_at = self._safe_text(existing.get("next_fire_at")) or next_fire_at
+        self.scheduler_store.upsert_cron(
+            cron_id=SYSTEM_CRON_DAILY_ROLLOVER,
+            name="Daily session rollover",
+            kind="system",
+            description="Finalize the previous daily session at the configured local reset hour and seed carry-forward state into the new day.",
+            cron_expr=cron_expr,
+            timezone_name=timezone_name,
+            next_fire_at=next_fire_at,
+            metadata={
+                "purpose": "daily_session_rollover",
+                "managed_by": "gateway",
+            },
+        )
+
+    async def _scheduler_loop(self) -> None:
+        try:
+            while True:
+                await self._run_due_crons()
+                try:
+                    await asyncio.wait_for(
+                        self._scheduler_wakeup.wait(),
+                        timeout=self.config.scheduler_poll_interval_sec,
+                    )
+                except asyncio.TimeoutError:
+                    continue
+                self._scheduler_wakeup.clear()
+        except asyncio.CancelledError:
+            raise
+
+    async def _run_due_crons(self) -> None:
+        self._sync_system_crons()
+        due_crons = self.scheduler_store.fetch_due_crons(now_iso=utcnow_iso(), limit=8)
+        for cron in due_crons:
+            cron_id = self._safe_text(cron.get("cron_id"))
+            scheduled_for = self._safe_text(cron.get("next_fire_at")) or None
+            status = "ignored"
+            summary = "Unknown cron."
+            next_fire_at = None
+            try:
+                if cron_id == SYSTEM_CRON_DAILY_ROLLOVER:
+                    await self._finalize_rollover_sessions(current_session_id=self._current_session_id())
+                    status = "completed"
+                    summary = "Daily rollover finalized."
+                    next_fire_at = self._next_rollover_fire_at(
+                        timezone_name=self.current_user_timezone()
+                    )
+            except Exception as exc:
+                logger.exception("gateway.scheduler_cron_failed cron_id=%s", cron_id)
+                status = "failed"
+                summary = str(exc)
+                next_fire_at = self._safe_text(cron.get("next_fire_at")) or None
+            self.scheduler_store.record_cron_result(
+                cron_id=cron_id,
+                scheduled_for=scheduled_for,
+                status=status,
+                summary=summary,
+                next_fire_at=next_fire_at,
+            )
+
+    def scheduler_overview(self) -> dict[str, Any]:
+        return {
+            "profile": self.scheduler_store.get_profile(),
+            "current_session_id": self._current_session_id(),
+            "crons": self.scheduler_store.list_crons(),
+            "heartbeat": self.scheduler_store.get_heartbeat(),
+        }
+
+    def list_scheduler_crons(self) -> list[dict[str, Any]]:
+        return self.scheduler_store.list_crons()
+
+    def get_scheduler_cron(self, cron_id: str) -> dict[str, Any] | None:
+        record = self.scheduler_store.get_cron(cron_id)
+        if record is None:
+            return None
+        record["history"] = self.scheduler_store.list_cron_history(cron_id, limit=20)
+        return record
+
+    def pause_scheduler_cron(self, cron_id: str, *, reason: str | None = None) -> dict[str, Any] | None:
+        return self.scheduler_store.pause_cron(cron_id, reason=reason)
+
+    def resume_scheduler_cron(self, cron_id: str) -> dict[str, Any] | None:
+        next_fire_at = None
+        if cron_id == SYSTEM_CRON_DAILY_ROLLOVER:
+            next_fire_at = self._next_rollover_fire_at(timezone_name=self.current_user_timezone())
+        record = self.scheduler_store.resume_cron(cron_id, next_fire_at=next_fire_at)
+        self._scheduler_wakeup.set()
+        return record
+
+    def get_scheduler_heartbeat(self) -> dict[str, Any]:
+        return self.scheduler_store.get_heartbeat()
+
+    def pause_scheduler_heartbeat(self, *, reason: str | None = None) -> dict[str, Any]:
+        return self.scheduler_store.pause_heartbeat(reason=reason)
+
+    def resume_scheduler_heartbeat(self) -> dict[str, Any]:
+        return self.scheduler_store.resume_heartbeat()
 
     async def _register_adapters(self) -> None:
         if "desktop" not in self.registry.adapters:
@@ -685,7 +864,7 @@ class GatewayRuntime:
         )
 
     def _resolve_session_id(self, requested_session_id: Any) -> str:
-        current_session_id = self.session_store.current_session_id()
+        current_session_id = self._current_session_id()
         requested = self._safe_text(requested_session_id)
         if requested == current_session_id:
             return requested
@@ -1866,7 +2045,7 @@ class GatewayRuntime:
         if not claimed:
             return
 
-        session_id = self.session_store.current_session_id()
+        session_id = self._current_session_id()
         request_id = "channel_welcome_{0}".format(uuid4().hex)
         try:
             await channel_adapter.send(
@@ -1922,6 +2101,7 @@ class GatewayRuntime:
             "request_id": request_id,
             "session_id": session_id,
             "channel": channel,
+            "user_timezone": self.current_user_timezone(),
             "history_tail": history_tail,
             "active_tasks": active_tasks,
             "pending_inputs": pending_inputs,
@@ -2353,8 +2533,9 @@ class GatewayRuntime:
             "cosmic_memory_url": self.config.cosmic_memory_url,
             "memory": memory,
             "channels": self.list_channels(),
-            "current_session_id": self.session_store.current_session_id(),
+            "current_session_id": self._current_session_id(),
             "delivery_queue": self.delivery_queue_store.summary(),
+            "scheduler": self.scheduler_store.summary(),
         }
 
     async def readiness_payload(self) -> dict[str, Any]:
@@ -2371,6 +2552,7 @@ class GatewayRuntime:
             "cosmic_memory_url": self.config.cosmic_memory_url,
             "memory": memory,
             "delivery_queue": self.delivery_queue_store.summary(),
+            "scheduler": self.scheduler_store.summary(),
         }
 
     async def _active_task_summaries(self, *, session_id: str, channel: str) -> list[dict[str, Any]]:
@@ -2735,7 +2917,7 @@ class GatewayRuntime:
                 }
 
     async def _finalize_rollover_sessions(self, current_session_id: str | None = None) -> None:
-        resolved_current_session_id = current_session_id or self.session_store.current_session_id()
+        resolved_current_session_id = current_session_id or self._current_session_id()
         async with self._rollover_finalize_lock:
             candidates = self.session_store.list_rollover_candidates(
                 current_session_id=resolved_current_session_id

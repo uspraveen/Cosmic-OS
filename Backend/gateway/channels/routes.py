@@ -40,6 +40,10 @@ class TelegramSendRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=8000)
 
 
+class PauseRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=200)
+
+
 def get_runtime(request: Request) -> GatewayRuntime:
     runtime = getattr(request.app.state, "gateway_runtime", None)
     if runtime is None:
@@ -150,6 +154,7 @@ async def _handle_desktop_websocket_message(
     request_id = str(payload.get("request_id") or "").strip() or None
 
     if message_type == "ping":
+        await runtime.update_user_timezone(payload.get("timezone"), source="desktop")
         await adapter.send(
             {
                 "type": "pong",
@@ -164,6 +169,7 @@ async def _handle_desktop_websocket_message(
         known_task_ids = payload.get("known_task_ids")
         if not isinstance(known_task_ids, list):
             known_task_ids = []
+        await runtime.update_user_timezone(payload.get("timezone"), source="desktop")
         response = await runtime.build_resume_payload(
             channel=channel,
             request_id=request_id,
@@ -510,6 +516,84 @@ async def list_routing_audit(
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
     return {"entries": runtime.list_routing_audit(limit=max(1, min(limit, 500)))}
+
+
+@router.get("/scheduler/overview")
+async def scheduler_overview(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return runtime.scheduler_overview()
+
+
+@router.get("/scheduler/crons")
+async def list_scheduler_crons(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return {"crons": runtime.list_scheduler_crons()}
+
+
+@router.get("/scheduler/crons/{cron_id}")
+async def get_scheduler_cron(
+    cron_id: str,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    payload = runtime.get_scheduler_cron(cron_id)
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown cron")
+    return payload
+
+
+@router.post("/scheduler/crons/{cron_id}/pause")
+async def pause_scheduler_cron(
+    cron_id: str,
+    body: PauseRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    payload = runtime.pause_scheduler_cron(cron_id, reason=body.reason)
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown cron")
+    return payload
+
+
+@router.post("/scheduler/crons/{cron_id}/resume")
+async def resume_scheduler_cron(
+    cron_id: str,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    payload = runtime.resume_scheduler_cron(cron_id)
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown cron")
+    return payload
+
+
+@router.get("/scheduler/heartbeat")
+async def get_scheduler_heartbeat(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return runtime.get_scheduler_heartbeat()
+
+
+@router.post("/scheduler/heartbeat/pause")
+async def pause_scheduler_heartbeat(
+    body: PauseRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return runtime.pause_scheduler_heartbeat(reason=body.reason)
+
+
+@router.post("/scheduler/heartbeat/resume")
+async def resume_scheduler_heartbeat(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return runtime.resume_scheduler_heartbeat()
 
 
 @router.get("/channels")

@@ -289,11 +289,13 @@ export class GatewayConnectionManager {
 
   private sendResume() {
     const requestId = `resume_${crypto.randomUUID()}`
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || undefined
     this.sendJson({
       type: 'resume',
       request_id: requestId,
       session_id: this.currentSessionId,
       known_task_ids: Array.from(this.knownTaskIds),
+      timezone,
     })
     this.pendingResumeRequestId = requestId
     this.resumeAttemptCount += 1
@@ -301,9 +303,11 @@ export class GatewayConnectionManager {
   }
 
   private sendPing() {
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || undefined
     this.sendJson({
       type: 'ping',
       ts_unix_ms: Date.now(),
+      timezone,
     })
   }
 

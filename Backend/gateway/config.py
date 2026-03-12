@@ -65,7 +65,11 @@ class GatewayConfig:
     routing_audit_db_path: Path = BACKEND_ROOT / "gateway" / "routing_audit.db"
     artifacts_db_path: Path = BACKEND_ROOT / "gateway" / "artifacts.db"
     delivery_queue_db_path: Path = BACKEND_ROOT / "gateway" / "delivery_queue.db"
+    scheduler_db_path: Path = BACKEND_ROOT / "gateway" / "scheduler.db"
     session_transcript_dir: Path = BACKEND_ROOT / "logs" / "sessions"
+    session_reset_hour: int = 4
+    user_timezone_fallback: str = "America/Chicago"
+    scheduler_poll_interval_sec: float = 30.0
     delivery_retry_base_sec: float = 1.0
     delivery_retry_max_sec: float = 120.0
     delivery_max_attempts: int = 12
@@ -138,12 +142,27 @@ class GatewayConfig:
                     str(BACKEND_ROOT / "gateway" / "delivery_queue.db"),
                 )
             ).expanduser(),
+            scheduler_db_path=Path(
+                os.getenv(
+                    "GATEWAY_SCHEDULER_DB_PATH",
+                    str(BACKEND_ROOT / "gateway" / "scheduler.db"),
+                )
+            ).expanduser(),
             session_transcript_dir=Path(
                 os.getenv(
                     "GATEWAY_SESSION_TRANSCRIPT_DIR",
                     str(BACKEND_ROOT / "logs" / "sessions"),
                 )
             ).expanduser(),
+            session_reset_hour=min(
+                23,
+                max(0, _env_int("SESSION_RESET_HOUR", 4)),
+            ),
+            user_timezone_fallback=os.getenv("USER_TIMEZONE_FALLBACK", "America/Chicago").strip() or "America/Chicago",
+            scheduler_poll_interval_sec=max(
+                5.0,
+                _env_float("GATEWAY_SCHEDULER_POLL_INTERVAL_SEC", 30.0),
+            ),
             delivery_retry_base_sec=max(
                 0.25,
                 _env_float("GATEWAY_DELIVERY_RETRY_BASE_SEC", 1.0),

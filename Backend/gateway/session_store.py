@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 def utcnow_iso() -> str:
@@ -155,11 +156,25 @@ class SessionStore:
             )
             connection.commit()
 
-    def current_session_id(self, now: datetime | None = None) -> str:
-        current = now or datetime.now().astimezone()
+    def current_session_id(
+        self,
+        now: datetime | None = None,
+        *,
+        timezone_name: str | None = None,
+        reset_hour: int = 4,
+    ) -> str:
+        current = now or datetime.now(timezone.utc)
         if current.tzinfo is None:
             current = current.replace(tzinfo=timezone.utc)
-        shifted = current - timedelta(hours=4)
+        resolved = current
+        if timezone_name:
+            try:
+                resolved = current.astimezone(ZoneInfo(timezone_name))
+            except ZoneInfoNotFoundError:
+                resolved = current.astimezone()
+        else:
+            resolved = current.astimezone()
+        shifted = resolved - timedelta(hours=max(0, min(23, reset_hour)))
         return f"sess_{shifted.strftime('%Y%m%d')}"
 
     def append_message(
