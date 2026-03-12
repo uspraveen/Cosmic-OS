@@ -4,13 +4,16 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator
+from uuid import uuid4
 
 import httpx
+import redis.asyncio as redis
 
 from gateway.adapters.response_processor import AWAITING_REPLY_TAG
 from gateway.adapters.response_processor import normalize_conversation_history
-from shared import TaskEnvelope, verify_task_envelope
+from shared import TaskEnvelope, create_redis_client, ensure_stream_group, parse_stream_payload, verify_task_envelope
 
 from .config import OrchestratorConfig
 from .ledger import TaskLedger
@@ -39,22 +42,49 @@ class OrchestratorRuntime:
         config: OrchestratorConfig,
         *,
         client: httpx.AsyncClient | None = None,
+        redis_client: redis.Redis | None = None,
     ) -> None:
         self.config = config
         timeout = httpx.Timeout(config.request_timeout_sec, connect=min(config.request_timeout_sec, 15.0))
         self._client = client or httpx.AsyncClient(timeout=timeout, http2=True)
         self._owns_client = client is None
+        self._redis = redis_client if redis_client is not None else (
+            create_redis_client(config.redis_url) if config.redis_url else None
+        )
+        self._owns_redis = redis_client is None and self._redis is not None
         self.task_ledger = TaskLedger(config.task_ledger_db_path)
         self.started = False
         self._active_runs: dict[str, ActiveTaskRun] = {}
+        self._pending_input_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._reply_consumer_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         self.task_ledger.initialize()
+        if self._redis is not None:
+            await ensure_stream_group(
+                self._redis,
+                stream=self.config.task_input_replies_stream,
+                group=self.config.task_input_orchestrator_group,
+            )
+            self._reply_consumer_task = asyncio.create_task(
+                self._user_reply_consumer_loop(),
+                name="orchestrator-user-reply-consumer",
+            )
         self.started = True
 
     async def stop(self) -> None:
+        if self._reply_consumer_task is not None:
+            self._reply_consumer_task.cancel()
+            await asyncio.gather(self._reply_consumer_task, return_exceptions=True)
+            self._reply_consumer_task = None
+        for future in list(self._pending_input_futures.values()):
+            if not future.done():
+                future.cancel()
+        self._pending_input_futures.clear()
         if self._owns_client:
             await self._client.aclose()
+        if self._owns_redis and self._redis is not None:
+            await self._redis.aclose()
         self.started = False
 
     async def stream_task(self, task: TaskEnvelope) -> AsyncIterator[dict[str, Any]]:
@@ -283,6 +313,102 @@ class OrchestratorRuntime:
         if runner_task is not None and not runner_task.done():
             runner_task.cancel()
         return True
+
+    async def request_user_input(
+        self,
+        task_id: str,
+        *,
+        question: str,
+        options: list[str] | None = None,
+        channel: str | None = None,
+        agent: str = "cosmic/orchestrator:1.0.0",
+        wait_timeout_sec: float | None = None,
+    ) -> dict[str, Any]:
+        if self._redis is None:
+            raise RuntimeError("REDIS_URL is not configured in orchestrator.env.")
+        normalized_task_id = str(task_id or "").strip()
+        normalized_question = str(question or "").strip()
+        if not normalized_task_id or not normalized_question:
+            raise RuntimeError("task_id and question are required for task input requests.")
+
+        run_state = self._active_runs.get(normalized_task_id)
+        resolved_channel = str(channel or (run_state.channel if run_state is not None else "") or "").strip() or None
+        resolved_session_id = run_state.session_id if run_state is not None else None
+        input_request_id = f"uir_{uuid4().hex[:12]}"
+        payload = {
+            "input_request_id": input_request_id,
+            "task_id": normalized_task_id,
+            "session_id": resolved_session_id,
+            "agent": agent,
+            "channel": resolved_channel,
+            "question": normalized_question,
+            "options": [str(item) for item in options or [] if str(item).strip()],
+            "status": "pending",
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        self.task_ledger.create_task_input_request(
+            input_request_id=input_request_id,
+            task_id=normalized_task_id,
+            session_id=resolved_session_id,
+            channel=resolved_channel,
+            agent=agent,
+            question=normalized_question,
+            options=payload["options"],
+        )
+
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._pending_input_futures[input_request_id] = future
+        try:
+            await self._redis.xadd(
+                self.config.task_input_requests_stream,
+                {"payload": json.dumps(payload, ensure_ascii=False)},
+            )
+            if wait_timeout_sec is None or wait_timeout_sec <= 0:
+                return payload
+            try:
+                reply = await asyncio.wait_for(asyncio.shield(future), timeout=wait_timeout_sec)
+            except asyncio.TimeoutError:
+                return payload
+            return {
+                **payload,
+                "reply": reply,
+                "status": "answered",
+            }
+        finally:
+            if future.done() or (wait_timeout_sec is None or wait_timeout_sec <= 0):
+                self._pending_input_futures.pop(input_request_id, None)
+
+    async def _user_reply_consumer_loop(self) -> None:
+        assert self._redis is not None
+        consumer_name = "orchestrator-{0}".format(id(self))
+        while True:
+            entries = await self._redis.xreadgroup(
+                groupname=self.config.task_input_orchestrator_group,
+                consumername=consumer_name,
+                streams={self.config.task_input_replies_stream: ">"},
+                count=5,
+                block=1000,
+            )
+            for _stream, messages in entries:
+                for message_id, data in messages:
+                    try:
+                        reply = parse_stream_payload(data)
+                        input_request_id = str(reply.get("input_request_id") or "").strip()
+                        if not input_request_id:
+                            raise ValueError("input_request_id is required.")
+                        content = str(reply.get("content") or "").strip()
+                        self.task_ledger.mark_task_input_replied(input_request_id, content=content)
+                        future = self._pending_input_futures.get(input_request_id)
+                        if future is not None and not future.done():
+                            future.set_result(reply)
+                        self._pending_input_futures.pop(input_request_id, None)
+                        await self._redis.xack(
+                            self.config.task_input_replies_stream,
+                            self.config.task_input_orchestrator_group,
+                            message_id,
+                        )
+                    except Exception:
+                        continue
 
     async def _stream_anthropic_events(self, task: TaskEnvelope) -> AsyncIterator[SSEEvent]:
         url = "https://api.anthropic.com/v1/messages"

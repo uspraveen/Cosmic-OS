@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -28,7 +27,16 @@ from .router_client import ModelRouterClient
 from .routing_audit_store import RoutingAuditStore
 from .scheduler_store import SchedulerStore
 from .session_store import SessionStore
-from shared import SOURCE_PRIORITY_MAP, TaskEnvelope, generate_task_id, sign_task_envelope, utcnow
+from shared import (
+    SOURCE_PRIORITY_MAP,
+    TaskEnvelope,
+    create_redis_client,
+    ensure_stream_group,
+    generate_task_id,
+    parse_stream_payload,
+    sign_task_envelope,
+    utcnow,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,11 +127,11 @@ class GatewayRuntime:
             model=config.perplexity_model,
             timeout_sec=config.direct_llm_timeout_sec,
         )
+        self._redis = create_redis_client(config.redis_url) if config.redis_url else None
         self.started = False
         self.adapter_errors: dict[str, str] = {}
         self.active_task_channels: dict[str, str] = {}
         self.request_records: dict[str, dict[str, Any]] = {}
-        self.pending_input_requests: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self.active_requests: dict[str, ActiveRequest] = {}
         self.active_requests_by_task: dict[str, str] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
@@ -131,6 +139,7 @@ class GatewayRuntime:
         self._delivery_wakeup = asyncio.Event()
         self._scheduler_worker: asyncio.Task[None] | None = None
         self._scheduler_wakeup = asyncio.Event()
+        self._task_input_worker: asyncio.Task[None] | None = None
         self._rollover_finalize_lock = asyncio.Lock()
         self._session_compaction_lock = asyncio.Lock()
         self._memory_health_worker: asyncio.Task[None] | None = None
@@ -149,6 +158,12 @@ class GatewayRuntime:
         await self.model_router.start()
         await self.orchestrator.start()
         await self.memory_client.start()
+        if self._redis is not None:
+            await ensure_stream_group(
+                self._redis,
+                stream=self.config.task_input_requests_stream,
+                group=self.config.task_input_gateway_group,
+            )
         if self.memory_client.enabled:
             await self._refresh_memory_health()
             self._memory_health_worker = asyncio.create_task(
@@ -164,6 +179,11 @@ class GatewayRuntime:
             self._scheduler_loop(),
             name="gateway-scheduler",
         )
+        if self._redis is not None:
+            self._task_input_worker = asyncio.create_task(
+                self._task_input_consumer_loop(),
+                name="gateway-task-input-consumer",
+            )
         await self._finalize_rollover_sessions()
         await self._send_channel_activation_greetings()
         self.started = True
@@ -181,6 +201,10 @@ class GatewayRuntime:
             self._scheduler_worker.cancel()
             await asyncio.gather(self._scheduler_worker, return_exceptions=True)
             self._scheduler_worker = None
+        if self._task_input_worker is not None:
+            self._task_input_worker.cancel()
+            await asyncio.gather(self._task_input_worker, return_exceptions=True)
+            self._task_input_worker = None
         workers = [state.worker for state in self.active_requests.values() if state.worker is not None]
         for worker in workers:
             worker.cancel()
@@ -200,6 +224,8 @@ class GatewayRuntime:
         await self.memory_client.stop()
         await self.haiku_adapter.close()
         await self.perplexity_adapter.close()
+        if self._redis is not None:
+            await self._redis.aclose()
         self.started = False
 
     def _normalize_timezone_name(self, value: Any) -> str | None:
@@ -431,6 +457,18 @@ class GatewayRuntime:
         }
         await self._finalize_rollover_sessions(current_session_id=session_id)
         session_metadata = self._ensure_session_state_seeded(session_id)
+        auto_reply = await self._maybe_handle_pending_task_input_reply(
+            content=content,
+            channel=channel,
+            session_id=session_id,
+            request_id=request_id,
+            source_id=source_id,
+            metadata=metadata,
+            normalized_message=normalized_message,
+        )
+        if auto_reply is not None:
+            self.request_records[request_id] = auto_reply
+            return auto_reply
         active_working_set = (
             session_metadata.get("active_working_set")
             if isinstance(session_metadata.get("active_working_set"), dict)
@@ -2094,7 +2132,7 @@ class GatewayRuntime:
     ) -> dict[str, Any]:
         session_id = self._resolve_session_id(requested_session_id)
         history_tail = self.session_store.get_history_tail(session_id, limit=30)
-        pending_inputs = self._pending_inputs_for_channel(channel)
+        pending_inputs = self._pending_inputs_for_channel(channel, session_id=session_id)
         active_tasks = await self._active_task_summaries(session_id=session_id, channel=channel)
         return {
             "type": "resume.ok",
@@ -2111,13 +2149,178 @@ class GatewayRuntime:
         if not channel:
             return
         self._delivery_wakeup.set()
+        if self._redis is not None:
+            self._track_background_task(self._drain_pending_task_inputs(channel))
+
+    def _track_background_task(self, coroutine: asyncio.Future[Any] | asyncio.Task[Any] | Any) -> None:
+        task = asyncio.create_task(coroutine)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def submit_task_input_reply(
+        self,
+        *,
+        input_request_id: str,
+        task_id: str,
+        content: str,
+        channel: str,
+    ) -> dict[str, Any]:
+        if self._redis is None:
+            raise RuntimeError("REDIS_URL is not configured on the Gateway VM.")
+        normalized_input_request_id = self._safe_text(input_request_id)
+        normalized_task_id = self._safe_text(task_id)
+        normalized_content = self._safe_text(content)
+        normalized_channel = self._safe_text(channel)
+        if not normalized_input_request_id or not normalized_task_id or not normalized_content or not normalized_channel:
+            raise ValueError("task.input_reply requires input_request_id, task_id, content, and channel")
+
+        resolved = self.session_store.get_task_input_request(normalized_input_request_id)
+        if resolved is None:
+            raise ValueError("Unknown input_request_id")
+        if self._safe_text(resolved.get("status")) != "pending":
+            raise ValueError("input_request_id is no longer pending")
+        if self._safe_text(resolved.get("task_id")) != normalized_task_id:
+            raise ValueError("task_id does not match the pending input request")
+        if self._safe_text(resolved.get("channel")) != normalized_channel:
+            raise ValueError("channel does not match the pending input request")
+
+        reply_payload = {
+            "input_request_id": normalized_input_request_id,
+            "task_id": normalized_task_id,
+            "content": normalized_content,
+            "channel": normalized_channel,
+            "timestamp": utcnow_iso(),
+        }
+        await self._redis.xadd(
+            self.config.task_input_replies_stream,
+            {"payload": json.dumps(reply_payload, ensure_ascii=False)},
+        )
+        self.session_store.mark_task_input_request_replied(
+            input_request_id=normalized_input_request_id,
+            content=normalized_content,
+        )
+        return reply_payload
+
+    async def _task_input_consumer_loop(self) -> None:
+        assert self._redis is not None
+        consumer_name = "gateway-{0}".format(id(self))
+        while True:
+            entries = await self._redis.xreadgroup(
+                groupname=self.config.task_input_gateway_group,
+                consumername=consumer_name,
+                streams={self.config.task_input_requests_stream: ">"},
+                count=5,
+                block=1000,
+            )
+            for _stream, messages in entries:
+                for message_id, data in messages:
+                    await self._handle_task_input_stream_message(message_id, data)
+
+    async def _handle_task_input_stream_message(self, message_id: str, data: dict[str, Any]) -> None:
+        assert self._redis is not None
+        try:
+            request = parse_stream_payload(data)
+            input_request_id = self._safe_text(request.get("input_request_id"))
+            task_id = self._safe_text(request.get("task_id"))
+            question = self._safe_text(request.get("question"))
+            if not input_request_id or not task_id or not question:
+                raise ValueError("Task input request is missing required fields.")
+            channel = self._resolve_task_input_channel(request, task_id=task_id)
+            if not channel:
+                return
+            event = {
+                "type": "task.input_required",
+                "input_request_id": input_request_id,
+                "task_id": task_id,
+                "session_id": self._safe_text(request.get("session_id")),
+                "agent": self._safe_text(request.get("agent")),
+                "channel": channel,
+                "question": question,
+                "options": [str(item) for item in request.get("options", []) if str(item).strip()],
+                "status": self._safe_text(request.get("status")) or "pending",
+                "timestamp": self._safe_text(request.get("timestamp")) or utcnow_iso(),
+            }
+            self._persist_task_input_request(event)
+            await self._send_channel_event_now(event, channel)
+            await self._redis.xack(
+                self.config.task_input_requests_stream,
+                self.config.task_input_gateway_group,
+                message_id,
+            )
+        except ChannelUnavailableError:
+            return
+        except Exception:
+            logger.exception("gateway.task_input_consumer_failed msg_id=%s", message_id)
+            await self._redis.xack(
+                self.config.task_input_requests_stream,
+                self.config.task_input_gateway_group,
+                message_id,
+            )
+
+    async def _drain_pending_task_inputs(self, channel: str) -> None:
+        if self._redis is None:
+            return
+        consumer_name = "gateway-{0}".format(id(self))
+        while True:
+            entries = await self._redis.xreadgroup(
+                groupname=self.config.task_input_gateway_group,
+                consumername=consumer_name,
+                streams={self.config.task_input_requests_stream: "0"},
+                count=50,
+            )
+            if not entries:
+                return
+            delivered_any = False
+            for _stream, messages in entries:
+                for message_id, data in messages:
+                    try:
+                        request = parse_stream_payload(data)
+                        task_id = self._safe_text(request.get("task_id")) or ""
+                        request_channel = self._resolve_task_input_channel(request, task_id=task_id)
+                        if request_channel != channel:
+                            continue
+                        await self._handle_task_input_stream_message(message_id, data)
+                        delivered_any = True
+                    except Exception:
+                        continue
+            if not delivered_any:
+                return
+
+    def _resolve_task_input_channel(self, request: dict[str, Any], *, task_id: str) -> str | None:
+        explicit_channel = self._safe_text(request.get("channel"))
+        if explicit_channel:
+            return explicit_channel
+        return self.active_task_channels.get(task_id)
+
+    def _persist_task_input_request(self, event: dict[str, Any]) -> None:
+        input_request_id = self._safe_text(event.get("input_request_id"))
+        task_id = self._safe_text(event.get("task_id"))
+        session_id = self._safe_text(event.get("session_id"))
+        channel = self._safe_text(event.get("channel"))
+        question = self._safe_text(event.get("question"))
+        if not input_request_id or not task_id or not session_id or not channel or not question:
+            return
+        self.session_store.upsert_task_input_request(
+            input_request_id=input_request_id,
+            task_id=task_id,
+            session_id=session_id,
+            channel=channel,
+            question=question,
+            options=event.get("options") if isinstance(event.get("options"), list) else [],
+            agent=self._safe_text(event.get("agent")),
+            metadata={
+                "timestamp": self._safe_text(event.get("timestamp")),
+            },
+            status=self._safe_text(event.get("status")) or "pending",
+            created_at=self._safe_text(event.get("timestamp")),
+        )
 
     async def deliver_channel_event(self, event: dict[str, Any]) -> None:
         channel = self._safe_text(event.get("channel"))
         await self._deliver_or_queue_channel_event(event, channel=channel)
 
-    def _pending_inputs_for_channel(self, channel: str) -> list[dict[str, Any]]:
-        pending = list(self.pending_input_requests.get(channel, []))
+    def _pending_inputs_for_channel(self, channel: str, *, session_id: str | None = None) -> list[dict[str, Any]]:
+        pending = self.session_store.list_pending_task_inputs(session_id=session_id, channel=channel, limit=50)
         persisted = self.delivery_queue_store.list_pending_inputs(channel)
         if not persisted:
             return pending
@@ -2127,13 +2330,120 @@ class GatewayRuntime:
         for item in pending + persisted:
             key = (
                 self._safe_text(item.get("task_id")),
-                self._safe_text(item.get("request_id")),
+                self._safe_text(item.get("input_request_id")) or self._safe_text(item.get("request_id")),
             )
             if key in seen:
                 continue
             seen.add(key)
             merged.append(item)
         return merged
+
+    async def _maybe_handle_pending_task_input_reply(
+        self,
+        *,
+        content: str,
+        channel: str,
+        session_id: str,
+        request_id: str,
+        source_id: str,
+        metadata: dict[str, Any],
+        normalized_message: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if self._redis is None:
+            return None
+        if not content:
+            return None
+        if channel.startswith("desktop:"):
+            return None
+        pending_inputs = self.session_store.list_pending_task_inputs(
+            session_id=session_id,
+            channel=channel,
+            limit=2,
+        )
+        if not pending_inputs:
+            return None
+        target = pending_inputs[0]
+        input_request_id = self._safe_text(target.get("input_request_id"))
+        task_id = self._safe_text(target.get("task_id"))
+        if not input_request_id or not task_id:
+            return None
+
+        self._append_session_message(
+            session_id,
+            role="user",
+            content=content,
+            channel=channel,
+            metadata={
+                "request_id": request_id,
+                "platform": metadata.get("platform"),
+                "message_type": metadata.get("message_type"),
+                "attachments": metadata.get("attachments"),
+                "task_input_reply_for": input_request_id,
+                "task_id": task_id,
+            },
+        )
+        reply_payload = await self.submit_task_input_reply(
+            input_request_id=input_request_id,
+            task_id=task_id,
+            content=content,
+            channel=channel,
+        )
+        result = {
+            "status": "accepted",
+            "request_id": request_id,
+            "session_id": session_id,
+            "source": "user",
+            "source_id": source_id,
+            "channel": channel,
+            "route": "task_input_reply",
+            "dispatch_target": "redis",
+            "classification": {
+                "route": "task_input_reply",
+                "needs_latest": False,
+                "needs_citations": False,
+                "is_task": True,
+                "is_continuation": True,
+                "confidence": 1.0,
+                "signals": ["pending_task_input_reply"],
+            },
+            "message": normalized_message,
+            "assembled_conversation_context": self._build_conversation_context(
+                session_id,
+                fallback_context=normalized_message.get("conversation_context"),
+            ),
+            "memory_context": None,
+            "active_working_set": None,
+            "carry_forward_packet": None,
+            "memory_context_payload": None,
+            "routing_decision_source": "pending_task_input_reply",
+            "input_artifacts": [],
+            "task_input_reply": reply_payload,
+            "accepted_at": utcnow_iso(),
+        }
+        self.routing_audit_store.append(
+            request_id=request_id,
+            session_id=session_id,
+            channel=channel,
+            source="user",
+            source_id=source_id,
+            query_text=content,
+            route_override=None,
+            sticky_hit=False,
+            decision_source="pending_task_input_reply",
+            classifier_route=None,
+            final_route="task_input_reply",
+            dispatch_target="redis",
+            confidence=1.0,
+            signals=["pending_task_input_reply"],
+            conversation_context=result["assembled_conversation_context"],
+            classifier_payload=None,
+            classifier_metrics=None,
+            classifier_model=None,
+            classifier_latency_ms=None,
+            decision_latency_ms=0.0,
+            error_text=None,
+        )
+        return result
 
     async def _delivery_worker_loop(self) -> None:
         while True:
@@ -2306,7 +2616,12 @@ class GatewayRuntime:
             return None
 
         if event_type == "task.input_required":
-            identifier = task_id or request_id or session_id
+            identifier = (
+                self._safe_text(event.get("input_request_id"))
+                or task_id
+                or request_id
+                or session_id
+            )
             return f"{channel}:{event_type}:{identifier}" if identifier else self._event_fingerprint(event, channel)
 
         if event_type == "task.completed":
@@ -2661,8 +2976,8 @@ class GatewayRuntime:
             )
         elif event_type == "task.input_required":
             channel = self._safe_text(event.get("channel"))
-            if channel:
-                self.pending_input_requests[channel].append(event)
+            if channel and task_id and session_id:
+                self._persist_task_input_request(event)
         elif event_type in {"task.completed", "task.failed", "task.cancelled"}:
             if task_id:
                 self.active_task_channels.pop(task_id, None)

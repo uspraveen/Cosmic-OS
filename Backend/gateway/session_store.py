@@ -145,6 +145,29 @@ class SessionStore:
 
                 CREATE INDEX IF NOT EXISTS idx_task_notebooks_session_updated
                     ON task_notebooks(session_id, updated_at);
+
+                CREATE TABLE IF NOT EXISTS task_input_requests (
+                    input_request_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    agent TEXT,
+                    question TEXT NOT NULL,
+                    options_json TEXT,
+                    status TEXT NOT NULL,
+                    content TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    responded_at TEXT,
+                    metadata_json TEXT,
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_task_input_requests_session
+                    ON task_input_requests(session_id, updated_at);
+
+                CREATE INDEX IF NOT EXISTS idx_task_input_requests_channel_status
+                    ON task_input_requests(channel, status, updated_at);
                 """
             )
             self._ensure_column(connection, "messages", "request_id", "TEXT")
@@ -897,6 +920,274 @@ class SessionStore:
                 (now, session_id),
             )
             connection.commit()
+
+    def upsert_task_input_request(
+        self,
+        *,
+        input_request_id: str,
+        task_id: str,
+        session_id: str,
+        channel: str,
+        question: str,
+        options: list[str] | None = None,
+        agent: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        status: str = "pending",
+        created_at: str | None = None,
+    ) -> None:
+        if not input_request_id or not task_id or not session_id or not channel or not question:
+            raise ValueError("Task input request requires input_request_id, task_id, session_id, channel, and question")
+        now = utcnow_iso()
+        created = created_at or now
+        with self._lock, self._connect() as connection:
+            self._ensure_session(connection, session_id=session_id, created_at=created)
+            connection.execute(
+                """
+                INSERT INTO task_input_requests (
+                    input_request_id,
+                    task_id,
+                    session_id,
+                    channel,
+                    agent,
+                    question,
+                    options_json,
+                    status,
+                    content,
+                    created_at,
+                    updated_at,
+                    responded_at,
+                    metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?)
+                ON CONFLICT(input_request_id) DO UPDATE SET
+                    task_id = excluded.task_id,
+                    session_id = excluded.session_id,
+                    channel = excluded.channel,
+                    agent = excluded.agent,
+                    question = excluded.question,
+                    options_json = excluded.options_json,
+                    status = excluded.status,
+                    updated_at = excluded.updated_at,
+                    metadata_json = excluded.metadata_json
+                """,
+                (
+                    input_request_id,
+                    task_id,
+                    session_id,
+                    channel,
+                    self._normalize_optional_text(agent),
+                    question,
+                    self._json(options or []),
+                    status,
+                    created,
+                    now,
+                    self._json(metadata),
+                ),
+            )
+            connection.execute(
+                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+                (now, session_id),
+            )
+            connection.commit()
+
+    def resolve_task_input_request(
+        self,
+        *,
+        input_request_id: str,
+        content: str,
+        status: str = "answered",
+    ) -> dict[str, Any] | None:
+        if not input_request_id:
+            return None
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT task_id, session_id, channel, question, options_json, metadata_json, agent, status
+                FROM task_input_requests
+                WHERE input_request_id = ?
+                LIMIT 1
+                """,
+                (input_request_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                """
+                UPDATE task_input_requests
+                SET status = ?,
+                    content = ?,
+                    updated_at = ?,
+                    responded_at = ?
+                WHERE input_request_id = ?
+                """,
+                (
+                    status,
+                    content,
+                    now,
+                    now,
+                    input_request_id,
+                ),
+            )
+            connection.execute(
+                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+                (now, row["session_id"]),
+            )
+            connection.commit()
+        return {
+            "input_request_id": input_request_id,
+            "task_id": row["task_id"],
+            "session_id": row["session_id"],
+            "channel": row["channel"],
+            "question": row["question"],
+            "options": json.loads(row["options_json"]) if row["options_json"] else [],
+            "metadata": json.loads(row["metadata_json"]) if row["metadata_json"] else None,
+            "agent": row["agent"],
+            "status": status,
+            "content": content,
+            "responded_at": now,
+        }
+
+    def get_task_input_request(self, input_request_id: str) -> dict[str, Any] | None:
+        if not input_request_id:
+            return None
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    input_request_id,
+                    task_id,
+                    session_id,
+                    channel,
+                    question,
+                    options_json,
+                    metadata_json,
+                    agent,
+                    status,
+                    content,
+                    created_at,
+                    updated_at,
+                    responded_at
+                FROM task_input_requests
+                WHERE input_request_id = ?
+                LIMIT 1
+                """,
+                (input_request_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "input_request_id": row["input_request_id"],
+            "task_id": row["task_id"],
+            "session_id": row["session_id"],
+            "channel": row["channel"],
+            "question": row["question"],
+            "options": json.loads(row["options_json"]) if row["options_json"] else [],
+            "metadata": json.loads(row["metadata_json"]) if row["metadata_json"] else None,
+            "agent": row["agent"],
+            "status": row["status"],
+            "content": row["content"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "responded_at": row["responded_at"],
+        }
+
+    def mark_task_input_request_replied(
+        self,
+        *,
+        input_request_id: str,
+        content: str,
+        status: str = "answered",
+    ) -> dict[str, Any] | None:
+        existing = self.get_task_input_request(input_request_id)
+        if existing is None:
+            return None
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE task_input_requests
+                SET status = ?,
+                    content = ?,
+                    updated_at = ?,
+                    responded_at = ?
+                WHERE input_request_id = ?
+                """,
+                (
+                    status,
+                    content,
+                    now,
+                    now,
+                    input_request_id,
+                ),
+            )
+            connection.execute(
+                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+                (now, existing["session_id"]),
+            )
+            connection.commit()
+        existing["status"] = status
+        existing["content"] = content
+        existing["responded_at"] = now
+        existing["updated_at"] = now
+        return existing
+
+    def list_pending_task_inputs(
+        self,
+        *,
+        session_id: str | None = None,
+        channel: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        clauses = ["status = 'pending'"]
+        params: list[Any] = []
+        if session_id:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if channel:
+            clauses.append("channel = ?")
+            params.append(channel)
+        params.append(max(1, limit))
+        where_sql = " AND ".join(clauses)
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    input_request_id,
+                    task_id,
+                    session_id,
+                    channel,
+                    agent,
+                    question,
+                    options_json,
+                    created_at,
+                    updated_at,
+                    metadata_json
+                FROM task_input_requests
+                WHERE {where_sql}
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            items.append(
+                {
+                    "input_request_id": row["input_request_id"],
+                    "task_id": row["task_id"],
+                    "session_id": row["session_id"],
+                    "channel": row["channel"],
+                    "agent": row["agent"],
+                    "question": row["question"],
+                    "options": json.loads(row["options_json"]) if row["options_json"] else [],
+                    "status": "pending",
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                    "metadata": json.loads(row["metadata_json"]) if row["metadata_json"] else None,
+                }
+            )
+        return items
 
     def claim_memory_episode_ingest(
         self,

@@ -59,6 +59,10 @@ class GatewayConfig:
     model_router_timeout_sec: float = 15.0
     orchestrator_url: str = "http://127.0.0.1:8743"
     orchestrator_timeout_sec: float = 300.0
+    redis_url: str = ""
+    task_input_requests_stream: str = "user_input:requests"
+    task_input_replies_stream: str = "user_input:replies"
+    task_input_gateway_group: str = "gateway"
     enable_whatsapp: bool = True
     enable_telegram: bool = False
     sessions_db_path: Path = BACKEND_ROOT / "gateway" / "sessions.db"
@@ -119,6 +123,12 @@ class GatewayConfig:
                 10.0,
                 _env_float("ORCHESTRATOR_TIMEOUT_SEC", 300.0),
             ),
+            redis_url=os.getenv("REDIS_URL", "").strip(),
+            task_input_requests_stream=os.getenv("TASK_INPUT_REQUESTS_STREAM", "user_input:requests").strip()
+            or "user_input:requests",
+            task_input_replies_stream=os.getenv("TASK_INPUT_REPLIES_STREAM", "user_input:replies").strip()
+            or "user_input:replies",
+            task_input_gateway_group=os.getenv("TASK_INPUT_GATEWAY_GROUP", "gateway").strip() or "gateway",
             enable_whatsapp=_env_bool("WHATSAPP_ENABLED", True),
             enable_telegram=_env_bool("TELEGRAM_ENABLED", False),
             sessions_db_path=Path(

@@ -40,6 +40,10 @@ class TelegramSendRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=8000)
 
 
+class TaskInputReplyRequest(BaseModel):
+    content: str = Field(..., min_length=1, max_length=8000)
+
+
 class PauseRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=200)
 
@@ -214,12 +218,42 @@ async def _handle_desktop_websocket_message(
         return
 
     if message_type == "task.input_reply":
+        try:
+            accepted = await runtime.submit_task_input_reply(
+                input_request_id=str(payload.get("input_request_id") or "").strip(),
+                task_id=str(payload.get("task_id") or "").strip(),
+                content=str(payload.get("content") or "").strip(),
+                channel=channel,
+            )
+        except ValueError as exc:
+            await adapter.send(
+                _error_payload(
+                    request_id,
+                    "INVALID_TASK_INPUT_REPLY",
+                    str(exc),
+                ),
+                channel=channel,
+            )
+            return
+        except RuntimeError as exc:
+            await adapter.send(
+                _error_payload(
+                    request_id,
+                    "TASK_INPUT_UNAVAILABLE",
+                    str(exc),
+                ),
+                channel=channel,
+            )
+            return
         await adapter.send(
-            _error_payload(
-                request_id,
-                "NOT_IMPLEMENTED",
-                "task.input_reply is not implemented in this backend build yet.",
-            ),
+            {
+                "type": "task.input_reply.accepted",
+                "request_id": request_id,
+                "input_request_id": accepted["input_request_id"],
+                "task_id": accepted["task_id"],
+                "channel": channel,
+                "timestamp": accepted["timestamp"],
+            },
             channel=channel,
         )
         return
@@ -353,6 +387,8 @@ async def whatsapp_incoming(
 
     processed = await runtime.process_incoming_user_message(result)
     runtime.notify_channel_active(processed["channel"])
+    if processed.get("dispatch_target") == "redis":
+        return processed
     logger.info(
         "whatsapp.incoming classified request_id=%s route=%s elapsed_ms=%.1f",
         processed.get("request_id"),
@@ -444,6 +480,8 @@ async def telegram_webhook(
 
     processed = await runtime.process_incoming_user_message(normalized)
     runtime.notify_channel_active(processed["channel"])
+    if processed.get("dispatch_target") == "redis":
+        return {"ok": True, "status": "accepted", "request_id": processed["request_id"]}
     logger.info(
         "telegram.webhook classified request_id=%s route=%s elapsed_ms=%.1f",
         processed.get("request_id"),
@@ -507,6 +545,44 @@ async def get_session_history(
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
     return {"session_id": session_id, "messages": runtime.get_session_history(session_id)}
+
+
+@router.post("/tasks/{task_id}/input-reply/{input_request_id}")
+async def submit_task_input_reply(
+    task_id: str,
+    input_request_id: str,
+    payload: TaskInputReplyRequest,
+    request: Request,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    channel = (
+        request.headers.get("X-Channel", "").strip()
+        or str(request.query_params.get("channel") or "").strip()
+    )
+    if not channel:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="channel is required via X-Channel header or query parameter",
+        )
+    try:
+        accepted = await runtime.submit_task_input_reply(
+            input_request_id=input_request_id,
+            task_id=task_id,
+            content=payload.content,
+            channel=channel,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    return {
+        "type": "task.input_reply.accepted",
+        "input_request_id": accepted["input_request_id"],
+        "task_id": accepted["task_id"],
+        "channel": channel,
+        "timestamp": accepted["timestamp"],
+    }
 
 
 @router.get("/routing-audit")

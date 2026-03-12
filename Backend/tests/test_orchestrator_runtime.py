@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 
 import httpx
 import pytest
 
 from orchestrator.config import OrchestratorConfig
-from orchestrator.runtime import OrchestratorRuntime
+from orchestrator.runtime import ActiveTaskRun, OrchestratorRuntime
 from shared import TaskEnvelope, sign_task_envelope, utcnow
 
 
@@ -18,6 +19,68 @@ class SSEByteStream(httpx.AsyncByteStream):
     async def __aiter__(self):
         for chunk in self._chunks:
             yield chunk
+
+    async def aclose(self) -> None:
+        return
+
+
+class FakeRedis:
+    def __init__(self) -> None:
+        self.streams: dict[str, list[tuple[str, dict[str, str]]]] = {}
+        self.groups: dict[tuple[str, str], dict[str, object]] = {}
+        self._counter = 0
+
+    async def xgroup_create(self, stream: str, group: str, id: str = "0", mkstream: bool = True) -> None:
+        if mkstream:
+            self.streams.setdefault(stream, [])
+        self.groups.setdefault((stream, group), {"delivered": set(), "acked": set()})
+
+    async def xadd(self, stream: str, fields: dict[str, str]) -> str:
+        self._counter += 1
+        message_id = f"{self._counter}-0"
+        self.streams.setdefault(stream, []).append((message_id, dict(fields)))
+        return message_id
+
+    async def xreadgroup(
+        self,
+        *,
+        groupname: str,
+        consumername: str,
+        streams: dict[str, str],
+        count: int | None = None,
+        block: int | None = None,
+    ) -> list[tuple[str, list[tuple[str, dict[str, str]]]]]:
+        del consumername
+        results: list[tuple[str, list[tuple[str, dict[str, str]]]]] = []
+        limit = count or 10**9
+        for stream, start in streams.items():
+            state = self.groups.setdefault((stream, groupname), {"delivered": set(), "acked": set()})
+            delivered = state["delivered"]
+            acked = state["acked"]
+            messages: list[tuple[str, dict[str, str]]] = []
+            for message_id, payload in self.streams.get(stream, []):
+                if start == ">":
+                    if message_id in delivered:
+                        continue
+                    delivered.add(message_id)
+                    messages.append((message_id, payload))
+                elif start == "0":
+                    if message_id in delivered and message_id not in acked:
+                        messages.append((message_id, payload))
+                else:
+                    raise AssertionError(f"Unsupported xreadgroup start value: {start}")
+                if len(messages) >= limit:
+                    break
+            if messages:
+                results.append((stream, messages))
+        if not results and block:
+            await asyncio.sleep(min(block / 1000.0, 0.02))
+        return results
+
+    async def xack(self, stream: str, group: str, message_id: str) -> int:
+        state = self.groups.setdefault((stream, group), {"delivered": set(), "acked": set()})
+        state["acked"].add(message_id)
+        return 1
 
     async def aclose(self) -> None:
         return
@@ -200,3 +263,71 @@ def test_orchestrator_build_messages_includes_attachment_manifest(tmp_path) -> N
     assert "Attachment manifest:" in messages[-1]["content"]
     assert "bridge_media_ref=wamid_abc:att_1" in messages[-1]["content"]
     assert "Do not claim to have directly viewed" in messages[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_request_user_input_publishes_request_and_resumes_on_reply(tmp_path) -> None:
+    fake_redis = FakeRedis()
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_input.db",
+    )
+    runtime = OrchestratorRuntime(config, client=httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200))), redis_client=fake_redis)
+    runtime._active_runs["tsk_waiting"] = ActiveTaskRun(
+        runner_task=None,
+        request_id="req_waiting",
+        session_id="sess_20260312",
+        channel="desktop:desk_waiting",
+    )
+
+    await runtime.start()
+    try:
+        request_task = asyncio.create_task(
+            runtime.request_user_input(
+                "tsk_waiting",
+                question="Which environment should I target?",
+                options=["staging", "production"],
+                wait_timeout_sec=1.0,
+            )
+        )
+
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while "user_input:requests" not in fake_redis.streams and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+        assert "user_input:requests" in fake_redis.streams
+        request_payload = json.loads(fake_redis.streams["user_input:requests"][0][1]["payload"])
+        assert request_payload["task_id"] == "tsk_waiting"
+        assert request_payload["channel"] == "desktop:desk_waiting"
+        assert request_payload["session_id"] == "sess_20260312"
+        assert request_payload["question"] == "Which environment should I target?"
+
+        await fake_redis.xadd(
+            config.task_input_replies_stream,
+            {
+                "payload": json.dumps(
+                    {
+                        "input_request_id": request_payload["input_request_id"],
+                        "task_id": "tsk_waiting",
+                        "content": "Use staging.",
+                        "channel": "desktop:desk_waiting",
+                        "timestamp": "2026-03-12T12:00:00Z",
+                    }
+                )
+            },
+        )
+        result = await asyncio.wait_for(request_task, timeout=2.0)
+
+        assert result["status"] == "answered"
+        assert result["reply"]["content"] == "Use staging."
+
+        with sqlite3.connect(config.task_ledger_db_path) as connection:
+            row = connection.execute(
+                "SELECT status, reply_content FROM task_input_requests WHERE input_request_id = ?",
+                (request_payload["input_request_id"],),
+            ).fetchone()
+        assert row == ("answered", "Use staging.")
+    finally:
+        await runtime.stop()

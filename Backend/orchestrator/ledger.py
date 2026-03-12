@@ -59,6 +59,24 @@ class TaskLedger:
 
                 CREATE INDEX IF NOT EXISTS idx_tasks_session_channel
                     ON tasks(session_id, channel, status);
+
+                CREATE TABLE IF NOT EXISTS task_input_requests (
+                    input_request_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    session_id TEXT,
+                    channel TEXT,
+                    agent TEXT,
+                    question TEXT NOT NULL,
+                    options_json TEXT,
+                    status TEXT NOT NULL,
+                    reply_content TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    replied_at TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_task_input_requests_task_status
+                    ON task_input_requests(task_id, status, updated_at);
                 """
             )
             connection.commit()
@@ -227,6 +245,72 @@ class TaskLedger:
             }
             for row in rows
         ]
+
+    def create_task_input_request(
+        self,
+        *,
+        input_request_id: str,
+        task_id: str,
+        session_id: str | None,
+        channel: str | None,
+        agent: str | None,
+        question: str,
+        options: list[str] | None,
+    ) -> None:
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO task_input_requests (
+                    input_request_id,
+                    task_id,
+                    session_id,
+                    channel,
+                    agent,
+                    question,
+                    options_json,
+                    status,
+                    reply_content,
+                    created_at,
+                    updated_at,
+                    replied_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?, NULL)
+                """,
+                (
+                    input_request_id,
+                    task_id,
+                    session_id,
+                    channel,
+                    agent,
+                    question,
+                    json.dumps(options or [], ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+            connection.commit()
+
+    def mark_task_input_replied(self, input_request_id: str, *, content: str) -> None:
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE task_input_requests
+                SET status = 'answered',
+                    reply_content = ?,
+                    updated_at = ?,
+                    replied_at = ?
+                WHERE input_request_id = ?
+                """,
+                (
+                    content,
+                    now,
+                    now,
+                    input_request_id,
+                ),
+            )
+            connection.commit()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)

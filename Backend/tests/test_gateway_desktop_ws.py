@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -511,6 +512,68 @@ class FakeMemoryClient:
     async def get_core_fact_block(self, *, max_chars: int = 1500) -> dict[str, object]:
         self.core_fact_requests.append(max_chars)
         return {"items": [], "rendered": "- User prefers concise technical answers."}
+
+
+class FakeRedis:
+    def __init__(self) -> None:
+        self.streams: dict[str, list[tuple[str, dict[str, str]]]] = {}
+        self.groups: dict[tuple[str, str], dict[str, object]] = {}
+        self._counter = 0
+
+    async def xgroup_create(self, stream: str, group: str, id: str = "0", mkstream: bool = True) -> None:
+        if mkstream:
+            self.streams.setdefault(stream, [])
+        self.groups.setdefault((stream, group), {"delivered": set(), "acked": set()})
+
+    async def xadd(self, stream: str, fields: dict[str, str]) -> str:
+        self._counter += 1
+        message_id = f"{self._counter}-0"
+        self.streams.setdefault(stream, []).append((message_id, dict(fields)))
+        return message_id
+
+    async def xreadgroup(
+        self,
+        *,
+        groupname: str,
+        consumername: str,
+        streams: dict[str, str],
+        count: int | None = None,
+        block: int | None = None,
+    ) -> list[tuple[str, list[tuple[str, dict[str, str]]]]]:
+        del consumername
+        results: list[tuple[str, list[tuple[str, dict[str, str]]]]] = []
+        limit = count or 10**9
+        for stream, start in streams.items():
+            state = self.groups.setdefault((stream, groupname), {"delivered": set(), "acked": set()})
+            delivered = state["delivered"]
+            acked = state["acked"]
+            messages: list[tuple[str, dict[str, str]]] = []
+            for message_id, payload in self.streams.get(stream, []):
+                if start == ">":
+                    if message_id in delivered:
+                        continue
+                    delivered.add(message_id)
+                    messages.append((message_id, payload))
+                elif start == "0":
+                    if message_id in delivered and message_id not in acked:
+                        messages.append((message_id, payload))
+                else:
+                    raise AssertionError(f"Unsupported xreadgroup start value: {start}")
+                if len(messages) >= limit:
+                    break
+            if messages:
+                results.append((stream, messages))
+        if not results and block:
+            await asyncio.sleep(min(block / 1000.0, 0.02))
+        return results
+
+    async def xack(self, stream: str, group: str, message_id: str) -> int:
+        state = self.groups.setdefault((stream, group), {"delivered": set(), "acked": set()})
+        state["acked"].add(message_id)
+        return 1
+
+    async def aclose(self) -> None:
+        return
 
 
 def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
@@ -1572,6 +1635,109 @@ async def test_offline_desktop_task_input_is_held_until_channel_returns(tmp_path
         assert runtime.delivery_queue_store.summary()["pending_count"] == 0
     finally:
         await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_message_auto_submits_pending_task_input_reply(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="perplexity")
+    runtime._redis = FakeRedis()
+    await runtime.start()
+    try:
+        session_id = runtime._current_session_id()
+        runtime.session_store.upsert_task_input_request(
+            input_request_id="uir_whatsapp_1",
+            task_id="tsk_waiting_whatsapp",
+            session_id=session_id,
+            channel="whatsapp:+12153079021",
+            question="Which repository should I use?",
+            options=["Cosmic-OS", "cosmic-memory"],
+            agent="cosmic/orchestrator:1.0.0",
+            metadata={},
+            status="pending",
+            created_at=utcnow_iso(),
+        )
+
+        result = await runtime.process_incoming_user_message(
+            {
+                "content": "Use Cosmic-OS.",
+                "channel": "whatsapp:+12153079021",
+                "metadata": {"platform": "whatsapp", "message_id": "wamid_reply_1"},
+            }
+        )
+
+        assert result["dispatch_target"] == "redis"
+        assert result["route"] == "task_input_reply"
+        reply_stream = runtime._redis.streams[runtime.config.task_input_replies_stream]
+        reply_payload = json.loads(reply_stream[0][1]["payload"])
+        assert reply_payload["input_request_id"] == "uir_whatsapp_1"
+        assert reply_payload["task_id"] == "tsk_waiting_whatsapp"
+        assert reply_payload["content"] == "Use Cosmic-OS."
+
+        stored = runtime.session_store.get_task_input_request("uir_whatsapp_1")
+        assert stored is not None
+        assert stored["status"] == "answered"
+        assert stored["reply_content"] == "Use Cosmic-OS."
+    finally:
+        await runtime.stop()
+
+
+def test_desktop_websocket_accepts_task_input_reply_messages(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="haiku")
+    runtime._redis = FakeRedis()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+
+    with TestClient(app) as client:
+        session_id = runtime._current_session_id()
+        runtime.session_store.upsert_task_input_request(
+            input_request_id="uir_desktop_1",
+            task_id="tsk_waiting_desktop",
+            session_id=session_id,
+            channel="desktop:desk_input",
+            question="Which environment should I target?",
+            options=["staging", "production"],
+            agent="cosmic/orchestrator:1.0.0",
+            metadata={},
+            status="pending",
+            created_at=utcnow_iso(),
+        )
+
+        with client.websocket_connect("/ws?token=test-token&device_id=desk_input") as websocket:
+            websocket.send_json(
+                {
+                    "type": "task.input_reply",
+                    "request_id": "reply_req_1",
+                    "input_request_id": "uir_desktop_1",
+                    "task_id": "tsk_waiting_desktop",
+                    "content": "Use staging.",
+                }
+            )
+            accepted = websocket.receive_json()
+
+        assert accepted["type"] == "task.input_reply.accepted"
+        assert accepted["request_id"] == "reply_req_1"
+        assert accepted["input_request_id"] == "uir_desktop_1"
+        assert accepted["task_id"] == "tsk_waiting_desktop"
+
+        reply_stream = runtime._redis.streams[runtime.config.task_input_replies_stream]
+        reply_payload = json.loads(reply_stream[0][1]["payload"])
+        assert reply_payload["channel"] == "desktop:desk_input"
+        assert reply_payload["content"] == "Use staging."
+
+        stored = runtime.session_store.get_task_input_request("uir_desktop_1")
+        assert stored is not None
+        assert stored["status"] == "answered"
+        assert stored["reply_content"] == "Use staging."
 
 
 def test_internal_telegram_media_route_uses_internal_token(tmp_path) -> None:

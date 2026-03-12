@@ -8,6 +8,7 @@ from .contracts import (
     utcnow,
     verify_task_envelope,
 )
+from .redis_client import create_redis_client, ensure_stream_group, parse_stream_payload
 
 __all__ = [
     "ACCEPTED_READ_VERSIONS",
@@ -18,4 +19,7 @@ __all__ = [
     "sign_task_envelope",
     "utcnow",
     "verify_task_envelope",
+    "create_redis_client",
+    "ensure_stream_group",
+    "parse_stream_payload",
 ]

@@ -42,6 +42,10 @@ class OrchestratorConfig:
     anthropic_version: str = "2023-06-01"
     max_tokens: int = 16000
     request_timeout_sec: float = 300.0
+    redis_url: str = ""
+    task_input_requests_stream: str = "user_input:requests"
+    task_input_replies_stream: str = "user_input:replies"
+    task_input_orchestrator_group: str = "orchestrator"
     task_ledger_db_path: Path = BACKEND_ROOT / "agents" / "orchestrator" / "store" / "data" / "task_ledger.db"
 
     @classmethod
@@ -56,6 +60,13 @@ class OrchestratorConfig:
             anthropic_version=os.getenv("ANTHROPIC_VERSION", "2023-06-01").strip(),
             max_tokens=max(256, _env_int("OPUS_MAX_TOKENS", 16000)),
             request_timeout_sec=max(30.0, _env_float("ORCHESTRATOR_REQUEST_TIMEOUT_SEC", 300.0)),
+            redis_url=os.getenv("REDIS_URL", "").strip(),
+            task_input_requests_stream=os.getenv("TASK_INPUT_REQUESTS_STREAM", "user_input:requests").strip()
+            or "user_input:requests",
+            task_input_replies_stream=os.getenv("TASK_INPUT_REPLIES_STREAM", "user_input:replies").strip()
+            or "user_input:replies",
+            task_input_orchestrator_group=os.getenv("TASK_INPUT_ORCHESTRATOR_GROUP", "orchestrator").strip()
+            or "orchestrator",
             task_ledger_db_path=Path(
                 os.getenv(
                     "ORCHESTRATOR_TASK_LEDGER_DB_PATH",

@@ -7,6 +7,7 @@ from typing import AsyncIterator
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 import uvicorn
 
 from shared import TaskEnvelope
@@ -32,6 +33,14 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+
+class TaskInputRequestBody(BaseModel):
+    question: str = Field(..., min_length=1, max_length=4000)
+    options: list[str] = Field(default_factory=list, max_length=12)
+    channel: str | None = Field(default=None, max_length=128)
+    agent: str = Field(default="cosmic/orchestrator:1.0.0", min_length=1, max_length=200)
+    wait_timeout_sec: float | None = Field(default=None, ge=0, le=3600)
 
 
 def get_runtime(request: Request) -> OrchestratorRuntime:
@@ -64,6 +73,12 @@ async def health(request: Request) -> dict[str, object]:
         "model": runtime.config.anthropic_model,
         "anthropic_configured": bool(runtime.config.anthropic_api_key),
         "ledger_path": str(runtime.config.task_ledger_db_path),
+        "task_input_relay": {
+            "enabled": bool(runtime.config.redis_url),
+            "requests_stream": runtime.config.task_input_requests_stream,
+            "replies_stream": runtime.config.task_input_replies_stream,
+            "group": runtime.config.task_input_orchestrator_group,
+        },
     }
 
 
@@ -90,6 +105,27 @@ async def cancel_task(
         "ok": True,
         "task_id": task_id,
         "cancelled": cancelled,
+    }
+
+
+@app.post("/internal/tasks/{task_id}/request-input")
+async def request_task_input(
+    task_id: str,
+    body: TaskInputRequestBody,
+    _: None = Depends(require_internal_token),
+    runtime: OrchestratorRuntime = Depends(get_runtime),
+) -> dict[str, object]:
+    payload = await runtime.request_user_input(
+        task_id,
+        question=body.question,
+        options=body.options,
+        channel=body.channel,
+        agent=body.agent,
+        wait_timeout_sec=body.wait_timeout_sec,
+    )
+    return {
+        "ok": True,
+        **payload,
     }
 
 

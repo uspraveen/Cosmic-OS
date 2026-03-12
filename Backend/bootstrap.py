@@ -100,6 +100,12 @@ PACKAGE_NAMES: Dict[str, Dict[str, str]] = {
         "yum": "npm",
         "apk": "npm",
     },
+    "redis": {
+        "apt-get": "redis-server",
+        "dnf": "redis",
+        "yum": "redis",
+        "apk": "redis",
+    },
 }
 
 
@@ -511,6 +517,73 @@ def extract_host_from_url(value: Optional[str]) -> Optional[str]:
         host = parsed.path.split("/", 1)[0]
         return host or None
     return None
+
+
+def is_local_redis_url(value: Optional[str]) -> bool:
+    normalized = meaningful_env_value(value)
+    if normalized is None:
+        return False
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"redis", "rediss"}:
+        return False
+    hostname = (parsed.hostname or "").strip().lower()
+    return hostname in {"127.0.0.1", "localhost", "::1"}
+
+
+def resolve_configured_redis_url() -> Optional[str]:
+    candidates = [
+        BACKEND_ROOT / "gateway.env",
+        BACKEND_ROOT / "gateway.env.example",
+        BACKEND_ROOT / "orchestrator.env",
+        BACKEND_ROOT / "orchestrator.env.example",
+    ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        parsed = parse_env_text(path.read_text(encoding="utf-8"))
+        redis_url = meaningful_env_value(parsed.get("REDIS_URL"))
+        if redis_url is not None:
+            return redis_url
+    return None
+
+
+def setup_local_redis(redis_url: Optional[str]) -> None:
+    if not is_local_redis_url(redis_url):
+        return
+    if not is_linux():
+        raise BootstrapError("Local Redis provisioning currently targets Linux VMs only.")
+    manager = detect_package_manager()
+    if not manager:
+        raise BootstrapError("REDIS_URL points to localhost, but no supported package manager was found.")
+    package_name = PACKAGE_NAMES["redis"].get(manager)
+    if not package_name:
+        raise BootstrapError("No Redis package mapping for package manager: {0}".format(manager))
+
+    log("Ensuring local Redis is installed for task input queues via {0}: {1}".format(manager, package_name))
+    install_system_packages(manager, [package_name])
+
+    if shutil.which("systemctl") is None:
+        log("systemctl not found; skipping Redis service enable/start.")
+        return
+
+    service_candidates = {
+        "apt-get": ("redis-server",),
+        "dnf": ("redis",),
+        "yum": ("redis",),
+        "apk": ("redis",),
+    }.get(manager, ())
+    for service_name in service_candidates:
+        try:
+            run(["systemctl", "enable", service_name], use_sudo=True)
+            run(["systemctl", "restart", service_name], use_sudo=True)
+            log("Local Redis service is active: {0}".format(service_name))
+            return
+        except (BootstrapError, subprocess.CalledProcessError):
+            continue
+
+    raise BootstrapError(
+        "Installed Redis package, but could not enable a known Redis service for manager {0}.".format(manager)
+    )
 
 
 def missing_required_env_keys(env_path: Path, required_keys: Sequence[str]) -> List[str]:
@@ -1664,6 +1737,7 @@ def bootstrap(
             supabase_anon_key=supabase_anon_key,
             include_memory=enable_memory,
         )
+    setup_local_redis(resolve_configured_redis_url())
     setup_python(venv_path, requirements_path)
     if memory_repo_dir is not None:
         setup_cosmic_memory(venv_path, memory_repo_dir)

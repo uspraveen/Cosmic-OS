@@ -481,3 +481,43 @@ def test_run_with_retry_retries_subprocess_failure(monkeypatch) -> None:
 
     assert attempts["count"] == 3
     assert result.returncode == 0
+
+
+def test_setup_local_redis_installs_and_restarts_service(monkeypatch) -> None:
+    installed_packages: list[tuple[str, list[str]]] = []
+    executed_commands: list[list[str]] = []
+
+    monkeypatch.setattr(bootstrap, "is_linux", lambda: True)
+    monkeypatch.setattr(bootstrap, "detect_package_manager", lambda: "apt-get")
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: "/usr/bin/systemctl" if name == "systemctl" else None)
+    monkeypatch.setattr(
+        bootstrap,
+        "install_system_packages",
+        lambda manager, packages: installed_packages.append((manager, list(packages))),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "run",
+        lambda command, **kwargs: executed_commands.append(list(command)) or SimpleNamespace(returncode=0, stdout=""),
+    )
+
+    bootstrap.setup_local_redis("redis://127.0.0.1:6379/0")
+
+    assert installed_packages == [("apt-get", ["redis-server"])]
+    assert executed_commands == [
+        ["systemctl", "enable", "redis-server"],
+        ["systemctl", "restart", "redis-server"],
+    ]
+
+
+def test_setup_local_redis_skips_non_local_redis_urls(monkeypatch) -> None:
+    install_calls: list[list[str]] = []
+    monkeypatch.setattr(
+        bootstrap,
+        "install_system_packages",
+        lambda manager, packages: install_calls.append(list(packages)),
+    )
+
+    bootstrap.setup_local_redis("redis://10.0.0.5:6379/0")
+
+    assert install_calls == []
