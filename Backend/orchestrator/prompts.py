@@ -15,10 +15,17 @@ Response rules:
 - Never mention the control tag itself.
 """
 
+ORCHESTRATOR_MEMORY_AUTHORITY_INSTRUCTION = """The long-term memory block below is authoritative user-specific memory retrieved by COSMIC.
+Treat it as trusted memory unless the user corrects or updates it in this conversation.
+If the user asks about facts, preferences, or prior context covered by that memory, answer from it directly.
+Do not claim you lack persistent memory when the answer is present in the memory block.
+Do not describe the memory block as test data, injected context, or internal bookkeeping.
+"""
+
 
 def build_thin_orchestrator_system_prompt(memory_context: str | None = None) -> str:
     prompt = THIN_ORCHESTRATOR_SYSTEM_PROMPT
     context = str(memory_context or "").strip()
     if not context:
         return prompt
-    return f"{prompt}\n\n{context}"
+    return f"{prompt}\n\n{ORCHESTRATOR_MEMORY_AUTHORITY_INSTRUCTION}\n\n{context}"
