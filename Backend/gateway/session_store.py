@@ -98,6 +98,52 @@ class SessionStore:
 
                 CREATE INDEX IF NOT EXISTS idx_task_summary_links_session
                     ON task_summary_links(session_id, updated_at);
+
+                CREATE TABLE IF NOT EXISTS turn_ledger (
+                    turn_id TEXT PRIMARY KEY,
+                    request_id TEXT NOT NULL UNIQUE,
+                    session_id TEXT NOT NULL,
+                    task_id TEXT,
+                    channel TEXT NOT NULL,
+                    route TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT NOT NULL,
+                    user_message_id TEXT,
+                    assistant_message_id TEXT,
+                    user_goal TEXT NOT NULL,
+                    user_message_excerpt TEXT NOT NULL,
+                    assistant_outcome TEXT NOT NULL,
+                    compact_line TEXT NOT NULL,
+                    facts_learned_json TEXT,
+                    preferences_detected_json TEXT,
+                    decisions_made_json TEXT,
+                    accomplished_json TEXT,
+                    tool_summary_json TEXT,
+                    touched_entities_json TEXT,
+                    task_refs_json TEXT,
+                    artifact_refs_json TEXT,
+                    failures_to_avoid_json TEXT,
+                    open_loops_json TEXT,
+                    metadata_json TEXT,
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_turn_ledger_session_completed
+                    ON turn_ledger(session_id, completed_at);
+
+                CREATE TABLE IF NOT EXISTS task_notebooks (
+                    task_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    current_state TEXT,
+                    notebook_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_task_notebooks_session_updated
+                    ON task_notebooks(session_id, updated_at);
                 """
             )
             self._ensure_column(connection, "messages", "request_id", "TEXT")
@@ -279,7 +325,27 @@ class SessionStore:
                 break
             consumed_chars += content_len
             selected.append(item)
-        return list(reversed(selected))
+        selected_history = list(reversed(selected))
+        session_record = self.get_session_record(session_id)
+        compacted_summary = ""
+        if isinstance(session_record, dict):
+            compacted_summary = str(session_record.get("compacted_summary") or "").strip()
+        if compacted_summary:
+            selected_history = [
+                {
+                    "message_id": f"compacted_{session_id}",
+                    "role": "assistant",
+                    "content": f"[Compacted session summary]\n\n{compacted_summary}",
+                    "route": "system",
+                    "request_id": None,
+                    "awaiting_reply": False,
+                    "channel": None,
+                    "created_at": session_record.get("updated_at") if session_record else utcnow_iso(),
+                    "metadata": {"compacted_summary": True},
+                },
+                *selected_history,
+            ]
+        return selected_history
 
     def list_sessions(self, limit: int = 30) -> list[dict[str, Any]]:
         with self._lock, self._connect() as connection:
@@ -329,6 +395,116 @@ class SessionStore:
                 )
         return sessions
 
+    def get_session_record(self, session_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    session_id,
+                    user_id,
+                    created_at,
+                    updated_at,
+                    compaction_count,
+                    compacted_summary,
+                    metadata_json
+                FROM sessions
+                WHERE session_id = ?
+                LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone()
+
+        if row is None:
+            return None
+        metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        return {
+            "session_id": row["session_id"],
+            "user_id": row["user_id"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "compaction_count": int(row["compaction_count"] or 0),
+            "compacted_summary": row["compacted_summary"],
+            "metadata": metadata,
+        }
+
+    def get_session_metadata(self, session_id: str) -> dict[str, Any]:
+        record = self.get_session_record(session_id)
+        if record is None:
+            return {}
+        metadata = record.get("metadata")
+        return metadata if isinstance(metadata, dict) else {}
+
+    def update_session_metadata(self, session_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        if not session_id:
+            return {}
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            self._ensure_session(connection, session_id=session_id, created_at=now)
+            row = connection.execute(
+                "SELECT metadata_json FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            metadata = json.loads(row["metadata_json"]) if row and row["metadata_json"] else {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata.update(dict(patch or {}))
+            connection.execute(
+                """
+                UPDATE sessions
+                SET metadata_json = ?,
+                    updated_at = ?
+                WHERE session_id = ?
+                """,
+                (json.dumps(metadata), now, session_id),
+            )
+            connection.commit()
+        return metadata
+
+    def set_compaction_state(
+        self,
+        session_id: str,
+        *,
+        compacted_summary: str,
+        compaction_packet: dict[str, Any],
+    ) -> None:
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            self._ensure_session(connection, session_id=session_id, created_at=now)
+            row = connection.execute(
+                """
+                SELECT compaction_count, metadata_json
+                FROM sessions
+                WHERE session_id = ?
+                LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone()
+            metadata = json.loads(row["metadata_json"]) if row and row["metadata_json"] else {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata["compaction_packet"] = compaction_packet
+            metadata["compaction_updated_at"] = now
+            connection.execute(
+                """
+                UPDATE sessions
+                SET compacted_summary = ?,
+                    compaction_count = ?,
+                    metadata_json = ?,
+                    updated_at = ?
+                WHERE session_id = ?
+                """,
+                (
+                    compacted_summary,
+                    int(row["compaction_count"] or 0) + 1 if row else 1,
+                    json.dumps(metadata),
+                    now,
+                    session_id,
+                ),
+            )
+            connection.commit()
+
     def get_last_awaiting_reply(self, session_id: str, channel: str) -> dict[str, Any] | None:
         with self._lock, self._connect() as connection:
             row = connection.execute(
@@ -369,6 +545,48 @@ class SessionStore:
             "created_at": row["created_at"],
             "metadata": metadata,
         }
+
+    def list_awaiting_reply_messages(self, session_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    message_id,
+                    role,
+                    content,
+                    route,
+                    request_id,
+                    awaiting_reply,
+                    channel,
+                    created_at,
+                    metadata_json
+                FROM messages
+                WHERE session_id = ?
+                  AND role = 'assistant'
+                  AND awaiting_reply = 1
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (session_id, max(1, limit)),
+            ).fetchall()
+
+        awaiting_messages: list[dict[str, Any]] = []
+        for row in reversed(rows):
+            metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else None
+            awaiting_messages.append(
+                {
+                    "message_id": row["message_id"],
+                    "role": row["role"],
+                    "content": row["content"],
+                    "route": row["route"],
+                    "request_id": row["request_id"],
+                    "awaiting_reply": bool(row["awaiting_reply"]),
+                    "channel": row["channel"],
+                    "created_at": row["created_at"],
+                    "metadata": metadata,
+                }
+            )
+        return awaiting_messages
 
     def clear_awaiting_reply(self, message_id: str) -> None:
         with self._lock, self._connect() as connection:
@@ -426,6 +644,244 @@ class SessionStore:
             "created_at": row["created_at"],
             "metadata": metadata,
         }
+
+    def list_turn_ledger(
+        self,
+        session_id: str,
+        *,
+        limit: int = 20,
+        before_completed_at: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = [session_id]
+        where_clause = "WHERE session_id = ?"
+        if before_completed_at:
+            where_clause += " AND completed_at < ?"
+            params.append(before_completed_at)
+        params.append(max(1, limit))
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM turn_ledger
+                {where_clause}
+                ORDER BY completed_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [self._deserialize_turn_ledger_row(row) for row in reversed(rows)]
+
+    def list_all_turn_ledger(self, session_id: str) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM turn_ledger
+                WHERE session_id = ?
+                ORDER BY completed_at ASC
+                """,
+                (session_id,),
+            ).fetchall()
+        return [self._deserialize_turn_ledger_row(row) for row in rows]
+
+    def get_turn_ledger_entry(self, request_id: str) -> dict[str, Any] | None:
+        if not request_id:
+            return None
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM turn_ledger
+                WHERE request_id = ?
+                LIMIT 1
+                """,
+                (request_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._deserialize_turn_ledger_row(row)
+
+    def upsert_turn_ledger_entry(self, entry: dict[str, Any]) -> None:
+        request_id = self._normalize_optional_text(entry.get("request_id"))
+        session_id = self._normalize_optional_text(entry.get("session_id"))
+        if not request_id or not session_id:
+            raise ValueError("Turn ledger entry requires request_id and session_id")
+
+        now = utcnow_iso()
+        created_at = self._normalize_optional_text(entry.get("started_at")) or now
+        with self._lock, self._connect() as connection:
+            self._ensure_session(connection, session_id=session_id, created_at=created_at)
+            connection.execute(
+                """
+                INSERT INTO turn_ledger (
+                    turn_id,
+                    request_id,
+                    session_id,
+                    task_id,
+                    channel,
+                    route,
+                    started_at,
+                    completed_at,
+                    user_message_id,
+                    assistant_message_id,
+                    user_goal,
+                    user_message_excerpt,
+                    assistant_outcome,
+                    compact_line,
+                    facts_learned_json,
+                    preferences_detected_json,
+                    decisions_made_json,
+                    accomplished_json,
+                    tool_summary_json,
+                    touched_entities_json,
+                    task_refs_json,
+                    artifact_refs_json,
+                    failures_to_avoid_json,
+                    open_loops_json,
+                    metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(request_id) DO UPDATE SET
+                    task_id = excluded.task_id,
+                    channel = excluded.channel,
+                    route = excluded.route,
+                    started_at = excluded.started_at,
+                    completed_at = excluded.completed_at,
+                    user_message_id = excluded.user_message_id,
+                    assistant_message_id = excluded.assistant_message_id,
+                    user_goal = excluded.user_goal,
+                    user_message_excerpt = excluded.user_message_excerpt,
+                    assistant_outcome = excluded.assistant_outcome,
+                    compact_line = excluded.compact_line,
+                    facts_learned_json = excluded.facts_learned_json,
+                    preferences_detected_json = excluded.preferences_detected_json,
+                    decisions_made_json = excluded.decisions_made_json,
+                    accomplished_json = excluded.accomplished_json,
+                    tool_summary_json = excluded.tool_summary_json,
+                    touched_entities_json = excluded.touched_entities_json,
+                    task_refs_json = excluded.task_refs_json,
+                    artifact_refs_json = excluded.artifact_refs_json,
+                    failures_to_avoid_json = excluded.failures_to_avoid_json,
+                    open_loops_json = excluded.open_loops_json,
+                    metadata_json = excluded.metadata_json
+                """,
+                (
+                    self._normalize_optional_text(entry.get("turn_id")) or f"turn_{uuid4().hex}",
+                    request_id,
+                    session_id,
+                    self._normalize_optional_text(entry.get("task_id")),
+                    self._normalize_optional_text(entry.get("channel")) or "",
+                    self._normalize_optional_text(entry.get("route")) or "opus",
+                    created_at,
+                    self._normalize_optional_text(entry.get("completed_at")) or now,
+                    self._normalize_optional_text(entry.get("user_message_id")),
+                    self._normalize_optional_text(entry.get("assistant_message_id")),
+                    str(entry.get("user_goal") or ""),
+                    str(entry.get("user_message_excerpt") or ""),
+                    str(entry.get("assistant_outcome") or ""),
+                    str(entry.get("compact_line") or ""),
+                    self._json(entry.get("facts_learned")),
+                    self._json(entry.get("preferences_detected")),
+                    self._json(entry.get("decisions_made")),
+                    self._json(entry.get("accomplished")),
+                    self._json(entry.get("tool_summary")),
+                    self._json(entry.get("touched_entities")),
+                    self._json(entry.get("task_refs")),
+                    self._json(entry.get("artifact_refs")),
+                    self._json(entry.get("failures_to_avoid")),
+                    self._json(entry.get("open_loops")),
+                    self._json(entry.get("metadata")),
+                ),
+            )
+            connection.execute(
+                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+                (now, session_id),
+            )
+            connection.commit()
+
+    def get_task_notebook(self, task_id: str) -> dict[str, Any] | None:
+        if not task_id:
+            return None
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT notebook_json
+                FROM task_notebooks
+                WHERE task_id = ?
+                LIMIT 1
+                """,
+                (task_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        notebook = json.loads(row["notebook_json"]) if row["notebook_json"] else {}
+        return notebook if isinstance(notebook, dict) else None
+
+    def list_task_notebooks(self, session_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT notebook_json
+                FROM task_notebooks
+                WHERE session_id = ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (session_id, max(1, limit)),
+            ).fetchall()
+        notebooks: list[dict[str, Any]] = []
+        for row in reversed(rows):
+            notebook = json.loads(row["notebook_json"]) if row["notebook_json"] else {}
+            if isinstance(notebook, dict):
+                notebooks.append(notebook)
+        return notebooks
+
+    def upsert_task_notebook(self, task_id: str, session_id: str, notebook: dict[str, Any]) -> None:
+        if not task_id or not session_id:
+            raise ValueError("Task notebook requires task_id and session_id")
+        now = utcnow_iso()
+        created_at = self._normalize_optional_text(notebook.get("created_at")) or now
+        payload = dict(notebook)
+        payload.setdefault("task_id", task_id)
+        payload.setdefault("status", "active")
+        payload.setdefault("current_state", "")
+        payload["updated_at"] = now
+        with self._lock, self._connect() as connection:
+            self._ensure_session(connection, session_id=session_id, created_at=created_at)
+            connection.execute(
+                """
+                INSERT INTO task_notebooks (
+                    task_id,
+                    session_id,
+                    status,
+                    current_state,
+                    notebook_json,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    session_id = excluded.session_id,
+                    status = excluded.status,
+                    current_state = excluded.current_state,
+                    notebook_json = excluded.notebook_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    task_id,
+                    session_id,
+                    str(payload.get("status") or "active"),
+                    str(payload.get("current_state") or ""),
+                    json.dumps(payload),
+                    created_at,
+                    now,
+                ),
+            )
+            connection.execute(
+                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+                (now, session_id),
+            )
+            connection.commit()
 
     def claim_memory_episode_ingest(
         self,
@@ -842,3 +1298,51 @@ class SessionStore:
             return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
         except ValueError:
             return None
+
+    def _deserialize_turn_ledger_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "turn_id": row["turn_id"],
+            "request_id": row["request_id"],
+            "session_id": row["session_id"],
+            "task_id": row["task_id"],
+            "channel": row["channel"],
+            "route": row["route"],
+            "started_at": row["started_at"],
+            "completed_at": row["completed_at"],
+            "user_message_id": row["user_message_id"],
+            "assistant_message_id": row["assistant_message_id"],
+            "user_goal": row["user_goal"],
+            "user_message_excerpt": row["user_message_excerpt"],
+            "assistant_outcome": row["assistant_outcome"],
+            "compact_line": row["compact_line"],
+            "facts_learned": self._json_load(row["facts_learned_json"]),
+            "preferences_detected": self._json_load(row["preferences_detected_json"]),
+            "decisions_made": self._json_load(row["decisions_made_json"]),
+            "accomplished": self._json_load(row["accomplished_json"]),
+            "tool_summary": self._json_load(row["tool_summary_json"]),
+            "touched_entities": self._json_load(row["touched_entities_json"]),
+            "task_refs": self._json_load(row["task_refs_json"]),
+            "artifact_refs": self._json_load(row["artifact_refs_json"]),
+            "failures_to_avoid": self._json_load(row["failures_to_avoid_json"]),
+            "open_loops": self._json_load(row["open_loops_json"]),
+            "metadata": self._json_load(row["metadata_json"], default={}),
+        }
+
+    def _json(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        return json.dumps(value)
+
+    def _json_load(self, raw: str | None, *, default: Any | None = None) -> Any:
+        if not raw:
+            return [] if default is None else default
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return [] if default is None else default
+
+    def _normalize_optional_text(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None

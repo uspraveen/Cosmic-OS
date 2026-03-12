@@ -202,3 +202,56 @@ async def memory_health(
 ) -> dict[str, Any]:
     runtime = get_runtime(request)
     return await runtime.memory_client.health()
+
+
+@router.get("/internal/session/state/{session_id}")
+async def session_state(
+    session_id: str,
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return runtime.get_session_state(session_id)
+
+
+@router.get("/internal/session/turns/{session_id}")
+async def session_turns(
+    session_id: str,
+    limit: int = Query(default=20, ge=1, le=200),
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return {"session_id": session_id, "turns": runtime.list_turn_ledger(session_id, limit=limit)}
+
+
+@router.get("/internal/session/task-notebook/{task_id}")
+async def task_notebook(
+    task_id: str,
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    notebook = runtime.get_task_notebook(task_id)
+    if notebook is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task notebook not found")
+    return notebook
+
+
+@router.post("/internal/session/revisit")
+async def session_revisit(
+    payload: dict[str, Any],
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    session_id = str(payload.get("session_id") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="session_id is required")
+    task_id = str(payload.get("task_id") or "").strip() or None
+    request_id = str(payload.get("request_id") or "").strip() or None
+    turn_limit = int(payload.get("turn_limit") or 8)
+    raw_history_limit = int(payload.get("raw_history_limit") or 12)
+    return runtime.build_revisit_payload(
+        session_id=session_id,
+        task_id=task_id,
+        request_id=request_id,
+        turn_limit=max(1, min(200, turn_limit)),
+        raw_history_limit=max(1, min(200, raw_history_limit)),
+    )

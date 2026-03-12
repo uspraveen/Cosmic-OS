@@ -13,6 +13,7 @@ from gateway.channels.routes import router as channel_router
 from gateway.config import GatewayConfig
 from gateway.memory_client import MemoryPromptContext
 from gateway.runtime import GatewayRuntime
+from gateway.session_store import utcnow_iso
 
 
 class FakeDirectAdapter:
@@ -831,6 +832,140 @@ async def test_runtime_rollover_writes_session_summary_to_memory(tmp_path) -> No
         await runtime.stop()
 
 
+@pytest.mark.asyncio
+async def test_active_working_set_only_keeps_unresolved_open_loops(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="haiku")
+    await runtime.start()
+    try:
+        session_id = runtime.session_store.current_session_id()
+        request_id = "req_open_loop_1"
+        channel = "desktop:desk_a"
+        assistant_text = "Can you clarify which repository you want me to use?"
+        runtime.session_store.append_message(
+            session_id,
+            role="user",
+            content="Please continue with the migration.",
+            channel=channel,
+            metadata={"platform": "desktop", "request_id": request_id},
+        )
+        assistant_message_id = runtime.session_store.append_message(
+            session_id,
+            role="assistant",
+            content=assistant_text,
+            route="haiku",
+            awaiting_reply=True,
+            channel=channel,
+            metadata={"platform": "desktop", "request_id": request_id},
+        )
+        runtime.session_store.upsert_turn_ledger_entry(
+            {
+                "turn_id": "turn_req_open_loop_1",
+                "request_id": request_id,
+                "session_id": session_id,
+                "channel": channel,
+                "route": "haiku",
+                "started_at": utcnow_iso(),
+                "completed_at": utcnow_iso(),
+                "user_goal": "Continue the migration.",
+                "user_message_excerpt": "Please continue with the migration.",
+                "assistant_outcome": assistant_text,
+                "compact_line": "Continue the migration via haiku -> clarification requested",
+                "open_loops": [assistant_text],
+                "metadata": {"awaiting_reply": True},
+            }
+        )
+
+        working_set = runtime._refresh_active_working_set(session_id)  # noqa: SLF001 - targeted unit seam
+        assert assistant_text in working_set["open_loops"]
+
+        runtime.session_store.clear_awaiting_reply(assistant_message_id)
+        refreshed = runtime._refresh_active_working_set(session_id)  # noqa: SLF001 - targeted unit seam
+        assert assistant_text not in refreshed["open_loops"]
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_session_compaction_only_summarizes_newly_eligible_turns(tmp_path, monkeypatch) -> None:
+    runtime = build_runtime(tmp_path, route="haiku")
+    summary_prompts: list[str] = []
+
+    async def fake_generate_text(*, system_prompt: str, messages, max_tokens: int) -> tuple[str, dict[str, object], str]:
+        summary_prompts.append(str(messages[0]["content"]))
+        return (
+            "## Goal\n- Preserve the migration context.\n",
+            {"output_tokens": 42},
+            "end_turn",
+        )
+
+    runtime.haiku_adapter.generate_text = fake_generate_text
+    monkeypatch.setattr("gateway.runtime.COMPACTION_TRIGGER_CHAR_THRESHOLD", 1)
+    monkeypatch.setattr("gateway.runtime.COMPACTION_RECENT_WINDOW_MESSAGES", 2)
+    monkeypatch.setattr("gateway.runtime.COMPACTION_RAW_MESSAGE_CHAR_LIMIT", 2000)
+
+    def add_turn(index: int) -> None:
+        request_id = f"req_compaction_{index}"
+        channel = "desktop:desk_a"
+        user_text = f"Question {index}: explain the migration plan in detail."
+        assistant_text = f"Answer {index}: here is the migration guidance."
+        runtime.session_store.append_message(
+            session_id,
+            role="user",
+            content=user_text,
+            channel=channel,
+            metadata={"platform": "desktop", "request_id": request_id},
+        )
+        runtime.session_store.append_message(
+            session_id,
+            role="assistant",
+            content=assistant_text,
+            route="haiku",
+            channel=channel,
+            metadata={"platform": "desktop", "request_id": request_id},
+        )
+        runtime.session_store.upsert_turn_ledger_entry(
+            {
+                "turn_id": f"turn_{request_id}",
+                "request_id": request_id,
+                "session_id": session_id,
+                "channel": channel,
+                "route": "haiku",
+                "started_at": utcnow_iso(),
+                "completed_at": utcnow_iso(),
+                "user_goal": user_text,
+                "user_message_excerpt": user_text,
+                "assistant_outcome": assistant_text,
+                "compact_line": f"{user_text} via haiku -> {assistant_text}",
+                "accomplished": [assistant_text],
+                "metadata": {},
+            }
+        )
+        time.sleep(0.01)
+
+    await runtime.start()
+    try:
+        session_id = runtime.session_store.current_session_id()
+        add_turn(1)
+        add_turn(2)
+        add_turn(3)
+
+        await runtime._maybe_compact_session(session_id)  # noqa: SLF001 - targeted unit seam
+        assert len(summary_prompts) == 1
+        first_packet = runtime.get_session_state(session_id)["compaction_packet"]
+        assert first_packet["compacted_until_completed_at"]
+
+        await runtime._maybe_compact_session(session_id)  # noqa: SLF001 - targeted unit seam
+        assert len(summary_prompts) == 1
+
+        add_turn(4)
+        await runtime._maybe_compact_session(session_id)  # noqa: SLF001 - targeted unit seam
+        assert len(summary_prompts) == 2
+        assert "Question 3" in summary_prompts[1]
+        assert "Question 1" not in summary_prompts[1]
+    finally:
+        await runtime.stop()
+
+
 @pytest.fixture
 def test_client(tmp_path):
     runtime = build_runtime(tmp_path)
@@ -892,6 +1027,129 @@ def test_internal_memory_routes_proxy_to_memory_service(tmp_path) -> None:
         )
         assert core_fact_response.status_code == 200
         assert runtime.memory_client.core_fact_requests == [900]
+
+
+def test_internal_session_routes_expose_state_turns_and_revisit(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="haiku")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+    from gateway.memory_routes import router as memory_router
+
+    app.include_router(memory_router)
+
+    with TestClient(app) as client:
+        session_id = runtime.session_store.current_session_id()
+        runtime.session_store.update_session_metadata(
+            session_id,
+            {
+                "active_working_set": {
+                    "session_id": session_id,
+                    "goal": "Keep the migration plan moving.",
+                    "active_workstreams": ["Finish memory integration"],
+                    "recent_decisions": [],
+                    "open_loops": ["Confirm rollout timing"],
+                    "current_focus_entities": [],
+                    "active_task_refs": ["task_123"],
+                    "pending_artifact_pointers": [],
+                    "user_preferences_in_play": ["Concise answers"],
+                    "last_updated_at": utcnow_iso(),
+                }
+            },
+        )
+        runtime.session_store.append_message(
+            session_id,
+            role="user",
+            content="Continue the migration.",
+            channel="desktop:desk_a",
+            metadata={"platform": "desktop", "request_id": "req_revisit_1"},
+        )
+        runtime.session_store.append_message(
+            session_id,
+            role="assistant",
+            content="I will continue the migration and report back.",
+            route="haiku",
+            channel="desktop:desk_a",
+            metadata={"platform": "desktop", "request_id": "req_revisit_1"},
+        )
+        runtime.session_store.upsert_turn_ledger_entry(
+            {
+                "turn_id": "turn_req_revisit_1",
+                "request_id": "req_revisit_1",
+                "session_id": session_id,
+                "task_id": "task_123",
+                "channel": "desktop:desk_a",
+                "route": "haiku",
+                "started_at": utcnow_iso(),
+                "completed_at": utcnow_iso(),
+                "user_goal": "Continue the migration.",
+                "user_message_excerpt": "Continue the migration.",
+                "assistant_outcome": "I will continue the migration and report back.",
+                "compact_line": "Continue the migration via haiku -> I will continue the migration and report back.",
+                "task_refs": ["task_123"],
+                "metadata": {},
+            }
+        )
+        runtime.session_store.upsert_task_notebook(
+            "task_123",
+            session_id,
+            {
+                "task_id": "task_123",
+                "status": "active",
+                "goal": "Finish the migration",
+                "current_state": "Waiting on final verification",
+                "open_questions": ["Confirm rollout timing"],
+                "created_at": utcnow_iso(),
+            },
+        )
+
+        state_response = client.get(
+            f"/internal/session/state/{session_id}",
+            headers={"X-Internal-Token": "internal-token"},
+        )
+        assert state_response.status_code == 200
+        assert state_response.json()["active_working_set"]["goal"] == "Keep the migration plan moving."
+
+        turns_response = client.get(
+            f"/internal/session/turns/{session_id}",
+            headers={"X-Internal-Token": "internal-token"},
+            params={"limit": 5},
+        )
+        assert turns_response.status_code == 200
+        assert turns_response.json()["turns"][0]["request_id"] == "req_revisit_1"
+
+        notebook_response = client.get(
+            "/internal/session/task-notebook/task_123",
+            headers={"X-Internal-Token": "internal-token"},
+        )
+        assert notebook_response.status_code == 200
+        assert notebook_response.json()["current_state"] == "Waiting on final verification"
+
+        revisit_response = client.post(
+            "/internal/session/revisit",
+            headers={"X-Internal-Token": "internal-token"},
+            json={
+                "session_id": session_id,
+                "task_id": "task_123",
+                "request_id": "req_revisit_1",
+                "turn_limit": 5,
+                "raw_history_limit": 5,
+            },
+        )
+        assert revisit_response.status_code == 200
+        revisit_payload = revisit_response.json()
+        assert revisit_payload["turn"]["request_id"] == "req_revisit_1"
+        assert revisit_payload["task_notebook"]["task_id"] == "task_123"
+        assert revisit_payload["raw_history"][-1]["content"] == "I will continue the migration and report back."
 
 
 def test_desktop_websocket_supports_ping_query_and_resume(test_client: TestClient) -> None:

@@ -36,6 +36,11 @@ CHANNEL_WELCOME_MESSAGES = {
 }
 MEMORY_HEALTH_REFRESH_SEC = 30.0
 SESSION_SUMMARY_SOURCE_CHAR_LIMIT = 60_000
+COMPACTION_TRIGGER_CHAR_THRESHOLD = 33_600
+COMPACTION_RECENT_WINDOW_MESSAGES = 12
+COMPACTION_RAW_MESSAGE_CHAR_LIMIT = 24_000
+TURN_LEDGER_WINDOW_SIZE = 10
+TASK_NOTEBOOK_WINDOW_SIZE = 5
 EPHEMERAL_CHANNEL_EVENT_TYPES = {
     "route_result",
     "response.chunk",
@@ -121,6 +126,7 @@ class GatewayRuntime:
         self._delivery_worker: asyncio.Task[None] | None = None
         self._delivery_wakeup = asyncio.Event()
         self._rollover_finalize_lock = asyncio.Lock()
+        self._session_compaction_lock = asyncio.Lock()
         self._memory_health_worker: asyncio.Task[None] | None = None
         self._memory_health_snapshot: dict[str, Any] = {
             "enabled": self.memory_client.enabled,
@@ -245,6 +251,12 @@ class GatewayRuntime:
             "conversation_context": conversation_context,
         }
         await self._finalize_rollover_sessions(current_session_id=session_id)
+        session_metadata = self._ensure_session_state_seeded(session_id)
+        active_working_set = (
+            session_metadata.get("active_working_set")
+            if isinstance(session_metadata.get("active_working_set"), dict)
+            else None
+        )
         assembled_conversation_context = self._build_conversation_context(
             session_id,
             fallback_context=conversation_context,
@@ -302,7 +314,16 @@ class GatewayRuntime:
             "classification": classification,
             "message": normalized_message,
             "assembled_conversation_context": assembled_conversation_context,
-            "memory_context": memory_prompt_context.rendered,
+            "memory_context": self._compose_prompt_context(
+                active_working_set=active_working_set,
+                memory_context=memory_prompt_context.rendered,
+            ),
+            "active_working_set": active_working_set,
+            "carry_forward_packet": (
+                session_metadata.get("carry_forward_packet")
+                if isinstance(session_metadata.get("carry_forward_packet"), dict)
+                else None
+            ),
             "memory_context_payload": {
                 "core_facts_rendered": memory_prompt_context.core_facts_rendered,
                 "items": memory_prompt_context.recall_items,
@@ -311,6 +332,7 @@ class GatewayRuntime:
             },
             "routing_decision_source": routing_decision.decision_source,
             "input_artifacts": input_artifacts,
+            "accepted_at": utcnow_iso(),
         }
         self.request_records[request_id] = result
         self.routing_audit_store.append(
@@ -372,6 +394,13 @@ class GatewayRuntime:
                 delivery_status=delivery_status,
             )
             await self._maybe_schedule_delivered_task_summary_write(
+                {
+                    **event,
+                    "channel": channel,
+                },
+                delivery_status=delivery_status,
+            )
+            await self._maybe_schedule_delivered_turn_finalization(
                 {
                     **event,
                     "channel": channel,
@@ -727,6 +756,98 @@ class GatewayRuntime:
             metadata=metadata,
         )
 
+    def _ensure_session_state_seeded(self, session_id: str) -> dict[str, Any]:
+        metadata = self.session_store.get_session_metadata(session_id)
+        active_working_set = metadata.get("active_working_set")
+        if isinstance(active_working_set, dict):
+            return metadata
+
+        carry_forward = metadata.get("carry_forward_packet")
+        if not isinstance(carry_forward, dict):
+            return metadata
+
+        seeded_working_set = {
+            "session_id": session_id,
+            "goal": self._safe_text(carry_forward.get("goal")) or "",
+            "active_workstreams": self._normalize_string_list(carry_forward.get("active_workstreams")),
+            "recent_decisions": [],
+            "open_loops": self._normalize_string_list(carry_forward.get("open_loops")),
+            "current_focus_entities": self._normalize_entity_list(
+                carry_forward.get("current_focus_entities")
+            ),
+            "active_task_refs": self._normalize_string_list(carry_forward.get("active_task_refs")),
+            "pending_artifact_pointers": [],
+            "user_preferences_in_play": self._normalize_string_list(
+                carry_forward.get("stable_user_preferences")
+            ),
+            "last_updated_at": utcnow_iso(),
+        }
+        metadata = self.session_store.update_session_metadata(
+            session_id,
+            {"active_working_set": seeded_working_set},
+        )
+        return metadata
+
+    def _compose_prompt_context(
+        self,
+        *,
+        active_working_set: dict[str, Any] | None,
+        memory_context: str | None,
+    ) -> str | None:
+        blocks: list[str] = []
+        working_set_block = self._render_active_working_set_context(active_working_set)
+        if working_set_block:
+            blocks.append(working_set_block)
+        memory_block = self._safe_text(memory_context)
+        if memory_block:
+            blocks.append(memory_block)
+        if not blocks:
+            return None
+        return "\n\n".join(blocks)
+
+    def _render_active_working_set_context(self, working_set: dict[str, Any] | None) -> str | None:
+        if not isinstance(working_set, dict):
+            return None
+
+        lines: list[str] = ["## Active Working Set"]
+        goal = self._safe_text(working_set.get("goal"))
+        if goal:
+            lines.extend(["", f"- Goal: {goal}"])
+        active_workstreams = self._normalize_string_list(working_set.get("active_workstreams"))
+        if active_workstreams:
+            lines.extend(["", "- Active workstreams:"])
+            lines.extend(f"  - {item}" for item in active_workstreams[:6])
+        open_loops = self._normalize_string_list(working_set.get("open_loops"))
+        if open_loops:
+            lines.extend(["", "- Open loops:"])
+            lines.extend(f"  - {item}" for item in open_loops[:6])
+        recent_decisions = self._normalize_string_list(working_set.get("recent_decisions"))
+        if recent_decisions:
+            lines.extend(["", "- Recent decisions:"])
+            lines.extend(f"  - {item}" for item in recent_decisions[:6])
+        task_refs = self._normalize_string_list(working_set.get("active_task_refs"))
+        if task_refs:
+            lines.extend(["", f"- Active task refs: {', '.join(task_refs[:6])}"])
+        preferences = self._normalize_string_list(working_set.get("user_preferences_in_play"))
+        if preferences:
+            lines.extend(["", "- User preferences in play:"])
+            lines.extend(f"  - {item}" for item in preferences[:6])
+        focus_entities = self._normalize_entity_list(working_set.get("current_focus_entities"))
+        if focus_entities:
+            lines.extend(["", "- Current focus entities:"])
+            for entity in focus_entities[:6]:
+                label = self._safe_text(entity.get("label")) or self._safe_text(entity.get("id")) or "entity"
+                entity_type = self._safe_text(entity.get("type"))
+                if entity_type:
+                    lines.append(f"  - {entity_type}: {label}")
+                else:
+                    lines.append(f"  - {label}")
+        artifact_refs = self._normalize_string_list(working_set.get("pending_artifact_pointers"))
+        if artifact_refs:
+            lines.extend(["", f"- Pending artifact pointers: {', '.join(artifact_refs[:6])}"])
+
+        return "\n".join(lines) if len(lines) > 1 else None
+
     async def _assemble_memory_prompt_context(self, *, query: str) -> MemoryPromptContext:
         normalized_query = str(query or "").strip()
         if not normalized_query:
@@ -1004,6 +1125,664 @@ class GatewayRuntime:
 
     async def memory_index_rebuild(self) -> dict[str, Any]:
         return await self.memory_client.index_rebuild()
+
+    def get_session_state(self, session_id: str) -> dict[str, Any]:
+        record = self.session_store.get_session_record(session_id)
+        if record is None:
+            return {
+                "session_id": session_id,
+                "compacted_summary": None,
+                "active_working_set": None,
+                "carry_forward_packet": None,
+                "compaction_packet": None,
+                "metadata": {},
+            }
+        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        return {
+            "session_id": session_id,
+            "compacted_summary": record.get("compacted_summary"),
+            "active_working_set": metadata.get("active_working_set") if isinstance(metadata.get("active_working_set"), dict) else None,
+            "carry_forward_packet": metadata.get("carry_forward_packet") if isinstance(metadata.get("carry_forward_packet"), dict) else None,
+            "compaction_packet": metadata.get("compaction_packet") if isinstance(metadata.get("compaction_packet"), dict) else None,
+            "metadata": metadata,
+        }
+
+    def list_turn_ledger(self, session_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        return self.session_store.list_turn_ledger(session_id, limit=limit)
+
+    def get_task_notebook(self, task_id: str) -> dict[str, Any] | None:
+        return self.session_store.get_task_notebook(task_id)
+
+    def build_revisit_payload(
+        self,
+        *,
+        session_id: str,
+        task_id: str | None = None,
+        request_id: str | None = None,
+        turn_limit: int = 8,
+        raw_history_limit: int = 12,
+    ) -> dict[str, Any]:
+        payload = {
+            "session": self.get_session_state(session_id),
+            "turn_ledger": self.session_store.list_turn_ledger(session_id, limit=turn_limit),
+            "raw_history": self.session_store.get_history_tail(session_id, limit=raw_history_limit),
+        }
+        normalized_task_id = self._safe_text(task_id)
+        if normalized_task_id:
+            payload["task_notebook"] = self.session_store.get_task_notebook(normalized_task_id)
+        normalized_request_id = self._safe_text(request_id)
+        if normalized_request_id:
+            payload["turn"] = self.session_store.get_turn_ledger_entry(normalized_request_id)
+        return payload
+
+    async def _maybe_schedule_delivered_turn_finalization(
+        self,
+        event: dict[str, Any],
+        *,
+        delivery_status: str,
+    ) -> None:
+        if delivery_status != "sent":
+            return
+        if self._safe_text(event.get("type")) != "response.complete":
+            return
+        request_id = self._safe_text(event.get("request_id"))
+        session_id = self._safe_text(event.get("session_id"))
+        if not request_id or not session_id:
+            return
+        if self.session_store.get_turn_ledger_entry(request_id) is not None:
+            return
+        self._schedule_background_task(
+            self._finalize_turn_after_delivery(event=event),
+            name="gateway-turn-ledger-finalize",
+        )
+
+    async def _finalize_turn_after_delivery(self, *, event: dict[str, Any]) -> None:
+        request_id = self._safe_text(event.get("request_id"))
+        session_id = self._safe_text(event.get("session_id"))
+        channel = self._safe_text(event.get("channel"))
+        assistant_content = self._safe_text(event.get("content"))
+        if not request_id or not session_id or not channel or not assistant_content:
+            return
+
+        user_message = self.session_store.find_message_by_request_id(
+            session_id,
+            request_id=request_id,
+            role="user",
+        )
+        if user_message is None:
+            return
+
+        assistant_message = self.session_store.find_message_by_request_id(
+            session_id,
+            request_id=request_id,
+            role="assistant",
+        )
+        request_record = self.request_records.get(request_id) if isinstance(self.request_records.get(request_id), dict) else {}
+        turn_entry = self._build_turn_ledger_entry(
+            request_id=request_id,
+            session_id=session_id,
+            channel=channel,
+            user_message=user_message,
+            assistant_message=assistant_message,
+            event=event,
+            request_record=request_record,
+        )
+        self.session_store.upsert_turn_ledger_entry(turn_entry)
+
+        task_id = self._safe_text(event.get("task_id"))
+        if task_id:
+            notebook = self._merge_task_notebook(
+                task_id=task_id,
+                session_id=session_id,
+                request_id=request_id,
+                event=event,
+                turn_entry=turn_entry,
+            )
+            self.session_store.upsert_task_notebook(task_id, session_id, notebook)
+
+        self._refresh_active_working_set(session_id)
+        self._schedule_background_task(
+            self._maybe_compact_session(session_id),
+            name="gateway-session-compaction",
+        )
+
+    def _build_turn_ledger_entry(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        channel: str,
+        user_message: dict[str, Any],
+        assistant_message: dict[str, Any] | None,
+        event: dict[str, Any],
+        request_record: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        user_metadata = user_message.get("metadata") if isinstance(user_message.get("metadata"), dict) else {}
+        artifacts = user_metadata.get("input_artifacts") if isinstance(user_metadata.get("input_artifacts"), list) else []
+        artifact_refs = [
+            self._safe_text(item.get("artifact_id")) or self._safe_text(item.get("path"))
+            for item in artifacts
+            if isinstance(item, dict)
+        ]
+        touched_entities = []
+        for artifact in artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            label = self._safe_text(artifact.get("filename")) or self._safe_text(artifact.get("artifact_id"))
+            artifact_id = self._safe_text(artifact.get("artifact_id"))
+            if not label and not artifact_id:
+                continue
+            touched_entities.append(
+                {
+                    "type": "artifact",
+                    "id": artifact_id or label,
+                    "label": label or artifact_id,
+                }
+            )
+
+        route = self._safe_text(event.get("route")) or self._safe_text(assistant_message.get("route") if isinstance(assistant_message, dict) else None) or "opus"
+        assistant_excerpt = self._bounded_excerpt(assistant_message.get("content") if isinstance(assistant_message, dict) else event.get("content"))
+        awaiting_reply = bool(event.get("awaiting_reply"))
+        open_loops = [assistant_excerpt] if awaiting_reply and assistant_excerpt else []
+        task_id = self._safe_text(event.get("task_id"))
+        tool_summary = [route]
+        compact_line_parts = [self._bounded_excerpt(user_message.get("content"), limit=120)]
+        if task_id:
+            compact_line_parts.append(f"via {route} task {task_id}")
+        else:
+            compact_line_parts.append(f"via {route}")
+        if assistant_excerpt:
+            compact_line_parts.append(f"-> {self._bounded_excerpt(assistant_excerpt, limit=120)}")
+
+        started_at = self._safe_text(
+            (request_record or {}).get("accepted_at")
+        ) or self._safe_text(user_message.get("created_at")) or utcnow_iso()
+        completed_at = utcnow_iso()
+
+        return {
+            "turn_id": f"turn_{request_id}",
+            "request_id": request_id,
+            "session_id": session_id,
+            "task_id": task_id,
+            "channel": channel,
+            "route": self._normalize_route(route),
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "user_message_id": self._safe_text(user_message.get("message_id")),
+            "assistant_message_id": self._safe_text(assistant_message.get("message_id")) if isinstance(assistant_message, dict) else None,
+            "user_goal": self._bounded_excerpt(user_message.get("content")),
+            "user_message_excerpt": self._bounded_excerpt(user_message.get("content")),
+            "assistant_outcome": assistant_excerpt,
+            "facts_learned": [],
+            "preferences_detected": [],
+            "decisions_made": [],
+            "accomplished": [assistant_excerpt] if assistant_excerpt else [],
+            "tool_summary": tool_summary,
+            "touched_entities": self._normalize_entity_list(touched_entities),
+            "task_refs": self._normalize_string_list([task_id] if task_id else []),
+            "artifact_refs": self._normalize_string_list(artifact_refs),
+            "failures_to_avoid": [],
+            "open_loops": open_loops,
+            "compact_line": " ".join(part for part in compact_line_parts if part),
+            "metadata": {
+                "awaiting_reply": awaiting_reply,
+                "decision_source": (request_record or {}).get("routing_decision_source"),
+                "input_artifacts": artifacts,
+            },
+        }
+
+    def _merge_task_notebook(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        request_id: str | None,
+        event: dict[str, Any],
+        turn_entry: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        existing = self.session_store.get_task_notebook(task_id) or {}
+        notebook = dict(existing)
+        notebook.setdefault("task_id", task_id)
+        notebook.setdefault("goal", "")
+        notebook.setdefault("status", "active")
+        notebook.setdefault("current_state", "")
+        notebook.setdefault("key_findings", [])
+        notebook.setdefault("agents_involved", ["cosmic/orchestrator:1.0.0"])
+        notebook.setdefault("files_touched", [])
+        notebook.setdefault("artifact_refs", [])
+        notebook.setdefault("open_questions", [])
+        notebook.setdefault("failures_to_avoid", [])
+        notebook.setdefault("next_best_actions", [])
+        notebook.setdefault("compact_history", [])
+        notebook.setdefault("created_at", utcnow_iso())
+
+        event_type = self._safe_text(event.get("type")) or ""
+        request_text = ""
+        if request_id:
+            user_message = self.session_store.find_message_by_request_id(
+                session_id,
+                request_id=request_id,
+                role="user",
+            )
+            if user_message is not None:
+                request_text = self._bounded_excerpt(user_message.get("content"))
+        if request_text and not self._safe_text(notebook.get("goal")):
+            notebook["goal"] = request_text
+
+        state_message = self._safe_text(event.get("message")) or self._safe_text(event.get("content")) or self._safe_text(event.get("status")) or ""
+        if event_type == "task.created":
+            notebook["status"] = "active"
+            notebook["current_state"] = state_message or "Task created"
+        elif event_type == "task.input_required":
+            notebook["status"] = "waiting_for_input"
+            notebook["current_state"] = state_message or "Waiting for user input"
+            notebook["open_questions"] = self._normalize_string_list(
+                [*self._normalize_string_list(notebook.get("open_questions")), state_message]
+            )
+        elif event_type == "task.completed":
+            notebook["status"] = "completed"
+            notebook["current_state"] = state_message or "Task completed"
+        elif event_type == "task.failed":
+            notebook["status"] = "failed"
+            notebook["current_state"] = state_message or "Task failed"
+            notebook["failures_to_avoid"] = self._normalize_string_list(
+                [*self._normalize_string_list(notebook.get("failures_to_avoid")), state_message]
+            )
+        elif event_type == "task.cancelled":
+            notebook["status"] = "cancelled"
+            notebook["current_state"] = state_message or "Task cancelled"
+
+        if turn_entry is not None:
+            notebook["artifact_refs"] = self._normalize_string_list(
+                [
+                    *self._normalize_string_list(notebook.get("artifact_refs"), limit=16),
+                    *self._normalize_string_list(turn_entry.get("artifact_refs"), limit=16),
+                ],
+                limit=16,
+            )
+            notebook["files_touched"] = self._normalize_entity_list(
+                [*self._normalize_entity_list(notebook.get("files_touched"), limit=16), *self._normalize_entity_list(turn_entry.get("touched_entities"), limit=16)],
+                limit=16,
+            )
+            notebook["key_findings"] = self._normalize_string_list(
+                [
+                    *self._normalize_string_list(notebook.get("key_findings"), limit=12),
+                    *self._normalize_string_list(turn_entry.get("accomplished"), limit=12),
+                ],
+                limit=12,
+            )
+            notebook["compact_history"] = self._normalize_string_list(
+                [
+                    *self._normalize_string_list(notebook.get("compact_history"), limit=12),
+                    self._safe_text(turn_entry.get("compact_line")),
+                ],
+                limit=12,
+            )
+            if turn_entry.get("open_loops"):
+                notebook["open_questions"] = self._normalize_string_list(
+                    [
+                        *self._normalize_string_list(notebook.get("open_questions"), limit=12),
+                        *self._normalize_string_list(turn_entry.get("open_loops"), limit=12),
+                    ],
+                    limit=12,
+                )
+
+        notebook["updated_at"] = utcnow_iso()
+        return notebook
+
+    def _refresh_active_working_set(self, session_id: str) -> dict[str, Any]:
+        metadata = self.session_store.get_session_metadata(session_id)
+        carry_forward = metadata.get("carry_forward_packet") if isinstance(metadata.get("carry_forward_packet"), dict) else {}
+        recent_turns = self.session_store.list_turn_ledger(session_id, limit=TURN_LEDGER_WINDOW_SIZE)
+        notebooks = self.session_store.list_task_notebooks(session_id, limit=TASK_NOTEBOOK_WINDOW_SIZE)
+        awaiting_reply_messages = self.session_store.list_awaiting_reply_messages(session_id, limit=8)
+
+        active_task_refs = []
+        workstreams = self._normalize_string_list(carry_forward.get("active_workstreams"))
+        recent_decisions: list[str] = []
+        open_loops = self._normalize_string_list(carry_forward.get("open_loops"))
+        entities = self._normalize_entity_list(carry_forward.get("current_focus_entities"))
+        preferences = self._normalize_string_list(carry_forward.get("stable_user_preferences"))
+        artifact_pointers = []
+        goal = self._safe_text(carry_forward.get("goal")) or ""
+
+        for turn in recent_turns:
+            if not goal:
+                goal = self._safe_text(turn.get("user_goal")) or ""
+            workstreams = self._normalize_string_list([*workstreams, self._safe_text(turn.get("user_goal"))], limit=8)
+            recent_decisions = self._normalize_string_list(
+                [*recent_decisions, *self._normalize_string_list(turn.get("decisions_made"), limit=8)],
+                limit=8,
+            )
+            entities = self._normalize_entity_list(
+                [*entities, *self._normalize_entity_list(turn.get("touched_entities"), limit=8)],
+                limit=8,
+            )
+            preferences = self._normalize_string_list(
+                [*preferences, *self._normalize_string_list(turn.get("preferences_detected"), limit=8)],
+                limit=8,
+            )
+            active_task_refs = self._normalize_string_list(
+                [*active_task_refs, *self._normalize_string_list(turn.get("task_refs"), limit=8)],
+                limit=8,
+            )
+            artifact_pointers = self._normalize_string_list(
+                [*artifact_pointers, *self._normalize_string_list(turn.get("artifact_refs"), limit=8)],
+                limit=8,
+            )
+
+        next_actions: list[str] = []
+        for notebook in notebooks:
+            status = (self._safe_text(notebook.get("status")) or "").lower()
+            if status not in {"completed", "cancelled", "failed"}:
+                active_task_refs = self._normalize_string_list(
+                    [*active_task_refs, self._safe_text(notebook.get("task_id"))],
+                    limit=8,
+                )
+                workstreams = self._normalize_string_list(
+                    [*workstreams, self._safe_text(notebook.get("goal"))],
+                    limit=8,
+                )
+                open_loops = self._normalize_string_list(
+                    [*open_loops, *self._normalize_string_list(notebook.get("open_questions"), limit=8)],
+                    limit=8,
+                )
+                next_actions = self._normalize_string_list(
+                    [*next_actions, *self._normalize_string_list(notebook.get("next_best_actions"), limit=8)],
+                    limit=8,
+                )
+            entities = self._normalize_entity_list(
+                [*entities, *self._normalize_entity_list(notebook.get("files_touched"), limit=8)],
+                limit=8,
+            )
+            artifact_pointers = self._normalize_string_list(
+                [*artifact_pointers, *self._normalize_string_list(notebook.get("artifact_refs"), limit=8)],
+                limit=8,
+            )
+
+        open_loops = self._normalize_string_list(
+            [
+                *open_loops,
+                *[
+                    self._bounded_excerpt(item.get("content"), limit=220)
+                    for item in awaiting_reply_messages
+                    if self._bounded_excerpt(item.get("content"), limit=220)
+                ],
+            ],
+            limit=8,
+        )
+
+        working_set = {
+            "session_id": session_id,
+            "goal": goal,
+            "active_workstreams": workstreams,
+            "recent_decisions": recent_decisions,
+            "open_loops": open_loops,
+            "current_focus_entities": entities,
+            "active_task_refs": active_task_refs,
+            "pending_artifact_pointers": artifact_pointers,
+            "user_preferences_in_play": preferences,
+            "last_updated_at": utcnow_iso(),
+        }
+        self.session_store.update_session_metadata(
+            session_id,
+            {
+                "active_working_set": working_set,
+                "suggested_next_actions": next_actions,
+            },
+        )
+        return working_set
+
+    async def _maybe_compact_session(self, session_id: str) -> None:
+        async with self._session_compaction_lock:
+            history = self.session_store.get_history(session_id)
+            total_chars = sum(len(str(item.get("content") or "")) for item in history)
+            if total_chars < COMPACTION_TRIGGER_CHAR_THRESHOLD:
+                return
+            if len(history) <= COMPACTION_RECENT_WINDOW_MESSAGES:
+                return
+            if not self.haiku_adapter.api_key or not self.haiku_adapter.model:
+                return
+
+            recent_history = history[-COMPACTION_RECENT_WINDOW_MESSAGES:]
+            older_history = history[:-COMPACTION_RECENT_WINDOW_MESSAGES]
+            if not older_history:
+                return
+
+            turn_ledger = self.session_store.list_all_turn_ledger(session_id)
+            recent_boundary = self._safe_text(recent_history[0].get("created_at"))
+            compactable_turns = [
+                item
+                for item in turn_ledger
+                if not recent_boundary or (self._safe_text(item.get("completed_at")) or "") < recent_boundary
+            ]
+            if not compactable_turns:
+                return
+            session_state = self.get_session_state(session_id)
+            compaction_packet = (
+                session_state.get("compaction_packet")
+                if isinstance(session_state.get("compaction_packet"), dict)
+                else {}
+            )
+            compacted_until_completed_at = self._safe_text(compaction_packet.get("compacted_until_completed_at"))
+            new_compactable_turns = [
+                item
+                for item in compactable_turns
+                if not compacted_until_completed_at
+                or (self._safe_text(item.get("completed_at")) or "") > compacted_until_completed_at
+            ]
+            if not new_compactable_turns:
+                return
+            newly_compacted_request_ids = {
+                self._safe_text(item.get("request_id"))
+                for item in new_compactable_turns
+                if self._safe_text(item.get("request_id"))
+            }
+            compactable_history = (
+                [
+                    item
+                    for item in older_history
+                    if self._safe_text(item.get("request_id")) in newly_compacted_request_ids
+                ]
+                if newly_compacted_request_ids
+                else older_history
+            )
+            summary_text = await self._summarize_session_compaction(
+                session_id=session_id,
+                existing_summary=self._safe_text(session_state.get("compacted_summary")),
+                older_history=compactable_history,
+                recent_history=recent_history,
+                compactable_turns=new_compactable_turns,
+                session_state=session_state,
+            )
+            if not summary_text:
+                return
+            compaction_packet = self._build_compaction_packet(
+                session_id=session_id,
+                compacted_summary=summary_text,
+                compactable_turns=compactable_turns,
+                recent_history=recent_history,
+                session_state=session_state,
+            )
+            self.session_store.set_compaction_state(
+                session_id,
+                compacted_summary=summary_text,
+                compaction_packet=compaction_packet,
+            )
+
+    async def _summarize_session_compaction(
+        self,
+        *,
+        session_id: str,
+        existing_summary: str | None,
+        older_history: list[dict[str, Any]],
+        recent_history: list[dict[str, Any]],
+        compactable_turns: list[dict[str, Any]],
+        session_state: dict[str, Any],
+    ) -> str | None:
+        older_lines: list[str] = []
+        for item in older_history:
+            role = self._safe_text(item.get("role")) or "unknown"
+            content = self._bounded_excerpt(item.get("content"), limit=400)
+            if not content:
+                continue
+            older_lines.append(f"[{role}] {content}")
+            if sum(len(line) for line in older_lines) >= COMPACTION_RAW_MESSAGE_CHAR_LIMIT:
+                break
+
+        turn_lines = [
+            f"- {self._safe_text(item.get('compact_line'))}"
+            for item in compactable_turns
+            if self._safe_text(item.get("compact_line"))
+        ][:20]
+        active_working_set = session_state.get("active_working_set")
+        session_metadata = session_state.get("metadata") if isinstance(session_state.get("metadata"), dict) else {}
+        current_tasks = (
+            active_working_set.get("active_task_refs")
+            if isinstance(active_working_set, dict)
+            else session_metadata.get("active_task_refs")
+        )
+
+        system_prompt = (
+            "You are compacting a COSMIC live session into durable operational context.\n"
+            "Preserve only what helps the assistant continue the conversation intelligently.\n"
+            "Do not include raw chain-of-thought, raw tool payloads, or chatter.\n"
+            "Return concise Markdown using exactly these sections when relevant:\n"
+            "## Goal\n"
+            "## Active Workstreams\n"
+            "## Key Facts\n"
+            "## User Preferences\n"
+            "## Decisions Made\n"
+            "## Accomplished\n"
+            "## Files / Docs / Artifacts Touched\n"
+            "## Failures / Dead Ends\n"
+            "## Open Loops\n"
+            "## Next Best Actions"
+        )
+        user_prompt = (
+            f"Session ID: {session_id}\n\n"
+            f"Existing compacted summary:\n{existing_summary or '[none]'}\n\n"
+            f"Compactable turn ledger:\n{chr(10).join(turn_lines) or '[none]'}\n\n"
+            f"Older raw conversation slice:\n{chr(10).join(older_lines) or '[none]'}\n\n"
+            f"Recent window retained uncompressed count: {len(recent_history)}\n"
+            f"Active task refs: {', '.join(self._normalize_string_list(current_tasks)) or '[none]'}\n"
+        )
+        summary_text, _usage, _stop_reason = await self.haiku_adapter.generate_text(
+            system_prompt=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+            max_tokens=1200,
+        )
+        normalized = summary_text.strip()
+        return normalized or None
+
+    def _build_compaction_packet(
+        self,
+        *,
+        session_id: str,
+        compacted_summary: str,
+        compactable_turns: list[dict[str, Any]],
+        recent_history: list[dict[str, Any]],
+        session_state: dict[str, Any],
+    ) -> dict[str, Any]:
+        active_working_set = session_state.get("active_working_set") if isinstance(session_state.get("active_working_set"), dict) else {}
+        goal = self._safe_text(active_working_set.get("goal")) or ""
+        key_facts: list[str] = []
+        preferences: list[str] = []
+        decisions: list[str] = []
+        accomplished: list[str] = []
+        touched_entities = []
+        failures: list[str] = []
+        open_loops = self._normalize_string_list(active_working_set.get("open_loops"))
+        compacted_until_completed_at = ""
+        for turn in compactable_turns:
+            if not goal:
+                goal = self._safe_text(turn.get("user_goal")) or ""
+            compacted_until_completed_at = (
+                self._safe_text(turn.get("completed_at")) or compacted_until_completed_at
+            )
+            key_facts = self._normalize_string_list([*key_facts, *self._normalize_string_list(turn.get("facts_learned"))], limit=10)
+            preferences = self._normalize_string_list([*preferences, *self._normalize_string_list(turn.get("preferences_detected"))], limit=10)
+            decisions = self._normalize_string_list([*decisions, *self._normalize_string_list(turn.get("decisions_made"))], limit=10)
+            accomplished = self._normalize_string_list([*accomplished, *self._normalize_string_list(turn.get("accomplished"))], limit=10)
+            touched_entities = self._normalize_entity_list([*touched_entities, *self._normalize_entity_list(turn.get("touched_entities"), limit=12)], limit=12)
+            failures = self._normalize_string_list([*failures, *self._normalize_string_list(turn.get("failures_to_avoid"))], limit=10)
+            open_loops = self._normalize_string_list([*open_loops, *self._normalize_string_list(turn.get("open_loops"))], limit=10)
+        next_best_actions = []
+        if recent_history:
+            next_best_actions.append("Resume from the recent uncompressed window before asking the user to repeat context.")
+        return {
+            "session_id": session_id,
+            "goal": goal,
+            "active_workstreams": self._normalize_string_list(active_working_set.get("active_workstreams"), limit=8),
+            "key_facts": key_facts,
+            "user_preferences": preferences,
+            "decisions_made": decisions,
+            "accomplished": accomplished,
+            "touched_entities": touched_entities,
+            "failures_to_avoid": failures,
+            "open_loops": open_loops,
+            "next_best_actions": next_best_actions,
+            "summary_markdown": compacted_summary,
+            "compacted_turn_count": len(compactable_turns),
+            "compacted_until_completed_at": compacted_until_completed_at,
+            "updated_at": utcnow_iso(),
+        }
+
+    def _build_carry_forward_packet(self, session_id: str) -> dict[str, Any]:
+        session_state = self.get_session_state(session_id)
+        active_working_set = session_state.get("active_working_set") if isinstance(session_state.get("active_working_set"), dict) else {}
+        compaction_packet = session_state.get("compaction_packet") if isinstance(session_state.get("compaction_packet"), dict) else {}
+        open_loops = self._normalize_string_list(
+            [
+                *self._normalize_string_list(compaction_packet.get("open_loops")),
+                *self._normalize_string_list(active_working_set.get("open_loops")),
+            ],
+            limit=8,
+        )
+        active_task_refs = self._normalize_string_list(active_working_set.get("active_task_refs"), limit=8)
+        bootstrap_note = self._safe_text(compaction_packet.get("summary_markdown")) or self._safe_text(session_state.get("compacted_summary")) or ""
+        return {
+            "goal": self._safe_text(active_working_set.get("goal")) or self._safe_text(compaction_packet.get("goal")) or "",
+            "active_workstreams": self._normalize_string_list(
+                [
+                    *self._normalize_string_list(compaction_packet.get("active_workstreams")),
+                    *self._normalize_string_list(active_working_set.get("active_workstreams")),
+                ],
+                limit=8,
+            ),
+            "open_loops": open_loops,
+            "active_task_refs": active_task_refs,
+            "current_focus_entities": self._normalize_entity_list(
+                [
+                    *self._normalize_entity_list(compaction_packet.get("touched_entities"), limit=8),
+                    *self._normalize_entity_list(active_working_set.get("current_focus_entities"), limit=8),
+                ],
+                limit=8,
+            ),
+            "stable_user_preferences": self._normalize_string_list(
+                [
+                    *self._normalize_string_list(compaction_packet.get("user_preferences")),
+                    *self._normalize_string_list(active_working_set.get("user_preferences_in_play")),
+                ],
+                limit=8,
+            ),
+            "failures_to_avoid": self._normalize_string_list(compaction_packet.get("failures_to_avoid"), limit=8),
+            "bootstrap_note": self._bounded_excerpt(bootstrap_note, limit=400),
+        }
+
+    def _apply_carry_forward_packet(self, current_session_id: str, source_session_id: str, packet: dict[str, Any]) -> None:
+        if not packet:
+            return
+        metadata = self.session_store.update_session_metadata(
+            current_session_id,
+            {
+                "carry_forward_packet": packet,
+                "carry_forward_source_session_id": source_session_id,
+                "carry_forward_updated_at": utcnow_iso(),
+            },
+        )
+        if not isinstance(metadata.get("active_working_set"), dict):
+            self._ensure_session_state_seeded(current_session_id)
 
     async def _send_channel_activation_greetings(self) -> None:
         await self._maybe_send_whatsapp_activation_greeting()
@@ -1680,6 +2459,7 @@ class GatewayRuntime:
         event_type = self._safe_text(event.get("type")) or ""
         request_id = self._safe_text(event.get("request_id"))
         task_id = self._safe_text(event.get("task_id"))
+        session_id = self._safe_text(event.get("session_id"))
         if request_id and task_id:
             self.active_requests_by_task[task_id] = request_id
             active_request = self.active_requests.get(request_id)
@@ -1706,6 +2486,16 @@ class GatewayRuntime:
                 self.active_task_channels.pop(task_id, None)
                 self.active_requests_by_task.pop(task_id, None)
 
+        if task_id and session_id and event_type.startswith("task."):
+            notebook = self._merge_task_notebook(
+                task_id=task_id,
+                session_id=session_id,
+                request_id=request_id,
+                event=event,
+            )
+            self.session_store.upsert_task_notebook(task_id, session_id, notebook)
+            self._refresh_active_working_set(session_id)
+
         await send(event)
 
     def _normalize_orchestrator_event(
@@ -1731,6 +2521,57 @@ class GatewayRuntime:
             text = value.strip()
             return text or None
         return str(value)
+
+    def _normalize_string_list(self, values: Any, *, limit: int = 8) -> list[str]:
+        if not isinstance(values, list):
+            return []
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = self._safe_text(value)
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            normalized.append(text)
+            seen.add(key)
+            if len(normalized) >= limit:
+                break
+        return normalized
+
+    def _normalize_entity_list(self, values: Any, *, limit: int = 8) -> list[dict[str, Any]]:
+        if not isinstance(values, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            entity_type = self._safe_text(item.get("type")) or "entity"
+            entity_id = self._safe_text(item.get("id")) or self._safe_text(item.get("path")) or self._safe_text(item.get("url")) or self._safe_text(item.get("label"))
+            if not entity_id:
+                continue
+            dedupe = f"{entity_type}:{entity_id}".casefold()
+            if dedupe in seen:
+                continue
+            normalized.append(
+                {
+                    "type": entity_type,
+                    "id": entity_id,
+                    "label": self._safe_text(item.get("label")) or entity_id,
+                }
+            )
+            seen.add(dedupe)
+            if len(normalized) >= limit:
+                break
+        return normalized
+
+    def _bounded_excerpt(self, value: Any, *, limit: int = 280) -> str:
+        text = " ".join(str(value or "").strip().split())
+        if len(text) <= limit:
+            return text
+        return f"{text[: limit - 3].rstrip()}..."
 
     def _coerce_float(self, value: Any, default: float) -> float:
         try:
@@ -1899,13 +2740,24 @@ class GatewayRuntime:
             candidates = self.session_store.list_rollover_candidates(
                 current_session_id=resolved_current_session_id
             )
+            latest_carry_forward: tuple[str, dict[str, Any]] | None = None
             for candidate in candidates:
-                await self._finalize_single_rollover_session(candidate)
+                carry_forward = await self._finalize_single_rollover_session(candidate)
+                candidate_session_id = self._safe_text(candidate.get("session_id"))
+                if carry_forward and candidate_session_id:
+                    latest_carry_forward = (candidate_session_id, carry_forward)
+            if latest_carry_forward is not None:
+                source_session_id, packet = latest_carry_forward
+                self._apply_carry_forward_packet(
+                    resolved_current_session_id,
+                    source_session_id,
+                    packet,
+                )
 
-    async def _finalize_single_rollover_session(self, candidate: dict[str, Any]) -> None:
+    async def _finalize_single_rollover_session(self, candidate: dict[str, Any]) -> dict[str, Any] | None:
         session_id = self._safe_text(candidate.get("session_id"))
         if not session_id:
-            return
+            return None
 
         history = self.session_store.get_history(session_id)
         if not history:
@@ -1913,7 +2765,7 @@ class GatewayRuntime:
                 session_id,
                 summary_status="empty",
             )
-            return
+            return None
 
         transcript_markdown = self._render_session_transcript_markdown(candidate, history)
         transcript_path = self._write_session_transcript(session_id, transcript_markdown)
@@ -1961,6 +2813,12 @@ class GatewayRuntime:
             summary_status=summary_status,
             compacted_summary=summary_text,
         )
+        carry_forward_packet = self._build_carry_forward_packet(session_id)
+        self.session_store.update_session_metadata(
+            session_id,
+            {"carry_forward_packet": carry_forward_packet},
+        )
+        return carry_forward_packet
 
     def _render_session_transcript_markdown(
         self,
@@ -2065,6 +2923,8 @@ class GatewayRuntime:
         summary_text: str,
         history: list[dict[str, Any]],
     ) -> dict[str, Any]:
+        session_state = self.get_session_state(session_id)
+        carry_forward_packet = self._build_carry_forward_packet(session_id)
         return {
             "kind": "session_summary",
             "title": f"Session summary {session_id}",
@@ -2074,6 +2934,8 @@ class GatewayRuntime:
                 "session_id": session_id,
                 "message_count": len(history),
                 "transcript_path": transcript_path,
+                "carry_forward_packet": carry_forward_packet,
+                "compaction_packet": session_state.get("compaction_packet"),
             },
             "provenance": {
                 "source_kind": "gateway_rollover",
