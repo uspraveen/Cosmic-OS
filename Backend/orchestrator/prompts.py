@@ -1,4 +1,7 @@
 """System prompts for the COSMIC orchestrator."""
+from __future__ import annotations
+
+from datetime import datetime, timezone
 
 # ── Legacy thin prompt (kept for reference, no longer primary) ──
 
@@ -49,6 +52,11 @@ Tool use guidelines:
 - For web_search, formulate specific queries. "Latest SpaceX launch date" beats "SpaceX news".
 - For reminders, always confirm the time with the user if the request is ambiguous.
 
+Communication during tool use:
+- When you're about to use a tool, briefly tell the user what you're doing in your text response before the tool call. For example: "Let me look that up..." or "Checking your memory for that..." — keep it natural and short.
+- After getting tool results, weave the information naturally into your response. Don't say "the tool returned..." — just answer using the data.
+- When web_search returns citations, you MUST include the source URLs in your response. Format them naturally at the end of the relevant information, e.g., inline links or a "Sources:" section. The user should always know where web information came from.
+
 Response control:
 - When you genuinely need a direct user reply before you can proceed, append <awaiting_reply/> on its own final line. The Gateway uses this for sticky routing.
 - Never mention the <awaiting_reply/> tag itself.
@@ -72,9 +80,25 @@ def build_thin_orchestrator_system_prompt(memory_context: str | None = None) -> 
     return f"{prompt}\n\n{ORCHESTRATOR_MEMORY_AUTHORITY_INSTRUCTION}\n\n{context}"
 
 
-def build_agentic_system_prompt(memory_context: str | None = None) -> str:
-    """Build the full agentic orchestrator system prompt with optional memory context."""
-    prompt = AGENTIC_ORCHESTRATOR_SYSTEM_PROMPT
+def build_agentic_system_prompt(
+    memory_context: str | None = None,
+    *,
+    user_timezone: str | None = None,
+) -> str:
+    """Build the full agentic orchestrator system prompt with date and optional memory context."""
+    now_utc = datetime.now(timezone.utc)
+    date_line = f"Current date and time (UTC): {now_utc.strftime('%A, %B %d, %Y at %H:%M UTC')}."
+
+    tz_name = (user_timezone or "").strip()
+    if tz_name:
+        try:
+            import zoneinfo
+            local_now = now_utc.astimezone(zoneinfo.ZoneInfo(tz_name))
+            date_line += f"\nUser's local time: {local_now.strftime('%A, %B %d, %Y at %I:%M %p %Z')}."
+        except Exception:
+            pass
+
+    prompt = f"{AGENTIC_ORCHESTRATOR_SYSTEM_PROMPT}\n{date_line}"
     context = str(memory_context or "").strip()
     if not context:
         return prompt

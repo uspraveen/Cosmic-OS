@@ -69,6 +69,8 @@ EPHEMERAL_CHANNEL_EVENT_TYPES = {
     "response.thinking.chunk",
     "task.created",
     "task.progress",
+    "tool.call",
+    "tool.result",
 }
 
 
@@ -2968,6 +2970,7 @@ class GatewayRuntime:
                 "request_id": request_id,
                 "conversation_context": request_record.get("assembled_conversation_context") or [],
                 "memory_context": self._safe_text(request_record.get("memory_context")),
+                "user_timezone": self.current_user_timezone(),
             },
             input_artifacts=request_record.get("input_artifacts") or [],
             idempotency_key=uuid4().hex,

@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
+from urllib.parse import urlparse
+
 import httpx
 import redis.asyncio as redis
 
@@ -196,7 +198,8 @@ class OrchestratorRuntime:
         try:
             messages = self._build_messages(task)
             system_prompt = build_agentic_system_prompt(
-                str(task.input.get("memory_context") or "").strip() or None
+                str(task.input.get("memory_context") or "").strip() or None,
+                user_timezone=str(task.input.get("user_timezone") or "").strip() or None,
             )
             tools = get_tool_definitions()
             max_iterations = self.config.max_tool_iterations
@@ -204,6 +207,7 @@ class OrchestratorRuntime:
             iteration = 0
             full_response_text = ""
             full_reasoning_text = ""
+            collected_sources: list[dict[str, str]] = []
 
             while iteration < max_iterations:
                 iteration += 1
@@ -335,6 +339,16 @@ class OrchestratorRuntime:
                         except json.JSONDecodeError:
                             parsed_input = {}
 
+                        # Human-readable progress before the tool call
+                        progress_msg = self._tool_progress_message(tb.tool_name, parsed_input)
+                        yield {
+                            **ev, "type": "task.progress",
+                            "status": "tool_call",
+                            "iteration": iteration,
+                            "tool_name": tb.tool_name,
+                            "message": progress_msg,
+                        }
+
                         yield {
                             **ev, "type": "tool.call",
                             "iteration": iteration,
@@ -350,6 +364,10 @@ class OrchestratorRuntime:
 
                         assert self._tool_executor is not None
                         result_str = await self._tool_executor.execute(tb.tool_name, parsed_input)
+
+                        # Extract citations from web_search results
+                        if tb.tool_name == "web_search":
+                            self._collect_sources(result_str, collected_sources)
 
                         yield {
                             **ev, "type": "tool.result",
@@ -396,7 +414,7 @@ class OrchestratorRuntime:
             self.task_ledger.mark_completed(task.task_id, result=result_payload)
             elapsed_ms = max(1, int((time.perf_counter() - started_at) * 1000))
 
-            yield {
+            complete_event: dict[str, Any] = {
                 **ev,
                 "type": "response.complete",
                 "content": display_text,
@@ -405,6 +423,9 @@ class OrchestratorRuntime:
                 "thinking_text": full_reasoning_text,
                 "metrics": {"rtt_ms": elapsed_ms, "tool_iterations": iteration, **cumulative_usage},
             }
+            if collected_sources:
+                complete_event["sources"] = collected_sources
+            yield complete_event
             yield {**ev, "type": "task.completed", "route": "opus", "status": "completed"}
 
         except asyncio.CancelledError:
@@ -628,6 +649,50 @@ class OrchestratorRuntime:
                 if msg:
                     return msg
         return f"status={status_code}"
+
+    @staticmethod
+    def _tool_progress_message(tool_name: str, tool_input: dict[str, Any]) -> str:
+        """Return a human-readable progress message for a tool call."""
+        if tool_name == "web_search":
+            query = str(tool_input.get("query") or "").strip()
+            return f"Searching the web for: {query}" if query else "Searching the web..."
+        if tool_name == "memory_search":
+            query = str(tool_input.get("query") or "").strip()
+            return f"Searching memory for: {query}" if query else "Checking memory..."
+        if tool_name == "memory_write":
+            title = str(tool_input.get("title") or "").strip()
+            return f"Saving to memory: {title}" if title else "Saving to memory..."
+        if tool_name == "create_reminder":
+            label = str(tool_input.get("label") or "").strip()
+            return f"Creating reminder: {label}" if label else "Creating reminder..."
+        if tool_name == "list_reminders":
+            return "Checking your reminders..."
+        if tool_name == "delete_reminder":
+            return "Removing reminder..."
+        return f"Using tool: {tool_name}..."
+
+    @staticmethod
+    def _collect_sources(result_str: str, sources: list[dict[str, str]]) -> None:
+        """Extract citation URLs from a web_search result and append as source objects."""
+        try:
+            data = json.loads(result_str)
+        except (json.JSONDecodeError, TypeError):
+            return
+        citations = data.get("citations")
+        if not isinstance(citations, list):
+            return
+        seen_urls = {s["url"] for s in sources}
+        for url in citations:
+            url = str(url or "").strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            try:
+                parsed = urlparse(url)
+                domain = parsed.netloc.replace("www.", "")
+            except Exception:
+                domain = url
+            sources.append({"url": url, "domain": domain, "title": domain or url})
 
     # ════════════════════════════════════════════════════════════
     #  User input relay
