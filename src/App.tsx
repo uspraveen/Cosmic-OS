@@ -1761,21 +1761,20 @@ export default function App() {
                                     type="button"
                                     className={`task-list-item ${selectedTaskInput.inputRequestId === taskInput.inputRequestId ? 'active' : ''}`}
                                     onClick={() => setSelectedTaskInputId(taskInput.inputRequestId)}
-                                  >
-                                    <div className="task-list-item-label-row">
-                                      <span className="task-list-item-label">Opus task</span>
-                                      <span className="task-list-item-status">
-                                        {taskInput.options.length > 0
-                                          ? `${taskInput.options.length} choice${taskInput.options.length === 1 ? '' : 's'}`
-                                          : 'Reply needed'}
-                                      </span>
-                                    </div>
-                                    <div className="task-list-item-question">{taskInput.question}</div>
-                                    <div className="task-list-item-meta">{taskInput.taskId}</div>
-                                  </button>
-                                ))}
+                                    >
+                                      <div className="task-list-item-label-row">
+                                        <span className="task-list-item-label">Task</span>
+                                        <span className="task-list-item-status">
+                                          {taskInput.options.length > 0
+                                            ? `${taskInput.options.length} choice${taskInput.options.length === 1 ? '' : 's'}`
+                                            : 'Reply needed'}
+                                        </span>
+                                      </div>
+                                      <div className="task-list-item-question">{taskInput.question}</div>
+                                    </button>
+                                  ))}
+                                </div>
                               </div>
-                            </div>
                           )}
 
                           <div className="task-detail-pane">
