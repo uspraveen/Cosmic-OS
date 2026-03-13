@@ -15,7 +15,7 @@
 | Protocol | Agent Runtime Contract v1.6 |
 | Tool Access | Declared per agent in `agent_card.yaml` |
 | Agent IDs | `{org}/{name}:{version}` |
-| Scheduling | Gateway Scheduler Module (Crons + Heartbeats) — SQLite-backed, internal API |
+| Scheduling | Gateway Scheduler / Cron Manager (Crons + Heartbeats) — SQLite-backed, timezone-aware, observable, internal + desktop control surfaces |
 | Webhooks | Gateway Webhook Handler — provider signature verification, event conversion |
 | Channel Adapters | Multi-platform messaging — Desktop (WebSocket), WhatsApp, Telegram, Slack, Discord, CLI |
 | Hooks | Gateway Hooks Engine — internal state change triggers |
@@ -127,10 +127,10 @@ Every design decision flows from one mental model. Keep these three layers stric
 
 | Component | Responsibility |
 |---|---|
-| **Desktop App** | Electron + React UI. Always-on background process registered at startup. Authenticates users via Cosmic API key against Supabase, auto-provisions Gateway URL and API token from the user's VM config (§3.5a). Maintains conversation history locally. Connects to Gateway via WebSocket. Settings panel triggers OAuth account connections via Gateway. One of several channel adapters — see §27. |
+| **Desktop App** | Electron + React UI. Always-on background process registered at startup. Authenticates users via Cosmic API key against Supabase, auto-provisions Gateway URL and API token from the user's VM config (§3.5a). Maintains conversation history locally. Connects to Gateway via WebSocket. Reports the user's current IANA timezone to the Gateway on login/startup/resume and whenever the OS timezone changes; that timezone becomes the authoritative basis for daily session rollover and default cron scheduling. Settings panel triggers OAuth account connections via Gateway. One of several channel adapters — see §27. |
 | **Channel Adapters** | Normalize platform-specific messages into the unified TaskEnvelope format. Each adapter handles authentication, message parsing, and response delivery for its platform. Available adapters: Desktop (WebSocket), WhatsApp, Telegram, Slack, Discord, CLI. New platforms are added by implementing the adapter interface (§27). |
-| **Gateway** | Receives inputs from all five sources (messages, heartbeats, crons, hooks, webhooks), validates auth + schema, tags every input with `source`, `source_id`, and `channel`, assembles session context via the Session Manager (today's conversation + retrieved memories). Checks `awaiting_reply` for sticky routing (§3.7); otherwise calls Model Router for classification. Routes to appropriate backend, strips `<awaiting_reply/>` control tags from responses (§3.8), streams responses and task events via the originating channel adapter. Relays task input requests from `user_input:requests` to UI and user replies to `user_input:replies` (§3.12). Owns the Credential Manager (§22), Session Manager (§23), Scheduler (§25), Webhook Handler (§26), Hooks Engine (§28), Channel Adapter Registry (§27), and the Usage Ledger (`gateway/usage.db`) for append-only token/cost telemetry. |
-| **Scheduler** | Gateway module that manages crons and heartbeats. Stores cron definitions and heartbeat config in SQLite. Runs a polling loop that fires TaskEnvelopes to the orchestrator when jobs are due. Exposes internal API for CRUD operations. The orchestrator creates and manages crons via this API. See §25. |
+| **Gateway** | Receives inputs from all five sources (messages, heartbeats, crons, hooks, webhooks), validates auth + schema, tags every input with `source`, `source_id`, and `channel`, assembles session context via the Session Manager (today's conversation + retrieved memories). Checks `awaiting_reply` for sticky routing (§3.7); otherwise calls Model Router for classification. Routes to appropriate backend, strips `<awaiting_reply/>` control tags from responses (§3.8), streams responses and task events via the originating channel adapter. Relays task input requests from `user_input:requests` to UI and user replies to `user_input:replies` (§3.12). Owns the Credential Manager (§22), Session Manager (§23), Scheduler / Cron Manager (§25), Webhook Handler (§26), Hooks Engine (§28), Channel Adapter Registry (§27), the Usage Ledger (`gateway/usage.db`) for append-only token/cost telemetry, and the Routing Audit store (`gateway/routing_audit.db`) for durable inspection of final route decisions. Persists the user-local timezone last reported by the desktop and uses it as the authoritative basis for 4 AM rollover and default cron scheduling. |
+| **Scheduler / Cron Manager** | Gateway module that manages crons and heartbeats. Stores cron definitions, execution history, pause state, and the persisted user timezone snapshot in SQLite. Runs a polling loop that fires TaskEnvelopes to the orchestrator when jobs are due. Exposes an internal API for orchestrator CRUD plus a desktop-facing management surface for future observability/UI control (list, inspect, pause, resume, edit, delete). See §25. |
 | **Webhook Handler** | Gateway module that receives HTTP POST callbacks from external systems (Gmail, GitHub, Jira, Slack). Verifies provider-specific signatures, converts payloads into TaskEnvelopes tagged with `source='webhook'`, and dispatches to the orchestrator. See §26. |
 | **Hooks Engine** | Gateway module that fires TaskEnvelopes in response to internal state changes: gateway startup/shutdown, session reset, compaction, agent registration/deregistration. Configurable hook definitions stored alongside the Gateway. See §28. |
 | **Model Router** | Lightweight stateless classifier. Determines which backend handles a query: `opus` (orchestrator — tasks, continuations, ambiguous input), `haiku` (direct API), or `perplexity` (direct API). Called by Gateway after context assembly — unless `awaiting_reply` sticky routing triggers first (§3.7), which skips the classifier entirely. No `unknown` route — `opus` is the fallback. |
@@ -330,6 +330,8 @@ With context, the classifier can distinguish between a continuation of a task di
 
 **Note:** The `awaiting_reply` sticky routing check happens at the Gateway level BEFORE this classification call. If the last assistant message has `awaiting_reply = true`, the classifier is never called — the Gateway routes directly to `last_route`. The Model Router only sees queries that passed through the pre-check without triggering sticky routing. See §3.7.
 
+**Routing audit note:** The Gateway persists the full Model Router response payload for each classified request into `gateway/routing_audit.db`, alongside the final effective route chosen after overrides, sticky routing, and fallback handling. This includes `classification`, `metrics`, `classifier_model`, `raw_classifier_output`, and any future classifier-side debug/reasoning fields returned by the Model Router. The audit store is Gateway-owned because the final truth may differ from the raw classifier route.
+
 ### 2.6 Fallback & Error Handling
 
 If the Model Router is unreachable or returns an error, the Gateway falls back to `opus`. This is the safest default — the orchestrator can handle any query type, even if it's more expensive. The system degrades gracefully rather than failing.
@@ -490,7 +492,7 @@ The Gateway is the single entry point for all input sources. It handles authenti
 | Rate limiting | Token-bucket rate limiting per session |
 | Credential management | Owns the Credential Manager: handles OAuth PKCE flows, stores encrypted refresh tokens, manages connected accounts, validates scopes, refreshes access tokens, and exposes internal-only endpoints for the orchestrator to resolve credentials at dispatch time (see §22) |
 | Usage monitoring | Owns the Usage Ledger: append-only token/cost telemetry in `gateway/usage.db`. Logs direct LLM route usage locally and accepts internal usage events from the orchestrator, agents, Session Manager, and Model Router. Stores `llm_call_placed_at` as the UTC timestamp of each metered call. |
-| Scheduling | Owns the Scheduler module: manages cron job definitions and heartbeat configuration in SQLite. Runs a polling loop that fires TaskEnvelopes when jobs are due. Exposes internal API for CRUD operations (see §25) |
+| Scheduling | Owns the Scheduler / Cron Manager module: manages cron job definitions, pause/resume state, heartbeat configuration, and the persisted user timezone snapshot in SQLite. Runs a polling loop that fires TaskEnvelopes when jobs are due. Exposes internal API for orchestrator CRUD plus a desktop-facing management surface for observability and future UI controls (see §25) |
 | Webhook ingestion | Owns the Webhook Handler: receives HTTP POST callbacks from external systems, verifies provider signatures, converts payloads to TaskEnvelopes tagged with `source='webhook'` (see §26) |
 | Channel management | Owns the Channel Adapter Registry: manages platform adapters (Desktop/WebSocket, WhatsApp, Telegram, Slack, Discord, CLI), normalizes incoming messages, routes responses back to originating channels (see §27) |
 | Internal hooks | Owns the Hooks Engine: fires TaskEnvelopes on internal state changes (startup, shutdown, session reset, compaction, agent registration) (see §28) |
@@ -555,6 +557,7 @@ The desktop app maintains one persistent WebSocket connection per desktop instal
     "type": "resume",
     "session_id": "sess_20260307",
     "known_task_ids": ["tsk_abc123", "tsk_def456"],
+    "timezone": "America/Chicago",      # current desktop IANA timezone
     "request_id": "req_resume_001"
 }
 
@@ -681,7 +684,8 @@ The WebSocket is a **transport**, not the session. Reconnects do not create new 
    - tail of the current daily session
    - active task summaries
    - pending `task.input_required` items
-7. REST remains the control plane for stateless operations such as `/auth/*`, `/health*`, `/channels/*`, and other non-chat actions.
+7. The desktop includes its current IANA timezone in `resume` and on any later timezone-change event so the Gateway keeps scheduler/session boundaries aligned to the user's local time.
+8. REST remains the control plane for stateless operations such as `/auth/*`, `/health*`, `/channels/*`, and other non-chat actions.
 
 **Why explicit resume matters:** a live desktop connection can drop because of laptop sleep, Wi-Fi transitions, renderer reloads, Gateway restarts, reverse-proxy idle timeouts, or VM redeploys. The system must recover the user's current shared daily session and in-flight tasks after reconnect rather than pretending this is a brand-new conversation.
 
@@ -694,15 +698,26 @@ The WebSocket is a **transport**, not the session. Reconnects do not create new 
 | `GET` | `/tasks/{task_id}/events` | SSE stream of task events |
 | `POST` | `/tasks/{task_id}/input-reply/{input_request_id}` | Reply to a task input request (alternative to WebSocket `task.input_reply`) |
 | `GET` | `/sessions/{session_id}` | Get session conversation history |
+| `GET` | `/routing-audit?limit=N` | Inspect recent Gateway routing decisions from `gateway/routing_audit.db`. Protected by the desktop/local API token. Operational visibility only — not part of the message pipeline. |
 | `DELETE` | `/tasks/{task_id}` | Cancel a task |
 | `GET` | `/health` | Health check |
 | `GET` | `/health/ready` | Readiness check (all dependencies up) |
+| | | |
+| | **Scheduler / Cron Manager (desktop app / local API token)** | |
+| `GET` | `/scheduler/overview` | Return heartbeat state plus all cron jobs with computed state (`active`, `paused`, `error`), next fire time, last fire time, last outcome, timezone, and recent execution summary for observability UI |
+| `GET` | `/scheduler/crons` | List cron jobs for the desktop Cron Manager UI |
+| `GET` | `/scheduler/crons/{cron_id}` | Get cron details, execution history, timezone, pause state, and next fire time |
+| `POST` | `/scheduler/crons/{cron_id}/pause` | Pause a cron without deleting it; records `paused_at` and `pause_reason` |
+| `POST` | `/scheduler/crons/{cron_id}/resume` | Resume a paused cron and recompute `next_fire_at` |
+| `GET` | `/scheduler/heartbeat` | Get heartbeat status, delivery channel, active hours, timezone behavior, and current pause/enabled state |
+| `POST` | `/scheduler/heartbeat/pause` | Pause heartbeat delivery without deleting config |
+| `POST` | `/scheduler/heartbeat/resume` | Resume heartbeat delivery |
 | | | |
 | | **Scheduler (internal — orchestrator only)** | |
 | `POST` | `/internal/scheduler/crons` | Create a cron job — returns `cron_id` |
 | `GET` | `/internal/scheduler/crons` | List all cron jobs (active, paused, all) |
 | `GET` | `/internal/scheduler/crons/{cron_id}` | Get cron job details |
-| `PATCH` | `/internal/scheduler/crons/{cron_id}` | Update cron schedule, prompt, priority, enabled |
+| `PATCH` | `/internal/scheduler/crons/{cron_id}` | Update cron schedule, timezone, prompt, priority, enabled/pause metadata |
 | `DELETE` | `/internal/scheduler/crons/{cron_id}` | Delete a cron job |
 | `POST` | `/internal/scheduler/heartbeat/config` | Update heartbeat configuration |
 | `GET` | `/internal/scheduler/heartbeat/config` | Get current heartbeat configuration |
@@ -892,6 +907,31 @@ directly to one row in `usage_events`.
 }
 ```
 
+### 3.4b Routing Audit
+
+The Gateway owns a separate SQLite inspection store for routing decisions. This is distinct from `usage.db`: usage is billing/telemetry for outbound metered API calls, while routing audit records *why* a given inbound request was sent to `haiku`, `perplexity`, or `opus`.
+
+**Database:** `gateway/routing_audit.db`
+
+Each inbound request appends one row containing the Gateway's final decision context, including:
+
+- request identity: `request_id`, `session_id`, `channel`, `source`, `source_id`
+- input: `query_text`, bounded conversation-context snapshot
+- decision controls: `route_override`, `sticky_hit`, `decision_source`
+- routing outcome: `classifier_route`, `final_route`, `dispatch_target`, `confidence`, `signals`
+- classifier payload: an allowlisted subset of the Model Router response payload (`classification`, `metrics`, `classifier_model`, `raw_classifier_output`, `timestamp_unix_ms`). Future debug/reasoning fields are **not** persisted automatically; adding them requires an explicit schema/privacy review.
+- timing: classifier latency and total Gateway routing-decision latency
+- error details when the classifier is unavailable and the Gateway falls back to `opus`
+
+**Design rule:** this store is written by the Gateway, not the Model Router, because the final route may be changed by Gateway-local logic such as:
+
+- manual route override from the desktop model selector
+- sticky routing via `awaiting_reply`
+- non-text inbound coercion to `opus`
+- classifier failure fallback to `opus`
+
+**Operational inspection route:** `GET /routing-audit?limit=N` returns the most recent rows from this store. It is protected by the desktop/local API token and is for debugging/inspection only; it is not part of the user message pipeline.
+
 ### 3.5 Authentication
 
 For the desktop app, authentication uses a local API token (`GATEWAY_LOCAL_API_TOKEN`) that is auto-provisioned from Supabase during user login and stored in the desktop app's local SQLite database (`resources/user_data.db`) via the settings bridge. See §3.5a for the full user authentication and VM provisioning flow.
@@ -958,6 +998,8 @@ Desktop App (Electron)
         └── Returns: user profile + VM config (gateway_url, api_token, vm_ip, vm_dns)
               └── Desktop stores auth data in local SQLite (resources/user_data.db)
               └── Auto-configures Gateway URL + API token for all downstream connections
+              └── Desktop reports current IANA timezone to Gateway after auth so
+                    rollover and default cron scheduling use user-local time, not VM time
 
 VM Bootstrap (Linux VM)
   └── Supabase RPC (consume_bootstrap_token)
@@ -1417,10 +1459,12 @@ FROM app_private.issue_vm_bootstrap_token('user@example.com', 20);
 ```bash
 cd ~/Cosmic-OS/Backend
 export COSMIC_BOOTSTRAP_TOKEN='<one-time bootstrap token>'
-python3 bootstrap.py provision-vm
+python3 bootstrap.py --memory-repo-dir ~/cosmic-memory provision-vm
 ```
 
 That flow fetches the env payload from Supabase, installs/syncs the backend env files, installs dependencies, installs systemd units, starts the backend services, installs/configures Caddy, and lets Caddy obtain the TLS certificate automatically.
+
+**Memory provisioning rule:** if the VM should run the internal `cosmic-memory` service, operators must clone the `cosmic-memory` repo onto the VM first and pass its local path to bootstrap via `--memory-repo-dir` (for example, `~/cosmic-memory`). In the current implementation, bootstrap only materializes `memory.env`, installs `cosmic-memory.service`, enables the service, and injects `COSMIC_MEMORY_URL` into `gateway.env` when `--memory-repo-dir` is present. If the flag is omitted, the Gateway intentionally leaves long-term memory integration disabled for that VM.
 
 6. Verify the public edge:
 
@@ -1816,7 +1860,7 @@ Both groups receive every event independently. Neither blocks the other.
 
 ### 3.11 Session Management
 
-The Gateway maintains session state in SQLite. The user experiences one persistent assistant, implemented as one shared **daily** session across all channels. WebSocket reconnects do not create new sessions. Daily sessions reset at 4AM with forced compaction. See §23 for the full Session & Memory Management specification.
+The Gateway maintains session state in SQLite. The user experiences one persistent assistant, implemented as one shared **daily** session across all channels. WebSocket reconnects do not create new sessions. Daily sessions reset at 4AM with forced compaction. In addition to the canonical SQLite store, the Gateway maintains a **derived append-only daily transcript** in Markdown under `logs/sessions/` for human-readable archival and export. SQLite remains the source of truth for live session state, routing, and replay. See §23 for the full Session & Memory Management specification.
 
 ```sql
 -- gateway/sessions.db
@@ -2083,12 +2127,15 @@ cosmic-agents/
 │   │   ├── memory_retriever.py # Hybrid retrieval (Qdrant dense + sparse vectors, RRF fusion), ranking
 │   │   ├── memory_sync.py     # Startup consistency check + full rebuild (§23.5a)
 │   │   ├── compaction.py       # Conversation compaction logic (summarization)
+│   │   ├── transcript_writer.py # Derived append-only daily session transcripts (.md, non-canonical)
 │   │   ├── memory_writer.py    # Write memories to .md files + embed into Qdrant
 │   │   └── response_processor.py # LLMStreamProcessor: strip <awaiting_reply/> tags, set flags (§3.8)
 │   ├── user_input.py           # Task input relay: consume user_input:requests, publish replies (§3.12)
 │   ├── usage.py                # Usage Ledger write/query helpers (§3.4a)
 │   ├── sessions.py             # Session storage (SQLite)
 │   ├── sessions.db             # Session + message storage
+│   ├── routing_audit_store.py  # Durable inspection log for final routing decisions (§3.4b)
+│   ├── routing_audit.db        # Route decision audit store (SQLite)
 │   ├── credentials.db          # Credential store (accounts, tokens, audit — see §22)
 │   └── usage.db                # Token/cost telemetry ledger (SQLite)
 │
@@ -2100,7 +2147,7 @@ cosmic-agents/
 │       │   └── auth/           # e.g. Baileys multi-file auth state
 │       └── runtime/            # EPHEMERAL. Logs, cache, pidfiles, temp files
 │
-├── memory/                     # Persistent memory store (.md source of truth)
+├── memory/                     # Logical canonical memory tree (.md source of truth; owned by internal cosmic-memory service when enabled)
 │   ├── sessions/               # Compacted daily session summaries
 │   │   ├── 2025-01-15.md
 │   │   └── 2025-01-16.md
@@ -2125,7 +2172,10 @@ cosmic-agents/
 ├── registry/                   # SQLite agent registry
 │   └── registry.db
 │
-├── logs/                       # Persistent event archive
+├── logs/                       # Persistent derived/archival logs
+│   ├── sessions/               # Derived append-only daily session transcripts (.md)
+│   │   ├── 2025-01-15.md
+│   │   └── 2025-01-16.md
 │   └── events/                 # Archived task events (.jsonl per task — see §12.8)
 │       └── <task_id>.jsonl
 │
@@ -2150,6 +2200,8 @@ cosmic-agents/
     # it contains webhook registrations.
     # memory/ and qdrant_data/ MUST be on persistent volumes —
     # they contain the system's long-term memory.
+    # logs/sessions/ MUST be on a persistent volume —
+    # it contains derived daily session transcript archives.
     # logs/events/ MUST be on a persistent volume —
     # it contains archived task event history (see §12.8).
 ```
@@ -2234,6 +2286,15 @@ python bootstrap.py provision-vm --skip-edge
 - `provision-vm`: Full production bare-VM flow for a host whose DNS and ingress are already ready. Materializes envs, installs Python and bridge deps, installs systemd units, starts the backend target, and invokes Caddy/TLS edge setup.
 - `provision-vm --skip-edge`: Full bare-VM flow for an already-networked host. Materializes envs, installs Python and bridge deps, installs systemd units, and starts the backend target without forcing Caddy/TLS edge setup.
 
+**Memory-specific invocation:** long-term memory is opt-in at bootstrap time. To provision the internal memory service on a VM, the operator must already have a local clone of the `cosmic-memory` repo on that machine and pass `--memory-repo-dir <path>` when running `bootstrap.py`. Example:
+
+```bash
+export COSMIC_BOOTSTRAP_TOKEN='<one-time bootstrap token>'
+python3 bootstrap.py --memory-repo-dir ~/cosmic-memory provision-vm
+```
+
+Without `--memory-repo-dir`, bootstrap does not install the `cosmic-memory` package or service, does not create `/etc/cosmic/memory.env`, and leaves `COSMIC_MEMORY_URL` blank/disabled in the Gateway env.
+
 **Operational note:** `bootstrap.py` is intended to be the first backend command after clone on a Linux VM image that already has a callable Python interpreter. In the current production flow, operators mint a one-time Supabase bootstrap token and export it as `COSMIC_BOOTSTRAP_TOKEN` before running `bootstrap.py provision-vm`. Use `--skip-edge` only when the public DNS record and/or inbound `80/443` are not ready yet, or when you intentionally want an internal-only/non-TLS rollout first. If the base image has no Python at all, a minimal cloud-init/scripted OS bootstrap may install Python first and then hand off to `bootstrap.py`.
 
 ### 5.2 Per-Agent Folder (Every Agent Is Identical in Shape)
@@ -2285,6 +2346,37 @@ agents/research_agent/
 - Model SDK choice, provider `base_url`, context-window limits, output limits, and token pricing are **NOT** defined per agent. Resolve them from `shared/model_specs.json`, not from `agent_card.yaml` and not from agent-local constants.
 - Orchestrator **NEVER** silently rewrites prompts live. Use versioned rollout + rollback.
 - Track sha256 hashes of prompt files in registry so audits detect drift.
+
+### 5.3a Agent Memory Contract
+
+Every agent/subagent created from this document must follow the same memory boundary rules:
+
+1. **Agent-private memory lives in the agent folder.**
+   - durable private notes: `agents/<agent>/store/learnings.md`
+   - agent-owned structured history/state: `agents/<agent>/store/data/`
+2. **Shared long-term memory lives outside the agent folder.**
+   - it is owned by the same-VM internal `cosmic-memory` service
+   - agents never read/write shared memory files directly
+   - agents access it only through Gateway-injected universal tools (`MemoryRead`, `MemoryWrite`) and internal HTTP
+3. **Live session continuity is not agent-owned.**
+   - daily session state, active working set, compaction packet, carry-forward packet, and deterministic revisit live in the Gateway/session layer
+   - agents may receive this context in `TaskEnvelope.input` or through explicit internal session APIs, but they do not own or mutate the canonical session ledger
+4. **Shared memory is for high-signal durable knowledge, not raw execution exhaust.**
+   - good writes: reusable facts, stable preferences, validated task summaries, artifact pointers, curated agent notes
+   - bad writes: raw chain-of-thought, raw tool payloads, temporary progress chatter, repeated intermediate drafts
+5. **Large outputs must spill to artifacts, not memory text.**
+   - store bulky bodies under `runs/artifacts/<task_id>/`
+   - write a compact `artifact_pointer` memory if the content must be retrievable later
+   - keep the prompt-visible memory text small and source-oriented
+6. **Exact prior context uses revisit/replay paths, not semantic search alone.**
+   - use recall intents for agent-private history
+   - use task replay / task notebooks for task continuity
+   - use `/internal/session/*` deterministic revisit when the exact prior turn history matters
+7. **Task execution remains isolated from the main conversation.**
+   - final user-visible outcome enters the shared session
+   - deep task state remains in task memory, per-agent storage, task notebooks, and artifacts
+
+This contract is intentionally strict so every new agent follows the same mental model: private store for agent-owned history, shared memory for durable system-wide retrieval, Gateway/session layer for live continuity.
 
 ---
 
@@ -5531,6 +5623,10 @@ Route to Opus / Haiku / Perplexity
 
 Each day is a session. The user sees one perpetual conversation — session boundaries are transparent.
 
+**Authoritative timezone rule:** "4:00 AM" always means 4:00 AM in the user's persisted local IANA timezone, not the VM's timezone. The desktop reports this timezone to the Gateway on login/startup/resume and whenever the OS timezone changes. The Gateway persists that value and the Session Manager evaluates rollover boundaries against it. If no desktop timezone has ever been reported yet, the system may use a configured fallback only until the first desktop sync occurs.
+
+**Implementation rule:** the 4 AM rollover is a Gateway-owned scheduled event, not a machine-level `crontab` entry. It uses the same persisted user-timezone snapshot as the Cron Manager, is visible to Gateway observability, and fires the `session.reset` hook path rather than relying on an external OS scheduler.
+
 ```
                     4:00 AM                           4:00 AM
     ─────────────────┼─────────────────────────────────┼──────────
@@ -5539,12 +5635,16 @@ Each day is a session. The user sees one perpetual conversation — session boun
     At boundary:     │                                  │
     1. Force compact │                                  │
        Session A     │                                  │
-    2. Write summary │                                  │
+    2. Finalize      │                                  │
+       transcript    │                                  │
+       → logs/       │                                  │
+         sessions/   │                                  │
+    3. Write summary │                                  │
        as memory     │                                  │
        → memory/     │                                  │
          sessions/   │                                  │
        → Qdrant      │                                  │
-    3. Start fresh   │                                  │
+    4. Start fresh   │                                  │
        Session B     │                                  │
 ```
 
@@ -5553,9 +5653,9 @@ Each day is a session. The user sees one perpetual conversation — session boun
 | Event | What Happens |
 |---|---|
 | App startup | Gateway loads or creates today's session. Desktop app receives the tail of today's conversation history for display. |
-| Each message | Session Manager assembles context (conversation + memories). Message and response stored in `sessions.db`. |
+| Each message | Session Manager assembles context (conversation + memories). Message and response stored in `sessions.db`. After the SQLite write succeeds, the transcript writer appends a rendered entry to `logs/sessions/YYYY-MM-DD.md`. |
 | Context at 70% | Mid-day compaction triggers: older messages summarized, summary replaces them in context. Conversation continues with `[compacted summary] + [recent messages]`. |
-| 4:00 AM | Forced compaction of remaining session. Compacted summary written as a memory to `memory/sessions/` + Qdrant. New session ID created. |
+| 4:00 AM | Forced compaction of remaining session. The previous day's transcript in `logs/sessions/` is finalized. The compacted summary is written as a memory to `memory/sessions/` + Qdrant. New session ID created. |
 
 ### 23.3 Context Window Management
 
@@ -5959,6 +6059,49 @@ async def full_rebuild(qdrant: QdrantClient, memory_store_path: str):
 | Startup consistency check | Gateway startup | O(n) scroll of Qdrant + O(n) filesystem scan. Seconds for thousands of memories. |
 | Full rebuild | Manual invocation only (CLI Agent or script) | Re-embeds every file. Minutes for thousands of memories (rate-limited by OpenRouter API). |
 
+### 23.5b Derived Daily Transcript Archive
+
+In addition to the canonical SQLite session store, the Gateway maintains a **derived append-only Markdown transcript** for each daily session under `logs/sessions/`.
+
+**Purpose:** human-readable archival, export, debugging, and operator inspection. This transcript is **not** part of the retrieved memory store and is **not** used as live session state.
+
+**Rules:**
+
+- `gateway/sessions.db` remains authoritative for live session state, sticky routing, and replay.
+- The transcript writer appends entries **after** the SQLite message write succeeds. This is a one-way derivation, not a second writable source of truth.
+- Transcripts are append-only while the day is active. At the 4AM rollover, the previous day's transcript is finalized and a new day's file begins.
+- Transcripts are **not** indexed in Qdrant and are **not** part of the memory retrieval set in §23.4.
+- If a transcript file is missing or corrupted, it is regenerated from `sessions.db` by replaying the day's messages in `created_at` order.
+- Agents do not edit transcript files directly.
+
+**Path and naming:**
+
+```text
+logs/sessions/2025-01-15.md
+```
+
+**Example format:**
+
+```markdown
+<!-- logs/sessions/2025-01-15.md -->
+---
+session_id: sess_20250115
+date: 2025-01-15
+derived_from: gateway/sessions.db
+status: finalized
+---
+
+# Session Transcript — January 15, 2025
+
+[2025-01-15T10:03:12Z] [channel=desktop:desk_a1b2c3] [role=user]
+Update the Project Proposal doc
+
+[2025-01-15T10:03:26Z] [route=opus] [role=assistant]
+Done — I added a conclusion section.
+```
+
+**Why one-way derived, not bi-directional sync?** The session transcript preserves readability without introducing a second live system of record. SQLite keeps the structured state; the transcript is a rendered archive.
+
 ### 23.6 Task Memory Isolation
 
 Task execution happens in independent sessions. The full back-and-forth of task execution (agent progress, intermediate results, retries, internal clarifications) does NOT enter the main conversation session. Only the final task result is inserted as a message in the main session.
@@ -6061,7 +6204,7 @@ Agent learnings (`agents/*/store/learnings.md`) are the agents' own persistent m
 
 ```ini
 # Session Manager configuration (gateway environment)
-SESSION_RESET_HOUR=4                          # daily reset at 4:00 AM local time
+SESSION_RESET_HOUR=4                          # daily reset at 4:00 AM in persisted user-local timezone
 COMPACTION_THRESHOLD=0.70                     # compact at 70% context usage
 COMPACTION_MODEL=claude-haiku-4-5             # cheap/fast model for summarization
 MEMORY_TOKEN_BUDGET=12000                     # max tokens for retrieved memories
@@ -6071,7 +6214,9 @@ SPARSE_MODEL=Qdrant/bm25                     # sparse vectors — local via Fast
 OPENROUTER_API_KEY=<secret>                   # for embedding API calls
 QDRANT_PATH=./qdrant_data                     # local Qdrant storage path
 MEMORY_STORE_PATH=./memory                    # .md file tree root
+SESSION_TRANSCRIPT_PATH=./logs/sessions       # derived append-only daily session transcript archive (.md)
 MEMORY_SYNC_ON_STARTUP=true                   # run consistency check at Gateway startup (§23.5a)
+USER_TIMEZONE_FALLBACK=America/Chicago        # used only until desktop reports a real IANA timezone
 ```
 
 `COMPACTION_MODEL` and `EMBEDDING_MODEL` must resolve to entries in `shared/model_specs.json`
@@ -6137,10 +6282,11 @@ cost estimation rather than maintaining a second copy of model metadata.
 4. **Task execution is isolated from the main session.** Only final task results enter the main session as messages. Full task details are retrievable via recall intents and the memory store.
 5. **Agent notes have priority over user data** in memory ranking. Curated, task-proven facts outrank bulk external data.
 6. **.md files are the source of truth.** Qdrant is the index (dense + sparse vectors). If Qdrant is lost, `full_rebuild()` re-generates both vector types from `memory/` (see §23.5a). Startup consistency check detects and repairs drift automatically.
-7. **Compaction uses a cheap model.** Never use Opus for summarization. Claude Haiku 4.5 or Sonnet — fast, cheap, good enough.
-8. **Daily reset is transparent to the user.** Session boundaries at 4AM are invisible. The compacted summary becomes a retrievable memory. The user sees one perpetual conversation.
-9. **Conversational replies use sticky routing, task input uses queues.** Two separate mechanisms for two separate problems. `<awaiting_reply/>` tag + `last_route` for inline conversation (§3.7). `user_input:requests/replies` Redis streams for async background task input (§13.2). They never overlap.
-10. **`awaiting_reply` flag is cleared on first use.** Once the user replies and sticky routing fires, the flag is cleared. The next message goes through normal classification. No sticky routing chains.
+7. **Daily full-session transcripts are derived archives.** `logs/sessions/*.md` is append-only, human-readable, and regenerated from SQLite if needed. It is not indexed in Qdrant and is not a second writable source of truth.
+8. **Compaction uses a cheap model.** Never use Opus for summarization. Claude Haiku 4.5 or Sonnet — fast, cheap, good enough.
+9. **Daily reset is transparent to the user.** Session boundaries at 4AM are invisible. The compacted summary becomes a retrievable memory. The user sees one perpetual conversation.
+10. **Conversational replies use sticky routing, task input uses queues.** Two separate mechanisms for two separate problems. `<awaiting_reply/>` tag + `last_route` for inline conversation (§3.7). `user_input:requests/replies` Redis streams for async background task input (§13.2). They never overlap.
+11. **`awaiting_reply` flag is cleared on first use.** Once the user replies and sticky routing fires, the flag is cleared. The next message goes through normal classification. No sticky routing chains.
 
 ---
 
@@ -6218,11 +6364,13 @@ async def handle_heartbeat_response(response: str, delivery_channel: str | None)
 
 ---
 
-## 25. Scheduler Module (Crons & Heartbeats)
+## 25. Scheduler Module / Cron Manager (Crons & Heartbeats)
 
-The Scheduler is a Gateway module that manages cron jobs and heartbeats. It stores definitions in SQLite, runs a polling loop to check what's due, and fires TaskEnvelopes to the orchestrator when jobs trigger. The orchestrator creates and manages cron jobs via the Scheduler's internal API.
+The Scheduler is a Gateway module that manages cron jobs and heartbeats. It stores definitions in SQLite, runs a polling loop to check what's due, and fires TaskEnvelopes to the orchestrator when jobs trigger. The orchestrator creates and manages cron jobs via the Scheduler's internal API. The same module also serves as the **Cron Manager** for future desktop observability/control: it owns durable cron state, execution history, timezone handling, and pause/resume behavior so the desktop UI can inspect and manage scheduled work without talking to the orchestrator directly.
 
 **Design principle:** Scheduling is infrastructure, not AI. No LLM is involved in deciding "is it 9 AM yet?" — the Scheduler is a simple timer loop. The AI reasoning happens when the orchestrator receives the fired TaskEnvelope and processes it like any other input.
+
+**Timezone rule:** All user-facing schedules are evaluated in the user's persisted local IANA timezone as last reported by the desktop app. The VM timezone is never authoritative for user intent. `next_fire_at` is stored in UTC, but it is always computed from `(cron expression + cron timezone)` where the cron timezone defaults to the persisted user timezone snapshot.
 
 ### 25.1 Data Model
 
@@ -6232,15 +6380,20 @@ The Scheduler is a Gateway module that manages cron jobs and heartbeats. It stor
 CREATE TABLE cron_jobs (
     cron_id TEXT PRIMARY KEY,                    -- 'cron_morning_email'
     schedule TEXT NOT NULL,                       -- cron expression: '0 9 * * *'
+    timezone TEXT NOT NULL,                       -- IANA timezone for interpreting the cron expression; defaults to persisted user timezone
     prompt TEXT NOT NULL,                         -- what to send to orchestrator
     description TEXT,                             -- human-readable description
     delivery_channel TEXT DEFAULT 'desktop',      -- where to deliver results: 'desktop' (primary desktop alias), 'desktop:<device_id>', 'whatsapp:+1234', etc.
     priority TEXT DEFAULT 'low',                  -- TaskEnvelope priority override
     active_hours TEXT,                            -- '08:00-22:00' or null for always
     enabled BOOLEAN DEFAULT TRUE,
+    paused_at TIMESTAMP,                          -- set when user/operator pauses the cron
+    pause_reason TEXT,                            -- 'user_paused', 'maintenance', etc.
     created_by TEXT DEFAULT 'user',               -- 'user', 'orchestrator' (tracks who created it)
     metadata_json TEXT,                           -- arbitrary metadata (tags, labels)
     last_fired_at TIMESTAMP,
+    last_result_status TEXT,                      -- 'success', 'failed', 'suppressed', null before first run
+    last_result_summary TEXT,                     -- short human-readable result summary for observability UI
     next_fire_at TIMESTAMP,
     created_at TIMESTAMP NOT NULL,
     updated_at TIMESTAMP NOT NULL
@@ -6251,9 +6404,12 @@ CREATE TABLE heartbeat_config (
     interval_sec INTEGER DEFAULT 1800,            -- 30 minutes
     prompt TEXT NOT NULL,                          -- heartbeat check prompt
     delivery_channel TEXT DEFAULT 'desktop',       -- where to deliver results; bare 'desktop' = primary desktop alias
+    timezone TEXT,                                 -- null = use persisted user timezone snapshot
     active_hours TEXT DEFAULT '08:00-22:00',       -- suppress outside these hours
     priority TEXT DEFAULT 'low',
     enabled BOOLEAN DEFAULT TRUE,
+    paused_at TIMESTAMP,
+    pause_reason TEXT,
     suppress_token TEXT DEFAULT 'heartbeat_ok',    -- token that suppresses delivery
     updated_at TIMESTAMP NOT NULL
 );
@@ -6274,6 +6430,14 @@ CREATE TABLE cron_execution_log (
 );
 
 CREATE INDEX idx_cron_log_cron ON cron_execution_log(cron_id, fired_at);
+
+CREATE TABLE scheduler_profile (
+    profile_id TEXT PRIMARY KEY DEFAULT 'default',
+    user_timezone TEXT NOT NULL,                  -- latest IANA timezone reported by desktop
+    timezone_source TEXT DEFAULT 'desktop',       -- 'desktop', 'fallback'
+    timezone_reported_at TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL
+);
 ```
 
 ### 25.2 Scheduler Polling Loop
@@ -6298,9 +6462,9 @@ async def scheduler_polling_loop(redis):
         ''').fetchall()
 
         for cron in due_crons:
-            if not is_within_active_hours(cron['active_hours']):
+            if not is_within_active_hours(cron['active_hours'], cron['timezone']):
                 log_execution(cron['cron_id'], 'skipped_inactive_hours')
-                update_next_fire(cron['cron_id'], cron['schedule'])
+                update_next_fire(cron['cron_id'], cron['schedule'], cron['timezone'])
                 continue
 
             # Deterministic idempotency key: same cron + same scheduled time = same key.
@@ -6337,7 +6501,7 @@ async def scheduler_polling_loop(redis):
                 UPDATE cron_jobs SET last_fired_at = ?, updated_at = ?
                 WHERE cron_id = ?
             ''', [utcnow(), utcnow(), cron['cron_id']])
-            update_next_fire(cron['cron_id'], cron['schedule'])
+            update_next_fire(cron['cron_id'], cron['schedule'], cron['timezone'])
             log_execution(cron['cron_id'], 'fired', task_id)
 
 
@@ -6350,7 +6514,8 @@ async def check_and_fire_heartbeat(redis):
     if not config or not config['enabled']:
         return
 
-    if not is_within_active_hours(config['active_hours']):
+    effective_timezone = config['timezone'] or load_scheduler_profile()['user_timezone']
+    if not is_within_active_hours(config['active_hours'], effective_timezone):
         return
 
     # Check if enough time has passed since last heartbeat
@@ -6408,13 +6573,14 @@ async def create_cron(request: Request):
     cron_id = body.get('cron_id') or f'cron_{uuid4().hex[:12]}'
     db.execute('''
         INSERT INTO cron_jobs
-        (cron_id, schedule, prompt, description, delivery_channel,
+        (cron_id, schedule, timezone, prompt, description, delivery_channel,
          priority, active_hours, enabled, created_by, metadata_json,
          next_fire_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', [
         cron_id,
         body['schedule'],              # '0 9 * * *'
+        body.get('timezone') or load_scheduler_profile()['user_timezone'],
         body['prompt'],                # 'Check my email and flag anything urgent'
         body.get('description', ''),
         body.get('delivery_channel', 'desktop'),
@@ -6423,10 +6589,19 @@ async def create_cron(request: Request):
         body.get('enabled', True),
         body.get('created_by', 'orchestrator'),
         json.dumps(body.get('metadata', {})),
-        compute_next_fire(body['schedule']),
+        compute_next_fire(
+            body['schedule'],
+            body.get('timezone') or load_scheduler_profile()['user_timezone'],
+        ),
         utcnow(), utcnow(),
     ])
-    return {'cron_id': cron_id, 'next_fire_at': compute_next_fire(body['schedule'])}
+    return {
+        'cron_id': cron_id,
+        'next_fire_at': compute_next_fire(
+            body['schedule'],
+            body.get('timezone') or load_scheduler_profile()['user_timezone'],
+        ),
+    }
 
 @app.get('/internal/scheduler/crons')
 async def list_crons(request: Request):
@@ -6448,7 +6623,7 @@ async def update_cron(cron_id: str, request: Request):
     body = await request.json()
     updates = []
     params = []
-    for field in ['schedule', 'prompt', 'description', 'delivery_channel',
+    for field in ['schedule', 'timezone', 'prompt', 'description', 'delivery_channel',
                   'priority', 'active_hours', 'enabled', 'metadata_json']:
         if field in body:
             updates.append(f'{field} = ?')
@@ -6456,7 +6631,10 @@ async def update_cron(cron_id: str, request: Request):
                          else json.dumps(body[field]))
     if 'schedule' in body:
         updates.append('next_fire_at = ?')
-        params.append(compute_next_fire(body['schedule']))
+        params.append(compute_next_fire(
+            body['schedule'],
+            body.get('timezone') or get_existing_timezone(cron_id),
+        ))
     updates.append('updated_at = ?')
     params.append(utcnow())
     params.append(cron_id)
@@ -6468,6 +6646,38 @@ async def delete_cron(cron_id: str, request: Request):
     await verify_internal_auth(request)
     db.execute('DELETE FROM cron_jobs WHERE cron_id = ?', [cron_id])
     return {'deleted': True}
+
+@app.post('/internal/scheduler/crons/{cron_id}/pause')
+async def pause_cron(cron_id: str, request: Request):
+    await verify_internal_auth(request)
+    body = await request.json()
+    db.execute('''
+        UPDATE cron_jobs SET
+            enabled = FALSE,
+            paused_at = ?,
+            pause_reason = ?,
+            updated_at = ?
+        WHERE cron_id = ?
+    ''', [utcnow(), body.get('reason', 'user_paused'), utcnow(), cron_id])
+    return {'paused': True}
+
+@app.post('/internal/scheduler/crons/{cron_id}/resume')
+async def resume_cron(cron_id: str, request: Request):
+    await verify_internal_auth(request)
+    cron = db.execute(
+        'SELECT schedule, timezone FROM cron_jobs WHERE cron_id = ?',
+        [cron_id]
+    ).fetchone()
+    db.execute('''
+        UPDATE cron_jobs SET
+            enabled = TRUE,
+            paused_at = NULL,
+            pause_reason = NULL,
+            next_fire_at = ?,
+            updated_at = ?
+        WHERE cron_id = ?
+    ''', [compute_next_fire(cron['schedule'], cron['timezone']), utcnow(), cron_id])
+    return {'resumed': True}
 
 @app.get('/internal/scheduler/heartbeat/config')
 async def get_heartbeat_config(request: Request):
@@ -6486,6 +6696,7 @@ async def update_heartbeat_config(request: Request):
             interval_sec = COALESCE(?, interval_sec),
             prompt = COALESCE(?, prompt),
             delivery_channel = COALESCE(?, delivery_channel),
+            timezone = COALESCE(?, timezone),
             active_hours = COALESCE(?, active_hours),
             priority = COALESCE(?, priority),
             enabled = COALESCE(?, enabled),
@@ -6494,12 +6705,27 @@ async def update_heartbeat_config(request: Request):
         WHERE config_id = 'default'
     ''', [
         body.get('interval_sec'), body.get('prompt'),
-        body.get('delivery_channel'), body.get('active_hours'),
+        body.get('delivery_channel'), body.get('timezone'),
+        body.get('active_hours'),
         body.get('priority'), body.get('enabled'),
         body.get('suppress_token'), utcnow(),
     ])
     return {'updated': True}
 ```
+
+### 25.3a Desktop-Facing Cron Manager Surface
+
+The desktop app should not manipulate raw SQLite rows. It talks to the Gateway's desktop-authenticated Cron Manager surface (`/scheduler/*`), which returns a stable management view over the same scheduler state used by the orchestrator.
+
+**Design goals:**
+
+- show all scheduled jobs and heartbeat config in one place,
+- expose computed state (`active`, `paused`, `error`),
+- show `timezone`, `next_fire_at`, `last_fired_at`, and recent outcomes,
+- allow pause/resume without deleting the underlying cron,
+- support future observability UI without giving the desktop direct write access to internal-only orchestrator APIs.
+
+**Pause semantics:** a paused cron is represented durably in the scheduler DB (`enabled = FALSE`, `paused_at`, `pause_reason`). The Cron Manager surfaces this as `state='paused'` in desktop responses.
 
 ### 25.4 Orchestrator Intent: `orchestrator.schedule`
 
@@ -6516,6 +6742,7 @@ async def on_schedule_request(self, task: TaskEnvelope):
         f'{GATEWAY_INTERNAL_URL}/internal/scheduler/crons',
         json={
             'schedule': task.input['schedule'],       # '0 9 * * *'
+            'timezone': task.input.get('timezone'),   # defaults to persisted user timezone
             'prompt': task.input['prompt'],            # 'Check email, flag urgent'
             'description': task.input.get('description', ''),
             'delivery_channel': task.channel or 'desktop',
@@ -6533,9 +6760,11 @@ async def on_schedule_request(self, task: TaskEnvelope):
 ```ini
 # Scheduler configuration (gateway environment)
 SCHEDULER_POLL_INTERVAL_SEC=10          # how often the polling loop runs
-SCHEDULER_TIMEZONE=America/New_York     # timezone for active_hours evaluation
+SCHEDULER_TIMEZONE=America/Chicago      # fallback only until desktop reports a real IANA timezone
 GATEWAY_SIGNING_SECRET=<secret>         # for signing gateway-generated TaskEnvelopes (scheduler, heartbeat, webhook, hooks)
 ```
+
+**Important:** `SCHEDULER_TIMEZONE` is only a bootstrap fallback. Once the desktop has reported the user's current IANA timezone, the persisted scheduler profile becomes authoritative. All cron evaluation, heartbeat active-hours checks, and the 4 AM session rollover must use the user-local timezone snapshot, not the VM timezone.
 
 ---
 
@@ -6836,11 +7065,154 @@ class ChannelAdapterRegistry:
 | `DesktopAdapter` | Desktop App (Electron) | WebSocket (persistent) | **Primary** — ships with v1.0 |
 | `CLIAdapter` | CLI Agent | Internal pipe (in-process) | **Alpha** — ships with v1.0 |
 | `WhatsAppAdapter` | WhatsApp | Baileys (via Node.js sidecar bridge) | **Implemented** — ships with v1.0 |
-| `TelegramAdapter` | Telegram | Bot API (grammY / python-telegram-bot) | **Planned** |
+| `TelegramAdapter` | Telegram | Bot API webhook (Gateway-owned) | **Implemented** — private DM + media manifest support |
 | `SlackAdapter` | Slack | Bolt SDK / Events API | **Planned** |
 | `DiscordAdapter` | Discord | discord.py | **Planned** |
 
 **Adding a new adapter:** Implement `ChannelAdapter`, register it in the `ChannelAdapterRegistry`, configure its credentials in environment variables. No Gateway code changes required.
+
+**Telegram implementation notes (current):**
+
+- Telegram is implemented as a **Gateway-owned Bot API webhook adapter**, not a sidecar bridge.
+- Inbound entrypoint: `POST /channels/telegram/webhook`
+- Secret verification: `X-Telegram-Bot-Api-Secret-Token`
+- Scope: **private chats only** for user ↔ COSMIC communication
+- Media handling: inbound Telegram attachments are normalized into the common `attachments` / `input_artifacts` pipeline; raw bytes are materialized later via `GET /internal/channels/telegram/media/{file_id}`
+- Control-plane routes:
+  - `POST /channels/telegram/webhook/sync`
+  - `DELETE /channels/telegram/webhook`
+  - `POST /channels/telegram/send`
+
+#### 27.4a Telegram Provisioning Model
+
+Under the current direct-to-VM COSMIC architecture, Telegram is a **per-VM bot**, not a single centralized platform bot.
+
+- Users do **not** create their own bots.
+- The operator creates **one BotFather bot per VM / deployment**.
+- That bot token is installed into the VM's `gateway.env`.
+- The Gateway on that VM owns the Telegram webhook and routes messages into that user's COSMIC session space.
+
+**Why per-VM?** A single global Telegram bot would require a centralized ingress/router service that receives all Telegram traffic and forwards it to the correct user VM. COSMIC does not currently have that central Telegram ingress layer; adapters live inside each user's Gateway (§27.4, §27.5a).
+
+#### 27.4b Telegram Bot Setup (Per VM)
+
+Create the bot in Telegram via `@BotFather`.
+
+**Operator steps:**
+
+1. `/newbot`
+2. Choose bot display name and username
+3. Copy the Bot API token returned by BotFather
+4. `/setjoingroups` → select the bot → `Disable`
+
+**Design rule:** Telegram support is **private-DM only** in the current architecture. Group chats are intentionally ignored by the adapter.
+
+#### 27.4c Telegram VM Configuration
+
+Install these values into the VM's `gateway.env` (and mirror them into the repo-local `Backend/gateway.env` if you keep repo-local envs aligned with live service envs):
+
+```dotenv
+TELEGRAM_ENABLED=true
+TELEGRAM_BOT_TOKEN=<botfather-token>
+TELEGRAM_WEBHOOK_SECRET=<random-secret-token>
+TELEGRAM_AUTO_CONFIGURE_WEBHOOK=true
+TELEGRAM_ALLOWED_USER_ID=
+TELEGRAM_ALLOWED_CHAT_ID=
+```
+
+**Where each value comes from:**
+
+- `TELEGRAM_BOT_TOKEN`: returned by `@BotFather` during `/newbot`
+- `TELEGRAM_WEBHOOK_SECRET`: operator-generated random secret used to verify `X-Telegram-Bot-Api-Secret-Token`
+- `TELEGRAM_ALLOWED_USER_ID`, `TELEGRAM_ALLOWED_CHAT_ID`: intentionally blank on first boot, then locked after first successful `/start` from the intended user
+
+#### 27.4d Telegram Webhook Activation
+
+Once the VM has:
+
+- a valid public hostname in `GATEWAY_PUBLIC_HOST`
+- working HTTPS via Caddy / TLS edge
+- `TELEGRAM_ENABLED=true`
+- a valid `TELEGRAM_BOT_TOKEN`
+
+restart the Gateway and sync the webhook:
+
+```text
+POST /channels/telegram/webhook/sync
+```
+
+Expected webhook target:
+
+```text
+https://<vm-public-host>/channels/telegram/webhook
+```
+
+The adapter verifies inbound requests using Telegram's secret-token header:
+
+```text
+X-Telegram-Bot-Api-Secret-Token
+```
+
+#### 27.4e Telegram User Locking / Pairing
+
+After webhook activation, the intended human user sends `/start` to the bot from Telegram.
+
+**Initial state:**
+
+- `TELEGRAM_ALLOWED_USER_ID` is blank
+- `TELEGRAM_ALLOWED_CHAT_ID` is blank
+- the adapter accepts the first private-DM traffic
+
+**Operator flow after first `/start`:**
+
+1. Inspect the inbound Telegram event through Gateway observability:
+   - Gateway logs (`journalctl -u cosmic-gateway | grep telegram`)
+   - session store (`gateway/sessions.db`, `channel='telegram:chat_<id>'`)
+2. Extract:
+   - Telegram `user_id`
+   - Telegram `chat_id`
+3. Write both into:
+
+```dotenv
+TELEGRAM_ALLOWED_USER_ID=<telegram-user-id>
+TELEGRAM_ALLOWED_CHAT_ID=<telegram-chat-id>
+```
+
+4. Restart `cosmic-gateway`
+
+After that, only that exact Telegram private chat is accepted by the adapter.
+
+**Private-DM note:** for Telegram private chats, `chat_id` typically matches the human user's Telegram ID. COSMIC still stores and enforces both fields explicitly for clarity and future-proofing.
+
+#### 27.4f Telegram Operational Checks
+
+Useful operational checks for a live Telegram adapter:
+
+- `GET /channels`
+  - verify `telegram` appears as configured + healthy
+- `POST /channels/telegram/webhook/sync`
+  - force webhook registration / repair
+- `DELETE /channels/telegram/webhook`
+  - clear webhook during maintenance
+- `POST /channels/telegram/send`
+  - send an explicit test message to a known `chat_id`
+- `journalctl -u cosmic-gateway | grep telegram`
+  - inspect inbound acceptance, allowlist rejects, webhook timing, outbound sends, typing actions, and media download timing
+
+#### 27.4g Telegram Media Behavior
+
+Telegram media is handled exactly like other attachment-capable channels in COSMIC:
+
+- Adapter normalizes Telegram `photo`, `video`, `animation`, `audio`, `voice`, `document`, `sticker`, and `video_note` messages into attachment metadata
+- Gateway persists those attachments into the common artifact/input-manifest path
+- Downstream components consume them via `input_artifacts`
+- Raw bytes are fetched lazily through:
+
+```text
+GET /internal/channels/telegram/media/{file_id}
+```
+
+This keeps Telegram aligned with the architecture's channel-agnostic attachment model rather than introducing Telegram-specific orchestration semantics.
 
 ### 27.5 Response Routing
 
@@ -6876,6 +7248,7 @@ Channel integrations have two distinct planes. They must not be conflated.
 - Entry points:
   - Desktop WebSocket messages
   - Internal bridge intake routes such as `/internal/channels/whatsapp/incoming`
+  - Public webhook adapters such as `POST /channels/telegram/webhook`
 - Behavior:
   - Message arrives
   - Adapter normalizes it to `{ content, session_id, channel, metadata }`
@@ -7056,6 +7429,8 @@ The bridge supports restricting inbound and outbound traffic to a single configu
 - **Outbound:** Send requests targeting numbers other than the allowed phone are rejected with `403`.
 - **Self-chat-only mode:** When `selfChatOnly` is true, only messages from the linked WhatsApp account itself are processed (useful for personal-assistant mode where the user talks to themselves).
 - **Config persistence:** The bridge reads `store/bridge-config.json` on startup and updates it via `POST /config`. The Gateway adapter proxies config read/write through `GET/POST /channels/whatsapp/config`.
+
+**Sender identity normalization (IMPORTANT):** modern WhatsApp traffic may include both a phone-backed sender identity and a Linked Identity (`@lid`) for the same user. Allowed-phone enforcement must normalize the sender using the phone-backed identity (`pnJid`) when present and only fall back to the LID if no phone-backed JID is available. Otherwise, valid messages from the configured allowed number can be incorrectly dropped as "outside configured user scope" even though the human sender is correct.
 
 #### 27.7.1 Bridge -> Gateway Inbound Contract
 
@@ -8866,7 +9241,17 @@ Agents can read from and write to the shared memory store. MemoryRead retrieves 
 
 **Note:** These tools complement the existing agent learnings mechanism (§12.1). `store/learnings.md` is the agent's private persistent memory. MemoryRead/MemoryWrite access the shared `memory/` store that all LLM backends can retrieve from.
 
-**Architecture:** The memory store (Qdrant + SQLite) lives in the Gateway process alongside the Session Manager. Agents run in separate processes and cannot import Gateway modules directly. Therefore, MemoryRead/MemoryWrite communicate with the Gateway via internal HTTP API endpoints — the same pattern used by credential resolution (§22.3). The agent runtime injects `GATEWAY_INTERNAL_URL` (not a Python object) into the tools at startup.
+**Architecture:** The shared long-term memory subsystem is owned by the internal `cosmic-memory` service on the same VM, not embedded directly inside the Gateway process. Gateway remains the single integration surface for the rest of COSMIC: it assembles memory into prompts, proxies `/internal/memory/*` calls to `cosmic-memory` when memory is enabled, and degrades safely when memory is absent. Agents run in separate processes and cannot import Gateway modules directly, so MemoryRead/MemoryWrite still communicate with the Gateway via internal HTTP API endpoints — the same pattern used by credential resolution (§22.3). The agent runtime injects `GATEWAY_INTERNAL_URL` (not a Python object) into the tools at startup.
+
+**Current agent-builder rules:**
+
+- `MemoryRead` is for **shared retrievable memory** (`core_fact`, `session_summary`, `task_summary`, `agent_note`, `user_data`, `transcript`, `artifact_pointer`).
+- `MemoryWrite` is for **high-signal durable memory only**. Do not use it as a task scratchpad.
+- Exact prior session context should come from deterministic revisit (`/internal/session/state`, `/internal/session/turns`, `/internal/session/task-notebook`, `/internal/session/revisit`) rather than broad semantic recall.
+- Exact prior agent-specific context should come from recall intents against that agent's own `store/data/`.
+- Large outputs belong in `runs/artifacts/<task_id>/` plus a compact `artifact_pointer`, not as huge shared memory blobs.
+- Agents should read their own `store/learnings.md` at task start, update it only when something durable was learned, and let Gateway/session sync project it into shared `memory/agent_notes/`.
+- Agents must never persist raw chain-of-thought or raw tool chatter into shared memory.
 
 ```python
 # shared/memory_tools.py
@@ -9041,6 +9426,31 @@ async def memory_write(request: MemoryWriteRequest):
 | **MemoryRead** | `search` | Access shared memory store (all types). Complements agent's own `learnings.md`. | No |
 | **MemoryWrite** | `write` | Persist learnings to shared store. Indexed in Qdrant for retrieval by all backends. | No |
 
+### 32.6a Current Internal Memory / Session Surface
+
+In the current runtime, the Gateway exposes these internal memory/session endpoints to agents and internal control flows:
+
+- `/internal/memory/search`
+- `/internal/memory/active-search`
+- `/internal/memory/schema-context`
+- `/internal/memory/plan`
+- `/internal/memory/resolve-identity`
+- `/internal/memory/current-state`
+- `/internal/memory/temporal-facts`
+- `/internal/memory/memory-brief`
+- `/internal/memory/write`
+- `/internal/memory/core-facts`
+- `/internal/memory/episodes`
+- `/internal/memory/index-status`
+- `/internal/memory/index-sync`
+- `/internal/memory/index-rebuild`
+- `/internal/session/state/{session_id}`
+- `/internal/session/turns/{session_id}`
+- `/internal/session/task-notebook/{task_id}`
+- `/internal/session/revisit`
+
+Agent authors should treat these as the canonical same-VM memory/session control surface. Shared memory search/write goes through `/internal/memory/*`; exact historical recovery and live continuity inspection go through `/internal/session/*`.
+
 ### 32.7 How Universal Tools Appear to the LLM
 
 The agent runtime exposes universal tools to the LLM as standard tool definitions in the tool-use API call. The LLM calls them like any other tool — it doesn't know they're "universal" vs "declared."
@@ -9138,6 +9548,7 @@ def build_tool_definitions(self) -> list[dict]:
 | `agents/orchestrator/store/data/task_ledger.db` | Orchestrator | Orchestrator (Task Planner) | Plans, plan steps, tasks, deferred checks (§31.1) |
 | `registry/registry.db` | Registry | Agents (write), Orchestrator (read) | Agent capabilities, intents |
 | `gateway/sessions.db` | Gateway | Session Manager | Conversation history, messages |
+| `gateway/routing_audit.db` | Gateway | Gateway routing layer | Durable inspection of final route decisions, classifier payloads, sticky-routing hits, overrides, and routing latency |
 | `gateway/credentials.db` | Gateway | Credential Manager | OAuth accounts, encrypted tokens, audit |
 | `gateway/usage.db` | Gateway | Usage Ledger | Append-only token/cost telemetry for direct LLM routes, model router, orchestrator, and agents |
 | `gateway/scheduler/scheduler.db` | Gateway | Scheduler | Cron definitions, heartbeat config, execution log |

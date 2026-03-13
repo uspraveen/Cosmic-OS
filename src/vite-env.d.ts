@@ -79,6 +79,7 @@ interface Window {
     getGatewayState: () => Promise<GatewaySocketState | null>
     requestGatewayResume: () => Promise<{ ok: boolean }>
     sendGatewayQuery: (payload: { content: string; conversationContext?: any[]; requestId?: string; routeOverride?: string }) => Promise<{ requestId: string }>
+    submitGatewayTaskInputReply: (payload: { inputRequestId: string; taskId: string; content: string }) => Promise<{ ok: boolean; requestId: string }>
     cancelGatewayResponse: (payload: { requestId?: string; taskId?: string }) => Promise<{ ok: boolean }>
     listGatewaySessions: () => Promise<{ sessions: any[] }>
     getGatewaySessionHistory: (sessionId: string) => Promise<{ session_id: string; messages: any[] }>

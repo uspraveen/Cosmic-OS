@@ -204,6 +204,25 @@ async def handle_<domain>_recall_session(self, task: TaskEnvelope) -> AgentResul
     )
 ```
 
+`<domain>.recall_session` is the preferred exact-recall path for that agent's own private history.
+Do not rely on broad semantic MemoryRead queries when you need exact rows from the agent's own
+`store/data/`.
+
+## Memory / Session Interoperability
+
+Different agents may manage private memory differently. The shared contract is the boundary:
+
+- `store/learnings.md` and `store/data/` are agent-private; their internal schema is agent-specific
+- shared retrievable memory goes through MemoryRead / MemoryWrite or explicit Gateway internal APIs,
+  never by reading or writing shared `memory/` files directly
+- use `<domain>.recall_session` for exact agent-private history
+- if the surrounding runtime exposes `/internal/session/*`, use those revisit/state paths when exact
+  prior turn/task/session context matters more than semantic similarity
+- keep large extracted/generated bodies in `runs/artifacts/<task_id>/` plus compact references
+  rather than stuffing them into shared memory or `learnings.md`
+- live session continuity is Gateway/session-owned; agents may keep local continuity in `store/data/`
+  but do not own the canonical daily session ledger
+
 ## Event Emission
 
 ### Progress Events
@@ -459,6 +478,14 @@ def maybe_update_learnings(self, task, result):
 The Session Manager syncs `store/learnings.md` to `memory/agent_notes/<agent_name>/learnings.md`
 and indexes it in Qdrant as a high-priority memory. All LLM backends benefit from agent learnings
 during context assembly.
+
+Write discipline for `store/learnings.md`:
+
+- add durable, reusable patterns and validated facts
+- avoid raw tool traces, temporary progress notes, and chain-of-thought
+- avoid copying large artifact bodies into `learnings.md`
+- if a task produced a large body worth revisiting later, keep the full body in
+  `runs/artifacts/<task_id>/` or agent-private storage and store only a compact reference
 
 ## Orchestrator-Side Guarantees (What Agents Can Rely On)
 

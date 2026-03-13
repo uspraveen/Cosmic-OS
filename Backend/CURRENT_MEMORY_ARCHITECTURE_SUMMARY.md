@@ -1200,6 +1200,13 @@ The spec says agents:
 
 This is how agent-private long-term memory becomes part of the shared retrieval layer once the full subagent runtime is active.
 
+**Write discipline for `learnings.md`:**
+
+- append only durable, re-usable patterns and validated facts
+- do not dump raw tool traces, temporary progress notes, or chain-of-thought
+- do not copy large artifact bodies into `learnings.md`
+- if a task produced a large body worth revisiting later, keep the full body under `runs/artifacts/<task_id>/` and store only a compact reference in the learnings/task-memory path
+
 ## 16. Agent-Managed Session Data
 
 Each agent manages its own domain-specific `store/data/` schema.
@@ -1536,6 +1543,66 @@ The architecture says:
 - Gateway is still the single integration surface for the rest of COSMIC
 - agents cannot import Gateway modules directly
 - therefore agents access memory through Gateway internal HTTP APIs, and Gateway proxies to `cosmic-memory` when enabled
+
+### 22.4 Agent / Subagent Implementation Contract
+
+Any new COSMIC agent or subagent built from the architecture should follow this exact memory model:
+
+1. **Private agent memory**
+   - `store/learnings.md` for durable private learnings
+   - `store/data/` for agent-owned structured history/state
+2. **Shared retrievable memory**
+   - access only through `MemoryRead` / `MemoryWrite`
+   - never read or write the shared `memory/` files directly
+3. **Live session continuity**
+   - owned by the Gateway/session layer, not by the agent
+   - includes active working set, compaction packet, carry-forward packet, and deterministic revisit
+4. **Exact prior context**
+   - use recall intents for agent-private history
+   - use task notebook / task replay for task continuity
+   - use `/internal/session/*` for exact session-level revisit
+   - do not rely on semantic search alone when exact historical reconstruction matters
+5. **Large output handling**
+   - store bulky content in `runs/artifacts/<task_id>/`
+   - write `artifact_pointer` memories instead of stuffing large bodies into prompt-visible memory
+6. **Shared memory write policy**
+   - write only high-signal durable knowledge
+   - never write raw chain-of-thought
+   - never write raw tool chatter or transient progress updates
+   - prefer `task_summary`, `agent_note`, `core_fact`, `user_data`, or `artifact_pointer`
+7. **Session/task isolation**
+   - the main daily session gets only user-visible outcomes
+   - deep task execution state stays in task notebooks, raw event ledgers, agent `store/data/`, and artifacts
+
+This contract is the intended default for agent generators and human-authored agents alike.
+
+### 22.5 Current Internal Memory / Session Surface
+
+The current Gateway exposes these internal routes as the canonical same-VM memory/session surface:
+
+- `/internal/memory/search`
+- `/internal/memory/active-search`
+- `/internal/memory/schema-context`
+- `/internal/memory/plan`
+- `/internal/memory/resolve-identity`
+- `/internal/memory/current-state`
+- `/internal/memory/temporal-facts`
+- `/internal/memory/memory-brief`
+- `/internal/memory/write`
+- `/internal/memory/core-facts`
+- `/internal/memory/episodes`
+- `/internal/memory/index-status`
+- `/internal/memory/index-sync`
+- `/internal/memory/index-rebuild`
+- `/internal/session/state/{session_id}`
+- `/internal/session/turns/{session_id}`
+- `/internal/session/task-notebook/{task_id}`
+- `/internal/session/revisit`
+
+Use these routes conceptually as follows:
+
+- `/internal/memory/*` for shared retrieval/write/index operations
+- `/internal/session/*` for deterministic continuity, state inspection, and exact historical revisit
 
 ## 23. Configuration
 

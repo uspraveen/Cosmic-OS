@@ -8,11 +8,82 @@ from typing import Any
 
 from .session_store import utcnow_iso
 
+_MAX_RAW_CLASSIFIER_OUTPUT_CHARS = 2000
+_MAX_CONTEXT_MESSAGES = 6
+_MAX_CONTEXT_TEXT_CHARS = 400
+
 
 def _json_dumps(value: Any) -> str | None:
     if value is None:
         return None
     return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+
+
+def _truncate_text(value: str, *, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    return value[: max_chars - 1] + "…"
+
+
+def _sanitize_context_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _truncate_text(value, max_chars=_MAX_CONTEXT_TEXT_CHARS)
+    if isinstance(value, list):
+        sanitized_items: list[Any] = []
+        for item in value[:6]:
+            sanitized_items.append(_sanitize_context_value(item))
+        return sanitized_items
+    if isinstance(value, dict):
+        sanitized_dict: dict[str, Any] = {}
+        for key in ("type", "text", "name", "content"):
+            item = value.get(key)
+            if item is not None:
+                sanitized_dict[key] = _sanitize_context_value(item)
+        return sanitized_dict
+    return value
+
+
+def _sanitize_conversation_context(
+    conversation_context: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]] | None:
+    if not conversation_context:
+        return None
+
+    sanitized: list[dict[str, Any]] = []
+    for message in conversation_context[-_MAX_CONTEXT_MESSAGES:]:
+        entry: dict[str, Any] = {}
+        role = message.get("role")
+        if isinstance(role, str):
+            entry["role"] = role
+        if "content" in message:
+            entry["content"] = _sanitize_context_value(message.get("content"))
+        if "channel" in message and isinstance(message.get("channel"), str):
+            entry["channel"] = message["channel"]
+        if entry:
+            sanitized.append(entry)
+    return sanitized or None
+
+
+def _sanitize_classifier_payload(
+    classifier_payload: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not classifier_payload:
+        return None
+
+    sanitized: dict[str, Any] = {}
+    for key in ("classification", "metrics", "classifier_model", "timestamp_unix_ms"):
+        value = classifier_payload.get(key)
+        if value is not None:
+            sanitized[key] = value
+
+    raw_classifier_output = classifier_payload.get("raw_classifier_output")
+    if raw_classifier_output is not None:
+        sanitized["raw_classifier_output"] = _truncate_text(
+            str(raw_classifier_output),
+            max_chars=_MAX_RAW_CLASSIFIER_OUTPUT_CHARS,
+        )
+
+    return sanitized or None
 
 
 class RoutingAuditStore:
@@ -137,8 +208,8 @@ class RoutingAuditStore:
                     dispatch_target,
                     confidence,
                     _json_dumps(signals),
-                    _json_dumps(conversation_context),
-                    _json_dumps(classifier_payload),
+                    _json_dumps(_sanitize_conversation_context(conversation_context)),
+                    _json_dumps(_sanitize_classifier_payload(classifier_payload)),
                     _json_dumps(classifier_metrics),
                     classifier_model,
                     classifier_latency_ms,

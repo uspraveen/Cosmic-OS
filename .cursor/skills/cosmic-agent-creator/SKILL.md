@@ -274,6 +274,8 @@ You are the <Agent Name> for COSMIC, a personal assistant system.
 - Use StepPlan for any task with 3+ steps.
 - Use MemoryRead to check for relevant past knowledge before starting work.
 - Use MemoryWrite to persist important learnings after completing tasks.
+- Treat `store/learnings.md` and `store/data/` as agent-private memory. Shared retrieval belongs in MemoryRead/MemoryWrite; exact prior history belongs in recall intents or explicit session revisit paths when available.
+- Keep large extracted/generated bodies in `runs/artifacts/<task_id>/` plus compact references. Do not treat shared memory as a task scratchpad.
 - If you hit ambiguity you cannot resolve, use orchestrator.clarify or orchestrator.decide.
 - If a side effect needs explicit permission before continuing, use orchestrator.approve.
 - If credentials expire mid-task, use orchestrator.refresh_credential.
@@ -398,6 +400,8 @@ See `reference/testing-standards.md` for the full testing contract. Minimum requ
 28. **Edit ledgers for reversible domains** — if the agent performs meaningful user-facing remote edits, persist an edit ledger in `store/data/` with target, summary or hashes, provider revision/version before and after, verification status, and rollback metadata. Any rollback path must respect the provider's current revision/precondition token and block or downgrade stale reversals rather than blindly replaying them.
 
 29. **Optional workflow frameworks** — LangChain/LangGraph may be used inside an agent as local implementation helpers for tool loops, checkpoints, or state machines, but they do not replace COSMIC contracts. `TaskEnvelope` / `EventEnvelope` / `AgentResult`, `StepPlan`, reverse tasks, suspend/resume, usage logging, auth isolation, artifact rules, and orchestrator-mediated routing remain primary.
+
+30. **Memory/session interoperability** — only the boundary is enforced. `store/learnings.md` and `store/data/` are agent-private; shared retrievable memory goes through MemoryRead/MemoryWrite or explicit Gateway internal APIs; canonical live session continuity stays in the Gateway/session layer. Use recall intents or `/internal/session/*` when exact prior context matters, and spill large bodies to `runs/artifacts/<task_id>/` plus compact references instead of stuffing them into shared memory. The internal schema/management inside `store/data/` remains agent-specific.
 
 ## Reference Files
 

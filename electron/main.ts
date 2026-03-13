@@ -717,6 +717,17 @@ app.whenReady().then(() => {
     )
   })
 
+  ipcMain.handle('gateway:submit-task-input-reply', async (_, payload: { inputRequestId?: string; taskId?: string; content?: string }) => {
+    if (!gatewayConnectionManager) {
+      throw new Error('Gateway connection manager is unavailable.')
+    }
+    return gatewayConnectionManager.submitTaskInputReply(
+      String(payload?.inputRequestId || ''),
+      String(payload?.taskId || ''),
+      String(payload?.content || ''),
+    )
+  })
+
   ipcMain.handle('gateway:request-resume', () => {
     gatewayConnectionManager?.requestResume()
     return { ok: true }

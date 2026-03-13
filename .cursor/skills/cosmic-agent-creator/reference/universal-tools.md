@@ -152,6 +152,7 @@ class StepPlan:
 ## MemoryRead: Shared Memory Access
 
 Queries the Gateway's memory retrieval system (Qdrant hybrid search) via internal HTTP.
+This is a **shared retrievable memory** tool, not a universal replay/session-state API.
 
 ```python
 class MemoryRead:
@@ -189,13 +190,20 @@ class MemoryRead:
 ### When to Use MemoryRead
 
 - Before starting research: check if relevant knowledge already exists
-- When the user references something from the past
 - When context from other agents' learnings would be useful
 - To avoid redundant work
+- When approximate semantic retrieval is acceptable
+
+Use something else when exactness matters:
+
+- use `<domain>.recall_session` against `store/data/` for exact agent-private history
+- use explicit `/internal/session/*` revisit/state routes when the surrounding runtime exposes them
+  and you need exact turn/task/session reconstruction
 
 ## MemoryWrite: Persist to Shared Memory
 
 Writes a new memory entry to the shared store (`.md` file + Qdrant vector index) via Gateway.
+This is for **high-signal durable shared memory**, not for task scratchpads or raw execution logs.
 
 ```python
 class MemoryWrite:
@@ -234,13 +242,54 @@ class MemoryWrite:
 - After discovering important facts the user would want remembered
 - After completing a significant task (persist the summary)
 - When learning user preferences or patterns
+- When storing compact references to large artifacts that may need retrieval later
 - Rate limited: max 50 writes per agent per hour
+
+Avoid using MemoryWrite for:
+
+- raw chain-of-thought
+- raw tool chatter or transient progress notes
+- large extracted/generated bodies that belong in `runs/artifacts/<task_id>/`
+- exact agent-private history that already lives in `store/data/`
 
 ### Deduplication
 
 MemoryWrite uses content-hash-based deduplication (SHA256 prefix + Redis SETNX).
 Writing the same content twice returns the original memory_id with `deduplicated: True`.
 No duplicate entries are created.
+
+## Memory / Session Boundary Rules
+
+Different agents may manage their private history differently. The interoperable boundary is:
+
+- `store/learnings.md` and `store/data/` are agent-private
+- shared retrievable memory goes through MemoryRead / MemoryWrite or explicit Gateway internal APIs
+- canonical live session continuity belongs to the Gateway/session layer, not the agent
+- large bodies should spill to `runs/artifacts/<task_id>/` plus compact references
+- agents must never read or write shared `memory/` files directly
+
+## Current Low-Level Memory / Session Surface (Reference)
+
+Normal generated-agent defaults:
+
+- `MemoryRead` -> `/internal/memory/search`
+- `MemoryWrite` -> `/internal/memory/write`
+- `<domain>.recall_session` -> exact agent-private history from `store/data/`
+
+Exact revisit / continuity paths when explicitly needed:
+
+- `/internal/session/state/{session_id}`
+- `/internal/session/turns/{session_id}`
+- `/internal/session/task-notebook/{task_id}`
+- `/internal/session/revisit`
+
+Infrastructure / admin routes that are not normal agent defaults:
+
+- `/internal/memory/index-status`
+- `/internal/memory/index-sync`
+- `/internal/memory/index-rebuild`
+- other specialized `/internal/memory/*` analysis/planning routes, when present in the surrounding
+  runtime
 
 ## Tool Injection (How It Works)
 

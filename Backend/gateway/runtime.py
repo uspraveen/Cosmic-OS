@@ -26,6 +26,11 @@ from .orchestrator_client import OrchestratorClient
 from .router_client import ModelRouterClient
 from .routing_audit_store import RoutingAuditStore
 from .scheduler_store import SchedulerStore
+from .session.compaction import build_compaction_prompts
+from .session.summary import (
+    build_rollover_summary_prompts,
+    session_summary_source_text,
+)
 from .session_store import SessionStore
 from shared import (
     SOURCE_PRIORITY_MAP,
@@ -1860,29 +1865,13 @@ class GatewayRuntime:
             else session_metadata.get("active_task_refs")
         )
 
-        system_prompt = (
-            "You are compacting a COSMIC live session into durable operational context.\n"
-            "Preserve only what helps the assistant continue the conversation intelligently.\n"
-            "Do not include raw chain-of-thought, raw tool payloads, or chatter.\n"
-            "Return concise Markdown using exactly these sections when relevant:\n"
-            "## Goal\n"
-            "## Active Workstreams\n"
-            "## Key Facts\n"
-            "## User Preferences\n"
-            "## Decisions Made\n"
-            "## Accomplished\n"
-            "## Files / Docs / Artifacts Touched\n"
-            "## Failures / Dead Ends\n"
-            "## Open Loops\n"
-            "## Next Best Actions"
-        )
-        user_prompt = (
-            f"Session ID: {session_id}\n\n"
-            f"Existing compacted summary:\n{existing_summary or '[none]'}\n\n"
-            f"Compactable turn ledger:\n{chr(10).join(turn_lines) or '[none]'}\n\n"
-            f"Older raw conversation slice:\n{chr(10).join(older_lines) or '[none]'}\n\n"
-            f"Recent window retained uncompressed count: {len(recent_history)}\n"
-            f"Active task refs: {', '.join(self._normalize_string_list(current_tasks)) or '[none]'}\n"
+        system_prompt, user_prompt = build_compaction_prompts(
+            session_id=session_id,
+            existing_summary=existing_summary,
+            turn_lines=turn_lines,
+            older_lines=older_lines,
+            recent_window_count=len(recent_history),
+            current_tasks=self._normalize_string_list(current_tasks),
         )
         summary_text, _usage, _stop_reason = await self.haiku_adapter.generate_text(
             system_prompt=system_prompt,
@@ -3376,23 +3365,10 @@ class GatewayRuntime:
             return None
 
         transcript_source = self._session_summary_source_text(transcript_markdown)
-        system_prompt = (
-            "You are summarizing a completed COSMIC daily session for long-term memory.\n"
-            "Capture durable context the assistant should remember tomorrow.\n"
-            "Prioritize stable user preferences, notable facts learned, important decisions, current projects, open loops, and concrete follow-ups.\n"
-            "Exclude filler chatter, acknowledgements, and repeated back-and-forth.\n"
-            "Write concise Markdown with these sections when relevant:\n"
-            "## Summary\n"
-            "## Durable Facts\n"
-            "## Open Loops\n"
-            "## Follow-ups\n"
-            "Do not mention hidden system internals or implementation details."
-        )
-        user_message = (
-            f"Session ID: {session_id}\n"
-            f"Message count: {len(history)}\n\n"
-            "Transcript:\n\n"
-            f"{transcript_source}"
+        system_prompt, user_message = build_rollover_summary_prompts(
+            session_id=session_id,
+            message_count=len(history),
+            transcript_source=transcript_source,
         )
         summary_text, _usage, _stop_reason = await self.haiku_adapter.generate_text(
             system_prompt=system_prompt,
@@ -3403,14 +3379,10 @@ class GatewayRuntime:
         return normalized or None
 
     def _session_summary_source_text(self, transcript_markdown: str) -> str:
-        normalized = transcript_markdown.strip()
-        if len(normalized) <= SESSION_SUMMARY_SOURCE_CHAR_LIMIT:
-            return normalized
-
-        half_limit = SESSION_SUMMARY_SOURCE_CHAR_LIMIT // 2
-        head = normalized[:half_limit].rstrip()
-        tail = normalized[-half_limit:].lstrip()
-        return head + "\n\n[... transcript truncated for summarization ...]\n\n" + tail
+        return session_summary_source_text(
+            transcript_markdown,
+            char_limit=SESSION_SUMMARY_SOURCE_CHAR_LIMIT,
+        )
 
     def _build_session_summary_memory_payload(
         self,

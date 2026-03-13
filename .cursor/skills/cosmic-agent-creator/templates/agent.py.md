@@ -172,6 +172,11 @@ class <AgentClass>(AgentRuntime):
 
         # ── Check memory for relevant context ──────────────────
         # memories = await self.memory_read.search(query, max_results=5)
+        # Use MemoryRead for shared retrievable memory, not exact replay.
+        # For exact agent-private history, prefer <domain>.recall_session
+        # against store/data/. If the surrounding runtime exposes
+        # /internal/session/* and exact prior turn/task context matters, use
+        # that explicit revisit path instead of broad semantic search.
 
         # ── Use credentials if needed (auth_requirements) ──────
         # if self.auth:
@@ -235,6 +240,11 @@ class <AgentClass>(AgentRuntime):
         #     memory_type='agent_note',
         #     tags=['<domain>', 'learning'],
         # )
+        # Keep shared-memory writes and store/learnings.md high-signal and
+        # durable. Do not dump raw tool chatter, temporary progress notes,
+        # chain-of-thought, or large bodies here. If the task produced a large
+        # body worth revisiting, keep the full content in
+        # runs/artifacts/<task_id>/ and store only a compact reference.
 
         # ── Save to agent session data ─────────────────────────
         self.db.execute('''
@@ -333,6 +343,9 @@ class <AgentClass>(AgentRuntime):
         #     with self.learnings_path.open('a') as f:
         #         f.write(f'\n## {utcnow().date()}\n')
         #         f.write(f'- {self._extract_insight(result)}\n')
+        # Keep this file agent-private and durable: reusable patterns,
+        # validated facts, stable preferences. Avoid raw traces and large
+        # bodies; those belong in artifacts or store/data/.
         pass
 ```
 

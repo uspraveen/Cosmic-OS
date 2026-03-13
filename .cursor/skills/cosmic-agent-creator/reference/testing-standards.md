@@ -360,6 +360,19 @@ If the agent mutates provider-owned remote state:
 - if the agent supports edit ledgers or rollback, verify revision/version before/after and
   verification metadata are recorded and stale rollback is blocked
 
+### 9. Memory / Session Boundary Tests (Conditional)
+
+If the agent uses private or shared memory beyond trivial reads:
+
+- verify exact agent-private recall comes from `store/data/` / `<domain>.recall_session`, not broad
+  semantic memory search
+- verify MemoryWrite is used only for durable high-signal content, not raw tool chatter,
+  chain-of-thought, or temporary progress notes
+- verify large extracted/generated bodies spill to `runs/artifacts/<task_id>/` plus compact
+  references instead of being dumped into shared memory or `store/learnings.md`
+- verify credentials and other sensitive runtime-only data never appear in shared memory writes,
+  `store/learnings.md`, or artifact-pointer content
+
 ## Shared Fixtures (conftest.py)
 
 ```python

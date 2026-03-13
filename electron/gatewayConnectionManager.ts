@@ -262,6 +262,24 @@ export class GatewayConnectionManager {
     return effectiveRequestId
   }
 
+  submitTaskInputReply(inputRequestId: string, taskId: string, content: string) {
+    const normalizedInputRequestId = String(inputRequestId || '').trim()
+    const normalizedTaskId = String(taskId || '').trim()
+    const normalizedContent = String(content || '').trim()
+    if (!normalizedInputRequestId || !normalizedTaskId || !normalizedContent) {
+      throw new Error('inputRequestId, taskId, and content are required to reply to a task.')
+    }
+    const requestId = `task_input_reply_${crypto.randomUUID()}`
+    this.sendJson({
+      type: 'task.input_reply',
+      request_id: requestId,
+      input_request_id: normalizedInputRequestId,
+      task_id: normalizedTaskId,
+      content: normalizedContent,
+    })
+    return { ok: true, requestId }
+  }
+
   cancelResponse(requestId?: string, taskId?: string) {
     const normalizedRequestId = String(requestId || '').trim()
     const normalizedTaskId = String(taskId || '').trim()
