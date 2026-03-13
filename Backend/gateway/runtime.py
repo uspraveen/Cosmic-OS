@@ -13,19 +13,19 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .adapters import HaikuAdapter, PerplexityAdapter
-from .artifact_store import ArtifactStore
+from .artifacts.store import ArtifactStore
 from .channels.base import ChannelUnavailableError, PermanentDeliveryError, RetryableDeliveryError
 from .channels.desktop import DesktopAdapter
 from .channels.registry import ChannelAdapterRegistry
 from .channels.telegram import TelegramAdapter, TelegramConfig
 from .channels.whatsapp import WhatsAppAdapter, WhatsAppConfig
 from .config import GatewayConfig
-from .delivery_queue_store import DeliveryQueueStore, utcnow_iso
-from .memory_client import CosmicMemoryClient, MemoryPromptContext
+from .delivery.queue_store import DeliveryQueueStore, utcnow_iso
+from .memory.client import CosmicMemoryClient, MemoryPromptContext
 from .orchestrator_client import OrchestratorClient
-from .router_client import ModelRouterClient
-from .routing_audit_store import RoutingAuditStore
-from .scheduler_store import SchedulerStore
+from .routing.router_client import ModelRouterClient
+from .routing.audit_store import RoutingAuditStore
+from .scheduler.store import SchedulerStore
 from .session.compaction import build_compaction_prompts
 from .session.summary import (
     build_rollover_summary_prompts,

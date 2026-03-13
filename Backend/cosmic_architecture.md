@@ -2088,11 +2088,13 @@ cosmic-agents/
 │
 ├── gateway/                    # FastAPI gateway service
 │   ├── main.py                 # Gateway entry point + WebSocket handler
-│   ├── routes/                 # REST endpoint modules
 │   ├── circuit_breaker.py      # Per-API circuit breaker for external LLM APIs (§2.6a)
 │   ├── adapters/               # Direct LLM adapters (Haiku, Perplexity)
 │   │   ├── haiku.py
 │   │   └── perplexity.py
+│   ├── artifacts/              # Attachment/artifact persistence helpers
+│   │   ├── __init__.py
+│   │   └── store.py            # Canonical ArtifactStore implementation
 │   ├── channels/               # Channel Adapter Registry (see §27)
 │   │   ├── base.py             # ChannelAdapter base class (interface contract)
 │   │   ├── registry.py         # Adapter registry + channel → session routing
@@ -2103,16 +2105,30 @@ cosmic-agents/
 │   │   ├── slack.py            # Slack adapter (Bolt / Events API)
 │   │   ├── discord.py          # Discord adapter (discord.py)
 │   │   └── cli.py              # CLI agent channel adapter (internal pipe)
+│   ├── delivery/               # Durable channel-delivery queue helpers
+│   │   ├── __init__.py
+│   │   └── queue_store.py      # Canonical DeliveryQueueStore implementation
 │   ├── credentials/            # Credential Manager module (see §22)
 │   │   ├── manager.py          # Core credential logic (resolve, refresh, revoke)
 │   │   ├── oauth.py            # OAuth PKCE flow handlers per provider
 │   │   ├── providers.py        # Provider adapter registry (Google, GitHub, etc.)
 │   │   ├── encryption.py       # Token encryption/decryption (Fernet envelope)
 │   │   └── routes.py           # OAuth + internal credential API routes
+│   ├── memory/                 # Internal cosmic-memory integration surface
+│   │   ├── __init__.py
+│   │   ├── client.py           # Canonical CosmicMemoryClient implementation
+│   │   └── routes.py           # Internal memory/session proxy routes
+│   ├── prompts/                # READ-ONLY runtime prompt assets
+│   │   ├── session.py
+│   │   ├── session_compaction_system.md
+│   │   └── session_rollover_summary_system.md
+│   ├── routing/                # Routing helpers / audit storage
+│   │   ├── __init__.py
+│   │   ├── audit_store.py      # Durable inspection log for final routing decisions (§3.4b)
+│   │   └── router_client.py    # Internal model-router client
 │   ├── scheduler/              # Scheduler module — Crons + Heartbeats (see §25)
-│   │   ├── manager.py          # Core scheduler logic (fire, check_due, CRUD)
-│   │   ├── polling.py          # Polling loop: check due jobs, fire TaskEnvelopes
-│   │   ├── routes.py           # Internal API routes (/internal/scheduler/*)
+│   │   ├── __init__.py
+│   │   ├── store.py            # Canonical SchedulerStore implementation
 │   │   └── scheduler.db        # Cron definitions + heartbeat config (SQLite)
 │   ├── webhooks/               # Webhook Handler module (see §26)
 │   │   ├── handler.py          # Receive, verify, convert to TaskEnvelope
@@ -2123,19 +2139,21 @@ cosmic-agents/
 │   │   ├── engine.py           # Hook registry, lifecycle event dispatcher
 │   │   └── definitions.py     # Built-in hook definitions (startup, shutdown, session_reset, etc.)
 │   ├── session/                # Session Manager module (see §23)
-│   │   ├── manager.py          # Core session logic (assemble context, prune, compact)
-│   │   ├── memory_retriever.py # Hybrid retrieval (Qdrant dense + sparse vectors, RRF fusion), ranking
-│   │   ├── memory_sync.py     # Startup consistency check + full rebuild (§23.5a)
 │   │   ├── compaction.py       # Conversation compaction logic (summarization)
-│   │   ├── transcript_writer.py # Derived append-only daily session transcripts (.md, non-canonical)
-│   │   ├── memory_writer.py    # Write memories to .md files + embed into Qdrant
-│   │   └── response_processor.py # LLMStreamProcessor: strip <awaiting_reply/> tags, set flags (§3.8)
+│   │   ├── summary.py          # Daily rollover summarization helpers
+│   │   └── __init__.py
 │   ├── user_input.py           # Task input relay: consume user_input:requests, publish replies (§3.12)
-│   ├── usage.py                # Usage Ledger write/query helpers (§3.4a)
-│   ├── sessions.py             # Session storage (SQLite)
+│   ├── artifact_store.py       # Compatibility shim -> gateway/artifacts/store.py
+│   ├── delivery_queue_store.py # Compatibility shim -> gateway/delivery/queue_store.py
+│   ├── memory_client.py        # Compatibility shim -> gateway/memory/client.py
+│   ├── memory_routes.py        # Compatibility shim -> gateway/memory/routes.py
+│   ├── router_client.py        # Compatibility shim -> gateway/routing/router_client.py
+│   ├── routing_audit_store.py  # Compatibility shim -> gateway/routing/audit_store.py
+│   ├── scheduler_store.py      # Compatibility shim -> gateway/scheduler/store.py
 │   ├── sessions.db             # Session + message storage
-│   ├── routing_audit_store.py  # Durable inspection log for final routing decisions (§3.4b)
 │   ├── routing_audit.db        # Route decision audit store (SQLite)
+│   ├── artifacts.db            # Inbound attachment metadata store (SQLite)
+│   ├── delivery_queue.db       # Durable user-visible delivery queue (SQLite)
 │   ├── credentials.db          # Credential store (accounts, tokens, audit — see §22)
 │   └── usage.db                # Token/cost telemetry ledger (SQLite)
 │

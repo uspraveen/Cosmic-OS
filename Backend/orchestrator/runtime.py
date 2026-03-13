@@ -16,7 +16,7 @@ from gateway.adapters.response_processor import normalize_conversation_history
 from shared import TaskEnvelope, create_redis_client, ensure_stream_group, parse_stream_payload, verify_task_envelope
 
 from .config import OrchestratorConfig
-from .ledger import TaskLedger
+from .store.ledger import TaskLedger
 from .prompts import build_thin_orchestrator_system_prompt
 
 

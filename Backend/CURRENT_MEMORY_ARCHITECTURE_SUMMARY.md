@@ -1107,7 +1107,17 @@ Cosmic-OS/Backend/
 │   ├── delivery_queue.db
 │   ├── routing_audit.db
 │   ├── artifacts.db
-│   └── memory_client.py
+│   ├── memory/
+│   │   ├── client.py
+│   │   └── routes.py
+│   ├── session/
+│   │   ├── compaction.py
+│   │   └── summary.py
+│   ├── prompts/
+│   │   ├── session.py
+│   │   ├── session_compaction_system.md
+│   │   └── session_rollover_summary_system.md
+│   └── memory_client.py      # compatibility shim -> gateway/memory/client.py
 ├── logs/
 │   ├── sessions/
 │   └── events/
@@ -1603,6 +1613,11 @@ Use these routes conceptually as follows:
 
 - `/internal/memory/*` for shared retrieval/write/index operations
 - `/internal/session/*` for deterministic continuity, state inspection, and exact historical revisit
+
+Implementation note:
+
+- The canonical Gateway memory package now lives under `gateway/memory/`.
+- Legacy flat imports such as `gateway/memory_client.py` and `gateway/memory_routes.py` remain as compatibility shims so older imports do not break while the package structure converges on the architecture.
 
 ## 23. Configuration
 

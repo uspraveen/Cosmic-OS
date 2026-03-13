@@ -7,7 +7,7 @@ import uvicorn
 
 from .channels.routes import router as channel_router
 from .config import GatewayConfig
-from .memory_routes import router as memory_router
+from .memory.routes import router as memory_router
 from .runtime import GatewayRuntime
 
 
