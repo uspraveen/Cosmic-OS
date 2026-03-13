@@ -37,6 +37,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from shared import lookup_model_spec
 
 load_dotenv(Path(__file__).with_name("model_router.env"))
 load_dotenv()
@@ -76,7 +77,12 @@ def env_float(name: str, default: float) -> float:
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 CLASSIFIER_MODEL = os.getenv("CLASSIFIER_MODEL", "openai/gpt-oss-20b")
-GROQ_API_BASE = "https://api.groq.com/openai/v1"
+CLASSIFIER_SPEC = lookup_model_spec("groq", CLASSIFIER_MODEL)
+CLASSIFIER_BASE_URL = (
+    os.getenv("CLASSIFIER_BASE_URL", "").strip()
+    or (CLASSIFIER_SPEC.base_url if CLASSIFIER_SPEC is not None else "")
+    or "https://api.groq.com/openai/v1"
+)
 SERVER_HOST = os.getenv("MODEL_ROUTER_HOST", "0.0.0.0")
 SERVER_PORT = env_int("MODEL_ROUTER_PORT", 8742)
 HTTP2_ENABLED = env_bool("HTTP2_ENABLED", True)
@@ -455,7 +461,7 @@ async def prewarm_connection() -> float:
     start = now()
     try:
         response = await _http_client.post(
-            f"{GROQ_API_BASE}/chat/completions",
+            f"{CLASSIFIER_BASE_URL}/chat/completions",
             json={
                 "model": CLASSIFIER_MODEL,
                 "messages": [{"role": "user", "content": "hi"}],
@@ -494,7 +500,7 @@ async def classify_async(
 
     start = now()
     response = await _http_client.post(
-        f"{GROQ_API_BASE}/chat/completions",
+        f"{CLASSIFIER_BASE_URL}/chat/completions",
         json={
             "model": CLASSIFIER_MODEL,
             "messages": build_messages(user_text, conversation_context, memory_context),
@@ -532,6 +538,7 @@ def readiness_payload() -> Tuple[bool, Dict[str, Any]]:
         "connection_warmed": _connection_warmed,
         "warmup_latency_ms": _warmup_latency_ms,
         "classifier_model": CLASSIFIER_MODEL,
+        "classifier_base_url": CLASSIFIER_BASE_URL,
     }
 
 
@@ -568,6 +575,7 @@ def create_app() -> FastAPI:
             "connection_warmed": _connection_warmed,
             "warmup_latency_ms": _warmup_latency_ms,
             "classifier_model": CLASSIFIER_MODEL,
+            "classifier_base_url": CLASSIFIER_BASE_URL,
         }
 
     @app.get("/health/ready")

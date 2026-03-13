@@ -964,9 +964,10 @@ async def test_session_compaction_only_summarizes_newly_eligible_turns(tmp_path,
         )
 
     runtime.haiku_adapter.generate_text = fake_generate_text
-    monkeypatch.setattr("gateway.runtime.COMPACTION_TRIGGER_CHAR_THRESHOLD", 1)
     monkeypatch.setattr("gateway.runtime.COMPACTION_RECENT_WINDOW_MESSAGES", 2)
     monkeypatch.setattr("gateway.runtime.COMPACTION_RAW_MESSAGE_CHAR_LIMIT", 2000)
+    monkeypatch.setattr(runtime, "_compaction_trigger_threshold_tokens", lambda: 1)
+    monkeypatch.setattr(runtime, "_conversation_context_budget_tokens", lambda: 100_000)
 
     def add_turn(index: int) -> None:
         request_id = f"req_compaction_{index}"

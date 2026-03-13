@@ -9,6 +9,8 @@ from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from shared import estimate_text_tokens
+
 
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -344,24 +346,33 @@ class SessionStore:
         self,
         session_id: str,
         *,
-        max_messages: int = 40,
-        max_chars: int = 48000,
+        max_messages: int | None = 40,
+        max_chars: int | None = 48000,
+        max_approx_tokens: int | None = None,
     ) -> list[dict[str, Any]]:
         history = self.get_history(session_id)
         if not history:
             return []
 
-        window = history[-max(1, max_messages) :]
+        if max_messages is None:
+            window = history
+        else:
+            window = history[-max(1, max_messages) :]
         selected: list[dict[str, Any]] = []
         consumed_chars = 0
+        consumed_tokens = 0
         for item in reversed(window):
             content = str(item.get("content") or "")
             if not content:
                 continue
             content_len = len(content)
-            if selected and consumed_chars + content_len > max_chars:
+            content_tokens = estimate_text_tokens(content)
+            if selected and max_chars is not None and consumed_chars + content_len > max_chars:
+                break
+            if selected and max_approx_tokens is not None and consumed_tokens + content_tokens > max_approx_tokens:
                 break
             consumed_chars += content_len
+            consumed_tokens += content_tokens
             selected.append(item)
         selected_history = list(reversed(selected))
         session_record = self.get_session_record(session_id)
@@ -369,11 +380,30 @@ class SessionStore:
         if isinstance(session_record, dict):
             compacted_summary = str(session_record.get("compacted_summary") or "").strip()
         if compacted_summary:
+            summary_content = f"[Compacted session summary]\n\n{compacted_summary}"
+            summary_chars = len(summary_content)
+            summary_tokens = estimate_text_tokens(summary_content)
+            while selected_history:
+                next_content = str(selected_history[0].get("content") or "")
+                would_exceed_chars = (
+                    max_chars is not None and consumed_chars + summary_chars > max_chars
+                )
+                would_exceed_tokens = (
+                    max_approx_tokens is not None and consumed_tokens + summary_tokens > max_approx_tokens
+                )
+                if not would_exceed_chars and not would_exceed_tokens:
+                    break
+                removed = selected_history.pop(0)
+                removed_content = str(removed.get("content") or "")
+                consumed_chars = max(0, consumed_chars - len(removed_content))
+                consumed_tokens = max(0, consumed_tokens - estimate_text_tokens(removed_content))
+            consumed_chars += summary_chars
+            consumed_tokens += summary_tokens
             selected_history = [
                 {
                     "message_id": f"compacted_{session_id}",
                     "role": "assistant",
-                    "content": f"[Compacted session summary]\n\n{compacted_summary}",
+                    "content": summary_content,
                     "route": "system",
                     "request_id": None,
                     "awaiting_reply": False,

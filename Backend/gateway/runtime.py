@@ -33,11 +33,14 @@ from .session.summary import (
 )
 from .session_store import SessionStore
 from shared import (
+    ModelSpec,
     SOURCE_PRIORITY_MAP,
     TaskEnvelope,
     create_redis_client,
+    estimate_text_tokens,
     ensure_stream_group,
     generate_task_id,
+    lookup_model_spec,
     parse_stream_payload,
     sign_task_envelope,
     utcnow,
@@ -51,9 +54,12 @@ CHANNEL_WELCOME_MESSAGES = {
 }
 MEMORY_HEALTH_REFRESH_SEC = 30.0
 SESSION_SUMMARY_SOURCE_CHAR_LIMIT = 60_000
-COMPACTION_TRIGGER_CHAR_THRESHOLD = 33_600
 COMPACTION_RECENT_WINDOW_MESSAGES = 12
 COMPACTION_RAW_MESSAGE_CHAR_LIMIT = 24_000
+COMPACTION_TRIGGER_FRACTION = 0.70
+CONTEXT_SYSTEM_PROMPT_TOKEN_BUDGET = 2_000
+CONTEXT_MIN_CONVERSATION_BUDGET_TOKENS = 8_000
+DEFAULT_CONTEXT_WINDOW_TOKENS = 48_000
 SYSTEM_CRON_DAILY_ROLLOVER = "system.daily_rollover"
 TURN_LEDGER_WINDOW_SIZE = 10
 TASK_NOTEBOOK_WINDOW_SIZE = 5
@@ -594,7 +600,7 @@ class GatewayRuntime:
         if channel_adapter is None:
             raise ValueError(f"No adapter registered for channel: {channel!r}")
 
-        history = self.session_store.get_pruned_history(session_id)
+        history = self._get_model_visible_history(session_id)
         memory_context = self._safe_text(request_record.get("memory_context"))
         active_request = self.active_requests.get(request_id)
 
@@ -1755,11 +1761,80 @@ class GatewayRuntime:
         )
         return working_set
 
+    def _compaction_target_model_specs(self) -> list[ModelSpec]:
+        specs: list[ModelSpec] = []
+        candidates = [
+            ("anthropic", self.config.haiku_model),
+            ("anthropic", "claude-opus-4-6"),
+            ("perplexity", self.config.perplexity_model),
+        ]
+        seen: set[str] = set()
+        for provider, model in candidates:
+            spec = lookup_model_spec(provider, model)
+            if spec is None or spec.key in seen or spec.status != "active":
+                continue
+            seen.add(spec.key)
+            specs.append(spec)
+        return specs
+
+    def _conversation_context_budget_tokens(self) -> int:
+        specs = self._compaction_target_model_specs()
+        finite_contexts = [
+            int(spec.context_window_tokens)
+            for spec in specs
+            if isinstance(spec.context_window_tokens, int) and spec.context_window_tokens > 0
+        ]
+        if not finite_contexts:
+            return DEFAULT_CONTEXT_WINDOW_TOKENS
+        context_window = min(finite_contexts)
+        reserve_tokens = max(
+            (
+                int(spec.recommended_headroom_reserve_tokens)
+                for spec in specs
+                if spec.context_window_tokens
+            ),
+            default=8_000,
+        )
+        budget = (
+            context_window
+            - CONTEXT_SYSTEM_PROMPT_TOKEN_BUDGET
+            - self.config.cosmic_memory_passive_token_budget
+            - reserve_tokens
+        )
+        return max(CONTEXT_MIN_CONVERSATION_BUDGET_TOKENS, budget)
+
+    def _compaction_trigger_threshold_tokens(self) -> int:
+        return max(
+            1_000,
+            int(self._conversation_context_budget_tokens() * COMPACTION_TRIGGER_FRACTION),
+        )
+
+    def _get_model_visible_history(self, session_id: str) -> list[dict[str, Any]]:
+        return self.session_store.get_pruned_history(
+            session_id,
+            max_messages=None,
+            max_chars=None,
+            max_approx_tokens=self._conversation_context_budget_tokens(),
+        )
+
+    def _estimate_history_tokens(self, history: list[dict[str, Any]]) -> int:
+        total = 0
+        for item in history:
+            total += estimate_text_tokens(self._safe_text(item.get("content")))
+            total += 4
+        return total
+
     async def _maybe_compact_session(self, session_id: str) -> None:
         async with self._session_compaction_lock:
+            model_visible_history = self._get_model_visible_history(session_id)
+            if not model_visible_history:
+                return
+            model_visible_tokens = self._estimate_history_tokens(model_visible_history)
+            if model_visible_tokens < self._compaction_trigger_threshold_tokens():
+                return
+
             history = self.session_store.get_history(session_id)
-            total_chars = sum(len(str(item.get("content") or "")) for item in history)
-            if total_chars < COMPACTION_TRIGGER_CHAR_THRESHOLD:
+            if not history:
                 return
             if len(history) <= COMPACTION_RECENT_WINDOW_MESSAGES:
                 return

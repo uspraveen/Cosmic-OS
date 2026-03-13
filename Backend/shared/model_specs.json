@@ -1,0 +1,117 @@
+{
+  "version": 1,
+  "models": {
+    "anthropic:claude-haiku-4-5": {
+      "provider": "anthropic",
+      "model": "claude-haiku-4-5",
+      "sdk": "anthropic",
+      "base_url": "https://api.anthropic.com/v1",
+      "usage_kind": "messages",
+      "context_window_tokens": 200000,
+      "max_output_tokens": null,
+      "recommended_headroom_reserve_tokens": 8000,
+      "pricing": {
+        "input_per_1m_usd": null,
+        "cached_input_per_1m_usd": null,
+        "output_per_1m_usd": null
+      },
+      "capabilities": {
+        "supports_cached_input_tokens": false,
+        "supports_reasoning_tokens": false,
+        "supports_streaming": true
+      },
+      "token_field_map": {
+        "prompt_tokens": ["input_tokens", "prompt_tokens"],
+        "completion_tokens": ["output_tokens", "completion_tokens"],
+        "total_tokens": ["total_tokens"],
+        "cached_tokens": ["cache_read_input_tokens", "cached_tokens"],
+        "reasoning_tokens": ["reasoning_tokens"]
+      },
+      "status": "active"
+    },
+    "anthropic:claude-opus-4-6": {
+      "provider": "anthropic",
+      "model": "claude-opus-4-6",
+      "sdk": "anthropic",
+      "base_url": "https://api.anthropic.com/v1",
+      "usage_kind": "messages",
+      "context_window_tokens": 200000,
+      "max_output_tokens": 128000,
+      "recommended_headroom_reserve_tokens": 12000,
+      "pricing": {
+        "input_per_1m_usd": null,
+        "cached_input_per_1m_usd": null,
+        "output_per_1m_usd": null
+      },
+      "capabilities": {
+        "supports_cached_input_tokens": true,
+        "supports_reasoning_tokens": true,
+        "supports_streaming": true
+      },
+      "token_field_map": {
+        "prompt_tokens": ["input_tokens", "prompt_tokens"],
+        "completion_tokens": ["output_tokens", "completion_tokens"],
+        "total_tokens": ["total_tokens"],
+        "cached_tokens": ["cache_read_input_tokens", "cached_tokens"],
+        "reasoning_tokens": ["reasoning_tokens"]
+      },
+      "status": "active"
+    },
+    "perplexity:sonar": {
+      "provider": "perplexity",
+      "model": "sonar",
+      "sdk": "openai_compatible",
+      "base_url": "https://api.perplexity.ai",
+      "usage_kind": "chat_completion",
+      "context_window_tokens": null,
+      "max_output_tokens": null,
+      "recommended_headroom_reserve_tokens": 0,
+      "pricing": {
+        "input_per_1m_usd": null,
+        "cached_input_per_1m_usd": null,
+        "output_per_1m_usd": null
+      },
+      "capabilities": {
+        "supports_cached_input_tokens": false,
+        "supports_reasoning_tokens": false,
+        "supports_streaming": true
+      },
+      "token_field_map": {
+        "prompt_tokens": ["prompt_tokens", "input_tokens"],
+        "completion_tokens": ["completion_tokens", "output_tokens"],
+        "total_tokens": ["total_tokens"],
+        "cached_tokens": [],
+        "reasoning_tokens": []
+      },
+      "status": "active"
+    },
+    "groq:openai/gpt-oss-20b": {
+      "provider": "groq",
+      "model": "openai/gpt-oss-20b",
+      "sdk": "openai_compatible",
+      "base_url": "https://api.groq.com/openai/v1",
+      "usage_kind": "classifier",
+      "context_window_tokens": null,
+      "max_output_tokens": null,
+      "recommended_headroom_reserve_tokens": 0,
+      "pricing": {
+        "input_per_1m_usd": null,
+        "cached_input_per_1m_usd": null,
+        "output_per_1m_usd": null
+      },
+      "capabilities": {
+        "supports_cached_input_tokens": false,
+        "supports_reasoning_tokens": false,
+        "supports_streaming": false
+      },
+      "token_field_map": {
+        "prompt_tokens": ["prompt_tokens", "input_tokens"],
+        "completion_tokens": ["completion_tokens", "output_tokens"],
+        "total_tokens": ["total_tokens"],
+        "cached_tokens": [],
+        "reasoning_tokens": []
+      },
+      "status": "active"
+    }
+  }
+}
