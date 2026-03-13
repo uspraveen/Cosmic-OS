@@ -1529,6 +1529,7 @@ export default function App() {
       ['--task-rail-top' as string]: `${taskRailLayout.top}px`,
     } as React.CSSProperties)
     : undefined
+  const hasMultiplePendingTaskInputs = orderedPendingTaskInputs.length > 1
 
   return (
     <>
@@ -1677,30 +1678,32 @@ export default function App() {
                       </div>
 
                       {pendingTaskCount > 0 && selectedTaskInput ? (
-                        <div className="task-hub-body">
-                          <div className="task-list-pane">
-                            <div className="task-list">
-                              {orderedPendingTaskInputs.map((taskInput) => (
-                                <button
-                                  key={taskInput.inputRequestId}
-                                  type="button"
-                                  className={`task-list-item ${selectedTaskInput.inputRequestId === taskInput.inputRequestId ? 'active' : ''}`}
-                                  onClick={() => setSelectedTaskInputId(taskInput.inputRequestId)}
-                                >
-                                  <div className="task-list-item-topline">
-                                    <span className="task-card-badge">Awaiting input</span>
-                                    <span className="task-card-meta">{taskInput.taskId}</span>
-                                  </div>
-                                  <div className="task-list-item-question">{taskInput.question}</div>
-                                  <div className="task-list-item-meta">
-                                    {taskInput.options.length > 0
-                                      ? `${taskInput.options.length} quick choice${taskInput.options.length === 1 ? '' : 's'}`
-                                      : 'Freeform reply required'}
-                                  </div>
-                                </button>
-                              ))}
+                        <div className={`task-hub-body ${hasMultiplePendingTaskInputs ? '' : 'single'}`}>
+                          {hasMultiplePendingTaskInputs && (
+                            <div className="task-list-pane">
+                              <div className="task-list">
+                                {orderedPendingTaskInputs.map((taskInput) => (
+                                  <button
+                                    key={taskInput.inputRequestId}
+                                    type="button"
+                                    className={`task-list-item ${selectedTaskInput.inputRequestId === taskInput.inputRequestId ? 'active' : ''}`}
+                                    onClick={() => setSelectedTaskInputId(taskInput.inputRequestId)}
+                                  >
+                                    <div className="task-list-item-label-row">
+                                      <span className="task-list-item-label">Opus task</span>
+                                      <span className="task-list-item-status">
+                                        {taskInput.options.length > 0
+                                          ? `${taskInput.options.length} choice${taskInput.options.length === 1 ? '' : 's'}`
+                                          : 'Reply needed'}
+                                      </span>
+                                    </div>
+                                    <div className="task-list-item-question">{taskInput.question}</div>
+                                    <div className="task-list-item-meta">{taskInput.taskId}</div>
+                                  </button>
+                                ))}
+                              </div>
                             </div>
-                          </div>
+                          )}
 
                           <div className="task-detail-pane">
                             {(() => {
@@ -1716,6 +1719,9 @@ export default function App() {
                                     <span className="task-card-meta">{taskInput.taskId}</span>
                                   </div>
                                   <div className="task-card-question task-detail-question">{taskInput.question}</div>
+                                  <div className="task-detail-copy">
+                                    Choose a quick option or send a custom reply to resume this task without disturbing your current conversation.
+                                  </div>
                                   {taskInput.options.length > 0 && (
                                     <div className="task-card-options">
                                       {taskInput.options.map((option) => (
