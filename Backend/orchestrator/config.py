@@ -47,6 +47,12 @@ class OrchestratorConfig:
     task_input_replies_stream: str = "user_input:replies"
     task_input_orchestrator_group: str = "orchestrator"
     task_ledger_db_path: Path = BACKEND_ROOT / "agents" / "orchestrator" / "store" / "data" / "task_ledger.db"
+    # Tool executor service endpoints
+    perplexity_api_key: str = ""
+    perplexity_model: str = "sonar"
+    cosmic_memory_url: str = "http://127.0.0.1:8090"
+    gateway_url: str = "http://127.0.0.1:8080"
+    max_tool_iterations: int = 25
 
     @classmethod
     def from_env(cls) -> "OrchestratorConfig":
@@ -73,4 +79,9 @@ class OrchestratorConfig:
                     str(BACKEND_ROOT / "agents" / "orchestrator" / "store" / "data" / "task_ledger.db"),
                 )
             ).expanduser(),
+            perplexity_api_key=os.getenv("PERPLEXITY_API_KEY", "").strip(),
+            perplexity_model=os.getenv("PERPLEXITY_MODEL", "sonar").strip() or "sonar",
+            cosmic_memory_url=os.getenv("COSMIC_MEMORY_URL", "http://127.0.0.1:8090").strip(),
+            gateway_url=os.getenv("GATEWAY_URL", "http://127.0.0.1:8080").strip(),
+            max_tool_iterations=max(1, _env_int("ORCHESTRATOR_MAX_TOOL_ITERATIONS", 25)),
         )

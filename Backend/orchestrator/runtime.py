@@ -1,9 +1,23 @@
+"""COSMIC Orchestrator Runtime — Full Agentic Loop.
+
+Implements the core agentic cycle:
+  1. Send user query + conversation context + tools to Claude Opus
+  2. Stream the response (thinking + text + tool_use blocks)
+  3. If stop_reason == "tool_use": execute tools, append results, loop back to 1
+  4. If stop_reason == "end_turn": emit final response, done
+
+Thinking blocks with signatures are properly tracked so the full assistant
+message can be echoed back for multi-turn tool use conversations.
+
+All events are yielded as dicts for ndjson streaming back to the Gateway.
+"""
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 from uuid import uuid4
@@ -16,14 +30,56 @@ from gateway.adapters.response_processor import normalize_conversation_history
 from shared import TaskEnvelope, create_redis_client, ensure_stream_group, parse_stream_payload, verify_task_envelope
 
 from .config import OrchestratorConfig
+from .prompts import build_agentic_system_prompt
 from .store.ledger import TaskLedger
-from .prompts import build_thin_orchestrator_system_prompt
+from .tools.definitions import get_tool_definitions
+from .tools.executor import ToolExecutor
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
 class SSEEvent:
     event: str
     data: str
+
+
+@dataclass(slots=True)
+class ContentBlock:
+    """Tracks a single content block as it streams from the Anthropic API."""
+    index: int
+    block_type: str
+    # Thinking
+    thinking_text: str = ""
+    signature: str = ""
+    # Text
+    text: str = ""
+    # Tool use
+    tool_id: str = ""
+    tool_name: str = ""
+    input_json: str = ""
+
+    def to_api_dict(self) -> dict[str, Any]:
+        """Convert to the dict format required by the Anthropic Messages API."""
+        if self.block_type == "thinking":
+            result: dict[str, Any] = {"type": "thinking", "thinking": self.thinking_text}
+            if self.signature:
+                result["signature"] = self.signature
+            return result
+        if self.block_type == "text":
+            return {"type": "text", "text": self.text}
+        if self.block_type == "tool_use":
+            try:
+                parsed_input = json.loads(self.input_json) if self.input_json else {}
+            except json.JSONDecodeError:
+                parsed_input = {}
+            return {
+                "type": "tool_use",
+                "id": self.tool_id,
+                "name": self.tool_name,
+                "input": parsed_input,
+            }
+        return {"type": self.block_type}
 
 
 @dataclass(slots=True)
@@ -57,6 +113,7 @@ class OrchestratorRuntime:
         self._active_runs: dict[str, ActiveTaskRun] = {}
         self._pending_input_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._reply_consumer_task: asyncio.Task[None] | None = None
+        self._tool_executor: ToolExecutor | None = None
 
     async def start(self) -> None:
         self.task_ledger.initialize()
@@ -70,6 +127,14 @@ class OrchestratorRuntime:
                 self._user_reply_consumer_loop(),
                 name="orchestrator-user-reply-consumer",
             )
+
+        self._tool_executor = ToolExecutor(
+            perplexity_api_key=self.config.perplexity_api_key,
+            perplexity_model=self.config.perplexity_model,
+            cosmic_memory_url=self.config.cosmic_memory_url,
+            gateway_url=self.config.gateway_url,
+            gateway_internal_token=self.config.internal_token,
+        )
         self.started = True
 
     async def stop(self) -> None:
@@ -81,19 +146,24 @@ class OrchestratorRuntime:
             if not future.done():
                 future.cancel()
         self._pending_input_futures.clear()
+        if self._tool_executor is not None:
+            await self._tool_executor.close()
+            self._tool_executor = None
         if self._owns_client:
             await self._client.aclose()
         if self._owns_redis and self._redis is not None:
             await self._redis.aclose()
         self.started = False
 
+    # ════════════════════════════════════════════════════════════
+    #  AGENTIC LOOP
+    # ════════════════════════════════════════════════════════════
+
     async def stream_task(self, task: TaskEnvelope) -> AsyncIterator[dict[str, Any]]:
         if not verify_task_envelope(task, self.config.signing_secret):
             raise RuntimeError("TaskEnvelope signature verification failed.")
         if not self.config.anthropic_api_key:
             raise RuntimeError("ANTHROPIC_API_KEY is not configured in orchestrator.env.")
-        if not self.config.anthropic_model:
-            raise RuntimeError("ANTHROPIC_MODEL is not configured in orchestrator.env.")
 
         request_id = str(task.input.get("request_id") or "").strip() or None
         query = str(task.input.get("query") or "").strip()
@@ -109,209 +179,271 @@ class OrchestratorRuntime:
             session_id=session_id,
             channel=channel,
         )
-        yield {
-            "type": "task.created",
+
+        ev = {
             "task_id": task.task_id,
             "request_id": request_id,
             "session_id": session_id,
             "channel": channel,
-            "route": "opus",
-            "status": "running",
         }
 
+        yield {**ev, "type": "task.created", "route": "opus", "status": "running"}
+
         started_at = time.perf_counter()
-        reasoning_started = False
-        response_started = False
-        full_reasoning = ""
-        full_response = ""
-        usage: dict[str, Any] = {}
+        cumulative_usage: dict[str, int] = {}
         stop_reason: str | None = None
 
         try:
-            async for event in self._stream_anthropic_events(task):
-                if event.event == "ping":
-                    continue
-                if not event.data:
-                    continue
+            messages = self._build_messages(task)
+            system_prompt = build_agentic_system_prompt(
+                str(task.input.get("memory_context") or "").strip() or None
+            )
+            tools = get_tool_definitions()
+            max_iterations = self.config.max_tool_iterations
 
-                payload = json.loads(event.data)
-                payload_type = str(payload.get("type") or "").strip()
-                if payload_type == "message_start":
-                    usage = self._merge_usage(usage, payload.get("message", {}).get("usage"))
-                    continue
+            iteration = 0
+            full_response_text = ""
+            full_reasoning_text = ""
 
-                if payload_type == "message_delta":
-                    usage = self._merge_usage(usage, payload.get("usage"))
-                    delta = payload.get("delta")
-                    if isinstance(delta, dict):
-                        stop_reason = str(delta.get("stop_reason") or "").strip() or stop_reason
-                    continue
+            while iteration < max_iterations:
+                iteration += 1
 
-                if payload_type == "error":
-                    error = payload.get("error")
-                    if isinstance(error, dict):
-                        message = str(error.get("message") or "").strip() or "Anthropic stream error"
-                    else:
-                        message = "Anthropic stream error"
-                    raise RuntimeError(message)
+                # ── Stream one Anthropic turn ───────────────────
+                blocks: dict[int, ContentBlock] = {}
+                turn_usage: dict[str, Any] = {}
+                turn_stop_reason: str | None = None
+                reasoning_announced = False
+                responding_announced = False
 
-                if payload_type != "content_block_delta":
-                    continue
-
-                delta = payload.get("delta")
-                if not isinstance(delta, dict):
-                    continue
-                delta_type = str(delta.get("type") or "").strip()
-
-                if delta_type == "thinking_delta":
-                    thinking = str(delta.get("thinking") or "")
-                    if not thinking:
+                async for sse in self._stream_anthropic_events(
+                    system_prompt=system_prompt,
+                    messages=messages,
+                    tools=tools,
+                ):
+                    if sse.event == "ping" or not sse.data:
                         continue
-                    if not reasoning_started:
-                        reasoning_started = True
+                    payload = json.loads(sse.data)
+                    ptype = str(payload.get("type") or "")
+
+                    # ── message_start ───────────────────────────
+                    if ptype == "message_start":
+                        turn_usage = self._merge_usage(turn_usage, payload.get("message", {}).get("usage"))
+                        continue
+
+                    # ── message_delta ───────────────────────────
+                    if ptype == "message_delta":
+                        turn_usage = self._merge_usage(turn_usage, payload.get("usage"))
+                        delta = payload.get("delta")
+                        if isinstance(delta, dict):
+                            turn_stop_reason = str(delta.get("stop_reason") or "").strip() or turn_stop_reason
+                        continue
+
+                    # ── error ───────────────────────────────────
+                    if ptype == "error":
+                        err = payload.get("error")
+                        msg = str(err.get("message") or "Anthropic stream error") if isinstance(err, dict) else "Anthropic stream error"
+                        raise RuntimeError(msg)
+
+                    # ── content_block_start ─────────────────────
+                    if ptype == "content_block_start":
+                        idx = int(payload.get("index", 0))
+                        cb = payload.get("content_block") or {}
+                        btype = str(cb.get("type") or "text")
+                        block = ContentBlock(index=idx, block_type=btype)
+                        if btype == "tool_use":
+                            block.tool_id = str(cb.get("id") or "")
+                            block.tool_name = str(cb.get("name") or "")
+                        blocks[idx] = block
+                        continue
+
+                    # ── content_block_delta ─────────────────────
+                    if ptype == "content_block_delta":
+                        idx = int(payload.get("index", 0))
+                        block = blocks.get(idx)
+                        if block is None:
+                            continue
+                        delta = payload.get("delta") or {}
+                        dtype = str(delta.get("type") or "")
+
+                        if dtype == "thinking_delta":
+                            chunk = str(delta.get("thinking") or "")
+                            if not chunk:
+                                continue
+                            block.thinking_text += chunk
+                            if not reasoning_announced:
+                                reasoning_announced = True
+                                yield {**ev, "type": "task.progress", "status": "thinking", "message": "Opus is reasoning through the request."}
+                            if iteration == 1:
+                                yield {**ev, "type": "response.thinking.chunk", "content": chunk, "done": False}
+
+                        elif dtype == "signature_delta":
+                            sig = str(delta.get("signature") or "")
+                            block.signature += sig
+
+                        elif dtype == "text_delta":
+                            chunk = str(delta.get("text") or "")
+                            if not chunk:
+                                continue
+                            block.text += chunk
+                            if not responding_announced:
+                                responding_announced = True
+                                yield {**ev, "type": "task.progress", "status": "responding", "message": "Opus is writing the response."}
+                            yield {**ev, "type": "response.chunk", "content": chunk, "done": False}
+
+                        elif dtype == "input_json_delta":
+                            partial = str(delta.get("partial_json") or "")
+                            block.input_json += partial
+
+                        continue
+
+                    # content_block_stop — nothing to capture beyond what deltas provided
+                    # message_stop — nothing to do
+
+                # ── End of Anthropic turn ───────────────────────
+                cumulative_usage = self._merge_usage(cumulative_usage, turn_usage)
+                stop_reason = turn_stop_reason
+
+                # Collect text and reasoning from this turn
+                turn_text_parts: list[str] = []
+                turn_reasoning_parts: list[str] = []
+                turn_tool_blocks: list[ContentBlock] = []
+                for idx in sorted(blocks):
+                    b = blocks[idx]
+                    if b.block_type == "thinking" and b.thinking_text:
+                        turn_reasoning_parts.append(b.thinking_text)
+                    elif b.block_type == "text" and b.text:
+                        turn_text_parts.append(b.text)
+                    elif b.block_type == "tool_use":
+                        turn_tool_blocks.append(b)
+
+                turn_text = "".join(turn_text_parts)
+                turn_reasoning = "".join(turn_reasoning_parts)
+                full_response_text += turn_text
+                full_reasoning_text += turn_reasoning
+
+                # ── Tool use → execute and loop ─────────────────
+                if turn_stop_reason == "tool_use" and turn_tool_blocks:
+                    # Reconstruct the full assistant message (thinking + text + tool_use)
+                    assistant_content = [blocks[idx].to_api_dict() for idx in sorted(blocks)]
+                    messages.append({"role": "assistant", "content": assistant_content})
+
+                    # Execute each tool
+                    tool_results: list[dict[str, Any]] = []
+                    for tb in turn_tool_blocks:
+                        try:
+                            parsed_input = json.loads(tb.input_json) if tb.input_json else {}
+                        except json.JSONDecodeError:
+                            parsed_input = {}
+
                         yield {
-                            "type": "task.progress",
-                            "task_id": task.task_id,
-                            "request_id": request_id,
-                            "session_id": session_id,
-                            "channel": channel,
-                            "status": "thinking",
-                            "message": "Opus is reasoning through the request.",
+                            **ev, "type": "tool.call",
+                            "iteration": iteration,
+                            "tool_name": tb.tool_name,
+                            "tool_call_id": tb.tool_id,
+                            "tool_input": parsed_input,
                         }
-                    full_reasoning += thinking
+
+                        # Check cancellation
+                        run_state = self._active_runs.get(task.task_id)
+                        if run_state and run_state.cancel_requested:
+                            raise asyncio.CancelledError()
+
+                        assert self._tool_executor is not None
+                        result_str = await self._tool_executor.execute(tb.tool_name, parsed_input)
+
+                        yield {
+                            **ev, "type": "tool.result",
+                            "iteration": iteration,
+                            "tool_name": tb.tool_name,
+                            "tool_call_id": tb.tool_id,
+                            "result_preview": result_str[:500],
+                        }
+
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tb.tool_id,
+                            "content": result_str,
+                        })
+
+                    messages.append({"role": "user", "content": tool_results})
+
                     yield {
-                        "type": "response.thinking.chunk",
-                        "task_id": task.task_id,
-                        "request_id": request_id,
-                        "session_id": session_id,
-                        "channel": channel,
-                        "content": thinking,
-                        "done": False,
+                        **ev, "type": "task.progress",
+                        "status": "tool_loop",
+                        "iteration": iteration,
+                        "tools_called": [tb.tool_name for tb in turn_tool_blocks],
+                        "message": f"Executed {len(turn_tool_blocks)} tool(s), continuing...",
                     }
                     continue
 
-                if delta_type != "text_delta":
-                    continue
-                text = str(delta.get("text") or "")
-                if not text:
-                    continue
-                if not response_started:
-                    response_started = True
-                    yield {
-                        "type": "task.progress",
-                        "task_id": task.task_id,
-                        "request_id": request_id,
-                        "session_id": session_id,
-                        "channel": channel,
-                        "status": "responding",
-                        "message": "Opus is writing the response.",
-                    }
-                full_response += text
-                yield {
-                    "type": "response.chunk",
-                    "task_id": task.task_id,
-                    "request_id": request_id,
-                    "session_id": session_id,
-                    "channel": channel,
-                    "content": text,
-                    "done": False,
-                }
+                # ── Final response (end_turn or other) ──────────
+                break
 
-            display_text = full_response.rstrip()
+            # ── Emit completion ─────────────────────────────────
+            display_text = full_response_text.rstrip()
             awaiting_reply = display_text.endswith(AWAITING_REPLY_TAG)
             if awaiting_reply:
                 display_text = display_text.removesuffix(AWAITING_REPLY_TAG).rstrip()
 
             result_payload = {
                 "content": display_text,
-                "thinking_text": full_reasoning,
+                "thinking_text": full_reasoning_text,
                 "awaiting_reply": awaiting_reply,
-                "usage": usage,
+                "usage": cumulative_usage,
                 "stop_reason": stop_reason,
+                "tool_iterations": iteration,
             }
             self.task_ledger.mark_completed(task.task_id, result=result_payload)
             elapsed_ms = max(1, int((time.perf_counter() - started_at) * 1000))
+
             yield {
+                **ev,
                 "type": "response.complete",
-                "task_id": task.task_id,
-                "request_id": request_id,
-                "session_id": session_id,
-                "channel": channel,
                 "content": display_text,
                 "route": "opus",
                 "awaiting_reply": awaiting_reply,
-                "thinking_text": full_reasoning,
-                "metrics": {
-                    "rtt_ms": elapsed_ms,
-                    **usage,
-                },
+                "thinking_text": full_reasoning_text,
+                "metrics": {"rtt_ms": elapsed_ms, "tool_iterations": iteration, **cumulative_usage},
             }
-            yield {
-                "type": "task.completed",
-                "task_id": task.task_id,
-                "request_id": request_id,
-                "session_id": session_id,
-                "channel": channel,
-                "route": "opus",
-                "status": "completed",
-            }
+            yield {**ev, "type": "task.completed", "route": "opus", "status": "completed"}
+
         except asyncio.CancelledError:
             run_state = self._active_runs.get(task.task_id)
             if run_state and run_state.cancel_requested:
                 message = run_state.cancel_message
                 self.task_ledger.mark_cancelled(task.task_id, message=message)
-                yield {
-                    "type": "task.cancelled",
-                    "task_id": task.task_id,
-                    "request_id": request_id,
-                    "session_id": session_id,
-                    "channel": channel,
-                    "route": "opus",
-                    "status": "cancelled",
-                    "message": message,
-                }
+                yield {**ev, "type": "task.cancelled", "route": "opus", "status": "cancelled", "message": message}
                 return
             raise
         except Exception as exc:
             message = str(exc).strip() or "Orchestrator processing failed."
             self.task_ledger.mark_failed(task.task_id, code="OPUS_UPSTREAM_ERROR", message=message)
             yield {
-                "type": "task.failed",
-                "task_id": task.task_id,
-                "request_id": request_id,
-                "session_id": session_id,
-                "channel": channel,
-                "route": "opus",
-                "status": "failed",
-                "error": {
-                    "code": "OPUS_UPSTREAM_ERROR",
-                    "message": message,
-                    "retryable": False,
-                },
+                **ev, "type": "task.failed", "route": "opus", "status": "failed",
+                "error": {"code": "OPUS_UPSTREAM_ERROR", "message": message, "retryable": False},
             }
         finally:
             self._active_runs.pop(task.task_id, None)
 
-    def list_active_tasks(
-        self,
-        *,
-        session_id: str | None = None,
-        channel: str | None = None,
-    ) -> list[dict[str, Any]]:
+    # ════════════════════════════════════════════════════════════
+    #  Task management
+    # ════════════════════════════════════════════════════════════
+
+    def list_active_tasks(self, *, session_id: str | None = None, channel: str | None = None) -> list[dict[str, Any]]:
         return self.task_ledger.list_active_tasks(session_id=session_id, channel=channel)
 
     def cancel_task(self, task_id: str, *, message: str = "Response stopped.") -> bool:
-        normalized_task_id = str(task_id or "").strip()
-        if not normalized_task_id:
+        tid = str(task_id or "").strip()
+        if not tid:
             return False
-        run_state = self._active_runs.get(normalized_task_id)
+        run_state = self._active_runs.get(tid)
         if run_state is None:
             return False
         run_state.cancel_requested = True
         run_state.cancel_message = message
-        runner_task = run_state.runner_task
-        if runner_task is not None and not runner_task.done():
-            runner_task.cancel()
+        runner = run_state.runner_task
+        if runner is not None and not runner.done():
+            runner.cancel()
         return True
 
     async def request_user_input(
@@ -326,38 +458,32 @@ class OrchestratorRuntime:
     ) -> dict[str, Any]:
         if self._redis is None:
             raise RuntimeError("REDIS_URL is not configured in orchestrator.env.")
-        normalized_task_id = str(task_id or "").strip()
-        normalized_question = str(question or "").strip()
-        if not normalized_task_id or not normalized_question:
+        ntid = str(task_id or "").strip()
+        nq = str(question or "").strip()
+        if not ntid or not nq:
             raise RuntimeError("task_id and question are required for task input requests.")
 
-        run_state = self._active_runs.get(normalized_task_id)
-        resolved_channel = str(channel or (run_state.channel if run_state is not None else "") or "").strip() or None
-        resolved_session_id = run_state.session_id if run_state is not None else None
-        input_request_id = f"uir_{uuid4().hex[:12]}"
+        run_state = self._active_runs.get(ntid)
+        resolved_channel = str(channel or (run_state.channel if run_state else "") or "").strip() or None
+        resolved_session = run_state.session_id if run_state else None
+        irid = f"uir_{uuid4().hex[:12]}"
         payload = {
-            "input_request_id": input_request_id,
-            "task_id": normalized_task_id,
-            "session_id": resolved_session_id,
+            "input_request_id": irid,
+            "task_id": ntid,
+            "session_id": resolved_session,
             "agent": agent,
             "channel": resolved_channel,
-            "question": normalized_question,
-            "options": [str(item) for item in options or [] if str(item).strip()],
+            "question": nq,
+            "options": [str(i) for i in options or [] if str(i).strip()],
             "status": "pending",
             "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
         self.task_ledger.create_task_input_request(
-            input_request_id=input_request_id,
-            task_id=normalized_task_id,
-            session_id=resolved_session_id,
-            channel=resolved_channel,
-            agent=agent,
-            question=normalized_question,
-            options=payload["options"],
+            input_request_id=irid, task_id=ntid, session_id=resolved_session,
+            channel=resolved_channel, agent=agent, question=nq, options=payload["options"],
         )
-
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
-        self._pending_input_futures[input_request_id] = future
+        self._pending_input_futures[irid] = future
         try:
             await self._redis.xadd(
                 self.config.task_input_requests_stream,
@@ -369,59 +495,34 @@ class OrchestratorRuntime:
                 reply = await asyncio.wait_for(asyncio.shield(future), timeout=wait_timeout_sec)
             except asyncio.TimeoutError:
                 return payload
-            return {
-                **payload,
-                "reply": reply,
-                "status": "answered",
-            }
+            return {**payload, "reply": reply, "status": "answered"}
         finally:
             if future.done() or (wait_timeout_sec is None or wait_timeout_sec <= 0):
-                self._pending_input_futures.pop(input_request_id, None)
+                self._pending_input_futures.pop(irid, None)
 
-    async def _user_reply_consumer_loop(self) -> None:
-        assert self._redis is not None
-        consumer_name = "orchestrator-{0}".format(id(self))
-        while True:
-            entries = await self._redis.xreadgroup(
-                groupname=self.config.task_input_orchestrator_group,
-                consumername=consumer_name,
-                streams={self.config.task_input_replies_stream: ">"},
-                count=5,
-                block=1000,
-            )
-            for _stream, messages in entries:
-                for message_id, data in messages:
-                    try:
-                        reply = parse_stream_payload(data)
-                        input_request_id = str(reply.get("input_request_id") or "").strip()
-                        if not input_request_id:
-                            raise ValueError("input_request_id is required.")
-                        content = str(reply.get("content") or "").strip()
-                        self.task_ledger.mark_task_input_replied(input_request_id, content=content)
-                        future = self._pending_input_futures.get(input_request_id)
-                        if future is not None and not future.done():
-                            future.set_result(reply)
-                        self._pending_input_futures.pop(input_request_id, None)
-                        await self._redis.xack(
-                            self.config.task_input_replies_stream,
-                            self.config.task_input_orchestrator_group,
-                            message_id,
-                        )
-                    except Exception:
-                        continue
+    # ════════════════════════════════════════════════════════════
+    #  Anthropic API streaming
+    # ════════════════════════════════════════════════════════════
 
-    async def _stream_anthropic_events(self, task: TaskEnvelope) -> AsyncIterator[SSEEvent]:
+    async def _stream_anthropic_events(
+        self,
+        *,
+        system_prompt: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> AsyncIterator[SSEEvent]:
         url = "https://api.anthropic.com/v1/messages"
-        payload = {
+        body: dict[str, Any] = {
             "model": self.config.anthropic_model,
             "max_tokens": self.config.max_tokens,
             "stream": True,
             "thinking": {"type": "adaptive"},
-            "system": build_thin_orchestrator_system_prompt(
-                str(task.input.get("memory_context") or "").strip() or None
-            ),
-            "messages": self._build_messages(task),
+            "system": system_prompt,
+            "messages": messages,
         }
+        if tools:
+            body["tools"] = tools
+
         headers = {
             "x-api-key": self.config.anthropic_api_key,
             "anthropic-version": self.config.anthropic_version,
@@ -432,19 +533,18 @@ class OrchestratorRuntime:
         for attempt in range(3):
             yielded_any = False
             try:
-                async with self._client.stream("POST", url, headers=headers, json=payload) as response:
-                    if response.status_code >= 400:
-                        body = await response.aread()
-                        raise RuntimeError(self._error_from_response(body, response.status_code))
-
-                    async for item in self._iter_sse(response):
+                async with self._client.stream("POST", url, headers=headers, json=body) as resp:
+                    if resp.status_code >= 400:
+                        raw = await resp.aread()
+                        raise RuntimeError(self._error_from_response(raw, resp.status_code))
+                    async for item in self._iter_sse(resp):
                         yielded_any = True
                         yield item
                 return
             except (httpx.HTTPError, RuntimeError, ValueError) as exc:
                 if yielded_any or attempt == 2:
                     raise RuntimeError(f"Anthropic API error: {exc}") from exc
-                await asyncio.sleep(0.5 * (2**attempt))
+                await asyncio.sleep(0.5 * (2 ** attempt))
 
     async def _iter_sse(self, response: httpx.Response) -> AsyncIterator[SSEEvent]:
         event_name = "message"
@@ -478,39 +578,32 @@ class OrchestratorRuntime:
             if role not in {"user", "assistant"} or not content:
                 continue
             messages.append({"role": role, "content": content})
+
         user_query = str(task.input.get("query") or "").strip()
         input_artifacts = task.input_artifacts if isinstance(task.input_artifacts, list) else []
         if input_artifacts:
             manifest_lines = [
                 "The user attached media/artifacts with metadata below.",
                 "You have metadata and references only. Do not claim to have directly viewed or listened to the bytes unless a tool actually loads them.",
-                "",
-                "Attachment manifest:",
+                "", "Attachment manifest:",
             ]
-            for index, artifact in enumerate(input_artifacts, start=1):
-                if not isinstance(artifact, dict):
+            for i, art in enumerate(input_artifacts, 1):
+                if not isinstance(art, dict):
                     continue
-                summary_parts = [
-                    f"kind={str(artifact.get('kind') or 'unknown').strip()}",
-                    f"mime={str(artifact.get('mime') or 'application/octet-stream').strip()}",
+                parts = [
+                    f"kind={str(art.get('kind') or 'unknown').strip()}",
+                    f"mime={str(art.get('mime') or 'application/octet-stream').strip()}",
                 ]
-                filename = str(artifact.get("filename") or "").strip()
-                caption = str(artifact.get("caption") or "").strip()
-                bridge_media_ref = str(artifact.get("bridge_media_ref") or "").strip()
-                download_url = str(artifact.get("download_url") or "").strip()
-                size_bytes = artifact.get("size_bytes")
-                if filename:
-                    summary_parts.append(f"filename={filename}")
-                if caption:
-                    summary_parts.append(f"caption={caption}")
-                if size_bytes:
-                    summary_parts.append(f"size_bytes={size_bytes}")
-                if bridge_media_ref:
-                    summary_parts.append(f"bridge_media_ref={bridge_media_ref}")
-                if download_url:
-                    summary_parts.append(f"download_url={download_url}")
-                manifest_lines.append(f"{index}. " + "; ".join(summary_parts))
+                for key in ("filename", "caption", "bridge_media_ref", "download_url"):
+                    v = str(art.get(key) or "").strip()
+                    if v:
+                        parts.append(f"{key}={v}")
+                sb = art.get("size_bytes")
+                if sb:
+                    parts.append(f"size_bytes={sb}")
+                manifest_lines.append(f"{i}. " + "; ".join(parts))
             user_query = user_query + "\n\n" + "\n".join(manifest_lines) if user_query else "\n".join(manifest_lines)
+
         messages.append({"role": "user", "content": user_query})
         return messages
 
@@ -520,7 +613,7 @@ class OrchestratorRuntime:
         merged = dict(existing)
         for key, value in usage.items():
             if isinstance(value, (int, float)):
-                merged[key] = int(value)
+                merged[key] = merged.get(key, 0) + int(value)
         return merged
 
     def _error_from_response(self, body: bytes, status_code: int) -> str:
@@ -528,11 +621,46 @@ class OrchestratorRuntime:
             payload = json.loads(body.decode("utf-8"))
         except Exception:
             return f"status={status_code}"
-
         if isinstance(payload, dict):
             error = payload.get("error")
             if isinstance(error, dict):
-                message = str(error.get("message") or "").strip()
-                if message:
-                    return message
+                msg = str(error.get("message") or "").strip()
+                if msg:
+                    return msg
         return f"status={status_code}"
+
+    # ════════════════════════════════════════════════════════════
+    #  User input relay
+    # ════════════════════════════════════════════════════════════
+
+    async def _user_reply_consumer_loop(self) -> None:
+        assert self._redis is not None
+        consumer_name = f"orchestrator-{id(self)}"
+        while True:
+            entries = await self._redis.xreadgroup(
+                groupname=self.config.task_input_orchestrator_group,
+                consumername=consumer_name,
+                streams={self.config.task_input_replies_stream: ">"},
+                count=5,
+                block=1000,
+            )
+            for _stream, msgs in entries:
+                for message_id, data in msgs:
+                    try:
+                        reply = parse_stream_payload(data)
+                        irid = str(reply.get("input_request_id") or "").strip()
+                        if not irid:
+                            raise ValueError("input_request_id is required.")
+                        content = str(reply.get("content") or "").strip()
+                        self.task_ledger.mark_task_input_replied(irid, content=content)
+                        future = self._pending_input_futures.get(irid)
+                        if future is not None and not future.done():
+                            future.set_result(reply)
+                        self._pending_input_futures.pop(irid, None)
+                        await self._redis.xack(
+                            self.config.task_input_replies_stream,
+                            self.config.task_input_orchestrator_group,
+                            message_id,
+                        )
+                    except Exception:
+                        continue
