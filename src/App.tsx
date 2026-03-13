@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -10,10 +10,11 @@ import DynamicIsland from './DynamicIsland'
 import CosmicLoginModal from './CosmicLoginModal'
 import LiquidGlassLoader from './LiquidGlassLoader'
 import MeetingMode from './MeetingMode'
+import cosmicGlassyThunderLogo from './assets/cosmic-glassy-thunder-logo.png'
 import './spotlight.css'
 
 export type SearchPosition = 'bottom' | 'middle'
-export type QueryMode = 'chat' | 'meeting'
+export type QueryMode = 'chat' | 'task' | 'meeting'
 export type GatewayModelSelection = 'cosmic' | 'haiku' | 'opus' | 'perplexity'
 type LauncherTileId = 'chat' | 'meeting' | 'task' | 'spaces'
 
@@ -24,6 +25,18 @@ interface Message {
   thinking?: string
   sources?: Array<{ url: string; title?: string; domain?: string } | string>
   stopped?: boolean
+}
+
+interface PendingTaskInput {
+  inputRequestId: string
+  taskId: string
+  sessionId?: string | null
+  agent?: string | null
+  channel?: string | null
+  question: string
+  options: string[]
+  status?: string
+  timestamp?: string | null
 }
 
 interface GatewayStatus {
@@ -101,6 +114,48 @@ const LAUNCHPAD_TILES: Array<{ id: LauncherTileId; label: string; locked: boolea
   { id: 'spaces', label: 'Spaces', locked: true },
 ]
 
+const normalizePendingTaskInput = (value: any): PendingTaskInput | null => {
+  const inputRequestId = String(value?.input_request_id || '').trim()
+  const taskId = String(value?.task_id || '').trim()
+  const question = String(value?.question || '').trim()
+  if (!inputRequestId || !taskId || !question) {
+    return null
+  }
+  return {
+    inputRequestId,
+    taskId,
+    sessionId: typeof value?.session_id === 'string' ? value.session_id : null,
+    agent: typeof value?.agent === 'string' ? value.agent : null,
+    channel: typeof value?.channel === 'string' ? value.channel : null,
+    question,
+    options: Array.isArray(value?.options) ? value.options.map((item: any) => String(item || '').trim()).filter(Boolean) : [],
+    status: typeof value?.status === 'string' ? value.status : undefined,
+    timestamp: typeof value?.timestamp === 'string' ? value.timestamp : null,
+  }
+}
+
+const sortPendingTaskInputs = (items: PendingTaskInput[]) => {
+  return [...items].sort((left, right) => {
+    const leftTs = Date.parse(left.timestamp || '')
+    const rightTs = Date.parse(right.timestamp || '')
+    if (Number.isFinite(leftTs) && Number.isFinite(rightTs) && leftTs !== rightTs) {
+      return leftTs - rightTs
+    }
+    return left.inputRequestId.localeCompare(right.inputRequestId)
+  })
+}
+
+const mergePendingTaskInputs = (existing: PendingTaskInput[], incoming: PendingTaskInput[]) => {
+  const byId = new Map<string, PendingTaskInput>()
+  for (const item of existing) {
+    byId.set(item.inputRequestId, item)
+  }
+  for (const item of incoming) {
+    byId.set(item.inputRequestId, item)
+  }
+  return sortPendingTaskInputs(Array.from(byId.values()))
+}
+
 export default function App() {
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const modelDialRef = useRef<HTMLDivElement>(null)
@@ -139,6 +194,10 @@ export default function App() {
   const [modelPulseModel, setModelPulseModel] = useState<GatewayModelSelection | null>(null)
   const [hoverTooltip, setHoverTooltip] = useState<HoverTooltipState | null>(null)
   const [surfaceLaunch, setSurfaceLaunch] = useState<SurfaceLaunchState | null>(null)
+  const [viewportSize, setViewportSize] = useState(() => ({
+    width: typeof window !== 'undefined' ? window.innerWidth : 1440,
+    height: typeof window !== 'undefined' ? window.innerHeight : 900,
+  }))
 
   // --- CHAT STATE ---
   const [messages, setMessages] = useState<Message[]>([])
@@ -153,6 +212,30 @@ export default function App() {
 
   // --- HISTORY / DB STATE ---
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
+  const [pendingTaskInputs, setPendingTaskInputs] = useState<PendingTaskInput[]>([])
+  const [taskInputDrafts, setTaskInputDrafts] = useState<Record<string, string>>({})
+  const [submittingTaskInputs, setSubmittingTaskInputs] = useState<Record<string, boolean>>({})
+  const [taskInputErrors, setTaskInputErrors] = useState<Record<string, string>>({})
+  const [dismissedTaskInterruptIds, setDismissedTaskInterruptIds] = useState<string[]>([])
+  const [selectedTaskInputId, setSelectedTaskInputId] = useState<string | null>(null)
+  const pendingTaskCount = pendingTaskInputs.length
+  const orderedPendingTaskInputs = useMemo(() => [...pendingTaskInputs].reverse(), [pendingTaskInputs])
+  const visibleTaskInterrupts = useMemo(
+    () => orderedPendingTaskInputs.filter((item) => !dismissedTaskInterruptIds.includes(item.inputRequestId)),
+    [dismissedTaskInterruptIds, orderedPendingTaskInputs],
+  )
+  const selectedTaskInput = useMemo(() => {
+    if (orderedPendingTaskInputs.length === 0) {
+      return null
+    }
+    if (selectedTaskInputId) {
+      const matched = orderedPendingTaskInputs.find((item) => item.inputRequestId === selectedTaskInputId)
+      if (matched) {
+        return matched
+      }
+    }
+    return orderedPendingTaskInputs[0]
+  }, [orderedPendingTaskInputs, selectedTaskInputId])
 
   // Track key status for SetupModal
   const [keyStatus, setKeyStatus] = useState({
@@ -393,6 +476,95 @@ export default function App() {
     activeStreamingTaskIdRef.current = null
   }
 
+  const removePendingTaskInput = (inputRequestId: string) => {
+    setPendingTaskInputs((prev) => prev.filter((item) => item.inputRequestId !== inputRequestId))
+    setTaskInputDrafts((prev) => {
+      if (!(inputRequestId in prev)) {
+        return prev
+      }
+      const next = { ...prev }
+      delete next[inputRequestId]
+      return next
+    })
+    setSubmittingTaskInputs((prev) => {
+      if (!(inputRequestId in prev)) {
+        return prev
+      }
+      const next = { ...prev }
+      delete next[inputRequestId]
+      return next
+    })
+    setTaskInputErrors((prev) => {
+      if (!(inputRequestId in prev)) {
+        return prev
+      }
+      const next = { ...prev }
+      delete next[inputRequestId]
+      return next
+    })
+    setDismissedTaskInterruptIds((prev) => prev.filter((item) => item !== inputRequestId))
+  }
+
+  const removePendingTaskInputsForTask = (taskId: string) => {
+    const normalizedTaskId = String(taskId || '').trim()
+    if (!normalizedTaskId) {
+      return
+    }
+    const relatedInputRequestIds = pendingTaskInputs
+      .filter((item) => item.taskId === normalizedTaskId)
+      .map((item) => item.inputRequestId)
+    setPendingTaskInputs((prev) => prev.filter((item) => item.taskId !== normalizedTaskId))
+    setTaskInputDrafts((prev) => {
+      if (relatedInputRequestIds.length === 0) {
+        return prev
+      }
+      const next = { ...prev }
+      let changed = false
+      for (const inputRequestId of relatedInputRequestIds) {
+        if (inputRequestId in next) {
+          delete next[inputRequestId]
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+    setSubmittingTaskInputs((prev) => {
+      if (relatedInputRequestIds.length === 0) {
+        return prev
+      }
+      const next = { ...prev }
+      let changed = false
+      for (const inputRequestId of relatedInputRequestIds) {
+        if (inputRequestId in next) {
+          delete next[inputRequestId]
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+    setTaskInputErrors((prev) => {
+      if (relatedInputRequestIds.length === 0) {
+        return prev
+      }
+      const next = { ...prev }
+      let changed = false
+      for (const inputRequestId of relatedInputRequestIds) {
+        if (inputRequestId in next) {
+          delete next[inputRequestId]
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+    setDismissedTaskInterruptIds((prev) => prev.filter((item) => !relatedInputRequestIds.includes(item)))
+  }
+
+  const dismissTaskInterrupt = (inputRequestId: string) => {
+    setDismissedTaskInterruptIds((prev) => (
+      prev.includes(inputRequestId) ? prev : [...prev, inputRequestId]
+    ))
+  }
+
   const resetDesktopVmSessionState = (detail = 'Signed out from your VM.') => {
     hideHoverTooltip()
     clearSurfaceLaunch()
@@ -400,6 +572,12 @@ export default function App() {
     clearActiveStreamingRefs()
     setMessages([])
     setActiveSessionId(null)
+    setPendingTaskInputs([])
+    setTaskInputDrafts({})
+    setSubmittingTaskInputs({})
+    setTaskInputErrors({})
+    setDismissedTaskInterruptIds([])
+    setSelectedTaskInputId(null)
     setIsStreaming(false)
     setGatewayStatus({ state: 'idle', connected: false, detail, sessionId: null })
     setShowLauncherTray(false)
@@ -494,6 +672,26 @@ export default function App() {
     }
   }, [])
 
+  useEffect(() => {
+    if (orderedPendingTaskInputs.length === 0) {
+      if (selectedTaskInputId !== null) {
+        setSelectedTaskInputId(null)
+      }
+      return
+    }
+    if (!selectedTaskInputId || !orderedPendingTaskInputs.some((item) => item.inputRequestId === selectedTaskInputId)) {
+      setSelectedTaskInputId(orderedPendingTaskInputs[0].inputRequestId)
+    }
+  }, [orderedPendingTaskInputs, selectedTaskInputId])
+
+  useEffect(() => {
+    if (dismissedTaskInterruptIds.length === 0) {
+      return
+    }
+    const validIds = new Set(pendingTaskInputs.map((item) => item.inputRequestId))
+    setDismissedTaskInterruptIds((prev) => prev.filter((id) => validIds.has(id)))
+  }, [dismissedTaskInterruptIds.length, pendingTaskInputs])
+
   const showChatComposer = () => {
     hideHoverTooltip()
     setMode('chat')
@@ -505,6 +703,32 @@ export default function App() {
       inputRef.current.style.height = '24px'
       inputRef.current.focus()
     }, 10)
+  }
+
+  const showTaskSurface = (options: { focusComposer?: boolean; forceOpus?: boolean; focusInputRequestId?: string | null } = {}) => {
+    const { focusComposer = false, forceOpus = true, focusInputRequestId = null } = options
+    hideHoverTooltip()
+    setDismissedTaskInterruptIds([])
+    if (focusInputRequestId) {
+      setSelectedTaskInputId(focusInputRequestId)
+    }
+    if (forceOpus) {
+      commitSelectedModel('opus', true, true)
+    }
+    setSearchState('visible')
+    setMode('task')
+    setShowLauncherTray(false)
+    setIsInputFocused(focusComposer)
+    if (!focusComposer && inputRef.current) {
+      inputRef.current.blur()
+    }
+    if (focusComposer) {
+      setTimeout(() => {
+        if (!inputRef.current) return
+        inputRef.current.style.height = '24px'
+        inputRef.current.focus()
+      }, 10)
+    }
   }
 
   const showMeetingSurface = () => {
@@ -665,6 +889,19 @@ export default function App() {
         setActiveSessionId(typeof event.session_id === 'string' ? event.session_id : null)
         resetInFlightAssistantMaps()
         setMessages(historyToMessages(event.history_tail))
+        setPendingTaskInputs(
+          mergePendingTaskInputs(
+            [],
+            Array.isArray(event.pending_inputs)
+              ? event.pending_inputs.map(normalizePendingTaskInput).filter(Boolean) as PendingTaskInput[]
+              : [],
+          ),
+        )
+        setTaskInputDrafts({})
+        setSubmittingTaskInputs({})
+        setTaskInputErrors({})
+        setDismissedTaskInterruptIds([])
+        setSelectedTaskInputId(null)
         setIsStreaming(false)
         return
       }
@@ -694,6 +931,36 @@ export default function App() {
           const { messages: nextMessages } = ensureAssistantMessageForEvent(prev, event)
           return nextMessages
         })
+        return
+      }
+
+      if (eventType === 'task.input_required') {
+        const pendingInput = normalizePendingTaskInput(event)
+        if (!pendingInput) {
+          return
+        }
+        setPendingTaskInputs((prev) => mergePendingTaskInputs(prev, [pendingInput]))
+        setTaskInputErrors((prev) => {
+          if (!(pendingInput.inputRequestId in prev)) {
+            return prev
+          }
+          const next = { ...prev }
+          delete next[pendingInput.inputRequestId]
+          return next
+        })
+        setDismissedTaskInterruptIds((prev) => prev.filter((id) => id !== pendingInput.inputRequestId))
+        if (modeRef.current === 'task') {
+          setSelectedTaskInputId(pendingInput.inputRequestId)
+        }
+        return
+      }
+
+      if (eventType === 'task.input_reply.accepted') {
+        const inputRequestId = String(event?.input_request_id || '').trim()
+        if (!inputRequestId) {
+          return
+        }
+        removePendingTaskInput(inputRequestId)
         return
       }
 
@@ -765,6 +1032,9 @@ export default function App() {
       if (eventType === 'task.failed') {
         setIsStreaming(false)
         clearActiveStreamingRefs()
+        if (event.task_id) {
+          removePendingTaskInputsForTask(String(event.task_id))
+        }
         const message = String(event?.error?.message || event?.message || 'Opus task failed.')
         setMessages((prev) => {
           const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
@@ -782,6 +1052,9 @@ export default function App() {
       if (eventType === 'task.completed' || eventType === 'task.cancelled') {
         setIsStreaming(false)
         clearActiveStreamingRefs()
+        if (event.task_id) {
+          removePendingTaskInputsForTask(String(event.task_id))
+        }
         const messageId = findAssistantMessageIdForEvent(event)
         const boundMessage = messageId
           ? messagesRef.current.find((item) => item.id === messageId)
@@ -844,10 +1117,12 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    if (!isStreaming && searchState === 'visible' && !showLauncherTray && mode !== 'meeting') {
+    const shouldFocusComposer =
+      mode === 'chat' || (mode === 'task' && pendingTaskCount === 0)
+    if (!isStreaming && searchState === 'visible' && !showLauncherTray && mode !== 'meeting' && shouldFocusComposer) {
       setTimeout(() => inputRef.current?.focus(), 10)
     }
-  }, [isStreaming, mode, searchState, showLauncherTray])
+  }, [isStreaming, mode, pendingTaskCount, searchState, showLauncherTray])
 
   useEffect(() => {
     if (authState !== 'authenticated') {
@@ -921,11 +1196,18 @@ export default function App() {
       return
     }
 
+    const effectiveRouteOverride =
+      mode === 'task'
+        ? 'opus'
+        : selectedModel === 'cosmic'
+          ? undefined
+          : selectedModel
+
     window.cosmic.sendGatewayQuery({
       requestId,
       content: textToSend,
       conversationContext: buildConversationContext([...messages, createUserMessage(textToSend)]),
-      routeOverride: selectedModel === 'cosmic' ? undefined : selectedModel,
+      routeOverride: effectiveRouteOverride,
     }).then((result) => {
       const confirmedRequestId = typeof result?.requestId === 'string' ? result.requestId.trim() : ''
       if (confirmedRequestId && confirmedRequestId !== requestId) {
@@ -947,6 +1229,72 @@ export default function App() {
         }
       }))
     })
+  }
+
+  const handleTaskInputDraftChange = (inputRequestId: string, value: string) => {
+    setTaskInputDrafts((prev) => ({
+      ...prev,
+      [inputRequestId]: value,
+    }))
+    setTaskInputErrors((prev) => {
+      if (!(inputRequestId in prev)) {
+        return prev
+      }
+      const next = { ...prev }
+      delete next[inputRequestId]
+      return next
+    })
+  }
+
+  const submitTaskInputReply = async (taskInput: PendingTaskInput, explicitContent?: string) => {
+    const content = String(explicitContent ?? taskInputDrafts[taskInput.inputRequestId] ?? '').trim()
+    if (!content) {
+      setTaskInputErrors((prev) => ({
+        ...prev,
+        [taskInput.inputRequestId]: 'Reply required',
+      }))
+      return
+    }
+    if (!window.cosmic?.submitGatewayTaskInputReply) {
+      setTaskInputErrors((prev) => ({
+        ...prev,
+        [taskInput.inputRequestId]: 'Task replies are unavailable in this desktop build.',
+      }))
+      return
+    }
+    setSubmittingTaskInputs((prev) => ({
+      ...prev,
+      [taskInput.inputRequestId]: true,
+    }))
+    setTaskInputErrors((prev) => {
+      if (!(taskInput.inputRequestId in prev)) {
+        return prev
+      }
+      const next = { ...prev }
+      delete next[taskInput.inputRequestId]
+      return next
+    })
+    try {
+      await window.cosmic.submitGatewayTaskInputReply({
+        inputRequestId: taskInput.inputRequestId,
+        taskId: taskInput.taskId,
+        content,
+      })
+      setTaskInputDrafts((prev) => ({
+        ...prev,
+        [taskInput.inputRequestId]: content,
+      }))
+    } catch (error: any) {
+      setSubmittingTaskInputs((prev) => {
+        const next = { ...prev }
+        delete next[taskInput.inputRequestId]
+        return next
+      })
+      setTaskInputErrors((prev) => ({
+        ...prev,
+        [taskInput.inputRequestId]: error?.message || 'Unable to send task reply.',
+      }))
+    }
   }
 
   const handleStopStreaming = () => {
@@ -985,14 +1333,10 @@ export default function App() {
       return
     }
     if (tile === 'task') {
-      commitSelectedModel('opus', true, true)
+      showTaskSurface({ focusComposer: pendingTaskInputs.length === 0, forceOpus: true })
+      return
     }
     showChatComposer()
-    if (tile === 'task') {
-      requestAnimationFrame(() => {
-        scrollModelDialTo('opus', 'auto')
-      })
-    }
   }
 
   const handleModelDialScroll = () => {
@@ -1097,14 +1441,61 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [searchState])
 
+  useEffect(() => {
+    const handleResize = () => {
+      setViewportSize({
+        width: window.innerWidth,
+        height: window.innerHeight,
+      })
+    }
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
+
   // Render Classes
-  const isChatSurfaceVisible = mode !== 'meeting' && !showLauncherTray
-  const effectivePosition = messages.length > 0 ? 'bottom' : searchPosition
+  const shouldShowTaskInterrupt =
+    visibleTaskInterrupts.length > 0 &&
+    mode !== 'task' &&
+    mode !== 'meeting' &&
+    !showLauncherTray
+  const shouldShowPrimarySurface = mode !== 'meeting' && !showLauncherTray
+  const shouldShowResponseSurface = shouldShowPrimarySurface && (mode === 'task' || messages.length > 0)
+  const taskRailLayout = useMemo(() => {
+    if (!shouldShowTaskInterrupt) {
+      return null
+    }
+
+    const edgePadding = viewportSize.width >= 1440 ? 32 : 24
+    const railGap = 20
+    const preferredRailWidth = viewportSize.width >= 1380 ? 360 : 328
+    const minimumRailWidth = viewportSize.width < 920 ? 228 : 252
+    const minimumMainWidth = shouldShowResponseSurface ? 420 : 360
+
+    const railWidth = Math.min(
+      preferredRailWidth,
+      Math.max(
+        minimumRailWidth,
+        viewportSize.width - (minimumMainWidth + edgePadding * 2 + railGap),
+      ),
+    )
+    const reserve = railWidth + railGap + edgePadding
+    const compact = railWidth < 286
+    const top = viewportSize.height < 820 ? 176 : 200
+
+    return {
+      edgePadding,
+      railWidth,
+      reserve,
+      compact,
+      top,
+    }
+  }, [shouldShowTaskInterrupt, shouldShowResponseSurface, viewportSize.height, viewportSize.width])
+  const effectivePosition = (messages.length > 0 || mode === 'task') ? 'bottom' : searchPosition
   const overlayClass = [
     searchState === 'hidden' ? '' : 'visible',
     effectivePosition === 'middle' ? 'position-middle' : '',
-    isChatSurfaceVisible && messages.length > 0 ? 'has-response' : '',
-    (isInputFocused || (isChatSurfaceVisible && messages.length > 0) || isStreaming || mode === 'meeting') ? 'focused' : ''
+    shouldShowResponseSurface ? 'has-response' : '',
+    (isInputFocused || shouldShowResponseSurface || isStreaming || mode === 'meeting') ? 'focused' : ''
   ].join(' ')
   const composerLaunchClass = surfaceLaunch?.target === 'chat' ? 'launcher-expand' : ''
   const composerLaunchStyle = surfaceLaunch?.target === 'chat'
@@ -1125,6 +1516,17 @@ export default function App() {
     ? ({
       ['--launch-offset-x' as string]: `${surfaceLaunch.meetingOffsetX}px`,
       ['--launch-offset-y' as string]: `${surfaceLaunch.meetingOffsetY}px`,
+    } as React.CSSProperties)
+    : undefined
+  const overlayStyle = {
+    pointerEvents: searchState === 'visible' ? 'auto' : 'none',
+    ['--task-rail-reserve' as string]: taskRailLayout ? `${taskRailLayout.reserve}px` : '0px',
+  } as React.CSSProperties
+  const taskInterruptStyle = taskRailLayout
+    ? ({
+      ['--task-rail-width' as string]: `${taskRailLayout.railWidth}px`,
+      ['--task-rail-edge' as string]: `${taskRailLayout.edgePadding}px`,
+      ['--task-rail-top' as string]: `${taskRailLayout.top}px`,
     } as React.CSSProperties)
     : undefined
 
@@ -1168,7 +1570,7 @@ export default function App() {
         onDoubleClick={(e) => {
           if (e.target === e.currentTarget) window.cosmic?.hide()
         }}
-        style={{ pointerEvents: searchState === 'visible' ? 'auto' : 'none' }}
+        style={overlayStyle}
       >
         <MeetingMode
           active={mode === 'meeting'}
@@ -1179,8 +1581,79 @@ export default function App() {
           containerStyle={meetingLaunchStyle}
         />
 
-        {/* MESSAGES AREA */}
-        {isChatSurfaceVisible && messages.length > 0 && (
+        {shouldShowTaskInterrupt && visibleTaskInterrupts.length > 0 && (
+          <div className={`task-interrupt-shell ${taskRailLayout?.compact ? 'compact' : ''}`} style={taskInterruptStyle}>
+            <div className="task-interrupt-stack" role="list" aria-label={`${visibleTaskInterrupts.length} task inputs waiting`}>
+              {visibleTaskInterrupts.map((taskInput, index) => (
+                <LiquidGlass
+                  key={taskInput.inputRequestId}
+                  disableTilt={true}
+                  cornerRadius={30}
+                  className="task-interrupt-glass"
+                  style={{ width: '100%' }}
+                >
+                  <div className="task-interrupt-card">
+                    <div className="task-interrupt-head">
+                      <div className="task-interrupt-title-cluster">
+                        <div className="task-interrupt-logo-shell" aria-hidden="true">
+                          <img
+                            src={cosmicGlassyThunderLogo}
+                            alt=""
+                            className="task-interrupt-logo"
+                            draggable={false}
+                          />
+                        </div>
+                        <div className="task-interrupt-copy">
+                          <div className="task-interrupt-kicker">Task needs your input</div>
+                          <div className="task-interrupt-meta">
+                            {visibleTaskInterrupts.length > 1
+                              ? `${index + 1} of ${visibleTaskInterrupts.length} waiting`
+                              : taskInput.options.length > 0
+                                ? `${taskInput.options.length} quick choices in Task Inbox`
+                                : 'Open Task Inbox to continue'}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="task-interrupt-chip-row">
+                        {visibleTaskInterrupts.length > 1 && (
+                          <div className="task-interrupt-chip count">{visibleTaskInterrupts.length} waiting</div>
+                        )}
+                        <div className="task-interrupt-chip">Opus task</div>
+                      </div>
+                    </div>
+                    <div className="task-interrupt-preview">{taskInput.question}</div>
+                    <div className="task-interrupt-actions">
+                      <button
+                        type="button"
+                        className="task-interrupt-btn secondary"
+                        onClick={() => dismissTaskInterrupt(taskInput.inputRequestId)}
+                      >
+                        Later
+                      </button>
+                      <button
+                        type="button"
+                        className="task-interrupt-btn primary"
+                        onClick={() => {
+                          setDismissedTaskInterruptIds([])
+                          showTaskSurface({
+                            focusComposer: false,
+                            forceOpus: true,
+                            focusInputRequestId: taskInput.inputRequestId,
+                          })
+                        }}
+                      >
+                        Reply
+                      </button>
+                    </div>
+                  </div>
+                </LiquidGlass>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* PRIMARY CONTENT AREA */}
+        {shouldShowResponseSurface && (
           <div
             ref={chatResponseSurfaceRef}
             className={`response-container ${searchState === 'visible' ? 'visible' : ''} ${responseLaunchClass}`}
@@ -1189,12 +1662,120 @@ export default function App() {
             <LiquidGlass disableTilt={true} cornerRadius={32} style={{ width: '100%', height: '100%' }}>
               <div className="response-wrapper">
                 <div className="response-content" style={{ paddingTop: 24 }} ref={responseContainerRef} onScroll={handleScroll}>
+                  {mode === 'task' && (
+                    <div className="task-hub">
+                      <div className="task-hub-header">
+                        <div>
+                          <div className="task-hub-kicker">Task Inbox</div>
+                          <h2 className="task-hub-title">
+                            {pendingTaskCount > 0 ? `${pendingTaskCount} request${pendingTaskCount === 1 ? '' : 's'} waiting` : 'No task input needed right now'}
+                          </h2>
+                        </div>
+                        <button type="button" className="task-hub-chat-btn" onClick={showChatComposer}>
+                          Return to chat
+                        </button>
+                      </div>
 
-                  {/* SOURCES GRID */}
+                      {pendingTaskCount > 0 && selectedTaskInput ? (
+                        <div className="task-hub-body">
+                          <div className="task-list-pane">
+                            <div className="task-list">
+                              {orderedPendingTaskInputs.map((taskInput) => (
+                                <button
+                                  key={taskInput.inputRequestId}
+                                  type="button"
+                                  className={`task-list-item ${selectedTaskInput.inputRequestId === taskInput.inputRequestId ? 'active' : ''}`}
+                                  onClick={() => setSelectedTaskInputId(taskInput.inputRequestId)}
+                                >
+                                  <div className="task-list-item-topline">
+                                    <span className="task-card-badge">Awaiting input</span>
+                                    <span className="task-card-meta">{taskInput.taskId}</span>
+                                  </div>
+                                  <div className="task-list-item-question">{taskInput.question}</div>
+                                  <div className="task-list-item-meta">
+                                    {taskInput.options.length > 0
+                                      ? `${taskInput.options.length} quick choice${taskInput.options.length === 1 ? '' : 's'}`
+                                      : 'Freeform reply required'}
+                                  </div>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
 
+                          <div className="task-detail-pane">
+                            {(() => {
+                              const taskInput = selectedTaskInput
+                              const isSubmitting = Boolean(submittingTaskInputs[taskInput.inputRequestId])
+                              const draftValue = taskInputDrafts[taskInput.inputRequestId] || ''
+                              const errorText = taskInputErrors[taskInput.inputRequestId]
+
+                              return (
+                                <div className="task-card task-detail-card">
+                                  <div className="task-card-topline">
+                                    <span className="task-card-badge">Awaiting input</span>
+                                    <span className="task-card-meta">{taskInput.taskId}</span>
+                                  </div>
+                                  <div className="task-card-question task-detail-question">{taskInput.question}</div>
+                                  {taskInput.options.length > 0 && (
+                                    <div className="task-card-options">
+                                      {taskInput.options.map((option) => (
+                                        <button
+                                          key={option}
+                                          type="button"
+                                          className="task-option-chip"
+                                          disabled={isSubmitting}
+                                          onClick={() => void submitTaskInputReply(taskInput, option)}
+                                        >
+                                          {option}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  )}
+                                  <textarea
+                                    className="task-reply-input"
+                                    value={draftValue}
+                                    placeholder="Add a reply for this task..."
+                                    disabled={isSubmitting}
+                                    onChange={(event) => handleTaskInputDraftChange(taskInput.inputRequestId, event.target.value)}
+                                  />
+                                  <div className="task-card-footer">
+                                    <div className="task-card-status">
+                                      {errorText ? (
+                                        <span className="task-card-error">{errorText}</span>
+                                      ) : isSubmitting ? (
+                                        <span className="task-card-waiting">Submitting...</span>
+                                      ) : (
+                                        <span className="task-card-hint">Reply keeps the task moving without interrupting your current chat.</span>
+                                      )}
+                                    </div>
+                                    <button
+                                      type="button"
+                                      className="task-submit-btn"
+                                      disabled={isSubmitting}
+                                      onClick={() => void submitTaskInputReply(taskInput)}
+                                    >
+                                      Send reply
+                                    </button>
+                                  </div>
+                                </div>
+                              )
+                            })()}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="task-empty-state">
+                          <div className="task-empty-icon">◌</div>
+                          <div className="task-empty-title">Tasks will collect here when they need you.</div>
+                          <div className="task-empty-copy">
+                            Long-running Opus work can pause for clarification without interrupting your active chat screen.
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* MESSAGES */}
-                  {messages.map((msg, idx) => (
+                  {mode !== 'task' && messages.map((msg, idx) => (
                     <div key={msg.id} className={`message-row ${msg.role}`} style={{ marginBottom: 24, display: 'flex', flexDirection: 'column', alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
 
                       {msg.role === 'user' ? (
@@ -1322,7 +1903,7 @@ export default function App() {
                     </div>
                   ))}
 
-                  {isStreaming && (
+                  {mode !== 'task' && isStreaming && (
                     <div className="streaming-indicator">
                       <div className="dot"></div><div className="dot"></div><div className="dot"></div>
                     </div>
@@ -1335,7 +1916,7 @@ export default function App() {
         )}
 
         {/* SCROLL TO BOTTOM BUTTON */}
-        {isChatSurfaceVisible && showScrollButton && (
+        {shouldShowPrimarySurface && mode !== 'task' && showScrollButton && (
           <button className="scroll-to-bottom" onClick={scrollToBottom}>
             <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
               <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z" />
@@ -1366,6 +1947,9 @@ export default function App() {
                       disabled={tile.locked}
                       aria-label={tile.locked ? `${tile.label} locked` : tile.label}
                     >
+                      {tile.id === 'task' && pendingTaskCount > 0 && (
+                        <span className="launchpad-badge">{pendingTaskCount}</span>
+                      )}
                       <div className="launchpad-icon-shell">
                         <LaunchpadIcon tile={tile.id} />
                       </div>
@@ -1374,119 +1958,157 @@ export default function App() {
                   ))}
                 </div>
               ) : (
-                <div className="input-row">
-                  <button
-                    className="back-btn"
-                    onClick={handleShowLauncherTray}
-                    onMouseEnter={(event) => showHoverTooltipForElement('Modes', event.currentTarget, 'control')}
-                    onMouseLeave={hideHoverTooltip}
-                    onFocus={(event) => showHoverTooltipForElement('Modes', event.currentTarget, 'control')}
-                    onBlur={hideHoverTooltip}
-                    aria-label="Modes"
-                    style={{ marginRight: 8 }}
-                    type="button"
-                  >
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M14.71 6.71a1 1 0 0 1 0 1.41L10.83 12l3.88 3.88a1 1 0 0 1-1.41 1.41l-4.59-4.59a1 1 0 0 1 0-1.41l4.59-4.59a1 1 0 0 1 1.41 0z" />
-                    </svg>
-                  </button>
-
-                  <textarea
-                    ref={inputRef}
-                    className="input"
-                    rows={1}
-                    value={query}
-                    onChange={handleInput}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault()
-                        handleSubmit()
-                      }
-                    }}
-                    onFocus={() => setIsInputFocused(true)}
-                    onBlur={() => setIsInputFocused(false)}
-                    placeholder={gatewayStatus.connected ? "Ask Cosmic..." : "Connecting to your VM..."}
-                    spellCheck={false}
-                    autoComplete="off"
-                    disabled={isStreaming || authState !== 'authenticated'}
-                  />
-
-                  {query && (
+                mode === 'task' ? (
+                  <div className="task-toolbar">
                     <button
-                      className="clear-btn"
-                      onClick={() => {
-                        setQuery('')
-                        if (inputRef.current) {
-                          inputRef.current.style.height = '24px'
-                          inputRef.current.focus()
-                        }
-                      }}
-                      type="button"
-                    >
-                      ✕
-                    </button>
-                  )}
-
-                  <div className="model-dial" role="tablist" aria-label="Model selection">
-                    <div className="model-dial-window">
-                      <div
-                        className="model-dial-viewport"
-                        ref={modelDialRef}
-                        onScroll={handleModelDialScroll}
-                        onWheel={handleModelDialWheel}
-                      >
-                        {MODEL_OPTIONS.map((item) => (
-                          <button
-                            key={item.id}
-                            data-model={item.id}
-                            className={`model-dial-btn ${selectedModel === item.id ? 'active' : ''} ${modelPulseModel === item.id ? 'pulse' : ''}`}
-                            onClick={() => handleModelDialFocus(item.id)}
-                            onMouseEnter={(event) => showHoverTooltipForElement(item.label, event.currentTarget, 'model')}
-                            onMouseLeave={hideHoverTooltip}
-                            onFocus={(event) => {
-                              handleModelDialFocus(item.id)
-                              showHoverTooltipForElement(item.label, event.currentTarget, 'model')
-                            }}
-                            onBlur={hideHoverTooltip}
-                            type="button"
-                            aria-label={item.label}
-                            aria-selected={selectedModel === item.id}
-                          >
-                            <span className="model-dial-knob">
-                              <ModelDialIcon model={item.id} />
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-
-                  {isStreaming ? (
-                    <button
-                      className="stream-stop-btn"
-                      onClick={handleStopStreaming}
-                      onMouseEnter={(event) => showHoverTooltipForElement('Stop response', event.currentTarget, 'control')}
+                      className="back-btn"
+                      onClick={handleShowLauncherTray}
+                      onMouseEnter={(event) => showHoverTooltipForElement('Modes', event.currentTarget, 'control')}
                       onMouseLeave={hideHoverTooltip}
-                      onFocus={(event) => showHoverTooltipForElement('Stop response', event.currentTarget, 'control')}
+                      onFocus={(event) => showHoverTooltipForElement('Modes', event.currentTarget, 'control')}
                       onBlur={hideHoverTooltip}
-                      type="button"
-                      aria-label="Stop response"
-                    >
-                      <LiquidGlassLoader />
-                    </button>
-                  ) : (
-                    <button
-                      className={`send-btn ${query.trim() ? 'active' : ''}`}
-                      onClick={handleSubmit}
-                      disabled={!query.trim()}
+                      aria-label="Modes"
+                      style={{ marginRight: 8 }}
                       type="button"
                     >
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M14.71 6.71a1 1 0 0 1 0 1.41L10.83 12l3.88 3.88a1 1 0 0 1-1.41 1.41l-4.59-4.59a1 1 0 0 1 0-1.41l4.59-4.59a1 1 0 0 1 1.41 0z" />
                       </svg>
                     </button>
-                  )}
-                </div>
+                    <div className="task-toolbar-copy">
+                      <div className="task-toolbar-title">Task Inbox</div>
+                      <div className="task-toolbar-subtitle">
+                        {pendingTaskCount > 0 ? `${pendingTaskCount} waiting for your input` : 'No task is waiting right now'}
+                      </div>
+                    </div>
+                    <div className="task-mode-pill" aria-label="Task mode uses Opus">
+                      <span className="task-mode-pill-kicker">Task</span>
+                      <span className="task-mode-pill-model">OPUS</span>
+                    </div>
+                    <button
+                      className="task-toolbar-chat-btn"
+                      onClick={showChatComposer}
+                      type="button"
+                    >
+                      Open chat
+                    </button>
+                  </div>
+                ) : (
+                  <div className="input-row">
+                    <button
+                      className="back-btn"
+                      onClick={handleShowLauncherTray}
+                      onMouseEnter={(event) => showHoverTooltipForElement('Modes', event.currentTarget, 'control')}
+                      onMouseLeave={hideHoverTooltip}
+                      onFocus={(event) => showHoverTooltipForElement('Modes', event.currentTarget, 'control')}
+                      onBlur={hideHoverTooltip}
+                      aria-label="Modes"
+                      style={{ marginRight: 8 }}
+                      type="button"
+                    >
+                      {pendingTaskCount > 0 && <span className="back-btn-badge">{pendingTaskCount}</span>}
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M14.71 6.71a1 1 0 0 1 0 1.41L10.83 12l3.88 3.88a1 1 0 0 1-1.41 1.41l-4.59-4.59a1 1 0 0 1 0-1.41l4.59-4.59a1 1 0 0 1 1.41 0z" />
+                      </svg>
+                    </button>
+
+                    <textarea
+                      ref={inputRef}
+                      className="input"
+                      rows={1}
+                      value={query}
+                      onChange={handleInput}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault()
+                          handleSubmit()
+                        }
+                      }}
+                      onFocus={() => setIsInputFocused(true)}
+                      onBlur={() => setIsInputFocused(false)}
+                      placeholder={gatewayStatus.connected ? "Ask Cosmic..." : "Connecting to your VM..."}
+                      spellCheck={false}
+                      autoComplete="off"
+                      disabled={isStreaming || authState !== 'authenticated'}
+                    />
+
+                    {query && (
+                      <button
+                        className="clear-btn"
+                        onClick={() => {
+                          setQuery('')
+                          if (inputRef.current) {
+                            inputRef.current.style.height = '24px'
+                            inputRef.current.focus()
+                          }
+                        }}
+                        type="button"
+                      >
+                        ✕
+                      </button>
+                    )}
+
+                    <div className="model-dial" role="tablist" aria-label="Model selection">
+                      <div className="model-dial-window">
+                        <div
+                          className="model-dial-viewport"
+                          ref={modelDialRef}
+                          onScroll={handleModelDialScroll}
+                          onWheel={handleModelDialWheel}
+                        >
+                          {MODEL_OPTIONS.map((item) => (
+                            <button
+                              key={item.id}
+                              data-model={item.id}
+                              className={`model-dial-btn ${selectedModel === item.id ? 'active' : ''} ${modelPulseModel === item.id ? 'pulse' : ''}`}
+                              onClick={() => handleModelDialFocus(item.id)}
+                              onMouseEnter={(event) => showHoverTooltipForElement(item.label, event.currentTarget, 'model')}
+                              onMouseLeave={hideHoverTooltip}
+                              onFocus={(event) => {
+                                handleModelDialFocus(item.id)
+                                showHoverTooltipForElement(item.label, event.currentTarget, 'model')
+                              }}
+                              onBlur={hideHoverTooltip}
+                              type="button"
+                              aria-label={item.label}
+                              aria-selected={selectedModel === item.id}
+                            >
+                              <span className="model-dial-knob">
+                                <ModelDialIcon model={item.id} />
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    {isStreaming ? (
+                      <button
+                        className="stream-stop-btn"
+                        onClick={handleStopStreaming}
+                        onMouseEnter={(event) => showHoverTooltipForElement('Stop response', event.currentTarget, 'control')}
+                        onMouseLeave={hideHoverTooltip}
+                        onFocus={(event) => showHoverTooltipForElement('Stop response', event.currentTarget, 'control')}
+                        onBlur={hideHoverTooltip}
+                        type="button"
+                        aria-label="Stop response"
+                      >
+                        <LiquidGlassLoader />
+                      </button>
+                    ) : (
+                      <button
+                        className={`send-btn ${query.trim() ? 'active' : ''}`}
+                        onClick={handleSubmit}
+                        disabled={!query.trim()}
+                        type="button"
+                      >
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                          <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+                        </svg>
+                      </button>
+                    )}
+                  </div>
+                )
               )}
             </div>
           </LiquidGlass>
