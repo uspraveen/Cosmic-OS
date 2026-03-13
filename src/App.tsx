@@ -161,6 +161,7 @@ export default function App() {
   const modelDialRef = useRef<HTMLDivElement>(null)
   const composerSurfaceRef = useRef<HTMLDivElement>(null)
   const chatResponseSurfaceRef = useRef<HTMLDivElement>(null)
+  const taskInterruptStackRef = useRef<HTMLDivElement>(null)
   const responseEndRef = useRef<HTMLDivElement>(null)
   const responseContainerRef = useRef<HTMLDivElement>(null)
   const modelDialSettleTimeoutRef = useRef<number | null>(null)
@@ -218,6 +219,7 @@ export default function App() {
   const [taskInputErrors, setTaskInputErrors] = useState<Record<string, string>>({})
   const [dismissedTaskInterruptIds, setDismissedTaskInterruptIds] = useState<string[]>([])
   const [selectedTaskInputId, setSelectedTaskInputId] = useState<string | null>(null)
+  const [taskInterruptIndex, setTaskInterruptIndex] = useState(0)
   const pendingTaskCount = pendingTaskInputs.length
   const orderedPendingTaskInputs = useMemo(() => [...pendingTaskInputs].reverse(), [pendingTaskInputs])
   const visibleTaskInterrupts = useMemo(
@@ -691,6 +693,47 @@ export default function App() {
     const validIds = new Set(pendingTaskInputs.map((item) => item.inputRequestId))
     setDismissedTaskInterruptIds((prev) => prev.filter((id) => validIds.has(id)))
   }, [dismissedTaskInterruptIds.length, pendingTaskInputs])
+
+  useEffect(() => {
+    if (visibleTaskInterrupts.length === 0) {
+      if (taskInterruptIndex !== 0) {
+        setTaskInterruptIndex(0)
+      }
+      return
+    }
+    if (taskInterruptIndex > visibleTaskInterrupts.length - 1) {
+      setTaskInterruptIndex(visibleTaskInterrupts.length - 1)
+    }
+  }, [taskInterruptIndex, visibleTaskInterrupts.length])
+
+  useEffect(() => {
+    const container = taskInterruptStackRef.current
+    if (!container || visibleTaskInterrupts.length === 0) {
+      return
+    }
+    const targetLeft = container.clientWidth * taskInterruptIndex
+    if (Math.abs(container.scrollLeft - targetLeft) > 2) {
+      container.scrollTo({ left: targetLeft, behavior: 'smooth' })
+    }
+  }, [taskInterruptIndex, visibleTaskInterrupts.length])
+
+  const handleTaskInterruptScroll = () => {
+    const container = taskInterruptStackRef.current
+    if (!container) {
+      return
+    }
+    const cardWidth = container.clientWidth
+    if (cardWidth <= 0) {
+      return
+    }
+    const nextIndex = Math.max(
+      0,
+      Math.min(visibleTaskInterrupts.length - 1, Math.round(container.scrollLeft / cardWidth)),
+    )
+    if (nextIndex !== taskInterruptIndex) {
+      setTaskInterruptIndex(nextIndex)
+    }
+  }
 
   const showChatComposer = () => {
     hideHoverTooltip()
@@ -1584,7 +1627,13 @@ export default function App() {
 
         {shouldShowTaskInterrupt && visibleTaskInterrupts.length > 0 && (
           <div className={`task-interrupt-shell ${taskRailLayout?.compact ? 'compact' : ''}`} style={taskInterruptStyle}>
-            <div className="task-interrupt-stack" role="list" aria-label={`${visibleTaskInterrupts.length} task inputs waiting`}>
+            <div
+              ref={taskInterruptStackRef}
+              className="task-interrupt-stack"
+              role="list"
+              aria-label={`${visibleTaskInterrupts.length} task inputs waiting`}
+              onScroll={handleTaskInterruptScroll}
+            >
               {visibleTaskInterrupts.map((taskInput, index) => (
                 <LiquidGlass
                   key={taskInput.inputRequestId}
@@ -1650,6 +1699,30 @@ export default function App() {
                 </LiquidGlass>
               ))}
             </div>
+            {visibleTaskInterrupts.length > 1 && (
+              <div
+                className="task-interrupt-dots"
+                aria-label={`Task card ${taskInterruptIndex + 1} of ${visibleTaskInterrupts.length}`}
+              >
+                {visibleTaskInterrupts.map((taskInput, index) => (
+                  <button
+                    key={taskInput.inputRequestId}
+                    type="button"
+                    className={`task-interrupt-dot ${taskInterruptIndex === index ? 'active' : ''}`}
+                    aria-label={`Show task ${index + 1}`}
+                    aria-current={taskInterruptIndex === index}
+                    onClick={() => {
+                      const container = taskInterruptStackRef.current
+                      if (!container) {
+                        return
+                      }
+                      container.scrollTo({ left: container.clientWidth * index, behavior: 'smooth' })
+                      setTaskInterruptIndex(index)
+                    }}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         )}
 

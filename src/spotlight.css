@@ -824,6 +824,35 @@ kbd {
   display: none;
 }
 
+.task-interrupt-dots {
+  margin-top: 10px;
+  display: flex;
+  justify-content: center;
+  gap: 7px;
+  pointer-events: auto;
+}
+
+.task-interrupt-dot {
+  width: 7px;
+  height: 7px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+  transition: transform 0.18s ease, background 0.18s ease;
+}
+
+.task-interrupt-dot:hover {
+  background: rgba(255, 255, 255, 0.34);
+}
+
+.task-interrupt-dot.active {
+  background: rgba(132, 206, 255, 0.92);
+  transform: scale(1.15);
+}
+
 .task-interrupt-glass {
   width: 100%;
   flex: 0 0 100%;
@@ -1070,8 +1099,8 @@ kbd {
 
 .task-hub-body {
   display: grid;
-  grid-template-columns: minmax(188px, 224px) minmax(0, 1fr);
-  gap: 14px;
+  grid-template-columns: minmax(160px, 188px) minmax(0, 1fr);
+  gap: 12px;
   min-height: 460px;
 }
 
@@ -1122,12 +1151,13 @@ kbd {
 
 .task-list-pane {
   min-width: 0;
+  max-width: 188px;
 }
 
 .task-list {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
 }
 
 .task-list-item {
@@ -1135,7 +1165,7 @@ kbd {
   text-align: left;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 20px;
-  padding: 13px 13px 12px;
+  padding: 11px 11px 10px;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.04)),
     rgba(255, 255, 255, 0.04);
@@ -1173,8 +1203,8 @@ kbd {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 8px;
+  gap: 8px;
+  margin-bottom: 6px;
 }
 
 .task-list-item-label {
@@ -1194,9 +1224,9 @@ kbd {
 
 .task-list-item-question {
   color: rgba(255, 255, 255, 0.92);
-  font-size: 13px;
-  line-height: 1.38;
-  margin-bottom: 8px;
+  font-size: 12.5px;
+  line-height: 1.34;
+  margin-bottom: 6px;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   line-clamp: 2;
@@ -1206,7 +1236,7 @@ kbd {
 
 .task-list-item-meta {
   color: rgba(255, 255, 255, 0.52);
-  font-size: 12px;
+  font-size: 10.5px;
   line-height: 1.35;
 }
 
