@@ -532,6 +532,17 @@ class GatewayRuntime:
             },
         )
 
+        # Cross-channel sync: push the user message to connected desktop clients
+        if channel and not channel.startswith("desktop:"):
+            self._track_background_task(
+                self._broadcast_cross_channel_to_desktop(
+                    session_id,
+                    role="user",
+                    content=content or "[non-text inbound message]",
+                    channel=channel,
+                )
+            )
+
         result = {
             "status": "accepted",
             "request_id": request_id,
@@ -2197,7 +2208,8 @@ class GatewayRuntime:
         known_task_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         session_id = self._resolve_session_id(requested_session_id)
-        history_tail = self.session_store.get_history_tail(session_id, limit=30)
+        # Fetch full day's history so the desktop shows the complete conversation
+        history = self.session_store.get_history(session_id)
         pending_inputs = self._pending_inputs_for_channel(channel, session_id=session_id)
         active_tasks = await self._active_task_summaries(session_id=session_id, channel=channel)
         return {
@@ -2206,7 +2218,7 @@ class GatewayRuntime:
             "session_id": session_id,
             "channel": channel,
             "user_timezone": self.current_user_timezone(),
-            "history_tail": history_tail,
+            "history_tail": history,
             "active_tasks": active_tasks,
             "pending_inputs": pending_inputs,
         }
@@ -2217,6 +2229,49 @@ class GatewayRuntime:
         self._delivery_wakeup.set()
         if self._redis is not None:
             self._track_background_task(self._drain_pending_task_inputs(channel))
+
+    async def _broadcast_cross_channel_to_desktop(
+        self,
+        session_id: str,
+        *,
+        role: str,
+        content: str,
+        channel: str,
+        route: str | None = None,
+        sources: list[dict[str, str]] | None = None,
+        thinking_text: str | None = None,
+    ) -> None:
+        """Push a cross-channel message to all connected desktop clients for this session.
+
+        Called when a non-desktop channel (WhatsApp, Telegram) produces a user
+        message or receives an assistant response, so the desktop UI can
+        display the conversation in real-time.
+        """
+        if not session_id or not channel or channel.startswith("desktop:"):
+            return
+        from .channels.desktop import DesktopAdapter
+        desktop_adapter: DesktopAdapter | None = None
+        for adapter in self.registry._adapters.values():
+            if isinstance(adapter, DesktopAdapter):
+                desktop_adapter = adapter
+                break
+        if desktop_adapter is None:
+            return
+
+        event: dict[str, Any] = {
+            "type": "crosschannel.message",
+            "session_id": session_id,
+            "role": role,
+            "content": content,
+            "channel": channel,
+            "route": route,
+            "timestamp": utcnow_iso(),
+        }
+        if sources:
+            event["sources"] = sources
+        if thinking_text:
+            event["thinking_text"] = thinking_text
+        await desktop_adapter.broadcast_to_session(session_id, event)
 
     def _track_background_task(self, coroutine: asyncio.Future[Any] | asyncio.Task[Any] | Any) -> None:
         task = asyncio.create_task(coroutine)
@@ -3030,6 +3085,7 @@ class GatewayRuntime:
             if active_request is not None:
                 active_request.task_id = task_id
         if event_type == "response.complete":
+            event_channel = self._safe_text(event.get("channel")) or ""
             store_assistant_message(
                 str(event.get("content") or ""),
                 awaiting_reply=bool(event.get("awaiting_reply")),
@@ -3038,9 +3094,22 @@ class GatewayRuntime:
                     "metrics": event.get("metrics"),
                     "thinking_text": self._safe_text(event.get("thinking_text")),
                 },
-                channel=self._safe_text(event.get("channel")) or "",
+                channel=event_channel,
                 route="opus",
             )
+            # Cross-channel sync: push the assistant response to connected desktop clients
+            if event_channel and not event_channel.startswith("desktop:") and session_id:
+                self._track_background_task(
+                    self._broadcast_cross_channel_to_desktop(
+                        session_id,
+                        role="assistant",
+                        content=str(event.get("content") or ""),
+                        channel=event_channel,
+                        route="opus",
+                        sources=event.get("sources") if isinstance(event.get("sources"), list) else None,
+                        thinking_text=self._safe_text(event.get("thinking_text")),
+                    )
+                )
         elif event_type == "task.input_required":
             channel = self._safe_text(event.get("channel"))
             if channel and task_id and session_id:

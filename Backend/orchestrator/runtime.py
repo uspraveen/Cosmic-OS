@@ -39,7 +39,13 @@ from .tools.executor import ToolExecutor
 logger = logging.getLogger(__name__)
 
 # Tools that are safe to execute in parallel (no side effects)
-_READ_ONLY_TOOLS = frozenset({"web_search", "memory_search", "list_reminders"})
+_READ_ONLY_TOOLS = frozenset({"perplexity_research", "memory_search", "list_reminders"})
+
+# Server-side tools — executed by Anthropic's infrastructure, not by us
+_SERVER_SIDE_TOOLS: list[dict[str, Any]] = [
+    {"type": "web_search_20260209", "name": "web_search"},
+    {"type": "web_fetch_20260209", "name": "web_fetch"},
+]
 
 
 @dataclass(slots=True)
@@ -58,10 +64,12 @@ class ContentBlock:
     signature: str = ""
     # Text
     text: str = ""
-    # Tool use
+    # Tool use (client-side) and server_tool_use (server-side)
     tool_id: str = ""
     tool_name: str = ""
     input_json: str = ""
+    # Raw block for opaque server-side result blocks (web_search_tool_result, web_fetch_tool_result)
+    raw_block: dict[str, Any] | None = None
 
     def to_api_dict(self) -> dict[str, Any]:
         """Convert to the dict format required by the Anthropic Messages API."""
@@ -83,6 +91,22 @@ class ContentBlock:
                 "name": self.tool_name,
                 "input": parsed_input,
             }
+        if self.block_type == "server_tool_use":
+            try:
+                parsed_input = json.loads(self.input_json) if self.input_json else {}
+            except json.JSONDecodeError:
+                parsed_input = {}
+            return {
+                "type": "server_tool_use",
+                "id": self.tool_id,
+                "name": self.tool_name,
+                "input": parsed_input,
+            }
+        if self.block_type in ("web_search_tool_result", "web_fetch_tool_result"):
+            # Echo the entire raw block back — the API needs it for multi-turn
+            if self.raw_block:
+                return dict(self.raw_block)
+            return {"type": self.block_type}
         return {"type": self.block_type}
 
 
@@ -203,7 +227,7 @@ class OrchestratorRuntime:
                 str(task.input.get("memory_context") or "").strip() or None,
                 user_timezone=str(task.input.get("user_timezone") or "").strip() or None,
             )
-            tools = get_tool_definitions()
+            tools = get_tool_definitions() + _SERVER_SIDE_TOOLS
             max_iterations = self.config.max_tool_iterations
 
             iteration = 0
@@ -259,7 +283,16 @@ class OrchestratorRuntime:
                         if btype == "tool_use":
                             block.tool_id = str(cb.get("id") or "")
                             block.tool_name = str(cb.get("name") or "")
+                        elif btype == "server_tool_use":
+                            block.tool_id = str(cb.get("id") or "")
+                            block.tool_name = str(cb.get("name") or "")
+                        elif btype in ("web_search_tool_result", "web_fetch_tool_result"):
+                            block.raw_block = dict(cb)
                         blocks[idx] = block
+                        # Emit progress for server-side tool calls
+                        if btype == "server_tool_use":
+                            progress_msg = "Searching the web..." if block.tool_name == "web_search" else "Fetching web page..."
+                            yield {**ev, "type": "task.progress", "status": "tool_call", "iteration": iteration, "tool_name": block.tool_name, "message": progress_msg}
                         continue
 
                     # ── content_block_delta ─────────────────────
@@ -302,7 +335,25 @@ class OrchestratorRuntime:
 
                         continue
 
-                    # content_block_stop — nothing to capture beyond what deltas provided
+                    # ── content_block_stop ─────────────────────
+                    if ptype == "content_block_stop":
+                        idx = int(payload.get("index", 0))
+                        block = blocks.get(idx)
+                        if block and block.block_type == "server_tool_use":
+                            # Now we have the full input — emit detailed progress
+                            try:
+                                pi = json.loads(block.input_json) if block.input_json else {}
+                            except json.JSONDecodeError:
+                                pi = {}
+                            progress_msg = self._tool_progress_message(block.tool_name, pi)
+                            yield {
+                                **ev, "type": "task.progress",
+                                "status": "tool_call",
+                                "iteration": iteration,
+                                "tool_name": block.tool_name,
+                                "message": progress_msg,
+                            }
+                        continue
                     # message_stop — nothing to do
 
                 # ── End of Anthropic turn ───────────────────────
@@ -321,11 +372,25 @@ class OrchestratorRuntime:
                         turn_text_parts.append(b.text)
                     elif b.block_type == "tool_use":
                         turn_tool_blocks.append(b)
+                    elif b.block_type == "web_search_tool_result" and b.raw_block:
+                        self._collect_native_search_sources(b.raw_block, collected_sources)
 
                 turn_text = "".join(turn_text_parts)
                 turn_reasoning = "".join(turn_reasoning_parts)
                 full_response_text += turn_text
                 full_reasoning_text += turn_reasoning
+
+                # ── Server-side tool continuation (pause_turn) ────
+                if turn_stop_reason == "pause_turn":
+                    assistant_content = [blocks[idx].to_api_dict() for idx in sorted(blocks)]
+                    messages.append({"role": "assistant", "content": assistant_content})
+                    yield {
+                        **ev, "type": "task.progress",
+                        "status": "tool_loop",
+                        "iteration": iteration,
+                        "message": "Server-side tools continuing...",
+                    }
+                    continue
 
                 # ── Tool use → execute and loop ─────────────────
                 if turn_stop_reason == "tool_use" and turn_tool_blocks:
@@ -383,8 +448,8 @@ class OrchestratorRuntime:
                     # Collect results and emit tool.result events
                     tool_results: list[dict[str, Any]] = []
                     for tb, pi, result_str in zip(turn_tool_blocks, parsed_inputs, result_strs):
-                        if tb.tool_name == "web_search":
-                            self._collect_sources(result_str, collected_sources)
+                        if tb.tool_name == "perplexity_research":
+                            self._collect_perplexity_sources(result_str, collected_sources)
 
                         yield {
                             **ev, "type": "tool.result",
@@ -414,7 +479,7 @@ class OrchestratorRuntime:
                 break
 
             # ── Emit completion ─────────────────────────────────
-            hit_max_iterations = iteration >= max_iterations and stop_reason == "tool_use"
+            hit_max_iterations = iteration >= max_iterations and stop_reason in ("tool_use", "pause_turn")
             result_type = "max_iterations" if hit_max_iterations else "success"
 
             display_text = full_response_text.rstrip()
@@ -704,6 +769,12 @@ class OrchestratorRuntime:
         if tool_name == "web_search":
             query = str(tool_input.get("query") or "").strip()
             return f"Searching the web for: {query}" if query else "Searching the web..."
+        if tool_name == "web_fetch":
+            url = str(tool_input.get("url") or "").strip()
+            return f"Fetching: {url}" if url else "Fetching web page..."
+        if tool_name == "perplexity_research":
+            query = str(tool_input.get("query") or "").strip()
+            return f"Researching: {query}" if query else "Conducting research..."
         if tool_name == "memory_search":
             query = str(tool_input.get("query") or "").strip()
             return f"Searching memory for: {query}" if query else "Checking memory..."
@@ -720,8 +791,8 @@ class OrchestratorRuntime:
         return f"Using tool: {tool_name}..."
 
     @staticmethod
-    def _collect_sources(result_str: str, sources: list[dict[str, str]]) -> None:
-        """Extract citation URLs from a web_search result and append as source objects."""
+    def _collect_perplexity_sources(result_str: str, sources: list[dict[str, str]]) -> None:
+        """Extract citation URLs from a perplexity_research result and append as source objects."""
         try:
             data = json.loads(result_str)
         except (json.JSONDecodeError, TypeError):
@@ -741,6 +812,30 @@ class OrchestratorRuntime:
             except Exception:
                 domain = url
             sources.append({"url": url, "domain": domain, "title": domain or url})
+
+    @staticmethod
+    def _collect_native_search_sources(raw_block: dict[str, Any], sources: list[dict[str, str]]) -> None:
+        """Extract source URLs from an Anthropic web_search_tool_result block."""
+        content = raw_block.get("content")
+        if not isinstance(content, list):
+            return
+        seen_urls = {s["url"] for s in sources}
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") != "web_search_result":
+                continue
+            url = str(item.get("url") or "").strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            title = str(item.get("title") or "").strip()
+            try:
+                parsed = urlparse(url)
+                domain = parsed.netloc.replace("www.", "")
+            except Exception:
+                domain = url
+            sources.append({"url": url, "title": title or domain, "domain": domain})
 
     # ════════════════════════════════════════════════════════════
     #  User input relay

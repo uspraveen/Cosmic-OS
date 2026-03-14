@@ -14,6 +14,7 @@ class DesktopConnection:
     channel: str
     device_id: str
     websocket: WebSocket
+    session_id: str | None = None
 
 
 class DesktopAdapter(ChannelAdapter):
@@ -168,6 +169,31 @@ class DesktopAdapter(ChannelAdapter):
             "conversation_context": conversation_context,
             "metadata": metadata,
         }
+
+    async def update_session_id(self, channel: str, session_id: str) -> None:
+        """Update the tracked session_id for a desktop connection (called after resume)."""
+        async with self._lock:
+            conn = self._connections.get(channel)
+            if conn is not None:
+                conn.session_id = session_id
+
+    async def broadcast_to_session(self, session_id: str, event: dict[str, Any]) -> None:
+        """Send an event to ALL desktop connections tracking the given session_id.
+
+        Used for cross-channel sync: when a non-desktop channel (WhatsApp, Telegram)
+        produces a message, desktop clients see it in real-time.
+        """
+        async with self._lock:
+            targets = [
+                conn for conn in self._connections.values()
+                if conn.session_id == session_id
+            ]
+        for conn in targets:
+            try:
+                await conn.websocket.send_json(event)
+            except Exception:
+                # Connection is dead — let the next receive loop handle cleanup
+                pass
 
     async def _resolve_connection(self, channel: str | None) -> DesktopConnection | None:
         async with self._lock:

@@ -64,8 +64,8 @@ class ToolExecutor:
 
     async def _dispatch(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         """Route a tool call to the appropriate handler."""
-        if tool_name == "web_search":
-            return await self._web_search(tool_input)
+        if tool_name == "perplexity_research":
+            return await self._perplexity_research(tool_input)
         if tool_name == "memory_search":
             return await self._memory_search(tool_input)
         if tool_name == "memory_write":
@@ -78,9 +78,9 @@ class ToolExecutor:
             return await self._delete_reminder(tool_input)
         return json.dumps({"error": True, "message": f"Unknown tool: {tool_name}"})
 
-    # ── Web Search (Perplexity) ─────────────────────────────────
+    # ── Perplexity Research ──────────────────────────────────────
 
-    async def _web_search(self, tool_input: dict[str, Any]) -> str:
+    async def _perplexity_research(self, tool_input: dict[str, Any]) -> str:
         query = str(tool_input.get("query") or "").strip()
         if not query:
             return json.dumps({"error": True, "message": "query is required"})

@@ -23,6 +23,7 @@ interface Message {
   role: 'user' | 'assistant'
   content: string
   thinking?: string
+  activity?: string
   sources?: Array<{ url: string; title?: string; domain?: string } | string>
   stopped?: boolean
   channel?: string | null
@@ -221,6 +222,7 @@ export default function App() {
   const [isStreaming, setIsStreaming] = useState(false)
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [showScrollButton, setShowScrollButton] = useState(false)
+  const [streamingProgress, setStreamingProgress] = useState('')
   const [expandedCrossChannelIds, setExpandedCrossChannelIds] = useState<Set<string>>(new Set())
 
   // --- AUTH STATE ---
@@ -281,6 +283,7 @@ export default function App() {
     role: 'assistant',
     content: '',
     thinking: '',
+    activity: '',
     ...overrides,
   })
 
@@ -589,6 +592,7 @@ export default function App() {
     clearSurfaceLaunch()
     resetInFlightAssistantMaps()
     clearActiveStreamingRefs()
+    setStreamingProgress('')
     setMessages([])
     setActiveSessionId(null)
     setPendingTaskInputs([])
@@ -946,9 +950,26 @@ export default function App() {
       if (!eventType) return
 
       if (eventType === 'resume.ok') {
-        setActiveSessionId(typeof event.session_id === 'string' ? event.session_id : null)
+        const newSessionId = typeof event.session_id === 'string' ? event.session_id : null
+        const oldSessionId = activeSessionIdRef.current
+        const sessionRolledOver = oldSessionId && newSessionId && oldSessionId !== newSessionId
+        setActiveSessionId(newSessionId)
         resetInFlightAssistantMaps()
-        setMessages(historyToMessages(event.history_tail))
+        const historyMessages = historyToMessages(event.history_tail)
+        // If session rolled over (e.g. 4 AM boundary), prepend a rollover divider
+        if (sessionRolledOver) {
+          setMessages([
+            {
+              id: `session-rollover-${newSessionId}`,
+              role: 'assistant' as const,
+              content: '',
+              channel: '__session_rollover__',
+            },
+            ...historyMessages,
+          ])
+        } else {
+          setMessages(historyMessages)
+        }
         setPendingTaskInputs(
           mergePendingTaskInputs(
             [],
@@ -1024,6 +1045,31 @@ export default function App() {
         return
       }
 
+      if (eventType === 'task.progress') {
+        if (typeof event.task_id !== 'string' && typeof event.request_id !== 'string') {
+          return
+        }
+        const eventStatus = String(event.status || '').trim()
+        const statusMessage = String(event.message || '').trim()
+        const fallbackMessage = eventStatus ? `Task ${eventStatus}...` : 'Working on your request...'
+        const activityText = statusMessage || fallbackMessage
+        setStreamingProgress(activityText)
+        setMessages((prev) => {
+          const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
+          return nextMessages.map((message) => {
+            if (message.id !== messageId) {
+              return message
+            }
+            return {
+              ...message,
+              activity: activityText,
+              stopped: false,
+            }
+          })
+        })
+        return
+      }
+
       if (eventType === 'response.chunk') {
         markResponseStreamSeen(event)
         setMessages((prev) => {
@@ -1064,6 +1110,7 @@ export default function App() {
 
       if (eventType === 'response.complete') {
         markResponseStreamSeen(event)
+        setStreamingProgress('')
         setActiveSessionId((prev) => typeof event.session_id === 'string' ? event.session_id : prev)
         setMessages((prev) => {
           const sources = Array.isArray(event.sources) ? event.sources : undefined
@@ -1089,9 +1136,45 @@ export default function App() {
         return
       }
 
+      // Cross-channel sync: messages from WhatsApp/Telegram arriving while desktop is open
+      if (eventType === 'crosschannel.message') {
+        const role = String(event.role || '').trim()
+        if (role !== 'user' && role !== 'assistant') return
+        const content = String(event.content || '').trim()
+        if (!content) return
+        const eventSessionId = typeof event.session_id === 'string' ? event.session_id : null
+
+        // If the session rolled over, show a divider and clear old messages
+        if (eventSessionId && activeSessionIdRef.current && eventSessionId !== activeSessionIdRef.current) {
+          setActiveSessionId(eventSessionId)
+          setMessages([
+            {
+              id: `session-rollover-${eventSessionId}`,
+              role: 'assistant' as const,
+              content: '',
+              channel: '__session_rollover__',
+            },
+          ])
+        }
+
+        setMessages((prev) => {
+          const newMsg: Message = {
+            id: `xchan-${crypto.randomUUID()}`,
+            role: role as 'user' | 'assistant',
+            content,
+            channel: typeof event.channel === 'string' ? event.channel : null,
+            sources: role === 'assistant' && Array.isArray(event.sources) ? event.sources : undefined,
+            thinking: role === 'assistant' && typeof event.thinking_text === 'string' ? event.thinking_text : undefined,
+          }
+          return [...prev, newMsg]
+        })
+        return
+      }
+
       if (eventType === 'task.failed') {
         setIsStreaming(false)
         clearActiveStreamingRefs()
+        setStreamingProgress('')
         if (event.task_id) {
           removePendingTaskInputsForTask(String(event.task_id))
         }
@@ -1112,6 +1195,7 @@ export default function App() {
       if (eventType === 'task.completed' || eventType === 'task.cancelled') {
         setIsStreaming(false)
         clearActiveStreamingRefs()
+        setStreamingProgress('')
         if (event.task_id) {
           removePendingTaskInputsForTask(String(event.task_id))
         }
@@ -1152,6 +1236,7 @@ export default function App() {
       if (eventType === 'error') {
         setIsStreaming(false)
         clearActiveStreamingRefs()
+        setStreamingProgress('')
         if (event.message) {
           setMessages((prev) => [...prev, {
             ...createAssistantMessage(),
@@ -1169,6 +1254,7 @@ export default function App() {
       }
       if (status?.state === 'error' || status?.state === 'idle') {
         setIsStreaming(false)
+        setStreamingProgress('')
         clearActiveStreamingRefs()
       }
     })
@@ -1246,8 +1332,10 @@ export default function App() {
     ])
 
     setIsStreaming(true)
+    setStreamingProgress('Working on your request...')
     if (!window.cosmic?.sendGatewayQuery) {
       setIsStreaming(false)
+      setStreamingProgress('')
       activeAssistantMessageByRequestRef.current.delete(requestId)
       setMessages(prev => [...prev, {
         ...createAssistantMessage(),
@@ -1277,6 +1365,7 @@ export default function App() {
       }
     }).catch((error: any) => {
       setIsStreaming(false)
+      setStreamingProgress('')
       clearActiveStreamingRefs()
       activeAssistantMessageByRequestRef.current.delete(requestId)
       setMessages(prev => prev.map((message) => {
@@ -1871,6 +1960,22 @@ export default function App() {
 
                   {/* MESSAGES */}
                   {mode !== 'task' && messages.map((msg, idx) => {
+                    // Session rollover divider
+                    if (msg.channel === '__session_rollover__') {
+                      return (
+                        <div key={msg.id} style={{
+                          display: 'flex', alignItems: 'center', gap: 12,
+                          margin: '20px 0', opacity: 0.35,
+                        }}>
+                          <div style={{ flex: 1, height: 1, background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent)' }} />
+                          <span style={{ fontSize: 11, fontWeight: 500, letterSpacing: 0.5, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase' }}>
+                            New day
+                          </span>
+                          <div style={{ flex: 1, height: 1, background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent)' }} />
+                        </div>
+                      )
+                    }
+
                     // Cross-channel messages: show as collapsible row with channel badge
                     const extLabel = channelLabel(msg.channel)
                     if (extLabel && msg.role === 'user') {
@@ -1954,7 +2059,7 @@ export default function App() {
                     return (
                     <div key={msg.id} className={`message-row ${msg.role}`} style={{ marginBottom: 24, display: 'flex', flexDirection: 'column', alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
 
-                      {msg.role === 'user' ? (
+                    {msg.role === 'user' ? (
                         <div className="query-pill" style={{ maxWidth: '70%', alignSelf: 'flex-end', position: 'relative' }}>
                           <span style={{
                             display: 'inline-block',
@@ -1982,6 +2087,11 @@ export default function App() {
                         </div>
                       ) : (
                         <>
+                          {msg.activity && (
+                            <div className="assistant-activity" title="Live activity from Opus tool orchestration">
+                              {msg.activity}
+                            </div>
+                          )}
                           {msg.thinking && (
                             <div className="thinking-block">
                               <div className="thinking-label">Thinking</div>
@@ -2082,7 +2192,10 @@ export default function App() {
 
                   {mode !== 'task' && isStreaming && (
                     <div className="streaming-indicator">
-                      <div className="dot"></div><div className="dot"></div><div className="dot"></div>
+                      {streamingProgress && <div className="streaming-status">{streamingProgress}</div>}
+                      <div className="streaming-dots">
+                        <div className="dot"></div><div className="dot"></div><div className="dot"></div>
+                      </div>
                     </div>
                   )}
                   <div ref={responseEndRef} />

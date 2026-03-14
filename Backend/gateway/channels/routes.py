@@ -180,6 +180,10 @@ async def _handle_desktop_websocket_message(
             requested_session_id=str(payload.get("session_id") or "").strip() or None,
             known_task_ids=[str(item) for item in known_task_ids if str(item).strip()],
         )
+        # Track which session this desktop connection belongs to (for cross-channel sync)
+        resolved_session_id = str(response.get("session_id") or "").strip()
+        if resolved_session_id:
+            await adapter.update_session_id(channel, resolved_session_id)
         await adapter.send(response, channel=channel)
         return
 

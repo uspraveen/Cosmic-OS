@@ -9,21 +9,23 @@ from typing import Any
 
 
 ORCHESTRATOR_TOOLS: list[dict[str, Any]] = [
-    # ── Web Search ──────────────────────────────────────────────
+    # ── Perplexity Research ──────────────────────────────────────
     {
-        "name": "web_search",
+        "name": "perplexity_research",
         "description": (
-            "Search the web for current information using a natural-language query. "
-            "Returns a concise answer with citations. Use this for real-time facts, "
-            "news, weather, prices, documentation lookups, or any question that benefits "
-            "from up-to-date web data."
+            "Conduct deep research using Perplexity AI. Use this for complex research "
+            "queries that benefit from Perplexity's deep analysis, synthesis, and "
+            "multi-source aggregation. Prefer the native web_search tool for quick factual "
+            "lookups; use perplexity_research when you need a more thorough, synthesized "
+            "research answer — for example comparing products, summarizing a topic in depth, "
+            "or gathering opinions from multiple sources."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "The search query. Be specific and descriptive for best results.",
+                    "description": "The research query. Be specific and descriptive for best results.",
                 },
             },
             "required": ["query"],
