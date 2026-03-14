@@ -234,6 +234,7 @@ class OrchestratorRuntime:
             full_response_text = ""
             full_reasoning_text = ""
             collected_sources: list[dict[str, str]] = []
+            container_id: str | None = None
 
             while iteration < max_iterations:
                 iteration += 1
@@ -249,6 +250,7 @@ class OrchestratorRuntime:
                     system_prompt=system_prompt,
                     messages=messages,
                     tools=tools,
+                    container_id=container_id,
                 ):
                     if sse.event == "ping" or not sse.data:
                         continue
@@ -257,7 +259,14 @@ class OrchestratorRuntime:
 
                     # ── message_start ───────────────────────────
                     if ptype == "message_start":
-                        turn_usage = self._merge_usage(turn_usage, payload.get("message", {}).get("usage"))
+                        msg_obj = payload.get("message", {})
+                        turn_usage = self._merge_usage(turn_usage, msg_obj.get("usage"))
+                        # Fallback container capture from message_start
+                        _cont = msg_obj.get("container")
+                        if isinstance(_cont, dict):
+                            _cid = _cont.get("id")
+                            if _cid:
+                                container_id = str(_cid)
                         continue
 
                     # ── message_delta ───────────────────────────
@@ -266,6 +275,12 @@ class OrchestratorRuntime:
                         delta = payload.get("delta")
                         if isinstance(delta, dict):
                             turn_stop_reason = str(delta.get("stop_reason") or "").strip() or turn_stop_reason
+                            # Capture container_id from delta.container.id (primary location)
+                            _cont = delta.get("container")
+                            if isinstance(_cont, dict):
+                                _cid = _cont.get("id")
+                                if _cid:
+                                    container_id = str(_cid)
                         continue
 
                     # ── error ───────────────────────────────────
@@ -617,6 +632,7 @@ class OrchestratorRuntime:
         system_prompt: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        container_id: str | None = None,
     ) -> AsyncIterator[SSEEvent]:
         url = "https://api.anthropic.com/v1/messages"
         body: dict[str, Any] = {
@@ -629,6 +645,8 @@ class OrchestratorRuntime:
         }
         if tools:
             body["tools"] = tools
+        if container_id:
+            body["container"] = container_id
 
         headers = {
             "x-api-key": self.config.anthropic_api_key,
