@@ -68,7 +68,7 @@ class ContentBlock:
     tool_id: str = ""
     tool_name: str = ""
     input_json: str = ""
-    # Raw block for opaque server-side result blocks (web_search_tool_result, web_fetch_tool_result)
+    # Raw block for opaque server-side result blocks (web_search_tool_result, web_fetch_tool_result, code_execution_tool_result)
     raw_block: dict[str, Any] | None = None
 
     def to_api_dict(self) -> dict[str, Any]:
@@ -102,7 +102,7 @@ class ContentBlock:
                 "name": self.tool_name,
                 "input": parsed_input,
             }
-        if self.block_type in ("web_search_tool_result", "web_fetch_tool_result"):
+        if self.block_type in ("web_search_tool_result", "web_fetch_tool_result", "code_execution_tool_result"):
             # Echo the entire raw block back — the API needs it for multi-turn
             if self.raw_block:
                 return dict(self.raw_block)
@@ -301,7 +301,7 @@ class OrchestratorRuntime:
                         elif btype == "server_tool_use":
                             block.tool_id = str(cb.get("id") or "")
                             block.tool_name = str(cb.get("name") or "")
-                        elif btype in ("web_search_tool_result", "web_fetch_tool_result"):
+                        elif btype in ("web_search_tool_result", "web_fetch_tool_result", "code_execution_tool_result"):
                             block.raw_block = dict(cb)
                         blocks[idx] = block
                         # Emit progress for server-side tool calls
