@@ -25,6 +25,7 @@ interface Message {
   thinking?: string
   sources?: Array<{ url: string; title?: string; domain?: string } | string>
   stopped?: boolean
+  channel?: string | null
 }
 
 interface PendingTaskInput {
@@ -82,7 +83,22 @@ const historyToMessages = (history: any[] = []): Message[] => {
       thinking: typeof item?.metadata?.thinking_text === 'string' ? item.metadata.thinking_text : undefined,
       sources: Array.isArray(item?.metadata?.sources) ? item.metadata.sources : undefined,
       stopped: Boolean(item?.metadata?.interrupted),
+      channel: typeof item?.channel === 'string' ? item.channel : null,
     }))
+}
+
+/** Extract a human-readable channel label from the raw channel string. */
+const channelLabel = (ch: string | null | undefined): string | null => {
+  if (!ch) return null
+  const lower = ch.toLowerCase()
+  if (lower.startsWith('whatsapp:')) return 'WhatsApp'
+  if (lower.startsWith('telegram:')) return 'Telegram'
+  return null
+}
+
+/** Check if a message originated from a non-desktop channel. */
+const isExternalChannel = (msg: Message): boolean => {
+  return channelLabel(msg.channel) !== null
 }
 
 const buildConversationContext = (messages: Message[]) => {
@@ -205,6 +221,7 @@ export default function App() {
   const [isStreaming, setIsStreaming] = useState(false)
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [showScrollButton, setShowScrollButton] = useState(false)
+  const [expandedCrossChannelIds, setExpandedCrossChannelIds] = useState<Set<string>>(new Set())
 
   // --- AUTH STATE ---
   const [authState, setAuthState] = useState<'loading' | 'unauthenticated' | 'authenticated'>('loading')
@@ -1853,7 +1870,88 @@ export default function App() {
                   )}
 
                   {/* MESSAGES */}
-                  {mode !== 'task' && messages.map((msg, idx) => (
+                  {mode !== 'task' && messages.map((msg, idx) => {
+                    // Cross-channel messages: show as collapsible row with channel badge
+                    const extLabel = channelLabel(msg.channel)
+                    if (extLabel && msg.role === 'user') {
+                      const isExpanded = expandedCrossChannelIds.has(msg.id)
+                      // Find the assistant response paired with this user message (next message)
+                      const pairedResponse = messages[idx + 1]?.role === 'assistant' && isExternalChannel(messages[idx + 1])
+                        ? messages[idx + 1] : null
+                      return (
+                        <div key={msg.id} className="cross-channel-group" style={{ marginBottom: 16 }}>
+                          <button
+                            className="cross-channel-bar"
+                            onClick={() => setExpandedCrossChannelIds((prev) => {
+                              const next = new Set(prev)
+                              if (next.has(msg.id)) next.delete(msg.id)
+                              else next.add(msg.id)
+                              return next
+                            })}
+                            style={{
+                              width: '100%', display: 'flex', alignItems: 'center', gap: 10,
+                              padding: '10px 14px', borderRadius: 12,
+                              background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
+                              color: 'rgba(255,255,255,0.6)', cursor: 'pointer', fontSize: 13,
+                              transition: 'background 0.15s',
+                            }}
+                          >
+                            <span style={{
+                              padding: '2px 8px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+                              background: extLabel === 'WhatsApp' ? 'rgba(37,211,102,0.15)' : 'rgba(0,136,204,0.15)',
+                              color: extLabel === 'WhatsApp' ? '#25d366' : '#0088cc',
+                            }}>
+                              {extLabel}
+                            </span>
+                            <span style={{ flex: 1, textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {cleanText(msg.content).slice(0, 80)}{msg.content.length > 80 ? '...' : ''}
+                            </span>
+                            <span style={{ fontSize: 11, opacity: 0.5 }}>
+                              {isExpanded ? 'collapse' : 'expand'}
+                            </span>
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"
+                              style={{ transform: isExpanded ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }}>
+                              <path d="M7 10l5 5 5-5z" />
+                            </svg>
+                          </button>
+                          {isExpanded && (
+                            <div style={{ padding: '12px 14px 4px', borderLeft: '2px solid rgba(255,255,255,0.06)', marginLeft: 16 }}>
+                              <div className="message-row user" style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                                <div className="query-pill" style={{ maxWidth: '70%', alignSelf: 'flex-end', position: 'relative' }}>
+                                  <span style={{ display: 'inline-block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '100%' }}>
+                                    {cleanText(msg.content)}
+                                  </span>
+                                </div>
+                              </div>
+                              {pairedResponse && (
+                                <div className="message-row assistant" style={{ marginBottom: 8, display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
+                                  <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}
+                                    components={{
+                                      table: ({ node, ...props }) => <div className="table-wrapper"><table {...props} /></div>,
+                                      code: ({ node, inline, className, children, ...props }: any) => {
+                                        if (inline) return <code className="inline-code" {...props}>{children}</code>
+                                        return <div className="code-block"><code {...props}>{children}</code></div>
+                                      },
+                                      a: ({ node, ...props }) => <a target="_blank" rel="noopener noreferrer" {...props} />
+                                    }}>
+                                    {pairedResponse.content}
+                                  </ReactMarkdown>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    }
+                    // Skip assistant messages that belong to a cross-channel pair (rendered above with their user message)
+                    if (extLabel && msg.role === 'assistant') {
+                      const prevMsg = idx > 0 ? messages[idx - 1] : null
+                      if (prevMsg && prevMsg.role === 'user' && isExternalChannel(prevMsg)) {
+                        return null // Already rendered as part of the collapsed group
+                      }
+                    }
+
+                    return (
                     <div key={msg.id} className={`message-row ${msg.role}`} style={{ marginBottom: 24, display: 'flex', flexDirection: 'column', alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
 
                       {msg.role === 'user' ? (
@@ -1979,7 +2077,8 @@ export default function App() {
                         </>
                       )}
                     </div>
-                  ))}
+                    )
+                  })}
 
                   {mode !== 'task' && isStreaming && (
                     <div className="streaming-indicator">

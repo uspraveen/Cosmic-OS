@@ -28,7 +28,6 @@ import httpx
 import redis.asyncio as redis
 
 from gateway.adapters.response_processor import AWAITING_REPLY_TAG
-from gateway.adapters.response_processor import normalize_conversation_history
 from shared import TaskEnvelope, create_redis_client, ensure_stream_group, parse_stream_payload, verify_task_envelope
 
 from .config import OrchestratorConfig
@@ -38,6 +37,9 @@ from .tools.definitions import get_tool_definitions
 from .tools.executor import ToolExecutor
 
 logger = logging.getLogger(__name__)
+
+# Tools that are safe to execute in parallel (no side effects)
+_READ_ONLY_TOOLS = frozenset({"web_search", "memory_search", "list_reminders"})
 
 
 @dataclass(slots=True)
@@ -331,16 +333,16 @@ class OrchestratorRuntime:
                     assistant_content = [blocks[idx].to_api_dict() for idx in sorted(blocks)]
                     messages.append({"role": "assistant", "content": assistant_content})
 
-                    # Execute each tool
-                    tool_results: list[dict[str, Any]] = []
+                    # Parse inputs and emit progress events for all tool calls
+                    parsed_inputs: list[dict[str, Any]] = []
                     for tb in turn_tool_blocks:
                         try:
-                            parsed_input = json.loads(tb.input_json) if tb.input_json else {}
+                            pi = json.loads(tb.input_json) if tb.input_json else {}
                         except json.JSONDecodeError:
-                            parsed_input = {}
+                            pi = {}
+                        parsed_inputs.append(pi)
 
-                        # Human-readable progress before the tool call
-                        progress_msg = self._tool_progress_message(tb.tool_name, parsed_input)
+                        progress_msg = self._tool_progress_message(tb.tool_name, pi)
                         yield {
                             **ev, "type": "task.progress",
                             "status": "tool_call",
@@ -348,24 +350,39 @@ class OrchestratorRuntime:
                             "tool_name": tb.tool_name,
                             "message": progress_msg,
                         }
-
                         yield {
                             **ev, "type": "tool.call",
                             "iteration": iteration,
                             "tool_name": tb.tool_name,
                             "tool_call_id": tb.tool_id,
-                            "tool_input": parsed_input,
+                            "tool_input": pi,
                         }
 
-                        # Check cancellation
-                        run_state = self._active_runs.get(task.task_id)
-                        if run_state and run_state.cancel_requested:
-                            raise asyncio.CancelledError()
+                    # Check cancellation before executing
+                    run_state = self._active_runs.get(task.task_id)
+                    if run_state and run_state.cancel_requested:
+                        raise asyncio.CancelledError()
 
-                        assert self._tool_executor is not None
-                        result_str = await self._tool_executor.execute(tb.tool_name, parsed_input)
+                    assert self._tool_executor is not None
 
-                        # Extract citations from web_search results
+                    # Execute tools — parallel for read-only, sequential for side-effect tools
+                    all_read_only = all(tb.tool_name in _READ_ONLY_TOOLS for tb in turn_tool_blocks)
+                    result_strs: list[str] = []
+
+                    if all_read_only and len(turn_tool_blocks) > 1:
+                        # All tools are read-only → run concurrently
+                        result_strs = list(await asyncio.gather(*(
+                            self._tool_executor.execute(tb.tool_name, pi)
+                            for tb, pi in zip(turn_tool_blocks, parsed_inputs)
+                        )))
+                    else:
+                        # Mixed or single tool → run sequentially
+                        for tb, pi in zip(turn_tool_blocks, parsed_inputs):
+                            result_strs.append(await self._tool_executor.execute(tb.tool_name, pi))
+
+                    # Collect results and emit tool.result events
+                    tool_results: list[dict[str, Any]] = []
+                    for tb, pi, result_str in zip(turn_tool_blocks, parsed_inputs, result_strs):
                         if tb.tool_name == "web_search":
                             self._collect_sources(result_str, collected_sources)
 
@@ -376,7 +393,6 @@ class OrchestratorRuntime:
                             "tool_call_id": tb.tool_id,
                             "result_preview": result_str[:500],
                         }
-
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": tb.tool_id,
@@ -390,7 +406,7 @@ class OrchestratorRuntime:
                         "status": "tool_loop",
                         "iteration": iteration,
                         "tools_called": [tb.tool_name for tb in turn_tool_blocks],
-                        "message": f"Executed {len(turn_tool_blocks)} tool(s), continuing...",
+                        "message": f"Executed {len(turn_tool_blocks)} tool(s){' in parallel' if all_read_only and len(turn_tool_blocks) > 1 else ''}, continuing...",
                     }
                     continue
 
@@ -398,6 +414,9 @@ class OrchestratorRuntime:
                 break
 
             # ── Emit completion ─────────────────────────────────
+            hit_max_iterations = iteration >= max_iterations and stop_reason == "tool_use"
+            result_type = "max_iterations" if hit_max_iterations else "success"
+
             display_text = full_response_text.rstrip()
             awaiting_reply = display_text.endswith(AWAITING_REPLY_TAG)
             if awaiting_reply:
@@ -409,6 +428,7 @@ class OrchestratorRuntime:
                 "awaiting_reply": awaiting_reply,
                 "usage": cumulative_usage,
                 "stop_reason": stop_reason,
+                "result_type": result_type,
                 "tool_iterations": iteration,
             }
             self.task_ledger.mark_completed(task.task_id, result=result_payload)
@@ -419,6 +439,7 @@ class OrchestratorRuntime:
                 "type": "response.complete",
                 "content": display_text,
                 "route": "opus",
+                "result_type": result_type,
                 "awaiting_reply": awaiting_reply,
                 "thinking_text": full_reasoning_text,
                 "metrics": {"rtt_ms": elapsed_ms, "tool_iterations": iteration, **cumulative_usage},
@@ -589,17 +610,38 @@ class OrchestratorRuntime:
             yield SSEEvent(event=event_name, data="\n".join(data_lines))
 
     def _build_messages(self, task: TaskEnvelope) -> list[dict[str, Any]]:
+        """Build the messages list for the Anthropic API from conversation context + current query.
+
+        Unlike the direct adapters which receive history that already includes the
+        current user message, the orchestrator receives conversation_context
+        (prior turns only) + a separate query field.  We must NOT strip trailing
+        assistant messages — doing so would create consecutive user messages when
+        the current query is appended, causing the model to answer multiple
+        questions at once.
+        """
         raw_context = task.input.get("conversation_context")
         context = raw_context if isinstance(raw_context, list) else []
-        normalized = normalize_conversation_history(context)
+
+        # ── Normalize prior history (keep trailing assistant!) ────
         messages: list[dict[str, Any]] = []
-        for item in normalized:
+        for item in context:
+            if not isinstance(item, dict):
+                continue
             role = str(item.get("role") or "").strip()
             content = str(item.get("content") or "").strip()
             if role not in {"user", "assistant"} or not content:
                 continue
+            # Collapse consecutive same-role messages (safety)
+            if messages and messages[-1]["role"] == role:
+                messages[-1]["content"] += "\n\n" + content
+                continue
             messages.append({"role": role, "content": content})
 
+        # Strip leading assistant messages (API requires first message is user)
+        while messages and messages[0]["role"] != "user":
+            messages.pop(0)
+
+        # ── Build the current user query ──────────────────────────
         user_query = str(task.input.get("query") or "").strip()
         input_artifacts = task.input_artifacts if isinstance(task.input_artifacts, list) else []
         if input_artifacts:
@@ -625,7 +667,13 @@ class OrchestratorRuntime:
                 manifest_lines.append(f"{i}. " + "; ".join(parts))
             user_query = user_query + "\n\n" + "\n".join(manifest_lines) if user_query else "\n".join(manifest_lines)
 
-        messages.append({"role": "user", "content": user_query})
+        # Append the current query — if context somehow ends with user (e.g.
+        # a response was never stored), collapse to avoid consecutive user turns.
+        if messages and messages[-1]["role"] == "user":
+            messages[-1]["content"] += "\n\n" + user_query
+        else:
+            messages.append({"role": "user", "content": user_query})
+
         return messages
 
     def _merge_usage(self, existing: dict[str, Any], usage: Any) -> dict[str, Any]:
