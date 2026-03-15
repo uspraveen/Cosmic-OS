@@ -384,6 +384,7 @@ class OrchestratorRuntime:
                 turn_text_parts: list[str] = []
                 turn_reasoning_parts: list[str] = []
                 turn_tool_blocks: list[ContentBlock] = []
+                turn_server_blocks: list[ContentBlock] = []
                 for idx in sorted(blocks):
                     b = blocks[idx]
                     if b.block_type == "thinking" and b.thinking_text:
@@ -392,8 +393,15 @@ class OrchestratorRuntime:
                         turn_text_parts.append(b.text)
                     elif b.block_type == "tool_use":
                         turn_tool_blocks.append(b)
-                    elif b.block_type == "web_search_tool_result" and b.raw_block:
-                        self._collect_native_search_sources(b.raw_block, collected_sources)
+                    elif b.block_type in (
+                        "server_tool_use",
+                        "web_search_tool_result",
+                        "web_fetch_tool_result",
+                        "code_execution_tool_result",
+                    ):
+                        turn_server_blocks.append(b)
+                        if b.block_type == "web_search_tool_result" and b.raw_block:
+                            self._collect_native_search_sources(b.raw_block, collected_sources)
 
                 turn_text = "".join(turn_text_parts)
                 turn_reasoning = "".join(turn_reasoning_parts)
@@ -408,7 +416,7 @@ class OrchestratorRuntime:
                         **ev, "type": "task.progress",
                         "status": "tool_loop",
                         "iteration": iteration,
-                        "message": "Server-side tools continuing...",
+                        "message": self._build_server_tool_loop_message(turn_server_blocks),
                     }
                     continue
 
@@ -491,7 +499,12 @@ class OrchestratorRuntime:
                         "status": "tool_loop",
                         "iteration": iteration,
                         "tools_called": [tb.tool_name for tb in turn_tool_blocks],
-                        "message": f"Executed {len(turn_tool_blocks)} tool(s){' in parallel' if all_read_only and len(turn_tool_blocks) > 1 else ''}, continuing...",
+                        "message": self._build_local_tool_loop_message(
+                            turn_tool_blocks,
+                            parsed_inputs,
+                            result_strs,
+                            parallel=all_read_only and len(turn_tool_blocks) > 1,
+                        ),
                     }
                     continue
 
@@ -832,6 +845,335 @@ class OrchestratorRuntime:
             except Exception:
                 domain = url
             sources.append({"url": url, "title": title or domain, "domain": domain})
+
+    def _build_server_tool_loop_message(self, blocks: list[ContentBlock]) -> str:
+        search_labels: list[str] = []
+        fetch_targets: list[str] = []
+        search_queries: list[str] = []
+        saw_code_execution = False
+        server_tool_count = 0
+
+        for block in blocks:
+            if block.block_type == "server_tool_use":
+                server_tool_count += 1
+                tool_input = self._parse_tool_input_json(block.input_json)
+                if block.tool_name == "web_search":
+                    query = self._activity_excerpt(tool_input.get("query"), limit=80)
+                    if query:
+                        search_queries.append(query)
+                elif block.tool_name == "web_fetch":
+                    target = self._activity_url_label(tool_input.get("url"))
+                    if target:
+                        fetch_targets.append(target)
+                elif block.tool_name == "code_execution":
+                    saw_code_execution = True
+                continue
+
+            if block.block_type == "web_search_tool_result" and block.raw_block:
+                search_labels.extend(self._extract_native_search_labels(block.raw_block, limit=2))
+                continue
+
+            if block.block_type == "web_fetch_tool_result" and block.raw_block:
+                target = self._extract_native_fetch_label(block.raw_block)
+                if target:
+                    fetch_targets.append(target)
+                continue
+
+            if block.block_type == "code_execution_tool_result":
+                saw_code_execution = True
+
+        phrases: list[str] = []
+        if search_labels:
+            phrases.append(self._format_found_pages_phrase("web search found", search_labels))
+        elif search_queries:
+            if len(search_queries) == 1:
+                phrases.append(f'searched the web for "{search_queries[0]}"')
+            else:
+                phrases.append(f"ran {len(search_queries)} web searches")
+
+        unique_fetch_targets = self._dedupe_preserve_order(fetch_targets)
+        if unique_fetch_targets:
+            phrases.append(self._format_found_pages_phrase("fetched page", unique_fetch_targets))
+
+        if saw_code_execution:
+            phrases.append("ran server-side code execution")
+
+        if not phrases:
+            return "Server-side tools continuing..."
+        return self._compose_tool_loop_message(phrases, parallel=server_tool_count > 1)
+
+    def _build_local_tool_loop_message(
+        self,
+        tool_blocks: list[ContentBlock],
+        parsed_inputs: list[dict[str, Any]],
+        result_strs: list[str],
+        *,
+        parallel: bool,
+    ) -> str:
+        phrases: list[str] = []
+        for block, tool_input, result_str in zip(tool_blocks, parsed_inputs, result_strs):
+            phrase = self._summarize_local_tool_activity(block.tool_name, tool_input, result_str)
+            if phrase:
+                phrases.append(phrase)
+
+        if not phrases:
+            tool_names = [block.tool_name for block in tool_blocks if block.tool_name]
+            if not tool_names:
+                return "Tool work completed. Continuing..."
+            phrases.append(self._format_found_pages_phrase("completed tool work for", tool_names))
+        return self._compose_tool_loop_message(phrases, parallel=parallel)
+
+    def _summarize_local_tool_activity(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        result_str: str,
+    ) -> str | None:
+        data = self._parse_tool_result_json(result_str)
+
+        if tool_name == "memory_search":
+            query = self._activity_excerpt(tool_input.get("query"), limit=72)
+            result_items = self._extract_result_items(data)
+            if query and result_items:
+                return f'searched memory for "{query}" and found {len(result_items)} hits'
+            if query:
+                return f'searched memory for "{query}"'
+            if result_items:
+                return f"searched memory and found {len(result_items)} hits"
+            return "searched memory"
+
+        if tool_name == "memory_fetch":
+            if isinstance(data, dict) and data.get("found") is False:
+                memory_id = self._activity_excerpt(tool_input.get("memory_id"), limit=48)
+                if memory_id:
+                    return f"checked full memory block {memory_id}"
+                return "checked a full memory block"
+            title = self._activity_excerpt(
+                (data or {}).get("title") or ((data or {}).get("record") or {}).get("title"),
+                limit=72,
+            )
+            if title:
+                return f'loaded full memory block "{title}"'
+            memory_id = self._activity_excerpt((data or {}).get("memory_id") or tool_input.get("memory_id"), limit=48)
+            if memory_id:
+                return f"loaded full memory block {memory_id}"
+            return "loaded a full memory block"
+
+        if tool_name == "session_revisit":
+            session_id = self._activity_excerpt(
+                ((data or {}).get("session") or {}).get("session_id") or tool_input.get("session_id"),
+                limit=48,
+            )
+            if session_id:
+                return f"revisited exact history for {session_id}"
+            return "revisited exact session history"
+
+        if tool_name == "session_history":
+            session_id = self._activity_excerpt((data or {}).get("session_id") or tool_input.get("session_id"), limit=48)
+            message_count = None
+            if isinstance(data, dict):
+                raw_messages = data.get("messages")
+                if isinstance(raw_messages, list):
+                    message_count = len(raw_messages)
+            if session_id and message_count is not None:
+                return f"loaded {message_count} messages from {session_id}"
+            if session_id:
+                return f"loaded detailed history for {session_id}"
+            return "loaded detailed session history"
+
+        if tool_name == "session_turns":
+            session_id = self._activity_excerpt((data or {}).get("session_id") or tool_input.get("session_id"), limit=48)
+            turn_count = None
+            if isinstance(data, dict):
+                turns = data.get("turns")
+                if isinstance(turns, list):
+                    turn_count = len(turns)
+            if session_id and turn_count is not None:
+                return f"reviewed {turn_count} turn summaries from {session_id}"
+            if session_id:
+                return f"reviewed turn summaries from {session_id}"
+            return "reviewed session turn summaries"
+
+        if tool_name == "session_state":
+            session_id = self._activity_excerpt((data or {}).get("session_id") or tool_input.get("session_id"), limit=48)
+            if session_id:
+                return f"loaded session state for {session_id}"
+            return "loaded session state"
+
+        if tool_name == "task_notebook":
+            task_id = self._activity_excerpt((data or {}).get("task_id") or tool_input.get("task_id"), limit=48)
+            if isinstance(data, dict) and data.get("found") is False:
+                if task_id:
+                    return f"checked task notebook for {task_id}"
+                return "checked the task notebook"
+            if task_id:
+                return f"loaded task notebook for {task_id}"
+            return "loaded the task notebook"
+
+        if tool_name == "perplexity_research":
+            query = self._activity_excerpt(tool_input.get("query"), limit=72)
+            if query:
+                return f'completed deep research for "{query}"'
+            return "completed deep research"
+
+        if tool_name == "memory_write":
+            return self._activity_phrase_from_result_message(data) or "saved durable memory"
+
+        if tool_name == "memory_write_core_fact":
+            return self._activity_phrase_from_result_message(data) or "saved a core fact"
+
+        if tool_name == "create_reminder":
+            return self._activity_phrase_from_result_message(data) or "created a reminder"
+
+        if tool_name == "delete_reminder":
+            return self._activity_phrase_from_result_message(data) or "deleted a reminder"
+
+        if tool_name == "list_reminders":
+            reminders = (data or {}).get("reminders") if isinstance(data, dict) else None
+            if isinstance(reminders, list):
+                return f"checked {len(reminders)} reminders"
+            return "checked reminders"
+
+        return None
+
+    @staticmethod
+    def _parse_tool_input_json(input_json: str) -> dict[str, Any]:
+        try:
+            payload = json.loads(input_json) if input_json else {}
+        except json.JSONDecodeError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _parse_tool_result_json(result_str: str) -> dict[str, Any] | None:
+        try:
+            payload = json.loads(result_str)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _dedupe_preserve_order(values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for value in values:
+            normalized = str(value or "").strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            result.append(normalized)
+        return result
+
+    def _extract_native_search_labels(self, raw_block: dict[str, Any], *, limit: int) -> list[str]:
+        content = raw_block.get("content")
+        if not isinstance(content, list):
+            return []
+        labels: list[str] = []
+        for item in content:
+            if not isinstance(item, dict) or item.get("type") != "web_search_result":
+                continue
+            title = self._activity_excerpt(item.get("title"), limit=72)
+            domain = self._activity_url_domain(item.get("url"))
+            label = title or domain
+            if title and domain:
+                label = f"{title} ({domain})"
+            if not label:
+                continue
+            labels.append(label)
+            if len(labels) >= limit:
+                break
+        return self._dedupe_preserve_order(labels)
+
+    def _extract_native_fetch_label(self, raw_block: dict[str, Any]) -> str | None:
+        title = self._activity_excerpt(raw_block.get("title"), limit=72)
+        domain = self._activity_url_domain(raw_block.get("url"))
+        if title and domain:
+            return f"{title} ({domain})"
+        if title:
+            return title
+        if domain:
+            return domain
+        return None
+
+    @staticmethod
+    def _extract_result_items(data: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if not isinstance(data, dict):
+            return []
+        for key in ("items", "results"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+        return []
+
+    def _activity_phrase_from_result_message(self, data: dict[str, Any] | None) -> str | None:
+        if not isinstance(data, dict):
+            return None
+        message = self._activity_excerpt(data.get("message"), limit=96)
+        if not message:
+            return None
+        normalized = message.rstrip(".")
+        if not normalized:
+            return None
+        return normalized[0].lower() + normalized[1:] if len(normalized) > 1 else normalized.lower()
+
+    @staticmethod
+    def _compose_tool_loop_message(phrases: list[str], *, parallel: bool) -> str:
+        cleaned = [phrase.strip().rstrip(".") for phrase in phrases if str(phrase or "").strip()]
+        if not cleaned:
+            return "Tool work completed. Continuing..."
+        if len(cleaned) == 1:
+            sentence = cleaned[0]
+            return sentence[0].upper() + sentence[1:] + ". Continuing..."
+
+        prefix = "Completed parallel tool work: " if parallel else "Completed tool work: "
+        preview = "; ".join(cleaned[:2])
+        if len(cleaned) > 2:
+            preview += f"; plus {len(cleaned) - 2} more"
+        return prefix + preview + ". Continuing..."
+
+    @staticmethod
+    def _format_found_pages_phrase(prefix: str, labels: list[str]) -> str:
+        cleaned = [label.strip() for label in labels if str(label or "").strip()]
+        if not cleaned:
+            return prefix
+        preview = ", ".join(cleaned[:2])
+        if len(cleaned) > 2:
+            preview += f", plus {len(cleaned) - 2} more"
+        return f"{prefix}: {preview}"
+
+    def _activity_excerpt(self, value: Any, *, limit: int) -> str | None:
+        normalized = " ".join(str(value or "").split())
+        if not normalized:
+            return None
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[: max(0, limit - 3)].rstrip() + "..."
+
+    def _activity_url_domain(self, value: Any) -> str | None:
+        url = str(value or "").strip()
+        if not url:
+            return None
+        try:
+            parsed = urlparse(url)
+            domain = parsed.netloc.replace("www.", "").strip()
+        except Exception:
+            domain = ""
+        return self._activity_excerpt(domain or url, limit=60)
+
+    def _activity_url_label(self, value: Any) -> str | None:
+        url = str(value or "").strip()
+        if not url:
+            return None
+        try:
+            parsed = urlparse(url)
+            if parsed.netloc:
+                path = parsed.path.rstrip("/")
+                if path and path != "/":
+                    return self._activity_excerpt(f"{parsed.netloc}{path}", limit=84)
+                return self._activity_excerpt(parsed.netloc, limit=84)
+        except Exception:
+            pass
+        return self._activity_excerpt(url, limit=84)
 
     # ════════════════════════════════════════════════════════════
     #  User input relay

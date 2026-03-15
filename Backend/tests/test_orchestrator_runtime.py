@@ -342,6 +342,183 @@ async def test_orchestrator_runtime_emits_progress_for_memory_fetch_tool(tmp_pat
     assert streamed_events[-2]["content"] == "Recovered the full memory block."
 
 
+@pytest.mark.asyncio
+async def test_orchestrator_runtime_summarizes_parallel_local_tool_work_with_details(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_parallel_tools.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    task = _signed_task("signing-secret")
+    stream_call_count = 0
+
+    async def scripted_stream(
+        *,
+        system_prompt: str,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]] | None = None,
+        container_id: str | None = None,
+    ):
+        del system_prompt, messages, tools, container_id
+        nonlocal stream_call_count
+        stream_call_count += 1
+        if stream_call_count == 1:
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 10}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "tool_mem_s", "name": "memory_search"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"query\":\"yc\",\"max_results\":2}"}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("content_block_start", {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "tool_mem_f", "name": "memory_fetch"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"memory_id\":\"mem_yc_1\"}"}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 1}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 5}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        else:
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 12}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Done."}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 7}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        for event_name, payload in events:
+            yield type("SSE", (), {"event": event_name, "data": json.dumps(payload)})()
+
+    async def fake_execute(
+        tool_name: str,
+        tool_input: dict[str, object],
+        *,
+        context=None,
+    ) -> str:
+        del context
+        if tool_name == "memory_search":
+            assert tool_input == {"query": "yc", "max_results": 2}
+            return json.dumps(
+                {
+                    "items": [
+                        {"memory_id": "mem_yc_1", "title": "YC note 1"},
+                        {"memory_id": "mem_yc_2", "title": "YC note 2"},
+                    ]
+                }
+            )
+        assert tool_name == "memory_fetch"
+        assert tool_input == {"memory_id": "mem_yc_1"}
+        return json.dumps({"found": True, "memory_id": "mem_yc_1", "title": "Session summary sess_20260314"})
+
+    runtime._stream_anthropic_events = scripted_stream  # type: ignore[method-assign]
+
+    await runtime.start()
+    assert runtime._tool_executor is not None
+    runtime._tool_executor.execute = fake_execute  # type: ignore[method-assign]
+    try:
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+
+    progress_events = [event for event in streamed_events if event["type"] == "task.progress" and event["status"] == "tool_loop"]
+    assert any(
+        event["message"]
+        == 'Completed parallel tool work: searched memory for "yc" and found 2 hits; loaded full memory block "Session summary sess_20260314". Continuing...'
+        for event in progress_events
+    )
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_runtime_summarizes_server_side_web_search_results(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_native_web.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    task = _signed_task("signing-secret")
+    stream_call_count = 0
+
+    async def scripted_stream(
+        *,
+        system_prompt: str,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]] | None = None,
+        container_id: str | None = None,
+    ):
+        del system_prompt, messages, tools, container_id
+        nonlocal stream_call_count
+        stream_call_count += 1
+        if stream_call_count == 1:
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 10}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "server_tool_use", "id": "srv_web_1", "name": "web_search"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"query\":\"yc summer 2026 companies\"}"}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                (
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": 1,
+                        "content_block": {
+                            "type": "web_search_tool_result",
+                            "content": [
+                                {
+                                    "type": "web_search_result",
+                                    "title": "Extruct S26 Batch",
+                                    "url": "https://example.com/extruct",
+                                },
+                                {
+                                    "type": "web_search_result",
+                                    "title": "GrowthList YC S26",
+                                    "url": "https://growthlist.co/yc-s26",
+                                },
+                            ],
+                        },
+                    },
+                ),
+                ("content_block_stop", {"type": "content_block_stop", "index": 1}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "pause_turn"}, "usage": {"output_tokens": 5}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        else:
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 12}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Done."}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 7}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        for event_name, payload in events:
+            yield type("SSE", (), {"event": event_name, "data": json.dumps(payload)})()
+
+    runtime._stream_anthropic_events = scripted_stream  # type: ignore[method-assign]
+
+    await runtime.start()
+    try:
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+
+    progress_events = [event for event in streamed_events if event["type"] == "task.progress"]
+    assert any(
+        event["status"] == "tool_call"
+        and event.get("tool_name") == "web_search"
+        and event["message"] == "Searching the web for: yc summer 2026 companies"
+        for event in progress_events
+    )
+    assert any(
+        event["status"] == "tool_loop"
+        and event["message"] == "Web search found: Extruct S26 Batch (example.com), GrowthList YC S26 (growthlist.co). Continuing..."
+        for event in progress_events
+    )
+
+
 def test_orchestrator_build_messages_includes_attachment_manifest(tmp_path) -> None:
     config = OrchestratorConfig(
         internal_token="internal-token",
