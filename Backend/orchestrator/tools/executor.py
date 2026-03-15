@@ -263,10 +263,16 @@ class ToolExecutor:
         context: ToolExecutionContext | None = None,
     ) -> dict[str, Any]:
         content = str(tool_input.get("content") or "").strip()
-        kind = str(tool_input.get("kind") or "note").strip() or "note"
+        original_kind = str(tool_input.get("kind") or "agent_note").strip() or "agent_note"
+        kind = self._normalize_memory_write_kind(original_kind)
         title = str(tool_input.get("title") or "").strip() or self._derive_memory_title(content)
         if not content:
             return {"error": True, "message": "content is required"}
+        if kind is None:
+            return {
+                "error": True,
+                "message": "Unsupported memory_write kind. Use user_data or agent_note. Stable always-on facts should use memory_write_core_fact.",
+            }
 
         metadata = tool_input.get("metadata") if isinstance(tool_input.get("metadata"), dict) else {}
         payload: dict[str, Any] = {
@@ -296,8 +302,15 @@ class ToolExecutor:
                 )
                 return {
                     "saved": True,
+                    "deduplicated": bool(response_payload.get("deduplicated")),
                     "id": response_payload.get("memory_id") or response_payload.get("id"),
-                    "message": f"Memory saved: {title}",
+                    "message": (
+                        f"Memory already captured: {title}"
+                        if bool(response_payload.get("deduplicated"))
+                        else f"Memory saved: {title}"
+                    ),
+                    "kind": kind,
+                    "original_kind": original_kind,
                     "record": response_payload,
                 }
             except ToolHTTPError as exc:
@@ -312,8 +325,97 @@ class ToolExecutor:
             )
             return {
                 "saved": True,
+                "deduplicated": bool(response_payload.get("deduplicated")),
                 "id": response_payload.get("memory_id") or response_payload.get("id"),
-                "message": f"Memory saved: {title}",
+                "message": (
+                    f"Memory already captured: {title}"
+                    if bool(response_payload.get("deduplicated"))
+                    else f"Memory saved: {title}"
+                ),
+                "kind": kind,
+                "original_kind": original_kind,
+                "record": response_payload,
+            }
+
+        raise RuntimeError("Memory service is not configured.")
+
+    async def _memory_write_core_fact(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        fact = str(tool_input.get("fact") or tool_input.get("content") or "").strip()
+        title = str(tool_input.get("title") or "").strip() or self._derive_memory_title(fact)
+        if not fact:
+            return {"error": True, "message": "fact is required"}
+
+        metadata = tool_input.get("metadata") if isinstance(tool_input.get("metadata"), dict) else {}
+        payload: dict[str, Any] = {
+            "fact": fact,
+            "title": title,
+            "priority": min(max(self._coerce_int(tool_input.get("priority"), 100), 0), 1000),
+            "always_include": self._coerce_bool(tool_input.get("always_include"), True),
+        }
+        canonical_key = str(tool_input.get("canonical_key") or "").strip()
+        if canonical_key:
+            payload["canonical_key"] = canonical_key
+        tags = self._normalize_string_list(tool_input.get("tags"))
+        if tags:
+            payload["tags"] = tags
+        merged_metadata = self._merge_dicts(
+            self._build_memory_metadata(context),
+            metadata,
+        )
+        if merged_metadata:
+            payload["metadata"] = merged_metadata
+        provenance = self._build_orchestrator_provenance(context)
+        if provenance:
+            payload["provenance"] = provenance
+
+        if self.gateway_url:
+            try:
+                response_payload = await self._request_gateway_json(
+                    "POST",
+                    "/internal/memory/core-facts",
+                    json_body=payload,
+                )
+                return {
+                    "saved": True,
+                    "deduplicated": bool(response_payload.get("deduplicated")),
+                    "id": response_payload.get("memory_id") or response_payload.get("id"),
+                    "kind": "core_fact",
+                    "title": title,
+                    "canonical_key": canonical_key,
+                    "message": (
+                        f"Core fact already captured: {title}"
+                        if bool(response_payload.get("deduplicated"))
+                        else f"Core fact saved: {title}"
+                    ),
+                    "record": response_payload,
+                }
+            except ToolHTTPError as exc:
+                if exc.status_code not in {404, 405} or not self.cosmic_memory_url:
+                    raise
+
+        if self.cosmic_memory_url:
+            response_payload = await self._request_cosmic_memory_json(
+                "POST",
+                "/v1/core-facts",
+                json_body=payload,
+            )
+            return {
+                "saved": True,
+                "deduplicated": bool(response_payload.get("deduplicated")),
+                "id": response_payload.get("memory_id") or response_payload.get("id"),
+                "kind": "core_fact",
+                "title": title,
+                "canonical_key": canonical_key,
+                "message": (
+                    f"Core fact already captured: {title}"
+                    if bool(response_payload.get("deduplicated"))
+                    else f"Core fact saved: {title}"
+                ),
                 "record": response_payload,
             }
 
@@ -674,6 +776,22 @@ class ToolExecutor:
             title = title[:69].rstrip() + "..."
         return title or "Untitled memory"
 
+    def _normalize_memory_write_kind(self, kind: str) -> str | None:
+        normalized = str(kind or "").strip().lower()
+        if not normalized:
+            return "agent_note"
+        alias_map = {
+            "agent_note": "agent_note",
+            "note": "agent_note",
+            "user_data": "user_data",
+            "preference": "user_data",
+            "fact": "user_data",
+            "relationship": "user_data",
+            "goal": "user_data",
+            "event": "user_data",
+        }
+        return alias_map.get(normalized)
+
     def _normalize_string_list(self, value: Any) -> list[str]:
         if not isinstance(value, list):
             return []
@@ -684,6 +802,19 @@ class ToolExecutor:
             return int(value)
         except (TypeError, ValueError):
             return default
+
+    def _coerce_bool(self, value: Any, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        return bool(value)
 
     def _merge_dicts(self, base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
         merged = dict(base)

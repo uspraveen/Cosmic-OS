@@ -158,8 +158,62 @@ async def test_tool_executor_memory_write_uses_gateway_and_enriches_contextual_m
     result = json.loads(raw_result)
     assert result["saved"] is True
     assert result["id"] == "mem_saved_1"
+    assert result["kind"] == "user_data"
+    assert result["original_kind"] == "preference"
+    assert seen_payload["kind"] == "user_data"
     assert seen_payload["title"] == "User prefers concise architectural explanations."
     assert seen_payload["tags"] == ["preference", "style"]
+    assert seen_payload["metadata"]["session_id"] == "sess_current"
+    assert seen_payload["metadata"]["task_id"] == "tsk_current"
+    assert seen_payload["provenance"]["created_by"] == "cosmic/orchestrator:1.0.0"
+    assert seen_payload["provenance"]["request_id"] == "req_current"
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_memory_write_core_fact_uses_gateway_and_enriches_contextual_metadata() -> None:
+    seen_payload: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == httpx.URL("http://gateway/internal/memory/core-facts")
+        assert request.headers["X-Internal-Token"] == "internal-token"
+        seen_payload.update(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(200, json={"memory_id": "mem_core_1"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    executor = ToolExecutor(
+        gateway_url="http://gateway",
+        gateway_internal_token="internal-token",
+        client=client,
+    )
+    context = ToolExecutionContext(
+        task_id="tsk_current",
+        request_id="req_current",
+        session_id="sess_current",
+        channel="desktop:desk_a",
+        source="user",
+        source_id="desktop",
+    )
+    try:
+        raw_result = await executor.execute(
+            "memory_write_core_fact",
+            {
+                "fact": "User prefers concise architectural explanations.",
+                "canonical_key": "preferences.response_style",
+                "tags": ["preference", "style"],
+                "always_include": "false",
+            },
+            context=context,
+        )
+    finally:
+        await client.aclose()
+
+    result = json.loads(raw_result)
+    assert result["saved"] is True
+    assert result["id"] == "mem_core_1"
+    assert result["kind"] == "core_fact"
+    assert result["canonical_key"] == "preferences.response_style"
+    assert seen_payload["canonical_key"] == "preferences.response_style"
+    assert seen_payload["always_include"] is False
     assert seen_payload["metadata"]["session_id"] == "sess_current"
     assert seen_payload["metadata"]["task_id"] == "tsk_current"
     assert seen_payload["provenance"]["created_by"] == "cosmic/orchestrator:1.0.0"

@@ -195,6 +195,31 @@ async def memory_index_rebuild(
         _raise_memory_http_error(exc)
 
 
+@router.get("/internal/memory/write-audit")
+async def memory_write_audit(
+    limit: int = Query(default=50, ge=1, le=500),
+    request_id: str | None = Query(default=None),
+    session_id: str | None = Query(default=None),
+    task_id: str | None = Query(default=None),
+    writer_id: str | None = Query(default=None),
+    operation: str | None = Query(default=None),
+    status_value: str | None = Query(default=None, alias="status"),
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return {
+        "entries": runtime.list_memory_write_audit(
+            limit=limit,
+            request_id=request_id,
+            session_id=session_id,
+            task_id=task_id,
+            writer_id=writer_id,
+            operation=operation,
+            status=status_value,
+        )
+    }
+
+
 @router.post("/internal/memory/episodes", status_code=status.HTTP_201_CREATED)
 async def memory_ingest_episode(
     payload: dict[str, Any],

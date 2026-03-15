@@ -142,10 +142,21 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
         assert payload["model"] == "claude-opus-4-6"
         assert payload["thinking"] == {"type": "adaptive"}
         tool_names = {tool["name"] for tool in payload["tools"]}
-        assert {"web_search", "web_fetch", "memory_search", "memory_fetch", "session_revisit", "session_history", "task_notebook"} <= tool_names
+        assert {
+            "web_search",
+            "web_fetch",
+            "memory_search",
+            "memory_fetch",
+            "memory_write",
+            "memory_write_core_fact",
+            "session_revisit",
+            "session_history",
+            "task_notebook",
+        } <= tool_names
         assert "session_revisit" in payload["system"]
         assert "session_history" in payload["system"]
         assert "memory_fetch" in payload["system"]
+        assert "memory_write_core_fact" in payload["system"]
         return httpx.Response(
             200,
             headers={"content-type": "text/event-stream"},

@@ -87,6 +87,16 @@ def _memory_write_progress(tool_input: dict[str, Any]) -> str:
     return f"Saving {kind} to memory..." if kind else "Saving to memory..."
 
 
+def _memory_core_fact_progress(tool_input: dict[str, Any]) -> str:
+    title = str(tool_input.get("title") or "").strip()
+    if title:
+        return f"Saving core fact: {title}"
+    canonical_key = str(tool_input.get("canonical_key") or "").strip()
+    if canonical_key:
+        return f"Saving core fact {canonical_key}..."
+    return "Saving core fact..."
+
+
 def _session_state_progress(tool_input: dict[str, Any]) -> str:
     session_id = str(tool_input.get("session_id") or "").strip()
     return f"Loading session state for {session_id}..." if session_id else "Loading session state..."
@@ -254,7 +264,9 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         api_definition={
             "name": "memory_write",
             "description": (
-                "Write important user or system context to the shared memory store. Use for durable preferences, facts, goals, relationships, or notable project context."
+                "Write durable shared memory that should remain retrievable later. Use kind=user_data for personal/project facts "
+                "that should be searchable later, or kind=agent_note for implementation notes, reasoning summaries, and notable work context. "
+                "Do not use this for always-on core profile facts."
             ),
             "input_schema": {
                 "type": "object",
@@ -265,9 +277,9 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                     },
                     "kind": {
                         "type": "string",
-                        "description": "Memory category. Defaults to note.",
-                        "enum": ["preference", "fact", "relationship", "goal", "event", "note"],
-                        "default": "note",
+                        "description": "Shared memory kind. Use user_data for durable facts/preferences/goals. Use agent_note for durable implementation or project notes.",
+                        "enum": ["user_data", "agent_note"],
+                        "default": "agent_note",
                     },
                     "title": {
                         "type": "string",
@@ -287,9 +299,60 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             },
         },
         group="memory",
-        prompt_summary="Persist a genuinely useful long-term memory. Be selective and avoid trivial conversation details.",
+        prompt_summary="Persist retrievable shared memory. Prefer user_data for durable user/project facts and agent_note for notable implementation context.",
         progress_builder=_memory_write_progress,
         handler_method="_memory_write",
+    ),
+    ToolSpec(
+        name="memory_write_core_fact",
+        api_definition={
+            "name": "memory_write_core_fact",
+            "description": (
+                "Write a stable always-on core fact or standing preference that should surface proactively in the core_fact block. "
+                "Use canonical_key when you are updating an established field such as response style, relationship, or identity fact."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "fact": {
+                        "type": "string",
+                        "description": "The durable fact or standing preference to store.",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Short title summarizing the fact. If omitted, one will be derived.",
+                    },
+                    "canonical_key": {
+                        "type": "string",
+                        "description": "Stable key for superseding future updates, such as preferences.response_style or relationships.spouse.",
+                    },
+                    "priority": {
+                        "type": "integer",
+                        "description": "Relative ordering priority inside the core_fact block. Default 100.",
+                        "default": 100,
+                    },
+                    "always_include": {
+                        "type": "boolean",
+                        "description": "Whether this fact should remain eligible for always-on inclusion in the core_fact block. Default true.",
+                        "default": True,
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional search tags for the saved fact.",
+                    },
+                    "metadata": {
+                        "type": "object",
+                        "description": "Optional structured metadata to store alongside the core fact.",
+                    },
+                },
+                "required": ["fact"],
+            },
+        },
+        group="memory",
+        prompt_summary="Persist a stable always-on core fact or standing preference. Prefer this over memory_write when the fact should proactively shape future context.",
+        progress_builder=_memory_core_fact_progress,
+        handler_method="_memory_write_core_fact",
     ),
     ToolSpec(
         name="session_state",

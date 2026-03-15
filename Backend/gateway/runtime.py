@@ -22,7 +22,8 @@ from .channels.telegram import TelegramAdapter, TelegramConfig
 from .channels.whatsapp import WhatsAppAdapter, WhatsAppConfig
 from .config import GatewayConfig
 from .delivery.queue_store import DeliveryQueueStore, utcnow_iso
-from .memory.client import CosmicMemoryClient, MemoryPromptContext
+from .memory import MemoryWriteAuditStore
+from .memory.client import CosmicMemoryClient, MemoryClientHTTPError, MemoryPromptContext
 from .orchestrator_client import OrchestratorClient
 from .routing.router_client import ModelRouterClient
 from .routing.audit_store import RoutingAuditStore
@@ -61,6 +62,8 @@ COMPACTION_TRIGGER_FRACTION = 0.70
 CONTEXT_SYSTEM_PROMPT_TOKEN_BUDGET = 2_000
 CONTEXT_MIN_CONVERSATION_BUDGET_TOKENS = 8_000
 DEFAULT_CONTEXT_WINDOW_TOKENS = 48_000
+MEMORY_WRITE_RATE_WINDOW_SEC = 3_600
+MEMORY_WRITE_PREVIEW_CHARS = 400
 SYSTEM_CRON_DAILY_ROLLOVER = "system.daily_rollover"
 TURN_LEDGER_WINDOW_SIZE = 10
 TASK_NOTEBOOK_WINDOW_SIZE = 5
@@ -103,6 +106,29 @@ class RoutingDecision:
     error_text: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class MemoryWriteAuditEvent:
+    operation: str
+    write_source: str
+    writer_id: str | None
+    request_id: str | None
+    session_id: str | None
+    task_id: str | None
+    channel: str | None
+    source_kind: str | None
+    source_id: str | None
+    title: str | None
+    original_kind: str | None
+    normalized_kind: str | None
+    canonical_key: str | None
+    content_hash: str | None
+    content_preview: str | None
+    tags: list[str]
+    metadata: dict[str, Any]
+    provenance: dict[str, Any]
+    guard_applied: bool
+
+
 class GatewayRuntime:
     """Single-process Gateway runtime for channel ingress and control-plane routes."""
 
@@ -120,6 +146,7 @@ class GatewayRuntime:
         )
         self.session_store = SessionStore(config.sessions_db_path)
         self.routing_audit_store = RoutingAuditStore(config.routing_audit_db_path)
+        self.memory_write_audit_store = MemoryWriteAuditStore(config.memory_write_audit_db_path)
         self.artifact_store = ArtifactStore(config.artifacts_db_path)
         self.delivery_queue_store = DeliveryQueueStore(config.delivery_queue_db_path)
         self.scheduler_store = SchedulerStore(config.scheduler_db_path)
@@ -148,6 +175,7 @@ class GatewayRuntime:
         self.request_records: dict[str, dict[str, Any]] = {}
         self.active_requests: dict[str, ActiveRequest] = {}
         self.active_requests_by_task: dict[str, str] = {}
+        self._memory_write_locks: dict[str, asyncio.Lock] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._delivery_worker: asyncio.Task[None] | None = None
         self._delivery_wakeup = asyncio.Event()
@@ -165,6 +193,7 @@ class GatewayRuntime:
     async def start(self) -> None:
         self.session_store.initialize()
         self.routing_audit_store.initialize()
+        self.memory_write_audit_store.initialize()
         self.artifact_store.initialize()
         self.delivery_queue_store.initialize()
         self.scheduler_store.initialize(default_timezone=self.config.user_timezone_fallback)
@@ -1339,7 +1368,7 @@ class GatewayRuntime:
         }
 
         try:
-            response = await self.memory_client.ingest_episode(
+            episode_payload, audit_event = self._normalize_episode_write_payload(
                 {
                     "observations": [
                         {
@@ -1373,7 +1402,12 @@ class GatewayRuntime:
                     },
                     "episode_type": "conversation_turn",
                     "extract_graph": self.config.cosmic_memory_episode_extract_graph,
-                }
+                },
+                write_source="gateway_episode_ingest",
+            )
+            response = await self._ingest_memory_episode(
+                payload=episode_payload,
+                audit_event=audit_event,
             )
         except Exception as exc:
             self.session_store.release_memory_episode_ingest_claim(
@@ -1454,15 +1488,24 @@ class GatewayRuntime:
             return
 
         try:
-            response = await self.memory_client.write_memory(
-                self._build_task_summary_memory_payload(
-                    task_id=task_id,
-                    request_id=request_id,
-                    session_id=session_id,
-                    channel=channel,
-                    user_message=user_message,
-                    event=event,
-                )
+            summary_payload = self._build_task_summary_memory_payload(
+                task_id=task_id,
+                request_id=request_id,
+                session_id=session_id,
+                channel=channel,
+                user_message=user_message,
+                event=event,
+            )
+            response = await self._write_memory_record(
+                payload=summary_payload,
+                audit_event=self._build_memory_write_audit_event(
+                    payload=summary_payload,
+                    operation="task_summary_write",
+                    write_source="gateway_task_summary",
+                    original_kind=self._safe_text(summary_payload.get("kind")),
+                    normalized_kind=self._safe_text(summary_payload.get("kind")),
+                    guard_applied=False,
+                ),
             )
         except Exception as exc:
             self.session_store.release_task_summary_write_claim(
@@ -1508,13 +1551,30 @@ class GatewayRuntime:
         return await self.memory_client.memory_brief(payload)
 
     async def memory_write(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self.memory_client.write_memory(payload)
+        normalized_payload, audit_event = self._normalize_tool_memory_write_payload(payload)
+        return await self._write_memory_record(
+            payload=normalized_payload,
+            audit_event=audit_event,
+            writer_id=audit_event.writer_id,
+        )
 
     async def memory_write_core_fact(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self.memory_client.write_core_fact(payload)
+        normalized_payload, audit_event = self._normalize_tool_core_fact_payload(payload)
+        return await self._write_core_fact_record(
+            payload=normalized_payload,
+            audit_event=audit_event,
+            writer_id=audit_event.writer_id,
+        )
 
     async def memory_ingest_episode(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self.memory_client.ingest_episode(payload)
+        normalized_payload, audit_event = self._normalize_episode_write_payload(
+            payload,
+            write_source="gateway_internal_episode",
+        )
+        return await self._ingest_memory_episode(
+            payload=normalized_payload,
+            audit_event=audit_event,
+        )
 
     async def memory_core_facts(self, *, max_chars: int = 1500) -> dict[str, Any]:
         return await self.memory_client.get_core_fact_block(max_chars=max_chars)
@@ -1527,6 +1587,27 @@ class GatewayRuntime:
 
     async def memory_index_rebuild(self) -> dict[str, Any]:
         return await self.memory_client.index_rebuild()
+
+    def list_memory_write_audit(
+        self,
+        *,
+        limit: int = 50,
+        request_id: str | None = None,
+        session_id: str | None = None,
+        task_id: str | None = None,
+        writer_id: str | None = None,
+        operation: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self.memory_write_audit_store.list_entries(
+            limit=limit,
+            request_id=request_id,
+            session_id=session_id,
+            task_id=task_id,
+            writer_id=writer_id,
+            operation=operation,
+            status=status,
+        )
 
     def get_session_state(self, session_id: str) -> dict[str, Any]:
         record = self.session_store.get_session_record(session_id)
@@ -3584,13 +3665,22 @@ class GatewayRuntime:
                 summary_status = "generated"
                 if self.memory_client.enabled:
                     try:
-                        memory_response = await self.memory_client.write_memory(
-                            self._build_session_summary_memory_payload(
-                                session_id=session_id,
-                                transcript_path=transcript_path,
-                                summary_text=summary_text,
-                                history=history,
-                            )
+                        summary_payload = self._build_session_summary_memory_payload(
+                            session_id=session_id,
+                            transcript_path=transcript_path,
+                            summary_text=summary_text,
+                            history=history,
+                        )
+                        memory_response = await self._write_memory_record(
+                            payload=summary_payload,
+                            audit_event=self._build_memory_write_audit_event(
+                                payload=summary_payload,
+                                operation="session_summary_write",
+                                write_source="gateway_session_rollover",
+                                original_kind=self._safe_text(summary_payload.get("kind")),
+                                normalized_kind=self._safe_text(summary_payload.get("kind")),
+                                guard_applied=False,
+                            ),
                         )
                     except Exception:
                         logger.exception(
@@ -3801,3 +3891,640 @@ class GatewayRuntime:
         if isinstance(record, dict):
             return self._safe_text(record.get("memory_id"))
         return None
+
+    def _coerce_bool(self, value: Any, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        return bool(value)
+
+    def _derive_memory_title(self, content: str) -> str:
+        normalized = str(content or "").strip()
+        if not normalized:
+            return "Untitled memory"
+        title = normalized.splitlines()[0].strip()
+        if len(title) > 72:
+            title = title[:69].rstrip() + "..."
+        return title or "Untitled memory"
+
+    def _normalize_tool_memory_write_payload(
+        self,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], MemoryWriteAuditEvent]:
+        content = str(payload.get("content") or "").strip()
+        if not content:
+            raise MemoryClientHTTPError(status_code=400, message="content is required")
+
+        original_kind = self._safe_text(payload.get("kind")) or "agent_note"
+        normalized_kind = self._normalize_memory_write_kind(original_kind)
+        if normalized_kind is None:
+            raise MemoryClientHTTPError(
+                status_code=400,
+                message=(
+                    "Unsupported memory write kind. Use user_data or agent_note. "
+                    "Stable always-on facts should use /internal/memory/core-facts."
+                ),
+            )
+
+        title = self._safe_text(payload.get("title")) or self._derive_memory_title(content)
+        tags = self._normalize_string_list(payload.get("tags"), limit=24)
+        metadata = dict(payload.get("metadata")) if isinstance(payload.get("metadata"), dict) else {}
+        provenance = dict(payload.get("provenance")) if isinstance(payload.get("provenance"), dict) else {}
+        normalized_payload = {
+            "kind": normalized_kind,
+            "title": title,
+            "content": content,
+            "tags": tags,
+            "metadata": metadata,
+            "provenance": provenance,
+        }
+        audit_event = self._build_memory_write_audit_event(
+            payload=normalized_payload,
+            operation="memory_write",
+            write_source="tool_memory_write",
+            original_kind=original_kind,
+            normalized_kind=normalized_kind,
+            guard_applied=True,
+        )
+        return normalized_payload, audit_event
+
+    def _normalize_tool_core_fact_payload(
+        self,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], MemoryWriteAuditEvent]:
+        fact = str(payload.get("fact") or payload.get("content") or "").strip()
+        if not fact:
+            raise MemoryClientHTTPError(status_code=400, message="fact is required")
+
+        title = self._safe_text(payload.get("title")) or self._derive_memory_title(fact)
+        canonical_key = self._safe_text(payload.get("canonical_key"))
+        priority = self._coerce_int(payload.get("priority"))
+        if priority is None:
+            priority = 100
+        priority = min(max(priority, 0), 1000)
+        always_include = self._coerce_bool(payload.get("always_include"), True)
+        tags = self._normalize_string_list(payload.get("tags"), limit=24)
+        metadata = dict(payload.get("metadata")) if isinstance(payload.get("metadata"), dict) else {}
+        provenance = dict(payload.get("provenance")) if isinstance(payload.get("provenance"), dict) else {}
+
+        normalized_payload: dict[str, Any] = {
+            "fact": fact,
+            "title": title,
+            "priority": priority,
+            "always_include": always_include,
+            "tags": tags,
+            "metadata": metadata,
+            "provenance": provenance,
+        }
+        if canonical_key:
+            normalized_payload["canonical_key"] = canonical_key
+
+        audit_event = self._build_memory_write_audit_event(
+            payload={
+                "kind": "core_fact",
+                "title": title,
+                "content": fact,
+                "tags": tags,
+                "metadata": metadata,
+                "provenance": provenance,
+                "canonical_key": canonical_key,
+            },
+            operation="memory_write_core_fact",
+            write_source="tool_memory_write_core_fact",
+            original_kind="core_fact",
+            normalized_kind="core_fact",
+            guard_applied=True,
+        )
+        return normalized_payload, audit_event
+
+    def _normalize_episode_write_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        write_source: str,
+    ) -> tuple[dict[str, Any], MemoryWriteAuditEvent]:
+        observations = payload.get("observations")
+        if not isinstance(observations, list) or not observations:
+            raise MemoryClientHTTPError(status_code=400, message="observations are required")
+        provenance = dict(payload.get("provenance")) if isinstance(payload.get("provenance"), dict) else {}
+        if not provenance:
+            raise MemoryClientHTTPError(status_code=400, message="provenance is required")
+
+        normalized_payload = dict(payload)
+        normalized_payload["kind"] = self._safe_text(payload.get("kind")) or "transcript"
+        normalized_payload["title"] = self._safe_text(payload.get("title")) or "Transcript episode"
+        normalized_payload["tags"] = self._normalize_string_list(payload.get("tags"), limit=24)
+        normalized_payload["metadata"] = dict(payload.get("metadata")) if isinstance(payload.get("metadata"), dict) else {}
+        normalized_payload["provenance"] = provenance
+
+        audit_event = self._build_memory_write_audit_event(
+            payload=normalized_payload,
+            operation="memory_ingest_episode",
+            write_source=write_source,
+            original_kind=self._safe_text(normalized_payload.get("kind")) or "transcript",
+            normalized_kind=self._safe_text(normalized_payload.get("kind")) or "transcript",
+            guard_applied=False,
+        )
+        return normalized_payload, audit_event
+
+    def _build_memory_write_audit_event(
+        self,
+        *,
+        payload: dict[str, Any],
+        operation: str,
+        write_source: str,
+        original_kind: str | None,
+        normalized_kind: str | None,
+        guard_applied: bool,
+    ) -> MemoryWriteAuditEvent:
+        metadata = dict(payload.get("metadata")) if isinstance(payload.get("metadata"), dict) else {}
+        provenance = dict(payload.get("provenance")) if isinstance(payload.get("provenance"), dict) else {}
+        content_preview = self._memory_payload_preview(payload)
+        content_hash = self._memory_payload_hash(
+            payload,
+            operation=operation,
+            normalized_kind=normalized_kind,
+        )
+        writer_id = (
+            self._safe_text(provenance.get("created_by"))
+            or self._safe_text(metadata.get("agent_id"))
+            or self._safe_text(metadata.get("stored_by"))
+            or write_source
+        )
+        request_id = (
+            self._safe_text(metadata.get("request_id"))
+            or self._safe_text(provenance.get("request_id"))
+            or self._safe_text(payload.get("request_id"))
+        )
+        session_id = (
+            self._safe_text(metadata.get("session_id"))
+            or self._safe_text(provenance.get("session_id"))
+            or self._safe_text(payload.get("session_id"))
+        )
+        task_id = (
+            self._safe_text(metadata.get("task_id"))
+            or self._safe_text(provenance.get("task_id"))
+            or self._safe_text(payload.get("task_id"))
+        )
+        channel = (
+            self._safe_text(metadata.get("channel"))
+            or self._safe_text(provenance.get("channel"))
+            or self._safe_text(payload.get("channel"))
+        )
+        source_kind = (
+            self._safe_text(provenance.get("source_kind"))
+            or self._safe_text(metadata.get("source"))
+            or self._safe_text(payload.get("source_kind"))
+        )
+        source_id = (
+            self._safe_text(provenance.get("source_id"))
+            or self._safe_text(metadata.get("source_id"))
+            or self._safe_text(payload.get("source_id"))
+        )
+        canonical_key = (
+            self._safe_text(payload.get("canonical_key"))
+            or self._safe_text(metadata.get("canonical_key"))
+        )
+        tags = self._normalize_string_list(payload.get("tags"), limit=24)
+        return MemoryWriteAuditEvent(
+            operation=operation,
+            write_source=write_source,
+            writer_id=writer_id,
+            request_id=request_id,
+            session_id=session_id,
+            task_id=task_id,
+            channel=channel,
+            source_kind=source_kind,
+            source_id=source_id,
+            title=self._safe_text(payload.get("title")),
+            original_kind=original_kind,
+            normalized_kind=normalized_kind,
+            canonical_key=canonical_key,
+            content_hash=content_hash,
+            content_preview=content_preview,
+            tags=tags,
+            metadata=metadata,
+            provenance=provenance,
+            guard_applied=guard_applied,
+        )
+
+    async def _write_memory_record(
+        self,
+        *,
+        payload: dict[str, Any],
+        audit_event: MemoryWriteAuditEvent,
+        writer_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._execute_audited_memory_call(
+            audit_event=audit_event,
+            writer_id=writer_id,
+            write_callable=lambda: self.memory_client.write_memory(payload),
+        )
+
+    async def _write_core_fact_record(
+        self,
+        *,
+        payload: dict[str, Any],
+        audit_event: MemoryWriteAuditEvent,
+        writer_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._execute_audited_memory_call(
+            audit_event=audit_event,
+            writer_id=writer_id,
+            write_callable=lambda: self.memory_client.write_core_fact(payload),
+        )
+
+    async def _ingest_memory_episode(
+        self,
+        *,
+        payload: dict[str, Any],
+        audit_event: MemoryWriteAuditEvent,
+    ) -> dict[str, Any]:
+        return await self._execute_audited_memory_call(
+            audit_event=audit_event,
+            writer_id=None,
+            write_callable=lambda: self.memory_client.ingest_episode(payload),
+        )
+
+    async def _execute_audited_memory_call(
+        self,
+        *,
+        audit_event: MemoryWriteAuditEvent,
+        writer_id: str | None,
+        write_callable,
+    ) -> dict[str, Any]:
+        resolved_writer_id = writer_id or audit_event.writer_id
+        lock_key = None
+        if audit_event.guard_applied and resolved_writer_id and audit_event.content_hash:
+            lock_key = f"{resolved_writer_id}:{audit_event.content_hash}"
+
+        if lock_key is None:
+            if audit_event.guard_applied and resolved_writer_id:
+                if await self._memory_write_is_rate_limited(resolved_writer_id):
+                    message = (
+                        f"Memory write rate limit exceeded for {resolved_writer_id}. "
+                        f"Max {self.config.memory_write_max_per_hour} writes per hour."
+                    )
+                    self._append_memory_write_audit(
+                        audit_event=audit_event,
+                        status="rate_limited",
+                        memory_id=None,
+                        response=None,
+                        deduplicated=False,
+                        rate_limited=True,
+                        indexed=None,
+                        error_text=message,
+                    )
+                    raise MemoryClientHTTPError(status_code=429, message=message)
+            return await self._execute_memory_call_without_guard(
+                audit_event=audit_event,
+                write_callable=write_callable,
+            )
+
+        lock = self._get_memory_write_lock(lock_key)
+        async with lock:
+            duplicate_entry = await self._find_duplicate_memory_write(
+                writer_id=resolved_writer_id,
+                content_hash=audit_event.content_hash or "",
+            )
+            if duplicate_entry is not None:
+                duplicate_response = self._build_deduplicated_memory_response(
+                    duplicate_entry=duplicate_entry,
+                    audit_event=audit_event,
+                )
+                self._append_memory_write_audit(
+                    audit_event=audit_event,
+                    status="deduplicated",
+                    memory_id=self._extract_memory_id(duplicate_response),
+                    response=self._summarize_memory_write_response(duplicate_response),
+                    deduplicated=True,
+                    rate_limited=False,
+                    indexed=True,
+                    error_text=None,
+                )
+                return duplicate_response
+
+            if await self._memory_write_is_rate_limited(resolved_writer_id):
+                message = (
+                    f"Memory write rate limit exceeded for {resolved_writer_id}. "
+                    f"Max {self.config.memory_write_max_per_hour} writes per hour."
+                )
+                self._append_memory_write_audit(
+                    audit_event=audit_event,
+                    status="rate_limited",
+                    memory_id=None,
+                    response=None,
+                    deduplicated=False,
+                    rate_limited=True,
+                    indexed=None,
+                    error_text=message,
+                )
+                raise MemoryClientHTTPError(status_code=429, message=message)
+
+            try:
+                response = await write_callable()
+            except Exception as exc:
+                self._append_memory_write_audit(
+                    audit_event=audit_event,
+                    status="failed",
+                    memory_id=None,
+                    response=None,
+                    deduplicated=False,
+                    rate_limited=False,
+                    indexed=False,
+                    error_text=str(exc),
+                )
+                raise
+
+            memory_id = self._extract_memory_id(response)
+            if resolved_writer_id and audit_event.content_hash and memory_id:
+                await self._remember_memory_write(
+                    writer_id=resolved_writer_id,
+                    content_hash=audit_event.content_hash,
+                    memory_id=memory_id,
+                )
+            self._append_memory_write_audit(
+                audit_event=audit_event,
+                status="saved",
+                memory_id=memory_id,
+                response=self._summarize_memory_write_response(response),
+                deduplicated=bool(self._coerce_bool(response.get("deduplicated") if isinstance(response, dict) else False, False)),
+                rate_limited=False,
+                indexed=True,
+                error_text=None,
+            )
+            return response
+
+    async def _execute_memory_call_without_guard(
+        self,
+        *,
+        audit_event: MemoryWriteAuditEvent,
+        write_callable,
+    ) -> dict[str, Any]:
+        try:
+            response = await write_callable()
+        except Exception as exc:
+            self._append_memory_write_audit(
+                audit_event=audit_event,
+                status="failed",
+                memory_id=None,
+                response=None,
+                deduplicated=False,
+                rate_limited=False,
+                indexed=False,
+                error_text=str(exc),
+            )
+            raise
+
+        self._append_memory_write_audit(
+            audit_event=audit_event,
+            status="saved",
+            memory_id=self._extract_memory_id(response),
+            response=self._summarize_memory_write_response(response),
+            deduplicated=bool(self._coerce_bool(response.get("deduplicated") if isinstance(response, dict) else False, False)),
+            rate_limited=False,
+            indexed=True,
+            error_text=None,
+        )
+        return response
+
+    async def _memory_write_is_rate_limited(self, writer_id: str) -> bool:
+        if self._redis is not None:
+            rate_key = f"memory_write_rate:{writer_id}"
+            try:
+                count = await self._redis.incr(rate_key)
+                if count == 1:
+                    await self._redis.expire(rate_key, MEMORY_WRITE_RATE_WINDOW_SEC)
+                return int(count) > self.config.memory_write_max_per_hour
+            except Exception:
+                logger.exception("gateway.memory_write_rate_limit_redis_failed writer_id=%s", writer_id)
+
+        since_created_at = self._iso_seconds_ago(MEMORY_WRITE_RATE_WINDOW_SEC)
+        count = self.memory_write_audit_store.count_recent_guarded_entries(
+            writer_id=writer_id,
+            since_created_at=since_created_at,
+        )
+        return count >= self.config.memory_write_max_per_hour
+
+    async def _find_duplicate_memory_write(
+        self,
+        *,
+        writer_id: str,
+        content_hash: str,
+    ) -> dict[str, Any] | None:
+        if self._redis is not None:
+            dedup_key = f"memory_write_dedup:{writer_id}:{content_hash}"
+            try:
+                memory_id = self._safe_text(await self._redis.get(dedup_key))
+            except Exception:
+                logger.exception("gateway.memory_write_dedup_redis_failed writer_id=%s", writer_id)
+            else:
+                if memory_id:
+                    return {
+                        "memory_id": memory_id,
+                        "response": {"memory_id": memory_id, "indexed": True, "deduplicated": True},
+                    }
+
+        return self.memory_write_audit_store.find_recent_duplicate(
+            writer_id=writer_id,
+            content_hash=content_hash,
+            since_created_at=self._iso_seconds_ago(self.config.memory_write_dedup_ttl_sec),
+        )
+
+    async def _remember_memory_write(
+        self,
+        *,
+        writer_id: str,
+        content_hash: str,
+        memory_id: str,
+    ) -> None:
+        if self._redis is None:
+            return
+        dedup_key = f"memory_write_dedup:{writer_id}:{content_hash}"
+        try:
+            await self._redis.set(
+                dedup_key,
+                memory_id,
+                ex=self.config.memory_write_dedup_ttl_sec,
+            )
+        except Exception:
+            logger.exception("gateway.memory_write_dedup_redis_store_failed writer_id=%s", writer_id)
+
+    def _append_memory_write_audit(
+        self,
+        *,
+        audit_event: MemoryWriteAuditEvent,
+        status: str,
+        memory_id: str | None,
+        response: dict[str, Any] | None,
+        deduplicated: bool,
+        rate_limited: bool,
+        indexed: bool | None,
+        error_text: str | None,
+    ) -> None:
+        self.memory_write_audit_store.append(
+            operation=audit_event.operation,
+            write_source=audit_event.write_source,
+            status=status,
+            writer_id=audit_event.writer_id,
+            request_id=audit_event.request_id,
+            session_id=audit_event.session_id,
+            task_id=audit_event.task_id,
+            channel=audit_event.channel,
+            source_kind=audit_event.source_kind,
+            source_id=audit_event.source_id,
+            memory_id=memory_id,
+            title=audit_event.title,
+            original_kind=audit_event.original_kind,
+            normalized_kind=audit_event.normalized_kind,
+            canonical_key=audit_event.canonical_key,
+            content_hash=audit_event.content_hash,
+            content_preview=audit_event.content_preview,
+            tags=audit_event.tags,
+            metadata=audit_event.metadata,
+            provenance=audit_event.provenance,
+            response=response,
+            deduplicated=deduplicated,
+            rate_limited=rate_limited,
+            guard_applied=audit_event.guard_applied,
+            indexed=indexed,
+            error_text=error_text,
+        )
+
+    def _memory_payload_preview(self, payload: dict[str, Any]) -> str | None:
+        content = self._safe_text(payload.get("content"))
+        if content:
+            return self._bounded_excerpt(content, limit=MEMORY_WRITE_PREVIEW_CHARS)
+        fact = self._safe_text(payload.get("fact"))
+        if fact:
+            return self._bounded_excerpt(fact, limit=MEMORY_WRITE_PREVIEW_CHARS)
+        observations = payload.get("observations")
+        if isinstance(observations, list):
+            parts: list[str] = []
+            for item in observations[:2]:
+                if not isinstance(item, dict):
+                    continue
+                role = self._safe_text(item.get("role")) or "unknown"
+                observation_content = self._bounded_excerpt(item.get("content"), limit=160)
+                if observation_content:
+                    parts.append(f"{role}: {observation_content}")
+            if parts:
+                return " | ".join(parts)
+        return None
+
+    def _memory_payload_hash(
+        self,
+        payload: dict[str, Any],
+        *,
+        operation: str,
+        normalized_kind: str | None,
+    ) -> str | None:
+        content = self._safe_text(payload.get("content"))
+        if content is None:
+            content = self._safe_text(payload.get("fact"))
+        if content is None:
+            observations = payload.get("observations")
+            if isinstance(observations, list):
+                content = json.dumps(observations, ensure_ascii=False, sort_keys=True, default=str)
+        if content is None:
+            return None
+        canonical_key = self._safe_text(payload.get("canonical_key"))
+        digest_input = "\n".join(
+            [
+                operation,
+                normalized_kind or "",
+                canonical_key or "",
+                content,
+            ]
+        )
+        return hashlib.sha256(digest_input.encode("utf-8")).hexdigest()
+
+    def _normalize_memory_write_kind(self, kind: str) -> str | None:
+        normalized = kind.strip().lower()
+        alias_map = {
+            "note": "agent_note",
+            "agent_note": "agent_note",
+            "user_data": "user_data",
+            "preference": "user_data",
+            "fact": "user_data",
+            "relationship": "user_data",
+            "goal": "user_data",
+            "event": "user_data",
+            "task_summary": "task_summary",
+            "session_summary": "session_summary",
+        }
+        return alias_map.get(normalized)
+
+    def _get_memory_write_lock(self, key: str) -> asyncio.Lock:
+        lock = self._memory_write_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._memory_write_locks[key] = lock
+        return lock
+
+    def _iso_seconds_ago(self, seconds: int) -> str:
+        return (datetime.now(timezone.utc) - timedelta(seconds=max(1, seconds))).isoformat().replace("+00:00", "Z")
+
+    def _build_deduplicated_memory_response(
+        self,
+        *,
+        duplicate_entry: dict[str, Any],
+        audit_event: MemoryWriteAuditEvent,
+    ) -> dict[str, Any]:
+        memory_id = self._safe_text(duplicate_entry.get("memory_id"))
+        response = duplicate_entry.get("response")
+        if isinstance(response, dict):
+            normalized = dict(response)
+        else:
+            normalized = {}
+        if memory_id:
+            normalized.setdefault("memory_id", memory_id)
+        normalized["indexed"] = True
+        normalized["deduplicated"] = True
+        if audit_event.normalized_kind:
+            normalized.setdefault("kind", audit_event.normalized_kind)
+        if audit_event.title:
+            normalized.setdefault("title", audit_event.title)
+        return normalized
+
+    def _summarize_memory_write_response(self, payload: dict[str, Any]) -> dict[str, Any]:
+        summary: dict[str, Any] = {}
+        memory_id = self._extract_memory_id(payload)
+        if memory_id:
+            summary["memory_id"] = memory_id
+        for key in (
+            "kind",
+            "title",
+            "status",
+            "version",
+            "indexed",
+            "deduplicated",
+            "observation_count",
+            "graph_episode_id",
+        ):
+            value = payload.get(key)
+            if value is not None:
+                summary[key] = value
+        record = payload.get("record")
+        if isinstance(record, dict):
+            for key in (
+                "kind",
+                "title",
+                "status",
+                "version",
+                "supersedes",
+                "superseded_by",
+                "created_at",
+                "updated_at",
+            ):
+                value = record.get(key)
+                if value is not None:
+                    summary[f"record_{key}"] = value
+        return summary

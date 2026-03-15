@@ -67,6 +67,7 @@ class GatewayConfig:
     enable_telegram: bool = False
     sessions_db_path: Path = BACKEND_ROOT / "gateway" / "sessions.db"
     routing_audit_db_path: Path = BACKEND_ROOT / "gateway" / "routing_audit.db"
+    memory_write_audit_db_path: Path = BACKEND_ROOT / "gateway" / "memory_write_audit.db"
     artifacts_db_path: Path = BACKEND_ROOT / "gateway" / "artifacts.db"
     delivery_queue_db_path: Path = BACKEND_ROOT / "gateway" / "delivery_queue.db"
     scheduler_db_path: Path = BACKEND_ROOT / "gateway" / "scheduler.db"
@@ -98,6 +99,8 @@ class GatewayConfig:
     )
     cosmic_memory_ingest_transcripts: bool = True
     cosmic_memory_episode_extract_graph: bool = False
+    memory_write_max_per_hour: int = 50
+    memory_write_dedup_ttl_sec: int = 86_400
     session_summary_max_output_tokens: int = 2500
 
     @classmethod
@@ -138,6 +141,12 @@ class GatewayConfig:
                 os.getenv(
                     "GATEWAY_ROUTING_AUDIT_DB_PATH",
                     str(BACKEND_ROOT / "gateway" / "routing_audit.db"),
+                )
+            ).expanduser(),
+            memory_write_audit_db_path=Path(
+                os.getenv(
+                    "GATEWAY_MEMORY_WRITE_AUDIT_DB_PATH",
+                    str(BACKEND_ROOT / "gateway" / "memory_write_audit.db"),
                 )
             ).expanduser(),
             artifacts_db_path=Path(
@@ -238,6 +247,14 @@ class GatewayConfig:
             cosmic_memory_episode_extract_graph=_env_bool(
                 "COSMIC_MEMORY_EPISODE_EXTRACT_GRAPH",
                 False,
+            ),
+            memory_write_max_per_hour=max(
+                1,
+                _env_int("GATEWAY_MEMORY_WRITE_MAX_PER_HOUR", 50),
+            ),
+            memory_write_dedup_ttl_sec=max(
+                60,
+                _env_int("GATEWAY_MEMORY_WRITE_DEDUP_TTL_SEC", 86_400),
             ),
             session_summary_max_output_tokens=max(
                 512,

@@ -14,7 +14,7 @@ from gateway.adapters.response_processor import DirectRouteHandoff
 from gateway.channels.base import ChannelUnavailableError, RetryableDeliveryError
 from gateway.channels.routes import router as channel_router
 from gateway.config import GatewayConfig
-from gateway.memory_client import MemoryPromptContext
+from gateway.memory_client import MemoryClientHTTPError, MemoryPromptContext
 from gateway.runtime import SYSTEM_CRON_DAILY_ROLLOVER, GatewayRuntime
 from gateway.session_store import utcnow_iso
 
@@ -582,6 +582,7 @@ class FakeRedis:
     def __init__(self) -> None:
         self.streams: dict[str, list[tuple[str, dict[str, str]]]] = {}
         self.groups: dict[tuple[str, str], dict[str, object]] = {}
+        self.values: dict[str, object] = {}
         self._counter = 0
 
     async def xgroup_create(self, stream: str, group: str, id: str = "0", mkstream: bool = True) -> None:
@@ -636,6 +637,24 @@ class FakeRedis:
         state["acked"].add(message_id)
         return 1
 
+    async def get(self, key: str) -> object | None:
+        return self.values.get(key)
+
+    async def set(self, key: str, value: object, ex: int | None = None) -> bool:
+        del ex
+        self.values[key] = value
+        return True
+
+    async def incr(self, key: str) -> int:
+        current = int(self.values.get(key) or 0)
+        current += 1
+        self.values[key] = current
+        return current
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        del key, seconds
+        return True
+
     async def aclose(self) -> None:
         return
 
@@ -654,6 +673,7 @@ def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
             artifacts_db_path=tmp_path / "artifacts.db",
             delivery_queue_db_path=tmp_path / "delivery_queue.db",
             scheduler_db_path=tmp_path / "scheduler.db",
+            memory_write_audit_db_path=tmp_path / "memory_write_audit.db",
         )
     )
 
@@ -1165,6 +1185,171 @@ def test_internal_memory_routes_proxy_to_memory_service(tmp_path) -> None:
         )
         assert core_fact_response.status_code == 200
         assert runtime.memory_client.core_fact_requests == [900]
+
+        write_response = client.post(
+            "/internal/memory/write",
+            headers={"X-Internal-Token": "internal-token"},
+            json={
+                "content": "User prefers concise answers.",
+                "kind": "preference",
+                "metadata": {
+                    "request_id": "req_memory_write_1",
+                    "session_id": "sess_memory_write_1",
+                    "task_id": "tsk_memory_write_1",
+                    "stored_by": "cosmic/orchestrator:1.0.0",
+                },
+                "provenance": {
+                    "created_by": "cosmic/orchestrator:1.0.0",
+                    "request_id": "req_memory_write_1",
+                    "session_id": "sess_memory_write_1",
+                    "task_id": "tsk_memory_write_1",
+                    "source_kind": "orchestrator_tool",
+                },
+            },
+        )
+        assert write_response.status_code == 201
+        assert runtime.memory_client.write_calls[0]["kind"] == "user_data"
+
+        core_fact_write_response = client.post(
+            "/internal/memory/core-facts",
+            headers={"X-Internal-Token": "internal-token"},
+            json={
+                "fact": "User prefers concise answers.",
+                "canonical_key": "preferences.response_style",
+                "metadata": {
+                    "request_id": "req_core_fact_1",
+                    "session_id": "sess_memory_write_1",
+                    "task_id": "tsk_memory_write_1",
+                    "stored_by": "cosmic/orchestrator:1.0.0",
+                },
+                "provenance": {
+                    "created_by": "cosmic/orchestrator:1.0.0",
+                    "request_id": "req_core_fact_1",
+                    "session_id": "sess_memory_write_1",
+                    "task_id": "tsk_memory_write_1",
+                    "source_kind": "orchestrator_tool",
+                },
+            },
+        )
+        assert core_fact_write_response.status_code == 201
+        assert runtime.memory_client.core_fact_write_calls[0]["canonical_key"] == "preferences.response_style"
+
+        audit_response = client.get(
+            "/internal/memory/write-audit",
+            headers={"X-Internal-Token": "internal-token"},
+            params={"limit": 10, "session_id": "sess_memory_write_1"},
+        )
+        assert audit_response.status_code == 200
+        entries = audit_response.json()["entries"]
+        operations = {entry["operation"] for entry in entries}
+        assert "memory_write" in operations
+        assert "memory_write_core_fact" in operations
+        assert any(entry["normalized_kind"] == "user_data" for entry in entries)
+        assert any(entry["canonical_key"] == "preferences.response_style" for entry in entries)
+
+
+@pytest.mark.asyncio
+async def test_runtime_tool_memory_writes_are_deduplicated_and_audited(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    fake_memory = FakeMemoryClient(enabled=True)
+    runtime.memory_client = fake_memory
+    runtime._redis = FakeRedis()
+    await runtime.start()
+    try:
+        payload = {
+            "content": "User prefers concise answers.",
+            "kind": "preference",
+            "metadata": {
+                "request_id": "req_dedupe_1",
+                "session_id": "sess_dedupe_1",
+                "task_id": "tsk_dedupe_1",
+                "channel": "desktop:desk_a",
+                "stored_by": "cosmic/orchestrator:1.0.0",
+            },
+            "provenance": {
+                "created_by": "cosmic/orchestrator:1.0.0",
+                "request_id": "req_dedupe_1",
+                "session_id": "sess_dedupe_1",
+                "task_id": "tsk_dedupe_1",
+                "channel": "desktop:desk_a",
+                "source_kind": "orchestrator_tool",
+            },
+        }
+
+        first = await runtime.memory_write(dict(payload))
+        second = await runtime.memory_write(dict(payload))
+
+        assert first["memory_id"] == "mem_write_1"
+        assert first.get("deduplicated") is not True
+        assert second["memory_id"] == "mem_write_1"
+        assert second["deduplicated"] is True
+        assert second["kind"] == "user_data"
+        assert len(fake_memory.write_calls) == 1
+
+        audit_entries = runtime.list_memory_write_audit(
+            request_id="req_dedupe_1",
+            writer_id="cosmic/orchestrator:1.0.0",
+        )
+        assert [entry["status"] for entry in audit_entries] == ["deduplicated", "saved"]
+        assert audit_entries[0]["deduplicated"] is True
+        assert audit_entries[1]["memory_id"] == "mem_write_1"
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_tool_memory_writes_rate_limit_distinct_writes(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    fake_memory = FakeMemoryClient(enabled=True)
+    runtime.memory_client = fake_memory
+    runtime._redis = FakeRedis()
+    runtime.config.memory_write_max_per_hour = 1
+    await runtime.start()
+    try:
+        base_metadata = {
+            "session_id": "sess_rate_limit_1",
+            "task_id": "tsk_rate_limit_1",
+            "channel": "desktop:desk_a",
+            "stored_by": "cosmic/orchestrator:1.0.0",
+        }
+        base_provenance = {
+            "created_by": "cosmic/orchestrator:1.0.0",
+            "session_id": "sess_rate_limit_1",
+            "task_id": "tsk_rate_limit_1",
+            "channel": "desktop:desk_a",
+            "source_kind": "orchestrator_tool",
+        }
+
+        await runtime.memory_write(
+            {
+                "content": "First durable memory item.",
+                "kind": "user_data",
+                "metadata": {**base_metadata, "request_id": "req_rate_limit_1"},
+                "provenance": {**base_provenance, "request_id": "req_rate_limit_1"},
+            }
+        )
+
+        with pytest.raises(MemoryClientHTTPError) as exc_info:
+            await runtime.memory_write(
+                {
+                    "content": "Second distinct durable memory item.",
+                    "kind": "user_data",
+                    "metadata": {**base_metadata, "request_id": "req_rate_limit_2"},
+                    "provenance": {**base_provenance, "request_id": "req_rate_limit_2"},
+                }
+            )
+
+        assert exc_info.value.status_code == 429
+        assert len(fake_memory.write_calls) == 1
+        audit_entries = runtime.list_memory_write_audit(
+            writer_id="cosmic/orchestrator:1.0.0",
+            session_id="sess_rate_limit_1",
+            limit=5,
+        )
+        assert [entry["status"] for entry in audit_entries] == ["rate_limited", "saved"]
+        assert audit_entries[0]["rate_limited"] is True
+    finally:
+        await runtime.stop()
 
 
 def test_internal_session_routes_expose_state_turns_and_revisit(tmp_path) -> None:
