@@ -948,6 +948,30 @@ class GatewayRuntime:
     def get_session_history(self, session_id: str) -> list[dict[str, Any]]:
         return self.session_store.get_history(session_id)
 
+    def get_session_history_page(
+        self,
+        session_id: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        normalized_limit = max(1, min(200, int(limit)))
+        normalized_offset = max(0, int(offset))
+        messages = self.session_store.get_history_page(
+            session_id,
+            limit=normalized_limit,
+            offset=normalized_offset,
+        )
+        total_messages = self.session_store.count_history(session_id)
+        return {
+            "session_id": session_id,
+            "offset": normalized_offset,
+            "limit": normalized_limit,
+            "total_messages": total_messages,
+            "has_more": normalized_offset + len(messages) < total_messages,
+            "messages": messages,
+        }
+
     def list_routing_audit(self, limit: int = 50) -> list[dict[str, Any]]:
         return self.routing_audit_store.list_entries(limit=limit)
 

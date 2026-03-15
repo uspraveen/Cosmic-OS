@@ -223,6 +223,17 @@ async def session_turns(
     return {"session_id": session_id, "turns": runtime.list_turn_ledger(session_id, limit=limit)}
 
 
+@router.get("/internal/session/history/{session_id}")
+async def session_history(
+    session_id: str,
+    limit: int = Query(default=20, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=100000),
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return runtime.get_session_history_page(session_id, limit=limit, offset=offset)
+
+
 @router.get("/internal/session/task-notebook/{task_id}")
 async def task_notebook(
     task_id: str,

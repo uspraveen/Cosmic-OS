@@ -1,0 +1,505 @@
+from __future__ import annotations
+
+from copy import deepcopy
+from dataclasses import dataclass
+from typing import Any, Callable
+
+
+ProgressBuilder = Callable[[dict[str, Any]], str]
+
+
+@dataclass(frozen=True, slots=True)
+class ToolSpec:
+    name: str
+    api_definition: dict[str, Any]
+    group: str
+    prompt_summary: str
+    progress_builder: ProgressBuilder | None = None
+    handler_method: str | None = None
+    read_only: bool = False
+    exposed_to_model: bool = True
+
+    @property
+    def is_local(self) -> bool:
+        return self.handler_method is not None
+
+    def to_definition(self) -> dict[str, Any]:
+        return deepcopy(self.api_definition)
+
+
+def _web_search_progress(tool_input: dict[str, Any]) -> str:
+    query = str(tool_input.get("query") or "").strip()
+    return f"Searching the web for: {query}" if query else "Searching the web..."
+
+
+def _web_fetch_progress(tool_input: dict[str, Any]) -> str:
+    url = str(tool_input.get("url") or "").strip()
+    return f"Fetching: {url}" if url else "Fetching web page..."
+
+
+def _perplexity_progress(tool_input: dict[str, Any]) -> str:
+    query = str(tool_input.get("query") or "").strip()
+    return f"Researching: {query}" if query else "Conducting research..."
+
+
+def _memory_search_progress(tool_input: dict[str, Any]) -> str:
+    query = str(tool_input.get("query") or "").strip()
+    return f"Searching memory for: {query}" if query else "Searching memory..."
+
+
+def _memory_write_progress(tool_input: dict[str, Any]) -> str:
+    title = str(tool_input.get("title") or "").strip()
+    if title:
+        return f"Saving to memory: {title}"
+    kind = str(tool_input.get("kind") or "").strip()
+    return f"Saving {kind} to memory..." if kind else "Saving to memory..."
+
+
+def _session_state_progress(tool_input: dict[str, Any]) -> str:
+    session_id = str(tool_input.get("session_id") or "").strip()
+    return f"Loading session state for {session_id}..." if session_id else "Loading session state..."
+
+
+def _session_turns_progress(tool_input: dict[str, Any]) -> str:
+    session_id = str(tool_input.get("session_id") or "").strip()
+    return f"Reviewing turn ledger for {session_id}..." if session_id else "Reviewing session turn ledger..."
+
+
+def _session_history_progress(tool_input: dict[str, Any]) -> str:
+    session_id = str(tool_input.get("session_id") or "").strip()
+    return f"Loading detailed history for {session_id}..." if session_id else "Loading detailed session history..."
+
+
+def _task_notebook_progress(tool_input: dict[str, Any]) -> str:
+    task_id = str(tool_input.get("task_id") or "").strip()
+    return f"Loading notebook for {task_id}..." if task_id else "Loading the current task notebook..."
+
+
+def _session_revisit_progress(tool_input: dict[str, Any]) -> str:
+    session_id = str(tool_input.get("session_id") or "").strip()
+    return f"Revisiting exact history for {session_id}..." if session_id else "Revisiting exact session history..."
+
+
+def _create_reminder_progress(tool_input: dict[str, Any]) -> str:
+    label = str(tool_input.get("label") or "").strip()
+    return f"Creating reminder: {label}" if label else "Creating reminder..."
+
+
+def _delete_reminder_progress(tool_input: dict[str, Any]) -> str:
+    cron_id = str(tool_input.get("cron_id") or "").strip()
+    return f"Removing reminder {cron_id}..." if cron_id else "Removing reminder..."
+
+
+_MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        name="web_search",
+        api_definition={"type": "web_search_20260209", "name": "web_search"},
+        group="web",
+        prompt_summary="Fast current-information lookup on the live web. Use this first for news, docs, prices, weather, laws, or anything time-sensitive.",
+        progress_builder=_web_search_progress,
+        read_only=True,
+    ),
+    ToolSpec(
+        name="web_fetch",
+        api_definition={"type": "web_fetch_20260209", "name": "web_fetch"},
+        group="web",
+        prompt_summary="Fetch and read the full text of a specific URL after you know which page you need.",
+        progress_builder=_web_fetch_progress,
+        read_only=True,
+    ),
+    ToolSpec(
+        name="perplexity_research",
+        api_definition={
+            "name": "perplexity_research",
+            "description": (
+                "Conduct deeper multi-source research using Perplexity. Use this when a quick web search is not enough "
+                "and you need synthesis, comparison, or a more thorough answer."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The research query. Be specific and descriptive for best results.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+        group="research",
+        prompt_summary="Deep synthesized research across multiple sources when a quick web lookup is not enough.",
+        progress_builder=_perplexity_progress,
+        handler_method="_perplexity_research",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="memory_search",
+        api_definition={
+            "name": "memory_search",
+            "description": (
+                "Actively search the shared memory system for prior facts, project details, task summaries, session summaries, "
+                "artifact pointers, and related entities. Returns raw memory hits, graph signals, episodes, and the search plan when available."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural-language search query describing what to look for in memory.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of memory hits to return. Default 5.",
+                        "default": 5,
+                    },
+                    "token_budget": {
+                        "type": "integer",
+                        "description": "Approximate result-size budget for the active search response. Default 3000.",
+                        "default": 3000,
+                    },
+                    "kinds": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional memory-kind filter such as core_fact, user_data, session_summary, task_summary, agent_note, transcript, or artifact_pointer.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+        group="memory",
+        prompt_summary="Active shared-memory search. Use this for durable memories, prior tasks, summaries, and artifact pointers.",
+        progress_builder=_memory_search_progress,
+        handler_method="_memory_search",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="memory_write",
+        api_definition={
+            "name": "memory_write",
+            "description": (
+                "Write important user or system context to the shared memory store. Use for durable preferences, facts, goals, relationships, or notable project context."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "The memory content to store as a clear standalone statement or short note.",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "description": "Memory category. Defaults to note.",
+                        "enum": ["preference", "fact", "relationship", "goal", "event", "note"],
+                        "default": "note",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Short title summarizing the memory. If omitted, one will be derived.",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional search tags for the saved memory.",
+                    },
+                    "metadata": {
+                        "type": "object",
+                        "description": "Optional structured metadata to store alongside the memory.",
+                    },
+                },
+                "required": ["content"],
+            },
+        },
+        group="memory",
+        prompt_summary="Persist a genuinely useful long-term memory. Be selective and avoid trivial conversation details.",
+        progress_builder=_memory_write_progress,
+        handler_method="_memory_write",
+    ),
+    ToolSpec(
+        name="session_state",
+        api_definition={
+            "name": "session_state",
+            "description": (
+                "Read the deterministic session-state packet for a session, including compacted summary, active working set, carry-forward packet, and compaction metadata."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID like sess_20260315. If omitted, the current session is used.",
+                    },
+                },
+            },
+        },
+        group="history",
+        prompt_summary="Deterministic session state for exact continuity, working-set, and carry-forward inspection.",
+        progress_builder=_session_state_progress,
+        handler_method="_session_state",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="session_turns",
+        api_definition={
+            "name": "session_turns",
+            "description": (
+                "Read the compact turn ledger for a session. Use this when you need a structured summary of what happened across prior turns."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID like sess_20260315. If omitted, the current session is used.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of turn-ledger entries to return. Default 20.",
+                        "default": 20,
+                    },
+                },
+            },
+        },
+        group="history",
+        prompt_summary="Structured turn-ledger summaries for a session. Good for decision/history review without loading raw text.",
+        progress_builder=_session_turns_progress,
+        handler_method="_session_turns",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="session_history",
+        api_definition={
+            "name": "session_history",
+            "description": (
+                "Read raw session messages directly from the canonical session store. Use this when exact prior turn text matters."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID like sess_20260315. If omitted, the current session is used.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Zero-based message offset for paging through raw history.",
+                        "default": 0,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of raw messages to return. Default 20.",
+                        "default": 20,
+                    },
+                },
+            },
+        },
+        group="history",
+        prompt_summary="Paged raw session messages from the canonical session store when exact earlier wording matters.",
+        progress_builder=_session_history_progress,
+        handler_method="_session_history",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="task_notebook",
+        api_definition={
+            "name": "task_notebook",
+            "description": (
+                "Read the compact task notebook for a task. Use this to recover the task goal, current state, key findings, open questions, and next actions."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "Task ID like tsk_abc123. If omitted, the current task is used.",
+                    },
+                },
+            },
+        },
+        group="history",
+        prompt_summary="Compact per-task state and progress notebook for exact task recovery and resumption.",
+        progress_builder=_task_notebook_progress,
+        handler_method="_task_notebook",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="session_revisit",
+        api_definition={
+            "name": "session_revisit",
+            "description": (
+                "Build a deterministic revisit bundle for a session. This combines session state, turn-ledger entries, a raw-history tail, and optionally a task notebook or specific request turn."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID like sess_20260315. If omitted, the current session is used.",
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Optional task ID whose notebook should be included in the revisit payload.",
+                    },
+                    "request_id": {
+                        "type": "string",
+                        "description": "Optional request ID whose turn-ledger entry should be included.",
+                    },
+                    "turn_limit": {
+                        "type": "integer",
+                        "description": "Number of turn-ledger entries to include. Default 8.",
+                        "default": 8,
+                    },
+                    "raw_history_limit": {
+                        "type": "integer",
+                        "description": "Number of raw history messages to include. Default 12.",
+                        "default": 12,
+                    },
+                },
+            },
+        },
+        group="history",
+        prompt_summary="Preferred exact-history recovery bundle. Use this before broad memory search when the exact earlier context matters.",
+        progress_builder=_session_revisit_progress,
+        handler_method="_session_revisit",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="create_reminder",
+        api_definition={
+            "name": "create_reminder",
+            "description": (
+                "Create a scheduled reminder or recurring cron job. Use this for one-shot reminders or recurring proactive tasks."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "label": {
+                        "type": "string",
+                        "description": "Human-readable label for the reminder. Shown in schedule listings.",
+                    },
+                    "cron_expression": {
+                        "type": "string",
+                        "description": "Standard 5-field cron expression in the user's local timezone.",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "The message or instruction sent back to the orchestrator when the schedule fires.",
+                    },
+                    "one_shot": {
+                        "type": "boolean",
+                        "description": "If true, the reminder fires once and is then deleted.",
+                        "default": True,
+                    },
+                },
+                "required": ["label", "cron_expression", "prompt"],
+            },
+        },
+        group="scheduling",
+        prompt_summary="Create one-shot reminders or recurring scheduled tasks.",
+        progress_builder=_create_reminder_progress,
+        handler_method="_create_reminder",
+    ),
+    ToolSpec(
+        name="list_reminders",
+        api_definition={
+            "name": "list_reminders",
+            "description": "List all active reminders and cron jobs.",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+        group="scheduling",
+        prompt_summary="Inspect the current reminder and schedule list.",
+        progress_builder=lambda _tool_input: "Checking your reminders...",
+        handler_method="_list_reminders",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="delete_reminder",
+        api_definition={
+            "name": "delete_reminder",
+            "description": "Delete a scheduled reminder or cron job by its ID.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "cron_id": {
+                        "type": "string",
+                        "description": "The ID of the reminder or cron job to delete.",
+                    },
+                },
+                "required": ["cron_id"],
+            },
+        },
+        group="scheduling",
+        prompt_summary="Delete an existing reminder or scheduled task.",
+        progress_builder=_delete_reminder_progress,
+        handler_method="_delete_reminder",
+    ),
+)
+
+_TOOL_BY_NAME = {spec.name: spec for spec in _MODEL_TOOL_SPECS}
+_GROUP_ORDER = ("web", "research", "memory", "history", "scheduling")
+_GROUP_TITLES = {
+    "web": "Web",
+    "research": "Research",
+    "memory": "Memory",
+    "history": "History",
+    "scheduling": "Scheduling",
+}
+
+
+def get_model_tool_definitions() -> list[dict[str, Any]]:
+    return [spec.to_definition() for spec in _MODEL_TOOL_SPECS if spec.exposed_to_model]
+
+
+def get_local_tool_definitions() -> list[dict[str, Any]]:
+    return [spec.to_definition() for spec in _MODEL_TOOL_SPECS if spec.is_local and spec.exposed_to_model]
+
+
+def get_tool_spec(name: str) -> ToolSpec | None:
+    return _TOOL_BY_NAME.get(str(name or "").strip())
+
+
+def get_local_tool_spec(name: str) -> ToolSpec | None:
+    spec = get_tool_spec(name)
+    if spec is None or not spec.is_local:
+        return None
+    return spec
+
+
+def get_parallel_safe_local_tool_names() -> frozenset[str]:
+    return frozenset(spec.name for spec in _MODEL_TOOL_SPECS if spec.is_local and spec.read_only)
+
+
+def build_tool_progress_message(tool_name: str, tool_input: dict[str, Any]) -> str:
+    spec = get_tool_spec(tool_name)
+    if spec is None or spec.progress_builder is None:
+        return f"Using tool: {tool_name}..."
+    return spec.progress_builder(tool_input)
+
+
+def build_tool_prompt_catalog() -> str:
+    grouped: dict[str, list[str]] = {}
+    for spec in _MODEL_TOOL_SPECS:
+        if not spec.exposed_to_model or not spec.prompt_summary:
+            continue
+        grouped.setdefault(spec.group, []).append(f"- `{spec.name}`: {spec.prompt_summary}")
+
+    lines = ["## Available Tools", ""]
+    for group in _GROUP_ORDER:
+        items = grouped.get(group)
+        if not items:
+            continue
+        lines.append(f"### {_GROUP_TITLES[group]}")
+        lines.extend(items)
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def get_tool_registry_snapshot() -> dict[str, Any]:
+    return {
+        "model_tools": [spec.name for spec in _MODEL_TOOL_SPECS if spec.exposed_to_model],
+        "local_tools": [spec.name for spec in _MODEL_TOOL_SPECS if spec.is_local and spec.exposed_to_model],
+        "server_tools": [spec.name for spec in _MODEL_TOOL_SPECS if not spec.is_local and spec.exposed_to_model],
+        "read_only_local_tools": sorted(get_parallel_safe_local_tool_names()),
+    }

@@ -342,6 +342,66 @@ class SessionStore:
             )
         return history
 
+    def count_history(self, session_id: str) -> int:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM messages
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return 0
+        return int(row["count"] or 0)
+
+    def get_history_page(
+        self,
+        session_id: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    message_id,
+                    role,
+                    content,
+                    route,
+                    request_id,
+                    awaiting_reply,
+                    channel,
+                    created_at,
+                    metadata_json
+                FROM messages
+                WHERE session_id = ?
+                ORDER BY created_at ASC
+                LIMIT ? OFFSET ?
+                """,
+                (session_id, max(1, limit), max(0, offset)),
+            ).fetchall()
+
+        history: list[dict[str, Any]] = []
+        for row in rows:
+            metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else None
+            history.append(
+                {
+                    "message_id": row["message_id"],
+                    "role": row["role"],
+                    "content": row["content"],
+                    "route": row["route"],
+                    "request_id": row["request_id"],
+                    "awaiting_reply": bool(row["awaiting_reply"]),
+                    "channel": row["channel"],
+                    "created_at": row["created_at"],
+                    "metadata": metadata,
+                }
+            )
+        return history
+
     def get_pruned_history(
         self,
         session_id: str,

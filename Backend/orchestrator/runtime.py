@@ -33,19 +33,16 @@ from shared import TaskEnvelope, create_redis_client, ensure_stream_group, parse
 from .config import OrchestratorConfig
 from .prompts import build_agentic_system_prompt
 from .store.ledger import TaskLedger
-from .tools.definitions import get_tool_definitions
-from .tools.executor import ToolExecutor
+from .tools.executor import ToolExecutionContext, ToolExecutor
+from .tools.registry import (
+    build_tool_progress_message,
+    get_model_tool_definitions,
+    get_parallel_safe_local_tool_names,
+)
 
 logger = logging.getLogger(__name__)
 
-# Tools that are safe to execute in parallel (no side effects)
-_READ_ONLY_TOOLS = frozenset({"perplexity_research", "memory_search", "list_reminders"})
-
-# Server-side tools — executed by Anthropic's infrastructure, not by us
-_SERVER_SIDE_TOOLS: list[dict[str, Any]] = [
-    {"type": "web_search_20260209", "name": "web_search"},
-    {"type": "web_fetch_20260209", "name": "web_fetch"},
-]
+_PARALLEL_SAFE_TOOLS = get_parallel_safe_local_tool_names()
 
 
 @dataclass(slots=True)
@@ -220,6 +217,14 @@ class OrchestratorRuntime:
         started_at = time.perf_counter()
         cumulative_usage: dict[str, int] = {}
         stop_reason: str | None = None
+        tool_context = ToolExecutionContext(
+            task_id=task.task_id,
+            request_id=request_id,
+            session_id=session_id,
+            channel=channel,
+            source=task.source,
+            source_id=task.source_id,
+        )
 
         try:
             messages = self._build_messages(task)
@@ -227,7 +232,7 @@ class OrchestratorRuntime:
                 str(task.input.get("memory_context") or "").strip() or None,
                 user_timezone=str(task.input.get("user_timezone") or "").strip() or None,
             )
-            tools = get_tool_definitions() + _SERVER_SIDE_TOOLS
+            tools = get_model_tool_definitions()
             max_iterations = self.config.max_tool_iterations
 
             iteration = 0
@@ -360,7 +365,7 @@ class OrchestratorRuntime:
                                 pi = json.loads(block.input_json) if block.input_json else {}
                             except json.JSONDecodeError:
                                 pi = {}
-                            progress_msg = self._tool_progress_message(block.tool_name, pi)
+                            progress_msg = build_tool_progress_message(block.tool_name, pi)
                             yield {
                                 **ev, "type": "task.progress",
                                 "status": "tool_call",
@@ -422,7 +427,7 @@ class OrchestratorRuntime:
                             pi = {}
                         parsed_inputs.append(pi)
 
-                        progress_msg = self._tool_progress_message(tb.tool_name, pi)
+                        progress_msg = build_tool_progress_message(tb.tool_name, pi)
                         yield {
                             **ev, "type": "task.progress",
                             "status": "tool_call",
@@ -446,19 +451,19 @@ class OrchestratorRuntime:
                     assert self._tool_executor is not None
 
                     # Execute tools — parallel for read-only, sequential for side-effect tools
-                    all_read_only = all(tb.tool_name in _READ_ONLY_TOOLS for tb in turn_tool_blocks)
+                    all_read_only = all(tb.tool_name in _PARALLEL_SAFE_TOOLS for tb in turn_tool_blocks)
                     result_strs: list[str] = []
 
                     if all_read_only and len(turn_tool_blocks) > 1:
                         # All tools are read-only → run concurrently
                         result_strs = list(await asyncio.gather(*(
-                            self._tool_executor.execute(tb.tool_name, pi)
+                            self._tool_executor.execute(tb.tool_name, pi, context=tool_context)
                             for tb, pi in zip(turn_tool_blocks, parsed_inputs)
                         )))
                     else:
                         # Mixed or single tool → run sequentially
                         for tb, pi in zip(turn_tool_blocks, parsed_inputs):
-                            result_strs.append(await self._tool_executor.execute(tb.tool_name, pi))
+                            result_strs.append(await self._tool_executor.execute(tb.tool_name, pi, context=tool_context))
 
                     # Collect results and emit tool.result events
                     tool_results: list[dict[str, Any]] = []
@@ -780,33 +785,6 @@ class OrchestratorRuntime:
                 if msg:
                     return msg
         return f"status={status_code}"
-
-    @staticmethod
-    def _tool_progress_message(tool_name: str, tool_input: dict[str, Any]) -> str:
-        """Return a human-readable progress message for a tool call."""
-        if tool_name == "web_search":
-            query = str(tool_input.get("query") or "").strip()
-            return f"Searching the web for: {query}" if query else "Searching the web..."
-        if tool_name == "web_fetch":
-            url = str(tool_input.get("url") or "").strip()
-            return f"Fetching: {url}" if url else "Fetching web page..."
-        if tool_name == "perplexity_research":
-            query = str(tool_input.get("query") or "").strip()
-            return f"Researching: {query}" if query else "Conducting research..."
-        if tool_name == "memory_search":
-            query = str(tool_input.get("query") or "").strip()
-            return f"Searching memory for: {query}" if query else "Checking memory..."
-        if tool_name == "memory_write":
-            title = str(tool_input.get("title") or "").strip()
-            return f"Saving to memory: {title}" if title else "Saving to memory..."
-        if tool_name == "create_reminder":
-            label = str(tool_input.get("label") or "").strip()
-            return f"Creating reminder: {label}" if label else "Creating reminder..."
-        if tool_name == "list_reminders":
-            return "Checking your reminders..."
-        if tool_name == "delete_reminder":
-            return "Removing reminder..."
-        return f"Using tool: {tool_name}..."
 
     @staticmethod
     def _collect_perplexity_sources(result_str: str, sources: list[dict[str, str]]) -> None:

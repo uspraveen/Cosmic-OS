@@ -118,10 +118,18 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
     events = [
         b'event: message_start\n'
         b'data: {"type":"message_start","message":{"usage":{"input_tokens":123}}}\n\n',
+        b'event: content_block_start\n'
+        b'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}\n\n',
         b'event: content_block_delta\n'
-        b'data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"Thinking..."}}\n\n',
+        b'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Thinking..."}}\n\n',
+        b'event: content_block_stop\n'
+        b'data: {"type":"content_block_stop","index":0}\n\n',
+        b'event: content_block_start\n'
+        b'data: {"type":"content_block_start","index":1,"content_block":{"type":"text"}}\n\n',
         b'event: content_block_delta\n'
-        b'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"The sky appears blue because of Rayleigh scattering."}}\n\n',
+        b'data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"The sky appears blue because of Rayleigh scattering."}}\n\n',
+        b'event: content_block_stop\n'
+        b'data: {"type":"content_block_stop","index":1}\n\n',
         b'event: message_delta\n'
         b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":27}}\n\n',
         b"event: message_stop\n"
@@ -133,6 +141,10 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
         payload = json.loads(request.content.decode("utf-8"))
         assert payload["model"] == "claude-opus-4-6"
         assert payload["thinking"] == {"type": "adaptive"}
+        tool_names = {tool["name"] for tool in payload["tools"]}
+        assert {"web_search", "web_fetch", "memory_search", "session_revisit", "session_history", "task_notebook"} <= tool_names
+        assert "session_revisit" in payload["system"]
+        assert "session_history" in payload["system"]
         return httpx.Response(
             200,
             headers={"content-type": "text/event-stream"},
@@ -195,10 +207,18 @@ async def test_orchestrator_runtime_can_cancel_active_task(tmp_path) -> None:
     created = asyncio.Event()
     streamed_events: list[dict[str, object]] = []
 
-    async def endless_stream(_task: TaskEnvelope):
+    async def endless_stream(
+        *,
+        system_prompt: str,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]] | None = None,
+        container_id: str | None = None,
+    ):
+        del system_prompt, messages, tools, container_id
+        if False:
+            yield None
         while True:
             await asyncio.sleep(60)
-            yield None
 
     runtime._stream_anthropic_events = endless_stream  # type: ignore[method-assign]
 

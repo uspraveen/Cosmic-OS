@@ -1,19 +1,38 @@
 """Tool executor for the COSMIC orchestrator agentic loop.
 
 Executes tool calls made by Opus during the agentic loop. Each tool maps to
-an internal service (cosmic-memory, Perplexity, Gateway scheduler) accessed
-over the local network within the same VM.
+an internal COSMIC service or an external research provider.
 """
 from __future__ import annotations
 
 import json
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
+from .registry import get_local_tool_spec
+
 logger = logging.getLogger(__name__)
+
+
+class ToolHTTPError(RuntimeError):
+    def __init__(self, *, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.message = message
+
+
+@dataclass(frozen=True, slots=True)
+class ToolExecutionContext:
+    task_id: str | None = None
+    request_id: str | None = None
+    session_id: str | None = None
+    channel: str | None = None
+    source: str | None = None
+    source_id: str | None = None
 
 
 class ToolExecutor:
@@ -42,50 +61,65 @@ class ToolExecutor:
         if self._owns_client:
             await self._client.aclose()
 
-    async def execute(self, tool_name: str, tool_input: dict[str, Any]) -> str:
-        """Execute a tool call and return the result as a string."""
+    async def execute(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> str:
+        """Execute a tool call and return the result as a JSON string."""
         started_at = time.perf_counter()
         try:
-            result = await self._dispatch(tool_name, tool_input)
+            result = await self._dispatch(tool_name, tool_input, context=context)
             elapsed_ms = int((time.perf_counter() - started_at) * 1000)
             logger.info("tool.executed name=%s rtt_ms=%d", tool_name, elapsed_ms)
-            return result
+            if isinstance(result, str):
+                return result
+            return json.dumps(result, ensure_ascii=False)
         except Exception as exc:
             elapsed_ms = int((time.perf_counter() - started_at) * 1000)
             logger.warning(
                 "tool.failed name=%s rtt_ms=%d error=%s",
                 tool_name, elapsed_ms, str(exc)[:200],
             )
-            return json.dumps({
-                "error": True,
-                "tool": tool_name,
-                "message": str(exc).strip()[:500] or "Tool execution failed.",
-            })
+            return json.dumps(
+                {
+                    "error": True,
+                    "tool": tool_name,
+                    "message": str(exc).strip()[:500] or "Tool execution failed.",
+                }
+            )
 
-    async def _dispatch(self, tool_name: str, tool_input: dict[str, Any]) -> str:
-        """Route a tool call to the appropriate handler."""
-        if tool_name == "perplexity_research":
-            return await self._perplexity_research(tool_input)
-        if tool_name == "memory_search":
-            return await self._memory_search(tool_input)
-        if tool_name == "memory_write":
-            return await self._memory_write(tool_input)
-        if tool_name == "create_reminder":
-            return await self._create_reminder(tool_input)
-        if tool_name == "list_reminders":
-            return await self._list_reminders()
-        if tool_name == "delete_reminder":
-            return await self._delete_reminder(tool_input)
-        return json.dumps({"error": True, "message": f"Unknown tool: {tool_name}"})
+    async def _dispatch(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any] | list[Any] | str:
+        spec = get_local_tool_spec(tool_name)
+        if spec is None or not spec.handler_method:
+            return {"error": True, "message": f"Unknown or unsupported tool: {tool_name}"}
+        handler = getattr(self, spec.handler_method, None)
+        if handler is None:
+            return {"error": True, "message": f"Tool handler is not implemented: {tool_name}"}
+        return await handler(tool_input, context=context)
 
     # ── Perplexity Research ──────────────────────────────────────
 
-    async def _perplexity_research(self, tool_input: dict[str, Any]) -> str:
+    async def _perplexity_research(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        del context
         query = str(tool_input.get("query") or "").strip()
         if not query:
-            return json.dumps({"error": True, "message": "query is required"})
+            return {"error": True, "message": "query is required"}
         if not self.perplexity_api_key:
-            return json.dumps({"error": True, "message": "Web search is not configured (no Perplexity API key)."})
+            return {"error": True, "message": "Web search is not configured (no Perplexity API key)."}
 
         response = await self._client.post(
             "https://api.perplexity.ai/chat/completions",
@@ -104,102 +138,242 @@ class ToolExecutor:
         )
         if response.status_code >= 400:
             body = response.text[:300]
-            return json.dumps({"error": True, "message": f"Perplexity API error (status={response.status_code}): {body}"})
+            return {"error": True, "message": f"Perplexity API error (status={response.status_code}): {body}"}
 
         payload = response.json()
         choices = payload.get("choices") or []
         if not choices:
-            return json.dumps({"error": True, "message": "No results from web search."})
+            return {"error": True, "message": "No results from web search."}
 
         answer = str(choices[0].get("message", {}).get("content") or "").strip()
         citations = payload.get("citations") or []
         result: dict[str, Any] = {"answer": answer}
         if citations:
             result["citations"] = citations[:10]
-        return json.dumps(result, ensure_ascii=False)
+        return result
 
-    # ── Memory Search ───────────────────────────────────────────
+    # ── Memory Search / Write ────────────────────────────────────
 
-    async def _memory_search(self, tool_input: dict[str, Any]) -> str:
+    async def _memory_search(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        del context
         query = str(tool_input.get("query") or "").strip()
         if not query:
-            return json.dumps({"error": True, "message": "query is required"})
-        if not self.cosmic_memory_url:
-            return json.dumps({"error": True, "message": "Memory service is not configured."})
+            return {"error": True, "message": "query is required"}
 
-        max_results = int(tool_input.get("max_results") or 5)
-        response = await self._client.post(
-            f"{self.cosmic_memory_url}/v1/query/active",
-            json={
-                "query": query,
-                "max_results": min(max(1, max_results), 20),
-                "token_budget": 3000,
-            },
-            headers=self._memory_headers(),
-        )
-        if response.status_code >= 400:
-            return json.dumps({"error": True, "message": f"Memory search failed (status={response.status_code})"})
+        payload: dict[str, Any] = {
+            "query": query,
+            "max_results": min(max(1, self._coerce_int(tool_input.get("max_results"), 5)), 20),
+            "token_budget": min(max(256, self._coerce_int(tool_input.get("token_budget"), 3000)), 12000),
+        }
+        kinds = self._normalize_string_list(tool_input.get("kinds"))
+        if kinds:
+            payload["kinds"] = kinds
 
-        payload = response.json()
-        items = payload.get("items") or []
-        if not items:
-            return json.dumps({"results": [], "message": "No matching memories found."})
+        if self.gateway_url:
+            try:
+                response_payload = await self._request_gateway_json(
+                    "POST",
+                    "/internal/memory/active-search",
+                    json_body=payload,
+                )
+                return self._normalize_memory_search_result(response_payload)
+            except ToolHTTPError as exc:
+                if exc.status_code not in {404, 405} or not self.cosmic_memory_url:
+                    raise
 
-        results = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            results.append({
-                "kind": str(item.get("kind") or "memory"),
-                "title": str(item.get("title") or "").strip(),
-                "content": str(item.get("content") or "").strip()[:1000],
-                "score": item.get("score"),
-            })
-        return json.dumps({"results": results}, ensure_ascii=False)
+        if self.cosmic_memory_url:
+            response_payload = await self._request_cosmic_memory_json(
+                "POST",
+                "/v1/query/active",
+                json_body=payload,
+            )
+            return self._normalize_memory_search_result(response_payload)
 
-    # ── Memory Write ────────────────────────────────────────────
+        raise RuntimeError("Memory service is not configured.")
 
-    async def _memory_write(self, tool_input: dict[str, Any]) -> str:
+    async def _memory_write(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
         content = str(tool_input.get("content") or "").strip()
-        kind = str(tool_input.get("kind") or "note").strip()
-        title = str(tool_input.get("title") or "").strip()
+        kind = str(tool_input.get("kind") or "note").strip() or "note"
+        title = str(tool_input.get("title") or "").strip() or self._derive_memory_title(content)
         if not content:
-            return json.dumps({"error": True, "message": "content is required"})
-        if not self.cosmic_memory_url:
-            return json.dumps({"error": True, "message": "Memory service is not configured."})
+            return {"error": True, "message": "content is required"}
 
-        response = await self._client.post(
-            f"{self.cosmic_memory_url}/v1/memories",
-            json={
-                "content": content,
-                "kind": kind,
-                "title": title or kind,
-                "source": "orchestrator",
-            },
-            headers=self._memory_headers(),
+        metadata = tool_input.get("metadata") if isinstance(tool_input.get("metadata"), dict) else {}
+        payload: dict[str, Any] = {
+            "content": content,
+            "kind": kind,
+            "title": title,
+        }
+        tags = self._normalize_string_list(tool_input.get("tags"))
+        if tags:
+            payload["tags"] = tags
+        merged_metadata = self._merge_dicts(
+            self._build_memory_metadata(context),
+            metadata,
         )
-        if response.status_code >= 400:
-            body = response.text[:200]
-            return json.dumps({"error": True, "message": f"Memory write failed (status={response.status_code}): {body}"})
+        if merged_metadata:
+            payload["metadata"] = merged_metadata
+        provenance = self._build_orchestrator_provenance(context)
+        if provenance:
+            payload["provenance"] = provenance
 
-        payload = response.json()
-        return json.dumps({
-            "saved": True,
-            "id": payload.get("id") or payload.get("memory_id"),
-            "message": f"Memory saved: {title}",
-        }, ensure_ascii=False)
+        if self.gateway_url:
+            try:
+                response_payload = await self._request_gateway_json(
+                    "POST",
+                    "/internal/memory/write",
+                    json_body=payload,
+                )
+                return {
+                    "saved": True,
+                    "id": response_payload.get("memory_id") or response_payload.get("id"),
+                    "message": f"Memory saved: {title}",
+                    "record": response_payload,
+                }
+            except ToolHTTPError as exc:
+                if exc.status_code not in {404, 405} or not self.cosmic_memory_url:
+                    raise
+
+        if self.cosmic_memory_url:
+            response_payload = await self._request_cosmic_memory_json(
+                "POST",
+                "/v1/memories",
+                json_body=payload,
+            )
+            return {
+                "saved": True,
+                "id": response_payload.get("memory_id") or response_payload.get("id"),
+                "message": f"Memory saved: {title}",
+                "record": response_payload,
+            }
+
+        raise RuntimeError("Memory service is not configured.")
+
+    # ── Session / Task Revisit ───────────────────────────────────
+
+    async def _session_state(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        session_id = self._coerce_session_id(tool_input, context)
+        if not session_id:
+            return {"error": True, "message": "session_id is required"}
+        return await self._request_gateway_json("GET", f"/internal/session/state/{session_id}")
+
+    async def _session_turns(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        session_id = self._coerce_session_id(tool_input, context)
+        if not session_id:
+            return {"error": True, "message": "session_id is required"}
+        limit = min(max(1, self._coerce_int(tool_input.get("limit"), 20)), 200)
+        return await self._request_gateway_json(
+            "GET",
+            f"/internal/session/turns/{session_id}",
+            params={"limit": limit},
+        )
+
+    async def _session_history(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        session_id = self._coerce_session_id(tool_input, context)
+        if not session_id:
+            return {"error": True, "message": "session_id is required"}
+        limit = min(max(1, self._coerce_int(tool_input.get("limit"), 20)), 200)
+        offset = max(0, self._coerce_int(tool_input.get("offset"), 0))
+        return await self._request_gateway_json(
+            "GET",
+            f"/internal/session/history/{session_id}",
+            params={"limit": limit, "offset": offset},
+        )
+
+    async def _task_notebook(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        task_id = self._coerce_task_id(tool_input, context)
+        if not task_id:
+            return {"error": True, "message": "task_id is required"}
+        payload = await self._request_gateway_json(
+            "GET",
+            f"/internal/session/task-notebook/{task_id}",
+            allow_404=True,
+        )
+        if payload is None:
+            return {
+                "found": False,
+                "task_id": task_id,
+                "message": "Task notebook not found.",
+            }
+        return {
+            "found": True,
+            "task_id": task_id,
+            "notebook": payload,
+        }
+
+    async def _session_revisit(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        session_id = self._coerce_session_id(tool_input, context)
+        if not session_id:
+            return {"error": True, "message": "session_id is required"}
+        payload: dict[str, Any] = {
+            "session_id": session_id,
+            "turn_limit": min(max(1, self._coerce_int(tool_input.get("turn_limit"), 8)), 200),
+            "raw_history_limit": min(max(1, self._coerce_int(tool_input.get("raw_history_limit"), 12)), 200),
+        }
+        task_id = str(tool_input.get("task_id") or "").strip() or (context.task_id if context else None)
+        if task_id:
+            payload["task_id"] = task_id
+        request_id = str(tool_input.get("request_id") or "").strip() or (context.request_id if context else None)
+        if request_id:
+            payload["request_id"] = request_id
+        return await self._request_gateway_json(
+            "POST",
+            "/internal/session/revisit",
+            json_body=payload,
+        )
 
     # ── Create Reminder (Gateway Scheduler) ─────────────────────
 
-    async def _create_reminder(self, tool_input: dict[str, Any]) -> str:
+    async def _create_reminder(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        del context
         label = str(tool_input.get("label") or "").strip()
         cron_expression = str(tool_input.get("cron_expression") or "").strip()
         prompt = str(tool_input.get("prompt") or "").strip()
         one_shot = bool(tool_input.get("one_shot", True))
         if not label or not cron_expression or not prompt:
-            return json.dumps({"error": True, "message": "label, cron_expression, and prompt are required"})
+            return {"error": True, "message": "label, cron_expression, and prompt are required"}
         if not self.gateway_url:
-            return json.dumps({"error": True, "message": "Gateway scheduler is not configured."})
+            return {"error": True, "message": "Gateway scheduler is not configured."}
 
         response = await self._client.post(
             f"{self.gateway_url}/internal/scheduler/crons",
@@ -214,54 +388,225 @@ class ToolExecutor:
         )
         if response.status_code >= 400:
             body = response.text[:200]
-            return json.dumps({"error": True, "message": f"Scheduler error (status={response.status_code}): {body}"})
+            return {"error": True, "message": f"Scheduler error (status={response.status_code}): {body}"}
 
         payload = response.json()
-        return json.dumps({
+        return {
             "created": True,
             "cron_id": payload.get("cron_id"),
             "label": label,
             "cron_expression": cron_expression,
             "one_shot": one_shot,
             "message": f"Reminder created: {label}",
-        }, ensure_ascii=False)
+        }
 
     # ── List Reminders ──────────────────────────────────────────
 
-    async def _list_reminders(self) -> str:
+    async def _list_reminders(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        del tool_input, context
         if not self.gateway_url:
-            return json.dumps({"error": True, "message": "Gateway scheduler is not configured."})
+            return {"error": True, "message": "Gateway scheduler is not configured."}
 
         response = await self._client.get(
             f"{self.gateway_url}/internal/scheduler/crons",
             headers=self._gateway_headers(),
         )
         if response.status_code >= 400:
-            return json.dumps({"error": True, "message": f"Scheduler error (status={response.status_code})"})
+            return {"error": True, "message": f"Scheduler error (status={response.status_code})"}
 
         payload = response.json()
         crons = payload.get("crons") or []
-        return json.dumps({"reminders": crons}, ensure_ascii=False)
+        return {"reminders": crons}
 
     # ── Delete Reminder ─────────────────────────────────────────
 
-    async def _delete_reminder(self, tool_input: dict[str, Any]) -> str:
+    async def _delete_reminder(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        del context
         cron_id = str(tool_input.get("cron_id") or "").strip()
         if not cron_id:
-            return json.dumps({"error": True, "message": "cron_id is required"})
+            return {"error": True, "message": "cron_id is required"}
         if not self.gateway_url:
-            return json.dumps({"error": True, "message": "Gateway scheduler is not configured."})
+            return {"error": True, "message": "Gateway scheduler is not configured."}
 
         response = await self._client.delete(
             f"{self.gateway_url}/internal/scheduler/crons/{cron_id}",
             headers=self._gateway_headers(),
         )
         if response.status_code >= 400:
-            return json.dumps({"error": True, "message": f"Delete failed (status={response.status_code})"})
+            return {"error": True, "message": f"Delete failed (status={response.status_code})"}
 
-        return json.dumps({"deleted": True, "cron_id": cron_id, "message": "Reminder deleted."})
+        return {"deleted": True, "cron_id": cron_id, "message": "Reminder deleted."}
 
     # ── Internal helpers ────────────────────────────────────────
+
+    async def _request_gateway_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        allow_404: bool = False,
+    ) -> dict[str, Any] | None:
+        if not self.gateway_url:
+            raise RuntimeError("Gateway internal API is not configured.")
+        response = await self._client.request(
+            method,
+            f"{self.gateway_url}{path}",
+            json=json_body,
+            params=params,
+            headers=self._gateway_headers(),
+        )
+        if allow_404 and response.status_code == 404:
+            return None
+        if response.status_code >= 400:
+            raise ToolHTTPError(
+                status_code=response.status_code,
+                message=f"Gateway API error (status={response.status_code}): {response.text[:300]}",
+            )
+        payload = self._response_json_as_object(response, service_name="gateway")
+        return payload
+
+    async def _request_cosmic_memory_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if not self.cosmic_memory_url:
+            raise RuntimeError("Memory service is not configured.")
+        response = await self._client.request(
+            method,
+            f"{self.cosmic_memory_url}{path}",
+            json=json_body,
+            params=params,
+            headers=self._memory_headers(),
+        )
+        if response.status_code >= 400:
+            raise ToolHTTPError(
+                status_code=response.status_code,
+                message=f"Memory API error (status={response.status_code}): {response.text[:300]}",
+            )
+        return self._response_json_as_object(response, service_name="cosmic-memory")
+
+    def _response_json_as_object(self, response: httpx.Response, *, service_name: str) -> dict[str, Any]:
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"{service_name} returned a non-object payload")
+        return payload
+
+    def _coerce_session_id(
+        self,
+        tool_input: dict[str, Any],
+        context: ToolExecutionContext | None,
+    ) -> str | None:
+        session_id = str(tool_input.get("session_id") or "").strip()
+        if session_id:
+            return session_id
+        if context and context.session_id:
+            return context.session_id
+        return None
+
+    def _coerce_task_id(
+        self,
+        tool_input: dict[str, Any],
+        context: ToolExecutionContext | None,
+    ) -> str | None:
+        task_id = str(tool_input.get("task_id") or "").strip()
+        if task_id:
+            return task_id
+        if context and context.task_id:
+            return context.task_id
+        return None
+
+    def _normalize_memory_search_result(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = dict(payload)
+        items = result.get("items")
+        if not isinstance(items, list):
+            items = result.get("results")
+        normalized_items = [item for item in items or [] if isinstance(item, dict)]
+        result["items"] = normalized_items
+        result.setdefault("results", normalized_items)
+        for key in ("entities", "relations", "episodes", "search_plan"):
+            value = result.get(key)
+            result[key] = value if isinstance(value, list) else []
+        if not normalized_items and not any(result[key] for key in ("entities", "relations", "episodes")):
+            result.setdefault("message", "No matching memories found.")
+        return result
+
+    def _build_memory_metadata(self, context: ToolExecutionContext | None) -> dict[str, Any]:
+        if context is None:
+            return {}
+        metadata = {
+            "stored_by": "cosmic/orchestrator:1.0.0",
+            "task_id": context.task_id,
+            "request_id": context.request_id,
+            "session_id": context.session_id,
+            "channel": context.channel,
+            "source": context.source,
+            "source_id": context.source_id,
+        }
+        return self._clean_mapping(metadata)
+
+    def _build_orchestrator_provenance(self, context: ToolExecutionContext | None) -> dict[str, Any]:
+        provenance = {
+            "source_kind": "orchestrator_tool",
+            "created_by": "cosmic/orchestrator:1.0.0",
+            "task_id": context.task_id if context else None,
+            "request_id": context.request_id if context else None,
+            "session_id": context.session_id if context else None,
+            "channel": context.channel if context else None,
+            "source": context.source if context else None,
+            "source_id": context.source_id if context else None,
+        }
+        return self._clean_mapping(provenance)
+
+    def _derive_memory_title(self, content: str) -> str:
+        normalized = str(content or "").strip()
+        if not normalized:
+            return "Untitled memory"
+        title = normalized.splitlines()[0].strip()
+        if len(title) > 72:
+            title = title[:69].rstrip() + "..."
+        return title or "Untitled memory"
+
+    def _normalize_string_list(self, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [item.strip() for item in (str(entry or "") for entry in value) if item.strip()]
+
+    def _coerce_int(self, value: Any, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _merge_dicts(self, base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(base)
+        for key, value in extra.items():
+            if value is None:
+                continue
+            merged[str(key)] = value
+        return self._clean_mapping(merged)
+
+    def _clean_mapping(self, value: dict[str, Any]) -> dict[str, Any]:
+        return {
+            str(key): item
+            for key, item in value.items()
+            if item not in ("", None, [], {})
+        }
 
     def _memory_headers(self) -> dict[str, str]:
         headers: dict[str, str] = {}

@@ -13,7 +13,9 @@ import uvicorn
 from shared import TaskEnvelope
 
 from .config import OrchestratorConfig
+from .prompts import get_prompt_asset_hashes
 from .runtime import OrchestratorRuntime
+from .tools.registry import get_tool_registry_snapshot
 
 
 @asynccontextmanager
@@ -79,6 +81,8 @@ async def health(request: Request) -> dict[str, object]:
             "replies_stream": runtime.config.task_input_replies_stream,
             "group": runtime.config.task_input_orchestrator_group,
         },
+        "tool_registry": get_tool_registry_snapshot(),
+        "prompt_assets": {"sha256": get_prompt_asset_hashes()},
     }
 
 

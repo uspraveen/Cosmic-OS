@@ -1241,6 +1241,17 @@ def test_internal_session_routes_expose_state_turns_and_revisit(tmp_path) -> Non
         assert turns_response.status_code == 200
         assert turns_response.json()["turns"][0]["request_id"] == "req_revisit_1"
 
+        history_response = client.get(
+            f"/internal/session/history/{session_id}",
+            headers={"X-Internal-Token": "internal-token"},
+            params={"limit": 1, "offset": 1},
+        )
+        assert history_response.status_code == 200
+        history_payload = history_response.json()
+        assert history_payload["total_messages"] == 2
+        assert history_payload["has_more"] is False
+        assert history_payload["messages"][0]["content"] == "I will continue the migration and report back."
+
         notebook_response = client.get(
             "/internal/session/task-notebook/task_123",
             headers={"X-Internal-Token": "internal-token"},
