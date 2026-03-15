@@ -259,6 +259,7 @@ export class GatewayConnectionManager {
       conversation_context: Array.isArray(conversationContext) ? conversationContext : [],
       route_override: normalizedRouteOverride || undefined,
     })
+    this.recordDesktopQueryInHistory(content, effectiveRequestId)
     return effectiveRequestId
   }
 
@@ -320,6 +321,157 @@ export class GatewayConnectionManager {
     this.scheduleResumeTimeout(requestId)
   }
 
+  private upsertHistoryMessage(message: any) {
+    if (!message || typeof message !== 'object') {
+      return
+    }
+
+    const role = String(message.role || '').trim()
+    if (role !== 'user' && role !== 'assistant') {
+      return
+    }
+
+    const content = String(message.content || '')
+    if (!content.trim()) {
+      return
+    }
+
+    const requestId =
+      typeof message.request_id === 'string' && message.request_id.trim()
+        ? message.request_id.trim()
+        : typeof message?.metadata?.request_id === 'string' && message.metadata.request_id.trim()
+          ? message.metadata.request_id.trim()
+          : ''
+    const messageId = typeof message.message_id === 'string' ? message.message_id.trim() : ''
+    const nextMessage = {
+      ...message,
+      role,
+      content,
+      request_id: requestId || undefined,
+      message_id: messageId || message.message_id,
+      metadata: message?.metadata && typeof message.metadata === 'object' ? message.metadata : undefined,
+    }
+
+    let replaceIndex = -1
+    if (messageId) {
+      replaceIndex = this.historyTail.findIndex((item: any) => String(item?.message_id || '').trim() === messageId)
+    }
+    if (replaceIndex < 0 && requestId) {
+      replaceIndex = this.historyTail.findIndex((item: any) => (
+        String(item?.role || '').trim() === role &&
+        (
+          String(item?.request_id || '').trim() === requestId ||
+          String(item?.metadata?.request_id || '').trim() === requestId
+        )
+      ))
+    }
+
+    if (replaceIndex >= 0) {
+      this.historyTail = this.historyTail.map((item, index) => (index === replaceIndex ? nextMessage : item))
+      return
+    }
+
+    this.historyTail = [...this.historyTail, nextMessage]
+  }
+
+  private recordDesktopQueryInHistory(content: string, requestId: string) {
+    const normalizedContent = String(content || '')
+    const normalizedRequestId = String(requestId || '').trim()
+    if (!normalizedContent.trim() || !normalizedRequestId) {
+      return
+    }
+
+    this.upsertHistoryMessage({
+      message_id: `pending_user_${normalizedRequestId}`,
+      role: 'user',
+      content: normalizedContent,
+      request_id: normalizedRequestId,
+      channel: this.config ? `desktop:${this.config.deviceId}` : null,
+      created_at: new Date().toISOString(),
+      metadata: {
+        request_id: normalizedRequestId,
+        pending: true,
+        platform: 'desktop',
+        message_type: 'query',
+      },
+    })
+  }
+
+  private applyEventToHistory(payload: any, eventType: string) {
+    if (!payload || typeof payload !== 'object') {
+      return
+    }
+
+    if (eventType === 'resume.ok') {
+      this.historyTail = Array.isArray(payload.history_tail) ? payload.history_tail : []
+      return
+    }
+
+    if (eventType === 'response.complete') {
+      const content = String(payload.content || '')
+      if (!content.trim()) {
+        return
+      }
+      const requestId = String(payload.request_id || '').trim()
+      const metadata: Record<string, unknown> = {}
+      if (typeof payload.thinking_text === 'string' && payload.thinking_text.trim()) {
+        metadata.thinking_text = payload.thinking_text
+      }
+      if (Array.isArray(payload.sources) && payload.sources.length > 0) {
+        metadata.sources = payload.sources
+      }
+      if (payload.awaiting_reply === true) {
+        metadata.awaiting_reply = true
+      }
+      this.upsertHistoryMessage({
+        message_id: requestId ? `pending_assistant_${requestId}` : `pending_assistant_${crypto.randomUUID()}`,
+        role: 'assistant',
+        content,
+        route: typeof payload.route === 'string' ? payload.route : undefined,
+        request_id: requestId || undefined,
+        channel: typeof payload.channel === 'string' ? payload.channel : null,
+        created_at: new Date().toISOString(),
+        metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+      })
+      return
+    }
+
+    if (eventType === 'crosschannel.message') {
+      const role = String(payload.role || '').trim()
+      const content = String(payload.content || '')
+      if ((role !== 'user' && role !== 'assistant') || !content.trim()) {
+        return
+      }
+      const lastItem = this.historyTail[this.historyTail.length - 1]
+      if (
+        lastItem &&
+        String(lastItem.role || '').trim() === role &&
+        String(lastItem.content || '') === content &&
+        String(lastItem.channel || '') === String(payload.channel || '')
+      ) {
+        return
+      }
+      const metadata: Record<string, unknown> = {}
+      if (Array.isArray(payload.sources) && payload.sources.length > 0) {
+        metadata.sources = payload.sources
+      }
+      if (typeof payload.thinking_text === 'string' && payload.thinking_text.trim()) {
+        metadata.thinking_text = payload.thinking_text
+      }
+      this.historyTail = [
+        ...this.historyTail,
+        {
+          message_id: `crosschannel_${crypto.randomUUID()}`,
+          role,
+          content,
+          channel: typeof payload.channel === 'string' ? payload.channel : null,
+          created_at: new Date().toISOString(),
+          metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+        },
+      ]
+    }
+  }
+
   private sendPing() {
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || undefined
     this.sendJson({
@@ -353,8 +505,17 @@ export class GatewayConnectionManager {
     }
 
     const eventType = String(payload.type || '').trim()
-    if (payload.session_id) {
-      this.currentSessionId = String(payload.session_id)
+    const nextSessionId = typeof payload.session_id === 'string' ? String(payload.session_id) : null
+    if (nextSessionId) {
+      if (this.currentSessionId && nextSessionId !== this.currentSessionId) {
+        const requestId = String(payload.request_id || '').trim()
+        this.historyTail = requestId
+          ? this.historyTail.filter((item: any) => (
+            String(item?.request_id || item?.metadata?.request_id || '').trim() === requestId
+          ))
+          : []
+      }
+      this.currentSessionId = nextSessionId
     }
     if (eventType === 'pong') {
       this.lastSocketActivityAt = Date.now()
@@ -367,7 +528,6 @@ export class GatewayConnectionManager {
       this.clearResumeTimeout()
       this.pendingResumeRequestId = null
       this.resumeAttemptCount = 0
-      this.historyTail = Array.isArray(payload.history_tail) ? payload.history_tail : []
       this.currentSessionId = typeof payload.session_id === 'string' ? payload.session_id : this.currentSessionId
       this.knownTaskIds = new Set(
         Array.isArray(payload.active_tasks)
@@ -384,6 +544,8 @@ export class GatewayConnectionManager {
     if ((eventType === 'task.completed' || eventType === 'task.failed' || eventType === 'task.cancelled') && payload.task_id) {
       this.knownTaskIds.delete(String(payload.task_id))
     }
+
+    this.applyEventToHistory(payload, eventType)
 
     this.emitToRenderer('gateway:event', payload)
   }

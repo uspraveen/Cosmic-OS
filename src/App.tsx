@@ -194,6 +194,9 @@ export default function App() {
   const activeStreamingTaskIdRef = useRef<string | null>(null)
   const messagesRef = useRef<Message[]>([])
   const activeSessionIdRef = useRef<string | null>(null)
+  const authStateRef = useRef<'loading' | 'unauthenticated' | 'authenticated'>('loading')
+  const isStreamingRef = useRef(false)
+  const lastGatewayResumeRequestAtRef = useRef(0)
   const shouldAutoScrollRef = useRef(true)
   const selectedModelRef = useRef<GatewayModelSelection>('cosmic')
 
@@ -684,6 +687,14 @@ export default function App() {
   }, [activeSessionId])
 
   useEffect(() => {
+    authStateRef.current = authState
+  }, [authState])
+
+  useEffect(() => {
+    isStreamingRef.current = isStreaming
+  }, [isStreaming])
+
+  useEffect(() => {
     selectedModelRef.current = selectedModel
   }, [selectedModel])
 
@@ -767,6 +778,25 @@ export default function App() {
       inputRef.current.style.height = '24px'
       inputRef.current.focus()
     }, 10)
+  }
+
+  const maybeRequestGatewayResumeOnShow = () => {
+    if (authStateRef.current !== 'authenticated' || !window.cosmic?.requestGatewayResume) {
+      return
+    }
+    if (
+      isStreamingRef.current ||
+      activeStreamingRequestIdRef.current ||
+      activeStreamingTaskIdRef.current
+    ) {
+      return
+    }
+    const now = Date.now()
+    if (now - lastGatewayResumeRequestAtRef.current < 1500) {
+      return
+    }
+    lastGatewayResumeRequestAtRef.current = now
+    window.cosmic.requestGatewayResume().catch(() => { })
   }
 
   const showTaskSurface = (options: { focusComposer?: boolean; forceOpus?: boolean; focusInputRequestId?: string | null } = {}) => {
@@ -914,7 +944,11 @@ export default function App() {
   }
 
   useEffect(() => {
-    const off1 = window.cosmic?.onShown(showChatComposer)
+    const handleShown = () => {
+      showChatComposer()
+      maybeRequestGatewayResumeOnShow()
+    }
+    const off1 = window.cosmic?.onShown(handleShown)
     const off2 = window.cosmic?.onHiding(performHide)
     const off3 = window.cosmic?.onMeetingInvoke(showMeetingSurface)
     const off4 = window.cosmic?.onMeetingToggle(() => {
@@ -1277,6 +1311,7 @@ export default function App() {
     }
 
     if (window.cosmic?.requestGatewayResume) {
+      lastGatewayResumeRequestAtRef.current = Date.now()
       window.cosmic.requestGatewayResume().catch(() => { })
     }
   }, [authState])
