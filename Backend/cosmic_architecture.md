@@ -1672,6 +1672,8 @@ For `haiku` and `perplexity` routes, the Gateway acts as a streaming proxy. For 
 
 **The `<awaiting_reply/>` control tag:** All three LLM backends (Opus, Haiku, Perplexity) receive a system prompt instruction to emit `<awaiting_reply/>` at the end of their response when they genuinely expect a direct user reply (e.g., they asked a question, presented options, or need confirmation before proceeding). The Gateway strips this tag before forwarding to the UI and sets a flag on the stored message.
 
+**Current implementation note:** the current direct-model runtime also supports a best-effort `<handoff_opus/>` control tag for Haiku and Perplexity. If a direct model determines that a request was misrouted and actually needs orchestrator-level handling, it may emit only that tag. The Gateway intercepts it before any user-visible text, redispatches the request to Opus, and emits a desktop `task.progress` status while the escalation happens. This is a safety net, not the primary routing decision.
+
 **System prompt instruction (included in all three model prompts):**
 
 ```
@@ -9265,7 +9267,7 @@ Agents can read from and write to the shared memory store. MemoryRead retrieves 
 
 - `MemoryRead` is for **shared retrievable memory** (`core_fact`, `session_summary`, `task_summary`, `agent_note`, `user_data`, `transcript`, `artifact_pointer`).
 - `MemoryWrite` is for **high-signal durable memory only**. Do not use it as a task scratchpad.
-- Exact prior session context should come from deterministic revisit (`/internal/session/state`, `/internal/session/turns`, `/internal/session/task-notebook`, `/internal/session/revisit`) rather than broad semantic recall.
+- Exact prior session context should come from deterministic revisit (`/internal/session/state`, `/internal/session/turns`, `/internal/session/history`, `/internal/session/task-notebook`, `/internal/session/revisit`) rather than broad semantic recall.
 - Exact prior agent-specific context should come from recall intents against that agent's own `store/data/`.
 - Large outputs belong in `runs/artifacts/<task_id>/` plus a compact `artifact_pointer`, not as huge shared memory blobs.
 - Agents should read their own `store/learnings.md` at task start, update it only when something durable was learned, and let Gateway/session sync project it into shared `memory/agent_notes/`.
@@ -9450,6 +9452,7 @@ In the current runtime, the Gateway exposes these internal memory/session endpoi
 
 - `/internal/memory/search`
 - `/internal/memory/active-search`
+- `/internal/memory/memories/{memory_id}`
 - `/internal/memory/schema-context`
 - `/internal/memory/plan`
 - `/internal/memory/resolve-identity`
@@ -9464,10 +9467,13 @@ In the current runtime, the Gateway exposes these internal memory/session endpoi
 - `/internal/memory/index-rebuild`
 - `/internal/session/state/{session_id}`
 - `/internal/session/turns/{session_id}`
+- `/internal/session/history/{session_id}`
 - `/internal/session/task-notebook/{task_id}`
 - `/internal/session/revisit`
 
-Agent authors should treat these as the canonical same-VM memory/session control surface. Shared memory search/write goes through `/internal/memory/*`; exact historical recovery and live continuity inspection go through `/internal/session/*`.
+Agent authors should treat these as the canonical same-VM memory/session control surface. Shared memory search/write goes through `/internal/memory/*`; exact historical recovery and live continuity inspection go through `/internal/session/*`. When a prior search or control flow already identified an exact `memory_id`, use `/internal/memory/memories/{memory_id}` to retrieve the full canonical memory block instead of relying on a truncated search hit alone.
+
+**Current implementation note (thin orchestrator):** the current production orchestrator assembles its system prompt from read-only asset files under `orchestrator/prompts/`, generates its exposed tool catalog from the centralized runtime registry in `orchestrator/tools/registry.py`, and exposes both the registry snapshot and prompt-asset SHA-256 hashes on `/health` for drift inspection. The shipped local tool set currently includes `memory_search`, `memory_fetch`, `memory_write`, `session_state`, `session_turns`, `session_history`, `task_notebook`, `session_revisit`, and reminder tools, alongside server-side `web_search` / `web_fetch`.
 
 ### 32.7 How Universal Tools Appear to the LLM
 
