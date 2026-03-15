@@ -43,6 +43,18 @@ async def memory_active_search(
         _raise_memory_http_error(exc)
 
 
+@router.get("/internal/memory/memories/{memory_id}")
+async def memory_get(
+    memory_id: str,
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return await runtime.memory_get(memory_id)
+    except Exception as exc:
+        _raise_memory_http_error(exc)
+
+
 @router.get("/internal/memory/schema-context")
 async def memory_schema_context(
     _: None = Depends(require_internal_token),

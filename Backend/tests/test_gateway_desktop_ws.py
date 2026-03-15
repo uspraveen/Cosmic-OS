@@ -456,6 +456,7 @@ class FakeMemoryClient:
         self.prompt_context_calls: list[dict[str, object]] = []
         self.search_calls: list[dict[str, object]] = []
         self.active_search_calls: list[dict[str, object]] = []
+        self.memory_get_requests: list[str] = []
         self.write_calls: list[dict[str, object]] = []
         self.core_fact_write_calls: list[dict[str, object]] = []
         self.episode_calls: list[dict[str, object]] = []
@@ -539,6 +540,21 @@ class FakeMemoryClient:
             "relations": [],
             "episodes": [],
             "search_plan": [],
+        }
+
+    async def get_memory(self, memory_id: str) -> dict[str, object]:
+        self.memory_get_requests.append(memory_id)
+        return {
+            "memory_id": memory_id,
+            "kind": "task_summary",
+            "title": "Detailed memory block",
+            "content": "This is the full canonical memory body.",
+            "metadata": {"task_id": "tsk_1"},
+            "provenance": {"source_kind": "gateway"},
+            "status": "active",
+            "version": 1,
+            "created_at": "2026-03-15T00:00:00Z",
+            "updated_at": "2026-03-15T00:00:00Z",
         }
 
     async def write_memory(self, payload: dict[str, object]) -> dict[str, object]:
@@ -1133,6 +1149,14 @@ def test_internal_memory_routes_proxy_to_memory_service(tmp_path) -> None:
         payload = search_response.json()
         assert payload["items"][0]["memory_id"] == "mem_search_1"
         assert runtime.memory_client.search_calls[0]["query"] == "memory integration"
+
+        memory_response = client.get(
+            "/internal/memory/memories/mem_search_1",
+            headers={"X-Internal-Token": "internal-token"},
+        )
+        assert memory_response.status_code == 200
+        assert memory_response.json()["content"] == "This is the full canonical memory body."
+        assert runtime.memory_client.memory_get_requests == ["mem_search_1"]
 
         core_fact_response = client.get(
             "/internal/memory/core-facts",

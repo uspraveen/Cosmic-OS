@@ -173,6 +173,12 @@ class CosmicMemoryClient:
     async def write_memory(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._request_json("POST", "/v1/memories", json_body=payload)
 
+    async def get_memory(self, memory_id: str) -> dict[str, Any]:
+        normalized_memory_id = str(memory_id or "").strip()
+        if not normalized_memory_id:
+            raise MemoryClientError("memory_id is required")
+        return await self._request_json("GET", f"/v1/memories/{normalized_memory_id}")
+
     async def write_core_fact(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._request_json("POST", "/v1/core-facts", json_body=payload)
 

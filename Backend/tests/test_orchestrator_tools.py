@@ -19,6 +19,10 @@ async def test_tool_executor_memory_search_uses_gateway_active_search_and_preser
             "max_results": 1,
             "token_budget": 4096,
             "kinds": ["task_summary"],
+            "seed_memory_ids": ["mem_anchor_1"],
+            "seed_entities": ["COSMIC"],
+            "max_hops": 3,
+            "include_diagnostics": True,
         }
         return httpx.Response(
             200,
@@ -38,6 +42,7 @@ async def test_tool_executor_memory_search_uses_gateway_active_search_and_preser
                 "relations": [{"from": "COSMIC", "to": "Gateway", "type": "uses"}],
                 "episodes": [{"episode_id": "ep_1"}],
                 "search_plan": [{"step": "semantic_lookup"}],
+                "diagnostics": {"flags": {"graph_assist_used": True}},
             },
         )
 
@@ -55,6 +60,10 @@ async def test_tool_executor_memory_search_uses_gateway_active_search_and_preser
                 "max_results": 1,
                 "token_budget": 4096,
                 "kinds": ["task_summary"],
+                "seed_memory_ids": ["mem_anchor_1"],
+                "seed_entities": ["COSMIC"],
+                "max_hops": 3,
+                "include_diagnostics": True,
             },
         )
     finally:
@@ -66,6 +75,48 @@ async def test_tool_executor_memory_search_uses_gateway_active_search_and_preser
     assert len(result["items"][0]["content"]) == 2400
     assert result["entities"][0]["name"] == "COSMIC"
     assert result["search_plan"][0]["step"] == "semantic_lookup"
+    assert result["diagnostics"]["flags"]["graph_assist_used"] is True
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_memory_fetch_reads_full_memory_record_via_gateway() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == httpx.URL("http://gateway/internal/memory/memories/mem_task_1")
+        assert request.headers["X-Internal-Token"] == "internal-token"
+        return httpx.Response(
+            200,
+            json={
+                "memory_id": "mem_task_1",
+                "kind": "task_summary",
+                "title": "Memory integration work",
+                "content": "Full canonical memory body",
+                "tags": ["architecture"],
+                "metadata": {"task_id": "tsk_1"},
+                "provenance": {"source_kind": "gateway"},
+                "status": "active",
+                "version": 2,
+                "created_at": "2026-03-15T00:00:00Z",
+                "updated_at": "2026-03-15T00:00:00Z",
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    executor = ToolExecutor(
+        gateway_url="http://gateway",
+        gateway_internal_token="internal-token",
+        client=client,
+    )
+    try:
+        raw_result = await executor.execute("memory_fetch", {"memory_id": "mem_task_1"})
+    finally:
+        await client.aclose()
+
+    result = json.loads(raw_result)
+    assert result["found"] is True
+    assert result["memory_id"] == "mem_task_1"
+    assert result["content"] == "Full canonical memory body"
+    assert result["metadata"]["task_id"] == "tsk_1"
+    assert result["record"]["version"] == 2
 
 
 @pytest.mark.asyncio

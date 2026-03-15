@@ -27,6 +27,19 @@ class ToolSpec:
         return deepcopy(self.api_definition)
 
 
+def _preview_list(value: Any, *, limit: int = 2) -> str:
+    if not isinstance(value, list):
+        return ""
+    normalized = [str(item or "").strip() for item in value]
+    items = [item for item in normalized if item][:limit]
+    if not items:
+        return ""
+    preview = ", ".join(items)
+    if len(normalized) > len(items):
+        preview += ", ..."
+    return preview
+
+
 def _web_search_progress(tool_input: dict[str, Any]) -> str:
     query = str(tool_input.get("query") or "").strip()
     return f"Searching the web for: {query}" if query else "Searching the web..."
@@ -44,7 +57,26 @@ def _perplexity_progress(tool_input: dict[str, Any]) -> str:
 
 def _memory_search_progress(tool_input: dict[str, Any]) -> str:
     query = str(tool_input.get("query") or "").strip()
+    seed_ids = _preview_list(tool_input.get("seed_memory_ids"))
+    if seed_ids:
+        return (
+            f"Exploring memories related to {seed_ids} for: {query}"
+            if query else
+            f"Exploring memories related to {seed_ids}..."
+        )
+    seed_entities = _preview_list(tool_input.get("seed_entities"))
+    if seed_entities:
+        return (
+            f"Tracing memory around {seed_entities} for: {query}"
+            if query else
+            f"Tracing memory around {seed_entities}..."
+        )
     return f"Searching memory for: {query}" if query else "Searching memory..."
+
+
+def _memory_fetch_progress(tool_input: dict[str, Any]) -> str:
+    memory_id = str(tool_input.get("memory_id") or "").strip()
+    return f"Loading full memory block {memory_id}..." if memory_id else "Loading full memory block..."
 
 
 def _memory_write_progress(tool_input: dict[str, Any]) -> str:
@@ -162,6 +194,26 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                         "items": {"type": "string"},
                         "description": "Optional memory-kind filter such as core_fact, user_data, session_summary, task_summary, agent_note, transcript, or artifact_pointer.",
                     },
+                    "seed_memory_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional memory IDs to anchor active recall and graph expansion around known memories.",
+                    },
+                    "seed_entities": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional canonical entity names to seed active recall around known people, projects, files, or topics.",
+                    },
+                    "max_hops": {
+                        "type": "integer",
+                        "description": "Maximum graph-expansion depth for active recall. Default 2.",
+                        "default": 2,
+                    },
+                    "include_diagnostics": {
+                        "type": "boolean",
+                        "description": "Include search diagnostics when you need to inspect how memory recall was assembled.",
+                        "default": False,
+                    },
                 },
                 "required": ["query"],
             },
@@ -170,6 +222,31 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Active shared-memory search. Use this for durable memories, prior tasks, summaries, and artifact pointers.",
         progress_builder=_memory_search_progress,
         handler_method="_memory_search",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="memory_fetch",
+        api_definition={
+            "name": "memory_fetch",
+            "description": (
+                "Read the full canonical shared-memory block for a specific memory_id. Use this after memory_search "
+                "or when you already know the exact memory ID you need to inspect in detail."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "memory_id": {
+                        "type": "string",
+                        "description": "The exact memory_id to load, such as mem_task_abc123.",
+                    },
+                },
+                "required": ["memory_id"],
+            },
+        },
+        group="memory",
+        prompt_summary="Load the full canonical memory block for a specific memory_id when a search hit needs deeper inspection.",
+        progress_builder=_memory_fetch_progress,
+        handler_method="_memory_fetch",
         read_only=True,
     ),
     ToolSpec(

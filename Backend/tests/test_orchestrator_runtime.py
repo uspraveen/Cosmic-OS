@@ -142,9 +142,10 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
         assert payload["model"] == "claude-opus-4-6"
         assert payload["thinking"] == {"type": "adaptive"}
         tool_names = {tool["name"] for tool in payload["tools"]}
-        assert {"web_search", "web_fetch", "memory_search", "session_revisit", "session_history", "task_notebook"} <= tool_names
+        assert {"web_search", "web_fetch", "memory_search", "memory_fetch", "session_revisit", "session_history", "task_notebook"} <= tool_names
         assert "session_revisit" in payload["system"]
         assert "session_history" in payload["system"]
+        assert "memory_fetch" in payload["system"]
         return httpx.Response(
             200,
             headers={"content-type": "text/event-stream"},
@@ -250,6 +251,84 @@ async def test_orchestrator_runtime_can_cancel_active_task(tmp_path) -> None:
         "status": "cancelled",
         "message": "Response stopped.",
     }
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_runtime_emits_progress_for_memory_fetch_tool(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_memory_fetch.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    task = _signed_task("signing-secret")
+    stream_call_count = 0
+
+    async def scripted_stream(
+        *,
+        system_prompt: str,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]] | None = None,
+        container_id: str | None = None,
+    ):
+        del system_prompt, messages, tools, container_id
+        nonlocal stream_call_count
+        stream_call_count += 1
+        if stream_call_count == 1:
+            events = [
+                ('message_start', {"type": "message_start", "message": {"usage": {"input_tokens": 10}}}),
+                ('content_block_start', {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "tool_mem_1", "name": "memory_fetch"}}),
+                ('content_block_delta', {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"memory_id\":\"mem_task_1\"}"}}),
+                ('content_block_stop', {"type": "content_block_stop", "index": 0}),
+                ('message_delta', {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 5}}),
+                ('message_stop', {"type": "message_stop"}),
+            ]
+        else:
+            events = [
+                ('message_start', {"type": "message_start", "message": {"usage": {"input_tokens": 12}}}),
+                ('content_block_start', {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+                ('content_block_delta', {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Recovered the full memory block."}}),
+                ('content_block_stop', {"type": "content_block_stop", "index": 0}),
+                ('message_delta', {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 7}}),
+                ('message_stop', {"type": "message_stop"}),
+            ]
+        for event_name, payload in events:
+            yield type("SSE", (), {"event": event_name, "data": json.dumps(payload)})()
+
+    async def fake_execute(
+        tool_name: str,
+        tool_input: dict[str, object],
+        *,
+        context=None,
+    ) -> str:
+        del context
+        assert tool_name == "memory_fetch"
+        assert tool_input == {"memory_id": "mem_task_1"}
+        return json.dumps({"found": True, "memory_id": "mem_task_1", "content": "Full canonical body"})
+
+    runtime._stream_anthropic_events = scripted_stream  # type: ignore[method-assign]
+
+    await runtime.start()
+    assert runtime._tool_executor is not None
+    runtime._tool_executor.execute = fake_execute  # type: ignore[method-assign]
+    try:
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+
+    progress_events = [event for event in streamed_events if event["type"] == "task.progress"]
+    assert any(
+        event.get("tool_name") == "memory_fetch"
+        and event.get("message") == "Loading full memory block mem_task_1..."
+        for event in progress_events
+    )
+    assert any(event["type"] == "tool.call" and event["tool_name"] == "memory_fetch" for event in streamed_events)
+    assert any(event["type"] == "tool.result" and event["tool_name"] == "memory_fetch" for event in streamed_events)
+    assert streamed_events[-2]["type"] == "response.complete"
+    assert streamed_events[-2]["content"] == "Recovered the full memory block."
 
 
 def test_orchestrator_build_messages_includes_attachment_manifest(tmp_path) -> None:

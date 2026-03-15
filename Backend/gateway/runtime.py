@@ -1486,6 +1486,9 @@ class GatewayRuntime:
     async def memory_active_search(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self.memory_client.active_search(payload)
 
+    async def memory_get(self, memory_id: str) -> dict[str, Any]:
+        return await self.memory_client.get_memory(memory_id)
+
     async def memory_schema_context(self) -> dict[str, Any]:
         return await self.memory_client.get_schema_context()
 

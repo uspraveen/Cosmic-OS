@@ -10,6 +10,7 @@ import logging
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -173,6 +174,17 @@ class ToolExecutor:
         kinds = self._normalize_string_list(tool_input.get("kinds"))
         if kinds:
             payload["kinds"] = kinds
+        seed_memory_ids = self._normalize_string_list(tool_input.get("seed_memory_ids"))
+        if seed_memory_ids:
+            payload["seed_memory_ids"] = seed_memory_ids
+        seed_entities = self._normalize_string_list(tool_input.get("seed_entities"))
+        if seed_entities:
+            payload["seed_entities"] = seed_entities
+        max_hops = self._coerce_int(tool_input.get("max_hops"), 2)
+        if max_hops > 0:
+            payload["max_hops"] = min(max_hops, 6)
+        if bool(tool_input.get("include_diagnostics")):
+            payload["include_diagnostics"] = True
 
         if self.gateway_url:
             try:
@@ -193,6 +205,54 @@ class ToolExecutor:
                 json_body=payload,
             )
             return self._normalize_memory_search_result(response_payload)
+
+        raise RuntimeError("Memory service is not configured.")
+
+    async def _memory_fetch(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        del context
+        memory_id = str(tool_input.get("memory_id") or "").strip()
+        if not memory_id:
+            return {"error": True, "message": "memory_id is required"}
+
+        gateway_path = f"/internal/memory/memories/{quote(memory_id, safe='')}"
+        memory_path = f"/v1/memories/{quote(memory_id, safe='')}"
+
+        if self.gateway_url:
+            try:
+                response_payload = await self._request_gateway_json(
+                    "GET",
+                    gateway_path,
+                    allow_404=True,
+                )
+                if response_payload is None:
+                    return {
+                        "found": False,
+                        "memory_id": memory_id,
+                        "message": "Memory not found.",
+                    }
+                return self._normalize_memory_record_result(response_payload, requested_memory_id=memory_id)
+            except ToolHTTPError as exc:
+                if exc.status_code not in {404, 405} or not self.cosmic_memory_url:
+                    raise
+
+        if self.cosmic_memory_url:
+            response_payload = await self._request_cosmic_memory_json(
+                "GET",
+                memory_path,
+                allow_404=True,
+            )
+            if response_payload is None:
+                return {
+                    "found": False,
+                    "memory_id": memory_id,
+                    "message": "Memory not found.",
+                }
+            return self._normalize_memory_record_result(response_payload, requested_memory_id=memory_id)
 
         raise RuntimeError("Memory service is not configured.")
 
@@ -484,7 +544,8 @@ class ToolExecutor:
         *,
         json_body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+        allow_404: bool = False,
+    ) -> dict[str, Any] | None:
         if not self.cosmic_memory_url:
             raise RuntimeError("Memory service is not configured.")
         response = await self._client.request(
@@ -494,6 +555,8 @@ class ToolExecutor:
             params=params,
             headers=self._memory_headers(),
         )
+        if allow_404 and response.status_code == 404:
+            return None
         if response.status_code >= 400:
             raise ToolHTTPError(
                 status_code=response.status_code,
@@ -545,6 +608,35 @@ class ToolExecutor:
         if not normalized_items and not any(result[key] for key in ("entities", "relations", "episodes")):
             result.setdefault("message", "No matching memories found.")
         return result
+
+    def _normalize_memory_record_result(
+        self,
+        payload: dict[str, Any],
+        *,
+        requested_memory_id: str,
+    ) -> dict[str, Any]:
+        record = dict(payload)
+        memory_id = str(record.get("memory_id") or requested_memory_id).strip() or requested_memory_id
+        tags = record.get("tags")
+        metadata = record.get("metadata")
+        provenance = record.get("provenance")
+        return {
+            "found": True,
+            "memory_id": memory_id,
+            "kind": record.get("kind"),
+            "title": record.get("title"),
+            "content": record.get("content"),
+            "tags": tags if isinstance(tags, list) else [],
+            "metadata": metadata if isinstance(metadata, dict) else {},
+            "provenance": provenance if isinstance(provenance, dict) else {},
+            "status": record.get("status"),
+            "version": record.get("version"),
+            "created_at": record.get("created_at"),
+            "updated_at": record.get("updated_at"),
+            "supersedes": record.get("supersedes"),
+            "superseded_by": record.get("superseded_by"),
+            "record": record,
+        }
 
     def _build_memory_metadata(self, context: ToolExecutionContext | None) -> dict[str, Any]:
         if context is None:
