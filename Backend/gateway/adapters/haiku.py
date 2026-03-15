@@ -8,7 +8,7 @@ from typing import Any, AsyncIterator
 import httpx
 
 from .prompts import build_direct_assistant_system_prompt
-from .response_processor import LLMStreamProcessor, normalize_conversation_history
+from .response_processor import DirectRouteHandoff, LLMStreamProcessor, normalize_conversation_history
 
 
 @dataclass(slots=True)
@@ -60,6 +60,22 @@ class HaikuAdapter(LLMStreamProcessor):
         usage: dict[str, int] = {}
         stop_reason: str | None = None
         thinking_text = ""
+        pending_thinking_chunks: list[str] = []
+
+        async def flush_thinking_chunks() -> None:
+            if not pending_thinking_chunks:
+                return
+            for thinking_chunk in pending_thinking_chunks:
+                await send(
+                    {
+                        "type": "response.thinking.chunk",
+                        "request_id": request_id,
+                        "session_id": session_id,
+                        "content": thinking_chunk,
+                        "done": False,
+                    }
+                )
+            pending_thinking_chunks.clear()
 
         async def text_stream() -> AsyncIterator[str]:
             nonlocal stop_reason, thinking_text, usage
@@ -78,15 +94,7 @@ class HaikuAdapter(LLMStreamProcessor):
                     if not chunk:
                         continue
                     thinking_text += chunk
-                    await send(
-                        {
-                            "type": "response.thinking.chunk",
-                            "request_id": request_id,
-                            "session_id": session_id,
-                            "content": chunk,
-                            "done": False,
-                        }
-                    )
+                    pending_thinking_chunks.append(chunk)
                     continue
                 if payload_type == "text":
                     chunk = str(payload.get("content") or "")
@@ -98,7 +106,10 @@ class HaikuAdapter(LLMStreamProcessor):
             request_id=request_id,
             session_id=session_id,
             send=send,
+            on_first_visible_chunk=flush_thinking_chunks,
         )
+        if result.handoff_route is not None:
+            raise DirectRouteHandoff(result.handoff_route)
 
         metadata: dict[str, Any] | None = None
         if thinking_text or stop_reason:

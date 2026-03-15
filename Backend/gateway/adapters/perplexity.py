@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import json
 import re
 from typing import Any, AsyncIterator
@@ -9,7 +10,7 @@ from urllib.parse import urlparse
 import httpx
 
 from .prompts import build_direct_assistant_system_prompt
-from .response_processor import LLMStreamProcessor, normalize_conversation_history
+from .response_processor import DirectRouteHandoff, LLMStreamProcessor, normalize_conversation_history
 
 
 class PerplexityAdapter(LLMStreamProcessor):
@@ -64,6 +65,12 @@ class PerplexityAdapter(LLMStreamProcessor):
             session_id=session_id,
             send=send,
         )
+        if result.handoff_route is not None:
+            if source_task is not None:
+                source_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await source_task
+            raise DirectRouteHandoff(result.handoff_route)
 
         sources = await source_task if source_task else self._normalize_sources(citations)
         metadata = {"sources": sources} if sources else None

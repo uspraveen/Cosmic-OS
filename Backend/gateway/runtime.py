@@ -13,6 +13,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .adapters import HaikuAdapter, PerplexityAdapter
+from .adapters.response_processor import DirectRouteHandoff
 from .artifacts.store import ArtifactStore
 from .channels.base import ChannelUnavailableError, PermanentDeliveryError, RetryableDeliveryError
 from .channels.desktop import DesktopAdapter
@@ -669,30 +670,162 @@ class GatewayRuntime:
                 metadata=assistant_metadata,
             )
 
-        if route in {"haiku", "gemini"}:
-            await self.haiku_adapter.stream(
+        try:
+            if route in {"haiku", "gemini"}:
+                await self.haiku_adapter.stream(
+                    request_id=request_id,
+                    session_id=session_id,
+                    history=history,
+                    send=send,
+                    store_assistant_message=store_assistant_message,
+                    channel=channel,
+                    memory_context=memory_context,
+                )
+                return
+
+            if route == "perplexity":
+                await self.perplexity_adapter.stream(
+                    request_id=request_id,
+                    session_id=session_id,
+                    history=history,
+                    send=send,
+                    store_assistant_message=store_assistant_message,
+                    channel=channel,
+                    memory_context=memory_context,
+                )
+                return
+        except DirectRouteHandoff as handoff:
+            handoff_route = self._normalize_route(handoff.route)
+            if handoff_route != "opus":
+                raise RuntimeError(f"Unsupported direct-model handoff route: {handoff.route}")
+            await self._handle_direct_model_handoff_to_opus(
+                request_record=request_record,
                 request_id=request_id,
                 session_id=session_id,
-                history=history,
-                send=send,
-                store_assistant_message=store_assistant_message,
                 channel=channel,
-                memory_context=memory_context,
-            )
-            return
-
-        if route == "perplexity":
-            await self.perplexity_adapter.stream(
-                request_id=request_id,
-                session_id=session_id,
-                history=history,
+                prior_route=route,
+                active_request=active_request,
                 send=send,
-                store_assistant_message=store_assistant_message,
-                channel=channel,
-                memory_context=memory_context,
             )
-            return
 
+        await self._stream_orchestrator_fulfillment(
+            request_record=request_record,
+            request_id=request_id,
+            session_id=session_id,
+            channel=channel,
+            active_request=active_request,
+            send=send,
+            store_assistant_message=store_assistant_message,
+        )
+
+    async def _handle_direct_model_handoff_to_opus(
+        self,
+        *,
+        request_record: dict[str, Any],
+        request_id: str,
+        session_id: str,
+        channel: str,
+        prior_route: str,
+        active_request: ActiveRequest | None,
+        send,
+    ) -> None:
+        normalized_prior_route = self._normalize_route(prior_route)
+        if active_request is not None and active_request.partial_content.strip():
+            raise RuntimeError(
+                f"{normalized_prior_route} requested Opus handoff after a direct response had already started."
+            )
+
+        handoff_count = self._coerce_int(request_record.get("direct_model_handoff_count")) or 0
+        if handoff_count >= 1:
+            raise RuntimeError("Direct model requested more than one Opus handoff for the same request.")
+
+        original_decision_source = self._safe_text(request_record.get("routing_decision_source")) or "model_router"
+        request_record.setdefault("initial_route", normalized_prior_route)
+        request_record.setdefault("initial_routing_decision_source", original_decision_source)
+
+        classification = dict(request_record.get("classification")) if isinstance(request_record.get("classification"), dict) else {}
+        signals = list(classification.get("signals")) if isinstance(classification.get("signals"), list) else []
+        handoff_signal = f"direct_model_handoff:{normalized_prior_route}->opus"
+        if handoff_signal not in signals:
+            signals.append(handoff_signal)
+        classification.update(
+            {
+                "route": "opus",
+                "is_task": True,
+                "is_continuation": True,
+                "signals": signals,
+            }
+        )
+
+        request_record["route"] = "opus"
+        request_record["dispatch_target"] = "orchestrator"
+        request_record["classification"] = classification
+        request_record["routing_decision_source"] = "direct_model_handoff"
+        request_record["direct_model_handoff_count"] = handoff_count + 1
+        request_record["direct_model_handoff_from"] = normalized_prior_route
+        self.request_records[request_id] = request_record
+
+        if active_request is not None:
+            active_request.route = "opus"
+
+        message = request_record.get("message") if isinstance(request_record.get("message"), dict) else {}
+        query_text = self._safe_text(message.get("content")) or "[empty message]"
+        assembled_conversation_context = (
+            request_record.get("assembled_conversation_context")
+            if isinstance(request_record.get("assembled_conversation_context"), list)
+            else None
+        )
+        route_override = normalized_prior_route if "manual_route_override" in signals else None
+        sticky_hit = original_decision_source == "sticky_awaiting_reply"
+        self.routing_audit_store.append(
+            request_id=request_id,
+            session_id=session_id,
+            channel=channel,
+            source=self._safe_text(request_record.get("source")) or "user",
+            source_id=self._safe_text(request_record.get("source_id")),
+            query_text=query_text,
+            route_override=route_override,
+            sticky_hit=sticky_hit,
+            decision_source="direct_model_handoff",
+            classifier_route=normalized_prior_route,
+            final_route="opus",
+            dispatch_target="orchestrator",
+            confidence=self._coerce_float(classification.get("confidence"), 0.0),
+            signals=signals,
+            conversation_context=assembled_conversation_context,
+            classifier_payload=None,
+            classifier_metrics=None,
+            classifier_model=None,
+            classifier_latency_ms=None,
+            decision_latency_ms=0.0,
+            error_text=None,
+        )
+
+        if channel.startswith("desktop:"):
+            await send(
+                {
+                    "type": "task.progress",
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "channel": channel,
+                    "route": "opus",
+                    "status": "escalating",
+                    "message": "Escalating to Opus for deeper handling.",
+                    "escalated_from": normalized_prior_route,
+                }
+            )
+
+    async def _stream_orchestrator_fulfillment(
+        self,
+        *,
+        request_record: dict[str, Any],
+        request_id: str,
+        session_id: str,
+        channel: str,
+        active_request: ActiveRequest | None,
+        send,
+        store_assistant_message,
+    ) -> None:
         task = self._build_orchestrator_task(
             request_record=request_record,
             session_id=session_id,
@@ -701,6 +834,7 @@ class GatewayRuntime:
         )
         self.active_task_channels[task.task_id] = channel
         if active_request is not None:
+            active_request.route = "opus"
             active_request.task_id = task.task_id
             self.active_requests_by_task[task.task_id] = request_id
 
@@ -2362,7 +2496,9 @@ class GatewayRuntime:
                 "timestamp": self._safe_text(request.get("timestamp")) or utcnow_iso(),
             }
             self._persist_task_input_request(event)
-            await self._send_channel_event_now(event, channel)
+            delivery_status = await self._deliver_or_queue_channel_event(event, channel=channel)
+            if delivery_status == "dropped":
+                return
             await self._redis.xack(
                 self.config.task_input_requests_stream,
                 self.config.task_input_gateway_group,

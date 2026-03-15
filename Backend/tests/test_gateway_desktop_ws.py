@@ -10,7 +10,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from gateway.channels.base import ChannelUnavailableError
+from gateway.adapters.response_processor import DirectRouteHandoff
+from gateway.channels.base import ChannelUnavailableError, RetryableDeliveryError
 from gateway.channels.routes import router as channel_router
 from gateway.config import GatewayConfig
 from gateway.memory_client import MemoryPromptContext
@@ -81,6 +82,40 @@ class FakeDirectAdapter:
             {"output_tokens": 64},
             "end_turn",
         )
+
+
+class FakeHandoffDirectAdapter:
+    def __init__(self, route: str, *, handoff_route: str = "opus") -> None:
+        self.route = route
+        self.handoff_route = handoff_route
+        self.last_memory_context: str | None = None
+
+    async def close(self) -> None:
+        return
+
+    async def stream(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        history,
+        send,
+        store_assistant_message,
+        channel: str,
+        memory_context: str | None = None,
+    ) -> None:
+        self.last_memory_context = memory_context
+        assert history[-1]["role"] == "user"
+        raise DirectRouteHandoff(self.handoff_route)
+
+    async def generate_text(
+        self,
+        *,
+        system_prompt: str,
+        messages,
+        max_tokens: int,
+    ) -> tuple[str, dict[str, object], str]:
+        raise AssertionError("generate_text should not be used in handoff tests")
 
 
 class FakeOrchestratorClient:
@@ -399,6 +434,19 @@ class FlakyDesktopChannelAdapter:
         if not self.available:
             raise ChannelUnavailableError("desktop socket offline")
         self.sent_events.append({**message, "channel": channel or message.get("channel")})
+
+
+class RetryableDesktopChannelAdapter(FlakyDesktopChannelAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.available = True
+        self.fail_once = True
+
+    async def send(self, message: dict[str, object], channel: str | None = None) -> None:
+        if self.fail_once:
+            self.fail_once = False
+            raise RetryableDeliveryError("desktop write timed out")
+        await super().send(message, channel=channel)
 
 
 class FakeMemoryClient:
@@ -1639,6 +1687,97 @@ async def test_offline_desktop_task_input_is_held_until_channel_returns(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_task_input_stream_message_queues_and_acks_when_channel_unavailable(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="haiku")
+    runtime._redis = FakeRedis()
+    desktop_adapter = FlakyDesktopChannelAdapter()
+    runtime.registry.register(desktop_adapter)
+    await runtime.start()
+    try:
+        payload = {
+            "input_request_id": "uir_stream_hold",
+            "task_id": "tsk_stream_hold",
+            "session_id": "sess_20260312",
+            "channel": "desktop:desk_hold",
+            "agent": "cosmic/orchestrator:1.0.0",
+            "question": "Choose a deployment target.",
+            "options": ["staging", "production"],
+            "status": "pending",
+            "timestamp": utcnow_iso(),
+        }
+
+        await runtime._handle_task_input_stream_message(  # noqa: SLF001 - targeted Redis seam
+            "1-0",
+            {"payload": json.dumps(payload)},
+        )
+
+        group_state = runtime._redis.groups[
+            (runtime.config.task_input_requests_stream, runtime.config.task_input_gateway_group)
+        ]
+        assert "1-0" in group_state["acked"]
+        assert runtime.delivery_queue_store.summary()["pending_count"] == 1
+        stored = runtime.session_store.get_task_input_request("uir_stream_hold")
+        assert stored is not None
+        assert stored["status"] == "pending"
+
+        desktop_adapter.available = True
+        runtime.notify_channel_active("desktop:desk_hold")
+
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            if desktop_adapter.sent_events:
+                break
+            await asyncio.sleep(0.05)
+
+        assert desktop_adapter.sent_events[0]["type"] == "task.input_required"
+        assert runtime.delivery_queue_store.summary()["pending_count"] == 0
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_task_input_stream_message_queues_and_acks_on_retryable_delivery_error(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="haiku")
+    runtime._redis = FakeRedis()
+    desktop_adapter = RetryableDesktopChannelAdapter()
+    runtime.registry.register(desktop_adapter)
+    await runtime.start()
+    try:
+        payload = {
+            "input_request_id": "uir_stream_retry",
+            "task_id": "tsk_stream_retry",
+            "session_id": "sess_20260312",
+            "channel": "desktop:desk_retry",
+            "agent": "cosmic/orchestrator:1.0.0",
+            "question": "Choose a deployment target.",
+            "options": ["staging", "production"],
+            "status": "pending",
+            "timestamp": utcnow_iso(),
+        }
+
+        await runtime._handle_task_input_stream_message(  # noqa: SLF001 - targeted Redis seam
+            "1-0",
+            {"payload": json.dumps(payload)},
+        )
+
+        group_state = runtime._redis.groups[
+            (runtime.config.task_input_requests_stream, runtime.config.task_input_gateway_group)
+        ]
+        assert "1-0" in group_state["acked"]
+
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            if desktop_adapter.sent_events:
+                break
+            await asyncio.sleep(0.05)
+
+        assert desktop_adapter.sent_events[0]["type"] == "task.input_required"
+        assert runtime.delivery_queue_store.summary()["pending_count"] == 0
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
 async def test_whatsapp_message_auto_submits_pending_task_input_reply(tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="perplexity")
     runtime._redis = FakeRedis()
@@ -1815,6 +1954,85 @@ def test_desktop_websocket_streams_thin_opus_route(test_client: TestClient, tmp_
 
             completed = websocket.receive_json()
             assert completed["type"] == "task.completed"
+
+
+def test_desktop_websocket_hands_off_direct_route_to_opus_with_escalation_activity(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="perplexity")
+    runtime.perplexity_adapter = FakeHandoffDirectAdapter("perplexity")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws?token=test-token&device_id=desk_handoff") as websocket:
+            websocket.send_json(
+                {
+                    "type": "query",
+                    "request_id": "req_handoff",
+                    "content": "Make a plan and then do it.",
+                }
+            )
+            route_result = websocket.receive_json()
+            assert route_result["type"] == "route_result"
+            assert route_result["route"] == "perplexity"
+
+            progress = websocket.receive_json()
+            assert progress["type"] == "task.progress"
+            assert progress["request_id"] == "req_handoff"
+            assert progress["route"] == "opus"
+            assert progress["status"] == "escalating"
+            assert progress["message"] == "Escalating to Opus for deeper handling."
+            assert progress["escalated_from"] == "perplexity"
+
+            created = websocket.receive_json()
+            assert created["type"] == "task.created"
+            assert created["route"] == "opus"
+
+            thinking = websocket.receive_json()
+            assert thinking["type"] == "response.thinking.chunk"
+            assert thinking["content"] == "Let me think this through."
+
+            chunk = websocket.receive_json()
+            assert chunk["type"] == "response.chunk"
+            assert chunk["content"] == "Thin Opus answer"
+
+            complete = websocket.receive_json()
+            assert complete["type"] == "response.complete"
+            assert complete["route"] == "opus"
+            assert complete["content"] == "Thin Opus answer"
+
+            completed = websocket.receive_json()
+            assert completed["type"] == "task.completed"
+
+        history = runtime.session_store.get_history(route_result["session_id"])
+        assert history[-1]["role"] == "assistant"
+        assert history[-1]["route"] == "opus"
+        assert history[-1]["content"] == "Thin Opus answer"
+
+        response = client.get(
+            "/routing-audit?limit=5",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert response.status_code == 200
+        entries = response.json()["entries"]
+        assert len(entries) == 2
+        assert entries[0]["request_id"] == "req_handoff"
+        assert entries[0]["decision_source"] == "direct_model_handoff"
+        assert entries[0]["classifier_route"] == "perplexity"
+        assert entries[0]["final_route"] == "opus"
+        assert entries[0]["dispatch_target"] == "orchestrator"
+        assert "direct_model_handoff:perplexity->opus" in entries[0]["signals"]
+        assert entries[1]["decision_source"] == "model_router"
+        assert entries[1]["final_route"] == "perplexity"
 
 
 def test_desktop_websocket_route_override_bypasses_classifier(test_client: TestClient, tmp_path) -> None:

@@ -1,13 +1,25 @@
 from __future__ import annotations
 
+from .response_processor import AWAITING_REPLY_TAG, HANDOFF_OPUS_TAG
 
 AWAITING_REPLY_INSTRUCTION = (
     "When you need the user to choose, confirm, or answer something before\n"
     "you can meaningfully continue, place this tag as the very last thing\n"
     "in your response - nothing after it, no trailing text, no whitespace:\n"
-    "<awaiting_reply/>\n"
+    f"{AWAITING_REPLY_TAG}\n"
     "Do not use this for rhetorical questions or open-ended suggestions.\n"
     "Only use it when you are genuinely blocked without the user's response."
+)
+
+HANDOFF_OPUS_INSTRUCTION = (
+    "If the request actually needs COSMIC's deeper orchestration path instead\n"
+    "of a direct answer, respond with exactly this tag and nothing else:\n"
+    f"{HANDOFF_OPUS_TAG}\n"
+    "Use it for multi-step work, planning or execution, code/file/system changes,\n"
+    "workflow help, task continuations, or anything that depends on prior task state.\n"
+    "Do not use it for simple questions you can answer directly.\n"
+    "If you use this tag, emit only the tag - no prose, no Markdown, no whitespace,\n"
+    f"and never combine it with {AWAITING_REPLY_TAG}."
 )
 
 DIRECT_ASSISTANT_SYSTEM_PROMPT = (
@@ -16,6 +28,7 @@ DIRECT_ASSISTANT_SYSTEM_PROMPT = (
     "Stay practical and concise unless the user explicitly asks for depth.\n"
     "If the user asks for up-to-date information and your provider does not have it,\n"
     "say so plainly instead of pretending to know.\n\n"
+    f"{HANDOFF_OPUS_INSTRUCTION}\n\n"
     f"{AWAITING_REPLY_INSTRUCTION}"
 )
 
