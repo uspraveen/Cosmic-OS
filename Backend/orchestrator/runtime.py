@@ -117,6 +117,30 @@ class ActiveTaskRun:
     cancel_message: str = "Response stopped."
 
 
+@dataclass(slots=True)
+class AnthropicLoopStats:
+    anthropic_requests: int = 0
+    tasks_observed: int = 0
+    tasks_with_tool_loops: int = 0
+    tasks_with_container_capture: int = 0
+    container_reuse_turns: int = 0
+    max_request_context_chars: int = 0
+    max_request_message_count: int = 0
+    max_tool_iterations: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "anthropic_requests": self.anthropic_requests,
+            "tasks_observed": self.tasks_observed,
+            "tasks_with_tool_loops": self.tasks_with_tool_loops,
+            "tasks_with_container_capture": self.tasks_with_container_capture,
+            "container_reuse_turns": self.container_reuse_turns,
+            "max_request_context_chars": self.max_request_context_chars,
+            "max_request_message_count": self.max_request_message_count,
+            "max_tool_iterations": self.max_tool_iterations,
+        }
+
+
 class OrchestratorRuntime:
     def __init__(
         self,
@@ -139,6 +163,7 @@ class OrchestratorRuntime:
         self._pending_input_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._reply_consumer_task: asyncio.Task[None] | None = None
         self._tool_executor: ToolExecutor | None = None
+        self._anthropic_loop_stats = AnthropicLoopStats()
 
     async def start(self) -> None:
         self.task_ledger.initialize()
@@ -240,9 +265,23 @@ class OrchestratorRuntime:
             full_reasoning_text = ""
             collected_sources: list[dict[str, str]] = []
             container_id: str | None = None
+            container_captured = False
+            container_reuse_turns = 0
+            anthropic_requests = 0
+            max_request_context_chars = 0
+            max_request_message_count = 0
+            saw_tool_loop = False
 
             while iteration < max_iterations:
                 iteration += 1
+                anthropic_requests += 1
+                if container_id:
+                    container_reuse_turns += 1
+                max_request_context_chars = max(
+                    max_request_context_chars,
+                    self._estimate_request_context_chars(system_prompt, messages),
+                )
+                max_request_message_count = max(max_request_message_count, len(messages))
 
                 # ── Stream one Anthropic turn ───────────────────
                 blocks: dict[int, ContentBlock] = {}
@@ -272,6 +311,7 @@ class OrchestratorRuntime:
                             _cid = _cont.get("id")
                             if _cid:
                                 container_id = str(_cid)
+                                container_captured = True
                         continue
 
                     # ── message_delta ───────────────────────────
@@ -286,6 +326,7 @@ class OrchestratorRuntime:
                                 _cid = _cont.get("id")
                                 if _cid:
                                     container_id = str(_cid)
+                                    container_captured = True
                         continue
 
                     # ── error ───────────────────────────────────
@@ -410,6 +451,7 @@ class OrchestratorRuntime:
 
                 # ── Server-side tool continuation (pause_turn) ────
                 if turn_stop_reason == "pause_turn":
+                    saw_tool_loop = True
                     assistant_content = [blocks[idx].to_api_dict() for idx in sorted(blocks)]
                     messages.append({"role": "assistant", "content": assistant_content})
                     yield {
@@ -422,6 +464,7 @@ class OrchestratorRuntime:
 
                 # ── Tool use → execute and loop ─────────────────
                 if turn_stop_reason == "tool_use" and turn_tool_blocks:
+                    saw_tool_loop = True
                     # Reconstruct the full assistant message (thinking + text + tool_use)
                     assistant_content = [blocks[idx].to_api_dict() for idx in sorted(blocks)]
                     messages.append({"role": "assistant", "content": assistant_content})
@@ -528,6 +571,13 @@ class OrchestratorRuntime:
                 "stop_reason": stop_reason,
                 "result_type": result_type,
                 "tool_iterations": iteration,
+                "loop_diagnostics": {
+                    "anthropic_requests": anthropic_requests,
+                    "container_captured": container_captured,
+                    "container_reuse_turns": container_reuse_turns,
+                    "max_request_context_chars": max_request_context_chars,
+                    "max_request_message_count": max_request_message_count,
+                },
             }
             self.task_ledger.mark_completed(task.task_id, result=result_payload)
             elapsed_ms = max(1, int((time.perf_counter() - started_at) * 1000))
@@ -540,7 +590,16 @@ class OrchestratorRuntime:
                 "result_type": result_type,
                 "awaiting_reply": awaiting_reply,
                 "thinking_text": full_reasoning_text,
-                "metrics": {"rtt_ms": elapsed_ms, "tool_iterations": iteration, **cumulative_usage},
+                "metrics": {
+                    "rtt_ms": elapsed_ms,
+                    "tool_iterations": iteration,
+                    "anthropic_requests": anthropic_requests,
+                    "container_captured": container_captured,
+                    "container_reuse_turns": container_reuse_turns,
+                    "max_request_context_chars": max_request_context_chars,
+                    "max_request_message_count": max_request_message_count,
+                    **cumulative_usage,
+                },
             }
             if collected_sources:
                 complete_event["sources"] = collected_sources
@@ -563,6 +622,15 @@ class OrchestratorRuntime:
                 "error": {"code": "OPUS_UPSTREAM_ERROR", "message": message, "retryable": False},
             }
         finally:
+            self._record_anthropic_loop_stats(
+                anthropic_requests=locals().get("anthropic_requests", 0),
+                saw_tool_loop=locals().get("saw_tool_loop", False),
+                container_captured=locals().get("container_captured", False),
+                container_reuse_turns=locals().get("container_reuse_turns", 0),
+                max_request_context_chars=locals().get("max_request_context_chars", 0),
+                max_request_message_count=locals().get("max_request_message_count", 0),
+                tool_iterations=locals().get("iteration", 0),
+            )
             self._active_runs.pop(task.task_id, None)
 
     # ════════════════════════════════════════════════════════════
@@ -585,6 +653,9 @@ class OrchestratorRuntime:
         if runner is not None and not runner.done():
             runner.cancel()
         return True
+
+    def get_loop_diagnostics_snapshot(self) -> dict[str, int]:
+        return self._anthropic_loop_stats.as_dict()
 
     async def request_user_input(
         self,
@@ -653,12 +724,23 @@ class OrchestratorRuntime:
         container_id: str | None = None,
     ) -> AsyncIterator[SSEEvent]:
         url = "https://api.anthropic.com/v1/messages"
+        system_payload: str | list[dict[str, Any]]
+        if self.config.anthropic_prompt_cache_enabled:
+            system_payload = [
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+        else:
+            system_payload = system_prompt
         body: dict[str, Any] = {
             "model": self.config.anthropic_model,
             "max_tokens": self.config.max_tokens,
             "stream": True,
             "thinking": {"type": "adaptive"},
-            "system": system_prompt,
+            "system": system_payload,
             "messages": messages,
         }
         if tools:
@@ -785,6 +867,36 @@ class OrchestratorRuntime:
             if isinstance(value, (int, float)):
                 merged[key] = merged.get(key, 0) + int(value)
         return merged
+
+    def _estimate_request_context_chars(self, system_prompt: str, messages: list[dict[str, Any]]) -> int:
+        try:
+            messages_json = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            messages_json = repr(messages)
+        return len(system_prompt) + len(messages_json)
+
+    def _record_anthropic_loop_stats(
+        self,
+        *,
+        anthropic_requests: int,
+        saw_tool_loop: bool,
+        container_captured: bool,
+        container_reuse_turns: int,
+        max_request_context_chars: int,
+        max_request_message_count: int,
+        tool_iterations: int,
+    ) -> None:
+        stats = self._anthropic_loop_stats
+        stats.tasks_observed += 1
+        stats.anthropic_requests += max(0, int(anthropic_requests))
+        if saw_tool_loop:
+            stats.tasks_with_tool_loops += 1
+        if container_captured:
+            stats.tasks_with_container_capture += 1
+        stats.container_reuse_turns += max(0, int(container_reuse_turns))
+        stats.max_request_context_chars = max(stats.max_request_context_chars, int(max_request_context_chars))
+        stats.max_request_message_count = max(stats.max_request_message_count, int(max_request_message_count))
+        stats.max_tool_iterations = max(stats.max_tool_iterations, int(tool_iterations))
 
     def _error_from_response(self, body: bytes, status_code: int) -> str:
         try:

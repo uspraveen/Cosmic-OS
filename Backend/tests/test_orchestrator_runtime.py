@@ -193,6 +193,11 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
     assert streamed_events[5]["thinking_text"] == "Thinking..."
     assert streamed_events[5]["metrics"]["input_tokens"] == 123
     assert streamed_events[5]["metrics"]["output_tokens"] == 27
+    assert streamed_events[5]["metrics"]["anthropic_requests"] == 1
+    assert streamed_events[5]["metrics"]["container_captured"] is False
+    assert streamed_events[5]["metrics"]["container_reuse_turns"] == 0
+    assert streamed_events[5]["metrics"]["max_request_message_count"] == 3
+    assert streamed_events[5]["metrics"]["max_request_context_chars"] > 0
     assert streamed_events[6] == {
         "type": "task.completed",
         "task_id": "tsk_test123",
@@ -201,6 +206,231 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
         "channel": "desktop:desk_test",
         "route": "opus",
         "status": "completed",
+    }
+
+    with sqlite3.connect(tmp_path / "task_ledger.db") as connection:
+        row = connection.execute(
+            "SELECT result_json FROM tasks WHERE task_id = ?",
+            ("tsk_test123",),
+        ).fetchone()
+    assert row is not None
+    result_payload = json.loads(row[0])
+    assert result_payload["loop_diagnostics"] == {
+        "anthropic_requests": 1,
+        "container_captured": False,
+        "container_reuse_turns": 0,
+        "max_request_context_chars": streamed_events[5]["metrics"]["max_request_context_chars"],
+        "max_request_message_count": 3,
+    }
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_runtime_can_enable_anthropic_prompt_cache(tmp_path) -> None:
+    observed_payloads: list[dict[str, object]] = []
+    events = [
+        b'event: message_start\n'
+        b'data: {"type":"message_start","message":{"usage":{"input_tokens":19,"cache_creation_input_tokens":1400,"cache_read_input_tokens":0}}}\n\n',
+        b'event: content_block_start\n'
+        b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n\n',
+        b'event: content_block_delta\n'
+        b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Cached prompt path is configured."}}\n\n',
+        b'event: content_block_stop\n'
+        b'data: {"type":"content_block_stop","index":0}\n\n',
+        b'event: message_delta\n'
+        b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}\n\n',
+        b"event: message_stop\n"
+        b'data: {"type":"message_stop"}\n\n',
+    ]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        observed_payloads.append(payload)
+        system_blocks = payload["system"]
+        assert isinstance(system_blocks, list)
+        assert system_blocks == [
+            {
+                "type": "text",
+                "text": system_blocks[0]["text"],
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+        assert "session_history" in system_blocks[0]["text"]
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=SSEByteStream(events),
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        anthropic_prompt_cache_enabled=True,
+        task_ledger_db_path=tmp_path / "task_ledger_prompt_cache.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    await runtime.start()
+    try:
+        streamed_events = [event async for event in runtime.stream_task(_signed_task("signing-secret"))]
+    finally:
+        await runtime.stop()
+
+    assert len(observed_payloads) == 1
+    complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert complete_event["content"] == "Cached prompt path is configured."
+    assert complete_event["metrics"]["cache_creation_input_tokens"] == 1400
+    assert complete_event["metrics"]["cache_read_input_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_runtime_reuses_container_without_inlining_system_prompt(tmp_path) -> None:
+    request_payloads: list[dict[str, object]] = []
+
+    def system_prompt_leaks_into_messages(payload: dict[str, object]) -> bool:
+        system_prompt = str(payload.get("system") or "")
+        if not system_prompt:
+            return False
+        for message in payload.get("messages", []):
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and system_prompt in content:
+                return True
+            if not isinstance(content, str):
+                try:
+                    rendered = json.dumps(content, ensure_ascii=False, sort_keys=True)
+                except (TypeError, ValueError):
+                    rendered = repr(content)
+                if system_prompt in rendered:
+                    return True
+        return False
+
+    first_events = [
+        b'event: message_start\n'
+        b'data: {"type":"message_start","message":{"usage":{"input_tokens":11},"container":{"id":"cont_loop_123"}}}\n\n',
+        b'event: content_block_start\n'
+        b'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}\n\n',
+        b'event: content_block_delta\n'
+        b'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Need to search memory."}}\n\n',
+        b'event: content_block_delta\n'
+        b'data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_loop_1"}}\n\n',
+        b'event: content_block_stop\n'
+        b'data: {"type":"content_block_stop","index":0}\n\n',
+        b'event: content_block_start\n'
+        b'data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool_mem_1","name":"memory_search"}}\n\n',
+        b'event: content_block_delta\n'
+        b'data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"query\\":\\"yc\\",\\"max_results\\":1}"}}\n\n',
+        b'event: content_block_stop\n'
+        b'data: {"type":"content_block_stop","index":1}\n\n',
+        b'event: message_delta\n'
+        b'data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":6}}\n\n',
+        b"event: message_stop\n"
+        b'data: {"type":"message_stop"}\n\n',
+    ]
+    second_events = [
+        b'event: message_start\n'
+        b'data: {"type":"message_start","message":{"usage":{"input_tokens":14}}}\n\n',
+        b'event: content_block_start\n'
+        b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n\n',
+        b'event: content_block_delta\n'
+        b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I checked the memory hit."}}\n\n',
+        b'event: content_block_stop\n'
+        b'data: {"type":"content_block_stop","index":0}\n\n',
+        b'event: message_delta\n'
+        b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":8}}\n\n',
+        b"event: message_stop\n"
+        b'data: {"type":"message_stop"}\n\n',
+    ]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == httpx.URL("https://api.anthropic.com/v1/messages")
+        payload = json.loads(request.content.decode("utf-8"))
+        request_payloads.append(payload)
+        assert system_prompt_leaks_into_messages(payload) is False
+
+        if len(request_payloads) == 1:
+            assert "container" not in payload
+            assert payload["messages"] == [
+                {"role": "user", "content": "Hi"},
+                {"role": "assistant", "content": "Hello"},
+                {"role": "user", "content": "Why is the sky blue?"},
+            ]
+            stream = SSEByteStream(first_events)
+        else:
+            assert payload["container"] == "cont_loop_123"
+            assistant_message = payload["messages"][-2]
+            assert assistant_message == {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "Need to search memory.", "signature": "sig_loop_1"},
+                    {"type": "tool_use", "id": "tool_mem_1", "name": "memory_search", "input": {"query": "yc", "max_results": 1}},
+                ],
+            }
+            tool_result_message = payload["messages"][-1]
+            assert tool_result_message["role"] == "user"
+            assert tool_result_message["content"] == [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tool_mem_1",
+                    "content": json.dumps({"items": [{"memory_id": "mem_yc_1", "title": "YC summary"}]}),
+                }
+            ]
+            stream = SSEByteStream(second_events)
+
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=stream,
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_loop_reuse.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+
+    async def fake_execute(
+        tool_name: str,
+        tool_input: dict[str, object],
+        *,
+        context=None,
+    ) -> str:
+        del context
+        assert tool_name == "memory_search"
+        assert tool_input == {"query": "yc", "max_results": 1}
+        return json.dumps({"items": [{"memory_id": "mem_yc_1", "title": "YC summary"}]})
+
+    await runtime.start()
+    assert runtime._tool_executor is not None
+    runtime._tool_executor.execute = fake_execute  # type: ignore[method-assign]
+    try:
+        streamed_events = [event async for event in runtime.stream_task(_signed_task("signing-secret"))]
+        loop_snapshot = runtime.get_loop_diagnostics_snapshot()
+    finally:
+        await runtime.stop()
+
+    assert len(request_payloads) == 2
+    complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert complete_event["metrics"]["anthropic_requests"] == 2
+    assert complete_event["metrics"]["container_captured"] is True
+    assert complete_event["metrics"]["container_reuse_turns"] == 1
+    assert complete_event["metrics"]["max_request_message_count"] == 5
+    assert complete_event["metrics"]["max_request_context_chars"] > 0
+    assert loop_snapshot == {
+        "anthropic_requests": 2,
+        "tasks_observed": 1,
+        "tasks_with_tool_loops": 1,
+        "tasks_with_container_capture": 1,
+        "container_reuse_turns": 1,
+        "max_request_context_chars": complete_event["metrics"]["max_request_context_chars"],
+        "max_request_message_count": 5,
+        "max_tool_iterations": 2,
     }
 
 

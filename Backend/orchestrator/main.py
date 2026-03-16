@@ -74,6 +74,7 @@ async def health(request: Request) -> dict[str, object]:
         "status": "ok" if runtime.started else "starting",
         "model": runtime.config.anthropic_model,
         "anthropic_configured": bool(runtime.config.anthropic_api_key),
+        "anthropic_prompt_cache_enabled": runtime.config.anthropic_prompt_cache_enabled,
         "ledger_path": str(runtime.config.task_ledger_db_path),
         "task_input_relay": {
             "enabled": bool(runtime.config.redis_url),
@@ -81,6 +82,7 @@ async def health(request: Request) -> dict[str, object]:
             "replies_stream": runtime.config.task_input_replies_stream,
             "group": runtime.config.task_input_orchestrator_group,
         },
+        "loop_diagnostics": runtime.get_loop_diagnostics_snapshot(),
         "tool_registry": get_tool_registry_snapshot(),
         "prompt_assets": {"sha256": get_prompt_asset_hashes()},
     }
