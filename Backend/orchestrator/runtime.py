@@ -17,6 +17,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -242,6 +243,7 @@ class OrchestratorRuntime:
             gateway_url=self.config.gateway_url,
             gateway_internal_token=self.config.internal_token,
             agent_dispatcher=self.dispatch_agent_task,
+            agent_catalog_searcher=self.search_agent_catalog,
         )
         self.started = True
 
@@ -746,6 +748,94 @@ class OrchestratorRuntime:
             )
         return results
 
+    async def search_agent_catalog(
+        self,
+        *,
+        query: str,
+        limit: int = 5,
+        require_healthy: bool = True,
+    ) -> dict[str, Any]:
+        normalized_query = str(query or "").strip()
+        query_tokens = self._catalog_tokens(normalized_query)
+        cards = self.registry_store.list_agent_cards(status="registered")
+        matches: list[dict[str, Any]] = []
+
+        for card in cards:
+            if not isinstance(card, dict):
+                continue
+            agent_id = str(card.get("agent_id") or "").strip()
+            if not agent_id:
+                continue
+
+            healthy = None
+            instance_id: str | None = None
+            if self._redis is not None:
+                found_agent_id, found_instance_id = await find_available_instance_for_agent(agent_id, self._redis)
+                healthy = bool(found_agent_id and found_instance_id)
+                instance_id = found_instance_id
+                if require_healthy and not healthy:
+                    continue
+
+            agent_display_name = str(card.get("display_name") or agent_id).strip() or agent_id
+            agent_description = str(card.get("description") or "").strip()
+            for raw_intent in card.get("intents", []):
+                if not isinstance(raw_intent, dict):
+                    continue
+                intent_name = str(raw_intent.get("name") or "").strip()
+                if not intent_name:
+                    continue
+                score = self._score_catalog_match(
+                    normalized_query=normalized_query,
+                    query_tokens=query_tokens,
+                    agent_display_name=agent_display_name,
+                    agent_id=agent_id,
+                    agent_description=agent_description,
+                    intent_name=intent_name,
+                    intent_description=str(raw_intent.get("description") or "").strip(),
+                )
+                if normalized_query and score <= 0:
+                    continue
+                matches.append(
+                    {
+                        "intent": intent_name,
+                        "intent_description": str(raw_intent.get("description") or "").strip(),
+                        "agent_id": agent_id,
+                        "display_name": agent_display_name,
+                        "agent_description": agent_description,
+                        "healthy": healthy,
+                        "instance_id": instance_id,
+                        "timeout_sec": raw_intent.get("timeout_sec"),
+                        "input_schema_summary": raw_intent.get("input_schema_summary") or {},
+                        "output_schema_summary": raw_intent.get("output_schema_summary") or {},
+                        "_score": score,
+                    }
+                )
+
+        matches.sort(
+            key=lambda item: (
+                int(item.get("_score") or 0),
+                1 if item.get("healthy") else 0,
+                str(item.get("intent") or ""),
+            ),
+            reverse=True,
+        )
+        limited_matches = matches[: max(1, min(limit, 20))]
+        for item in limited_matches:
+            item.pop("_score", None)
+
+        message = (
+            f"Found {len(limited_matches)} matching specialist intents."
+            if limited_matches else
+            "No matching specialist intents found."
+        )
+        return {
+            "query": normalized_query,
+            "require_healthy": require_healthy,
+            "matches": limited_matches,
+            "count": len(limited_matches),
+            "message": message,
+        }
+
     async def get_agent_dispatch_snapshot(self) -> dict[str, Any]:
         agents = await self.list_registered_agents()
         return {
@@ -761,6 +851,42 @@ class OrchestratorRuntime:
             "stats": self._agent_dispatch_stats.as_dict(),
             "agents": agents,
         }
+
+    @staticmethod
+    def _catalog_tokens(query: str) -> list[str]:
+        if not query:
+            return []
+        return [token for token in re.split(r"[^a-z0-9]+", query.lower()) if token]
+
+    def _score_catalog_match(
+        self,
+        *,
+        normalized_query: str,
+        query_tokens: list[str],
+        agent_display_name: str,
+        agent_id: str,
+        agent_description: str,
+        intent_name: str,
+        intent_description: str,
+    ) -> int:
+        if not normalized_query:
+            return 1
+
+        agent_text = " ".join((agent_display_name, agent_id, agent_description)).lower()
+        intent_text = " ".join((intent_name, intent_description)).lower()
+        score = 0
+
+        if normalized_query.lower() in intent_text:
+            score += 12
+        if normalized_query.lower() in agent_text:
+            score += 8
+
+        for token in query_tokens:
+            if token in intent_text:
+                score += 4
+            if token in agent_text:
+                score += 2
+        return score
 
     async def dispatch_agent_task(
         self,
@@ -1440,6 +1566,45 @@ class OrchestratorRuntime:
     ) -> str | None:
         data = self._parse_tool_result_json(result_str)
 
+        if tool_name == "agent_catalog_search":
+            matches = (data or {}).get("matches") if isinstance(data, dict) else None
+            if isinstance(matches, list) and matches:
+                labels: list[str] = []
+                for item in matches[:2]:
+                    if not isinstance(item, dict):
+                        continue
+                    intent_name = self._activity_excerpt(item.get("intent"), limit=64)
+                    agent_label = self._activity_excerpt(item.get("display_name"), limit=64)
+                    if intent_name and agent_label:
+                        labels.append(f"{intent_name} via {agent_label}")
+                    elif intent_name:
+                        labels.append(intent_name)
+                if labels:
+                    return self._format_found_pages_phrase("identified specialist intents", labels)
+                return f"identified {len(matches)} specialist intents"
+            query = self._activity_excerpt(tool_input.get("query"), limit=72)
+            if query:
+                return f'searched the specialist catalog for "{query}"'
+            return "searched the specialist catalog"
+
+        if tool_name == "delegate_to_agent":
+            delegation = (data or {}).get("delegation") if isinstance(data, dict) else None
+            intent_name = self._activity_excerpt(
+                (delegation or {}).get("intent") or tool_input.get("intent"),
+                limit=80,
+            )
+            agent_label = self._activity_agent_label((delegation or {}).get("agent_id") or tool_input.get("agent_id"))
+            phrase_from_message = self._activity_phrase_from_result_message(data)
+            if phrase_from_message and intent_name and agent_label:
+                return f"delegated {intent_name} to {agent_label} and {phrase_from_message}"
+            if phrase_from_message and intent_name:
+                return f"delegated {intent_name} and {phrase_from_message}"
+            if intent_name and agent_label:
+                return f"delegated {intent_name} to {agent_label}"
+            if intent_name:
+                return f"delegated {intent_name} to a specialist agent"
+            return "delegated work to a specialist agent"
+
         if tool_name == "firecrawl_scrape":
             url = self._activity_url_label((data or {}).get("url") or tool_input.get("url"))
             formats = (data or {}).get("available_formats") if isinstance(data, dict) else None
@@ -1715,6 +1880,18 @@ class OrchestratorRuntime:
         except Exception:
             pass
         return self._activity_excerpt(url, limit=84)
+
+    def _activity_agent_label(self, value: Any) -> str | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        normalized = raw
+        if "/" in normalized:
+            normalized = normalized.split("/", 1)[1]
+        if ":" in normalized:
+            normalized = normalized.split(":", 1)[0]
+        normalized = normalized.replace("-", " ").replace("_", " ").strip()
+        return self._activity_excerpt(normalized or raw, limit=72)
 
     # ════════════════════════════════════════════════════════════
     #  User input relay

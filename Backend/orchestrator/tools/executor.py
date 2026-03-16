@@ -51,6 +51,7 @@ class ToolExecutor:
         gateway_url: str = "",
         gateway_internal_token: str = "",
         agent_dispatcher: Callable[..., Awaitable[AgentResult | TaskInProgress]] | None = None,
+        agent_catalog_searcher: Callable[..., Awaitable[dict[str, Any]]] | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self.perplexity_api_key = perplexity_api_key.strip()
@@ -59,6 +60,7 @@ class ToolExecutor:
         self.gateway_url = gateway_url.rstrip("/") if gateway_url else ""
         self.gateway_internal_token = gateway_internal_token.strip()
         self._agent_dispatcher = agent_dispatcher
+        self._agent_catalog_searcher = agent_catalog_searcher
         timeout = httpx.Timeout(30.0, connect=10.0)
         self._client = client or httpx.AsyncClient(timeout=timeout, http2=True)
         self._owns_client = client is None
@@ -159,6 +161,58 @@ class ToolExecutor:
         return result
 
     # ── Specialist Agents ────────────────────────────────────────
+
+    async def _agent_catalog_search(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        del context
+        if self._agent_catalog_searcher is None:
+            return {"error": True, "message": "Agent catalog search is not configured in this orchestrator runtime."}
+        query = str(tool_input.get("query") or "").strip()
+        limit = min(max(1, self._coerce_int(tool_input.get("limit"), 5)), 20)
+        require_healthy = self._coerce_bool(tool_input.get("require_healthy"), default=True)
+        return await self._agent_catalog_searcher(
+            query=query,
+            limit=limit,
+            require_healthy=require_healthy,
+        )
+
+    async def _delegate_to_agent(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        intent = str(tool_input.get("intent") or "").strip()
+        if not intent:
+            return {"error": True, "message": "intent is required"}
+        payload = tool_input.get("input")
+        if not isinstance(payload, dict):
+            return {"error": True, "message": "input must be an object"}
+        preferred_agent_id = str(tool_input.get("agent_id") or "").strip() or None
+        wait_timeout_value = tool_input.get("wait_timeout_sec")
+        wait_timeout_sec: float | None = None
+        if wait_timeout_value not in (None, ""):
+            try:
+                wait_timeout_sec = max(1.0, float(wait_timeout_value))
+            except (TypeError, ValueError):
+                return {"error": True, "message": "wait_timeout_sec must be a number when provided"}
+        response = await self._dispatch_specialist_agent(
+            intent=intent,
+            payload=payload,
+            context=context,
+            agent_id=preferred_agent_id,
+            wait_timeout_sec=wait_timeout_sec,
+        )
+        if "delegation" not in response:
+            response["delegation"] = {
+                "intent": intent,
+                "agent_id": preferred_agent_id,
+            }
+        return response
 
     async def _firecrawl_scrape(
         self,
@@ -707,8 +761,8 @@ class ToolExecutor:
         intent: str,
         payload: dict[str, Any],
         context: ToolExecutionContext | None,
-        agent_id: str,
-        wait_timeout_sec: float,
+        agent_id: str | None,
+        wait_timeout_sec: float | None,
     ) -> dict[str, Any]:
         if self._agent_dispatcher is None:
             return {"error": True, "message": f"{intent} is not configured in this orchestrator runtime."}
@@ -730,6 +784,7 @@ class ToolExecutor:
                 "idempotency_key": result.idempotency_key,
                 "check_after_sec": result.check_after_sec,
                 "message": f"{intent} is still running in the specialist agent.",
+                "delegation": {"intent": intent, "agent_id": agent_id},
             }
 
         if result.status != "completed":
@@ -740,12 +795,14 @@ class ToolExecutor:
                 "retryable": error.retryable if error else False,
                 "next_action": error.next_action if error else "escalate",
                 "message": error.message if error else f"{intent} failed in the specialist agent.",
+                "delegation": {"intent": intent, "agent_id": agent_id},
             }
 
         output = result.output if isinstance(result.output, dict) else {}
         response = dict(output)
         if result.artifacts and "artifacts" not in response:
             response["artifacts"] = [artifact.model_dump(mode="json") for artifact in result.artifacts]
+        response.setdefault("delegation", {"intent": intent, "agent_id": agent_id})
         return response
 
     async def _request_gateway_json(

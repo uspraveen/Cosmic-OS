@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from pathlib import Path
@@ -348,7 +349,107 @@ class AgentRuntime:
         intents = raw.get("intents")
         if not isinstance(intents, list) or not intents:
             raise ValueError("agent_card.yaml must declare at least one intent")
-        return raw
+        return self._enrich_agent_card(raw, base_dir=path.parent)
+
+    def _enrich_agent_card(self, card: dict[str, Any], *, base_dir: Path) -> dict[str, Any]:
+        enriched = dict(card)
+        enriched_intents: list[dict[str, Any]] = []
+        for raw_intent in card.get("intents", []):
+            if not isinstance(raw_intent, dict):
+                continue
+            intent = dict(raw_intent)
+            input_schema_summary = self._load_schema_summary(base_dir, intent.get("input_schema"))
+            if input_schema_summary:
+                intent["input_schema_summary"] = input_schema_summary
+            output_schema_summary = self._load_schema_summary(base_dir, intent.get("output_schema"))
+            if output_schema_summary:
+                intent["output_schema_summary"] = output_schema_summary
+            enriched_intents.append(intent)
+        enriched["intents"] = enriched_intents
+        return enriched
+
+    def _load_schema_summary(self, base_dir: Path, schema_ref: Any) -> dict[str, Any] | None:
+        schema_name = str(schema_ref or "").strip()
+        if not schema_name:
+            return None
+        schema_path = Path(schema_name)
+        if not schema_path.is_absolute():
+            schema_path = (base_dir / schema_path).resolve()
+        try:
+            payload = json.loads(schema_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+
+        summary: dict[str, Any] = {}
+        description = str(payload.get("description") or "").strip()
+        if description:
+            summary["description"] = description[:240]
+
+        schema_type = self._schema_type_label(payload)
+        if schema_type:
+            summary["type"] = schema_type
+
+        required = payload.get("required")
+        required_names: list[str] = []
+        if isinstance(required, list):
+            required_names = [
+                str(name).strip()
+                for name in required
+                if str(name or "").strip()
+            ]
+        if required_names:
+            summary["required"] = required_names
+        required_set = set(required_names)
+
+        properties = payload.get("properties")
+        if isinstance(properties, dict) and properties:
+            property_summaries: list[dict[str, Any]] = []
+            for prop_name, prop_schema in list(properties.items())[:12]:
+                if not isinstance(prop_schema, dict):
+                    continue
+                name = str(prop_name or "").strip()
+                if not name:
+                    continue
+                item: dict[str, Any] = {"name": name}
+                prop_type = self._schema_type_label(prop_schema)
+                if prop_type:
+                    item["type"] = prop_type
+                prop_description = str(prop_schema.get("description") or "").strip()
+                if prop_description:
+                    item["description"] = prop_description[:160]
+                enum_values = prop_schema.get("enum")
+                if isinstance(enum_values, list) and enum_values:
+                    item["enum"] = [str(value)[:48] for value in enum_values[:6]]
+                if name in required_set:
+                    item["required"] = True
+                property_summaries.append(item)
+            if property_summaries:
+                summary["properties"] = property_summaries
+
+        return summary or None
+
+    def _schema_type_label(self, schema: dict[str, Any]) -> str | None:
+        raw_type = schema.get("type")
+        if isinstance(raw_type, list):
+            labels = [str(item).strip() for item in raw_type if str(item or "").strip()]
+            return " | ".join(labels) if labels else None
+        schema_type = str(raw_type or "").strip()
+        if schema_type == "array":
+            items = schema.get("items")
+            if isinstance(items, dict):
+                item_type = self._schema_type_label(items)
+                if item_type:
+                    return f"array<{item_type}>"
+            return "array"
+        if schema_type:
+            return schema_type
+        if isinstance(schema.get("enum"), list) and schema.get("enum"):
+            return "enum"
+        if isinstance(schema.get("properties"), dict):
+            return "object"
+        return None
 
     def _extract_claimed_messages(self, payload: Any) -> list[tuple[str, dict[str, Any]]]:
         if not isinstance(payload, (tuple, list)) or len(payload) < 2:

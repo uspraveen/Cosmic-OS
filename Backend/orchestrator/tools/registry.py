@@ -55,6 +55,34 @@ def _perplexity_progress(tool_input: dict[str, Any]) -> str:
     return f"Researching: {query}" if query else "Conducting research..."
 
 
+def _agent_catalog_search_progress(tool_input: dict[str, Any]) -> str:
+    query = str(tool_input.get("query") or "").strip()
+    return f"Looking for a specialist for: {query}" if query else "Looking for a specialist agent..."
+
+
+def _delegate_to_agent_progress(tool_input: dict[str, Any]) -> str:
+    intent = str(tool_input.get("intent") or "").strip()
+    payload = tool_input.get("input") if isinstance(tool_input.get("input"), dict) else {}
+    intent_label = intent or "specialist task"
+    url = str(payload.get("url") or "").strip()
+    if url:
+        return f"Delegating {intent_label} for {url}..."
+    urls = payload.get("urls")
+    if isinstance(urls, list):
+        cleaned = [str(item or "").strip() for item in urls if str(item or "").strip()]
+        if len(cleaned) == 1:
+            return f"Delegating {intent_label} for {cleaned[0]}..."
+        if cleaned:
+            return f"Delegating {intent_label} for {len(cleaned)} pages..."
+    query = str(payload.get("query") or "").strip()
+    if query:
+        return f"Delegating {intent_label} for: {query}"
+    session_id = str(payload.get("session_id") or "").strip()
+    if session_id:
+        return f"Delegating {intent_label} for {session_id}..."
+    return f"Delegating to specialist intent: {intent_label}" if intent else "Delegating to a specialist agent..."
+
+
 def _firecrawl_scrape_progress(tool_input: dict[str, Any]) -> str:
     url = str(tool_input.get("url") or "").strip()
     return f"Scraping via Firecrawl: {url}" if url else "Scraping a page via Firecrawl..."
@@ -196,6 +224,76 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         read_only=True,
     ),
     ToolSpec(
+        name="agent_catalog_search",
+        api_definition={
+            "name": "agent_catalog_search",
+            "description": (
+                "Search the live specialist-agent catalog for registered capabilities, health, and compact input-schema hints. "
+                "Use this when local tools are insufficient or when you need to discover the right specialist intent before delegation."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Capability search query such as 'rendered page scrape', 'structured extraction', or 'browser automation'.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of matching specialist intents to return. Default 5.",
+                        "default": 5,
+                    },
+                    "require_healthy": {
+                        "type": "boolean",
+                        "description": "When true, only return specialists that currently have a healthy live instance. Default true.",
+                        "default": True,
+                    },
+                },
+            },
+        },
+        group="specialists",
+        prompt_summary="Discover registered specialist agents on demand, including exact intents and compact input-schema hints, before delegating.",
+        progress_builder=_agent_catalog_search_progress,
+        handler_method="_agent_catalog_search",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="delegate_to_agent",
+        api_definition={
+            "name": "delegate_to_agent",
+            "description": (
+                "Dispatch a child task to a registered specialist agent by exact intent. "
+                "Use this only after you know the right intent, usually by first calling agent_catalog_search."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "intent": {
+                        "type": "string",
+                        "description": "Exact specialist intent name, such as firecrawl.scrape or browser.extract.",
+                    },
+                    "input": {
+                        "type": "object",
+                        "description": "Structured payload for the specialist intent. Keep it minimal and match the schema hints returned by agent_catalog_search.",
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Optional exact agent_id if you want a specific registered specialist version.",
+                    },
+                    "wait_timeout_sec": {
+                        "type": "number",
+                        "description": "Optional override for how long to wait before returning an in-progress result.",
+                    },
+                },
+                "required": ["intent", "input"],
+            },
+        },
+        group="specialists",
+        prompt_summary="Delegate specialist work by exact intent after discovery. Prefer this over carrying agent-specific tools in your tool list.",
+        progress_builder=_delegate_to_agent_progress,
+        handler_method="_delegate_to_agent",
+    ),
+    ToolSpec(
         name="firecrawl_scrape",
         api_definition={
             "name": "firecrawl_scrape",
@@ -260,6 +358,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Robust page scrape via the Firecrawl specialist agent when plain fetch is not enough and you need clean formats or rendered content artifacts.",
         progress_builder=_firecrawl_scrape_progress,
         handler_method="_firecrawl_scrape",
+        exposed_to_model=False,
     ),
     ToolSpec(
         name="firecrawl_extract",
@@ -320,6 +419,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Structured extraction via the Firecrawl specialist agent for schema-shaped outputs, list building, and multi-page research tasks.",
         progress_builder=_firecrawl_extract_progress,
         handler_method="_firecrawl_extract",
+        exposed_to_model=False,
     ),
     ToolSpec(
         name="firecrawl_recall_session",
@@ -349,6 +449,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_firecrawl_recall_progress,
         handler_method="_firecrawl_recall_session",
         read_only=True,
+        exposed_to_model=False,
     ),
     ToolSpec(
         name="memory_search",
@@ -754,10 +855,11 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
 )
 
 _TOOL_BY_NAME = {spec.name: spec for spec in _MODEL_TOOL_SPECS}
-_GROUP_ORDER = ("web", "research", "memory", "history", "scheduling")
+_GROUP_ORDER = ("web", "research", "specialists", "memory", "history", "scheduling")
 _GROUP_TITLES = {
     "web": "Web",
     "research": "Research",
+    "specialists": "Specialists",
     "memory": "Memory",
     "history": "History",
     "scheduling": "Scheduling",

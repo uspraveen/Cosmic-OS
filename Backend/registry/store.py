@@ -172,6 +172,30 @@ class RegistryStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_agent_cards(self, *, status: str | None = "registered") -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT agent_id, card_json
+                FROM agents
+                {where_sql}
+                ORDER BY agent_id ASC
+                """,
+                params,
+            ).fetchall()
+        cards: list[dict[str, Any]] = []
+        for row in rows:
+            payload = json.loads(row["card_json"])
+            if isinstance(payload, dict):
+                cards.append(payload)
+        return cards
+
     def list_agents_for_intent(self, intent: str, *, status: str | None = "registered") -> list[dict[str, Any]]:
         params: list[Any] = [intent]
         status_sql = ""

@@ -303,7 +303,53 @@ def _parent_task() -> TaskEnvelope:
 
 
 @pytest.mark.asyncio
-async def test_tool_executor_firecrawl_scrape_dispatches_specialist_agent_and_returns_output() -> None:
+async def test_tool_executor_agent_catalog_search_returns_matches_from_callback() -> None:
+    observed: dict[str, object] = {}
+
+    async def searcher(**kwargs):
+        observed.update(kwargs)
+        return {
+            "query": "rendered page scrape",
+            "matches": [
+                {
+                    "intent": "firecrawl.scrape",
+                    "agent_id": "cosmic/firecrawl-web-scrape-agent:1.0.0",
+                    "display_name": "Firecrawl Web Scrape Agent",
+                    "healthy": True,
+                    "input_schema_summary": {
+                        "required": ["url"],
+                        "properties": [
+                            {"name": "url", "type": "string"},
+                            {"name": "formats", "type": "array<string>"},
+                        ],
+                    },
+                }
+            ],
+            "count": 1,
+            "message": "Found 1 matching specialist intents.",
+        }
+
+    executor = ToolExecutor(agent_catalog_searcher=searcher)
+    raw_result = await executor.execute(
+        "agent_catalog_search",
+        {
+            "query": "rendered page scrape",
+            "limit": 2,
+        },
+    )
+
+    result = json.loads(raw_result)
+    assert observed == {
+        "query": "rendered page scrape",
+        "limit": 2,
+        "require_healthy": True,
+    }
+    assert result["matches"][0]["intent"] == "firecrawl.scrape"
+    assert result["matches"][0]["input_schema_summary"]["required"] == ["url"]
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_delegate_to_agent_dispatches_specialist_agent_and_returns_output() -> None:
     observed: dict[str, object] = {}
 
     async def dispatcher(**kwargs):
@@ -334,11 +380,15 @@ async def test_tool_executor_firecrawl_scrape_dispatches_specialist_agent_and_re
         parent_task=_parent_task(),
     )
     raw_result = await executor.execute(
-        "firecrawl_scrape",
+        "delegate_to_agent",
         {
-            "url": "https://example.com/post",
-            "formats": ["markdown"],
-            "wait_for_ms": 1000,
+            "intent": "firecrawl.scrape",
+            "agent_id": "cosmic/firecrawl-web-scrape-agent:1.0.0",
+            "input": {
+                "url": "https://example.com/post",
+                "formats": ["markdown"],
+                "wait_for_ms": 1000,
+            },
         },
         context=context,
     )
@@ -354,10 +404,14 @@ async def test_tool_executor_firecrawl_scrape_dispatches_specialist_agent_and_re
     }
     assert result["url"] == "https://example.com/post"
     assert result["available_formats"] == ["markdown"]
+    assert result["delegation"] == {
+        "intent": "firecrawl.scrape",
+        "agent_id": "cosmic/firecrawl-web-scrape-agent:1.0.0",
+    }
 
 
 @pytest.mark.asyncio
-async def test_tool_executor_firecrawl_extract_returns_agent_failure_payload() -> None:
+async def test_tool_executor_delegate_to_agent_returns_agent_failure_payload() -> None:
     async def dispatcher(**kwargs):
         del kwargs
         return AgentResult(
@@ -375,10 +429,13 @@ async def test_tool_executor_firecrawl_extract_returns_agent_failure_payload() -
     executor = ToolExecutor(agent_dispatcher=dispatcher)
     context = ToolExecutionContext(parent_task=_parent_task())
     raw_result = await executor.execute(
-        "firecrawl_extract",
+        "delegate_to_agent",
         {
-            "urls": ["https://example.com/a"],
-            "prompt": "Extract the company names.",
+            "intent": "firecrawl.extract",
+            "input": {
+                "urls": ["https://example.com/a"],
+                "prompt": "Extract the company names.",
+            },
         },
         context=context,
     )
@@ -390,11 +447,12 @@ async def test_tool_executor_firecrawl_extract_returns_agent_failure_payload() -
         "retryable": True,
         "next_action": "retry",
         "message": "Firecrawl rate limit exceeded.",
+        "delegation": {"intent": "firecrawl.extract", "agent_id": None},
     }
 
 
 @pytest.mark.asyncio
-async def test_tool_executor_firecrawl_recall_session_handles_in_progress_result() -> None:
+async def test_tool_executor_delegate_to_agent_handles_in_progress_result() -> None:
     observed: dict[str, object] = {}
 
     async def dispatcher(**kwargs):
@@ -409,8 +467,11 @@ async def test_tool_executor_firecrawl_recall_session_handles_in_progress_result
     executor = ToolExecutor(agent_dispatcher=dispatcher)
     context = ToolExecutionContext(parent_task=_parent_task(), session_id="sess_parent")
     raw_result = await executor.execute(
-        "firecrawl_recall_session",
-        {"limit": 5},
+        "delegate_to_agent",
+        {
+            "intent": "firecrawl.recall_session",
+            "input": {"session_id": "sess_parent", "limit": 5},
+        },
         context=context,
     )
 
@@ -423,4 +484,5 @@ async def test_tool_executor_firecrawl_recall_session_handles_in_progress_result
         "idempotency_key": "idem_child",
         "check_after_sec": 8,
         "message": "firecrawl.recall_session is still running in the specialist agent.",
+        "delegation": {"intent": "firecrawl.recall_session", "agent_id": None},
     }

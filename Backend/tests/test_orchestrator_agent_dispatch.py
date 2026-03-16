@@ -157,13 +157,24 @@ def _agent_card() -> dict[str, object]:
     return {
         "agent_id": "cosmic/research-agent:1.0.0",
         "display_name": "Research Agent",
+        "description": "Specialist agent for deep research, web investigation, and session recall.",
         "sla": {
             "max_concurrency": 3,
             "heartbeat_ttl_sec": 30,
             "max_task_duration_sec": 180,
         },
         "intents": [
-            {"name": "research.topic", "timeout_sec": 180},
+            {
+                "name": "research.topic",
+                "description": "Research a topic on the live web and return a structured summary.",
+                "timeout_sec": 180,
+                "input_schema_summary": {
+                    "required": ["query"],
+                    "properties": [
+                        {"name": "query", "type": "string", "description": "Research query."},
+                    ],
+                },
+            },
         ],
     }
 
@@ -418,3 +429,37 @@ async def test_orchestrator_health_snapshot_reports_agent_dispatch_state(tmp_pat
     assert snapshot["healthy_agents"] == 1
     assert snapshot["agents"][0]["agent_id"] == "cosmic/research-agent:1.0.0"
     assert snapshot["agents"][0]["healthy_instance"] is True
+
+
+@pytest.mark.asyncio
+async def test_search_agent_catalog_returns_intent_level_matches(tmp_path) -> None:
+    fake_redis = FakeRedis()
+    config = OrchestratorConfig(
+        signing_secret="gateway-secret",
+        anthropic_api_key="anthropic-key",
+        task_ledger_db_path=tmp_path / "task_ledger_catalog.db",
+        agent_registry_db_path=tmp_path / "registry_catalog.db",
+    )
+    await _register_agent(_agent_card(), fake_redis, config.agent_registry_db_path)
+    runtime = OrchestratorRuntime(
+        config,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200))),
+        redis_client=fake_redis,
+    )
+    await runtime.start()
+    try:
+        result = await runtime.search_agent_catalog(
+            query="deep research summary",
+            limit=3,
+            require_healthy=True,
+        )
+    finally:
+        await runtime.stop()
+
+    assert result["count"] == 1
+    assert result["message"] == "Found 1 matching specialist intents."
+    match = result["matches"][0]
+    assert match["intent"] == "research.topic"
+    assert match["display_name"] == "Research Agent"
+    assert match["healthy"] is True
+    assert match["input_schema_summary"]["required"] == ["query"]
