@@ -356,6 +356,320 @@ class GatewayRuntime:
             return normalize_timezone_name(self._safe_text(timezone_name) or "")
         return self.current_user_timezone()
 
+    def _channel_platform(self, channel: str | None) -> str | None:
+        normalized_channel = self._safe_text(channel)
+        if not normalized_channel:
+            return None
+        platform, separator, _ = normalized_channel.partition(":")
+        if separator:
+            return platform or None
+        if normalized_channel in self.registry.adapters or normalized_channel == "desktop":
+            return normalized_channel
+        return None
+
+    def _normalize_delivery_target(self, value: Any) -> str | None:
+        text = self._safe_text(value)
+        if not text:
+            return None
+        alias = text.casefold()
+        alias_map = {
+            "current": "current",
+            "incoming": "current",
+            "same": "current",
+            "same_channel": "current",
+            "same channel": "current",
+            "desktop": "desktop",
+            "desktop_primary": "desktop",
+            "primary_desktop": "desktop",
+            "primary desktop": "desktop",
+            "whatsapp": "whatsapp",
+            "telegram": "telegram",
+        }
+        return alias_map.get(alias, text)
+
+    def _preferred_linked_channel(
+        self,
+        platform: str,
+        *,
+        current_channel: str | None = None,
+    ) -> str | None:
+        normalized_current = self._safe_text(current_channel)
+        if normalized_current and self._channel_platform(normalized_current) == platform:
+            return normalized_current
+        if platform == "desktop":
+            return "desktop"
+
+        links = self.session_store.list_channel_links(platform=platform, limit=20)
+        if platform == "whatsapp":
+            for item in links:
+                channel = self._safe_text(item.get("channel"))
+                if not channel or not channel.startswith("whatsapp:"):
+                    continue
+                destination = channel.split(":", 1)[1]
+                if destination and "@g.us" not in destination:
+                    return channel
+        for item in links:
+            channel = self._safe_text(item.get("channel"))
+            if channel:
+                return channel
+        return None
+
+    def resolve_channel_target(
+        self,
+        *,
+        delivery_target: str | None,
+        current_channel: str | None = None,
+        fallback_channel: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_current = self._safe_text(current_channel)
+        normalized_fallback = self._safe_text(fallback_channel)
+        normalized_target = self._normalize_delivery_target(delivery_target)
+
+        if not normalized_target:
+            resolved_channel = normalized_current or "desktop"
+            return {
+                "delivery_target": resolved_channel,
+                "resolved_channel": resolved_channel,
+                "platform": self._channel_platform(resolved_channel) or "desktop",
+                "matched_by": "current_channel" if normalized_current else "desktop_default",
+            }
+
+        if normalized_target == "current":
+            resolved_channel = normalized_current or "desktop"
+            return {
+                "delivery_target": normalized_target,
+                "resolved_channel": resolved_channel,
+                "platform": self._channel_platform(resolved_channel) or "desktop",
+                "matched_by": "current_channel" if normalized_current else "desktop_default",
+            }
+
+        if ":" in normalized_target:
+            platform = self._channel_platform(normalized_target)
+            if not platform:
+                raise ValueError(f"Unsupported delivery target: {normalized_target}")
+            if platform not in self.registry.adapters and platform != "desktop":
+                raise ValueError(f"Channel platform is not configured: {platform}")
+            return {
+                "delivery_target": normalized_target,
+                "resolved_channel": normalized_target,
+                "platform": platform,
+                "matched_by": "explicit_channel",
+            }
+
+        platform = normalized_target
+        if platform not in self.registry.adapters and platform != "desktop":
+            raise ValueError(f"Unknown delivery target: {platform}")
+        if platform == "desktop":
+            return {
+                "delivery_target": platform,
+                "resolved_channel": "desktop",
+                "platform": "desktop",
+                "matched_by": "desktop_alias",
+            }
+
+        resolved_channel = self._preferred_linked_channel(platform, current_channel=normalized_current)
+        if resolved_channel:
+            return {
+                "delivery_target": platform,
+                "resolved_channel": resolved_channel,
+                "platform": platform,
+                "matched_by": "linked_channel",
+            }
+
+        if normalized_fallback and self._channel_platform(normalized_fallback) == platform:
+            return {
+                "delivery_target": platform,
+                "resolved_channel": normalized_fallback,
+                "platform": platform,
+                "matched_by": "stored_fallback",
+            }
+
+        raise ValueError(
+            f"No linked {platform} channel is available yet. Ask from that channel first or provide an exact channel."
+        )
+
+    def _compact_scheduler_working_set(self, working_set: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(working_set, dict):
+            return None
+        snapshot: dict[str, Any] = {}
+        goal = self._safe_text(working_set.get("goal"))
+        if goal:
+            snapshot["goal"] = self._bounded_excerpt(goal, limit=240)
+        active_workstreams = self._normalize_string_list(working_set.get("active_workstreams"), limit=4)
+        if active_workstreams:
+            snapshot["active_workstreams"] = active_workstreams
+        open_loops = self._normalize_string_list(working_set.get("open_loops"), limit=4)
+        if open_loops:
+            snapshot["open_loops"] = open_loops
+        active_task_refs = self._normalize_string_list(working_set.get("active_task_refs"), limit=4)
+        if active_task_refs:
+            snapshot["active_task_refs"] = active_task_refs
+        focus_entities = self._normalize_entity_list(working_set.get("current_focus_entities"), limit=4)
+        if focus_entities:
+            snapshot["current_focus_entities"] = [
+                self._safe_text(item.get("label")) or self._safe_text(item.get("id")) or "entity"
+                for item in focus_entities
+            ]
+        return snapshot or None
+
+    def _build_scheduler_context_packet(
+        self,
+        *,
+        prompt: str,
+        created_request_id: str | None,
+        created_session_id: str | None,
+        created_channel: str | None,
+        context_summary: str | None,
+    ) -> dict[str, Any] | None:
+        packet: dict[str, Any] = {
+            "captured_at": utcnow_iso(),
+        }
+        if created_session_id:
+            packet["created_session_id"] = created_session_id
+        if created_request_id:
+            packet["created_request_id"] = created_request_id
+        if created_channel:
+            packet["created_channel"] = created_channel
+        if self._safe_text(context_summary):
+            packet["context_summary"] = self._bounded_excerpt(context_summary, limit=500)
+
+        request_record = None
+        normalized_request_id = self._safe_text(created_request_id)
+        if normalized_request_id and isinstance(self.request_records.get(normalized_request_id), dict):
+            request_record = self.request_records[normalized_request_id]
+
+        original_request = None
+        prior_context: list[dict[str, Any]] = []
+        working_set_snapshot = None
+        memory_context_excerpt = None
+
+        if isinstance(request_record, dict):
+            message = request_record.get("message") if isinstance(request_record.get("message"), dict) else {}
+            original_request = self._safe_text(message.get("content"))
+            raw_context = request_record.get("assembled_conversation_context")
+            prior_context = raw_context if isinstance(raw_context, list) else []
+            working_set_snapshot = self._compact_scheduler_working_set(
+                request_record.get("active_working_set")
+                if isinstance(request_record.get("active_working_set"), dict)
+                else None
+            )
+            memory_context_excerpt = self._bounded_excerpt(
+                request_record.get("memory_context"),
+                limit=1_200,
+            )
+        elif created_session_id:
+            metadata = self._ensure_session_state_seeded(created_session_id)
+            working_set_snapshot = self._compact_scheduler_working_set(
+                metadata.get("active_working_set")
+                if isinstance(metadata.get("active_working_set"), dict)
+                else None
+            )
+            prior_context = self._build_conversation_context(created_session_id, limit=6)
+
+        original_request = original_request or prompt
+        if original_request:
+            packet["original_request"] = self._bounded_excerpt(original_request, limit=500)
+
+        normalized_context: list[dict[str, str]] = []
+        for item in prior_context[-4:]:
+            if not isinstance(item, dict):
+                continue
+            role = self._safe_text(item.get("role"))
+            content = self._safe_text(item.get("content"))
+            if role not in {"user", "assistant"} or not content:
+                continue
+            normalized_context.append(
+                {
+                    "role": role,
+                    "content": self._bounded_excerpt(content, limit=320) or "",
+                }
+            )
+        if normalized_context:
+            packet["conversation_tail"] = normalized_context
+        if working_set_snapshot:
+            packet["working_set_snapshot"] = working_set_snapshot
+        if memory_context_excerpt:
+            packet["memory_context_excerpt"] = memory_context_excerpt
+        return packet or None
+
+    def _scheduler_context_conversation(self, context_packet: dict[str, Any] | None) -> list[dict[str, str]]:
+        if not isinstance(context_packet, dict):
+            return []
+        raw_tail = context_packet.get("conversation_tail")
+        if not isinstance(raw_tail, list):
+            return []
+        normalized: list[dict[str, str]] = []
+        for item in raw_tail:
+            if not isinstance(item, dict):
+                continue
+            role = self._safe_text(item.get("role"))
+            content = self._safe_text(item.get("content"))
+            if role not in {"user", "assistant"} or not content:
+                continue
+            normalized.append({"role": role, "content": content})
+        return normalized
+
+    def _render_scheduler_context_block(self, context_packet: dict[str, Any] | None) -> str | None:
+        if not isinstance(context_packet, dict):
+            return None
+
+        lines = [
+            "## Stored Reminder Context",
+            "This reminder context was captured when the job was created. Use it as background, but verify against the current state before acting.",
+        ]
+
+        context_summary = self._safe_text(context_packet.get("context_summary"))
+        if context_summary:
+            lines.extend(["", f"- Why this exists: {context_summary}"])
+
+        original_request = self._safe_text(context_packet.get("original_request"))
+        if original_request:
+            lines.extend(["", f"- Original request: {original_request}"])
+
+        created_channel = self._safe_text(context_packet.get("created_channel"))
+        if created_channel:
+            lines.extend(["", f"- Created from channel: {created_channel}"])
+
+        created_at = self._safe_text(context_packet.get("captured_at"))
+        if created_at:
+            lines.extend(["", f"- Captured at: {created_at}"])
+
+        working_set = (
+            context_packet.get("working_set_snapshot")
+            if isinstance(context_packet.get("working_set_snapshot"), dict)
+            else None
+        )
+        if isinstance(working_set, dict):
+            goal = self._safe_text(working_set.get("goal"))
+            if goal:
+                lines.extend(["", f"- Goal at creation: {goal}"])
+            active_workstreams = self._normalize_string_list(working_set.get("active_workstreams"), limit=4)
+            if active_workstreams:
+                lines.extend(["", "- Active workstreams at creation:"])
+                lines.extend(f"  - {item}" for item in active_workstreams)
+            open_loops = self._normalize_string_list(working_set.get("open_loops"), limit=4)
+            if open_loops:
+                lines.extend(["", "- Open loops at creation:"])
+                lines.extend(f"  - {item}" for item in open_loops)
+
+        memory_context_excerpt = self._safe_text(context_packet.get("memory_context_excerpt"))
+        if memory_context_excerpt:
+            lines.extend(["", "### Memory Snapshot", memory_context_excerpt])
+
+        conversation_tail = self._scheduler_context_conversation(context_packet)
+        if conversation_tail:
+            lines.extend(["", "### Prior Conversation Snapshot"])
+            for item in conversation_tail:
+                lines.append(f"- {item['role']}: {item['content']}")
+
+        return "\n".join(lines)
+
+    def _join_context_blocks(self, *blocks: str | None) -> str | None:
+        normalized_blocks = [block for block in blocks if self._safe_text(block)]
+        if not normalized_blocks:
+            return None
+        return "\n\n".join(normalized_blocks)
+
     def _scheduler_record(self, record: dict[str, Any], *, include_history: bool = False) -> dict[str, Any]:
         payload = dict(record)
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
@@ -370,13 +684,19 @@ class GatewayRuntime:
             self._safe_text(payload.get("timezone")) or self.current_user_timezone(),
         )
         payload["prompt"] = self._safe_text(metadata.get("prompt"))
+        payload["delivery_target"] = self._safe_text(metadata.get("delivery_target")) or None
         payload["delivery_channel"] = self._safe_text(metadata.get("delivery_channel")) or "desktop"
+        payload["resolved_delivery_channel"] = payload["delivery_channel"]
         payload["one_shot"] = bool(metadata.get("one_shot"))
         payload["created_by"] = self._safe_text(metadata.get("created_by"))
         payload["created_request_id"] = self._safe_text(metadata.get("created_request_id"))
         payload["created_session_id"] = self._safe_text(metadata.get("created_session_id"))
         payload["created_channel"] = self._safe_text(metadata.get("created_channel"))
         payload["explicit_timezone"] = bool(metadata.get("explicit_timezone"))
+        context_packet = metadata.get("context_packet") if isinstance(metadata.get("context_packet"), dict) else {}
+        payload["context_summary"] = self._safe_text(metadata.get("context_summary")) or self._safe_text(
+            context_packet.get("context_summary")
+        )
         if include_history:
             payload["history"] = self.scheduler_store.list_cron_history(
                 self._safe_text(payload.get("cron_id")) or "",
@@ -410,12 +730,14 @@ class GatewayRuntime:
         one_shot: bool,
         description: str | None = None,
         timezone_name: str | None = None,
+        delivery_target: str | None = None,
         delivery_channel: str | None = None,
         metadata: dict[str, Any] | None = None,
         created_by: str | None = None,
         created_request_id: str | None = None,
         created_session_id: str | None = None,
         created_channel: str | None = None,
+        context_summary: str | None = None,
     ) -> dict[str, Any]:
         normalized_cron_id = self._safe_text(cron_id) or f"cron_{uuid4().hex[:12]}"
         if self.scheduler_store.get_cron(normalized_cron_id) is not None:
@@ -432,7 +754,20 @@ class GatewayRuntime:
             normalized_cron_expression,
             effective_timezone,
         )
-        normalized_delivery_channel = self._safe_text(delivery_channel) or "desktop"
+        resolution = self.resolve_channel_target(
+            delivery_target=self._safe_text(delivery_target) or self._safe_text(delivery_channel),
+            current_channel=self._safe_text(created_channel),
+            fallback_channel=self._safe_text(delivery_channel),
+        )
+        normalized_delivery_target = self._safe_text(resolution.get("delivery_target"))
+        normalized_delivery_channel = self._safe_text(resolution.get("resolved_channel")) or "desktop"
+        context_packet = self._build_scheduler_context_packet(
+            prompt=normalized_prompt,
+            created_request_id=self._safe_text(created_request_id),
+            created_session_id=self._safe_text(created_session_id),
+            created_channel=self._safe_text(created_channel),
+            context_summary=self._safe_text(context_summary),
+        )
         record = self.scheduler_store.upsert_cron(
             cron_id=normalized_cron_id,
             name=normalized_label,
@@ -445,12 +780,15 @@ class GatewayRuntime:
                 **(metadata or {}),
                 "prompt": normalized_prompt,
                 "one_shot": bool(one_shot),
+                "delivery_target": normalized_delivery_target,
                 "delivery_channel": normalized_delivery_channel,
                 "created_by": self._safe_text(created_by) or "orchestrator",
                 "created_request_id": self._safe_text(created_request_id),
                 "created_session_id": self._safe_text(created_session_id),
                 "created_channel": self._safe_text(created_channel),
                 "explicit_timezone": bool(self._normalize_timezone_name(timezone_name)),
+                "context_summary": self._safe_text(context_summary),
+                "context_packet": context_packet,
             },
         )
         self._scheduler_wakeup.set()
@@ -474,7 +812,12 @@ class GatewayRuntime:
         cron_id = self._safe_text(cron.get("cron_id")) or ""
         metadata = cron.get("metadata") if isinstance(cron.get("metadata"), dict) else {}
         prompt = self._safe_text(metadata.get("prompt"))
-        channel = self._safe_text(metadata.get("delivery_channel")) or "desktop"
+        resolution = self.resolve_channel_target(
+            delivery_target=self._safe_text(metadata.get("delivery_target")) or self._safe_text(metadata.get("delivery_channel")),
+            current_channel=self._safe_text(metadata.get("created_channel")),
+            fallback_channel=self._safe_text(metadata.get("delivery_channel")),
+        )
+        channel = self._safe_text(resolution.get("resolved_channel")) or "desktop"
         timezone_name = self._safe_text(cron.get("timezone")) or self.current_user_timezone()
         scheduled_for = self._safe_text(cron.get("next_fire_at"))
         if not prompt:
@@ -488,7 +831,14 @@ class GatewayRuntime:
             if isinstance(session_metadata.get("active_working_set"), dict)
             else None
         )
+        context_packet = metadata.get("context_packet") if isinstance(metadata.get("context_packet"), dict) else None
+        stored_conversation_context = self._scheduler_context_conversation(context_packet)
+        cron_context_block = self._render_scheduler_context_block(context_packet)
         memory_prompt_context = await self._assemble_memory_prompt_context(query=prompt)
+        combined_memory_context = self._join_context_blocks(
+            cron_context_block,
+            memory_prompt_context.rendered,
+        )
         request_record = {
             "status": "accepted",
             "request_id": request_id,
@@ -517,12 +867,13 @@ class GatewayRuntime:
                     "cron_label": self._safe_text(cron.get("name")),
                     "scheduled_for": scheduled_for,
                     "delivery_channel": channel,
+                    "delivery_target": self._safe_text(resolution.get("delivery_target")),
                 },
             },
-            "assembled_conversation_context": self._build_conversation_context(session_id),
+            "assembled_conversation_context": stored_conversation_context or self._build_conversation_context(session_id),
             "memory_context": self._compose_prompt_context(
                 active_working_set=active_working_set,
-                memory_context=memory_prompt_context.rendered,
+                memory_context=combined_memory_context,
             ),
             "active_working_set": active_working_set,
             "carry_forward_packet": (
@@ -542,6 +893,8 @@ class GatewayRuntime:
             "idempotency_key": idempotency_key,
             "cron_timezone": timezone_name,
             "cron_scheduled_for": scheduled_for,
+            "cron_context": context_packet,
+            "cron_delivery_target": self._safe_text(resolution.get("delivery_target")),
         }
         self.request_records[request_id] = request_record
         self.routing_audit_store.append(
@@ -2761,6 +3114,12 @@ class GatewayRuntime:
     def notify_channel_active(self, channel: str | None) -> None:
         if not channel:
             return
+        platform = self._channel_platform(channel)
+        if platform:
+            self.session_store.upsert_channel_link(
+                channel=channel,
+                platform=platform,
+            )
         self._delivery_wakeup.set()
         if self._redis is not None:
             self._track_background_task(self._drain_pending_task_inputs(channel))

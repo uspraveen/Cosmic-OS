@@ -1807,6 +1807,57 @@ def test_internal_scheduler_create_rejects_bad_cron_or_timezone(test_client: Tes
     assert bad_timezone.status_code == 400
 
 
+def test_internal_channel_resolve_defaults_to_current_and_can_pick_linked_whatsapp(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+    runtime.registry.register(FakeWhatsAppChannelAdapter())
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+
+    with TestClient(app) as client:
+        runtime.notify_channel_active("whatsapp:+12153079021")
+
+        default_response = client.post(
+            "/internal/channels/resolve",
+            headers={"X-Internal-Token": "internal-token"},
+            json={
+                "current_channel": "desktop:desk_sched",
+            },
+        )
+        assert default_response.status_code == 200
+        assert default_response.json() == {
+            "delivery_target": "desktop:desk_sched",
+            "resolved_channel": "desktop:desk_sched",
+            "platform": "desktop",
+            "matched_by": "current_channel",
+        }
+
+        whatsapp_response = client.post(
+            "/internal/channels/resolve",
+            headers={"X-Internal-Token": "internal-token"},
+            json={
+                "delivery_target": "whatsapp",
+                "current_channel": "desktop:desk_sched",
+            },
+        )
+        assert whatsapp_response.status_code == 200
+        assert whatsapp_response.json() == {
+            "delivery_target": "whatsapp",
+            "resolved_channel": "whatsapp:+12153079021",
+            "platform": "whatsapp",
+            "matched_by": "linked_channel",
+        }
+
+
 @pytest.mark.asyncio
 async def test_runtime_executes_due_custom_one_shot_cron_via_orchestrator(tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="opus")
@@ -1856,6 +1907,89 @@ async def test_runtime_executes_due_custom_one_shot_cron_via_orchestrator(tmp_pa
         assert notebook["goal"] == "Check if any new YC companies were added and report the diff."
         assert runtime.session_store.get_turn_ledger_entry(task.input["request_id"]) is None
         assert runtime.list_scheduler_crons(include_system=False, active_only=True) == []
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_due_cron_reuses_stored_context_and_resolves_explicit_whatsapp_target(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    runtime.registry.register(FakeWhatsAppChannelAdapter())
+    await runtime.start()
+    try:
+        runtime.notify_channel_active("whatsapp:+12153079021")
+        runtime.request_records["req_sched_create"] = {
+            "message": {
+                "content": "At 6 AM, check the YC S26 company list against the saved baseline and send the result on WhatsApp.",
+            },
+            "assembled_conversation_context": [
+                {"role": "user", "content": "Keep watching the YC S26 company list."},
+                {"role": "assistant", "content": "I saved the baseline and can diff against it in the morning."},
+            ],
+            "active_working_set": {
+                "goal": "Track changes to the YC S26 company list.",
+                "active_workstreams": ["Diff the current list against the saved baseline."],
+                "open_loops": ["Morning YC list check"],
+                "active_task_refs": ["tsk_yc_watch"],
+            },
+            "memory_context": "## Passive Memory\n- Saved YC S26 baseline with 25 companies on March 16.\n",
+        }
+
+        created = await runtime.create_scheduler_cron(
+            cron_id="cron_due_context",
+            label="Morning YC WhatsApp diff",
+            cron_expression="0 6 * * *",
+            prompt="Check for new YC companies and report additions or no change.",
+            one_shot=True,
+            created_by="orchestrator",
+            created_request_id="req_sched_create",
+            created_session_id="sess_sched_create",
+            created_channel="desktop:desk_sched",
+            delivery_target="whatsapp",
+            context_summary="Diff the saved YC S26 company baseline and explicitly report additions or no change.",
+        )
+        assert created["delivery_target"] == "whatsapp"
+        assert created["delivery_channel"] == "whatsapp:+12153079021"
+        assert created["context_summary"] == (
+            "Diff the saved YC S26 company baseline and explicitly report additions or no change."
+        )
+
+        stored = runtime.scheduler_store.get_cron("cron_due_context")
+        assert stored is not None
+        metadata = stored["metadata"]
+        runtime.scheduler_store.upsert_cron(
+            cron_id="cron_due_context",
+            name=stored["name"],
+            kind=stored["kind"],
+            description=stored["description"],
+            cron_expr=stored["cron_expr"],
+            timezone_name=stored["timezone"],
+            next_fire_at="2000-01-01T00:00:00Z",
+            metadata=metadata,
+        )
+
+        await runtime._run_due_crons()  # noqa: SLF001 - targeted scheduler seam
+
+        task = runtime.orchestrator.last_task
+        assert task is not None
+        assert task.source == "cron"
+        assert task.source_id == "cron_due_context"
+        assert task.channel == "whatsapp:+12153079021"
+        assert task.input["query"] == "Check for new YC companies and report additions or no change."
+        assert task.input["conversation_context"] == [
+            {"role": "user", "content": "Keep watching the YC S26 company list."},
+            {"role": "assistant", "content": "I saved the baseline and can diff against it in the morning."},
+        ]
+        memory_context = str(task.input["memory_context"] or "")
+        assert "## Stored Reminder Context" in memory_context
+        assert "Why this exists: Diff the saved YC S26 company baseline and explicitly report additions or no change." in memory_context
+        assert "Original request: At 6 AM, check the YC S26 company list against the saved baseline and send the result on WhatsApp." in memory_context
+        assert "Saved YC S26 baseline with 25 companies on March 16." in memory_context
+
+        cron_record = runtime.get_scheduler_cron("cron_due_context")
+        assert cron_record is not None
+        assert cron_record["last_result_status"] == "completed"
+        assert cron_record["next_fire_at"] is None
     finally:
         await runtime.stop()
 

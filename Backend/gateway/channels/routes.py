@@ -56,12 +56,20 @@ class SchedulerCreateRequest(BaseModel):
     one_shot: bool = True
     description: str | None = Field(default=None, max_length=500)
     timezone: str | None = Field(default=None, max_length=64)
+    delivery_target: str | None = Field(default=None, max_length=64)
     delivery_channel: str | None = Field(default=None, max_length=128)
+    context_summary: str | None = Field(default=None, max_length=800)
     source: str | None = Field(default=None, max_length=120)
     request_id: str | None = Field(default=None, max_length=120)
     session_id: str | None = Field(default=None, max_length=120)
     channel: str | None = Field(default=None, max_length=128)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChannelResolveRequest(BaseModel):
+    delivery_target: str | None = Field(default=None, max_length=128)
+    current_channel: str | None = Field(default=None, max_length=128)
+    fallback_channel: str | None = Field(default=None, max_length=128)
 
 
 def get_runtime(request: Request) -> GatewayRuntime:
@@ -645,12 +653,14 @@ async def create_internal_scheduler_cron(
             one_shot=body.one_shot,
             description=body.description,
             timezone_name=body.timezone,
-            delivery_channel=body.delivery_channel or body.channel,
+            delivery_target=body.delivery_target,
+            delivery_channel=body.delivery_channel,
             metadata=body.metadata,
             created_by=body.source,
             created_request_id=body.request_id,
             created_session_id=body.session_id,
             created_channel=body.channel,
+            context_summary=body.context_summary,
         )
     except ValueError as exc:
         detail = str(exc)
@@ -754,6 +764,22 @@ async def resume_internal_scheduler_cron(
     if payload is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown cron")
     return payload
+
+
+@router.post("/internal/channels/resolve")
+async def resolve_internal_channel(
+    body: ChannelResolveRequest,
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return runtime.resolve_channel_target(
+            delivery_target=body.delivery_target,
+            current_channel=body.current_channel,
+            fallback_channel=body.fallback_channel,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.get("/scheduler/heartbeat")

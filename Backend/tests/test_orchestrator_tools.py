@@ -222,7 +222,7 @@ async def test_tool_executor_memory_write_core_fact_uses_gateway_and_enriches_co
 
 
 @pytest.mark.asyncio
-async def test_tool_executor_create_reminder_uses_internal_scheduler_route_and_context_defaults() -> None:
+async def test_tool_executor_create_reminder_uses_internal_scheduler_route_and_passes_gateway_resolution_inputs() -> None:
     seen_payload: dict[str, object] = {}
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -238,7 +238,10 @@ async def test_tool_executor_create_reminder_uses_internal_scheduler_route_and_c
                 "timezone": "America/Chicago",
                 "next_fire_at": "2026-03-16T11:00:00Z",
                 "next_fire_local": "Monday, March 16, 2026 at 06:00 AM CDT",
-                "delivery_channel": "desktop:desk_a",
+                "delivery_target": "whatsapp",
+                "delivery_channel": "whatsapp:+12153079021",
+                "resolved_delivery_channel": "whatsapp:+12153079021",
+                "context_summary": "Diff the saved YC company baseline and report additions or no change.",
             },
         )
 
@@ -261,6 +264,8 @@ async def test_tool_executor_create_reminder_uses_internal_scheduler_route_and_c
                 "label": "Morning YC check",
                 "cron_expression": "0 6 * * *",
                 "prompt": "Check for new YC companies and report the diff.",
+                "delivery_target": "whatsapp",
+                "context_summary": "Diff the saved YC company baseline and report additions or no change.",
                 "one_shot": True,
             },
             context=context,
@@ -273,9 +278,10 @@ async def test_tool_executor_create_reminder_uses_internal_scheduler_route_and_c
         "label": "Morning YC check",
         "cron_expression": "0 6 * * *",
         "prompt": "Check for new YC companies and report the diff.",
+        "delivery_target": "whatsapp",
+        "context_summary": "Diff the saved YC company baseline and report additions or no change.",
         "one_shot": True,
         "source": "orchestrator",
-        "delivery_channel": "desktop:desk_a",
         "request_id": "req_current",
         "session_id": "sess_current",
         "channel": "desktop:desk_a",
@@ -284,7 +290,10 @@ async def test_tool_executor_create_reminder_uses_internal_scheduler_route_and_c
     assert result["cron_id"] == "cron_abc123"
     assert result["timezone"] == "America/Chicago"
     assert result["next_fire_at"] == "2026-03-16T11:00:00Z"
-    assert result["delivery_channel"] == "desktop:desk_a"
+    assert result["delivery_target"] == "whatsapp"
+    assert result["delivery_channel"] == "whatsapp:+12153079021"
+    assert result["resolved_delivery_channel"] == "whatsapp:+12153079021"
+    assert result["context_summary"] == "Diff the saved YC company baseline and report additions or no change."
 
 
 @pytest.mark.asyncio

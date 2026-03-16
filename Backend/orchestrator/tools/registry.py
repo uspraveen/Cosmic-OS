@@ -173,6 +173,9 @@ def _session_revisit_progress(tool_input: dict[str, Any]) -> str:
 
 def _create_reminder_progress(tool_input: dict[str, Any]) -> str:
     label = str(tool_input.get("label") or "").strip()
+    delivery_target = str(tool_input.get("delivery_target") or "").strip()
+    if label and delivery_target:
+        return f"Creating reminder for {delivery_target}: {label}"
     return f"Creating reminder: {label}" if label else "Creating reminder..."
 
 
@@ -784,7 +787,9 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         api_definition={
             "name": "create_reminder",
             "description": (
-                "Create a scheduled reminder or recurring cron job. Use this for one-shot reminders or recurring proactive tasks."
+                "Create a scheduled reminder or recurring cron job. Default delivery is the current channel. "
+                "Use delivery_target only when the user explicitly wants a different channel, and include "
+                "context_summary for recurring or long-delay reminders so the future run still has the right context."
             ),
             "input_schema": {
                 "type": "object",
@@ -805,9 +810,26 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                         "type": "string",
                         "description": "Optional explicit IANA timezone such as America/Chicago. Omit this unless the user explicitly asked for a different timezone than their current local timezone.",
                     },
+                    "delivery_target": {
+                        "type": "string",
+                        "description": (
+                            "Optional logical delivery target. Prefer simple values like desktop, whatsapp, telegram, or current. "
+                            "Use this only when the user explicitly wants a different delivery channel than the one they are using now."
+                        ),
+                    },
                     "delivery_channel": {
                         "type": "string",
-                        "description": "Optional explicit delivery channel. Omit this unless the user explicitly asked for a different channel than the one they are using now.",
+                        "description": (
+                            "Optional exact concrete channel such as whatsapp:+12153079021. "
+                            "Use this only as an escape hatch when you must pin an exact channel."
+                        ),
+                    },
+                    "context_summary": {
+                        "type": "string",
+                        "description": (
+                            "Optional durable reminder context. Include a concise summary for recurring or long-delay reminders "
+                            "describing the baseline, comparison goal, or reason the future run exists."
+                        ),
                     },
                     "one_shot": {
                         "type": "boolean",
@@ -819,7 +841,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             },
         },
         group="scheduling",
-        prompt_summary="Create one-shot reminders or recurring scheduled tasks.",
+        prompt_summary="Create one-shot reminders or recurring scheduled tasks. Default delivery is the current channel; use delivery_target only when explicitly requested, and add context_summary for long-delay or recurring jobs.",
         progress_builder=_create_reminder_progress,
         handler_method="_create_reminder",
     ),

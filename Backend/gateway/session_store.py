@@ -1607,6 +1607,117 @@ class SessionStore:
             connection.commit()
             return updated.rowcount > 0
 
+    def upsert_channel_link(
+        self,
+        *,
+        channel: str,
+        platform: str,
+        metadata: dict[str, Any] | None = None,
+        greeting_state: str | None = None,
+    ) -> None:
+        if not channel or not platform:
+            return
+
+        now = utcnow_iso()
+        metadata_json = json.dumps(metadata) if metadata is not None else None
+        insert_greeting_state = (greeting_state or "sent").strip() or "sent"
+
+        with self._lock, self._connect() as connection:
+            if greeting_state:
+                connection.execute(
+                    """
+                    INSERT INTO channel_links (
+                        channel,
+                        platform,
+                        first_seen_at,
+                        last_seen_at,
+                        greeting_state,
+                        metadata_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(channel) DO UPDATE SET
+                        platform = excluded.platform,
+                        last_seen_at = excluded.last_seen_at,
+                        greeting_state = excluded.greeting_state,
+                        metadata_json = COALESCE(excluded.metadata_json, channel_links.metadata_json)
+                    """,
+                    (
+                        channel,
+                        platform,
+                        now,
+                        now,
+                        insert_greeting_state,
+                        metadata_json,
+                    ),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO channel_links (
+                        channel,
+                        platform,
+                        first_seen_at,
+                        last_seen_at,
+                        greeting_state,
+                        metadata_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(channel) DO UPDATE SET
+                        platform = excluded.platform,
+                        last_seen_at = excluded.last_seen_at,
+                        metadata_json = COALESCE(excluded.metadata_json, channel_links.metadata_json)
+                    """,
+                    (
+                        channel,
+                        platform,
+                        now,
+                        now,
+                        insert_greeting_state,
+                        metadata_json,
+                    ),
+                )
+            connection.commit()
+
+    def list_channel_links(
+        self,
+        *,
+        platform: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        normalized_limit = max(1, min(500, int(limit)))
+        params: list[Any] = []
+        where_clause = ""
+        if platform:
+            where_clause = "WHERE platform = ?"
+            params.append(platform)
+        params.append(normalized_limit)
+
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    channel,
+                    platform,
+                    first_seen_at,
+                    last_seen_at,
+                    greeting_state,
+                    metadata_json
+                FROM channel_links
+                {where_clause}
+                ORDER BY last_seen_at DESC, first_seen_at DESC, channel ASC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+
+        entries: list[dict[str, Any]] = []
+        for row in rows:
+            record = dict(row)
+            metadata_json = record.pop("metadata_json", None)
+            record["metadata"] = json.loads(metadata_json) if metadata_json else {}
+            entries.append(record)
+        return entries
+
     def mark_channel_greeting_sent(self, channel: str) -> None:
         if not channel:
             return

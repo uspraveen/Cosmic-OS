@@ -689,11 +689,15 @@ class ToolExecutor:
         timezone_name = str(tool_input.get("timezone") or "").strip()
         if timezone_name:
             request_body["timezone"] = timezone_name
+        delivery_target = str(tool_input.get("delivery_target") or "").strip()
+        if delivery_target:
+            request_body["delivery_target"] = delivery_target
         delivery_channel = str(tool_input.get("delivery_channel") or "").strip()
         if delivery_channel:
             request_body["delivery_channel"] = delivery_channel
-        elif context and context.channel:
-            request_body["delivery_channel"] = context.channel
+        context_summary = str(tool_input.get("context_summary") or "").strip()
+        if context_summary:
+            request_body["context_summary"] = context_summary
         if context:
             if context.request_id:
                 request_body["request_id"] = context.request_id
@@ -713,9 +717,12 @@ class ToolExecutor:
             "cron_expression": cron_expression,
             "one_shot": one_shot,
             "timezone": response.get("timezone"),
+            "delivery_target": response.get("delivery_target"),
             "next_fire_at": response.get("next_fire_at"),
             "next_fire_local": response.get("next_fire_local"),
             "delivery_channel": response.get("delivery_channel"),
+            "resolved_delivery_channel": response.get("resolved_delivery_channel"),
+            "context_summary": response.get("context_summary"),
             "message": f"Reminder created: {label}",
         }
 
