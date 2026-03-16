@@ -462,6 +462,8 @@ class FakeMemoryClient:
         self.core_fact_write_calls: list[dict[str, object]] = []
         self.episode_calls: list[dict[str, object]] = []
         self.core_fact_requests: list[int] = []
+        self.graph_sync_calls: list[dict[str, object]] = []
+        self.graph_rebuild_calls: list[dict[str, object]] = []
 
     async def start(self) -> None:
         self.started = True
@@ -596,14 +598,16 @@ class FakeMemoryClient:
             "ingested_memory_count": 1 if self.enabled else 0,
         }
 
-    async def graph_sync(self) -> dict[str, object]:
+    async def graph_sync(self, payload: dict[str, object] | None = None) -> dict[str, object]:
+        self.graph_sync_calls.append(payload or {})
         return {
             "enabled": self.enabled,
             "backend": "memory" if self.enabled else None,
             "mode": "sync",
         }
 
-    async def graph_rebuild(self) -> dict[str, object]:
+    async def graph_rebuild(self, payload: dict[str, object] | None = None) -> dict[str, object]:
+        self.graph_rebuild_calls.append(payload or {})
         return {
             "enabled": self.enabled,
             "backend": "memory" if self.enabled else None,
@@ -1280,6 +1284,7 @@ def test_internal_memory_routes_proxy_to_memory_service(tmp_path) -> None:
         )
         assert graph_sync_response.status_code == 200
         assert graph_sync_response.json()["mode"] == "sync"
+        assert runtime.memory_client.graph_sync_calls[-1] == {}
 
         graph_rebuild_response = client.post(
             "/internal/memory/graph-rebuild",
@@ -1287,6 +1292,25 @@ def test_internal_memory_routes_proxy_to_memory_service(tmp_path) -> None:
         )
         assert graph_rebuild_response.status_code == 200
         assert graph_rebuild_response.json()["mode"] == "rebuild"
+        assert runtime.memory_client.graph_rebuild_calls[-1] == {}
+
+        graph_sync_with_payload = client.post(
+            "/internal/memory/graph-sync",
+            headers={"X-Internal-Token": "internal-token"},
+            json={
+                "allow_llm": True,
+                "persist_graph_documents": True,
+                "only_missing_graph_documents": True,
+                "max_records": 10,
+            },
+        )
+        assert graph_sync_with_payload.status_code == 200
+        assert runtime.memory_client.graph_sync_calls[-1] == {
+            "allow_llm": True,
+            "persist_graph_documents": True,
+            "only_missing_graph_documents": True,
+            "max_records": 10,
+        }
 
         audit_response = client.get(
             "/internal/memory/write-audit",

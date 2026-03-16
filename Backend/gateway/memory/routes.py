@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 
 from ..channels.routes import get_runtime, require_internal_token
 from .client import MemoryClientError, MemoryClientHTTPError
@@ -208,22 +208,24 @@ async def memory_graph_status(
 
 @router.post("/internal/memory/graph-sync")
 async def memory_graph_sync(
+    payload: dict[str, Any] | None = Body(default=None),
     _: None = Depends(require_internal_token),
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
     try:
-        return await runtime.memory_graph_sync()
+        return await runtime.memory_graph_sync(payload)
     except Exception as exc:
         _raise_memory_http_error(exc)
 
 
 @router.post("/internal/memory/graph-rebuild")
 async def memory_graph_rebuild(
+    payload: dict[str, Any] | None = Body(default=None),
     _: None = Depends(require_internal_token),
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
     try:
-        return await runtime.memory_graph_rebuild()
+        return await runtime.memory_graph_rebuild(payload)
     except Exception as exc:
         _raise_memory_http_error(exc)
 

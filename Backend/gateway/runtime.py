@@ -2231,11 +2231,11 @@ class GatewayRuntime:
     async def memory_graph_status(self) -> dict[str, Any]:
         return await self.memory_client.graph_status()
 
-    async def memory_graph_sync(self) -> dict[str, Any]:
-        return await self.memory_client.graph_sync()
+    async def memory_graph_sync(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return await self.memory_client.graph_sync(payload)
 
-    async def memory_graph_rebuild(self) -> dict[str, Any]:
-        return await self.memory_client.graph_rebuild()
+    async def memory_graph_rebuild(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return await self.memory_client.graph_rebuild(payload)
 
     def list_memory_write_audit(
         self,

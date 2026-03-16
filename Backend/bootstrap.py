@@ -1273,7 +1273,11 @@ def build_service_env_overrides(
         memory_external.get("COSMIC_MEMORY_GRAPH_SYNC_ON_STARTUP"),
         memory_existing.get("COSMIC_MEMORY_GRAPH_SYNC_ON_STARTUP"),
         memory_data.get("COSMIC_MEMORY_GRAPH_SYNC_ON_STARTUP"),
-        "true",
+    )
+    memory_graph_warm_cache_on_startup = first_meaningful_value(
+        memory_external.get("COSMIC_MEMORY_GRAPH_WARM_CACHE_ON_STARTUP"),
+        memory_existing.get("COSMIC_MEMORY_GRAPH_WARM_CACHE_ON_STARTUP"),
+        memory_data.get("COSMIC_MEMORY_GRAPH_WARM_CACHE_ON_STARTUP"),
     )
     memory_graph_deterministic_enabled = first_meaningful_value(
         memory_external.get("COSMIC_MEMORY_GRAPH_DETERMINISTIC_ENABLED"),
@@ -1281,12 +1285,45 @@ def build_service_env_overrides(
         memory_data.get("COSMIC_MEMORY_GRAPH_DETERMINISTIC_ENABLED"),
         "true",
     )
+    memory_neo4j_uri = first_meaningful_value(
+        memory_external.get("COSMIC_MEMORY_NEO4J_URI"),
+        memory_existing.get("COSMIC_MEMORY_NEO4J_URI"),
+        memory_data.get("COSMIC_MEMORY_NEO4J_URI"),
+    )
+    memory_neo4j_username = first_meaningful_value(
+        memory_external.get("COSMIC_MEMORY_NEO4J_USERNAME"),
+        memory_existing.get("COSMIC_MEMORY_NEO4J_USERNAME"),
+        memory_data.get("COSMIC_MEMORY_NEO4J_USERNAME"),
+    )
+    memory_neo4j_password = first_meaningful_value(
+        memory_external.get("COSMIC_MEMORY_NEO4J_PASSWORD"),
+        memory_existing.get("COSMIC_MEMORY_NEO4J_PASSWORD"),
+        memory_data.get("COSMIC_MEMORY_NEO4J_PASSWORD"),
+    )
+    memory_neo4j_database = first_meaningful_value(
+        memory_external.get("COSMIC_MEMORY_NEO4J_DATABASE"),
+        memory_existing.get("COSMIC_MEMORY_NEO4J_DATABASE"),
+        memory_data.get("COSMIC_MEMORY_NEO4J_DATABASE"),
+        "neo4j",
+    )
     memory_primary_user_display_name = first_meaningful_value(
         memory_external.get("COSMIC_MEMORY_PRIMARY_USER_DISPLAY_NAME"),
         memory_existing.get("COSMIC_MEMORY_PRIMARY_USER_DISPLAY_NAME"),
         memory_data.get("COSMIC_MEMORY_PRIMARY_USER_DISPLAY_NAME"),
         "",
     )
+    if (memory_graph_backend or "").strip().lower() in {"", "memory"} and any(
+        (memory_neo4j_uri, memory_neo4j_username, memory_neo4j_password)
+    ):
+        memory_graph_backend = "neo4j"
+    if not memory_graph_warm_cache_on_startup:
+        memory_graph_warm_cache_on_startup = (
+            "true" if (memory_graph_backend or "").strip().lower() == "neo4j" else "false"
+        )
+    if not memory_graph_sync_on_startup:
+        memory_graph_sync_on_startup = (
+            "false" if (memory_graph_backend or "").strip().lower() == "neo4j" else "true"
+        )
 
     overrides = {
         "gateway.env": {
@@ -1324,9 +1361,15 @@ def build_service_env_overrides(
             "COSMIC_MEMORY_DATA_DIR": memory_data_dir or str(DEFAULT_MEMORY_DATA_DIR),
             "COSMIC_MEMORY_SYNC_ON_STARTUP": memory_sync_on_startup or "true",
             "COSMIC_MEMORY_GRAPH_SYNC_ON_STARTUP": memory_graph_sync_on_startup or "true",
+            "COSMIC_MEMORY_GRAPH_WARM_CACHE_ON_STARTUP": memory_graph_warm_cache_on_startup
+            or "false",
             "COSMIC_MEMORY_GRAPH_DETERMINISTIC_ENABLED": memory_graph_deterministic_enabled or "true",
             "COSMIC_MEMORY_GRAPH_EXTRACT_ENABLED": memory_graph_extract_enabled or "false",
             "COSMIC_MEMORY_GRAPH_BACKEND": memory_graph_backend or "memory",
+            "COSMIC_MEMORY_NEO4J_URI": memory_neo4j_uri or "",
+            "COSMIC_MEMORY_NEO4J_USERNAME": memory_neo4j_username or "",
+            "COSMIC_MEMORY_NEO4J_PASSWORD": memory_neo4j_password or "",
+            "COSMIC_MEMORY_NEO4J_DATABASE": memory_neo4j_database or "neo4j",
             "COSMIC_MEMORY_PRIMARY_USER_DISPLAY_NAME": memory_primary_user_display_name or "",
         }
     return overrides
