@@ -48,6 +48,22 @@ class PauseRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=200)
 
 
+class SchedulerCreateRequest(BaseModel):
+    cron_id: str | None = Field(default=None, max_length=80)
+    label: str = Field(..., min_length=1, max_length=200)
+    cron_expression: str = Field(..., min_length=1, max_length=64)
+    prompt: str = Field(..., min_length=1, max_length=4000)
+    one_shot: bool = True
+    description: str | None = Field(default=None, max_length=500)
+    timezone: str | None = Field(default=None, max_length=64)
+    delivery_channel: str | None = Field(default=None, max_length=128)
+    source: str | None = Field(default=None, max_length=120)
+    request_id: str | None = Field(default=None, max_length=120)
+    session_id: str | None = Field(default=None, max_length=120)
+    channel: str | None = Field(default=None, max_length=128)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 def get_runtime(request: Request) -> GatewayRuntime:
     runtime = getattr(request.app.state, "gateway_runtime", None)
     if runtime is None:
@@ -614,6 +630,70 @@ async def list_scheduler_crons(
     return {"crons": runtime.list_scheduler_crons()}
 
 
+@router.post("/internal/scheduler/crons")
+async def create_internal_scheduler_cron(
+    body: SchedulerCreateRequest,
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return await runtime.create_scheduler_cron(
+            cron_id=body.cron_id,
+            label=body.label,
+            cron_expression=body.cron_expression,
+            prompt=body.prompt,
+            one_shot=body.one_shot,
+            description=body.description,
+            timezone_name=body.timezone,
+            delivery_channel=body.delivery_channel or body.channel,
+            metadata=body.metadata,
+            created_by=body.source,
+            created_request_id=body.request_id,
+            created_session_id=body.session_id,
+            created_channel=body.channel,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = status.HTTP_409_CONFLICT if "already exists" in detail.lower() else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
+@router.get("/internal/scheduler/crons")
+async def list_internal_scheduler_crons(
+    include_system: bool = False,
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return {"crons": runtime.list_scheduler_crons(include_system=include_system, active_only=True)}
+
+
+@router.get("/internal/scheduler/crons/{cron_id}")
+async def get_internal_scheduler_cron(
+    cron_id: str,
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    payload = runtime.get_scheduler_cron(cron_id)
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown cron")
+    return payload
+
+
+@router.delete("/internal/scheduler/crons/{cron_id}")
+async def delete_internal_scheduler_cron(
+    cron_id: str,
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        deleted = runtime.delete_scheduler_cron(cron_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown cron")
+    return {"deleted": True, "cron_id": cron_id}
+
+
 @router.get("/scheduler/crons/{cron_id}")
 async def get_scheduler_cron(
     cron_id: str,
@@ -639,10 +719,35 @@ async def pause_scheduler_cron(
     return payload
 
 
+@router.post("/internal/scheduler/crons/{cron_id}/pause")
+async def pause_internal_scheduler_cron(
+    cron_id: str,
+    body: PauseRequest,
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    payload = runtime.pause_scheduler_cron(cron_id, reason=body.reason)
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown cron")
+    return payload
+
+
 @router.post("/scheduler/crons/{cron_id}/resume")
 async def resume_scheduler_cron(
     cron_id: str,
     _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    payload = runtime.resume_scheduler_cron(cron_id)
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown cron")
+    return payload
+
+
+@router.post("/internal/scheduler/crons/{cron_id}/resume")
+async def resume_internal_scheduler_cron(
+    cron_id: str,
+    _: None = Depends(require_internal_token),
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
     payload = runtime.resume_scheduler_cron(cron_id)

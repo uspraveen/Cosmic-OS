@@ -222,6 +222,72 @@ async def test_tool_executor_memory_write_core_fact_uses_gateway_and_enriches_co
 
 
 @pytest.mark.asyncio
+async def test_tool_executor_create_reminder_uses_internal_scheduler_route_and_context_defaults() -> None:
+    seen_payload: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == httpx.URL("http://gateway/internal/scheduler/crons")
+        assert request.headers["X-Internal-Token"] == "internal-token"
+        seen_payload.update(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            json={
+                "cron_id": "cron_abc123",
+                "label": "Morning YC check",
+                "cron_expression": "0 6 * * *",
+                "timezone": "America/Chicago",
+                "next_fire_at": "2026-03-16T11:00:00Z",
+                "next_fire_local": "Monday, March 16, 2026 at 06:00 AM CDT",
+                "delivery_channel": "desktop:desk_a",
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    executor = ToolExecutor(
+        gateway_url="http://gateway",
+        gateway_internal_token="internal-token",
+        client=client,
+    )
+    context = ToolExecutionContext(
+        task_id="tsk_current",
+        request_id="req_current",
+        session_id="sess_current",
+        channel="desktop:desk_a",
+    )
+    try:
+        raw_result = await executor.execute(
+            "create_reminder",
+            {
+                "label": "Morning YC check",
+                "cron_expression": "0 6 * * *",
+                "prompt": "Check for new YC companies and report the diff.",
+                "one_shot": True,
+            },
+            context=context,
+        )
+    finally:
+        await client.aclose()
+
+    result = json.loads(raw_result)
+    assert seen_payload == {
+        "label": "Morning YC check",
+        "cron_expression": "0 6 * * *",
+        "prompt": "Check for new YC companies and report the diff.",
+        "one_shot": True,
+        "source": "orchestrator",
+        "delivery_channel": "desktop:desk_a",
+        "request_id": "req_current",
+        "session_id": "sess_current",
+        "channel": "desktop:desk_a",
+    }
+    assert result["created"] is True
+    assert result["cron_id"] == "cron_abc123"
+    assert result["timezone"] == "America/Chicago"
+    assert result["next_fire_at"] == "2026-03-16T11:00:00Z"
+    assert result["delivery_channel"] == "desktop:desk_a"
+
+
+@pytest.mark.asyncio
 async def test_tool_executor_session_revisit_defaults_to_current_context_and_task_notebook_handles_missing() -> None:
     revisit_payloads: list[dict[str, object]] = []
 

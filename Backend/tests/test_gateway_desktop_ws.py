@@ -15,6 +15,7 @@ from gateway.channels.base import ChannelUnavailableError, RetryableDeliveryErro
 from gateway.channels.routes import router as channel_router
 from gateway.config import GatewayConfig
 from gateway.memory_client import MemoryClientHTTPError, MemoryPromptContext
+from gateway.scheduler import CronExpressionError, compute_next_fire_at
 from gateway.runtime import SYSTEM_CRON_DAILY_ROLLOVER, GatewayRuntime
 from gateway.session_store import utcnow_iso
 
@@ -1707,6 +1708,156 @@ def test_scheduler_endpoints_list_and_pause_resume_system_cron(test_client: Test
     )
     assert heartbeat.status_code == 200
     assert heartbeat.json()["timezone"] == "America/Chicago"
+
+
+def test_scheduler_cron_helper_uses_user_local_timezone_and_validates_input() -> None:
+    next_fire_at = compute_next_fire_at(
+        "0 6 * * *",
+        "America/Chicago",
+        after=datetime(2026, 3, 16, 7, 30, tzinfo=timezone.utc),
+    )
+    assert next_fire_at == "2026-03-16T11:00:00Z"
+
+    with pytest.raises(CronExpressionError):
+        compute_next_fire_at("bad cron", "America/Chicago")
+
+    with pytest.raises(CronExpressionError):
+        compute_next_fire_at("0 6 * * *", "Mars/Phobos")
+
+
+def test_internal_scheduler_crud_defaults_to_user_timezone_snapshot(test_client: TestClient) -> None:
+    create_response = test_client.post(
+        "/internal/scheduler/crons",
+        headers={"X-Internal-Token": "internal-token"},
+        json={
+            "label": "Morning YC check",
+            "cron_expression": "0 6 * * *",
+            "prompt": "Check for newly added YC companies and report the diff.",
+            "one_shot": True,
+            "channel": "desktop:desk_sched",
+            "request_id": "req_sched_create",
+            "session_id": "sess_sched_create",
+            "source": "orchestrator",
+        },
+    )
+    assert create_response.status_code == 200
+    created = create_response.json()
+    cron_id = created["cron_id"]
+    assert cron_id.startswith("cron_")
+    assert created["timezone"] == "America/Chicago"
+    assert created["delivery_channel"] == "desktop:desk_sched"
+    assert created["prompt"] == "Check for newly added YC companies and report the diff."
+    assert created["one_shot"] is True
+    assert created["next_fire_at"]
+    assert created["next_fire_local"]
+
+    listed = test_client.get(
+        "/internal/scheduler/crons",
+        headers={"X-Internal-Token": "internal-token"},
+    )
+    assert listed.status_code == 200
+    listed_ids = {item["cron_id"] for item in listed.json()["crons"]}
+    assert cron_id in listed_ids
+    assert SYSTEM_CRON_DAILY_ROLLOVER not in listed_ids
+
+    fetched = test_client.get(
+        f"/internal/scheduler/crons/{cron_id}",
+        headers={"X-Internal-Token": "internal-token"},
+    )
+    assert fetched.status_code == 200
+    assert fetched.json()["created_request_id"] == "req_sched_create"
+    assert fetched.json()["created_session_id"] == "sess_sched_create"
+
+    deleted = test_client.delete(
+        f"/internal/scheduler/crons/{cron_id}",
+        headers={"X-Internal-Token": "internal-token"},
+    )
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted": True, "cron_id": cron_id}
+
+    missing = test_client.get(
+        f"/internal/scheduler/crons/{cron_id}",
+        headers={"X-Internal-Token": "internal-token"},
+    )
+    assert missing.status_code == 404
+
+
+def test_internal_scheduler_create_rejects_bad_cron_or_timezone(test_client: TestClient) -> None:
+    bad_cron = test_client.post(
+        "/internal/scheduler/crons",
+        headers={"X-Internal-Token": "internal-token"},
+        json={
+            "label": "Broken cron",
+            "cron_expression": "not-a-cron",
+            "prompt": "Do something later.",
+        },
+    )
+    assert bad_cron.status_code == 400
+
+    bad_timezone = test_client.post(
+        "/internal/scheduler/crons",
+        headers={"X-Internal-Token": "internal-token"},
+        json={
+            "label": "Wrong timezone",
+            "cron_expression": "0 6 * * *",
+            "prompt": "Do something later.",
+            "timezone": "Mars/Phobos",
+        },
+    )
+    assert bad_timezone.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_runtime_executes_due_custom_one_shot_cron_via_orchestrator(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    await runtime.start()
+    try:
+        runtime.scheduler_store.upsert_cron(
+            cron_id="cron_due_once",
+            name="Morning YC diff",
+            kind="reminder",
+            description="Check the YC company list and report any changes.",
+            cron_expr="0 6 * * *",
+            timezone_name="America/Chicago",
+            next_fire_at="2000-01-01T00:00:00Z",
+            metadata={
+                "prompt": "Check if any new YC companies were added and report the diff.",
+                "one_shot": True,
+                "delivery_channel": "desktop",
+                "created_by": "orchestrator",
+            },
+        )
+
+        await runtime._run_due_crons()  # noqa: SLF001 - targeted scheduler seam
+
+        cron_record = runtime.get_scheduler_cron("cron_due_once")
+        assert cron_record is not None
+        assert cron_record["last_result_status"] == "completed"
+        assert cron_record["next_fire_at"] is None
+
+        task = runtime.orchestrator.last_task
+        assert task is not None
+        assert task.source == "cron"
+        assert task.source_id == "cron_due_once"
+        assert task.channel == "desktop"
+        assert task.input["query"] == "Check if any new YC companies were added and report the diff."
+        assert task.input["user_timezone"] == "America/Chicago"
+
+        session_id = task.session_id
+        assert session_id is not None
+        history = runtime.get_session_history(session_id)
+        assert [item["role"] for item in history] == ["assistant"]
+        assert history[0]["content"] == "Thin Opus answer"
+        assert history[0]["metadata"]["source"] == "cron"
+        assert history[0]["metadata"]["source_id"] == "cron_due_once"
+
+        notebook = runtime.get_task_notebook(task.task_id)
+        assert notebook is not None
+        assert notebook["goal"] == "Check if any new YC companies were added and report the diff."
+        assert runtime.session_store.get_turn_ledger_entry(task.input["request_id"]) is None
+        assert runtime.list_scheduler_crons(include_system=False, active_only=True) == []
+    finally:
+        await runtime.stop()
 
 
 def test_whatsapp_incoming_emits_route_result_before_async_fulfillment(tmp_path) -> None:

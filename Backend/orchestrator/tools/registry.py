@@ -801,9 +801,17 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                         "type": "string",
                         "description": "The message or instruction sent back to the orchestrator when the schedule fires.",
                     },
+                    "timezone": {
+                        "type": "string",
+                        "description": "Optional explicit IANA timezone such as America/Chicago. Omit this unless the user explicitly asked for a different timezone than their current local timezone.",
+                    },
+                    "delivery_channel": {
+                        "type": "string",
+                        "description": "Optional explicit delivery channel. Omit this unless the user explicitly asked for a different channel than the one they are using now.",
+                    },
                     "one_shot": {
                         "type": "boolean",
-                        "description": "If true, the reminder fires once and is then deleted.",
+                        "description": "If true, the reminder fires once and then becomes inactive.",
                         "default": True,
                     },
                 },

@@ -27,7 +27,7 @@ from .memory.client import CosmicMemoryClient, MemoryClientHTTPError, MemoryProm
 from .orchestrator_client import OrchestratorClient
 from .routing.router_client import ModelRouterClient
 from .routing.audit_store import RoutingAuditStore
-from .scheduler.store import SchedulerStore
+from .scheduler import CronExpressionError, SchedulerStore, compute_next_fire_at, normalize_timezone_name, render_local_fire_time
 from .session.compaction import build_compaction_prompts
 from .session.summary import (
     build_rollover_summary_prompts,
@@ -351,6 +351,259 @@ class GatewayRuntime:
             },
         )
 
+    def _scheduler_effective_timezone(self, timezone_name: str | None = None) -> str:
+        if self._safe_text(timezone_name):
+            return normalize_timezone_name(self._safe_text(timezone_name) or "")
+        return self.current_user_timezone()
+
+    def _scheduler_record(self, record: dict[str, Any], *, include_history: bool = False) -> dict[str, Any]:
+        payload = dict(record)
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        payload["label"] = self._safe_text(payload.get("name")) or ""
+        payload["cron_expression"] = self._safe_text(payload.get("cron_expr")) or ""
+        payload["next_fire_local"] = render_local_fire_time(
+            self._safe_text(payload.get("next_fire_at")),
+            self._safe_text(payload.get("timezone")) or self.current_user_timezone(),
+        )
+        payload["last_fired_local"] = render_local_fire_time(
+            self._safe_text(payload.get("last_fired_at")),
+            self._safe_text(payload.get("timezone")) or self.current_user_timezone(),
+        )
+        payload["prompt"] = self._safe_text(metadata.get("prompt"))
+        payload["delivery_channel"] = self._safe_text(metadata.get("delivery_channel")) or "desktop"
+        payload["one_shot"] = bool(metadata.get("one_shot"))
+        payload["created_by"] = self._safe_text(metadata.get("created_by"))
+        payload["created_request_id"] = self._safe_text(metadata.get("created_request_id"))
+        payload["created_session_id"] = self._safe_text(metadata.get("created_session_id"))
+        payload["created_channel"] = self._safe_text(metadata.get("created_channel"))
+        payload["explicit_timezone"] = bool(metadata.get("explicit_timezone"))
+        if include_history:
+            payload["history"] = self.scheduler_store.list_cron_history(
+                self._safe_text(payload.get("cron_id")) or "",
+                limit=20,
+            )
+        return payload
+
+    def _list_scheduler_crons(self, *, include_system: bool, active_only: bool) -> list[dict[str, Any]]:
+        records = self.scheduler_store.list_crons()
+        if not include_system:
+            records = [item for item in records if self._safe_text(item.get("kind")) != "system"]
+        if active_only:
+            records = [
+                item for item in records
+                if bool(self._safe_text(item.get("next_fire_at")) or item.get("paused"))
+            ]
+        return [self._scheduler_record(item, include_history=False) for item in records]
+
+    def _cron_execution_identity(self, cron_id: str, scheduled_for: str | None) -> tuple[str, str]:
+        base = f"{cron_id}:{scheduled_for or 'unscheduled'}".encode("utf-8")
+        digest = hashlib.sha256(base).hexdigest()[:16]
+        return (f"req_cron_{digest}", f"cron:{cron_id}:{scheduled_for or 'unscheduled'}")
+
+    async def create_scheduler_cron(
+        self,
+        *,
+        cron_id: str | None,
+        label: str,
+        cron_expression: str,
+        prompt: str,
+        one_shot: bool,
+        description: str | None = None,
+        timezone_name: str | None = None,
+        delivery_channel: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        created_by: str | None = None,
+        created_request_id: str | None = None,
+        created_session_id: str | None = None,
+        created_channel: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_cron_id = self._safe_text(cron_id) or f"cron_{uuid4().hex[:12]}"
+        if self.scheduler_store.get_cron(normalized_cron_id) is not None:
+            raise ValueError(f"Cron already exists: {normalized_cron_id}")
+
+        normalized_label = self._safe_text(label)
+        normalized_prompt = self._safe_text(prompt)
+        normalized_cron_expression = self._safe_text(cron_expression)
+        if not normalized_label or not normalized_prompt or not normalized_cron_expression:
+            raise ValueError("label, cron_expression, and prompt are required")
+
+        effective_timezone = self._scheduler_effective_timezone(timezone_name)
+        next_fire_at = compute_next_fire_at(
+            normalized_cron_expression,
+            effective_timezone,
+        )
+        normalized_delivery_channel = self._safe_text(delivery_channel) or "desktop"
+        record = self.scheduler_store.upsert_cron(
+            cron_id=normalized_cron_id,
+            name=normalized_label,
+            kind="reminder",
+            description=self._safe_text(description),
+            cron_expr=normalized_cron_expression,
+            timezone_name=effective_timezone,
+            next_fire_at=next_fire_at,
+            metadata={
+                **(metadata or {}),
+                "prompt": normalized_prompt,
+                "one_shot": bool(one_shot),
+                "delivery_channel": normalized_delivery_channel,
+                "created_by": self._safe_text(created_by) or "orchestrator",
+                "created_request_id": self._safe_text(created_request_id),
+                "created_session_id": self._safe_text(created_session_id),
+                "created_channel": self._safe_text(created_channel),
+                "explicit_timezone": bool(self._normalize_timezone_name(timezone_name)),
+            },
+        )
+        self._scheduler_wakeup.set()
+        return self._scheduler_record(record, include_history=True)
+
+    def delete_scheduler_cron(self, cron_id: str) -> bool:
+        normalized_cron_id = self._safe_text(cron_id)
+        if not normalized_cron_id:
+            return False
+        existing = self.scheduler_store.get_cron(normalized_cron_id)
+        if existing is None:
+            return False
+        if self._safe_text(existing.get("kind")) == "system":
+            raise ValueError("System crons cannot be deleted.")
+        deleted = self.scheduler_store.delete_cron(normalized_cron_id)
+        if deleted:
+            self._scheduler_wakeup.set()
+        return deleted
+
+    async def _build_scheduler_request_record(self, cron: dict[str, Any]) -> dict[str, Any]:
+        cron_id = self._safe_text(cron.get("cron_id")) or ""
+        metadata = cron.get("metadata") if isinstance(cron.get("metadata"), dict) else {}
+        prompt = self._safe_text(metadata.get("prompt"))
+        channel = self._safe_text(metadata.get("delivery_channel")) or "desktop"
+        timezone_name = self._safe_text(cron.get("timezone")) or self.current_user_timezone()
+        scheduled_for = self._safe_text(cron.get("next_fire_at"))
+        if not prompt:
+            raise RuntimeError(f"Cron {cron_id} is missing its prompt payload.")
+
+        request_id, idempotency_key = self._cron_execution_identity(cron_id, scheduled_for)
+        session_id = self._current_session_id()
+        session_metadata = self._ensure_session_state_seeded(session_id)
+        active_working_set = (
+            session_metadata.get("active_working_set")
+            if isinstance(session_metadata.get("active_working_set"), dict)
+            else None
+        )
+        memory_prompt_context = await self._assemble_memory_prompt_context(query=prompt)
+        request_record = {
+            "status": "accepted",
+            "request_id": request_id,
+            "session_id": session_id,
+            "source": "cron",
+            "source_id": cron_id,
+            "channel": channel,
+            "route": "opus",
+            "dispatch_target": "orchestrator",
+            "classification": {
+                "route": "opus",
+                "needs_latest": False,
+                "needs_citations": False,
+                "is_task": True,
+                "is_continuation": False,
+                "confidence": 1.0,
+                "signals": ["scheduler_cron"],
+            },
+            "message": {
+                "content": prompt,
+                "channel": channel,
+                "request_id": request_id,
+                "metadata": {
+                    "platform": "scheduler",
+                    "cron_id": cron_id,
+                    "cron_label": self._safe_text(cron.get("name")),
+                    "scheduled_for": scheduled_for,
+                    "delivery_channel": channel,
+                },
+            },
+            "assembled_conversation_context": self._build_conversation_context(session_id),
+            "memory_context": self._compose_prompt_context(
+                active_working_set=active_working_set,
+                memory_context=memory_prompt_context.rendered,
+            ),
+            "active_working_set": active_working_set,
+            "carry_forward_packet": (
+                session_metadata.get("carry_forward_packet")
+                if isinstance(session_metadata.get("carry_forward_packet"), dict)
+                else None
+            ),
+            "memory_context_payload": {
+                "core_facts_rendered": memory_prompt_context.core_facts_rendered,
+                "items": memory_prompt_context.recall_items,
+                "total_token_count": memory_prompt_context.total_token_count,
+                "diagnostics": memory_prompt_context.diagnostics,
+            },
+            "routing_decision_source": "scheduler",
+            "input_artifacts": [],
+            "accepted_at": utcnow_iso(),
+            "idempotency_key": idempotency_key,
+            "cron_timezone": timezone_name,
+            "cron_scheduled_for": scheduled_for,
+        }
+        self.request_records[request_id] = request_record
+        self.routing_audit_store.append(
+            request_id=request_id,
+            session_id=session_id,
+            channel=channel,
+            source="cron",
+            source_id=cron_id,
+            query_text=prompt,
+            route_override=None,
+            sticky_hit=False,
+            decision_source="scheduler",
+            classifier_route="opus",
+            final_route="opus",
+            dispatch_target="orchestrator",
+            confidence=1.0,
+            signals=["scheduler_cron"],
+            conversation_context=request_record["assembled_conversation_context"],
+            classifier_payload=None,
+            classifier_metrics=None,
+            classifier_model=None,
+            classifier_latency_ms=None,
+            decision_latency_ms=0.0,
+            error_text=None,
+        )
+        return request_record
+
+    async def _execute_custom_scheduler_cron(self, cron: dict[str, Any]) -> tuple[str, str, str | None]:
+        cron_id = self._safe_text(cron.get("cron_id")) or ""
+        cron_expr = self._safe_text(cron.get("cron_expr"))
+        timezone_name = self._safe_text(cron.get("timezone")) or self.current_user_timezone()
+        metadata = cron.get("metadata") if isinstance(cron.get("metadata"), dict) else {}
+        one_shot = bool(metadata.get("one_shot"))
+        if not cron_expr:
+            raise RuntimeError(f"Cron {cron_id} is missing its cron expression.")
+
+        request_record = await self._build_scheduler_request_record(cron)
+        await self.fulfill_processed_message(request_record)
+
+        scheduled_for = self._safe_text(cron.get("next_fire_at"))
+        next_fire_at = None
+        if not one_shot:
+            after = None
+            if scheduled_for:
+                text = scheduled_for[:-1] + "+00:00" if scheduled_for.endswith("Z") else scheduled_for
+                try:
+                    after = datetime.fromisoformat(text)
+                except ValueError:
+                    after = None
+            next_fire_at = compute_next_fire_at(
+                cron_expr,
+                timezone_name,
+                after=after,
+            )
+        label = self._safe_text(cron.get("name")) or cron_id
+        summary = (
+            f"Reminder ran: {label}"
+            if one_shot else
+            f"Scheduled task ran: {label}"
+        )
+        return ("completed", summary, next_fire_at)
+
     async def _scheduler_loop(self) -> None:
         try:
             while True:
@@ -383,11 +636,24 @@ class GatewayRuntime:
                     next_fire_at = self._next_rollover_fire_at(
                         timezone_name=self.current_user_timezone()
                     )
+                else:
+                    status, summary, next_fire_at = await self._execute_custom_scheduler_cron(cron)
             except Exception as exc:
                 logger.exception("gateway.scheduler_cron_failed cron_id=%s", cron_id)
                 status = "failed"
                 summary = str(exc)
-                next_fire_at = self._safe_text(cron.get("next_fire_at")) or None
+                metadata = cron.get("metadata") if isinstance(cron.get("metadata"), dict) else {}
+                if not bool(metadata.get("one_shot")) and self._safe_text(cron.get("cron_expr")):
+                    try:
+                        next_fire_at = compute_next_fire_at(
+                            self._safe_text(cron.get("cron_expr")) or "",
+                            self._safe_text(cron.get("timezone")) or self.current_user_timezone(),
+                            after=datetime.now(timezone.utc),
+                        )
+                    except CronExpressionError:
+                        next_fire_at = None
+                else:
+                    next_fire_at = None
             self.scheduler_store.record_cron_result(
                 cron_id=cron_id,
                 scheduled_for=scheduled_for,
@@ -400,30 +666,45 @@ class GatewayRuntime:
         return {
             "profile": self.scheduler_store.get_profile(),
             "current_session_id": self._current_session_id(),
-            "crons": self.scheduler_store.list_crons(),
+            "crons": self._list_scheduler_crons(include_system=True, active_only=False),
             "heartbeat": self.scheduler_store.get_heartbeat(),
         }
 
-    def list_scheduler_crons(self) -> list[dict[str, Any]]:
-        return self.scheduler_store.list_crons()
+    def list_scheduler_crons(self, *, include_system: bool = True, active_only: bool = False) -> list[dict[str, Any]]:
+        return self._list_scheduler_crons(include_system=include_system, active_only=active_only)
 
     def get_scheduler_cron(self, cron_id: str) -> dict[str, Any] | None:
         record = self.scheduler_store.get_cron(cron_id)
         if record is None:
             return None
-        record["history"] = self.scheduler_store.list_cron_history(cron_id, limit=20)
-        return record
+        return self._scheduler_record(record, include_history=True)
 
     def pause_scheduler_cron(self, cron_id: str, *, reason: str | None = None) -> dict[str, Any] | None:
-        return self.scheduler_store.pause_cron(cron_id, reason=reason)
+        record = self.scheduler_store.pause_cron(cron_id, reason=reason)
+        if record is None:
+            return None
+        self._scheduler_wakeup.set()
+        return self._scheduler_record(record, include_history=False)
 
     def resume_scheduler_cron(self, cron_id: str) -> dict[str, Any] | None:
         next_fire_at = None
         if cron_id == SYSTEM_CRON_DAILY_ROLLOVER:
             next_fire_at = self._next_rollover_fire_at(timezone_name=self.current_user_timezone())
+        else:
+            existing = self.scheduler_store.get_cron(cron_id)
+            if existing is not None:
+                cron_expr = self._safe_text(existing.get("cron_expr"))
+                timezone_name = self._safe_text(existing.get("timezone")) or self.current_user_timezone()
+                if cron_expr:
+                    try:
+                        next_fire_at = compute_next_fire_at(cron_expr, timezone_name)
+                    except CronExpressionError:
+                        next_fire_at = None
         record = self.scheduler_store.resume_cron(cron_id, next_fire_at=next_fire_at)
         self._scheduler_wakeup.set()
-        return record
+        if record is None:
+            return None
+        return self._scheduler_record(record, include_history=False)
 
     def get_scheduler_heartbeat(self) -> dict[str, Any]:
         return self.scheduler_store.get_heartbeat()
@@ -875,6 +1156,8 @@ class GatewayRuntime:
                     request_id=request_id,
                     session_id=session_id,
                     channel=channel,
+                    source=self._safe_text(request_record.get("source")),
+                    source_id=self._safe_text(request_record.get("source_id")),
                 )
                 await self._handle_orchestrator_event(
                     normalized_event,
@@ -1313,6 +1596,8 @@ class GatewayRuntime:
             return
         if self._safe_text(event.get("type")) != "response.complete":
             return
+        if (self._safe_text(event.get("source")) or "user") != "user":
+            return
         request_id = self._safe_text(event.get("request_id"))
         session_id = self._safe_text(event.get("session_id"))
         if not request_id or not session_id:
@@ -1437,6 +1722,8 @@ class GatewayRuntime:
         if delivery_status != "sent" or not self.memory_client.enabled:
             return
         if self._safe_text(event.get("type")) != "response.complete":
+            return
+        if (self._safe_text(event.get("source")) or "user") != "user":
             return
         if (self._safe_text(event.get("route")) or "").strip().lower() != "opus":
             return
@@ -1668,6 +1955,8 @@ class GatewayRuntime:
             return
         if self._safe_text(event.get("type")) != "response.complete":
             return
+        if (self._safe_text(event.get("source")) or "user") != "user":
+            return
         request_id = self._safe_text(event.get("request_id"))
         session_id = self._safe_text(event.get("session_id"))
         if not request_id or not session_id:
@@ -1849,6 +2138,10 @@ class GatewayRuntime:
             )
             if user_message is not None:
                 request_text = self._bounded_excerpt(user_message.get("content"))
+            elif isinstance(self.request_records.get(request_id), dict):
+                request_record = self.request_records[request_id]
+                message = request_record.get("message") if isinstance(request_record.get("message"), dict) else {}
+                request_text = self._bounded_excerpt(message.get("content"))
         if request_text and not self._safe_text(notebook.get("goal")):
             notebook["goal"] = request_text
 
@@ -2493,7 +2786,7 @@ class GatewayRuntime:
             return
         from .channels.desktop import DesktopAdapter
         desktop_adapter: DesktopAdapter | None = None
-        for adapter in self.registry._adapters.values():
+        for adapter in self.registry.adapters.values():
             if isinstance(adapter, DesktopAdapter):
                 desktop_adapter = adapter
                 break
@@ -2974,7 +3267,7 @@ class GatewayRuntime:
         session_id = self._safe_text(event.get("session_id"))
 
         if event_type == "response.complete":
-            if channel.startswith("desktop:"):
+            if channel.startswith("desktop:") and (self._safe_text(event.get("source")) or "user") != "cron":
                 return None
             if request_id:
                 return f"{channel}:{event_type}:{request_id}"
@@ -3269,10 +3562,10 @@ class GatewayRuntime:
                 "request_id": request_id,
                 "conversation_context": request_record.get("assembled_conversation_context") or [],
                 "memory_context": self._safe_text(request_record.get("memory_context")),
-                "user_timezone": self.current_user_timezone(),
+                "user_timezone": self._safe_text(request_record.get("cron_timezone")) or self.current_user_timezone(),
             },
             input_artifacts=request_record.get("input_artifacts") or [],
-            idempotency_key=uuid4().hex,
+            idempotency_key=self._safe_text(request_record.get("idempotency_key")) or uuid4().hex,
             priority=SOURCE_PRIORITY_MAP.get(self._safe_text(request_record.get("source")) or "user", "normal"),
             signature="",
             created_at=utcnow(),
@@ -3337,6 +3630,8 @@ class GatewayRuntime:
                     "task_id": self._safe_text(event.get("task_id")),
                     "metrics": event.get("metrics"),
                     "thinking_text": self._safe_text(event.get("thinking_text")),
+                    "source": self._safe_text(event.get("source")),
+                    "source_id": self._safe_text(event.get("source_id")),
                 },
                 channel=event_channel,
                 route="opus",
@@ -3383,12 +3678,18 @@ class GatewayRuntime:
         request_id: str,
         session_id: str,
         channel: str,
+        source: str | None = None,
+        source_id: str | None = None,
     ) -> dict[str, Any]:
         normalized = dict(event)
         normalized.setdefault("task_id", task_id)
         normalized.setdefault("request_id", request_id)
         normalized.setdefault("session_id", session_id)
         normalized.setdefault("channel", channel)
+        if source:
+            normalized.setdefault("source", source)
+        if source_id:
+            normalized.setdefault("source_id", source_id)
         return normalized
 
     def _safe_text(self, value: Any) -> str | None:

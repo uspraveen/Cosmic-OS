@@ -671,38 +671,51 @@ class ToolExecutor:
         *,
         context: ToolExecutionContext | None = None,
     ) -> dict[str, Any]:
-        del context
         label = str(tool_input.get("label") or "").strip()
         cron_expression = str(tool_input.get("cron_expression") or "").strip()
         prompt = str(tool_input.get("prompt") or "").strip()
-        one_shot = bool(tool_input.get("one_shot", True))
+        one_shot = self._coerce_bool(tool_input.get("one_shot"), default=True)
         if not label or not cron_expression or not prompt:
             return {"error": True, "message": "label, cron_expression, and prompt are required"}
         if not self.gateway_url:
             return {"error": True, "message": "Gateway scheduler is not configured."}
-
-        response = await self._client.post(
-            f"{self.gateway_url}/internal/scheduler/crons",
-            json={
-                "label": label,
-                "cron_expression": cron_expression,
-                "prompt": prompt,
-                "one_shot": one_shot,
-                "source": "orchestrator",
-            },
-            headers=self._gateway_headers(),
+        request_body: dict[str, Any] = {
+            "label": label,
+            "cron_expression": cron_expression,
+            "prompt": prompt,
+            "one_shot": one_shot,
+            "source": "orchestrator",
+        }
+        timezone_name = str(tool_input.get("timezone") or "").strip()
+        if timezone_name:
+            request_body["timezone"] = timezone_name
+        delivery_channel = str(tool_input.get("delivery_channel") or "").strip()
+        if delivery_channel:
+            request_body["delivery_channel"] = delivery_channel
+        elif context and context.channel:
+            request_body["delivery_channel"] = context.channel
+        if context:
+            if context.request_id:
+                request_body["request_id"] = context.request_id
+            if context.session_id:
+                request_body["session_id"] = context.session_id
+            if context.channel:
+                request_body["channel"] = context.channel
+        response = await self._request_gateway_json(
+            "POST",
+            "/internal/scheduler/crons",
+            json_body=request_body,
         )
-        if response.status_code >= 400:
-            body = response.text[:200]
-            return {"error": True, "message": f"Scheduler error (status={response.status_code}): {body}"}
-
-        payload = response.json()
         return {
             "created": True,
-            "cron_id": payload.get("cron_id"),
+            "cron_id": response.get("cron_id"),
             "label": label,
             "cron_expression": cron_expression,
             "one_shot": one_shot,
+            "timezone": response.get("timezone"),
+            "next_fire_at": response.get("next_fire_at"),
+            "next_fire_local": response.get("next_fire_local"),
+            "delivery_channel": response.get("delivery_channel"),
             "message": f"Reminder created: {label}",
         }
 
@@ -717,15 +730,7 @@ class ToolExecutor:
         del tool_input, context
         if not self.gateway_url:
             return {"error": True, "message": "Gateway scheduler is not configured."}
-
-        response = await self._client.get(
-            f"{self.gateway_url}/internal/scheduler/crons",
-            headers=self._gateway_headers(),
-        )
-        if response.status_code >= 400:
-            return {"error": True, "message": f"Scheduler error (status={response.status_code})"}
-
-        payload = response.json()
+        payload = await self._request_gateway_json("GET", "/internal/scheduler/crons")
         crons = payload.get("crons") or []
         return {"reminders": crons}
 
@@ -743,13 +748,7 @@ class ToolExecutor:
             return {"error": True, "message": "cron_id is required"}
         if not self.gateway_url:
             return {"error": True, "message": "Gateway scheduler is not configured."}
-
-        response = await self._client.delete(
-            f"{self.gateway_url}/internal/scheduler/crons/{cron_id}",
-            headers=self._gateway_headers(),
-        )
-        if response.status_code >= 400:
-            return {"error": True, "message": f"Delete failed (status={response.status_code})"}
+        await self._request_gateway_json("DELETE", f"/internal/scheduler/crons/{cron_id}")
 
         return {"deleted": True, "cron_id": cron_id, "message": "Reminder deleted."}
 

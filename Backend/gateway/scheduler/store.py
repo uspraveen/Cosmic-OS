@@ -344,6 +344,18 @@ class SchedulerStore:
             connection.commit()
         return self.get_cron(cron_id)
 
+    def delete_cron(self, cron_id: str) -> bool:
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM cron_jobs
+                WHERE cron_id = ?
+                """,
+                (cron_id,),
+            )
+            connection.commit()
+        return bool(cursor.rowcount)
+
     def resume_cron(self, cron_id: str, *, next_fire_at: str | None = None) -> dict[str, Any] | None:
         now = utcnow_iso()
         with self._lock, self._connect() as connection:
