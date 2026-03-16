@@ -29,6 +29,55 @@ def generate_task_id() -> str:
     return f"tsk_{uuid4().hex[:12]}"
 
 
+def generate_event_id(prefix: str = "evt") -> str:
+    return f"{prefix}_{uuid4().hex[:12]}"
+
+
+def validate_outbound_version(contract_version: str) -> None:
+    if contract_version != CURRENT_WRITE_VERSION:
+        raise ValueError(
+            f"Outbound contract version {contract_version!r} does not match current write version {CURRENT_WRITE_VERSION!r}."
+        )
+
+
+ArtifactKind = Literal["input", "output", "intermediate"]
+EventType = Literal[
+    "task.accepted",
+    "task.progress",
+    "task.suspended",
+    "task.resumed",
+    "task.deferred",
+    "artifact.added",
+    "task.completed",
+    "task.failed",
+    "task.dlq",
+    "task.rejected",
+]
+
+TERMINAL_EVENTS: set[EventType] = {"task.completed", "task.failed", "task.dlq"}
+NON_TERMINAL_EVENTS: set[EventType] = {
+    "task.accepted",
+    "task.progress",
+    "task.suspended",
+    "task.resumed",
+    "task.deferred",
+    "artifact.added",
+    "task.rejected",
+}
+
+
+class ArtifactManifest(BaseModel):
+    artifact_id: str
+    task_id: str
+    mime: str
+    sha256: str
+    path: str
+    source_url: str | None = None
+    created_by_agent: str
+    created_at: datetime = Field(default_factory=utcnow)
+    kind: ArtifactKind = "output"
+
+
 class TaskEnvelope(BaseModel):
     task_id: str
     task_list_id: str
@@ -57,6 +106,70 @@ class TaskEnvelope(BaseModel):
             raise ValueError(
                 f"Unacceptable contract version: {value}. Accepted: {sorted(ACCEPTED_READ_VERSIONS)}"
             )
+        return value
+
+
+class EventEnvelope(BaseModel):
+    task_id: str
+    agent_id: str
+    event_type: EventType
+    seq: int
+    payload: dict[str, Any] = Field(default_factory=dict)
+    emitted_at: datetime = Field(default_factory=utcnow)
+    contract_version: str = CURRENT_WRITE_VERSION
+
+    @field_validator("contract_version")
+    @classmethod
+    def check_contract_version(cls, value: str) -> str:
+        if value not in ACCEPTED_READ_VERSIONS:
+            raise ValueError(
+                f"Unacceptable contract version: {value}. Accepted: {sorted(ACCEPTED_READ_VERSIONS)}"
+            )
+        return value
+
+    @field_validator("seq")
+    @classmethod
+    def check_seq(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("EventEnvelope.seq must be >= 1")
+        return value
+
+
+class AgentError(BaseModel):
+    code: str
+    retryable: bool
+    message: str
+    next_action: str | None = None
+
+
+class AgentResult(BaseModel):
+    status: Literal["completed", "failed"]
+    output: dict[str, Any] = Field(default_factory=dict)
+    artifacts: list[ArtifactManifest] = Field(default_factory=list)
+    error: AgentError | None = None
+
+
+class TaskInProgress(BaseModel):
+    task_id: str
+    idempotency_key: str
+    executing_since: datetime
+    check_after_sec: int
+
+
+class Heartbeat(BaseModel):
+    agent_id: str
+    instance_id: str
+    healthy: bool
+    current_load: int
+    max_concurrency: int
+    heartbeat_ttl_sec: int
+    last_seen: datetime = Field(default_factory=utcnow)
+
+    @field_validator("current_load", "max_concurrency", "heartbeat_ttl_sec")
+    @classmethod
+    def check_non_negative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("Heartbeat numeric fields must be >= 0")
         return value
 
 

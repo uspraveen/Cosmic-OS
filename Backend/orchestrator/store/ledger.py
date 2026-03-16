@@ -60,6 +60,55 @@ class TaskLedger:
                 CREATE INDEX IF NOT EXISTS idx_tasks_session_channel
                     ON tasks(session_id, channel, status);
 
+                CREATE TABLE IF NOT EXISTS plans (
+                    plan_id TEXT PRIMARY KEY,
+                    session_id TEXT,
+                    original_query TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'planning',
+                    total_steps INTEGER NOT NULL DEFAULT 0,
+                    completed_steps INTEGER NOT NULL DEFAULT 0,
+                    current_step INTEGER NOT NULL DEFAULT 0,
+                    plan_json TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'user',
+                    source_id TEXT,
+                    channel TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_plans_status
+                    ON plans(status);
+
+                CREATE INDEX IF NOT EXISTS idx_plans_session
+                    ON plans(session_id);
+
+                CREATE TABLE IF NOT EXISTS plan_steps (
+                    step_id TEXT PRIMARY KEY,
+                    plan_id TEXT NOT NULL,
+                    step_number INTEGER NOT NULL,
+                    description TEXT NOT NULL,
+                    intent TEXT,
+                    agent_id TEXT,
+                    depends_on TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    task_id TEXT,
+                    attempt INTEGER NOT NULL DEFAULT 0,
+                    max_attempts INTEGER NOT NULL DEFAULT 3,
+                    input_json TEXT,
+                    output_json TEXT,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    FOREIGN KEY (plan_id) REFERENCES plans(plan_id) ON DELETE CASCADE,
+                    FOREIGN KEY (task_id) REFERENCES tasks(task_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_steps_plan
+                    ON plan_steps(plan_id, step_number);
+
+                CREATE INDEX IF NOT EXISTS idx_steps_status
+                    ON plan_steps(plan_id, status);
+
                 CREATE TABLE IF NOT EXISTS task_input_requests (
                     input_request_id TEXT PRIMARY KEY,
                     task_id TEXT NOT NULL,
@@ -80,6 +129,145 @@ class TaskLedger:
                 """
             )
             connection.commit()
+
+    def create_plan(
+        self,
+        *,
+        plan_id: str,
+        session_id: str | None,
+        original_query: str,
+        plan_json: dict[str, Any],
+        source: str = "user",
+        source_id: str | None = None,
+        channel: str | None = None,
+        status: str = "planning",
+        total_steps: int = 0,
+    ) -> None:
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO plans (
+                    plan_id,
+                    session_id,
+                    original_query,
+                    status,
+                    total_steps,
+                    completed_steps,
+                    current_step,
+                    plan_json,
+                    source,
+                    source_id,
+                    channel,
+                    created_at,
+                    updated_at,
+                    completed_at
+                )
+                VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    plan_id,
+                    session_id,
+                    original_query,
+                    status,
+                    total_steps,
+                    json.dumps(plan_json, ensure_ascii=False),
+                    source,
+                    source_id,
+                    channel,
+                    now,
+                    now,
+                ),
+            )
+            connection.commit()
+
+    def create_plan_step(
+        self,
+        *,
+        step_id: str,
+        plan_id: str,
+        step_number: int,
+        description: str,
+        intent: str | None,
+        agent_id: str | None,
+        depends_on: list[str] | None,
+        input_json: dict[str, Any] | None,
+        status: str = "pending",
+        max_attempts: int = 3,
+    ) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO plan_steps (
+                    step_id,
+                    plan_id,
+                    step_number,
+                    description,
+                    intent,
+                    agent_id,
+                    depends_on,
+                    status,
+                    task_id,
+                    attempt,
+                    max_attempts,
+                    input_json,
+                    output_json,
+                    started_at,
+                    completed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, NULL, NULL, NULL)
+                """,
+                (
+                    step_id,
+                    plan_id,
+                    step_number,
+                    description,
+                    intent,
+                    agent_id,
+                    json.dumps(depends_on or [], ensure_ascii=False),
+                    status,
+                    max(1, int(max_attempts)),
+                    json.dumps(input_json or {}, ensure_ascii=False),
+                ),
+            )
+            connection.commit()
+
+    def get_plan(self, plan_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM plans
+                WHERE plan_id = ?
+                """,
+                (plan_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["plan_json"] = json.loads(result["plan_json"]) if result.get("plan_json") else None
+        return result
+
+    def list_plan_steps(self, plan_id: str) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM plan_steps
+                WHERE plan_id = ?
+                ORDER BY step_number ASC
+                """,
+                (plan_id,),
+            ).fetchall()
+
+        steps: list[dict[str, Any]] = []
+        for row in rows:
+            step = dict(row)
+            step["depends_on"] = json.loads(step["depends_on"]) if step.get("depends_on") else []
+            step["input_json"] = json.loads(step["input_json"]) if step.get("input_json") else {}
+            step["output_json"] = json.loads(step["output_json"]) if step.get("output_json") else None
+            steps.append(step)
+        return steps
 
     def create_task(self, task: TaskEnvelope) -> None:
         payload = task.model_dump(mode="json")
