@@ -9,10 +9,12 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable
 from urllib.parse import quote
 
 import httpx
+
+from shared.contracts import AgentResult, TaskEnvelope, TaskInProgress
 
 from .registry import get_local_tool_spec
 
@@ -34,6 +36,7 @@ class ToolExecutionContext:
     channel: str | None = None
     source: str | None = None
     source_id: str | None = None
+    parent_task: TaskEnvelope | None = None
 
 
 class ToolExecutor:
@@ -47,6 +50,7 @@ class ToolExecutor:
         cosmic_memory_url: str = "",
         gateway_url: str = "",
         gateway_internal_token: str = "",
+        agent_dispatcher: Callable[..., Awaitable[AgentResult | TaskInProgress]] | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self.perplexity_api_key = perplexity_api_key.strip()
@@ -54,6 +58,7 @@ class ToolExecutor:
         self.cosmic_memory_url = cosmic_memory_url.rstrip("/") if cosmic_memory_url else ""
         self.gateway_url = gateway_url.rstrip("/") if gateway_url else ""
         self.gateway_internal_token = gateway_internal_token.strip()
+        self._agent_dispatcher = agent_dispatcher
         timeout = httpx.Timeout(30.0, connect=10.0)
         self._client = client or httpx.AsyncClient(timeout=timeout, http2=True)
         self._owns_client = client is None
@@ -152,6 +157,91 @@ class ToolExecutor:
         if citations:
             result["citations"] = citations[:10]
         return result
+
+    # ── Specialist Agents ────────────────────────────────────────
+
+    async def _firecrawl_scrape(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "url": str(tool_input.get("url") or "").strip(),
+        }
+        formats = self._normalize_string_list(tool_input.get("formats"))
+        if formats:
+            payload["formats"] = formats
+        for key in (
+            "only_main_content",
+            "wait_for_ms",
+            "timeout_ms",
+            "max_age_ms",
+            "include_tags",
+            "exclude_tags",
+            "mobile",
+            "proxy",
+        ):
+            value = tool_input.get(key)
+            if value not in (None, "", [], {}):
+                payload[key] = value
+        return await self._dispatch_specialist_agent(
+            intent="firecrawl.scrape",
+            payload=payload,
+            context=context,
+            agent_id="cosmic/firecrawl-web-scrape-agent:1.0.0",
+            wait_timeout_sec=125.0,
+        )
+
+    async def _firecrawl_extract(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "urls": self._normalize_string_list(tool_input.get("urls")),
+            "prompt": str(tool_input.get("prompt") or "").strip(),
+        }
+        for key in (
+            "schema",
+            "show_sources",
+            "enable_web_search",
+            "only_main_content",
+            "wait_for_ms",
+            "timeout_ms",
+            "max_age_ms",
+        ):
+            value = tool_input.get(key)
+            if value not in (None, "", [], {}):
+                payload[key] = value
+        return await self._dispatch_specialist_agent(
+            intent="firecrawl.extract",
+            payload=payload,
+            context=context,
+            agent_id="cosmic/firecrawl-web-scrape-agent:1.0.0",
+            wait_timeout_sec=185.0,
+        )
+
+    async def _firecrawl_recall_session(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "session_id": str(tool_input.get("session_id") or "").strip() or (context.session_id if context else ""),
+        }
+        limit = self._coerce_int(tool_input.get("limit"), 10)
+        if limit > 0:
+            payload["limit"] = min(max(limit, 1), 50)
+        return await self._dispatch_specialist_agent(
+            intent="firecrawl.recall_session",
+            payload=payload,
+            context=context,
+            agent_id="cosmic/firecrawl-web-scrape-agent:1.0.0",
+            wait_timeout_sec=35.0,
+        )
 
     # ── Memory Search / Write ────────────────────────────────────
 
@@ -610,6 +700,53 @@ class ToolExecutor:
         return {"deleted": True, "cron_id": cron_id, "message": "Reminder deleted."}
 
     # ── Internal helpers ────────────────────────────────────────
+
+    async def _dispatch_specialist_agent(
+        self,
+        *,
+        intent: str,
+        payload: dict[str, Any],
+        context: ToolExecutionContext | None,
+        agent_id: str,
+        wait_timeout_sec: float,
+    ) -> dict[str, Any]:
+        if self._agent_dispatcher is None:
+            return {"error": True, "message": f"{intent} is not configured in this orchestrator runtime."}
+        if context is None or context.parent_task is None:
+            return {"error": True, "message": f"{intent} requires the active parent task context."}
+
+        result = await self._agent_dispatcher(
+            parent_task=context.parent_task,
+            intent=intent,
+            input_payload=payload,
+            agent_id=agent_id,
+            wait_timeout_sec=wait_timeout_sec,
+        )
+        if isinstance(result, TaskInProgress):
+            return {
+                "error": True,
+                "in_progress": True,
+                "task_id": result.task_id,
+                "idempotency_key": result.idempotency_key,
+                "check_after_sec": result.check_after_sec,
+                "message": f"{intent} is still running in the specialist agent.",
+            }
+
+        if result.status != "completed":
+            error = result.error
+            return {
+                "error": True,
+                "code": error.code if error else "AGENT_FAILED",
+                "retryable": error.retryable if error else False,
+                "next_action": error.next_action if error else "escalate",
+                "message": error.message if error else f"{intent} failed in the specialist agent.",
+            }
+
+        output = result.output if isinstance(result.output, dict) else {}
+        response = dict(output)
+        if result.artifacts and "artifacts" not in response:
+            response["artifacts"] = [artifact.model_dump(mode="json") for artifact in result.artifacts]
+        return response
 
     async def _request_gateway_json(
         self,

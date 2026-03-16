@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "url": {
+      "type": "string",
+      "format": "uri",
+      "description": "The single page URL to scrape."
+    },
+    "formats": {
+      "type": "array",
+      "description": "Requested Firecrawl output formats.",
+      "items": {
+        "type": "string",
+        "enum": ["markdown", "html", "rawHtml", "links", "images", "screenshot"]
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "only_main_content": {
+      "type": "boolean",
+      "description": "Prefer the main page content over boilerplate.",
+      "default": true
+    },
+    "wait_for_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 120000
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 180000
+    },
+    "max_age_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "include_tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "exclude_tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "mobile": {
+      "type": "boolean",
+      "default": false
+    },
+    "proxy": {
+      "type": "string",
+      "enum": ["auto", "basic", "enhanced"]
+    }
+  },
+  "required": ["url"]
+}

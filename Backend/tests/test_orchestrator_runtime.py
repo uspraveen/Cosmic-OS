@@ -149,6 +149,9 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
             "memory_fetch",
             "memory_write",
             "memory_write_core_fact",
+            "firecrawl_scrape",
+            "firecrawl_extract",
+            "firecrawl_recall_session",
             "session_revisit",
             "session_history",
             "task_notebook",
@@ -157,6 +160,7 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
         assert "session_history" in payload["system"]
         assert "memory_fetch" in payload["system"]
         assert "memory_write_core_fact" in payload["system"]
+        assert "firecrawl_extract" in payload["system"]
         return httpx.Response(
             200,
             headers={"content-type": "text/event-stream"},
@@ -747,6 +751,56 @@ async def test_orchestrator_runtime_summarizes_server_side_web_search_results(tm
         and event["message"] == "Web search found: Extruct S26 Batch (example.com), GrowthList YC S26 (growthlist.co). Continuing..."
         for event in progress_events
     )
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_runtime_summarizes_firecrawl_specialist_tool_work(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_firecrawl_summary.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    try:
+        scrape_summary = runtime._summarize_local_tool_activity(
+            "firecrawl_scrape",
+            {"url": "https://example.com/post"},
+            json.dumps(
+                {
+                    "url": "https://example.com/post",
+                    "available_formats": ["markdown", "links"],
+                }
+            ),
+        )
+        extract_summary = runtime._summarize_local_tool_activity(
+            "firecrawl_extract",
+            {"urls": ["https://example.com/a", "https://example.com/b"]},
+            json.dumps(
+                {
+                    "urls": ["https://example.com/a", "https://example.com/b"],
+                    "status": "completed",
+                }
+            ),
+        )
+        recall_summary = runtime._summarize_local_tool_activity(
+            "firecrawl_recall_session",
+            {"session_id": "sess_20260316"},
+            json.dumps(
+                {
+                    "session_id": "sess_20260316",
+                    "entries": [{"task_id": "tsk_1"}, {"task_id": "tsk_2"}],
+                }
+            ),
+        )
+    finally:
+        await runtime.stop()
+
+    assert scrape_summary == "Firecrawl scraped example.com/post and captured markdown, links"
+    assert extract_summary == "Firecrawl extracted structured data from 2 pages"
+    assert recall_summary == "reviewed 2 prior Firecrawl runs from sess_20260316"
 
 
 def test_orchestrator_build_messages_includes_attachment_manifest(tmp_path) -> None:

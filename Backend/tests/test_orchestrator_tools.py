@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from orchestrator.tools.executor import ToolExecutionContext, ToolExecutor
+from shared import AgentError, AgentResult, TaskEnvelope, TaskInProgress, sign_task_envelope, utcnow
 
 
 @pytest.mark.asyncio
@@ -276,4 +277,150 @@ async def test_tool_executor_session_revisit_defaults_to_current_context_and_tas
         "found": False,
         "task_id": "tsk_current",
         "message": "Task notebook not found.",
+    }
+
+
+def _parent_task() -> TaskEnvelope:
+    task = TaskEnvelope(
+        task_id="tsk_parent",
+        task_list_id="sess_parent",
+        parent_task_id=None,
+        session_id="sess_parent",
+        sender="cosmic/gateway:1.0.0",
+        recipient="cosmic/orchestrator:1.0.0",
+        intent="orchestrator.process",
+        input={"query": "research this page", "request_id": "req_parent"},
+        input_artifacts=[],
+        idempotency_key="idem_parent",
+        priority="normal",
+        signature="",
+        created_at=utcnow(),
+        source="user",
+        source_id="desktop",
+        channel="desktop:test",
+    )
+    return task.model_copy(update={"signature": sign_task_envelope(task, "signing-secret")})
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_firecrawl_scrape_dispatches_specialist_agent_and_returns_output() -> None:
+    observed: dict[str, object] = {}
+
+    async def dispatcher(**kwargs):
+        observed.update(kwargs)
+        return AgentResult(
+            status="completed",
+            output={
+                "response": "Scraped https://example.com/post and captured markdown.",
+                "message": "Scraped https://example.com/post and captured markdown.",
+                "url": "https://example.com/post",
+                "title": "Example",
+                "available_formats": ["markdown"],
+                "metadata": {"title": "Example"},
+                "data": {"markdown_excerpt": "# Example"},
+                "artifacts": [{"artifact_id": "art_1", "path": "runs/artifacts/tsk_child/page.md", "mime": "text/markdown"}],
+            },
+            artifacts=[],
+        )
+
+    executor = ToolExecutor(agent_dispatcher=dispatcher)
+    context = ToolExecutionContext(
+        task_id="tsk_parent",
+        request_id="req_parent",
+        session_id="sess_parent",
+        channel="desktop:test",
+        source="user",
+        source_id="desktop",
+        parent_task=_parent_task(),
+    )
+    raw_result = await executor.execute(
+        "firecrawl_scrape",
+        {
+            "url": "https://example.com/post",
+            "formats": ["markdown"],
+            "wait_for_ms": 1000,
+        },
+        context=context,
+    )
+
+    result = json.loads(raw_result)
+    assert observed["intent"] == "firecrawl.scrape"
+    assert observed["agent_id"] == "cosmic/firecrawl-web-scrape-agent:1.0.0"
+    assert observed["parent_task"].task_id == "tsk_parent"
+    assert observed["input_payload"] == {
+        "url": "https://example.com/post",
+        "formats": ["markdown"],
+        "wait_for_ms": 1000,
+    }
+    assert result["url"] == "https://example.com/post"
+    assert result["available_formats"] == ["markdown"]
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_firecrawl_extract_returns_agent_failure_payload() -> None:
+    async def dispatcher(**kwargs):
+        del kwargs
+        return AgentResult(
+            status="failed",
+            output={},
+            artifacts=[],
+            error=AgentError(
+                code="RATE_LIMITED",
+                retryable=True,
+                message="Firecrawl rate limit exceeded.",
+                next_action="retry",
+            ),
+        )
+
+    executor = ToolExecutor(agent_dispatcher=dispatcher)
+    context = ToolExecutionContext(parent_task=_parent_task())
+    raw_result = await executor.execute(
+        "firecrawl_extract",
+        {
+            "urls": ["https://example.com/a"],
+            "prompt": "Extract the company names.",
+        },
+        context=context,
+    )
+
+    result = json.loads(raw_result)
+    assert result == {
+        "error": True,
+        "code": "RATE_LIMITED",
+        "retryable": True,
+        "next_action": "retry",
+        "message": "Firecrawl rate limit exceeded.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_firecrawl_recall_session_handles_in_progress_result() -> None:
+    observed: dict[str, object] = {}
+
+    async def dispatcher(**kwargs):
+        observed.update(kwargs)
+        return TaskInProgress(
+            task_id="tsk_child_firecrawl",
+            idempotency_key="idem_child",
+            executing_since=utcnow(),
+            check_after_sec=8,
+        )
+
+    executor = ToolExecutor(agent_dispatcher=dispatcher)
+    context = ToolExecutionContext(parent_task=_parent_task(), session_id="sess_parent")
+    raw_result = await executor.execute(
+        "firecrawl_recall_session",
+        {"limit": 5},
+        context=context,
+    )
+
+    result = json.loads(raw_result)
+    assert observed["input_payload"] == {"session_id": "sess_parent", "limit": 5}
+    assert result == {
+        "error": True,
+        "in_progress": True,
+        "task_id": "tsk_child_firecrawl",
+        "idempotency_key": "idem_child",
+        "check_after_sec": 8,
+        "message": "firecrawl.recall_session is still running in the specialist agent.",
     }

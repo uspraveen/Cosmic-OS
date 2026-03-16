@@ -44,6 +44,7 @@ from .redis_bus import (
     prepare_for_redispatch,
     task_stream_name,
 )
+from .sqlite_client import connect_sync
 
 __all__ = [
     "ACCEPTED_READ_VERSIONS",
@@ -87,5 +88,6 @@ __all__ = [
     "parse_stream_payload",
     "parse_task_envelope",
     "prepare_for_redispatch",
+    "connect_sync",
     "task_stream_name",
 ]

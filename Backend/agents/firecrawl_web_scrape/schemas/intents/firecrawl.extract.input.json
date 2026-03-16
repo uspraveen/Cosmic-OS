@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "urls": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "format": "uri"
+      },
+      "minItems": 1,
+      "maxItems": 10,
+      "uniqueItems": true
+    },
+    "prompt": {
+      "type": "string",
+      "minLength": 5,
+      "description": "Extraction instructions for Firecrawl."
+    },
+    "schema": {
+      "type": "object",
+      "description": "Optional JSON schema describing the desired structured output."
+    },
+    "show_sources": {
+      "type": "boolean",
+      "default": false
+    },
+    "enable_web_search": {
+      "type": "boolean",
+      "default": false
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 180000
+    },
+    "only_main_content": {
+      "type": "boolean",
+      "default": true
+    },
+    "wait_for_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 120000
+    },
+    "max_age_ms": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "required": ["urls", "prompt"]
+}

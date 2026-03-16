@@ -1,0 +1,74 @@
+agent_id: cosmic/firecrawl-web-scrape-agent:1.0.0
+display_name: Firecrawl Web Scrape Agent
+description: >
+  Specialist agent for high-fidelity page scraping and structured extraction through
+  Firecrawl. It handles single-page scrape requests, multi-page extraction jobs, and
+  recall of prior Firecrawl work captured in the agent's private session ledger.
+
+intents:
+  - name: firecrawl.scrape
+    description: Scrape a single URL into clean content formats such as markdown, html, links, images, or screenshot metadata.
+    input_schema: schemas/intents/firecrawl.scrape.input.json
+    output_schema: schemas/intents/firecrawl.scrape.output.json
+    timeout_sec: 120
+
+  - name: firecrawl.extract
+    description: Run Firecrawl extraction over one or more URLs and return structured data with optional sources.
+    input_schema: schemas/intents/firecrawl.extract.input.json
+    output_schema: schemas/intents/firecrawl.extract.output.json
+    timeout_sec: 180
+
+  - name: firecrawl.recall_session
+    description: Recall previous Firecrawl work stored in the agent session ledger.
+    input_schema: schemas/intents/firecrawl.recall_session.input.json
+    output_schema: schemas/intents/firecrawl.recall_session.output.json
+    timeout_sec: 30
+
+artifact_types:
+  - web_page
+  - structured_extract
+  - raw_json
+
+policies:
+  network_access: true
+  writable_paths:
+    - runs/artifacts
+    - agents/firecrawl_web_scrape/store
+    - agents/firecrawl_web_scrape/runtime
+  tool_access: []
+  allowed_senders:
+    - cosmic/orchestrator:1.0.0
+  intent_authorization:
+    firecrawl.scrape: [cosmic/orchestrator:1.0.0]
+    firecrawl.extract: [cosmic/orchestrator:1.0.0]
+    firecrawl.recall_session: [cosmic/orchestrator:1.0.0]
+
+sla:
+  max_concurrency: 2
+  heartbeat_interval_sec: 10
+  heartbeat_ttl_sec: 30
+  max_task_duration_sec: 180
+  health_endpoint: /health
+  retry_policy:
+    max_attempts: 3
+    backoff: exponential
+    backoff_base_sec: 2
+    backoff_max_sec: 60
+    retryable_codes:
+      - TIMEOUT
+      - NETWORK_ERROR
+      - RATE_LIMITED
+    non_retryable_codes:
+      - INVALID_INPUT
+      - AUTH_ERROR
+      - SCHEMA_VIOLATION
+      - INTERNAL_ERROR
+
+stream_key: streams:cosmic/firecrawl-web-scrape-agent:1.0.0
+
+version_info:
+  semver: 1.0.0
+  released_at: 2026-03-16
+  deprecated_at: null
+  remove_after: null
+  changelog: CHANGELOG.md

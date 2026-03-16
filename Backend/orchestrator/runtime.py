@@ -241,6 +241,7 @@ class OrchestratorRuntime:
             cosmic_memory_url=self.config.cosmic_memory_url,
             gateway_url=self.config.gateway_url,
             gateway_internal_token=self.config.internal_token,
+            agent_dispatcher=self.dispatch_agent_task,
         )
         self.started = True
 
@@ -314,6 +315,7 @@ class OrchestratorRuntime:
             channel=channel,
             source=task.source,
             source_id=task.source_id,
+            parent_task=task,
         )
 
         try:
@@ -1437,6 +1439,38 @@ class OrchestratorRuntime:
         result_str: str,
     ) -> str | None:
         data = self._parse_tool_result_json(result_str)
+
+        if tool_name == "firecrawl_scrape":
+            url = self._activity_url_label((data or {}).get("url") or tool_input.get("url"))
+            formats = (data or {}).get("available_formats") if isinstance(data, dict) else None
+            if url and isinstance(formats, list) and formats:
+                return f'Firecrawl scraped {url} and captured {", ".join(str(item) for item in formats[:3])}'
+            if url:
+                return f"Firecrawl scraped {url}"
+            return "Firecrawl scraped a page"
+
+        if tool_name == "firecrawl_extract":
+            urls = (data or {}).get("urls") if isinstance(data, dict) else tool_input.get("urls")
+            if isinstance(urls, list):
+                cleaned: list[str] = []
+                for item in urls:
+                    label = self._activity_url_label(item)
+                    if label:
+                        cleaned.append(label)
+                if len(cleaned) == 1:
+                    return f"Firecrawl extracted structured data from {cleaned[0]}"
+                if cleaned:
+                    return f"Firecrawl extracted structured data from {len(cleaned)} pages"
+            return "Firecrawl extracted structured data"
+
+        if tool_name == "firecrawl_recall_session":
+            session_id = self._activity_excerpt((data or {}).get("session_id") or tool_input.get("session_id"), limit=48)
+            entries = (data or {}).get("entries") if isinstance(data, dict) else None
+            if session_id and isinstance(entries, list):
+                return f"reviewed {len(entries)} prior Firecrawl runs from {session_id}"
+            if session_id:
+                return f"reviewed prior Firecrawl runs from {session_id}"
+            return "reviewed prior Firecrawl runs"
 
         if tool_name == "memory_search":
             query = self._activity_excerpt(tool_input.get("query"), limit=72)

@@ -55,6 +55,27 @@ def _perplexity_progress(tool_input: dict[str, Any]) -> str:
     return f"Researching: {query}" if query else "Conducting research..."
 
 
+def _firecrawl_scrape_progress(tool_input: dict[str, Any]) -> str:
+    url = str(tool_input.get("url") or "").strip()
+    return f"Scraping via Firecrawl: {url}" if url else "Scraping a page via Firecrawl..."
+
+
+def _firecrawl_extract_progress(tool_input: dict[str, Any]) -> str:
+    urls = tool_input.get("urls")
+    if isinstance(urls, list):
+        cleaned = [str(item or "").strip() for item in urls if str(item or "").strip()]
+        if len(cleaned) == 1:
+            return f"Extracting structured data via Firecrawl: {cleaned[0]}"
+        if cleaned:
+            return f"Extracting structured data via Firecrawl from {len(cleaned)} pages..."
+    return "Extracting structured data via Firecrawl..."
+
+
+def _firecrawl_recall_progress(tool_input: dict[str, Any]) -> str:
+    session_id = str(tool_input.get("session_id") or "").strip()
+    return f"Reviewing prior Firecrawl runs for {session_id}..." if session_id else "Reviewing prior Firecrawl runs..."
+
+
 def _memory_search_progress(tool_input: dict[str, Any]) -> str:
     query = str(tool_input.get("query") or "").strip()
     seed_ids = _preview_list(tool_input.get("seed_memory_ids"))
@@ -172,6 +193,161 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Deep synthesized research across multiple sources when a quick web lookup is not enough.",
         progress_builder=_perplexity_progress,
         handler_method="_perplexity_research",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="firecrawl_scrape",
+        api_definition={
+            "name": "firecrawl_scrape",
+            "description": (
+                "Use the Firecrawl specialist agent to scrape a live web page into robust formats such as markdown, html, links, images, or screenshot metadata. "
+                "Prefer this over plain web_fetch when you need page rendering resilience or structured scrape outputs."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Single page URL to scrape.",
+                    },
+                    "formats": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Requested formats such as markdown, html, rawHtml, links, images, or screenshot.",
+                    },
+                    "only_main_content": {
+                        "type": "boolean",
+                        "description": "Prefer the main page content over boilerplate. Default true.",
+                        "default": True,
+                    },
+                    "wait_for_ms": {
+                        "type": "integer",
+                        "description": "Optional page wait delay in milliseconds before scraping.",
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "description": "Optional scrape timeout in milliseconds.",
+                    },
+                    "max_age_ms": {
+                        "type": "integer",
+                        "description": "Optional cache max-age in milliseconds.",
+                    },
+                    "include_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional include-tags hint for the page scrape.",
+                    },
+                    "exclude_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional exclude-tags hint for the page scrape.",
+                    },
+                    "mobile": {
+                        "type": "boolean",
+                        "description": "Use a mobile user-agent when scraping. Default false.",
+                        "default": False,
+                    },
+                    "proxy": {
+                        "type": "string",
+                        "description": "Optional Firecrawl proxy tier: auto, basic, or enhanced.",
+                        "enum": ["auto", "basic", "enhanced"],
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+        group="research",
+        prompt_summary="Robust page scrape via the Firecrawl specialist agent when plain fetch is not enough and you need clean formats or rendered content artifacts.",
+        progress_builder=_firecrawl_scrape_progress,
+        handler_method="_firecrawl_scrape",
+    ),
+    ToolSpec(
+        name="firecrawl_extract",
+        api_definition={
+            "name": "firecrawl_extract",
+            "description": (
+                "Use the Firecrawl specialist agent to extract structured data from one or more URLs. "
+                "Use this for schema-shaped research outputs, list building, and reliable multi-page extraction."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "urls": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "One or more page URLs to extract from.",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "Extraction instruction describing the fields or structure you need.",
+                    },
+                    "schema": {
+                        "type": "object",
+                        "description": "Optional JSON schema for the extracted structured output.",
+                    },
+                    "show_sources": {
+                        "type": "boolean",
+                        "description": "Whether to return source references when available.",
+                        "default": False,
+                    },
+                    "enable_web_search": {
+                        "type": "boolean",
+                        "description": "Allow Firecrawl web search assist during extraction if needed.",
+                        "default": False,
+                    },
+                    "only_main_content": {
+                        "type": "boolean",
+                        "description": "Prefer main page content during Firecrawl scrapeOptions. Default true.",
+                        "default": True,
+                    },
+                    "wait_for_ms": {
+                        "type": "integer",
+                        "description": "Optional page wait delay in milliseconds before extraction scraping.",
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "description": "Optional extraction timeout in milliseconds.",
+                    },
+                    "max_age_ms": {
+                        "type": "integer",
+                        "description": "Optional cache max-age in milliseconds.",
+                    },
+                },
+                "required": ["urls", "prompt"],
+            },
+        },
+        group="research",
+        prompt_summary="Structured extraction via the Firecrawl specialist agent for schema-shaped outputs, list building, and multi-page research tasks.",
+        progress_builder=_firecrawl_extract_progress,
+        handler_method="_firecrawl_extract",
+    ),
+    ToolSpec(
+        name="firecrawl_recall_session",
+        api_definition={
+            "name": "firecrawl_recall_session",
+            "description": (
+                "Read the Firecrawl agent's private run ledger for a prior session. Use this when you need exact recall of what the Firecrawl specialist already scraped or extracted."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID whose Firecrawl runs should be recalled.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of Firecrawl runs to return. Default 10.",
+                        "default": 10,
+                    },
+                },
+                "required": ["session_id"],
+            },
+        },
+        group="research",
+        prompt_summary="Exact recall of the Firecrawl agent's private session ledger so you can reuse or inspect prior Firecrawl work.",
+        progress_builder=_firecrawl_recall_progress,
+        handler_method="_firecrawl_recall_session",
         read_only=True,
     ),
     ToolSpec(

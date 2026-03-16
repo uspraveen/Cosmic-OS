@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "response": { "type": "string" },
+    "session_id": { "type": "string" },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "task_id": { "type": "string" },
+          "intent": { "type": "string" },
+          "summary": { "type": "string" },
+          "target_url": { "type": ["string", "null"] },
+          "artifact_refs": {
+            "type": "array",
+            "items": { "type": "object" }
+          },
+          "created_at": { "type": "string" }
+        },
+        "required": ["task_id", "intent", "summary", "artifact_refs", "created_at"]
+      }
+    }
+  },
+  "required": ["response", "session_id", "entries"]
+}
