@@ -212,6 +212,15 @@ class CosmicMemoryClient:
     async def index_rebuild(self) -> dict[str, Any]:
         return await self._request_json("POST", "/v1/index/rebuild", json_body={})
 
+    async def graph_status(self) -> dict[str, Any]:
+        return await self._request_json("GET", "/v1/graph/status")
+
+    async def graph_sync(self) -> dict[str, Any]:
+        return await self._request_json("POST", "/v1/graph/sync", json_body={})
+
+    async def graph_rebuild(self) -> dict[str, Any]:
+        return await self._request_json("POST", "/v1/graph/rebuild", json_body={})
+
     async def get_core_fact_block(self, *, max_chars: int = 1500) -> dict[str, Any]:
         return await self._request_json(
             "GET",

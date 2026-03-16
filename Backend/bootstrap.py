@@ -1263,6 +1263,30 @@ def build_service_env_overrides(
         memory_data.get("COSMIC_MEMORY_GRAPH_EXTRACT_ENABLED"),
         "false",
     )
+    memory_graph_backend = first_meaningful_value(
+        memory_external.get("COSMIC_MEMORY_GRAPH_BACKEND"),
+        memory_existing.get("COSMIC_MEMORY_GRAPH_BACKEND"),
+        memory_data.get("COSMIC_MEMORY_GRAPH_BACKEND"),
+        "memory",
+    )
+    memory_graph_sync_on_startup = first_meaningful_value(
+        memory_external.get("COSMIC_MEMORY_GRAPH_SYNC_ON_STARTUP"),
+        memory_existing.get("COSMIC_MEMORY_GRAPH_SYNC_ON_STARTUP"),
+        memory_data.get("COSMIC_MEMORY_GRAPH_SYNC_ON_STARTUP"),
+        "true",
+    )
+    memory_graph_deterministic_enabled = first_meaningful_value(
+        memory_external.get("COSMIC_MEMORY_GRAPH_DETERMINISTIC_ENABLED"),
+        memory_existing.get("COSMIC_MEMORY_GRAPH_DETERMINISTIC_ENABLED"),
+        memory_data.get("COSMIC_MEMORY_GRAPH_DETERMINISTIC_ENABLED"),
+        "true",
+    )
+    memory_primary_user_display_name = first_meaningful_value(
+        memory_external.get("COSMIC_MEMORY_PRIMARY_USER_DISPLAY_NAME"),
+        memory_existing.get("COSMIC_MEMORY_PRIMARY_USER_DISPLAY_NAME"),
+        memory_data.get("COSMIC_MEMORY_PRIMARY_USER_DISPLAY_NAME"),
+        "",
+    )
 
     overrides = {
         "gateway.env": {
@@ -1299,7 +1323,11 @@ def build_service_env_overrides(
             "COSMIC_MEMORY_INTERNAL_TOKEN": shared_internal_token or secrets.token_urlsafe(32),
             "COSMIC_MEMORY_DATA_DIR": memory_data_dir or str(DEFAULT_MEMORY_DATA_DIR),
             "COSMIC_MEMORY_SYNC_ON_STARTUP": memory_sync_on_startup or "true",
+            "COSMIC_MEMORY_GRAPH_SYNC_ON_STARTUP": memory_graph_sync_on_startup or "true",
+            "COSMIC_MEMORY_GRAPH_DETERMINISTIC_ENABLED": memory_graph_deterministic_enabled or "true",
             "COSMIC_MEMORY_GRAPH_EXTRACT_ENABLED": memory_graph_extract_enabled or "false",
+            "COSMIC_MEMORY_GRAPH_BACKEND": memory_graph_backend or "memory",
+            "COSMIC_MEMORY_PRIMARY_USER_DISPLAY_NAME": memory_primary_user_display_name or "",
         }
     return overrides
 

@@ -473,6 +473,8 @@ class FakeMemoryClient:
         return {
             "enabled": self.enabled,
             "status": "ok" if self.enabled else "disabled",
+            "graph_enabled": self.enabled,
+            "graph_backend": "memory" if self.enabled else None,
         }
 
     async def build_prompt_context(
@@ -577,6 +579,36 @@ class FakeMemoryClient:
     async def get_core_fact_block(self, *, max_chars: int = 1500) -> dict[str, object]:
         self.core_fact_requests.append(max_chars)
         return {"items": [], "rendered": "- User prefers concise technical answers."}
+
+    async def index_status(self) -> dict[str, object]:
+        return {"enabled": self.enabled}
+
+    async def index_sync(self) -> dict[str, object]:
+        return {"enabled": self.enabled, "mode": "sync"}
+
+    async def index_rebuild(self) -> dict[str, object]:
+        return {"enabled": self.enabled, "mode": "rebuild"}
+
+    async def graph_status(self) -> dict[str, object]:
+        return {
+            "enabled": self.enabled,
+            "backend": "memory" if self.enabled else None,
+            "ingested_memory_count": 1 if self.enabled else 0,
+        }
+
+    async def graph_sync(self) -> dict[str, object]:
+        return {
+            "enabled": self.enabled,
+            "backend": "memory" if self.enabled else None,
+            "mode": "sync",
+        }
+
+    async def graph_rebuild(self) -> dict[str, object]:
+        return {
+            "enabled": self.enabled,
+            "backend": "memory" if self.enabled else None,
+            "mode": "rebuild",
+        }
 
 
 class FakeRedis:
@@ -1234,6 +1266,27 @@ def test_internal_memory_routes_proxy_to_memory_service(tmp_path) -> None:
         )
         assert core_fact_write_response.status_code == 201
         assert runtime.memory_client.core_fact_write_calls[0]["canonical_key"] == "preferences.response_style"
+
+        graph_status_response = client.get(
+            "/internal/memory/graph-status",
+            headers={"X-Internal-Token": "internal-token"},
+        )
+        assert graph_status_response.status_code == 200
+        assert graph_status_response.json()["backend"] == "memory"
+
+        graph_sync_response = client.post(
+            "/internal/memory/graph-sync",
+            headers={"X-Internal-Token": "internal-token"},
+        )
+        assert graph_sync_response.status_code == 200
+        assert graph_sync_response.json()["mode"] == "sync"
+
+        graph_rebuild_response = client.post(
+            "/internal/memory/graph-rebuild",
+            headers={"X-Internal-Token": "internal-token"},
+        )
+        assert graph_rebuild_response.status_code == 200
+        assert graph_rebuild_response.json()["mode"] == "rebuild"
 
         audit_response = client.get(
             "/internal/memory/write-audit",

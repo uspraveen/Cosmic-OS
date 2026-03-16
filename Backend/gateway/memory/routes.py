@@ -195,6 +195,39 @@ async def memory_index_rebuild(
         _raise_memory_http_error(exc)
 
 
+@router.get("/internal/memory/graph-status")
+async def memory_graph_status(
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return await runtime.memory_graph_status()
+    except Exception as exc:
+        _raise_memory_http_error(exc)
+
+
+@router.post("/internal/memory/graph-sync")
+async def memory_graph_sync(
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return await runtime.memory_graph_sync()
+    except Exception as exc:
+        _raise_memory_http_error(exc)
+
+
+@router.post("/internal/memory/graph-rebuild")
+async def memory_graph_rebuild(
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return await runtime.memory_graph_rebuild()
+    except Exception as exc:
+        _raise_memory_http_error(exc)
+
+
 @router.get("/internal/memory/write-audit")
 async def memory_write_audit(
     limit: int = Query(default=50, ge=1, le=500),

@@ -2228,6 +2228,15 @@ class GatewayRuntime:
     async def memory_index_rebuild(self) -> dict[str, Any]:
         return await self.memory_client.index_rebuild()
 
+    async def memory_graph_status(self) -> dict[str, Any]:
+        return await self.memory_client.graph_status()
+
+    async def memory_graph_sync(self) -> dict[str, Any]:
+        return await self.memory_client.graph_sync()
+
+    async def memory_graph_rebuild(self) -> dict[str, Any]:
+        return await self.memory_client.graph_rebuild()
+
     def list_memory_write_audit(
         self,
         *,
