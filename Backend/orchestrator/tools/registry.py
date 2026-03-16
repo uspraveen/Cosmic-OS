@@ -919,5 +919,9 @@ def get_tool_registry_snapshot() -> dict[str, Any]:
         "model_tools": [spec.name for spec in _MODEL_TOOL_SPECS if spec.exposed_to_model],
         "local_tools": [spec.name for spec in _MODEL_TOOL_SPECS if spec.is_local and spec.exposed_to_model],
         "server_tools": [spec.name for spec in _MODEL_TOOL_SPECS if not spec.is_local and spec.exposed_to_model],
-        "read_only_local_tools": sorted(get_parallel_safe_local_tool_names()),
+        "read_only_local_tools": sorted(
+            spec.name
+            for spec in _MODEL_TOOL_SPECS
+            if spec.is_local and spec.read_only and spec.exposed_to_model
+        ),
     }
