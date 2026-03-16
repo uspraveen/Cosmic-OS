@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -43,6 +44,25 @@ def _env_bool(name: str, default: bool) -> bool:
     return default
 
 
+def _env_json_map(name: str) -> dict[str, str]:
+    raw = os.getenv(name)
+    if raw is None:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    result: dict[str, str] = {}
+    for key, value in parsed.items():
+        normalized_key = str(key or "").strip()
+        normalized_value = str(value or "").strip()
+        if normalized_key and normalized_value:
+            result[normalized_key] = normalized_value
+    return result
+
+
 @dataclass(slots=True)
 class OrchestratorConfig:
     host: str = "127.0.0.1"
@@ -56,6 +76,11 @@ class OrchestratorConfig:
     max_tokens: int = 16000
     request_timeout_sec: float = 300.0
     redis_url: str = ""
+    agent_registry_db_path: Path = BACKEND_ROOT / "registry" / "registry.db"
+    agent_events_stream: str = "streams:events"
+    agent_events_group: str = "orchestrator"
+    orchestrator_agent_id: str = "cosmic/orchestrator:1.0.0"
+    agent_signing_secrets: dict[str, str] = field(default_factory=dict)
     task_input_requests_stream: str = "user_input:requests"
     task_input_replies_stream: str = "user_input:replies"
     task_input_orchestrator_group: str = "orchestrator"
@@ -81,6 +106,14 @@ class OrchestratorConfig:
             max_tokens=max(256, _env_int("OPUS_MAX_TOKENS", 16000)),
             request_timeout_sec=max(30.0, _env_float("ORCHESTRATOR_REQUEST_TIMEOUT_SEC", 300.0)),
             redis_url=os.getenv("REDIS_URL", "").strip(),
+            agent_registry_db_path=Path(
+                os.getenv("AGENT_REGISTRY_DB_PATH", str(BACKEND_ROOT / "registry" / "registry.db"))
+            ).expanduser(),
+            agent_events_stream=os.getenv("AGENT_EVENTS_STREAM", "streams:events").strip() or "streams:events",
+            agent_events_group=os.getenv("AGENT_EVENTS_GROUP", "orchestrator").strip() or "orchestrator",
+            orchestrator_agent_id=os.getenv("ORCHESTRATOR_AGENT_ID", "cosmic/orchestrator:1.0.0").strip()
+            or "cosmic/orchestrator:1.0.0",
+            agent_signing_secrets=_env_json_map("AGENT_SIGNING_SECRETS_JSON"),
             task_input_requests_stream=os.getenv("TASK_INPUT_REQUESTS_STREAM", "user_input:requests").strip()
             or "user_input:requests",
             task_input_replies_stream=os.getenv("TASK_INPUT_REPLIES_STREAM", "user_input:replies").strip()

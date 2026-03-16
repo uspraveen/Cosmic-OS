@@ -70,6 +70,7 @@ def require_internal_token(
 @app.get("/health")
 async def health(request: Request) -> dict[str, object]:
     runtime: OrchestratorRuntime = request.app.state.orchestrator_runtime
+    agent_dispatch = await runtime.get_agent_dispatch_snapshot()
     return {
         "status": "ok" if runtime.started else "starting",
         "model": runtime.config.anthropic_model,
@@ -83,6 +84,7 @@ async def health(request: Request) -> dict[str, object]:
             "group": runtime.config.task_input_orchestrator_group,
         },
         "loop_diagnostics": runtime.get_loop_diagnostics_snapshot(),
+        "agent_dispatch": agent_dispatch,
         "tool_registry": get_tool_registry_snapshot(),
         "prompt_assets": {"sha256": get_prompt_asset_hashes()},
     }

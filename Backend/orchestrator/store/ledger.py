@@ -349,6 +349,28 @@ class TaskLedger:
             )
             connection.commit()
 
+    def mark_deferred(self, task_id: str, *, result: dict[str, Any]) -> None:
+        updated_at = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status = 'deferred',
+                    result_json = ?,
+                    error_code = NULL,
+                    error_message = NULL,
+                    updated_at = ?,
+                    completed_at = NULL
+                WHERE task_id = ?
+                """,
+                (
+                    json.dumps(result, ensure_ascii=False),
+                    updated_at,
+                    task_id,
+                ),
+            )
+            connection.commit()
+
     def mark_failed(self, task_id: str, *, code: str, message: str) -> None:
         completed_at = utcnow_iso()
         with self._lock, self._connect() as connection:

@@ -64,32 +64,38 @@ async def find_available_instance(
     agent_ids = await client.smembers(intent_members_key(intent))
 
     for agent_id in sorted(agent_ids):
-        cursor = 0
-        while True:
-            cursor, keys = await client.scan(
-                cursor=cursor,
-                match=f"registry:{agent_id}:*",
-                count=20,
-            )
-            for key in keys:
-                state = await client.hgetall(key)
-                if not state:
-                    continue
-                if str(state.get("status") or "").strip() != "healthy":
-                    continue
-                load = _safe_int(state.get("current_load"), fallback=10**9)
-                max_conc = _safe_int(state.get("max_conc"), fallback=0)
-                ttl = _safe_int(state.get("heartbeat_ttl"), fallback=0)
-                last_seen = _parse_utc_timestamp(state.get("last_seen"))
-                if last_seen is None or ttl <= 0 or load >= max_conc:
-                    continue
-                if (current_time - last_seen).total_seconds() >= ttl:
-                    continue
-                instance_id = key.split(":")[-1]
-                return str(agent_id), instance_id
-            if cursor == 0:
-                break
+        candidate = await find_available_instance_for_agent(str(agent_id), client, now=current_time)
+        if candidate != (None, None):
+            return candidate
 
+    return None, None
+
+
+async def find_available_instance_for_agent(
+    agent_id: str,
+    client: redis.Redis,
+    *,
+    now: datetime | None = None,
+) -> tuple[str | None, str | None]:
+    current_time = (now or utcnow()).astimezone(timezone.utc)
+    cursor = 0
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_agent_id:
+        return None, None
+
+    while True:
+        cursor, keys = await client.scan(
+            cursor=cursor,
+            match=f"registry:{normalized_agent_id}:*",
+            count=20,
+        )
+        for key in keys:
+            state = await client.hgetall(key)
+            if _state_is_available(state, now=current_time):
+                instance_id = key.split(":")[-1]
+                return normalized_agent_id, instance_id
+        if cursor == 0:
+            break
     return None, None
 
 
@@ -111,3 +117,19 @@ def _parse_utc_timestamp(value: Any) -> datetime | None:
         return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     except ValueError:
         return None
+
+
+def _state_is_available(state: dict[str, Any], *, now: datetime) -> bool:
+    if not state:
+        return False
+    if str(state.get("status") or "").strip() != "healthy":
+        return False
+    load = _safe_int(state.get("current_load"), fallback=10**9)
+    max_conc = _safe_int(state.get("max_conc"), fallback=0)
+    ttl = _safe_int(state.get("heartbeat_ttl"), fallback=0)
+    last_seen = _parse_utc_timestamp(state.get("last_seen"))
+    if last_seen is None or ttl <= 0 or load >= max_conc:
+        return False
+    if (now - last_seen).total_seconds() >= ttl:
+        return False
+    return True

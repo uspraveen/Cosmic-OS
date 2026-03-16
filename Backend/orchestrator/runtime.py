@@ -14,11 +14,12 @@ All events are yielded as dicts for ndjson streaming back to the Gateway.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
@@ -28,7 +29,24 @@ import httpx
 import redis.asyncio as redis
 
 from gateway.adapters.response_processor import AWAITING_REPLY_TAG
-from shared import TaskEnvelope, create_redis_client, ensure_stream_group, parse_stream_payload, verify_task_envelope
+from registry import RegistryStore, find_available_instance, find_available_instance_for_agent
+from shared import (
+    AgentError,
+    AgentResult,
+    BackpressureError,
+    EventEnvelope,
+    SOURCE_PRIORITY_MAP,
+    TaskEnvelope,
+    TaskInProgress,
+    create_redis_client,
+    dispatch_task,
+    ensure_stream_group,
+    generate_task_id,
+    parse_event_envelope,
+    parse_stream_payload,
+    sign_task_envelope,
+    verify_task_envelope,
+)
 
 from .config import OrchestratorConfig
 from .prompts import build_agentic_system_prompt
@@ -141,6 +159,30 @@ class AnthropicLoopStats:
         }
 
 
+@dataclass(slots=True)
+class AgentDispatchStats:
+    dispatches_started: int = 0
+    dispatches_completed: int = 0
+    dispatch_failures: int = 0
+    events_consumed: int = 0
+    deferred_events: int = 0
+    rejected_events: int = 0
+    failed_events: int = 0
+    wait_timeouts: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "dispatches_started": self.dispatches_started,
+            "dispatches_completed": self.dispatches_completed,
+            "dispatch_failures": self.dispatch_failures,
+            "events_consumed": self.events_consumed,
+            "deferred_events": self.deferred_events,
+            "rejected_events": self.rejected_events,
+            "failed_events": self.failed_events,
+            "wait_timeouts": self.wait_timeouts,
+        }
+
+
 class OrchestratorRuntime:
     def __init__(
         self,
@@ -158,20 +200,35 @@ class OrchestratorRuntime:
         )
         self._owns_redis = redis_client is None and self._redis is not None
         self.task_ledger = TaskLedger(config.task_ledger_db_path)
+        self.registry_store = RegistryStore(config.agent_registry_db_path)
         self.started = False
         self._active_runs: dict[str, ActiveTaskRun] = {}
         self._pending_input_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._pending_agent_results: dict[str, asyncio.Future[AgentResult | TaskInProgress]] = {}
         self._reply_consumer_task: asyncio.Task[None] | None = None
+        self._agent_event_consumer_task: asyncio.Task[None] | None = None
         self._tool_executor: ToolExecutor | None = None
         self._anthropic_loop_stats = AnthropicLoopStats()
+        self._agent_dispatch_stats = AgentDispatchStats()
+        self._agent_event_consumer_name = f"orchestrator-events-{id(self)}"
 
     async def start(self) -> None:
         self.task_ledger.initialize()
+        self.registry_store.initialize()
         if self._redis is not None:
+            await ensure_stream_group(
+                self._redis,
+                stream=self.config.agent_events_stream,
+                group=self.config.agent_events_group,
+            )
             await ensure_stream_group(
                 self._redis,
                 stream=self.config.task_input_replies_stream,
                 group=self.config.task_input_orchestrator_group,
+            )
+            self._agent_event_consumer_task = asyncio.create_task(
+                self._agent_event_consumer_loop(),
+                name=self._agent_event_consumer_name,
             )
             self._reply_consumer_task = asyncio.create_task(
                 self._user_reply_consumer_loop(),
@@ -188,6 +245,10 @@ class OrchestratorRuntime:
         self.started = True
 
     async def stop(self) -> None:
+        if self._agent_event_consumer_task is not None:
+            self._agent_event_consumer_task.cancel()
+            await asyncio.gather(self._agent_event_consumer_task, return_exceptions=True)
+            self._agent_event_consumer_task = None
         if self._reply_consumer_task is not None:
             self._reply_consumer_task.cancel()
             await asyncio.gather(self._reply_consumer_task, return_exceptions=True)
@@ -196,6 +257,10 @@ class OrchestratorRuntime:
             if not future.done():
                 future.cancel()
         self._pending_input_futures.clear()
+        for future in list(self._pending_agent_results.values()):
+            if not future.done():
+                future.cancel()
+        self._pending_agent_results.clear()
         if self._tool_executor is not None:
             await self._tool_executor.close()
             self._tool_executor = None
@@ -657,6 +722,140 @@ class OrchestratorRuntime:
     def get_loop_diagnostics_snapshot(self) -> dict[str, int]:
         return self._anthropic_loop_stats.as_dict()
 
+    async def list_registered_agents(self) -> list[dict[str, Any]]:
+        rows = self.registry_store.list_agents(status=None)
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            agent_id = str(row.get("agent_id") or "").strip()
+            intents = [item["intent"] for item in self.registry_store.list_intents(agent_id) if item.get("intent")]
+            healthy_instance = False
+            instance_id: str | None = None
+            if self._redis is not None and agent_id:
+                found_agent_id, found_instance_id = await find_available_instance_for_agent(agent_id, self._redis)
+                healthy_instance = bool(found_agent_id and found_instance_id)
+                instance_id = found_instance_id
+            results.append(
+                {
+                    **row,
+                    "intents": intents,
+                    "healthy_instance": healthy_instance,
+                    "instance_id": instance_id,
+                }
+            )
+        return results
+
+    async def get_agent_dispatch_snapshot(self) -> dict[str, Any]:
+        agents = await self.list_registered_agents()
+        return {
+            "enabled": self._redis is not None,
+            "registry_db_path": str(self.config.agent_registry_db_path),
+            "events_stream": self.config.agent_events_stream,
+            "events_group": self.config.agent_events_group,
+            "consumer_running": self._agent_event_consumer_task is not None and not self._agent_event_consumer_task.done(),
+            "consumer_name": self._agent_event_consumer_name if self._redis is not None else None,
+            "registered_agents": len(agents),
+            "healthy_agents": sum(1 for item in agents if item.get("healthy_instance")),
+            "pending_results": len(self._pending_agent_results),
+            "stats": self._agent_dispatch_stats.as_dict(),
+            "agents": agents,
+        }
+
+    async def dispatch_agent_task(
+        self,
+        *,
+        parent_task: TaskEnvelope,
+        intent: str,
+        input_payload: dict[str, Any] | None = None,
+        agent_id: str | None = None,
+        priority: str | None = None,
+        idempotency_key: str | None = None,
+        wait_timeout_sec: float | None = None,
+    ) -> AgentResult | TaskInProgress:
+        if self._redis is None:
+            raise RuntimeError("REDIS_URL is not configured in orchestrator.env.")
+
+        resolved_intent = str(intent or "").strip()
+        if not resolved_intent:
+            raise RuntimeError("intent is required for agent dispatch.")
+
+        candidate = await self._find_available_agent(resolved_intent, preferred_agent_id=agent_id)
+        recipient = str(candidate["agent_id"])
+        timeout_sec = max(1, int(candidate.get("timeout_sec") or self.config.request_timeout_sec))
+        child_deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout_sec)
+        if parent_task.deadline_ts is not None and parent_task.deadline_ts < child_deadline:
+            child_deadline = parent_task.deadline_ts
+        child_input = dict(input_payload or {})
+        if "request_id" not in child_input:
+            inherited_request_id = str(parent_task.input.get("request_id") or "").strip()
+            if inherited_request_id:
+                child_input["request_id"] = inherited_request_id
+
+        child_priority = str(priority or parent_task.priority or SOURCE_PRIORITY_MAP.get(parent_task.source, "normal")).strip()
+        normalized_idempotency_key = str(idempotency_key or "").strip() or self._build_child_idempotency_key(
+            parent_task.idempotency_key,
+            recipient,
+            resolved_intent,
+            child_input,
+        )
+
+        child_task = TaskEnvelope(
+            task_id=generate_task_id(),
+            task_list_id=parent_task.task_list_id,
+            parent_task_id=parent_task.task_id,
+            session_id=parent_task.session_id,
+            sender=self.config.orchestrator_agent_id,
+            recipient=recipient,
+            intent=resolved_intent,
+            input=child_input,
+            input_artifacts=[],
+            idempotency_key=normalized_idempotency_key,
+            deadline_ts=child_deadline,
+            priority=child_priority if child_priority in {"high", "normal", "low"} else "normal",
+            leader_epoch=None,
+            signature="",
+            source=parent_task.source,
+            source_id=parent_task.source_id,
+            channel=parent_task.channel,
+        )
+        signature = sign_task_envelope(child_task, self._resolve_agent_secret(recipient))
+        child_task = child_task.model_copy(update={"signature": signature})
+        self.task_ledger.create_task(child_task)
+
+        wait_timeout = wait_timeout_sec if wait_timeout_sec is not None else float(timeout_sec)
+        pending_result: asyncio.Future[AgentResult | TaskInProgress] | None = None
+        if wait_timeout > 0:
+            pending_result = asyncio.get_running_loop().create_future()
+            self._pending_agent_results[child_task.task_id] = pending_result
+
+        try:
+            await dispatch_task(child_task, self._redis)
+            self._agent_dispatch_stats.dispatches_started += 1
+
+            if pending_result is None:
+                result = self._build_in_progress_result(child_task.task_id, normalized_idempotency_key, timeout_sec=timeout_sec)
+                self.task_ledger.mark_deferred(child_task.task_id, result=result.model_dump(mode="json"))
+                return result
+
+            try:
+                return await asyncio.wait_for(asyncio.shield(pending_result), timeout=wait_timeout)
+            except asyncio.TimeoutError:
+                self._agent_dispatch_stats.wait_timeouts += 1
+                result = self._build_in_progress_result(child_task.task_id, normalized_idempotency_key, timeout_sec=timeout_sec)
+                self.task_ledger.mark_deferred(child_task.task_id, result=result.model_dump(mode="json"))
+                return result
+        except BackpressureError as exc:
+            self._agent_dispatch_stats.dispatch_failures += 1
+            self.task_ledger.mark_failed(child_task.task_id, code="BACKPRESSURE", message=str(exc))
+            raise RuntimeError(str(exc)) from exc
+        except Exception as exc:
+            self._agent_dispatch_stats.dispatch_failures += 1
+            message = str(exc).strip()[:500] or "Agent dispatch failed."
+            self.task_ledger.mark_failed(child_task.task_id, code="DISPATCH_ERROR", message=message)
+            raise
+        finally:
+            if pending_result is None or pending_result.done():
+                self._pending_agent_results.pop(child_task.task_id, None)
+
     async def request_user_input(
         self,
         task_id: str,
@@ -710,6 +909,202 @@ class OrchestratorRuntime:
         finally:
             if future.done() or (wait_timeout_sec is None or wait_timeout_sec <= 0):
                 self._pending_input_futures.pop(irid, None)
+
+    def _resolve_agent_secret(self, agent_id: str) -> str:
+        normalized_agent_id = str(agent_id or "").strip()
+        secret = (
+            self.config.agent_signing_secrets.get(normalized_agent_id)
+            or self.config.signing_secret
+        ).strip()
+        if not secret:
+            raise RuntimeError(f"No signing secret configured for agent {normalized_agent_id}.")
+        return secret
+
+    def _build_child_idempotency_key(
+        self,
+        parent_idempotency_key: str,
+        agent_id: str,
+        intent: str,
+        input_payload: dict[str, Any],
+    ) -> str:
+        fingerprint_payload = dict(input_payload)
+        fingerprint_payload.pop("auth", None)
+        digest = hashlib.sha256(
+            json.dumps(
+                fingerprint_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        return f"{parent_idempotency_key}:{agent_id}:{intent}:{digest}"
+
+    async def _find_available_agent(
+        self,
+        intent: str,
+        *,
+        preferred_agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        if self._redis is None:
+            raise RuntimeError("REDIS_URL is not configured in orchestrator.env.")
+
+        registered_matches = self.registry_store.list_agents_for_intent(intent)
+        if not registered_matches:
+            raise RuntimeError(f"No registered agent advertises intent {intent!r}.")
+
+        if preferred_agent_id:
+            normalized_agent_id = str(preferred_agent_id or "").strip()
+            match = next((item for item in registered_matches if item.get("agent_id") == normalized_agent_id), None)
+            if match is None:
+                if self.registry_store.get_card(normalized_agent_id) is None:
+                    raise RuntimeError(f"Agent {normalized_agent_id!r} is not registered.")
+                raise RuntimeError(f"Agent {normalized_agent_id!r} does not advertise intent {intent!r}.")
+            found_agent_id, instance_id = await find_available_instance_for_agent(normalized_agent_id, self._redis)
+            if not found_agent_id or not instance_id:
+                raise RuntimeError(f"Agent {normalized_agent_id!r} is registered but has no healthy instance.")
+            return {**match, "instance_id": instance_id}
+
+        found_agent_id, instance_id = await find_available_instance(intent, self._redis)
+        if not found_agent_id or not instance_id:
+            raise RuntimeError(f"No healthy agent instance is available for intent {intent!r}.")
+
+        match = next((item for item in registered_matches if item.get("agent_id") == found_agent_id), None)
+        if match is None:
+            raise RuntimeError(f"Healthy agent {found_agent_id!r} is not registered for intent {intent!r}.")
+        return {**match, "instance_id": instance_id}
+
+    def _build_in_progress_result(self, task_id: str, idempotency_key: str, *, timeout_sec: int) -> TaskInProgress:
+        return TaskInProgress(
+            task_id=task_id,
+            idempotency_key=idempotency_key,
+            executing_since=datetime.now(timezone.utc),
+            check_after_sec=max(5, min(60, max(1, timeout_sec) // 4 or 5)),
+        )
+
+    def _coerce_agent_result(self, event: EventEnvelope) -> AgentResult:
+        try:
+            result = AgentResult.model_validate(event.payload)
+        except Exception as exc:
+            return AgentResult(
+                status="failed",
+                output={},
+                artifacts=[],
+                error=AgentError(
+                    code="INVALID_EVENT_PAYLOAD",
+                    retryable=False,
+                    message=f"Invalid {event.event_type} payload: {exc}",
+                    next_action="escalate",
+                ),
+            )
+
+        if result.status == "failed" and result.error is None:
+            return result.model_copy(
+                update={
+                    "error": AgentError(
+                        code="AGENT_FAILED",
+                        retryable=False,
+                        message="Agent reported failure without an error payload.",
+                        next_action="escalate",
+                    )
+                }
+            )
+        return result
+
+    def _rejected_agent_result(self, event: EventEnvelope) -> AgentResult:
+        reason = str(event.payload.get("reason") or "agent_rejected").strip().replace("_", " ")
+        sender = str(event.payload.get("sender") or "").strip()
+        message = f"Agent rejected dispatched task: {reason}."
+        if sender:
+            message = f"{message.rstrip('.')} Sender: {sender}."
+        return AgentResult(
+            status="failed",
+            output={},
+            artifacts=[],
+            error=AgentError(
+                code="TASK_REJECTED",
+                retryable=False,
+                message=message,
+                next_action="escalate",
+            ),
+        )
+
+    def _resolve_pending_agent_result(self, task_id: str, result: AgentResult | TaskInProgress) -> None:
+        future = self._pending_agent_results.pop(task_id, None)
+        if future is not None and not future.done():
+            future.set_result(result)
+
+    async def _agent_event_consumer_loop(self) -> None:
+        assert self._redis is not None
+        while True:
+            entries = await self._redis.xreadgroup(
+                groupname=self.config.agent_events_group,
+                consumername=self._agent_event_consumer_name,
+                streams={self.config.agent_events_stream: ">"},
+                count=20,
+                block=1000,
+            )
+            for _stream, messages in entries:
+                for message_id, data in messages:
+                    try:
+                        event = parse_event_envelope(data)
+                        await self._handle_agent_event(event)
+                    except Exception as exc:
+                        logger.warning("orchestrator.agent_event_invalid message_id=%s error=%s", message_id, exc)
+                    finally:
+                        await self._redis.xack(
+                            self.config.agent_events_stream,
+                            self.config.agent_events_group,
+                            message_id,
+                        )
+
+    async def _handle_agent_event(self, event: EventEnvelope) -> None:
+        self._agent_dispatch_stats.events_consumed += 1
+
+        if event.event_type == "task.completed":
+            result = self._coerce_agent_result(event)
+            self.task_ledger.mark_completed(event.task_id, result=result.model_dump(mode="json"))
+            self._agent_dispatch_stats.dispatches_completed += 1
+            self._resolve_pending_agent_result(event.task_id, result)
+            return
+
+        if event.event_type in {"task.failed", "task.dlq"}:
+            result = self._coerce_agent_result(event)
+            error = result.error or AgentError(
+                code="AGENT_FAILED",
+                retryable=False,
+                message=f"Agent emitted {event.event_type}.",
+                next_action="escalate",
+            )
+            self.task_ledger.mark_failed(event.task_id, code=error.code, message=error.message)
+            self._agent_dispatch_stats.failed_events += 1
+            self._resolve_pending_agent_result(event.task_id, result)
+            return
+
+        if event.event_type == "task.deferred":
+            try:
+                result = TaskInProgress.model_validate(event.payload)
+            except Exception as exc:
+                result = self._build_in_progress_result(
+                    event.task_id,
+                    idempotency_key=f"deferred:{event.task_id}",
+                    timeout_sec=30,
+                )
+                logger.warning("orchestrator.agent_event_invalid_deferred task_id=%s error=%s", event.task_id, exc)
+            self.task_ledger.mark_deferred(event.task_id, result=result.model_dump(mode="json"))
+            self._agent_dispatch_stats.deferred_events += 1
+            self._resolve_pending_agent_result(event.task_id, result)
+            return
+
+        if event.event_type == "task.rejected":
+            # Current workers use task.rejected for hard dispatch rejection.
+            # When epoch-based redrive lands, this branch can become redispatch-aware.
+            result = self._rejected_agent_result(event)
+            error = result.error
+            assert error is not None
+            self.task_ledger.mark_failed(event.task_id, code=error.code, message=error.message)
+            self._agent_dispatch_stats.rejected_events += 1
+            self._resolve_pending_agent_result(event.task_id, result)
+            return
 
     # ════════════════════════════════════════════════════════════
     #  Anthropic API streaming
