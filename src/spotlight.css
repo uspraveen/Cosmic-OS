@@ -826,6 +826,63 @@ kbd {
   z-index: 44;
 }
 
+.cron-result-shell {
+  position: fixed;
+  right: 24px;
+  bottom: var(--cron-result-bottom, 24px);
+  width: min(340px, calc(100vw - 32px));
+  max-height: min(280px, calc(100vh - var(--cron-result-bottom, 24px) - 48px));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  pointer-events: none;
+  z-index: 9105;
+}
+
+.cron-result-stack {
+  width: 100%;
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+  pointer-events: auto;
+}
+
+.cron-result-stack::-webkit-scrollbar {
+  display: none;
+}
+
+.cron-result-dots {
+  margin-top: 10px;
+  display: flex;
+  width: 100%;
+  justify-content: center;
+  gap: 7px;
+  pointer-events: auto;
+}
+
+.cron-result-card {
+  pointer-events: auto;
+}
+
+.cron-result-chip {
+  background:
+    linear-gradient(180deg, rgba(255, 210, 140, 0.24), rgba(255, 210, 140, 0.08)),
+    rgba(255, 210, 140, 0.08);
+  border-top-color: rgba(255, 232, 190, 0.24);
+  border-right-color: rgba(255, 220, 162, 0.18);
+  border-left-color: rgba(255, 228, 180, 0.22);
+  color: rgba(255, 248, 236, 0.96);
+}
+
+.cron-result-preview {
+  min-height: 72px;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+
 .task-interrupt-stack {
   width: 100%;
   display: flex;

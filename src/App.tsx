@@ -27,6 +27,10 @@ interface Message {
   sources?: Array<{ url: string; title?: string; domain?: string } | string>
   stopped?: boolean
   channel?: string | null
+  requestId?: string | null
+  source?: string | null
+  sourceId?: string | null
+  createdAt?: string | null
 }
 
 interface PendingTaskInput {
@@ -39,6 +43,16 @@ interface PendingTaskInput {
   options: string[]
   status?: string
   timestamp?: string | null
+}
+
+interface CronResultNotification {
+  id: string
+  requestId?: string | null
+  sourceId?: string | null
+  sessionId?: string | null
+  content: string
+  channel?: string | null
+  createdAt?: string | null
 }
 
 interface GatewayStatus {
@@ -85,6 +99,14 @@ const historyToMessages = (history: any[] = []): Message[] => {
       sources: Array.isArray(item?.metadata?.sources) ? item.metadata.sources : undefined,
       stopped: Boolean(item?.metadata?.interrupted),
       channel: typeof item?.channel === 'string' ? item.channel : null,
+      requestId: typeof item?.request_id === 'string'
+        ? item.request_id
+        : typeof item?.metadata?.request_id === 'string'
+          ? item.metadata.request_id
+          : null,
+      source: typeof item?.metadata?.source === 'string' ? item.metadata.source : null,
+      sourceId: typeof item?.metadata?.source_id === 'string' ? item.metadata.source_id : null,
+      createdAt: typeof item?.created_at === 'string' ? item.created_at : null,
     }))
 }
 
@@ -179,6 +201,7 @@ export default function App() {
   const composerSurfaceRef = useRef<HTMLDivElement>(null)
   const chatResponseSurfaceRef = useRef<HTMLDivElement>(null)
   const taskInterruptStackRef = useRef<HTMLDivElement>(null)
+  const cronResultStackRef = useRef<HTMLDivElement>(null)
   const responseEndRef = useRef<HTMLDivElement>(null)
   const responseContainerRef = useRef<HTMLDivElement>(null)
   const modelDialSettleTimeoutRef = useRef<number | null>(null)
@@ -196,9 +219,12 @@ export default function App() {
   const activeSessionIdRef = useRef<string | null>(null)
   const authStateRef = useRef<'loading' | 'unauthenticated' | 'authenticated'>('loading')
   const isStreamingRef = useRef(false)
+  const searchStateRef = useRef<'hidden' | 'visible' | 'hiding'>('hidden')
+  const showLauncherTrayRef = useRef(false)
   const lastGatewayResumeRequestAtRef = useRef(0)
   const shouldAutoScrollRef = useRef(true)
   const selectedModelRef = useRef<GatewayModelSelection>('cosmic')
+  const seenCronResultKeysRef = useRef<Set<string>>(new Set())
 
   const [query, setQuery] = useState('')
   const [searchState, setSearchState] = useState<'hidden' | 'visible' | 'hiding'>('hidden')
@@ -242,11 +268,17 @@ export default function App() {
   const [dismissedTaskInterruptIds, setDismissedTaskInterruptIds] = useState<string[]>([])
   const [selectedTaskInputId, setSelectedTaskInputId] = useState<string | null>(null)
   const [taskInterruptIndex, setTaskInterruptIndex] = useState(0)
+  const [cronResultNotifications, setCronResultNotifications] = useState<CronResultNotification[]>([])
+  const [cronResultIndex, setCronResultIndex] = useState(0)
   const pendingTaskCount = pendingTaskInputs.length
   const orderedPendingTaskInputs = useMemo(() => [...pendingTaskInputs].reverse(), [pendingTaskInputs])
   const visibleTaskInterrupts = useMemo(
     () => orderedPendingTaskInputs.filter((item) => !dismissedTaskInterruptIds.includes(item.inputRequestId)),
     [dismissedTaskInterruptIds, orderedPendingTaskInputs],
+  )
+  const orderedCronResultNotifications = useMemo(
+    () => [...cronResultNotifications].reverse(),
+    [cronResultNotifications],
   )
   const selectedTaskInput = useMemo(() => {
     if (orderedPendingTaskInputs.length === 0) {
@@ -295,6 +327,94 @@ export default function App() {
     role: 'user',
     content,
   })
+
+  const buildCronResultNotificationKey = (value: {
+    requestId?: string | null
+    sourceId?: string | null
+    createdAt?: string | null
+    id?: string | null
+    content?: string | null
+  }) => {
+    const requestId = String(value.requestId || '').trim()
+    if (requestId) {
+      return `request:${requestId}`
+    }
+    const messageId = String(value.id || '').trim()
+    if (messageId) {
+      return `message:${messageId}`
+    }
+    const sourceId = String(value.sourceId || '').trim()
+    const createdAt = String(value.createdAt || '').trim()
+    if (sourceId && createdAt) {
+      return `source:${sourceId}:${createdAt}`
+    }
+    if (sourceId) {
+      return `source:${sourceId}`
+    }
+    const content = String(value.content || '').trim()
+    return content ? `content:${content.slice(0, 120)}` : ''
+  }
+
+  const isCronResultChatInactive = () => {
+    return (
+      searchStateRef.current !== 'visible' ||
+      modeRef.current !== 'chat' ||
+      showLauncherTrayRef.current
+    )
+  }
+
+  const enqueueCronResultNotification = (notification: CronResultNotification) => {
+    const dedupeKey = buildCronResultNotificationKey({
+      requestId: notification.requestId,
+      sourceId: notification.sourceId,
+      createdAt: notification.createdAt,
+      id: notification.id,
+      content: notification.content,
+    })
+    if (!dedupeKey || seenCronResultKeysRef.current.has(dedupeKey)) {
+      return
+    }
+    seenCronResultKeysRef.current.add(dedupeKey)
+    setCronResultNotifications((prev) => {
+      const exists = prev.some((item) => (
+        buildCronResultNotificationKey({
+          requestId: item.requestId,
+          sourceId: item.sourceId,
+          createdAt: item.createdAt,
+          id: item.id,
+          content: item.content,
+        }) === dedupeKey
+      ))
+      if (exists) {
+        return prev
+      }
+      return [...prev, notification]
+    })
+  }
+
+  const dismissCronResultNotification = (notificationId: string) => {
+    setCronResultNotifications((prev) => prev.filter((item) => item.id !== notificationId))
+  }
+
+  const clearCronResultNotifications = () => {
+    setCronResultNotifications([])
+    setCronResultIndex(0)
+  }
+
+  const openChatFromCronNotification = () => {
+    shouldAutoScrollRef.current = true
+    clearCronResultNotifications()
+    setMode('chat')
+    setShowLauncherTray(false)
+    if (searchStateRef.current !== 'visible') {
+      window.cosmic?.toggle?.()
+    } else {
+      showChatComposer()
+    }
+    window.setTimeout(() => {
+      responseEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }, 140)
+  }
 
   const triggerModelDialPulse = (model: GatewayModelSelection) => {
     if (modelDialPulseTimeoutRef.current !== null) {
@@ -595,6 +715,7 @@ export default function App() {
     clearSurfaceLaunch()
     resetInFlightAssistantMaps()
     clearActiveStreamingRefs()
+    seenCronResultKeysRef.current.clear()
     setStreamingProgress('')
     setMessages([])
     setActiveSessionId(null)
@@ -604,6 +725,7 @@ export default function App() {
     setTaskInputErrors({})
     setDismissedTaskInterruptIds([])
     setSelectedTaskInputId(null)
+    clearCronResultNotifications()
     setIsStreaming(false)
     setGatewayStatus({ state: 'idle', connected: false, detail, sessionId: null })
     setShowLauncherTray(false)
@@ -679,6 +801,14 @@ export default function App() {
   }, [mode])
 
   useEffect(() => {
+    searchStateRef.current = searchState
+  }, [searchState])
+
+  useEffect(() => {
+    showLauncherTrayRef.current = showLauncherTray
+  }, [showLauncherTray])
+
+  useEffect(() => {
     messagesRef.current = messages
   }, [messages])
 
@@ -749,6 +879,27 @@ export default function App() {
     }
   }, [taskInterruptIndex, visibleTaskInterrupts.length])
 
+  useEffect(() => {
+    const container = cronResultStackRef.current
+    if (!container || orderedCronResultNotifications.length === 0) {
+      return
+    }
+    const targetLeft = container.clientWidth * cronResultIndex
+    if (Math.abs(container.scrollLeft - targetLeft) > 2) {
+      container.scrollTo({ left: targetLeft, behavior: 'smooth' })
+    }
+  }, [cronResultIndex, orderedCronResultNotifications.length])
+
+  useEffect(() => {
+    if (orderedCronResultNotifications.length === 0) {
+      setCronResultIndex(0)
+      return
+    }
+    if (cronResultIndex > orderedCronResultNotifications.length - 1) {
+      setCronResultIndex(orderedCronResultNotifications.length - 1)
+    }
+  }, [cronResultIndex, orderedCronResultNotifications.length])
+
   const handleTaskInterruptScroll = () => {
     const container = taskInterruptStackRef.current
     if (!container) {
@@ -767,8 +918,27 @@ export default function App() {
     }
   }
 
+  const handleCronResultScroll = () => {
+    const container = cronResultStackRef.current
+    if (!container) {
+      return
+    }
+    const cardWidth = container.clientWidth
+    if (cardWidth <= 0) {
+      return
+    }
+    const nextIndex = Math.max(
+      0,
+      Math.min(orderedCronResultNotifications.length - 1, Math.round(container.scrollLeft / cardWidth)),
+    )
+    if (nextIndex !== cronResultIndex) {
+      setCronResultIndex(nextIndex)
+    }
+  }
+
   const showChatComposer = () => {
     hideHoverTooltip()
+    clearCronResultNotifications()
     setMode('chat')
     setShowLauncherTray(false)
     setSearchState('visible')
@@ -907,13 +1077,15 @@ export default function App() {
       const settings = !!el.closest('.settings-overlay')
       const overlay = searchState !== 'hidden' && !!el.closest('.overlay')
 
-      const isInteractive = island || settings || overlay
+      const cronNotice = !!el.closest('.cron-result-shell')
+      const shouldHighlightIsland = island || settings || overlay
+      const isInteractive = shouldHighlightIsland || cronNotice
 
-      if (lastIsland !== isInteractive) {
-        lastIsland = isInteractive
-        setIsIslandHovered(isInteractive)
+      if (lastIsland !== shouldHighlightIsland) {
+        lastIsland = shouldHighlightIsland
+        setIsIslandHovered(shouldHighlightIsland)
       }
-      const shouldIgnore = !(isInteractive || overlay)
+      const shouldIgnore = !isInteractive
       if (lastIgnore === shouldIgnore) return
       lastIgnore = shouldIgnore
       if (shouldIgnore) {
@@ -1157,6 +1329,10 @@ export default function App() {
               ...message,
               content: String(event.content || message.content || ''),
               sources,
+              requestId: typeof event.request_id === 'string' ? event.request_id : message.requestId,
+              source: typeof event.source === 'string' ? event.source : message.source,
+              sourceId: typeof event.source_id === 'string' ? event.source_id : message.sourceId,
+              createdAt: new Date().toISOString(),
               stopped: false,
             }
           })
@@ -1165,6 +1341,19 @@ export default function App() {
           }
           return updatedMessages
         })
+        const eventSource = String(event.source || '').trim()
+        const eventContent = String(event.content || '').trim()
+        if (eventSource === 'cron' && eventContent && isCronResultChatInactive()) {
+          enqueueCronResultNotification({
+            id: `cron_result_${String(event.request_id || event.source_id || crypto.randomUUID())}`,
+            requestId: typeof event.request_id === 'string' ? event.request_id : null,
+            sourceId: typeof event.source_id === 'string' ? event.source_id : null,
+            sessionId: typeof event.session_id === 'string' ? event.session_id : null,
+            content: eventContent,
+            channel: typeof event.channel === 'string' ? event.channel : null,
+            createdAt: new Date().toISOString(),
+          })
+        }
         setIsStreaming(false)
         clearActiveStreamingRefs()
         return
@@ -1303,6 +1492,16 @@ export default function App() {
       setTimeout(() => inputRef.current?.focus(), 10)
     }
   }, [isStreaming, mode, pendingTaskCount, searchState, showLauncherTray])
+
+  useEffect(() => {
+    const isChatInactiveNow =
+      searchState !== 'visible' ||
+      mode !== 'chat' ||
+      showLauncherTray
+    if (!isChatInactiveNow && cronResultNotifications.length > 0) {
+      clearCronResultNotifications()
+    }
+  }, [cronResultNotifications.length, mode, searchState, showLauncherTray])
 
   useEffect(() => {
     if (authState !== 'authenticated') {
@@ -1674,6 +1873,16 @@ export default function App() {
       top,
     }
   }, [shouldShowTaskInterrupt, shouldShowResponseSurface, viewportSize.height, viewportSize.width])
+  const shouldShowCronResultSurface =
+    orderedCronResultNotifications.length > 0 &&
+    (
+      searchState !== 'visible' ||
+      mode !== 'chat' ||
+      showLauncherTray
+    )
+  const cronResultShellStyle = {
+    ['--cron-result-bottom' as string]: searchState === 'visible' ? '112px' : '24px',
+  } as React.CSSProperties
   const effectivePosition = (messages.length > 0 || mode === 'task') ? 'bottom' : searchPosition
   const overlayClass = [
     searchState === 'hidden' ? '' : 'visible',
@@ -1748,6 +1957,98 @@ export default function App() {
             setAuthData(data)
           }}
         />
+      )}
+
+      {shouldShowCronResultSurface && (
+        <div className="cron-result-shell" style={cronResultShellStyle}>
+          <div
+            ref={cronResultStackRef}
+            className="cron-result-stack"
+            role="list"
+            aria-label={`${orderedCronResultNotifications.length} scheduled result${orderedCronResultNotifications.length === 1 ? '' : 's'} ready`}
+            onScroll={handleCronResultScroll}
+          >
+            {orderedCronResultNotifications.map((notification, index) => (
+              <LiquidGlass
+                key={notification.id}
+                disableTilt={true}
+                cornerRadius={30}
+                className="task-interrupt-glass"
+                style={{ width: '100%' }}
+              >
+                <div className="task-interrupt-card cron-result-card">
+                  <div className="task-interrupt-head">
+                    <div className="task-interrupt-title-cluster">
+                      <div className="task-interrupt-logo-shell" aria-hidden="true">
+                        <img
+                          src={cosmicGlassyThunderLogo}
+                          alt=""
+                          className="task-interrupt-logo"
+                          draggable={false}
+                        />
+                      </div>
+                      <div className="task-interrupt-copy">
+                        <div className="task-interrupt-kicker">Scheduled result ready</div>
+                        <div className="task-interrupt-meta">
+                          {orderedCronResultNotifications.length > 1
+                            ? `${index + 1} of ${orderedCronResultNotifications.length} waiting`
+                            : 'Open chat to review the latest reminder result'}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="task-interrupt-chip-row">
+                      {orderedCronResultNotifications.length > 1 && (
+                        <div className="task-interrupt-chip count">{orderedCronResultNotifications.length} waiting</div>
+                      )}
+                      <div className="task-interrupt-chip cron-result-chip">Reminder</div>
+                    </div>
+                  </div>
+                  <div className="task-interrupt-preview cron-result-preview">{notification.content}</div>
+                  <div className="task-interrupt-actions">
+                    <button
+                      type="button"
+                      className="task-interrupt-btn secondary"
+                      onClick={() => dismissCronResultNotification(notification.id)}
+                    >
+                      Later
+                    </button>
+                    <button
+                      type="button"
+                      className="task-interrupt-btn primary"
+                      onClick={openChatFromCronNotification}
+                    >
+                      Open chat
+                    </button>
+                  </div>
+                </div>
+              </LiquidGlass>
+            ))}
+          </div>
+          {orderedCronResultNotifications.length > 1 && (
+            <div
+              className="cron-result-dots"
+              aria-label={`Scheduled result card ${cronResultIndex + 1} of ${orderedCronResultNotifications.length}`}
+            >
+              {orderedCronResultNotifications.map((notification, index) => (
+                <button
+                  key={notification.id}
+                  type="button"
+                  className={`task-interrupt-dot ${cronResultIndex === index ? 'active' : ''}`}
+                  aria-label={`Show result ${index + 1}`}
+                  aria-current={cronResultIndex === index}
+                  onClick={() => {
+                    const container = cronResultStackRef.current
+                    if (!container) {
+                      return
+                    }
+                    container.scrollTo({ left: container.clientWidth * index, behavior: 'smooth' })
+                    setCronResultIndex(index)
+                  }}
+                />
+              ))}
+            </div>
+          )}
+        </div>
       )}
 
       <div
