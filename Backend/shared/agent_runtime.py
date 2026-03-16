@@ -1,0 +1,368 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+from pathlib import Path
+from typing import Any
+
+import httpx
+import redis.asyncio as redis
+import yaml
+
+from registry.live_state import register_intent_index, write_heartbeat
+from registry.store import RegistryStore
+
+from .contracts import AgentError, AgentResult, EventEnvelope, Heartbeat, TaskEnvelope, TaskInProgress, verify_task_envelope
+from .idempotency import RESULT_TTL_SEC, execute_with_idempotency
+from .memory_tools import MemoryRead, MemoryWrite
+from .redis_bus import EVENTS_STREAM_MAXLEN, parse_task_envelope, task_stream_name
+from .redis_client import ensure_stream_group
+from .step_plan import StepPlan
+
+logger = logging.getLogger(__name__)
+
+BACKEND_ROOT = Path(__file__).resolve().parent.parent
+WORKER_GROUP = "workers"
+STREAM_PRIORITIES = ("high", "normal", "low")
+
+
+class AgentRuntime:
+    """Shared runtime backbone for future specialist agents."""
+
+    def __init__(
+        self,
+        *,
+        agent_card_path: str | Path,
+        redis_client: redis.Redis,
+        instance_id: str | None = None,
+        agent_secret: str | None = None,
+        registry_db_path: str | Path | None = None,
+        gateway_url: str | None = None,
+        gateway_internal_token: str | None = None,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self.agent_card_path = Path(agent_card_path)
+        self.redis = redis_client
+        self.agent_secret = (agent_secret or os.getenv("AGENT_SECRET", "")).strip()
+        self.gateway_url = (gateway_url or os.getenv("GATEWAY_URL", "http://127.0.0.1:8080")).strip()
+        self.gateway_internal_token = (gateway_internal_token or os.getenv("GATEWAY_INTERNAL_TOKEN", "")).strip()
+        self.instance_id = (instance_id or os.getenv("INSTANCE_ID", "")).strip() or f"inst-{id(self)}"
+        timeout = httpx.Timeout(30.0, connect=10.0)
+        self._http_client = http_client or httpx.AsyncClient(timeout=timeout, http2=True)
+        self._owns_http_client = http_client is None
+
+        self.agent_card = self._load_agent_card(self.agent_card_path)
+        self.agent_id = str(self.agent_card["agent_id"]).strip()
+        self.display_name = str(self.agent_card.get("display_name") or self.agent_id).strip() or self.agent_id
+        self.stream_key = str(self.agent_card.get("stream_key") or f"streams:{self.agent_id}").strip()
+
+        sla = self.agent_card.get("sla") if isinstance(self.agent_card.get("sla"), dict) else {}
+        self.max_concurrency = max(1, int(sla.get("max_concurrency") or 1))
+        self.heartbeat_interval_sec = max(1, int(sla.get("heartbeat_interval_sec") or 10))
+        self.heartbeat_ttl_sec = max(1, int(sla.get("heartbeat_ttl_sec") or 30))
+        self.max_task_duration_sec = max(1, int(sla.get("max_task_duration_sec") or 300))
+        self.claim_min_idle_ms = self.max_task_duration_sec * 2 * 1000
+
+        policies = self.agent_card.get("policies") if isinstance(self.agent_card.get("policies"), dict) else {}
+        raw_allowed_senders = policies.get("allowed_senders") if isinstance(policies.get("allowed_senders"), list) else []
+        self.allowed_senders = {str(item).strip() for item in raw_allowed_senders if str(item).strip()}
+        raw_authorization = policies.get("intent_authorization") if isinstance(policies.get("intent_authorization"), dict) else {}
+        self.intent_authorization = {
+            str(intent).strip(): {
+                str(item).strip()
+                for item in values
+                if str(item).strip()
+            }
+            for intent, values in raw_authorization.items()
+            if isinstance(values, list) and str(intent).strip()
+        }
+
+        registry_path = Path(registry_db_path).expanduser() if registry_db_path else BACKEND_ROOT / "registry" / "registry.db"
+        self.registry_store = RegistryStore(registry_path)
+
+        self.started = False
+        self._heartbeat_task: asyncio.Task[None] | None = None
+        self._active_task_count = 0
+
+        self.auth: dict[str, Any] | None = None
+        self.step_plan: StepPlan | None = None
+        self.memory_read: MemoryRead | None = None
+        self.memory_write: MemoryWrite | None = None
+
+    async def on_startup(self) -> None:
+        return None
+
+    async def execute(self, task: TaskEnvelope) -> AgentResult | TaskInProgress:
+        raise NotImplementedError
+
+    async def register(self) -> None:
+        self.registry_store.initialize()
+        self.registry_store.upsert_agent_card(self.agent_card)
+        await register_intent_index(self.agent_id, self.agent_card, self.redis)
+
+        for priority in STREAM_PRIORITIES:
+            await ensure_stream_group(
+                self.redis,
+                stream=task_stream_name(self.agent_id, priority),
+                group=WORKER_GROUP,
+            )
+
+        await write_heartbeat(self._heartbeat(healthy=False), self.redis, status="starting")
+        await self.on_startup()
+        await write_heartbeat(self._heartbeat(healthy=True), self.redis, status="healthy")
+        self._heartbeat_task = asyncio.create_task(
+            self._heartbeat_loop(),
+            name=f"{self.agent_id}-heartbeat",
+        )
+        self.started = True
+
+    async def run(self) -> None:
+        while True:
+            handled = await self.poll_once()
+            if not handled:
+                await asyncio.sleep(0.05)
+
+    async def poll_once(self) -> bool:
+        for priority in STREAM_PRIORITIES:
+            stream = task_stream_name(self.agent_id, priority)
+            claimed = await self._claim_stale_messages(stream)
+            if claimed:
+                return True
+
+        for priority in STREAM_PRIORITIES:
+            stream = task_stream_name(self.agent_id, priority)
+            messages = await self.redis.xreadgroup(
+                groupname=WORKER_GROUP,
+                consumername=self.instance_id,
+                streams={stream: ">"},
+                count=1,
+                block=10,
+            )
+            for stream_name, items in messages:
+                for message_id, fields in items:
+                    await self._process_message(message_id, fields, stream_name)
+                    return True
+        return False
+
+    async def stop(self) -> None:
+        if self._heartbeat_task is not None:
+            self._heartbeat_task.cancel()
+            await asyncio.gather(self._heartbeat_task, return_exceptions=True)
+            self._heartbeat_task = None
+        if self.memory_read is not None:
+            await self.memory_read.close()
+            self.memory_read = None
+        if self.memory_write is not None:
+            await self.memory_write.close()
+            self.memory_write = None
+        if self._owns_http_client:
+            await self._http_client.aclose()
+        self.started = False
+
+    async def emit_event(self, task_id: str, event_type: str, payload: dict[str, Any]) -> str:
+        seq = int(await self.redis.incr(f"event_seq:{task_id}"))
+        event = EventEnvelope(
+            task_id=task_id,
+            agent_id=self.agent_id,
+            event_type=event_type,
+            seq=seq,
+            payload=payload,
+        )
+        message_id = await self.redis.xadd(
+            "streams:events",
+            {"event": event.model_dump_json()},
+            maxlen=EVENTS_STREAM_MAXLEN,
+            approximate=True,
+        )
+        await self.redis.rpush(f"task_events:{task_id}", message_id)
+        if event_type in {"task.completed", "task.failed", "task.dlq"}:
+            await self.redis.expire(f"event_seq:{task_id}", RESULT_TTL_SEC)
+            await self.redis.expire(f"task_events:{task_id}", RESULT_TTL_SEC)
+        return message_id
+
+    async def emit_terminal_event(self, task_id: str, result: AgentResult) -> str:
+        payload: dict[str, Any] = {
+            "status": result.status,
+            "output": result.output,
+            "artifacts": [item.model_dump(mode="json") for item in result.artifacts],
+        }
+        if result.error is not None:
+            payload["error"] = result.error.model_dump(mode="json")
+        event_type = "task.completed" if result.status == "completed" else "task.failed"
+        return await self.emit_event(task_id, event_type, payload)
+
+    async def _heartbeat_loop(self) -> None:
+        while True:
+            await write_heartbeat(self._heartbeat(healthy=True), self.redis, status="healthy")
+            await asyncio.sleep(self.heartbeat_interval_sec)
+
+    async def _claim_stale_messages(self, stream: str) -> bool:
+        if not hasattr(self.redis, "xautoclaim"):
+            return False
+        claimed = await self.redis.xautoclaim(
+            stream,
+            WORKER_GROUP,
+            self.instance_id,
+            min_idle_time=self.claim_min_idle_ms,
+            start_id="0-0",
+            count=1,
+        )
+        messages = self._extract_claimed_messages(claimed)
+        for message_id, fields in messages:
+            await self._process_message(message_id, fields, stream)
+            return True
+        return False
+
+    async def _process_message(self, message_id: str, fields: dict[str, Any], stream: str) -> None:
+        try:
+            task = parse_task_envelope(fields)
+        except Exception as exc:
+            logger.warning("agent.invalid_stream_entry stream=%s message_id=%s error=%s", stream, message_id, exc)
+            await self.redis.xack(stream, WORKER_GROUP, message_id)
+            return
+        await self._handle_task(task, message_id, stream)
+
+    async def _handle_task(self, task: TaskEnvelope, message_id: str, stream: str) -> None:
+        if task.recipient != self.agent_id:
+            await self.redis.xack(stream, WORKER_GROUP, message_id)
+            return
+
+        if not self.agent_secret or not verify_task_envelope(task, self.agent_secret):
+            await self.emit_event(
+                task.task_id,
+                "task.rejected",
+                {"reason": "invalid_signature", "sender": task.sender, "intent": task.intent},
+            )
+            await self.redis.xack(stream, WORKER_GROUP, message_id)
+            return
+
+        if not self._sender_allowed(task):
+            await self.emit_event(
+                task.task_id,
+                "task.rejected",
+                {"reason": "unauthorized_sender", "sender": task.sender, "intent": task.intent},
+            )
+            await self.redis.xack(stream, WORKER_GROUP, message_id)
+            return
+
+        await self.emit_event(
+            task.task_id,
+            "task.accepted",
+            {"sender": task.sender, "intent": task.intent, "stream": stream},
+        )
+
+        task_input = dict(task.input)
+        self.auth = task_input.pop("auth", None) if isinstance(task_input.get("auth"), dict) else None
+        working_task = task.model_copy(update={"input": task_input})
+        self.step_plan = StepPlan(task_id=task.task_id, emit_event_fn=self.emit_event)
+        self.memory_read = MemoryRead(
+            gateway_url=self.gateway_url,
+            service_token=self.gateway_internal_token,
+            agent_id=self.agent_id,
+            client=self._http_client,
+        )
+        self.memory_write = MemoryWrite(
+            gateway_url=self.gateway_url,
+            service_token=self.gateway_internal_token,
+            agent_id=self.agent_id,
+            client=self._http_client,
+        )
+
+        self._active_task_count += 1
+        try:
+            result = await execute_with_idempotency(
+                working_task,
+                self.execute,
+                self.redis,
+                agent_max_duration_sec=self.max_task_duration_sec,
+            )
+            if isinstance(result, AgentResult):
+                if result.status == "completed" and self.step_plan.has_pending_steps():
+                    result = AgentResult(
+                        status="failed",
+                        output={},
+                        artifacts=[],
+                        error=AgentError(
+                            code="PLAN_INCOMPLETE",
+                            retryable=False,
+                            message="Agent returned completed but StepPlan has pending steps.",
+                            next_action="escalate",
+                        ),
+                    )
+                await self.emit_terminal_event(task.task_id, result)
+                await self.redis.xack(stream, WORKER_GROUP, message_id)
+                return
+
+            await self.emit_event(task.task_id, "task.deferred", result.model_dump(mode="json"))
+            await self.redis.xack(stream, WORKER_GROUP, message_id)
+        except Exception as exc:
+            logger.exception("agent.task_failed agent_id=%s task_id=%s", self.agent_id, task.task_id)
+            await self.emit_terminal_event(
+                task.task_id,
+                AgentResult(
+                    status="failed",
+                    output={},
+                    artifacts=[],
+                    error=AgentError(
+                        code="INTERNAL_ERROR",
+                        retryable=False,
+                        message=str(exc).strip()[:500] or "Agent execution failed.",
+                        next_action="escalate",
+                    ),
+                ),
+            )
+            await self.redis.xack(stream, WORKER_GROUP, message_id)
+        finally:
+            self._active_task_count = max(0, self._active_task_count - 1)
+            self.auth = None
+            self.step_plan = None
+            self.memory_read = None
+            self.memory_write = None
+
+    def _heartbeat(self, *, healthy: bool) -> Heartbeat:
+        return Heartbeat(
+            agent_id=self.agent_id,
+            instance_id=self.instance_id,
+            healthy=healthy,
+            current_load=self._active_task_count,
+            max_concurrency=self.max_concurrency,
+            heartbeat_ttl_sec=self.heartbeat_ttl_sec,
+        )
+
+    def _sender_allowed(self, task: TaskEnvelope) -> bool:
+        intent_senders = self.intent_authorization.get(task.intent)
+        if intent_senders is not None:
+            return task.sender in intent_senders
+        if not self.allowed_senders:
+            return True
+        return task.sender in self.allowed_senders
+
+    def _load_agent_card(self, path: Path) -> dict[str, Any]:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("agent_card.yaml must decode to an object")
+        agent_id = str(raw.get("agent_id") or "").strip()
+        if not agent_id:
+            raise ValueError("agent_card.yaml is missing agent_id")
+        intents = raw.get("intents")
+        if not isinstance(intents, list) or not intents:
+            raise ValueError("agent_card.yaml must declare at least one intent")
+        return raw
+
+    def _extract_claimed_messages(self, payload: Any) -> list[tuple[str, dict[str, Any]]]:
+        if not isinstance(payload, (tuple, list)) or len(payload) < 2:
+            return []
+        raw_messages = payload[1]
+        if not isinstance(raw_messages, list):
+            return []
+        messages: list[tuple[str, dict[str, Any]]] = []
+        for item in raw_messages:
+            if (
+                isinstance(item, (tuple, list))
+                and len(item) == 2
+                and isinstance(item[0], str)
+                and isinstance(item[1], dict)
+            ):
+                messages.append((item[0], item[1]))
+        return messages

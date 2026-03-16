@@ -2,6 +2,7 @@ fastapi
 groq
 httpx[http2]
 pydantic
+pyyaml
 redis
 python-dotenv
 uvicorn[standard]

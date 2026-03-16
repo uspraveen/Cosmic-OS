@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -100,7 +101,7 @@ class RegistryStore:
                     max_concurrency,
                     heartbeat_ttl,
                     max_task_duration,
-                    json.dumps(card, ensure_ascii=False),
+                    json.dumps(card, ensure_ascii=False, default=_json_default),
                     now,
                     now,
                 ),
@@ -210,3 +211,13 @@ class RegistryStore:
         connection.execute("PRAGMA foreign_keys=ON;")
         connection.execute("PRAGMA busy_timeout = 5000;")
         return connection
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
