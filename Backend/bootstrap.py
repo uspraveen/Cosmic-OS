@@ -860,6 +860,7 @@ def normalize_bootstrap_env_payload(payload: Dict[str, object]) -> Dict[str, Dic
     model_router_env = (
         dict(payload.get("model_router_env") or {}) if isinstance(payload.get("model_router_env"), dict) else {}
     )
+    memory_env = dict(payload.get("memory_env") or {}) if isinstance(payload.get("memory_env"), dict) else {}
     firecrawl_agent_env = {}
     if isinstance(payload.get("firecrawl_agent_env"), dict):
         firecrawl_agent_env = dict(payload.get("firecrawl_agent_env") or {})
@@ -891,6 +892,8 @@ def normalize_bootstrap_env_payload(payload: Dict[str, object]) -> Dict[str, Dic
         "model-router.env": model_router_env,
         "orchestrator.env": orchestrator_env,
     }
+    if memory_env:
+        normalized["memory.env"] = memory_env
     if firecrawl_agent_env:
         normalized[FIRECRAWL_AGENT_ENV_NAME] = firecrawl_agent_env
     required_fields = {

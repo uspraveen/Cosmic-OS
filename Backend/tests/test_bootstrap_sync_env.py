@@ -233,6 +233,36 @@ def test_normalize_bootstrap_env_payload_accepts_firecrawl_agent_env() -> None:
     assert normalized[bootstrap.FIRECRAWL_AGENT_ENV_NAME]["FIRECRAWL_API_KEY"] == "fc-live"
 
 
+def test_normalize_bootstrap_env_payload_accepts_memory_env() -> None:
+    normalized = bootstrap.normalize_bootstrap_env_payload(
+        {
+            "success": True,
+            "vm": {
+                "gateway_url": "http://127.0.0.1:8080",
+                "vm_dns": "localhost",
+            },
+            "gateway_env": {
+                "GATEWAY_LOCAL_API_TOKEN": "pg_live_token",
+                "ANTHROPIC_API_KEY": "anthropic-live",
+                "PERPLEXITY_API_KEY": "perplexity-live",
+                "HAIKU_MODEL": "claude-haiku-4-5",
+            },
+            "orchestrator_env": {
+                "ANTHROPIC_API_KEY": "anthropic-live",
+                "OPUS_MODEL": "claude-opus-4-6",
+            },
+            "meeting_env": {
+                "GROQ_API_KEY": "groq-live",
+            },
+            "memory_env": {
+                "XAI_API_KEY": "xai-live",
+            },
+        }
+    )
+
+    assert normalized["memory.env"]["XAI_API_KEY"] == "xai-live"
+
+
 def test_materialize_bootstrap_env_files_updates_repo_envs(monkeypatch, tmp_path) -> None:
     backend_root = tmp_path / "Backend"
     bridge_dir = backend_root / "bridges" / "whatsapp_bridge"
@@ -302,6 +332,9 @@ def test_materialize_bootstrap_env_files_updates_repo_envs(monkeypatch, tmp_path
             "orchestrator.env": {
                 "ANTHROPIC_API_KEY": "anthropic-live",
                 "ANTHROPIC_MODEL": "claude-opus-4-6",
+            },
+            "memory.env": {
+                "XAI_API_KEY": "xai-live",
             },
         },
     )
@@ -475,6 +508,9 @@ def test_materialize_bootstrap_env_files_can_render_memory_env(monkeypatch, tmp_
                 "ANTHROPIC_API_KEY": "anthropic-live",
                 "ANTHROPIC_MODEL": "claude-opus-4-6",
             },
+            "memory.env": {
+                "XAI_API_KEY": "xai-live",
+            },
         },
     )
 
@@ -494,6 +530,7 @@ def test_materialize_bootstrap_env_files_can_render_memory_env(monkeypatch, tmp_
     assert "COSMIC_MEMORY_URL=http://127.0.0.1:8090" in gateway_env_path.read_text(encoding="utf-8")
     memory_rendered = memory_env_path.read_text(encoding="utf-8")
     assert "PERPLEXITY_API_KEY=perplexity-live" in memory_rendered
+    assert "XAI_API_KEY=xai-live" in memory_rendered
     assert "GATEWAY_INTERNAL_TOKEN=shared-token" in memory_rendered
     assert "COSMIC_MEMORY_INTERNAL_TOKEN=shared-token" in memory_rendered
     assert "COSMIC_MEMORY_DATA_DIR=/var/lib/cosmic/memory" in memory_rendered
