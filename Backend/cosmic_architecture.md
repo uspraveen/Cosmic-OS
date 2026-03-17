@@ -1312,6 +1312,8 @@ DECLARE
   v_perplexity text;
   v_deepgram text;
   v_groq text;
+  v_firecrawl text;
+  v_xai text;
 BEGIN
   IF p_token IS NULL OR length(trim(p_token)) < 20 THEN
     RETURN jsonb_build_object(
@@ -1326,6 +1328,7 @@ BEGIN
   SELECT
     t.id AS token_id,
     uv.id AS vm_id,
+    uv.user_id,
     uv.gateway_url,
     uv.api_token,
     uv.vm_ip,
@@ -1376,6 +1379,20 @@ BEGIN
    ORDER BY created_at DESC
    LIMIT 1;
 
+  SELECT decrypted_secret
+    INTO v_firecrawl
+    FROM vault.decrypted_secrets
+   WHERE name = 'platform_firecrawl_api_key'
+   ORDER BY created_at DESC
+   LIMIT 1;
+
+  SELECT decrypted_secret
+    INTO v_xai
+    FROM vault.decrypted_secrets
+   WHERE name = 'platform_xai_api_key'
+   ORDER BY created_at DESC
+   LIMIT 1;
+
   IF v_anthropic IS NULL OR v_perplexity IS NULL THEN
     RETURN jsonb_build_object(
       'success', false,
@@ -1393,6 +1410,7 @@ BEGIN
     'success', true,
     'vm', jsonb_build_object(
       'vm_id', v_token_row.vm_id,
+      'user_id', v_token_row.user_id,
       'gateway_url', v_token_row.gateway_url,
       'vm_ip', v_token_row.vm_ip,
       'vm_dns', v_token_row.vm_dns,
@@ -1412,20 +1430,29 @@ BEGIN
     'meeting_env', jsonb_build_object(
       'DEEPGRAM_API_KEY', coalesce(v_deepgram, ''),
       'GROQ_API_KEY', coalesce(v_groq, '')
+    ),
+    'firecrawl_agent_env', jsonb_build_object(
+      'FIRECRAWL_API_KEY', coalesce(v_firecrawl, '')
+    ),
+    'memory_env', jsonb_build_object(
+      'XAI_API_KEY', coalesce(v_xai, '')
     )
   );
 END;
 $$;
 ```
 
-**Current implementation note:** the current RPC shape returns `meeting_env.GROQ_API_KEY` and `orchestrator_env.OPUS_MODEL`. `bootstrap.py` normalizes these into the actual backend env files:
+**Current implementation note:** the current RPC shape returns `meeting_env.GROQ_API_KEY`, `orchestrator_env.OPUS_MODEL`, `vm.user_id`, `firecrawl_agent_env`, and `memory_env`. `bootstrap.py` normalizes these into the actual backend env files:
 
 - `meeting_env.GROQ_API_KEY` -> `model_router.env:GROQ_API_KEY`
 - `orchestrator_env.OPUS_MODEL` -> `orchestrator.env:ANTHROPIC_MODEL`
+- `vm.user_id` -> `gateway.env:COSMIC_USER_ID`
+- `firecrawl_agent_env.FIRECRAWL_API_KEY` -> `/etc/cosmic/agents/firecrawl-web-scrape-agent.env:FIRECRAWL_API_KEY`
+- `memory_env.XAI_API_KEY` -> `memory.env:XAI_API_KEY`
 
 This is acceptable for the current system, though a future cleanup may return `model_router_env` and `orchestrator_env.ANTHROPIC_MODEL` directly.
 
-**Secret storage:** shared provider keys live once in Supabase Vault under names such as `platform_anthropic_api_key`, `platform_perplexity_api_key`, `platform_deepgram_api_key`, and `platform_groq_api_key`. They are not duplicated into `public.user_vms`.
+**Secret storage:** shared provider keys live once in Supabase Vault under names such as `platform_anthropic_api_key`, `platform_perplexity_api_key`, `platform_deepgram_api_key`, `platform_groq_api_key`, `platform_firecrawl_api_key`, and `platform_xai_api_key`. They are not duplicated into `public.user_vms`.
 
 #### 3.5a.5a Production Bare-VM Provisioning Sequence
 

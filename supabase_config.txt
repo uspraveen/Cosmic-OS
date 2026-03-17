@@ -337,6 +337,8 @@ declare
   v_perplexity text;
   v_deepgram text;
   v_groq text;
+  v_firecrawl text;
+  v_xai text;
 begin
   if p_token is null or length(trim(p_token)) < 20 then
     return jsonb_build_object(
@@ -351,6 +353,7 @@ begin
   select
     t.id as token_id,
     uv.id as vm_id,
+    uv.user_id,
     uv.gateway_url,
     uv.api_token,
     uv.vm_ip,
@@ -401,6 +404,20 @@ begin
    order by created_at desc
    limit 1;
 
+  select decrypted_secret
+    into v_firecrawl
+    from vault.decrypted_secrets
+   where name = 'platform_firecrawl_api_key'
+   order by created_at desc
+   limit 1;
+
+  select decrypted_secret
+    into v_xai
+    from vault.decrypted_secrets
+   where name = 'platform_xai_api_key'
+   order by created_at desc
+   limit 1;
+
   if v_anthropic is null or v_perplexity is null then
     return jsonb_build_object(
       'success', false,
@@ -418,6 +435,7 @@ begin
     'success', true,
     'vm', jsonb_build_object(
       'vm_id', v_token_row.vm_id,
+      'user_id', v_token_row.user_id,
       'gateway_url', v_token_row.gateway_url,
       'vm_ip', v_token_row.vm_ip,
       'vm_dns', v_token_row.vm_dns,
@@ -437,6 +455,12 @@ begin
     'meeting_env', jsonb_build_object(
       'DEEPGRAM_API_KEY', coalesce(v_deepgram, ''),
       'GROQ_API_KEY', coalesce(v_groq, '')
+    ),
+    'firecrawl_agent_env', jsonb_build_object(
+      'FIRECRAWL_API_KEY', coalesce(v_firecrawl, '')
+    ),
+    'memory_env', jsonb_build_object(
+      'XAI_API_KEY', coalesce(v_xai, '')
     )
   );
 end;
@@ -445,10 +469,13 @@ $$;
 
 Note:
 
-- `consume_bootstrap_token(...)` currently returns `meeting_env.GROQ_API_KEY` and `orchestrator_env.OPUS_MODEL`.
+- `consume_bootstrap_token(...)` currently returns `meeting_env.GROQ_API_KEY`, `orchestrator_env.OPUS_MODEL`, `vm.user_id`, `firecrawl_agent_env`, and `memory_env`.
 - The current `bootstrap.py` implementation normalizes that into the actual backend env files:
   - `meeting_env.GROQ_API_KEY` -> `model_router.env:GROQ_API_KEY`
   - `orchestrator_env.OPUS_MODEL` -> `orchestrator.env:ANTHROPIC_MODEL`
+  - `vm.user_id` -> `gateway.env:COSMIC_USER_ID`
+  - `firecrawl_agent_env.FIRECRAWL_API_KEY` -> `/etc/cosmic/agents/firecrawl-web-scrape-agent.env:FIRECRAWL_API_KEY`
+  - `memory_env.XAI_API_KEY` -> `memory.env:XAI_API_KEY`
 
 
 10. Grant Anon Access to the Bootstrap RPC
@@ -481,4 +508,3 @@ Do not store them here permanently.
 - `public.user_vms.api_token` must always match the VM's live `GATEWAY_LOCAL_API_TOKEN`.
 - Shared provider keys are intentionally platform-wide, not per-user.
 - Current live `gateway_url` is still `http://3.137.194.119:8080`. This should eventually move to the final HTTPS/WSS edge host.
-
