@@ -65,6 +65,14 @@ DEFAULT_NEO4J_URI = "bolt://127.0.0.1:7687"
 DEFAULT_NEO4J_USERNAME = "neo4j"
 DEFAULT_NEO4J_DATABASE = "neo4j"
 DEFAULT_NEO4J_SERVICE_NAME = "neo4j"
+DEFAULT_POST_PROVISION_TIMEOUT_SEC = 120.0
+DEFAULT_POST_PROVISION_POLL_INTERVAL_SEC = 2.0
+CORE_BACKEND_SERVICE_UNITS = (
+    "cosmic-model-router.service",
+    "cosmic-orchestrator.service",
+    "cosmic-gateway.service",
+    "cosmic-whatsapp-bridge.service",
+)
 DEFAULT_SUPABASE_URL = "https://hluenippcdiejenmteen.supabase.co"
 DEFAULT_SUPABASE_ANON_KEY = (
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
@@ -2150,6 +2158,157 @@ def setup_neo4j(memory_env_path: Path) -> None:
     )
 
 
+def systemd_unit_state(unit_name: str) -> str:
+    result = run(
+        ["systemctl", "is-active", unit_name],
+        capture_output=True,
+        check=False,
+    )
+    return (result.stdout or "").strip().lower() or "unknown"
+
+
+def wait_for_systemd_unit_active(
+    unit_name: str,
+    *,
+    timeout_sec: float = DEFAULT_POST_PROVISION_TIMEOUT_SEC,
+    poll_interval_sec: float = DEFAULT_POST_PROVISION_POLL_INTERVAL_SEC,
+) -> None:
+    deadline = time.time() + max(1.0, timeout_sec)
+    last_state = "unknown"
+    while time.time() < deadline:
+        last_state = systemd_unit_state(unit_name)
+        if last_state == "active":
+            return
+        if last_state in {"failed", "inactive"}:
+            time.sleep(min(poll_interval_sec, 1.0))
+        else:
+            time.sleep(poll_interval_sec)
+    raise BootstrapError(
+        "Timed out waiting for systemd unit {0} to become active (last state: {1}).".format(
+            unit_name,
+            last_state,
+        )
+    )
+
+
+def fetch_json(url: str, *, timeout_sec: float = 5.0) -> dict[str, object]:
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "cosmic-bootstrap/1.0",
+            "Accept": "application/json",
+        },
+    )
+    with urlopen(request, timeout=timeout_sec) as response:
+        raw = response.read().decode("utf-8")
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise BootstrapError("Health endpoint returned invalid JSON for {0}: {1}".format(url, exc)) from exc
+    if not isinstance(parsed, dict):
+        raise BootstrapError("Health endpoint returned unexpected payload for {0}.".format(url))
+    return parsed
+
+
+def health_payload_ready(check_name: str, payload: dict[str, object]) -> bool:
+    status_value = str(payload.get("status") or "").strip().lower()
+    ok_value = payload.get("ok")
+    if check_name == "gateway":
+        return status_value == "ready"
+    if check_name == "orchestrator":
+        return status_value == "ok"
+    if check_name == "memory":
+        if isinstance(ok_value, bool):
+            return ok_value
+        return status_value in {"ok", "ready"}
+    return status_value in {"ok", "ready"}
+
+
+def wait_for_health_endpoint(
+    url: str,
+    *,
+    check_name: str,
+    timeout_sec: float = DEFAULT_POST_PROVISION_TIMEOUT_SEC,
+    poll_interval_sec: float = DEFAULT_POST_PROVISION_POLL_INTERVAL_SEC,
+) -> dict[str, object]:
+    deadline = time.time() + max(1.0, timeout_sec)
+    last_payload: dict[str, object] | None = None
+    last_error: str | None = None
+    while time.time() < deadline:
+        try:
+            payload = fetch_json(url)
+            last_payload = payload
+            if health_payload_ready(check_name, payload):
+                return payload
+            last_error = "not ready"
+        except (BootstrapError, HTTPError, URLError) as exc:
+            last_error = str(exc)
+        time.sleep(poll_interval_sec)
+    if last_payload is not None:
+        raise BootstrapError(
+            "Timed out waiting for {0} health at {1}. Last payload: {2}".format(
+                check_name,
+                url,
+                json.dumps(last_payload, sort_keys=True),
+            )
+        )
+    raise BootstrapError(
+        "Timed out waiting for {0} health at {1}. Last error: {2}".format(
+            check_name,
+            url,
+            last_error or "unknown error",
+        )
+    )
+
+
+def run_post_provision_health_checks(
+    *,
+    include_memory: bool,
+    timeout_sec: float = DEFAULT_POST_PROVISION_TIMEOUT_SEC,
+    poll_interval_sec: float = DEFAULT_POST_PROVISION_POLL_INTERVAL_SEC,
+) -> None:
+    if not is_linux():
+        raise BootstrapError("Post-provision readiness checks currently target Linux VMs only.")
+    if shutil.which("systemctl") is None:
+        raise BootstrapError("systemctl not found. Post-provision readiness checks require a systemd-based Linux VM.")
+
+    for unit_name in CORE_BACKEND_SERVICE_UNITS:
+        wait_for_systemd_unit_active(
+            unit_name,
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+
+    wait_for_health_endpoint(
+        "http://127.0.0.1:8743/health",
+        check_name="orchestrator",
+        timeout_sec=timeout_sec,
+        poll_interval_sec=poll_interval_sec,
+    )
+
+    if include_memory:
+        wait_for_systemd_unit_active(
+            "cosmic-memory.service",
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+        wait_for_health_endpoint(
+            "http://127.0.0.1:8090/health",
+            check_name="memory",
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+
+    wait_for_health_endpoint(
+        "http://127.0.0.1:8080/health/ready",
+        check_name="gateway",
+        timeout_sec=timeout_sec,
+        poll_interval_sec=poll_interval_sec,
+    )
+
+    log("Post-provision readiness checks passed.")
+
+
 def setup_cosmic_memory(
     venv_path: Path,
     memory_repo_dir: Path,
@@ -2321,6 +2480,8 @@ def provision_vm(
         extra_enable_units=["cosmic-memory.service"] if enable_units and enable_memory else [],
         include_memory_env=enable_memory,
     )
+    if enable_units and start_units:
+        run_post_provision_health_checks(include_memory=enable_memory)
 
     print("")
     print("VM provisioning complete")
@@ -2463,7 +2624,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers.add_parser(
         "provision-vm",
-        help="Create env files, install Python and bridge deps, provision /etc/cosmic envs, install systemd units, enable them, and start the backend target.",
+        help="Create env files, install Python and bridge deps, provision /etc/cosmic envs, install systemd units, enable them, start the backend target, and wait for core readiness.",
     )
     return parser
 
@@ -2570,6 +2731,8 @@ def main() -> int:
                 extra_enable_units=["cosmic-memory.service"] if memory_repo_dir is not None and bool(getattr(args, "enable", False)) else [],
                 include_memory_env=memory_repo_dir is not None,
             )
+            if bool(getattr(args, "enable", False)) and bool(getattr(args, "start", False)):
+                run_post_provision_health_checks(include_memory=memory_repo_dir is not None)
             print("Installed systemd units:")
             for unit_name in installed:
                 print("  - {0}".format(unit_name))

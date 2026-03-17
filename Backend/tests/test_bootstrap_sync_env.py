@@ -742,3 +742,59 @@ def test_setup_neo4j_rotates_default_password_when_needed(monkeypatch, tmp_path)
     assert ["systemctl", "enable", "neo4j"] in executed_commands
     assert ["systemctl", "restart", "neo4j"] in executed_commands
     assert rotations == [("bolt://127.0.0.1:7687", "neo4j", "neo4j", "DesiredSecret1234567890")]
+
+
+def test_wait_for_health_endpoint_polls_until_ready(monkeypatch) -> None:
+    attempts = {"count": 0}
+
+    def fake_fetch_json(url: str, *, timeout_sec: float = 5.0):
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            return {"status": "starting"}
+        return {"status": "ready"}
+
+    monkeypatch.setattr(bootstrap, "fetch_json", fake_fetch_json)
+    monkeypatch.setattr(bootstrap.time, "sleep", lambda _seconds: None)
+
+    payload = bootstrap.wait_for_health_endpoint(
+        "http://127.0.0.1:8080/health/ready",
+        check_name="gateway",
+        timeout_sec=0.5,
+        poll_interval_sec=0.01,
+    )
+
+    assert payload["status"] == "ready"
+    assert attempts["count"] == 3
+
+
+def test_run_post_provision_health_checks_uses_core_service_order(monkeypatch) -> None:
+    systemd_checks: list[str] = []
+    health_checks: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(bootstrap, "is_linux", lambda: True)
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: "/usr/bin/systemctl" if name == "systemctl" else None)
+    monkeypatch.setattr(
+        bootstrap,
+        "wait_for_systemd_unit_active",
+        lambda unit_name, **kwargs: systemd_checks.append(unit_name),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "wait_for_health_endpoint",
+        lambda url, *, check_name, **kwargs: health_checks.append((check_name, url)) or {"status": "ok"},
+    )
+
+    bootstrap.run_post_provision_health_checks(include_memory=True, timeout_sec=1.0, poll_interval_sec=0.01)
+
+    assert systemd_checks == [
+        "cosmic-model-router.service",
+        "cosmic-orchestrator.service",
+        "cosmic-gateway.service",
+        "cosmic-whatsapp-bridge.service",
+        "cosmic-memory.service",
+    ]
+    assert health_checks == [
+        ("orchestrator", "http://127.0.0.1:8743/health"),
+        ("memory", "http://127.0.0.1:8090/health"),
+        ("gateway", "http://127.0.0.1:8080/health/ready"),
+    ]
