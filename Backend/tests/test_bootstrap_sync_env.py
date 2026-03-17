@@ -203,11 +203,43 @@ def test_normalize_bootstrap_env_payload_maps_current_supabase_shape() -> None:
     assert normalized["orchestrator.env"]["ANTHROPIC_MODEL"] == "claude-opus-4-6"
 
 
+def test_normalize_bootstrap_env_payload_accepts_firecrawl_agent_env() -> None:
+    normalized = bootstrap.normalize_bootstrap_env_payload(
+        {
+            "success": True,
+            "vm": {
+                "gateway_url": "http://127.0.0.1:8080",
+                "vm_dns": "localhost",
+            },
+            "gateway_env": {
+                "GATEWAY_LOCAL_API_TOKEN": "pg_live_token",
+                "ANTHROPIC_API_KEY": "anthropic-live",
+                "PERPLEXITY_API_KEY": "perplexity-live",
+                "HAIKU_MODEL": "claude-haiku-4-5",
+            },
+            "orchestrator_env": {
+                "ANTHROPIC_API_KEY": "anthropic-live",
+                "OPUS_MODEL": "claude-opus-4-6",
+            },
+            "meeting_env": {
+                "GROQ_API_KEY": "groq-live",
+            },
+            "firecrawl_agent_env": {
+                "FIRECRAWL_API_KEY": "fc-live",
+            },
+        }
+    )
+
+    assert normalized[bootstrap.FIRECRAWL_AGENT_ENV_NAME]["FIRECRAWL_API_KEY"] == "fc-live"
+
+
 def test_materialize_bootstrap_env_files_updates_repo_envs(monkeypatch, tmp_path) -> None:
     backend_root = tmp_path / "Backend"
     bridge_dir = backend_root / "bridges" / "whatsapp_bridge"
+    firecrawl_dir = backend_root / "agents" / "firecrawl_web_scrape"
     system_env_dir = tmp_path / "etc" / "cosmic"
     bridge_dir.mkdir(parents=True)
+    firecrawl_dir.mkdir(parents=True)
     system_env_dir.mkdir(parents=True)
 
     (backend_root / "gateway.env.example").write_text(
@@ -237,6 +269,15 @@ def test_materialize_bootstrap_env_files_updates_repo_envs(monkeypatch, tmp_path
         "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
         "WHATSAPP_BRIDGE_TOKEN=<whatsapp-bridge-token>\n"
         "WHATSAPP_AUTH_DIR=<auth-dir>\n",
+        encoding="utf-8",
+    )
+    (firecrawl_dir / "agent.env.example").write_text(
+        "REDIS_URL=redis://127.0.0.1:6379/0\n"
+        "GATEWAY_URL=http://127.0.0.1:8080\n"
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "AGENT_SECRET=<agent-shared-secret>\n"
+        "INSTANCE_ID=firecrawl-web-scrape-agent-1\n"
+        "FIRECRAWL_API_KEY=<firecrawl-api-key>\n",
         encoding="utf-8",
     )
 
@@ -297,11 +338,82 @@ def test_materialize_bootstrap_env_files_updates_repo_envs(monkeypatch, tmp_path
     assert "WHATSAPP_AUTH_DIR=/var/lib/cosmic/whatsapp/auth" in bridge_rendered
 
 
+def test_install_service_env_files_installs_firecrawl_agent_env(monkeypatch, tmp_path) -> None:
+    backend_root = tmp_path / "Backend"
+    bridge_dir = backend_root / "bridges" / "whatsapp_bridge"
+    firecrawl_dir = backend_root / "agents" / "firecrawl_web_scrape"
+    system_env_dir = tmp_path / "etc" / "cosmic"
+    bridge_dir.mkdir(parents=True)
+    firecrawl_dir.mkdir(parents=True)
+    system_env_dir.mkdir(parents=True)
+
+    (backend_root / "gateway.env.example").write_text(
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "GATEWAY_SIGNING_SECRET=<gateway-signing-secret>\n",
+        encoding="utf-8",
+    )
+    (backend_root / "model_router.env").write_text(
+        "GROQ_API_KEY=groq-real\n",
+        encoding="utf-8",
+    )
+    (backend_root / "orchestrator.env.example").write_text(
+        "ANTHROPIC_API_KEY=<anthropic-api-key>\n"
+        "ANTHROPIC_MODEL=claude-opus-4-6\n",
+        encoding="utf-8",
+    )
+    (bridge_dir / ".env.example").write_text(
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "WHATSAPP_BRIDGE_TOKEN=<whatsapp-bridge-token>\n"
+        "WHATSAPP_AUTH_DIR=<auth-dir>\n",
+        encoding="utf-8",
+    )
+    (firecrawl_dir / "agent.env.example").write_text(
+        "REDIS_URL=redis://127.0.0.1:6379/0\n"
+        "GATEWAY_URL=http://127.0.0.1:8080\n"
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "AGENT_SECRET=<agent-shared-secret>\n"
+        "INSTANCE_ID=firecrawl-web-scrape-agent-1\n"
+        "FIRECRAWL_API_KEY=<firecrawl-api-key>\n",
+        encoding="utf-8",
+    )
+
+    def fake_run(command, **kwargs):
+        args = list(command)
+        if args[0] == "install" and "-d" in args:
+            Path(args[-1]).mkdir(parents=True, exist_ok=True)
+            return SimpleNamespace(stdout="", returncode=0)
+        if args[0] == "install" and "-m" in args:
+            src_path = Path(args[-2])
+            dest_path = Path(args[-1])
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            dest_path.write_text(src_path.read_text(encoding="utf-8"), encoding="utf-8")
+            return SimpleNamespace(stdout="", returncode=0)
+        raise AssertionError("Unexpected command: {0}".format(args))
+
+    monkeypatch.setattr(bootstrap, "BACKEND_ROOT", backend_root)
+    monkeypatch.setattr(bootstrap, "DEFAULT_BRIDGE_DIR", bridge_dir)
+    monkeypatch.setattr(bootstrap, "DEFAULT_SYSTEM_ENV_DIR", system_env_dir)
+    monkeypatch.setattr(bootstrap, "DEFAULT_WHATSAPP_AUTH_DIR", PurePosixPath("/var/lib/cosmic/whatsapp/auth"))
+    monkeypatch.setattr(bootstrap, "is_linux", lambda: True)
+    monkeypatch.setattr(bootstrap, "run", fake_run)
+
+    installed = bootstrap.install_service_env_files(system_env_dir)
+
+    firecrawl_env_path = system_env_dir / "agents" / bootstrap.FIRECRAWL_AGENT_ENV_NAME
+    assert firecrawl_env_path in installed
+    firecrawl_rendered = firecrawl_env_path.read_text(encoding="utf-8")
+    assert "GATEWAY_INTERNAL_TOKEN=<internal-service-token>" not in firecrawl_rendered
+    assert "AGENT_SECRET=<agent-shared-secret>" not in firecrawl_rendered
+    assert "FIRECRAWL_API_KEY=<firecrawl-api-key>" in firecrawl_rendered
+
+
 def test_materialize_bootstrap_env_files_can_render_memory_env(monkeypatch, tmp_path) -> None:
     backend_root = tmp_path / "Backend"
     bridge_dir = backend_root / "bridges" / "whatsapp_bridge"
+    firecrawl_dir = backend_root / "agents" / "firecrawl_web_scrape"
     system_env_dir = tmp_path / "etc" / "cosmic"
     bridge_dir.mkdir(parents=True)
+    firecrawl_dir.mkdir(parents=True)
     system_env_dir.mkdir(parents=True)
 
     (backend_root / "gateway.env.example").write_text(
@@ -331,6 +443,15 @@ def test_materialize_bootstrap_env_files_can_render_memory_env(monkeypatch, tmp_
         "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
         "WHATSAPP_BRIDGE_TOKEN=<whatsapp-bridge-token>\n"
         "WHATSAPP_AUTH_DIR=<auth-dir>\n",
+        encoding="utf-8",
+    )
+    (firecrawl_dir / "agent.env.example").write_text(
+        "REDIS_URL=redis://127.0.0.1:6379/0\n"
+        "GATEWAY_URL=http://127.0.0.1:8080\n"
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "AGENT_SECRET=<agent-shared-secret>\n"
+        "INSTANCE_ID=firecrawl-web-scrape-agent-1\n"
+        "FIRECRAWL_API_KEY=<firecrawl-api-key>\n",
         encoding="utf-8",
     )
 
@@ -796,5 +917,49 @@ def test_run_post_provision_health_checks_uses_core_service_order(monkeypatch) -
     assert health_checks == [
         ("orchestrator", "http://127.0.0.1:8743/health"),
         ("memory", "http://127.0.0.1:8090/health"),
+        ("gateway", "http://127.0.0.1:8080/health/ready"),
+    ]
+
+
+def test_run_post_provision_health_checks_waits_for_firecrawl_agent(monkeypatch) -> None:
+    systemd_checks: list[str] = []
+    health_checks: list[tuple[str, str]] = []
+    agent_checks: list[str] = []
+
+    monkeypatch.setattr(bootstrap, "is_linux", lambda: True)
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: "/usr/bin/systemctl" if name == "systemctl" else None)
+    monkeypatch.setattr(
+        bootstrap,
+        "wait_for_systemd_unit_active",
+        lambda unit_name, **kwargs: systemd_checks.append(unit_name),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "wait_for_health_endpoint",
+        lambda url, *, check_name, **kwargs: health_checks.append((check_name, url)) or {"status": "ok"},
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "wait_for_orchestrator_agent_ready",
+        lambda agent_id, **kwargs: agent_checks.append(agent_id) or {"status": "ok"},
+    )
+
+    bootstrap.run_post_provision_health_checks(
+        include_memory=False,
+        include_firecrawl_agent=True,
+        timeout_sec=1.0,
+        poll_interval_sec=0.01,
+    )
+
+    assert systemd_checks == [
+        "cosmic-model-router.service",
+        "cosmic-orchestrator.service",
+        "cosmic-gateway.service",
+        "cosmic-whatsapp-bridge.service",
+        bootstrap.FIRECRAWL_AGENT_SERVICE_NAME,
+    ]
+    assert agent_checks == [bootstrap.FIRECRAWL_AGENT_ID]
+    assert health_checks == [
+        ("orchestrator", "http://127.0.0.1:8743/health"),
         ("gateway", "http://127.0.0.1:8080/health/ready"),
     ]
