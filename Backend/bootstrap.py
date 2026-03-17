@@ -1872,8 +1872,17 @@ def doctor(
     )
     firecrawl_source = resolve_firecrawl_agent_env_source()
     firecrawl_source_data = parse_env_text(firecrawl_source.read_text(encoding="utf-8")) if firecrawl_source.exists() else {}
+    firecrawl_system_path = firecrawl_agent_system_env_path(DEFAULT_SYSTEM_ENV_DIR)
+    firecrawl_system_data = {}
+    if is_linux() and firecrawl_system_path.exists():
+        firecrawl_system_data = read_firecrawl_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
     print("  firecrawl env src  : {0}".format(firecrawl_source if firecrawl_source.exists() else "missing"))
-    print("  firecrawl enabled  : {0}".format("yes" if firecrawl_agent_is_configured(firecrawl_source_data) else "no"))
+    if is_linux():
+        print("  firecrawl system env: {0}".format(firecrawl_system_path if firecrawl_system_path.exists() else "missing"))
+    firecrawl_enabled = firecrawl_agent_is_configured(
+        firecrawl_system_data if firecrawl_system_data else firecrawl_source_data
+    )
+    print("  firecrawl enabled  : {0}".format("yes" if firecrawl_enabled else "no"))
     if is_linux() and shutil.which("systemctl") is not None:
         neo4j_status = run(
             ["systemctl", "is-active", DEFAULT_NEO4J_SERVICE_NAME],
