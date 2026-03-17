@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from urllib.error import HTTPError, URLError
@@ -521,3 +522,223 @@ def test_setup_local_redis_skips_non_local_redis_urls(monkeypatch) -> None:
     bootstrap.setup_local_redis("redis://10.0.0.5:6379/0")
 
     assert install_calls == []
+
+
+def test_build_service_env_overrides_generates_neo4j_defaults_and_password(monkeypatch, tmp_path) -> None:
+    backend_root = tmp_path / "Backend"
+    bridge_dir = backend_root / "bridges" / "whatsapp_bridge"
+    system_env_dir = tmp_path / "etc" / "cosmic"
+    bridge_dir.mkdir(parents=True)
+    system_env_dir.mkdir(parents=True)
+
+    (backend_root / "gateway.env.example").write_text(
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "PERPLEXITY_API_KEY=<perplexity-api-key>\n",
+        encoding="utf-8",
+    )
+    (backend_root / "model_router.env.example").write_text(
+        "GROQ_API_KEY=<groq-api-key>\n",
+        encoding="utf-8",
+    )
+    (backend_root / "orchestrator.env.example").write_text(
+        "ANTHROPIC_API_KEY=<anthropic-api-key>\n"
+        "ANTHROPIC_MODEL=claude-opus-4-6\n",
+        encoding="utf-8",
+    )
+    (backend_root / "memory.env.example").write_text(
+        "PERPLEXITY_API_KEY=<perplexity-api-key>\n"
+        "XAI_API_KEY=\n"
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "COSMIC_MEMORY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "COSMIC_MEMORY_GRAPH_BACKEND=neo4j\n"
+        "COSMIC_MEMORY_NEO4J_URI=\n"
+        "COSMIC_MEMORY_NEO4J_USERNAME=\n"
+        "COSMIC_MEMORY_NEO4J_PASSWORD=<neo4j-password>\n"
+        "COSMIC_MEMORY_NEO4J_DATABASE=\n",
+        encoding="utf-8",
+    )
+    (bridge_dir / ".env.example").write_text(
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "WHATSAPP_BRIDGE_TOKEN=<whatsapp-bridge-token>\n"
+        "WHATSAPP_AUTH_DIR=<auth-dir>\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(bootstrap, "BACKEND_ROOT", backend_root)
+    monkeypatch.setattr(bootstrap, "DEFAULT_BRIDGE_DIR", bridge_dir)
+    monkeypatch.setattr(bootstrap, "DEFAULT_SYSTEM_ENV_DIR", system_env_dir)
+    monkeypatch.setattr(bootstrap, "DEFAULT_MEMORY_DATA_DIR", PurePosixPath("/var/lib/cosmic/memory"))
+    monkeypatch.setattr(bootstrap, "DEFAULT_WHATSAPP_AUTH_DIR", PurePosixPath("/var/lib/cosmic/whatsapp/auth"))
+
+    effective_sources = bootstrap.resolve_effective_service_env_sources(system_env_dir, include_memory=True)
+    overrides = bootstrap.build_service_env_overrides(effective_sources, include_memory=True)
+
+    memory_env = overrides["memory.env"]
+    assert memory_env["COSMIC_MEMORY_GRAPH_BACKEND"] == "neo4j"
+    assert memory_env["COSMIC_MEMORY_NEO4J_URI"] == bootstrap.DEFAULT_NEO4J_URI
+    assert memory_env["COSMIC_MEMORY_NEO4J_USERNAME"] == bootstrap.DEFAULT_NEO4J_USERNAME
+    assert memory_env["COSMIC_MEMORY_NEO4J_DATABASE"] == bootstrap.DEFAULT_NEO4J_DATABASE
+    assert memory_env["COSMIC_MEMORY_NEO4J_PASSWORD"]
+    assert "<neo4j-password>" not in memory_env["COSMIC_MEMORY_NEO4J_PASSWORD"]
+    assert len(memory_env["COSMIC_MEMORY_NEO4J_PASSWORD"]) >= 24
+
+
+def test_ensure_memory_repo_checkout_clones_missing_repo(monkeypatch, tmp_path) -> None:
+    target_repo = tmp_path / "cosmic-memory"
+    commands: list[list[str]] = []
+
+    def fake_run_with_retry(command, **kwargs):
+        commands.append(list(command))
+        target_repo.mkdir(parents=True, exist_ok=True)
+        (target_repo / "pyproject.toml").write_text("[project]\nname='cosmic-memory'\n", encoding="utf-8")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(bootstrap, "ensure_git_available", lambda: None)
+    monkeypatch.setattr(bootstrap, "run_with_retry", fake_run_with_retry)
+
+    resolved = bootstrap.ensure_memory_repo_checkout(
+        target_repo,
+        "https://github.com/uspraveen/cosmic-memory.git",
+        "main",
+    )
+
+    assert resolved == target_repo.resolve()
+    assert commands == [[
+        "git",
+        "clone",
+        "--depth",
+        "1",
+        "--branch",
+        "main",
+        "https://github.com/uspraveen/cosmic-memory.git",
+        str(target_repo.resolve()),
+    ]]
+
+
+def test_ensure_neo4j_apt_repository_writes_repo_and_key(monkeypatch, tmp_path) -> None:
+    keyring_path = tmp_path / "etc" / "apt" / "keyrings" / "neotechnology.gpg"
+    source_path = tmp_path / "etc" / "apt" / "sources.list.d" / "neo4j.list"
+    installed_packages: list[tuple[str, list[str]]] = []
+    retried_commands: list[list[str]] = []
+    executed_commands: list[list[str]] = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return b"fake-key"
+
+    @contextmanager
+    def fake_tempdir(prefix: str = ""):
+        temp_dir = tmp_path / "{0}temp".format(prefix or "neo4j-")
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            yield str(temp_dir)
+        finally:
+            pass
+
+    def fake_run(command, **kwargs):
+        args = list(command)
+        executed_commands.append(args)
+        if args[:3] == ["install", "-d", "-m"]:
+            Path(args[-1]).mkdir(parents=True, exist_ok=True)
+            return SimpleNamespace(stdout="", returncode=0)
+        if args[0] == "gpg":
+            output_index = args.index("--output") + 1
+            Path(args[output_index]).write_bytes(b"binary-key")
+            return SimpleNamespace(stdout="", returncode=0)
+        if args[0] == "install" and "-m" in args:
+            src_path = Path(args[-2])
+            dest_path = Path(args[-1])
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            if src_path.exists():
+                dest_path.write_bytes(src_path.read_bytes())
+            return SimpleNamespace(stdout="", returncode=0)
+        raise AssertionError("Unexpected command: {0}".format(args))
+
+    monkeypatch.setattr(bootstrap, "detect_package_manager", lambda: "apt-get")
+    monkeypatch.setattr(bootstrap, "is_ubuntu_host", lambda: True)
+    monkeypatch.setattr(bootstrap, "apt_has_candidate", lambda _package: False)
+    monkeypatch.setattr(
+        bootstrap,
+        "install_system_packages",
+        lambda manager, packages: installed_packages.append((manager, list(packages))),
+    )
+    monkeypatch.setattr(bootstrap, "run_with_retry", lambda command, **kwargs: retried_commands.append(list(command)) or SimpleNamespace(returncode=0))
+    monkeypatch.setattr(bootstrap, "run", fake_run)
+    monkeypatch.setattr(bootstrap, "urlopen", lambda request, timeout=30: FakeResponse())
+    monkeypatch.setattr(bootstrap.tempfile, "TemporaryDirectory", fake_tempdir)
+    monkeypatch.setattr(bootstrap, "DEFAULT_NEO4J_APT_KEYRING_PATH", keyring_path)
+    monkeypatch.setattr(bootstrap, "DEFAULT_NEO4J_APT_SOURCE_PATH", source_path)
+    monkeypatch.setattr(
+        bootstrap,
+        "DEFAULT_NEO4J_APT_SOURCE",
+        "deb [signed-by={0}] https://debian.neo4j.com stable latest".format(keyring_path),
+    )
+
+    bootstrap.ensure_neo4j_apt_repository()
+
+    assert installed_packages == [
+        ("apt-get", ["ca-certificates", "gpg"]),
+        ("apt-get", ["software-properties-common"]),
+    ]
+    assert ["add-apt-repository", "-y", "universe"] in retried_commands
+    assert ["apt-get", "update"] in retried_commands
+    assert keyring_path.exists()
+    assert source_path.read_text(encoding="utf-8").strip().endswith("https://debian.neo4j.com stable latest")
+
+
+def test_setup_neo4j_rotates_default_password_when_needed(monkeypatch, tmp_path) -> None:
+    memory_env_path = tmp_path / "memory.env"
+    memory_env_path.write_text(
+        "COSMIC_MEMORY_GRAPH_BACKEND=neo4j\n"
+        "COSMIC_MEMORY_NEO4J_URI=bolt://127.0.0.1:7687\n"
+        "COSMIC_MEMORY_NEO4J_USERNAME=neo4j\n"
+        "COSMIC_MEMORY_NEO4J_PASSWORD=DesiredSecret1234567890\n",
+        encoding="utf-8",
+    )
+    executed_commands: list[list[str]] = []
+    initial_passwords: list[str] = []
+    rotations: list[tuple[str, str, str, str]] = []
+    auth_attempts = {"desired": 0, "default": 0}
+
+    def fake_auth(uri, username, password):
+        if password == "DesiredSecret1234567890":
+            auth_attempts["desired"] += 1
+            return auth_attempts["desired"] >= 2
+        if password == "neo4j":
+            auth_attempts["default"] += 1
+            return True
+        return False
+
+    monkeypatch.setattr(bootstrap, "is_linux", lambda: True)
+    monkeypatch.setattr(bootstrap, "ensure_neo4j_package_installed", lambda: True)
+    monkeypatch.setattr(
+        bootstrap,
+        "sync_assignment_file",
+        lambda path, **kwargs: executed_commands.append(["sync_assignment_file", str(path), kwargs["overrides"]["server.default_listen_address"]]),
+    )
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: "/usr/bin/systemctl" if name == "systemctl" else None)
+    monkeypatch.setattr(bootstrap, "read_text_file", lambda path, **kwargs: Path(path).read_text(encoding="utf-8"))
+    monkeypatch.setattr(bootstrap, "run", lambda command, **kwargs: executed_commands.append(list(command)) or SimpleNamespace(returncode=0, stdout=""))
+    monkeypatch.setattr(bootstrap, "wait_for_tcp_endpoint", lambda uri, timeout_sec=45.0: None)
+    monkeypatch.setattr(bootstrap, "neo4j_auth_works", fake_auth)
+    monkeypatch.setattr(bootstrap, "set_neo4j_initial_password", lambda password: initial_passwords.append(password))
+    monkeypatch.setattr(
+        bootstrap,
+        "rotate_neo4j_password",
+        lambda uri, username, current_password, new_password: rotations.append(
+            (uri, username, current_password, new_password)
+        ),
+    )
+
+    bootstrap.setup_neo4j(memory_env_path)
+
+    assert initial_passwords == ["DesiredSecret1234567890"]
+    assert ["systemctl", "enable", "neo4j"] in executed_commands
+    assert ["systemctl", "restart", "neo4j"] in executed_commands
+    assert rotations == [("bolt://127.0.0.1:7687", "neo4j", "neo4j", "DesiredSecret1234567890")]

@@ -2,13 +2,14 @@
 """
 Bootstrap helper for COSMIC Backend VM setup.
 
-This script is meant to be the first thing run on a Linux VM after cloning
-the backend repo. It currently handles Python readiness, pip availability,
-virtual environment creation, backend dependency installation, and WhatsApp
-bridge dependency setup. It can also invoke the dedicated VM edge setup
-script for Caddy/TLS when a public hostname is configured. It is intentionally
-structured so future setup steps
-can be added without turning it into an unmaintainable script.
+This script is meant to be the first thing run on a Linux VM after copying or
+cloning the backend repo. It handles Python readiness, pip availability,
+virtual environment creation, backend dependency installation, WhatsApp bridge
+dependency setup, and the production memory stack bootstrap (public
+cosmic-memory checkout plus local Neo4j provisioning) when memory is enabled.
+It can also invoke the dedicated VM edge setup script for Caddy/TLS when a
+public hostname is configured. It is intentionally structured so future setup
+steps can be added without turning it into an unmaintainable script.
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ import json
 import os
 import shlex
 import shutil
+import socket
+import string
 import subprocess
 import sys
 import tempfile
@@ -45,9 +48,23 @@ DEFAULT_ENV_SEARCH_ROOTS = (
     BACKEND_ROOT,
     BACKEND_ROOT / "bridges",
 )
+DEFAULT_MEMORY_REPO_DIR = BACKEND_ROOT.parent.parent / "cosmic-memory"
+DEFAULT_MEMORY_REPO_URL = "https://github.com/uspraveen/cosmic-memory.git"
+DEFAULT_MEMORY_REPO_REF = "main"
 DEFAULT_SYSTEM_ENV_DIR = Path("/etc/cosmic")
 DEFAULT_WHATSAPP_AUTH_DIR = Path("/var/lib/cosmic/whatsapp/auth")
 DEFAULT_MEMORY_DATA_DIR = Path("/var/lib/cosmic/memory")
+DEFAULT_NEO4J_APT_KEY_URL = "https://debian.neo4j.com/neotechnology.gpg.key"
+DEFAULT_NEO4J_APT_KEYRING_PATH = Path("/etc/apt/keyrings/neotechnology.gpg")
+DEFAULT_NEO4J_APT_SOURCE_PATH = Path("/etc/apt/sources.list.d/neo4j.list")
+DEFAULT_NEO4J_APT_SOURCE = (
+    "deb [signed-by={keyring}] https://debian.neo4j.com stable latest"
+).format(keyring=DEFAULT_NEO4J_APT_KEYRING_PATH)
+DEFAULT_NEO4J_CONFIG_PATH = Path("/etc/neo4j/neo4j.conf")
+DEFAULT_NEO4J_URI = "bolt://127.0.0.1:7687"
+DEFAULT_NEO4J_USERNAME = "neo4j"
+DEFAULT_NEO4J_DATABASE = "neo4j"
+DEFAULT_NEO4J_SERVICE_NAME = "neo4j"
 DEFAULT_SUPABASE_URL = "https://hluenippcdiejenmteen.supabase.co"
 DEFAULT_SUPABASE_ANON_KEY = (
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
@@ -162,6 +179,38 @@ def run(
     )
 
 
+def run_redacted(
+    command: Sequence[str],
+    *,
+    display_command: Sequence[str],
+    use_sudo: bool = False,
+    capture_output: bool = False,
+    check: bool = True,
+    cwd: Optional[Path] = None,
+) -> subprocess.CompletedProcess:
+    full_command = list(command)
+    display = list(display_command)
+    if use_sudo and not is_root():
+        sudo_path = shutil.which("sudo")
+        if not sudo_path:
+            raise BootstrapError(
+                "System package install requires root or sudo. Missing sudo for command: {0}".format(
+                    command_str(display_command)
+                )
+            )
+        full_command = [sudo_path] + full_command
+        display = [sudo_path] + display
+
+    log("Running: {0}".format(command_str(display)))
+    return subprocess.run(
+        full_command,
+        check=check,
+        text=True,
+        capture_output=capture_output,
+        cwd=str(cwd) if cwd else None,
+    )
+
+
 def retry_call(
     operation_label: str,
     action: Callable[[], RetryResult],
@@ -235,6 +284,26 @@ def detect_package_manager() -> Optional[str]:
         if shutil.which(manager):
             return manager
     return None
+
+
+def parse_os_release(path: Path = Path("/etc/os-release")) -> Dict[str, str]:
+    if not path.exists():
+        return {}
+    parsed: Dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        parsed[key.strip()] = value.strip().strip('"').strip("'")
+    return parsed
+
+
+def is_ubuntu_host() -> bool:
+    os_release = parse_os_release()
+    host_id = os_release.get("ID", "").strip().lower()
+    id_like = os_release.get("ID_LIKE", "").strip().lower()
+    return host_id == "ubuntu" or "ubuntu" in {part.strip() for part in id_like.split()}
 
 
 def executable_version(command: Sequence[str]) -> Optional[str]:
@@ -330,6 +399,16 @@ def read_text_file(path: Path, *, use_sudo: bool = False) -> str:
 
 def install_text_file(path: Path, content: str, *, mode: str = "600", use_sudo: bool = False) -> None:
     with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8", newline="\n") as tmp:
+        tmp.write(content)
+        temp_path = Path(tmp.name)
+    try:
+        run(["install", "-m", mode, str(temp_path), str(path)], use_sudo=use_sudo)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def install_bytes_file(path: Path, content: bytes, *, mode: str = "644", use_sudo: bool = False) -> None:
+    with tempfile.NamedTemporaryFile("wb", delete=False) as tmp:
         tmp.write(content)
         temp_path = Path(tmp.name)
     try:
@@ -493,6 +572,48 @@ def render_env_with_overrides(raw: str, overrides: Dict[str, str]) -> str:
             rendered_lines.append("{0}={1}".format(key, value))
 
     return "\n".join(rendered_lines).rstrip() + "\n"
+
+
+def render_assignment_overrides(raw: str, overrides: Dict[str, str]) -> str:
+    rendered_lines: list[str] = []
+    seen: set[str] = set()
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            rendered_lines.append(line)
+            continue
+
+        key, _value = line.split("=", 1)
+        assignment_key = key.strip()
+        if assignment_key in overrides:
+            rendered_lines.append("{0}={1}".format(assignment_key, overrides[assignment_key]))
+            seen.add(assignment_key)
+        else:
+            rendered_lines.append(line)
+
+    for key, value in overrides.items():
+        if key not in seen:
+            rendered_lines.append("{0}={1}".format(key, value))
+
+    return "\n".join(rendered_lines).rstrip() + "\n"
+
+
+def sync_assignment_file(
+    target_path: Path,
+    *,
+    overrides: Dict[str, str],
+    create_missing: bool = True,
+    use_sudo: bool = False,
+    mode: str = "644",
+) -> None:
+    existing_raw = ""
+    if target_path.exists():
+        existing_raw = read_text_file(target_path, use_sudo=use_sudo)
+    elif not create_missing:
+        raise BootstrapError("Cannot update missing config file: {0}".format(target_path))
+
+    rendered = render_assignment_overrides(existing_raw, overrides)
+    install_text_file(target_path, rendered, mode=mode, use_sudo=use_sudo)
 
 
 def meaningful_env_value(value: Optional[str]) -> Optional[str]:
@@ -1114,6 +1235,11 @@ def first_meaningful_value(*values: Optional[str]) -> Optional[str]:
     return None
 
 
+def generate_safe_secret(length: int = 40) -> str:
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
 def build_service_env_overrides(
     effective_sources: Sequence[Tuple[Path, Path]],
     *,
@@ -1316,6 +1442,11 @@ def build_service_env_overrides(
         (memory_neo4j_uri, memory_neo4j_username, memory_neo4j_password)
     ):
         memory_graph_backend = "neo4j"
+    if (memory_graph_backend or "").strip().lower() == "neo4j":
+        memory_neo4j_uri = memory_neo4j_uri or DEFAULT_NEO4J_URI
+        memory_neo4j_username = memory_neo4j_username or DEFAULT_NEO4J_USERNAME
+        memory_neo4j_database = memory_neo4j_database or DEFAULT_NEO4J_DATABASE
+        memory_neo4j_password = memory_neo4j_password or generate_safe_secret()
     if not memory_graph_warm_cache_on_startup:
         memory_graph_warm_cache_on_startup = (
             "true" if (memory_graph_backend or "").strip().lower() == "neo4j" else "false"
@@ -1601,6 +1732,19 @@ def doctor(
     print("  bridge package     : {0}".format(
         (bridge_dir / "package.json") if (bridge_dir / "package.json").exists() else "missing"
     ))
+    print("  memory repo target : {0}".format(DEFAULT_MEMORY_REPO_DIR))
+    print(
+        "  memory repo exists : {0}".format(
+            "yes" if (DEFAULT_MEMORY_REPO_DIR / "pyproject.toml").exists() else "no"
+        )
+    )
+    if is_linux() and shutil.which("systemctl") is not None:
+        neo4j_status = run(
+            ["systemctl", "is-active", DEFAULT_NEO4J_SERVICE_NAME],
+            capture_output=True,
+            check=False,
+        )
+        print("  neo4j service      : {0}".format((neo4j_status.stdout or "unknown").strip() or "unknown"))
     print("  env search roots   : {0}".format(", ".join(str(path) for path in env_search_roots)))
     print("  env templates      : {0}".format(len(env_examples)))
     print("  systemd templates  : {0}".format(systemd_template_dir if systemd_template_dir.exists() else "missing"))
@@ -1726,18 +1870,293 @@ def setup_whatsapp_bridge(bridge_dir: Path) -> None:
     install_whatsapp_bridge_dependencies(bridge_dir)
 
 
-def resolve_memory_repo_dir(configured_path: Path | None) -> Path | None:
+def resolve_memory_repo_dir(configured_path: Path | None, *, allow_missing: bool = False) -> Path | None:
     if configured_path is None:
         return None
     resolved = configured_path.expanduser().resolve()
     if not resolved.exists():
+        if allow_missing:
+            return resolved
         raise BootstrapError("cosmic-memory repo directory does not exist: {0}".format(resolved))
     if not (resolved / "pyproject.toml").exists():
         raise BootstrapError("cosmic-memory repo is missing pyproject.toml: {0}".format(resolved))
     return resolved
 
 
-def setup_cosmic_memory(venv_path: Path, memory_repo_dir: Path) -> None:
+def ensure_git_available() -> None:
+    if shutil.which("git"):
+        return
+    if not is_linux():
+        raise BootstrapError("git is required to fetch cosmic-memory.")
+    manager = detect_package_manager()
+    if not manager:
+        raise BootstrapError("git is required to fetch cosmic-memory, but no supported package manager was found.")
+    install_system_packages(manager, ["git"])
+    if shutil.which("git") is None:
+        raise BootstrapError("git is still unavailable after installation attempts.")
+
+
+def ensure_memory_repo_checkout(memory_repo_dir: Path, memory_repo_url: str, memory_repo_ref: str) -> Path:
+    resolved = resolve_memory_repo_dir(memory_repo_dir, allow_missing=True)
+    if resolved is None:
+        raise BootstrapError("cosmic-memory repo path could not be resolved.")
+    if resolved.exists():
+        if not resolved.is_dir():
+            raise BootstrapError("cosmic-memory repo path is not a directory: {0}".format(resolved))
+        if (resolved / "pyproject.toml").exists():
+            return resolve_memory_repo_dir(resolved)
+        if any(resolved.iterdir()):
+            raise BootstrapError(
+                "cosmic-memory checkout target exists but is not a valid repo: {0}".format(resolved)
+            )
+    ensure_git_available()
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    clone_command = ["git", "clone", "--depth", "1"]
+    normalized_ref = meaningful_env_value(memory_repo_ref)
+    if normalized_ref is not None:
+        clone_command.extend(["--branch", normalized_ref])
+    clone_command.extend([memory_repo_url, str(resolved)])
+    run_with_retry(clone_command)
+    return resolve_memory_repo_dir(resolved)
+
+
+def apt_package_installed(package_name: str) -> bool:
+    result = run(
+        ["dpkg-query", "-W", "-f=${Status}", package_name],
+        capture_output=True,
+        check=False,
+    )
+    status = (result.stdout or "").strip().lower()
+    return result.returncode == 0 and "install ok installed" in status
+
+
+def apt_has_candidate(package_name: str) -> bool:
+    result = run(
+        ["apt-cache", "policy", package_name],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    output = (result.stdout or "").strip().lower()
+    return "candidate: (none)" not in output
+
+
+def ensure_neo4j_apt_repository() -> None:
+    manager = detect_package_manager()
+    if manager != "apt-get":
+        raise BootstrapError("Automatic Neo4j provisioning currently supports apt-get based Linux VMs only.")
+
+    install_system_packages(manager, ["ca-certificates", "gpg"])
+    if is_ubuntu_host() and not apt_has_candidate("daemon"):
+        install_system_packages(manager, ["software-properties-common"])
+        run_with_retry(["add-apt-repository", "-y", "universe"], use_sudo=True)
+
+    run(["install", "-d", "-m", "755", str(DEFAULT_NEO4J_APT_KEYRING_PATH.parent)], use_sudo=True)
+    request = Request(
+        DEFAULT_NEO4J_APT_KEY_URL,
+        headers={"User-Agent": "cosmic-bootstrap/1.0"},
+    )
+    with retry_call(
+        "Downloading Neo4j APT signing key",
+        lambda: urlopen(request, timeout=30),
+        retry_exceptions=(HTTPError, URLError),
+        should_retry=should_retry_bootstrap_http_error,
+    ) as response:
+        key_bytes = response.read()
+
+    with tempfile.TemporaryDirectory(prefix="cosmic-neo4j-key-") as temp_dir:
+        temp_dir_path = Path(temp_dir)
+        raw_key_path = temp_dir_path / "neo4j.asc"
+        dearmored_key_path = temp_dir_path / "neo4j.gpg"
+        raw_key_path.write_bytes(key_bytes)
+        run(
+            ["gpg", "--dearmor", "--yes", "--output", str(dearmored_key_path), str(raw_key_path)],
+            capture_output=False,
+            check=True,
+        )
+        install_bytes_file(
+            DEFAULT_NEO4J_APT_KEYRING_PATH,
+            dearmored_key_path.read_bytes(),
+            mode="644",
+            use_sudo=True,
+        )
+
+    install_text_file(
+        DEFAULT_NEO4J_APT_SOURCE_PATH,
+        DEFAULT_NEO4J_APT_SOURCE + "\n",
+        mode="644",
+        use_sudo=True,
+    )
+    run_with_retry(["apt-get", "update"], use_sudo=True)
+
+
+def ensure_neo4j_package_installed() -> bool:
+    ensure_neo4j_apt_repository()
+    if apt_package_installed("neo4j"):
+        return False
+    run_with_retry(["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "neo4j"], use_sudo=True)
+    return True
+
+
+def wait_for_tcp_endpoint(uri: str, *, timeout_sec: float = 45.0) -> None:
+    parsed = urlparse(uri)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 7687
+    deadline = time.time() + timeout_sec
+    last_error: Optional[OSError] = None
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=2.0):
+                return
+        except OSError as exc:
+            last_error = exc
+            time.sleep(1.0)
+    raise BootstrapError(
+        "Timed out waiting for Neo4j at {0}:{1}: {2}".format(
+            host,
+            port,
+            last_error or "unreachable",
+        )
+    )
+
+
+def neo4j_auth_works(uri: str, username: str, password: str) -> bool:
+    try:
+        run_redacted(
+            [
+                "cypher-shell",
+                "-a",
+                uri,
+                "-u",
+                username,
+                "-p",
+                password,
+                "--non-interactive",
+                "RETURN 1;",
+            ],
+            display_command=[
+                "cypher-shell",
+                "-a",
+                uri,
+                "-u",
+                username,
+                "-p",
+                "<redacted>",
+                "--non-interactive",
+                "RETURN 1;",
+            ],
+            capture_output=True,
+        )
+        return True
+    except (BootstrapError, FileNotFoundError, subprocess.CalledProcessError):
+        return False
+
+
+def set_neo4j_initial_password(password: str) -> None:
+    run_redacted(
+        ["neo4j-admin", "dbms", "set-initial-password", password],
+        display_command=["neo4j-admin", "dbms", "set-initial-password", "<redacted>"],
+        use_sudo=True,
+    )
+
+
+def rotate_neo4j_password(uri: str, username: str, current_password: str, new_password: str) -> None:
+    query = "ALTER CURRENT USER SET PASSWORD FROM '{0}' TO '{1}'".format(
+        current_password,
+        new_password,
+    )
+    run_redacted(
+        [
+            "cypher-shell",
+            "-a",
+            uri,
+            "-u",
+            username,
+            "-p",
+            current_password,
+            "--non-interactive",
+            query,
+        ],
+        display_command=[
+            "cypher-shell",
+            "-a",
+            uri,
+            "-u",
+            username,
+            "-p",
+            "<redacted>",
+            "--non-interactive",
+            "ALTER CURRENT USER SET PASSWORD FROM '<redacted>' TO '<redacted>'",
+        ],
+        capture_output=True,
+    )
+
+
+def setup_neo4j(memory_env_path: Path) -> None:
+    if not is_linux():
+        raise BootstrapError("Automatic Neo4j provisioning currently targets Linux VMs only.")
+
+    env_data = parse_env_text(read_text_file(memory_env_path, use_sudo=True))
+    graph_backend = (first_meaningful_value(env_data.get("COSMIC_MEMORY_GRAPH_BACKEND"), "neo4j") or "").strip().lower()
+    if graph_backend != "neo4j":
+        log("Skipping Neo4j provisioning because COSMIC_MEMORY_GRAPH_BACKEND={0}.".format(graph_backend or "<empty>"))
+        return
+
+    neo4j_uri = first_meaningful_value(env_data.get("COSMIC_MEMORY_NEO4J_URI"), DEFAULT_NEO4J_URI) or DEFAULT_NEO4J_URI
+    neo4j_username = (
+        first_meaningful_value(env_data.get("COSMIC_MEMORY_NEO4J_USERNAME"), DEFAULT_NEO4J_USERNAME)
+        or DEFAULT_NEO4J_USERNAME
+    )
+    neo4j_password = meaningful_env_value(env_data.get("COSMIC_MEMORY_NEO4J_PASSWORD"))
+    if neo4j_password is None:
+        raise BootstrapError(
+            "memory.env is configured for Neo4j but COSMIC_MEMORY_NEO4J_PASSWORD is blank or still a placeholder."
+        )
+
+    freshly_installed = ensure_neo4j_package_installed()
+    sync_assignment_file(
+        DEFAULT_NEO4J_CONFIG_PATH,
+        overrides={"server.default_listen_address": "127.0.0.1"},
+        create_missing=False,
+        use_sudo=True,
+        mode="644",
+    )
+
+    if freshly_installed:
+        try:
+            set_neo4j_initial_password(neo4j_password)
+        except subprocess.CalledProcessError:
+            log("Neo4j initial password setup was not accepted before first start; will verify or rotate after service startup.")
+
+    if shutil.which("systemctl") is None:
+        raise BootstrapError("systemctl not found. Neo4j provisioning expects a systemd-based Linux VM.")
+
+    run(["systemctl", "enable", DEFAULT_NEO4J_SERVICE_NAME], use_sudo=True)
+    run(["systemctl", "restart", DEFAULT_NEO4J_SERVICE_NAME], use_sudo=True)
+    wait_for_tcp_endpoint(neo4j_uri)
+
+    if neo4j_auth_works(neo4j_uri, neo4j_username, neo4j_password):
+        return
+
+    if neo4j_auth_works(neo4j_uri, neo4j_username, "neo4j"):
+        rotate_neo4j_password(neo4j_uri, neo4j_username, "neo4j", neo4j_password)
+        if neo4j_auth_works(neo4j_uri, neo4j_username, neo4j_password):
+            return
+
+    raise BootstrapError(
+        "Neo4j is installed, but COSMIC_MEMORY_NEO4J_PASSWORD does not authenticate. "
+        "Refusing to continue with an unknown graph DB password state."
+    )
+
+
+def setup_cosmic_memory(
+    venv_path: Path,
+    memory_repo_dir: Path,
+    *,
+    memory_repo_url: str,
+    memory_repo_ref: str,
+) -> None:
     if not is_linux():
         raise BootstrapError("This bootstrap flow currently targets Linux VMs only.")
 
@@ -1745,9 +2164,7 @@ def setup_cosmic_memory(venv_path: Path, memory_repo_dir: Path) -> None:
     if not python_path.exists():
         raise BootstrapError("Missing venv python executable at {0}".format(python_path))
 
-    memory_repo = resolve_memory_repo_dir(memory_repo_dir)
-    if memory_repo is None:
-        return
+    memory_repo = ensure_memory_repo_checkout(memory_repo_dir, memory_repo_url, memory_repo_ref)
 
     install_target = "{0}[qdrant-local,graph,llm]".format(memory_repo)
     log("Installing cosmic-memory package from {0}".format(memory_repo))
@@ -1796,6 +2213,8 @@ def bootstrap(
     supabase_url: str = DEFAULT_SUPABASE_URL,
     supabase_anon_key: str = DEFAULT_SUPABASE_ANON_KEY,
     memory_repo_dir: Path | None = None,
+    memory_repo_url: str = DEFAULT_MEMORY_REPO_URL,
+    memory_repo_ref: str = DEFAULT_MEMORY_REPO_REF,
 ) -> None:
     enable_memory = memory_repo_dir is not None
     setup_env_files(env_search_roots)
@@ -1811,7 +2230,12 @@ def bootstrap(
     setup_local_redis(resolve_configured_redis_url())
     setup_python(venv_path, requirements_path)
     if memory_repo_dir is not None:
-        setup_cosmic_memory(venv_path, memory_repo_dir)
+        setup_cosmic_memory(
+            venv_path,
+            memory_repo_dir,
+            memory_repo_url=memory_repo_url,
+            memory_repo_ref=memory_repo_ref,
+        )
     setup_whatsapp_bridge(bridge_dir)
     if not skip_edge and edge_setup_script is not None and gateway_env_path is not None:
         setup_vm_edge(
@@ -1828,6 +2252,8 @@ def bootstrap(
     print("  venv   : {0}".format(venv_path))
     print("  deps   : {0}".format(requirements_path))
     print("  bridge : {0}".format(bridge_dir))
+    if enable_memory and memory_repo_dir is not None:
+        print("  memory : {0}".format(memory_repo_dir))
     print("  next   : source {0}/bin/activate".format(venv_path))
 
 
@@ -1849,6 +2275,8 @@ def provision_vm(
     supabase_url: str = DEFAULT_SUPABASE_URL,
     supabase_anon_key: str = DEFAULT_SUPABASE_ANON_KEY,
     memory_repo_dir: Path | None = None,
+    memory_repo_url: str = DEFAULT_MEMORY_REPO_URL,
+    memory_repo_ref: str = DEFAULT_MEMORY_REPO_REF,
 ) -> None:
     enable_memory = memory_repo_dir is not None
     bootstrap(
@@ -1865,6 +2293,8 @@ def provision_vm(
         supabase_url=supabase_url,
         supabase_anon_key=supabase_anon_key,
         memory_repo_dir=memory_repo_dir,
+        memory_repo_url=memory_repo_url,
+        memory_repo_ref=memory_repo_ref,
     )
     if enable_memory:
         run(
@@ -1881,6 +2311,8 @@ def provision_vm(
             ],
             use_sudo=True,
         )
+        install_service_env_files(DEFAULT_SYSTEM_ENV_DIR, include_memory=True)
+        setup_neo4j(DEFAULT_SYSTEM_ENV_DIR / "memory.env")
     installed = install_systemd_units(
         systemd_template_dir,
         enable_units=enable_units,
@@ -1941,8 +2373,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--memory-repo-dir",
-        default="",
-        help="Optional local path to the cosmic-memory repo. When set, bootstrap installs the package, materializes memory.env, and provisions cosmic-memory.service.",
+        default=str(DEFAULT_MEMORY_REPO_DIR),
+        help="cosmic-memory checkout path. Existing repos are reused; missing paths are cloned from --memory-repo-url. Default: %(default)s",
+    )
+    parser.add_argument(
+        "--memory-repo-url",
+        default=DEFAULT_MEMORY_REPO_URL,
+        help="Public cosmic-memory Git URL used when --memory-repo-dir does not exist. Default: %(default)s",
+    )
+    parser.add_argument(
+        "--memory-repo-ref",
+        default=DEFAULT_MEMORY_REPO_REF,
+        help="Branch or tag to clone for cosmic-memory when bootstrap fetches it. Default: %(default)s",
+    )
+    parser.add_argument(
+        "--skip-memory",
+        action="store_true",
+        help="Skip cosmic-memory checkout/install, memory.env materialization, and Neo4j provisioning.",
     )
     parser.add_argument(
         "--skip-edge",
@@ -2033,10 +2480,16 @@ def main() -> int:
     gateway_env_path = Path(args.gateway_env_path).expanduser().resolve()
     gateway_host = getattr(args, "gateway_host", "").strip() or None
     memory_repo_dir = (
-        resolve_memory_repo_dir(Path(args.memory_repo_dir))
-        if meaningful_env_value(getattr(args, "memory_repo_dir", "")) is not None
+        resolve_memory_repo_dir(
+            Path(getattr(args, "memory_repo_dir", "")),
+            allow_missing=True,
+        )
+        if not bool(getattr(args, "skip_memory", False))
+        and meaningful_env_value(getattr(args, "memory_repo_dir", "")) is not None
         else None
     )
+    memory_repo_url = meaningful_env_value(getattr(args, "memory_repo_url", "")) or DEFAULT_MEMORY_REPO_URL
+    memory_repo_ref = meaningful_env_value(getattr(args, "memory_repo_ref", "")) or DEFAULT_MEMORY_REPO_REF
     bootstrap_token = (
         meaningful_env_value(getattr(args, "bootstrap_token", ""))
         or meaningful_env_value(os.getenv("COSMIC_BOOTSTRAP_TOKEN"))
@@ -2089,7 +2542,12 @@ def main() -> int:
         elif command == "setup-python":
             setup_python(venv_path, requirements_path)
             if memory_repo_dir is not None:
-                setup_cosmic_memory(venv_path, memory_repo_dir)
+                setup_cosmic_memory(
+                    venv_path,
+                    memory_repo_dir,
+                    memory_repo_url=memory_repo_url,
+                    memory_repo_ref=memory_repo_ref,
+                )
         elif command == "setup-whatsapp-bridge":
             setup_whatsapp_bridge(bridge_dir)
         elif command == "setup-edge":
@@ -2101,6 +2559,9 @@ def main() -> int:
                 skip_if_unconfigured=False,
             )
         elif command == "install-systemd":
+            if memory_repo_dir is not None:
+                install_service_env_files(DEFAULT_SYSTEM_ENV_DIR, include_memory=True)
+                setup_neo4j(DEFAULT_SYSTEM_ENV_DIR / "memory.env")
             installed = install_systemd_units(
                 systemd_template_dir,
                 enable_units=bool(getattr(args, "enable", False)),
@@ -2128,6 +2589,8 @@ def main() -> int:
                 supabase_url=supabase_url,
                 supabase_anon_key=supabase_anon_key,
                 memory_repo_dir=memory_repo_dir,
+                memory_repo_url=memory_repo_url,
+                memory_repo_ref=memory_repo_ref,
             )
         else:
             bootstrap(
@@ -2144,6 +2607,8 @@ def main() -> int:
                 supabase_url=supabase_url,
                 supabase_anon_key=supabase_anon_key,
                 memory_repo_dir=memory_repo_dir,
+                memory_repo_url=memory_repo_url,
+                memory_repo_ref=memory_repo_ref,
             )
     except BootstrapError as exc:
         print("Bootstrap failed: {0}".format(exc), file=sys.stderr)
