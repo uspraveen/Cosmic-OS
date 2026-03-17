@@ -34,10 +34,16 @@ from .session.summary import (
     session_summary_source_text,
 )
 from .session_store import SessionStore
+from .usage_store import UsageStore
 from shared import (
+    MeteredCall,
     ModelSpec,
     SOURCE_PRIORITY_MAP,
     TaskEnvelope,
+    UsageEvent,
+    begin_metered_call,
+    build_model_key,
+    build_usage_event,
     create_redis_client,
     estimate_text_tokens,
     ensure_stream_group,
@@ -145,6 +151,7 @@ class GatewayRuntime:
             timeout_sec=config.orchestrator_timeout_sec,
         )
         self.session_store = SessionStore(config.sessions_db_path)
+        self.usage_store = UsageStore(config.usage_db_path)
         self.routing_audit_store = RoutingAuditStore(config.routing_audit_db_path)
         self.memory_write_audit_store = MemoryWriteAuditStore(config.memory_write_audit_db_path)
         self.artifact_store = ArtifactStore(config.artifacts_db_path)
@@ -193,6 +200,7 @@ class GatewayRuntime:
 
     async def start(self) -> None:
         self.session_store.initialize()
+        self.usage_store.initialize()
         self.routing_audit_store.initialize()
         self.memory_write_audit_store.initialize()
         self.artifact_store.initialize()
@@ -1240,6 +1248,13 @@ class GatewayRuntime:
             "input_artifacts": input_artifacts,
             "accepted_at": utcnow_iso(),
         }
+        if routing_decision.decision_source == "model_router":
+            self._record_classifier_usage(
+                request_id=request_id,
+                session_id=session_id,
+                route=self._safe_text(classification.get("route")) or "opus",
+                router_response=routing_decision.classifier_payload,
+            )
         self.request_records[request_id] = result
         self.routing_audit_store.append(
             request_id=request_id,
@@ -1281,6 +1296,13 @@ class GatewayRuntime:
         history = self._get_model_visible_history(session_id)
         memory_context = self._safe_text(request_record.get("memory_context"))
         active_request = self.active_requests.get(request_id)
+        source = self._safe_text(request_record.get("source")) or "user"
+        source_id = self._safe_text(request_record.get("source_id"))
+        direct_usage_metadata = {
+            "channel": channel,
+            "source": source,
+            "source_id": source_id,
+        }
 
         async def send(event: dict[str, Any]) -> None:
             if active_request is not None:
@@ -1344,6 +1366,14 @@ class GatewayRuntime:
                     store_assistant_message=store_assistant_message,
                     channel=channel,
                     memory_context=memory_context,
+                    usage_recorder=self._build_gateway_usage_recorder(
+                        source_id="gateway:haiku",
+                        operation="gateway.direct_chat",
+                        route="haiku",
+                        request_id=request_id,
+                        session_id=session_id,
+                        extra_metadata=direct_usage_metadata,
+                    ),
                 )
                 return
 
@@ -1356,6 +1386,14 @@ class GatewayRuntime:
                     store_assistant_message=store_assistant_message,
                     channel=channel,
                     memory_context=memory_context,
+                    usage_recorder=self._build_gateway_usage_recorder(
+                        source_id="gateway:perplexity",
+                        operation="gateway.direct_chat",
+                        route="perplexity",
+                        request_id=request_id,
+                        session_id=session_id,
+                        extra_metadata=direct_usage_metadata,
+                    ),
                 )
                 return
         except DirectRouteHandoff as handoff:
@@ -1640,6 +1678,147 @@ class GatewayRuntime:
 
     def list_routing_audit(self, limit: int = 50) -> list[dict[str, Any]]:
         return self.routing_audit_store.list_entries(limit=limit)
+
+    def log_usage_event(self, event: UsageEvent | dict[str, Any]) -> bool:
+        payload = event if isinstance(event, UsageEvent) else UsageEvent.model_validate(event)
+        return self.usage_store.append(payload)
+
+    def list_recent_usage(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        return self.usage_store.list_recent(limit=limit)
+
+    def _record_local_usage_event(self, event: UsageEvent | dict[str, Any]) -> None:
+        try:
+            deduplicated = not self.log_usage_event(event)
+            payload = event if isinstance(event, UsageEvent) else UsageEvent.model_validate(event)
+            logger.info(
+                "gateway.usage_logged llm_call_id=%s source_component=%s operation=%s provider=%s model=%s deduplicated=%s",
+                payload.llm_call_id,
+                payload.source_component,
+                payload.operation,
+                payload.provider,
+                payload.model,
+                deduplicated,
+            )
+        except Exception:
+            logger.exception("gateway.usage_log_failed")
+
+    def _record_classifier_usage(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        route: str,
+        router_response: dict[str, Any] | None,
+    ) -> None:
+        if not isinstance(router_response, dict):
+            return
+        raw_usage = router_response.get("usage")
+        classifier_model = self._safe_text(router_response.get("classifier_model"))
+        if not classifier_model:
+            return
+        model_key = build_model_key("groq", classifier_model)
+        llm_call_id = self._safe_text(router_response.get("llm_call_id"))
+        llm_call_placed_at = self._safe_text(router_response.get("llm_call_placed_at"))
+        if not llm_call_id or not llm_call_placed_at:
+            metered_call = begin_metered_call(prefix="call")
+        else:
+            metered_call = MeteredCall(
+                llm_call_id=llm_call_id,
+                llm_call_placed_at=llm_call_placed_at,
+                started_perf_counter=time.perf_counter(),
+            )
+        metrics = router_response.get("metrics") if isinstance(router_response.get("metrics"), dict) else {}
+        event = build_usage_event(
+            metered_call=metered_call,
+            source_component="model_router",
+            source_id=f"model_router:{classifier_model}",
+            task_id=None,
+            session_id=session_id,
+            route=route,
+            operation="model_router.classify",
+            model_key=model_key,
+            request_id=request_id,
+            provider_request_id=self._safe_text(router_response.get("provider_request_id")) or None,
+            raw_usage=raw_usage,
+            success=True,
+            latency_ms=self._coerce_int(metrics.get("rtt_ms")),
+            metadata_json={
+                "classification": router_response.get("classification"),
+                "metrics": metrics,
+            },
+        )
+        self._record_local_usage_event(event)
+
+    def _build_gateway_usage_recorder(
+        self,
+        *,
+        source_id: str,
+        operation: str,
+        route: str | None,
+        request_id: str | None,
+        session_id: str | None,
+        task_id: str | None = None,
+        extra_metadata: dict[str, Any] | None = None,
+    ):
+        def normalize_latency(value: Any) -> int | None:
+            return self._coerce_int(value)
+
+        def normalize_cost(value: Any) -> float | None:
+            try:
+                if value is None or value == "":
+                    return None
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        async def recorder(payload: dict[str, Any]) -> None:
+            model_key = self._safe_text(payload.get("model_key"))
+            provider = self._safe_text(payload.get("provider"))
+            model = self._safe_text(payload.get("model"))
+            event = build_usage_event(
+                metered_call=payload["metered_call"],
+                source_component="gateway",
+                source_id=source_id,
+                task_id=task_id,
+                session_id=session_id,
+                route=route,
+                operation=operation,
+                model_key=model_key or None,
+                provider=provider or None,
+                model=model or None,
+                usage_kind=self._safe_text(payload.get("usage_kind")) or None,
+                request_id=request_id,
+                provider_request_id=self._safe_text(payload.get("provider_request_id")) or None,
+                raw_usage=payload.get("raw_usage"),
+                success=bool(payload.get("success", True)),
+                error_code=self._safe_text(payload.get("error_code")) or None,
+                latency_ms=normalize_latency(payload.get("latency_ms")),
+                estimated_cost_usd=normalize_cost(payload.get("estimated_cost_usd")),
+                metadata_json=self._merge_usage_metadata(
+                    extra_metadata,
+                    payload.get("metadata_json"),
+                ),
+            )
+            self._record_local_usage_event(event)
+
+        return recorder
+
+    def _merge_usage_metadata(self, primary: dict[str, Any] | None, secondary: Any) -> Any:
+        if primary is None and secondary is None:
+            return None
+        if primary is None:
+            return secondary
+        if secondary is None:
+            return primary
+        if isinstance(secondary, dict):
+            return {
+                **primary,
+                **secondary,
+            }
+        return {
+            **primary,
+            "extra": secondary,
+        }
 
     async def _classify_message(
         self,
@@ -2863,6 +3042,17 @@ class GatewayRuntime:
             system_prompt=system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
             max_tokens=1200,
+            usage_recorder=self._build_gateway_usage_recorder(
+                source_id="gateway:haiku",
+                operation="gateway.session_compaction",
+                route="haiku",
+                request_id=None,
+                session_id=session_id,
+                extra_metadata={
+                    "summary_type": "session_compaction",
+                    "session_id": session_id,
+                },
+            ),
         )
         normalized = summary_text.strip()
         return normalized or None
@@ -3876,6 +4066,7 @@ class GatewayRuntime:
             "memory": memory,
             "channels": self.list_channels(),
             "current_session_id": self._current_session_id(),
+            "usage": self.usage_store.summary(),
             "delivery_queue": self.delivery_queue_store.summary(),
             "scheduler": self.scheduler_store.summary(),
         }
@@ -3893,6 +4084,7 @@ class GatewayRuntime:
             "orchestrator_url": self.config.orchestrator_url,
             "cosmic_memory_url": self.config.cosmic_memory_url,
             "memory": memory,
+            "usage": self.usage_store.summary(),
             "delivery_queue": self.delivery_queue_store.summary(),
             "scheduler": self.scheduler_store.summary(),
         }
@@ -4444,6 +4636,18 @@ class GatewayRuntime:
             system_prompt=system_prompt,
             messages=[{"role": "user", "content": user_message}],
             max_tokens=self.config.session_summary_max_output_tokens,
+            usage_recorder=self._build_gateway_usage_recorder(
+                source_id="gateway:haiku",
+                operation="gateway.session_summary",
+                route="haiku",
+                request_id=None,
+                session_id=session_id,
+                extra_metadata={
+                    "summary_type": "session_rollover",
+                    "session_id": session_id,
+                    "message_count": len(history),
+                },
+            ),
         )
         normalized = summary_text.strip()
         return normalized or None

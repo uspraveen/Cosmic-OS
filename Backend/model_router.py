@@ -37,7 +37,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from shared import lookup_model_spec
+from shared import begin_metered_call, lookup_model_spec
 
 load_dotenv(Path(__file__).with_name("model_router.env"))
 load_dotenv()
@@ -490,7 +490,7 @@ async def classify_async(
     conversation_context: Optional[Sequence[Any]] = None,
     memory_context: Optional[str] = None,
     max_completion_tokens: int = DEFAULT_MAX_COMPLETION_TOKENS,
-) -> Tuple[Dict[str, Any], Dict[str, float], str]:
+) -> Tuple[Dict[str, Any], Dict[str, Any], str, Dict[str, Any] | None, str | None, str, str]:
     global _http_client
 
     if not GROQ_API_KEY:
@@ -498,6 +498,7 @@ async def classify_async(
     if _http_client is None:
         raise RuntimeError("HTTP client is not initialized")
 
+    metered_call = begin_metered_call(prefix="call")
     start = now()
     response = await _http_client.post(
         f"{CLASSIFIER_BASE_URL}/chat/completions",
@@ -515,12 +516,27 @@ async def classify_async(
     raw = result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
     parsed = extract_json_object(raw) or default_classifier_output("parse_failed")
     classification = enforce_rules(parsed)
+    usage = result.get("usage") if isinstance(result.get("usage"), dict) else None
+    provider_request_id = (
+        response.headers.get("x-request-id")
+        or response.headers.get("request-id")
+        or response.headers.get("x-groq-request-id")
+        or None
+    )
     metrics = {
         "rtt_ms": (end - start) * 1000,
         "connection_warmed": _connection_warmed,
         "http2_enabled": HTTP2_ENABLED,
     }
-    return classification, metrics, raw
+    return (
+        classification,
+        metrics,
+        raw,
+        usage,
+        provider_request_id,
+        metered_call.llm_call_id,
+        metered_call.llm_call_placed_at,
+    )
 
 
 def readiness_payload() -> Tuple[bool, Dict[str, Any]]:
@@ -587,7 +603,15 @@ def create_app() -> FastAPI:
     @app.post("/classify")
     async def classify(body: ClassifyRequest) -> Dict[str, Any]:
         try:
-            classification, metrics, raw = await classify_async(
+            (
+                classification,
+                metrics,
+                raw,
+                usage,
+                provider_request_id,
+                llm_call_id,
+                llm_call_placed_at,
+            ) = await classify_async(
                 user_text=body.query,
                 conversation_context=body.conversation_context,
                 memory_context=body.memory_context,
@@ -613,6 +637,10 @@ def create_app() -> FastAPI:
         return {
             "classification": classification,
             "metrics": metrics,
+            "usage": usage,
+            "provider_request_id": provider_request_id,
+            "llm_call_id": llm_call_id,
+            "llm_call_placed_at": llm_call_placed_at,
             "classifier_model": CLASSIFIER_MODEL,
             "raw_classifier_output": raw,
             "timestamp_unix_ms": int(time.time() * 1000),
@@ -624,7 +652,15 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty batch")
 
         async def _run(item: ClassifyRequest) -> Dict[str, Any]:
-            classification, metrics, raw = await classify_async(
+            (
+                classification,
+                metrics,
+                raw,
+                usage,
+                provider_request_id,
+                llm_call_id,
+                llm_call_placed_at,
+            ) = await classify_async(
                 user_text=item.query,
                 conversation_context=item.conversation_context,
                 memory_context=item.memory_context,
@@ -633,6 +669,10 @@ def create_app() -> FastAPI:
             return {
                 "classification": classification,
                 "metrics": metrics,
+                "usage": usage,
+                "provider_request_id": provider_request_id,
+                "llm_call_id": llm_call_id,
+                "llm_call_placed_at": llm_call_placed_at,
                 "raw_classifier_output": raw,
                 "timestamp_unix_ms": int(time.time() * 1000),
             }

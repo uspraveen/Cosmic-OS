@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 import httpx
 
 from .prompts import build_direct_assistant_system_prompt
 from .response_processor import DirectRouteHandoff, LLMStreamProcessor, normalize_conversation_history
+from shared import begin_metered_call, build_model_key
 
 
 @dataclass(slots=True)
@@ -51,6 +52,7 @@ class HaikuAdapter(LLMStreamProcessor):
         store_assistant_message,
         channel: str,
         memory_context: str | None = None,
+        usage_recorder: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> None:
         if not self.api_key:
             raise RuntimeError("ANTHROPIC_API_KEY is not configured on the Gateway VM.")
@@ -79,7 +81,11 @@ class HaikuAdapter(LLMStreamProcessor):
 
         async def text_stream() -> AsyncIterator[str]:
             nonlocal stop_reason, thinking_text, usage
-            async for payload in self._stream_events(history, memory_context=memory_context):
+            async for payload in self._stream_events(
+                history,
+                memory_context=memory_context,
+                usage_recorder=usage_recorder,
+            ):
                 payload_type = str(payload.get("type") or "").strip()
                 if payload_type == "usage":
                     usage = self._merge_usage(usage, payload.get("usage"))
@@ -148,6 +154,7 @@ class HaikuAdapter(LLMStreamProcessor):
         system_prompt: str,
         messages: list[dict[str, str]],
         max_tokens: int,
+        usage_recorder: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> tuple[str, dict[str, int], str | None]:
         if not self.api_key:
             raise RuntimeError("ANTHROPIC_API_KEY is not configured on the Gateway VM.")
@@ -167,12 +174,48 @@ class HaikuAdapter(LLMStreamProcessor):
             "content-type": "application/json",
         }
 
+        metered_call = begin_metered_call(prefix="call")
         response = await self._client.post(url, headers=headers, json=payload)
+        provider_request_id = (
+            response.headers.get("request-id")
+            or response.headers.get("x-request-id")
+            or response.headers.get("anthropic-request-id")
+            or None
+        )
         if response.status_code >= 400:
+            await self._emit_usage(
+                usage_recorder,
+                {
+                    "metered_call": metered_call,
+                    "model_key": build_model_key("anthropic", self.model),
+                    "provider_request_id": provider_request_id,
+                    "raw_usage": None,
+                    "success": False,
+                    "error_code": f"HTTP_{response.status_code}",
+                    "metadata_json": {
+                        "status_code": response.status_code,
+                        "operation": "generate_text",
+                    },
+                },
+            )
             raise RuntimeError(self._error_from_response(response.content, response.status_code))
 
         body = response.json()
         if not isinstance(body, dict):
+            await self._emit_usage(
+                usage_recorder,
+                {
+                    "metered_call": metered_call,
+                    "model_key": build_model_key("anthropic", self.model),
+                    "provider_request_id": provider_request_id,
+                    "raw_usage": None,
+                    "success": False,
+                    "error_code": "INVALID_RESPONSE",
+                    "metadata_json": {
+                        "operation": "generate_text",
+                    },
+                },
+            )
             raise RuntimeError("Anthropic Haiku API returned a non-object response")
 
         content_blocks = body.get("content")
@@ -189,6 +232,20 @@ class HaikuAdapter(LLMStreamProcessor):
 
         usage = self._merge_usage({}, body.get("usage"))
         stop_reason = str(body.get("stop_reason") or "").strip() or None
+        await self._emit_usage(
+            usage_recorder,
+            {
+                "metered_call": metered_call,
+                "model_key": build_model_key("anthropic", self.model),
+                "provider_request_id": provider_request_id,
+                "raw_usage": usage,
+                "success": True,
+                "metadata_json": {
+                    "operation": "generate_text",
+                    "stop_reason": stop_reason,
+                },
+            },
+        )
         return "".join(text_parts).strip(), usage, stop_reason
 
     async def _stream_events(
@@ -196,6 +253,7 @@ class HaikuAdapter(LLMStreamProcessor):
         history: list[dict[str, Any]],
         *,
         memory_context: str | None = None,
+        usage_recorder: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         url = "https://api.anthropic.com/v1/messages"
         payload: dict[str, Any] = {
@@ -219,8 +277,17 @@ class HaikuAdapter(LLMStreamProcessor):
 
         for attempt in range(3):
             yielded_any = False
+            usage: dict[str, int] = {}
+            metered_call = begin_metered_call(prefix="call")
+            provider_request_id: str | None = None
             try:
                 async with self._client.stream("POST", url, headers=headers, json=payload) as response:
+                    provider_request_id = (
+                        response.headers.get("request-id")
+                        or response.headers.get("x-request-id")
+                        or response.headers.get("anthropic-request-id")
+                        or None
+                    )
                     if response.status_code >= 400:
                         body = await response.aread()
                         raise RuntimeError(self._error_from_response(body, response.status_code))
@@ -238,10 +305,12 @@ class HaikuAdapter(LLMStreamProcessor):
                         if payload_type == "message_start":
                             message = parsed.get("message")
                             if isinstance(message, dict):
+                                usage = self._merge_usage(usage, message.get("usage"))
                                 yield {"type": "usage", "usage": message.get("usage")}
                             continue
 
                         if payload_type == "message_delta":
+                            usage = self._merge_usage(usage, parsed.get("usage"))
                             yield {"type": "usage", "usage": parsed.get("usage")}
                             delta = parsed.get("delta")
                             if isinstance(delta, dict):
@@ -272,8 +341,39 @@ class HaikuAdapter(LLMStreamProcessor):
                         if delta_type == "text_delta":
                             yield {"type": "text", "content": str(delta.get("text") or "")}
                             continue
+                await self._emit_usage(
+                    usage_recorder,
+                    {
+                        "metered_call": metered_call,
+                        "model_key": build_model_key("anthropic", self.model),
+                        "provider_request_id": provider_request_id,
+                        "raw_usage": usage,
+                        "success": True,
+                        "metadata_json": {
+                            "attempt": attempt + 1,
+                            "streaming": True,
+                            "yielded_any": yielded_any,
+                        },
+                    },
+                )
                 return
             except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+                await self._emit_usage(
+                    usage_recorder,
+                    {
+                        "metered_call": metered_call,
+                        "model_key": build_model_key("anthropic", self.model),
+                        "provider_request_id": provider_request_id,
+                        "raw_usage": usage,
+                        "success": False,
+                        "error_code": type(exc).__name__,
+                        "metadata_json": {
+                            "attempt": attempt + 1,
+                            "streaming": True,
+                            "yielded_any": yielded_any,
+                        },
+                    },
+                )
                 if yielded_any or attempt == 2:
                     raise RuntimeError(f"Anthropic Haiku API error: {exc}") from exc
                 await asyncio.sleep(0.5 * (2**attempt))
@@ -331,3 +431,15 @@ class HaikuAdapter(LLMStreamProcessor):
                 if message:
                     return message
         return f"status={status_code}"
+
+    async def _emit_usage(
+        self,
+        usage_recorder: Callable[[dict[str, Any]], Awaitable[None]] | None,
+        payload: dict[str, Any],
+    ) -> None:
+        if usage_recorder is None:
+            return
+        try:
+            await usage_recorder(payload)
+        except Exception:
+            return

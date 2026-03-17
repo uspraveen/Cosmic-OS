@@ -14,6 +14,7 @@ from urllib.parse import quote
 
 import httpx
 
+from shared import begin_metered_call, build_model_key, build_usage_event, post_usage_event
 from shared.contracts import AgentResult, TaskEnvelope, TaskInProgress
 
 from .registry import get_local_tool_spec
@@ -50,6 +51,7 @@ class ToolExecutor:
         cosmic_memory_url: str = "",
         gateway_url: str = "",
         gateway_internal_token: str = "",
+        usage_source_id: str = "orchestrator:tool_executor",
         agent_dispatcher: Callable[..., Awaitable[AgentResult | TaskInProgress]] | None = None,
         agent_catalog_searcher: Callable[..., Awaitable[dict[str, Any]]] | None = None,
         client: httpx.AsyncClient | None = None,
@@ -59,6 +61,7 @@ class ToolExecutor:
         self.cosmic_memory_url = cosmic_memory_url.rstrip("/") if cosmic_memory_url else ""
         self.gateway_url = gateway_url.rstrip("/") if gateway_url else ""
         self.gateway_internal_token = gateway_internal_token.strip()
+        self.usage_source_id = usage_source_id.strip() or "orchestrator:tool_executor"
         self._agent_dispatcher = agent_dispatcher
         self._agent_catalog_searcher = agent_catalog_searcher
         timeout = httpx.Timeout(30.0, connect=10.0)
@@ -122,13 +125,13 @@ class ToolExecutor:
         *,
         context: ToolExecutionContext | None = None,
     ) -> dict[str, Any]:
-        del context
         query = str(tool_input.get("query") or "").strip()
         if not query:
             return {"error": True, "message": "query is required"}
         if not self.perplexity_api_key:
             return {"error": True, "message": "Web search is not configured (no Perplexity API key)."}
 
+        metered_call = begin_metered_call(prefix="call")
         response = await self._client.post(
             "https://api.perplexity.ai/chat/completions",
             headers={
@@ -146,9 +149,59 @@ class ToolExecutor:
         )
         if response.status_code >= 400:
             body = response.text[:300]
+            await self._post_usage_event(
+                build_usage_event(
+                    metered_call=metered_call,
+                    source_component="orchestrator",
+                    source_id=self.usage_source_id,
+                    task_id=context.task_id if context else None,
+                    session_id=context.session_id if context else None,
+                    route="opus",
+                    operation="orchestrator.perplexity_research",
+                    model_key=build_model_key("perplexity", self.perplexity_model),
+                    request_id=context.request_id if context else None,
+                    provider_request_id=(
+                        response.headers.get("x-request-id")
+                        or response.headers.get("request-id")
+                        or response.headers.get("x-perplexity-request-id")
+                        or None
+                    ),
+                    raw_usage=response.json().get("usage") if response.headers.get("content-type", "").startswith("application/json") else None,
+                    success=False,
+                    error_code=f"HTTP_{response.status_code}",
+                    metadata_json={
+                        "tool": "perplexity_research",
+                        "status_code": response.status_code,
+                    },
+                )
+            )
             return {"error": True, "message": f"Perplexity API error (status={response.status_code}): {body}"}
 
         payload = response.json()
+        await self._post_usage_event(
+            build_usage_event(
+                metered_call=metered_call,
+                source_component="orchestrator",
+                source_id=self.usage_source_id,
+                task_id=context.task_id if context else None,
+                session_id=context.session_id if context else None,
+                route="opus",
+                operation="orchestrator.perplexity_research",
+                model_key=build_model_key("perplexity", self.perplexity_model),
+                request_id=context.request_id if context else None,
+                provider_request_id=(
+                    response.headers.get("x-request-id")
+                    or response.headers.get("request-id")
+                    or response.headers.get("x-perplexity-request-id")
+                    or None
+                ),
+                raw_usage=payload.get("usage"),
+                success=True,
+                metadata_json={
+                    "tool": "perplexity_research",
+                },
+            )
+        )
         choices = payload.get("choices") or []
         if not choices:
             return {"error": True, "message": "No results from web search."}
@@ -159,6 +212,29 @@ class ToolExecutor:
         if citations:
             result["citations"] = citations[:10]
         return result
+
+    async def _post_usage_event(self, event) -> None:
+        try:
+            posted = await post_usage_event(
+                client=self._client,
+                gateway_url=self.gateway_url,
+                internal_token=self.gateway_internal_token,
+                event=event,
+            )
+            if not posted:
+                logger.warning(
+                    "tool.usage_post_failed llm_call_id=%s operation=%s model=%s",
+                    event.llm_call_id,
+                    event.operation,
+                    event.model,
+                )
+        except Exception:
+            logger.exception(
+                "tool.usage_post_exception llm_call_id=%s operation=%s model=%s",
+                event.llm_call_id,
+                event.operation,
+                event.model,
+            )
 
     # ── Specialist Agents ────────────────────────────────────────
 

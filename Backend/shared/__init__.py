@@ -26,6 +26,17 @@ from .model_specs import (
     load_model_specs,
     lookup_model_spec,
 )
+from .usage import (
+    MeteredCall,
+    UsageEvent,
+    begin_metered_call,
+    build_usage_event,
+    extract_provider_cost_usd,
+    normalize_usage,
+    post_usage_event,
+    serialize_usage_metadata,
+    utcnow_iso as usage_utcnow_iso,
+)
 from .redis_client import create_redis_client, ensure_stream_group, parse_stream_payload
 from .redis_bus import (
     EVENTS_STREAM,
@@ -73,6 +84,10 @@ __all__ = [
     "get_model_spec",
     "load_model_specs",
     "lookup_model_spec",
+    "MeteredCall",
+    "UsageEvent",
+    "begin_metered_call",
+    "build_usage_event",
     "sign_task_envelope",
     "utcnow",
     "validate_outbound_version",
@@ -88,6 +103,11 @@ __all__ = [
     "parse_stream_payload",
     "parse_task_envelope",
     "prepare_for_redispatch",
+    "extract_provider_cost_usd",
+    "normalize_usage",
+    "post_usage_event",
+    "serialize_usage_metadata",
     "connect_sync",
     "task_stream_name",
+    "usage_utcnow_iso",
 ]

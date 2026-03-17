@@ -85,6 +85,34 @@
       },
       "status": "active"
     },
+    "perplexity:pplx-embed-v1-4b": {
+      "provider": "perplexity",
+      "model": "pplx-embed-v1-4b",
+      "sdk": "perplexity",
+      "base_url": "https://api.perplexity.ai",
+      "usage_kind": "embedding",
+      "context_window_tokens": null,
+      "max_output_tokens": null,
+      "recommended_headroom_reserve_tokens": 0,
+      "pricing": {
+        "input_per_1m_usd": null,
+        "cached_input_per_1m_usd": null,
+        "output_per_1m_usd": null
+      },
+      "capabilities": {
+        "supports_cached_input_tokens": false,
+        "supports_reasoning_tokens": false,
+        "supports_streaming": false
+      },
+      "token_field_map": {
+        "prompt_tokens": ["prompt_tokens", "input_tokens"],
+        "completion_tokens": [],
+        "total_tokens": ["total_tokens"],
+        "cached_tokens": [],
+        "reasoning_tokens": []
+      },
+      "status": "active"
+    },
     "groq:openai/gpt-oss-20b": {
       "provider": "groq",
       "model": "openai/gpt-oss-20b",
@@ -110,6 +138,34 @@
         "total_tokens": ["total_tokens"],
         "cached_tokens": [],
         "reasoning_tokens": []
+      },
+      "status": "active"
+    },
+    "xai:grok-4-1-fast-reasoning": {
+      "provider": "xai",
+      "model": "grok-4-1-fast-reasoning",
+      "sdk": "xai_sdk",
+      "base_url": "https://api.x.ai/v1",
+      "usage_kind": "chat_completion",
+      "context_window_tokens": null,
+      "max_output_tokens": null,
+      "recommended_headroom_reserve_tokens": 0,
+      "pricing": {
+        "input_per_1m_usd": null,
+        "cached_input_per_1m_usd": null,
+        "output_per_1m_usd": null
+      },
+      "capabilities": {
+        "supports_cached_input_tokens": true,
+        "supports_reasoning_tokens": true,
+        "supports_streaming": false
+      },
+      "token_field_map": {
+        "prompt_tokens": ["prompt_tokens", "prompt_text_tokens", "input_tokens"],
+        "completion_tokens": ["completion_tokens", "output_tokens"],
+        "total_tokens": ["total_tokens"],
+        "cached_tokens": ["cached_prompt_text_tokens", "cached_tokens"],
+        "reasoning_tokens": ["reasoning_tokens"]
       },
       "status": "active"
     }

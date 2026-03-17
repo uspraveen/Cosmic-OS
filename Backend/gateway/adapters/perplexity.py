@@ -4,13 +4,14 @@ import asyncio
 from contextlib import suppress
 import json
 import re
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 from urllib.parse import urlparse
 
 import httpx
 
 from .prompts import build_direct_assistant_system_prompt
 from .response_processor import DirectRouteHandoff, LLMStreamProcessor, normalize_conversation_history
+from shared import begin_metered_call, build_model_key
 
 
 class PerplexityAdapter(LLMStreamProcessor):
@@ -41,6 +42,7 @@ class PerplexityAdapter(LLMStreamProcessor):
         store_assistant_message,
         channel: str,
         memory_context: str | None = None,
+        usage_recorder: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> None:
         if not self.api_key:
             raise RuntimeError("PERPLEXITY_API_KEY is not configured on the Gateway VM.")
@@ -49,10 +51,16 @@ class PerplexityAdapter(LLMStreamProcessor):
 
         source_task: asyncio.Task[list[dict[str, str]]] | None = None
         citations: list[str] = []
+        usage: dict[str, int] = {}
 
         async def stream_text() -> AsyncIterator[str]:
-            nonlocal source_task, citations
-            async for text, citation_batch in self._stream_events(history, memory_context=memory_context):
+            nonlocal source_task, citations, usage
+            async for text, citation_batch, usage_batch in self._stream_events(
+                history,
+                memory_context=memory_context,
+                usage_recorder=usage_recorder,
+            ):
+                usage = self._merge_usage(usage, usage_batch)
                 if citation_batch and not source_task:
                     citations = citation_batch
                     source_task = asyncio.create_task(self._enrich_sources(citation_batch))
@@ -81,7 +89,10 @@ class PerplexityAdapter(LLMStreamProcessor):
             "content": result.content,
             "route": "perplexity",
             "awaiting_reply": result.awaiting_reply,
-            "metrics": result.metrics,
+            "metrics": {
+                **result.metrics,
+                **usage,
+            },
         }
         if sources:
             complete_payload["sources"] = sources
@@ -100,7 +111,8 @@ class PerplexityAdapter(LLMStreamProcessor):
         history: list[dict[str, Any]],
         *,
         memory_context: str | None = None,
-    ) -> AsyncIterator[tuple[str, list[str]]]:
+        usage_recorder: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> AsyncIterator[tuple[str, list[str], dict[str, int]]]:
         url = "https://api.perplexity.ai/chat/completions"
         payload = {
             "model": self.model,
@@ -114,8 +126,17 @@ class PerplexityAdapter(LLMStreamProcessor):
 
         for attempt in range(3):
             yielded_any = False
+            usage: dict[str, int] = {}
+            metered_call = begin_metered_call(prefix="call")
+            provider_request_id: str | None = None
             try:
                 async with self._client.stream("POST", url, headers=headers, json=payload) as response:
+                    provider_request_id = (
+                        response.headers.get("x-request-id")
+                        or response.headers.get("request-id")
+                        or response.headers.get("x-perplexity-request-id")
+                        or None
+                    )
                     if response.status_code >= 400:
                         body = await response.aread()
                         raise RuntimeError(self._error_from_response(body, response.status_code))
@@ -132,11 +153,44 @@ class PerplexityAdapter(LLMStreamProcessor):
                         parsed = json.loads(data_str)
                         citations = self._extract_citations(parsed)
                         text = self._extract_delta_text(parsed)
-                        if text or citations:
+                        usage_batch = self._extract_usage(parsed)
+                        usage = self._merge_usage(usage, usage_batch)
+                        if text or citations or usage_batch:
                             yielded_any = yielded_any or bool(text)
-                            yield text, citations
+                            yield text, citations, usage_batch
+                await self._emit_usage(
+                    usage_recorder,
+                    {
+                        "metered_call": metered_call,
+                        "model_key": build_model_key("perplexity", self.model),
+                        "provider_request_id": provider_request_id,
+                        "raw_usage": usage,
+                        "success": True,
+                        "metadata_json": {
+                            "attempt": attempt + 1,
+                            "streaming": True,
+                            "yielded_any": yielded_any,
+                        },
+                    },
+                )
                 return
             except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+                await self._emit_usage(
+                    usage_recorder,
+                    {
+                        "metered_call": metered_call,
+                        "model_key": build_model_key("perplexity", self.model),
+                        "provider_request_id": provider_request_id,
+                        "raw_usage": usage,
+                        "success": False,
+                        "error_code": type(exc).__name__,
+                        "metadata_json": {
+                            "attempt": attempt + 1,
+                            "streaming": True,
+                            "yielded_any": yielded_any,
+                        },
+                    },
+                )
                 if yielded_any or attempt == 2:
                     raise RuntimeError(f"Perplexity API error: {exc}") from exc
                 await asyncio.sleep(0.5 * (2**attempt))
@@ -217,6 +271,38 @@ class PerplexityAdapter(LLMStreamProcessor):
         except Exception:
             return source
         return source
+
+    def _extract_usage(self, payload: dict[str, Any]) -> dict[str, int]:
+        usage = payload.get("usage")
+        if isinstance(usage, dict):
+            return self._merge_usage({}, usage)
+        choices = payload.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0]
+            if isinstance(first, dict):
+                return self._merge_usage({}, first.get("usage"))
+        return {}
+
+    def _merge_usage(self, existing: dict[str, int], usage: Any) -> dict[str, int]:
+        if not isinstance(usage, dict):
+            return existing
+        merged = dict(existing)
+        for key, value in usage.items():
+            if isinstance(value, (int, float)):
+                merged[key] = int(value)
+        return merged
+
+    async def _emit_usage(
+        self,
+        usage_recorder: Callable[[dict[str, Any]], Awaitable[None]] | None,
+        payload: dict[str, Any],
+    ) -> None:
+        if usage_recorder is None:
+            return
+        try:
+            await usage_recorder(payload)
+        except Exception:
+            return
 
     def _normalize_sources(self, urls: list[str]) -> list[dict[str, str]]:
         normalized: list[dict[str, str]] = []

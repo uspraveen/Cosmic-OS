@@ -36,15 +36,20 @@ from shared import (
     AgentResult,
     BackpressureError,
     EventEnvelope,
+    MeteredCall,
     SOURCE_PRIORITY_MAP,
     TaskEnvelope,
     TaskInProgress,
+    begin_metered_call,
+    build_model_key,
+    build_usage_event,
     create_redis_client,
     dispatch_task,
     ensure_stream_group,
     generate_task_id,
     parse_event_envelope,
     parse_stream_payload,
+    post_usage_event,
     sign_task_envelope,
     verify_task_envelope,
 )
@@ -364,6 +369,19 @@ class OrchestratorRuntime:
                     messages=messages,
                     tools=tools,
                     container_id=container_id,
+                    usage_context={
+                        "task_id": task.task_id,
+                        "request_id": request_id,
+                        "session_id": session_id,
+                        "route": "opus",
+                        "operation": "orchestrator.process",
+                        "metadata_json": {
+                            "iteration": iteration,
+                            "source": task.source,
+                            "source_id": task.source_id,
+                            "channel": channel,
+                        },
+                    },
                 ):
                     if sse.event == "ping" or not sse.data:
                         continue
@@ -1245,6 +1263,7 @@ class OrchestratorRuntime:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         container_id: str | None = None,
+        usage_context: dict[str, Any] | None = None,
     ) -> AsyncIterator[SSEEvent]:
         url = "https://api.anthropic.com/v1/messages"
         system_payload: str | list[dict[str, Any]]
@@ -1280,16 +1299,68 @@ class OrchestratorRuntime:
 
         for attempt in range(3):
             yielded_any = False
+            usage: dict[str, Any] = {}
+            metered_call = begin_metered_call(prefix="call")
+            provider_request_id: str | None = None
             try:
                 async with self._client.stream("POST", url, headers=headers, json=body) as resp:
+                    provider_request_id = (
+                        resp.headers.get("request-id")
+                        or resp.headers.get("x-request-id")
+                        or resp.headers.get("anthropic-request-id")
+                        or None
+                    )
                     if resp.status_code >= 400:
                         raw = await resp.aread()
                         raise RuntimeError(self._error_from_response(raw, resp.status_code))
                     async for item in self._iter_sse(resp):
                         yielded_any = True
+                        if item.data:
+                            try:
+                                payload = json.loads(item.data)
+                            except Exception:
+                                payload = None
+                            if isinstance(payload, dict):
+                                ptype = str(payload.get("type") or "")
+                                if ptype == "message_start":
+                                    message = payload.get("message")
+                                    if isinstance(message, dict):
+                                        usage = self._merge_usage(usage, message.get("usage"))
+                                elif ptype == "message_delta":
+                                    usage = self._merge_usage(usage, payload.get("usage"))
                         yield item
+                await self._record_internal_usage_event(
+                    metered_call=metered_call,
+                    model_key=build_model_key("anthropic", self.config.anthropic_model),
+                    usage_context=usage_context,
+                    provider_request_id=provider_request_id,
+                    raw_usage=usage,
+                    success=True,
+                    error_code=None,
+                    metadata_json={
+                        "attempt": attempt + 1,
+                        "streaming": True,
+                        "yielded_any": yielded_any,
+                        "container_id": container_id,
+                    },
+                )
                 return
             except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+                await self._record_internal_usage_event(
+                    metered_call=metered_call,
+                    model_key=build_model_key("anthropic", self.config.anthropic_model),
+                    usage_context=usage_context,
+                    provider_request_id=provider_request_id,
+                    raw_usage=usage,
+                    success=False,
+                    error_code=type(exc).__name__,
+                    metadata_json={
+                        "attempt": attempt + 1,
+                        "streaming": True,
+                        "yielded_any": yielded_any,
+                        "container_id": container_id,
+                    },
+                )
                 if yielded_any or attempt == 2:
                     raise RuntimeError(f"Anthropic API error: {exc}") from exc
                 await asyncio.sleep(0.5 * (2 ** attempt))
@@ -1314,6 +1385,87 @@ class OrchestratorRuntime:
                 data_lines.append(line[5:].strip())
         if data_lines:
             yield SSEEvent(event=event_name, data="\n".join(data_lines))
+
+    async def _record_internal_usage_event(
+        self,
+        *,
+        metered_call: MeteredCall,
+        model_key: str,
+        usage_context: dict[str, Any] | None,
+        provider_request_id: str | None,
+        raw_usage: Any,
+        success: bool,
+        error_code: str | None,
+        metadata_json: dict[str, Any] | None,
+    ) -> None:
+        base_context = usage_context if isinstance(usage_context, dict) else {}
+        event = build_usage_event(
+            metered_call=metered_call,
+            source_component="orchestrator",
+            source_id=self.config.orchestrator_agent_id,
+            task_id=str(base_context.get("task_id") or "").strip() or None,
+            session_id=str(base_context.get("session_id") or "").strip() or None,
+            route=str(base_context.get("route") or "").strip() or None,
+            operation=str(base_context.get("operation") or "orchestrator.process").strip(),
+            model_key=model_key,
+            request_id=str(base_context.get("request_id") or "").strip() or None,
+            provider_request_id=provider_request_id,
+            raw_usage=raw_usage,
+            success=success,
+            error_code=error_code,
+            metadata_json=self._merge_usage_metadata(
+                base_context.get("metadata_json"),
+                metadata_json,
+            ),
+        )
+        try:
+            posted = await post_usage_event(
+                client=self._client,
+                gateway_url=self.config.gateway_url,
+                internal_token=self.config.internal_token,
+                event=event,
+            )
+            if not posted:
+                logger.warning(
+                    "orchestrator.usage_post_failed llm_call_id=%s operation=%s model=%s",
+                    event.llm_call_id,
+                    event.operation,
+                    event.model,
+                )
+        except Exception:
+            logger.exception(
+                "orchestrator.usage_post_exception llm_call_id=%s operation=%s model=%s",
+                event.llm_call_id,
+                event.operation,
+                event.model,
+            )
+
+    def _merge_usage_metadata(self, primary: Any, secondary: Any) -> Any:
+        if primary is None and secondary is None:
+            return None
+        if primary is None:
+            return secondary
+        if secondary is None:
+            return primary
+        if isinstance(primary, dict) and isinstance(secondary, dict):
+            return {
+                **primary,
+                **secondary,
+            }
+        if isinstance(primary, dict):
+            return {
+                **primary,
+                "extra": secondary,
+            }
+        if isinstance(secondary, dict):
+            return {
+                **secondary,
+                "extra": primary,
+            }
+        return {
+            "primary": primary,
+            "secondary": secondary,
+        }
 
     def _build_messages(self, task: TaskEnvelope) -> list[dict[str, Any]]:
         """Build the messages list for the Anthropic API from conversation context + current query.

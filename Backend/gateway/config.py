@@ -66,6 +66,7 @@ class GatewayConfig:
     enable_whatsapp: bool = True
     enable_telegram: bool = False
     sessions_db_path: Path = BACKEND_ROOT / "gateway" / "sessions.db"
+    usage_db_path: Path = BACKEND_ROOT / "gateway" / "usage.db"
     routing_audit_db_path: Path = BACKEND_ROOT / "gateway" / "routing_audit.db"
     memory_write_audit_db_path: Path = BACKEND_ROOT / "gateway" / "memory_write_audit.db"
     artifacts_db_path: Path = BACKEND_ROOT / "gateway" / "artifacts.db"
@@ -137,6 +138,12 @@ class GatewayConfig:
             enable_telegram=_env_bool("TELEGRAM_ENABLED", False),
             sessions_db_path=Path(
                 os.getenv("GATEWAY_SESSIONS_DB_PATH", str(BACKEND_ROOT / "gateway" / "sessions.db"))
+            ).expanduser(),
+            usage_db_path=Path(
+                os.getenv(
+                    "GATEWAY_USAGE_DB_PATH",
+                    str(BACKEND_ROOT / "gateway" / "usage.db"),
+                )
             ).expanduser(),
             routing_audit_db_path=Path(
                 os.getenv(

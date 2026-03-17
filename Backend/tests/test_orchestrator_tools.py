@@ -222,6 +222,78 @@ async def test_tool_executor_memory_write_core_fact_uses_gateway_and_enriches_co
 
 
 @pytest.mark.asyncio
+async def test_tool_executor_perplexity_research_posts_usage_to_gateway() -> None:
+    usage_posts: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url == httpx.URL("https://api.perplexity.ai/chat/completions"):
+            return httpx.Response(
+                200,
+                headers={"x-request-id": "pplx_req_1"},
+                json={
+                    "usage": {
+                        "prompt_tokens": 15,
+                        "completion_tokens": 6,
+                        "total_tokens": 21,
+                    },
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "Answer with citations.",
+                            }
+                        }
+                    ],
+                    "citations": ["https://example.com/source"],
+                },
+            )
+        if request.url == httpx.URL("http://gateway/internal/usage/log"):
+            usage_posts.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(201, json={"ok": True, "deduplicated": False})
+        raise AssertionError(f"Unexpected request URL: {request.url!s}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    executor = ToolExecutor(
+        perplexity_api_key="perplexity-key",
+        gateway_url="http://gateway",
+        gateway_internal_token="internal-token",
+        client=client,
+    )
+    context = ToolExecutionContext(
+        task_id="tsk_1",
+        request_id="req_1",
+        session_id="sess_1",
+        channel="desktop:desk_a",
+        source="user",
+        source_id="desktop",
+    )
+    try:
+        raw_result = await executor.execute(
+            "perplexity_research",
+            {"query": "latest AI updates"},
+            context=context,
+        )
+    finally:
+        await client.aclose()
+
+    result = json.loads(raw_result)
+    assert result["answer"] == "Answer with citations."
+    assert result["citations"] == ["https://example.com/source"]
+    assert len(usage_posts) == 1
+    usage_event = usage_posts[0]
+    assert usage_event["provider"] == "perplexity"
+    assert usage_event["model"] == "sonar"
+    assert usage_event["operation"] == "orchestrator.perplexity_research"
+    assert usage_event["task_id"] == "tsk_1"
+    assert usage_event["session_id"] == "sess_1"
+    assert usage_event["request_id"] == "req_1"
+    assert usage_event["provider_request_id"] == "pplx_req_1"
+    assert usage_event["prompt_tokens"] == 15
+    assert usage_event["completion_tokens"] == 6
+    assert usage_event["total_tokens"] == 21
+    assert usage_event["metadata_json"]["tool"] == "perplexity_research"
+
+
+@pytest.mark.asyncio
 async def test_tool_executor_create_reminder_uses_internal_scheduler_route_and_passes_gateway_resolution_inputs() -> None:
     seen_payload: dict[str, object] = {}
 

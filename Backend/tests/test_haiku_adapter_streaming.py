@@ -59,9 +59,13 @@ async def test_haiku_adapter_streams_thinking_and_text() -> None:
 
     sent_events: list[dict] = []
     stored_messages: list[dict] = []
+    usage_payloads: list[dict] = []
 
     async def send(event: dict) -> None:
         sent_events.append(event)
+
+    async def usage_recorder(payload: dict) -> None:
+        usage_payloads.append(payload)
 
     def store_assistant_message(content: str, *, awaiting_reply: bool, metadata, channel: str, route: str) -> None:
         stored_messages.append(
@@ -82,6 +86,7 @@ async def test_haiku_adapter_streams_thinking_and_text() -> None:
             send=send,
             store_assistant_message=store_assistant_message,
             channel="desktop:desk_test",
+            usage_recorder=usage_recorder,
         )
     finally:
         await adapter.close()
@@ -95,6 +100,11 @@ async def test_haiku_adapter_streams_thinking_and_text() -> None:
     assert sent_events[2]["thinking_text"] == "Reasoning..."
     assert sent_events[2]["metrics"]["input_tokens"] == 42
     assert sent_events[2]["metrics"]["output_tokens"] == 9
+    assert len(usage_payloads) == 1
+    assert usage_payloads[0]["model_key"] == "anthropic:claude-haiku-4-5"
+    assert usage_payloads[0]["raw_usage"]["input_tokens"] == 42
+    assert usage_payloads[0]["raw_usage"]["output_tokens"] == 9
+    assert usage_payloads[0]["success"] is True
 
     assert stored_messages == [
         {
