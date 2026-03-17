@@ -153,6 +153,7 @@ class GatewayRuntime:
         self.memory_client = CosmicMemoryClient(
             base_url=config.cosmic_memory_url,
             timeout_sec=config.cosmic_memory_timeout_sec,
+            write_timeout_sec=config.cosmic_memory_write_timeout_sec,
             internal_token=config.internal_token,
         )
         self.haiku_adapter = HaikuAdapter(

@@ -88,6 +88,7 @@ class GatewayConfig:
     direct_llm_timeout_sec: float = 90.0
     cosmic_memory_url: str = ""
     cosmic_memory_timeout_sec: float = 12.0
+    cosmic_memory_write_timeout_sec: float = 45.0
     cosmic_memory_core_fact_max_chars: int = 1500
     cosmic_memory_passive_max_results: int = 8
     cosmic_memory_passive_token_budget: int = 12000
@@ -221,6 +222,10 @@ class GatewayConfig:
             cosmic_memory_timeout_sec=max(
                 1.0,
                 _env_float("COSMIC_MEMORY_TIMEOUT_SEC", 12.0),
+            ),
+            cosmic_memory_write_timeout_sec=max(
+                5.0,
+                _env_float("COSMIC_MEMORY_WRITE_TIMEOUT_SEC", 45.0),
             ),
             cosmic_memory_core_fact_max_chars=max(
                 250,

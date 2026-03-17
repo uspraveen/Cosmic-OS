@@ -36,10 +36,12 @@ class CosmicMemoryClient:
         *,
         base_url: str,
         timeout_sec: float,
+        write_timeout_sec: float | None = None,
         internal_token: str = "",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_sec = timeout_sec
+        self.write_timeout_sec = max(timeout_sec, write_timeout_sec or timeout_sec)
         self.internal_token = internal_token.strip()
         self._client: httpx.AsyncClient | None = None
 
@@ -50,10 +52,9 @@ class CosmicMemoryClient:
     async def start(self) -> None:
         if not self.enabled or self._client is not None:
             return
-        timeout = httpx.Timeout(self.timeout_sec, connect=min(self.timeout_sec, 5.0))
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
-            timeout=timeout,
+            timeout=self._build_timeout(self.timeout_sec),
             http2=True,
         )
 
@@ -171,7 +172,12 @@ class CosmicMemoryClient:
         return await self._request_json("POST", "/v1/query/active", json_body=payload)
 
     async def write_memory(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self._request_json("POST", "/v1/memories", json_body=payload)
+        return await self._request_json(
+            "POST",
+            "/v1/memories",
+            json_body=payload,
+            timeout_sec=self.write_timeout_sec,
+        )
 
     async def get_memory(self, memory_id: str) -> dict[str, Any]:
         normalized_memory_id = str(memory_id or "").strip()
@@ -180,10 +186,20 @@ class CosmicMemoryClient:
         return await self._request_json("GET", f"/v1/memories/{normalized_memory_id}")
 
     async def write_core_fact(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self._request_json("POST", "/v1/core-facts", json_body=payload)
+        return await self._request_json(
+            "POST",
+            "/v1/core-facts",
+            json_body=payload,
+            timeout_sec=self.write_timeout_sec,
+        )
 
     async def ingest_episode(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self._request_json("POST", "/v1/episodes", json_body=payload)
+        return await self._request_json(
+            "POST",
+            "/v1/episodes",
+            json_body=payload,
+            timeout_sec=self.write_timeout_sec,
+        )
 
     async def get_schema_context(self) -> dict[str, Any]:
         return await self._request_json("GET", "/v1/agent/schema-context")
@@ -235,6 +251,7 @@ class CosmicMemoryClient:
         *,
         json_body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
+        timeout_sec: float | None = None,
     ) -> dict[str, Any]:
         if not self.enabled:
             raise MemoryClientError("cosmic-memory is not configured")
@@ -253,6 +270,7 @@ class CosmicMemoryClient:
             json=json_body,
             params=params,
             headers=headers,
+            timeout=self._build_timeout(timeout_sec or self.timeout_sec),
         )
         if response.status_code >= 400:
             raise MemoryClientHTTPError(
@@ -279,6 +297,11 @@ class CosmicMemoryClient:
             if isinstance(error, str) and error.strip():
                 return error.strip()
         return f"status={response.status_code}"
+
+    @staticmethod
+    def _build_timeout(timeout_sec: float) -> httpx.Timeout:
+        normalized_timeout = max(1.0, timeout_sec)
+        return httpx.Timeout(normalized_timeout, connect=min(normalized_timeout, 5.0))
 
     def _render_prompt_context(
         self,
