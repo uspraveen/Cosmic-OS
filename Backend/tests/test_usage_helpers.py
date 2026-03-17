@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from shared.usage import build_usage_event, begin_metered_call
+import asyncio
+
+from shared.usage import build_usage_event, begin_metered_call, post_usage_event
 
 
 def test_build_usage_event_normalizes_provider_usage_and_cost() -> None:
@@ -60,3 +62,35 @@ def test_build_usage_event_clamps_and_backfills_missing_totals() -> None:
     assert event.total_tokens == 16
     assert event.cached_tokens == 12
     assert event.reasoning_tokens == 4
+
+
+def test_post_usage_event_accepts_202_response() -> None:
+    class FakeResponse:
+        status_code = 202
+
+        def raise_for_status(self) -> None:
+            return
+
+    class FakeClient:
+        async def post(self, *args, **kwargs):
+            del args, kwargs
+            return FakeResponse()
+
+    async def run() -> None:
+        event = build_usage_event(
+            metered_call=begin_metered_call(prefix="call"),
+            source_component="orchestrator",
+            source_id="cosmic/orchestrator:1.0.0",
+            operation="orchestrator.process",
+            model_key="anthropic:claude-opus-4-6",
+            raw_usage={"input_tokens": 8, "output_tokens": 2},
+        )
+        posted = await post_usage_event(
+            client=FakeClient(),
+            gateway_url="http://127.0.0.1:8080",
+            internal_token="internal-token",
+            event=event,
+        )
+        assert posted is True
+
+    asyncio.run(run())

@@ -52,6 +52,7 @@ class GatewayConfig:
     host: str = "0.0.0.0"
     port: int = 8080
     public_host: str = ""
+    owner_user_id: str = ""
     local_api_token: str = ""
     internal_token: str = ""
     signing_secret: str = ""
@@ -79,6 +80,8 @@ class GatewayConfig:
     delivery_retry_base_sec: float = 1.0
     delivery_retry_max_sec: float = 120.0
     delivery_max_attempts: int = 12
+    usage_queue_max_size: int = 1000
+    usage_queue_flush_timeout_sec: float = 5.0
     haiku_api_key: str = ""
     haiku_model: str = "claude-haiku-4-5"
     anthropic_version: str = "2023-06-01"
@@ -111,6 +114,7 @@ class GatewayConfig:
             host=os.getenv("GATEWAY_HOST", "0.0.0.0"),
             port=_env_int("GATEWAY_PORT", 8080),
             public_host=os.getenv("GATEWAY_PUBLIC_HOST", "").strip(),
+            owner_user_id=os.getenv("COSMIC_USER_ID", "").strip(),
             local_api_token=(
                 os.getenv("GATEWAY_LOCAL_API_TOKEN")
                 or os.getenv("LOCAL_API_TOKEN")
@@ -201,6 +205,14 @@ class GatewayConfig:
             delivery_max_attempts=max(
                 1,
                 _env_int("GATEWAY_DELIVERY_MAX_ATTEMPTS", 12),
+            ),
+            usage_queue_max_size=max(
+                16,
+                _env_int("GATEWAY_USAGE_QUEUE_MAX_SIZE", 1000),
+            ),
+            usage_queue_flush_timeout_sec=max(
+                0.25,
+                _env_float("GATEWAY_USAGE_QUEUE_FLUSH_TIMEOUT_SEC", 5.0),
             ),
             haiku_api_key=(
                 os.getenv("HAIKU_API_KEY")

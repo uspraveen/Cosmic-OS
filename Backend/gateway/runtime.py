@@ -135,6 +135,15 @@ class MemoryWriteAuditEvent:
     guard_applied: bool
 
 
+@dataclass(frozen=True, slots=True)
+class UsageSubmitResult:
+    queued: bool
+    inserted: bool | None
+    deduplicated: bool | None
+    queue_depth: int = 0
+    used_sync_fallback: bool = False
+
+
 class GatewayRuntime:
     """Single-process Gateway runtime for channel ingress and control-plane routes."""
 
@@ -185,6 +194,16 @@ class GatewayRuntime:
         self.active_requests_by_task: dict[str, str] = {}
         self._memory_write_locks: dict[str, asyncio.Lock] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._usage_event_queue: asyncio.Queue[UsageEvent] | None = None
+        self._usage_worker: asyncio.Task[None] | None = None
+        self._usage_queue_metrics: dict[str, int] = {
+            "queued_events": 0,
+            "persisted_events": 0,
+            "deduplicated_events": 0,
+            "sync_fallback_events": 0,
+            "append_failures": 0,
+            "max_queue_depth": 0,
+        }
         self._delivery_worker: asyncio.Task[None] | None = None
         self._delivery_wakeup = asyncio.Event()
         self._scheduler_worker: asyncio.Task[None] | None = None
@@ -206,6 +225,7 @@ class GatewayRuntime:
         self.artifact_store.initialize()
         self.delivery_queue_store.initialize()
         self.scheduler_store.initialize(default_timezone=self.config.user_timezone_fallback)
+        self._usage_event_queue = asyncio.Queue(maxsize=self.config.usage_queue_max_size)
         self._sync_system_crons()
         await self.model_router.start()
         await self.orchestrator.start()
@@ -223,6 +243,10 @@ class GatewayRuntime:
                 name="gateway-memory-health",
             )
         await self._register_adapters()
+        self._usage_worker = asyncio.create_task(
+            self._usage_worker_loop(),
+            name="gateway-usage-worker",
+        )
         self._delivery_worker = asyncio.create_task(
             self._delivery_worker_loop(),
             name="gateway-delivery-worker",
@@ -245,6 +269,11 @@ class GatewayRuntime:
             self._memory_health_worker.cancel()
             await asyncio.gather(self._memory_health_worker, return_exceptions=True)
             self._memory_health_worker = None
+        await self._flush_usage_queue()
+        if self._usage_worker is not None:
+            self._usage_worker.cancel()
+            await asyncio.gather(self._usage_worker, return_exceptions=True)
+            self._usage_worker = None
         if self._delivery_worker is not None:
             self._delivery_worker.cancel()
             await asyncio.gather(self._delivery_worker, return_exceptions=True)
@@ -278,6 +307,7 @@ class GatewayRuntime:
         await self.perplexity_adapter.close()
         if self._redis is not None:
             await self._redis.aclose()
+        self._usage_event_queue = None
         self.started = False
 
     def _normalize_timezone_name(self, value: Any) -> str | None:
@@ -1680,27 +1710,147 @@ class GatewayRuntime:
         return self.routing_audit_store.list_entries(limit=limit)
 
     def log_usage_event(self, event: UsageEvent | dict[str, Any]) -> bool:
-        payload = event if isinstance(event, UsageEvent) else UsageEvent.model_validate(event)
-        return self.usage_store.append(payload)
+        payload = self._normalize_usage_event(event)
+        inserted = self.usage_store.append(payload)
+        metrics_key = "persisted_events" if inserted else "deduplicated_events"
+        self._usage_queue_metrics[metrics_key] = self._usage_queue_metrics.get(metrics_key, 0) + 1
+        return inserted
+
+    def submit_usage_event(self, event: UsageEvent | dict[str, Any]) -> UsageSubmitResult:
+        payload = self._normalize_usage_event(event)
+        queue = self._usage_event_queue
+        worker_active = self._usage_worker is not None and not self._usage_worker.done()
+        if queue is not None and worker_active:
+            try:
+                queue.put_nowait(payload)
+                queue_depth = queue.qsize()
+                self._usage_queue_metrics["queued_events"] = self._usage_queue_metrics.get("queued_events", 0) + 1
+                self._usage_queue_metrics["max_queue_depth"] = max(
+                    self._usage_queue_metrics.get("max_queue_depth", 0),
+                    queue_depth,
+                )
+                return UsageSubmitResult(
+                    queued=True,
+                    inserted=None,
+                    deduplicated=None,
+                    queue_depth=queue_depth,
+                    used_sync_fallback=False,
+                )
+            except asyncio.QueueFull:
+                self._usage_queue_metrics["sync_fallback_events"] = (
+                    self._usage_queue_metrics.get("sync_fallback_events", 0) + 1
+                )
+                logger.warning(
+                    "gateway.usage_queue_full llm_call_id=%s operation=%s provider=%s model=%s",
+                    payload.llm_call_id,
+                    payload.operation,
+                    payload.provider,
+                    payload.model,
+                )
+        inserted = self.log_usage_event(payload)
+        return UsageSubmitResult(
+            queued=False,
+            inserted=inserted,
+            deduplicated=not inserted,
+            queue_depth=queue.qsize() if queue is not None else 0,
+            used_sync_fallback=queue is not None and worker_active,
+        )
 
     def list_recent_usage(self, *, limit: int = 100) -> list[dict[str, Any]]:
         return self.usage_store.list_recent(limit=limit)
 
     def _record_local_usage_event(self, event: UsageEvent | dict[str, Any]) -> None:
         try:
-            deduplicated = not self.log_usage_event(event)
-            payload = event if isinstance(event, UsageEvent) else UsageEvent.model_validate(event)
+            payload = self._normalize_usage_event(event)
+            result = self.submit_usage_event(payload)
             logger.info(
-                "gateway.usage_logged llm_call_id=%s source_component=%s operation=%s provider=%s model=%s deduplicated=%s",
+                "gateway.usage_logged llm_call_id=%s source_component=%s operation=%s provider=%s model=%s queued=%s deduplicated=%s sync_fallback=%s",
                 payload.llm_call_id,
                 payload.source_component,
                 payload.operation,
                 payload.provider,
                 payload.model,
-                deduplicated,
+                result.queued,
+                result.deduplicated,
+                result.used_sync_fallback,
             )
         except Exception:
             logger.exception("gateway.usage_log_failed")
+
+    def _normalize_usage_event(self, event: UsageEvent | dict[str, Any]) -> UsageEvent:
+        payload = event if isinstance(event, UsageEvent) else UsageEvent.model_validate(event)
+        owner_user_id = self._safe_text(self.config.owner_user_id) or None
+        if owner_user_id is None:
+            return payload
+        current_user_id = self._safe_text(payload.user_id) or None
+        if current_user_id and current_user_id != owner_user_id:
+            logger.warning(
+                "gateway.usage_owner_override llm_call_id=%s source_component=%s current_user_id=%s owner_user_id=%s",
+                payload.llm_call_id,
+                payload.source_component,
+                current_user_id,
+                owner_user_id,
+            )
+        if current_user_id == owner_user_id:
+            return payload
+        return payload.model_copy(update={"user_id": owner_user_id})
+
+    async def _flush_usage_queue(self) -> None:
+        queue = self._usage_event_queue
+        if queue is None:
+            return
+        try:
+            await asyncio.wait_for(
+                queue.join(),
+                timeout=self.config.usage_queue_flush_timeout_sec,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "gateway.usage_queue_flush_timeout remaining=%s timeout_sec=%s",
+                queue.qsize(),
+                self.config.usage_queue_flush_timeout_sec,
+            )
+
+    async def _usage_worker_loop(self) -> None:
+        while True:
+            queue = self._usage_event_queue
+            if queue is None:
+                await asyncio.sleep(0.1)
+                continue
+            payload = await queue.get()
+            try:
+                for attempt in range(2):
+                    try:
+                        self.log_usage_event(payload)
+                        break
+                    except Exception:
+                        if attempt >= 1:
+                            self._usage_queue_metrics["append_failures"] = (
+                                self._usage_queue_metrics.get("append_failures", 0) + 1
+                            )
+                            logger.exception(
+                                "gateway.usage_queue_append_failed llm_call_id=%s operation=%s provider=%s model=%s",
+                                payload.llm_call_id,
+                                payload.operation,
+                                payload.provider,
+                                payload.model,
+                            )
+                        else:
+                            await asyncio.sleep(0.1)
+            finally:
+                queue.task_done()
+
+    def _usage_summary(self) -> dict[str, Any]:
+        summary = self.usage_store.summary()
+        queue = self._usage_event_queue
+        return {
+            **summary,
+            "owner_user_id": self._safe_text(self.config.owner_user_id) or None,
+            "queue_depth": queue.qsize() if queue is not None else 0,
+            "queue_max_size": self.config.usage_queue_max_size,
+            "worker_running": bool(self._usage_worker is not None and not self._usage_worker.done()),
+            "queue_metrics": dict(self._usage_queue_metrics),
+        }
 
     def _record_classifier_usage(
         self,
@@ -4066,7 +4216,7 @@ class GatewayRuntime:
             "memory": memory,
             "channels": self.list_channels(),
             "current_session_id": self._current_session_id(),
-            "usage": self.usage_store.summary(),
+            "usage": self._usage_summary(),
             "delivery_queue": self.delivery_queue_store.summary(),
             "scheduler": self.scheduler_store.summary(),
         }
@@ -4084,7 +4234,7 @@ class GatewayRuntime:
             "orchestrator_url": self.config.orchestrator_url,
             "cosmic_memory_url": self.config.cosmic_memory_url,
             "memory": memory,
-            "usage": self.usage_store.summary(),
+            "usage": self._usage_summary(),
             "delivery_queue": self.delivery_queue_store.summary(),
             "scheduler": self.scheduler_store.summary(),
         }

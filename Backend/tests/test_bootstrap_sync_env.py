@@ -203,6 +203,34 @@ def test_normalize_bootstrap_env_payload_maps_current_supabase_shape() -> None:
     assert normalized["orchestrator.env"]["ANTHROPIC_MODEL"] == "claude-opus-4-6"
 
 
+def test_normalize_bootstrap_env_payload_maps_vm_user_id_to_gateway_env() -> None:
+    normalized = bootstrap.normalize_bootstrap_env_payload(
+        {
+            "success": True,
+            "vm": {
+                "gateway_url": "http://127.0.0.1:8080",
+                "vm_dns": "localhost",
+                "user_id": "user_supabase_123",
+            },
+            "gateway_env": {
+                "GATEWAY_LOCAL_API_TOKEN": "pg_live_token",
+                "ANTHROPIC_API_KEY": "anthropic-live",
+                "PERPLEXITY_API_KEY": "perplexity-live",
+                "HAIKU_MODEL": "claude-haiku-4-5",
+            },
+            "orchestrator_env": {
+                "ANTHROPIC_API_KEY": "anthropic-live",
+                "OPUS_MODEL": "claude-opus-4-6",
+            },
+            "meeting_env": {
+                "GROQ_API_KEY": "groq-live",
+            },
+        }
+    )
+
+    assert normalized["gateway.env"]["COSMIC_USER_ID"] == "user_supabase_123"
+
+
 def test_normalize_bootstrap_env_payload_accepts_firecrawl_agent_env() -> None:
     normalized = bootstrap.normalize_bootstrap_env_payload(
         {

@@ -886,6 +886,14 @@ def normalize_bootstrap_env_payload(payload: Dict[str, object]) -> Dict[str, Dic
     )
     if public_host is not None:
         gateway_env["GATEWAY_PUBLIC_HOST"] = public_host
+    owner_user_id = first_meaningful_value(
+        gateway_env.get("COSMIC_USER_ID"),
+        vm_payload.get("user_id") if isinstance(vm_payload.get("user_id"), str) else None,
+        vm_payload.get("owner_user_id") if isinstance(vm_payload.get("owner_user_id"), str) else None,
+        vm_payload.get("vm_user_id") if isinstance(vm_payload.get("vm_user_id"), str) else None,
+    )
+    if owner_user_id is not None:
+        gateway_env["COSMIC_USER_ID"] = owner_user_id
 
     normalized = {
         "gateway.env": gateway_env,

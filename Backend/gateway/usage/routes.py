@@ -17,12 +17,18 @@ async def log_usage_event(
     _: None = Depends(require_internal_token),
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, object]:
-    inserted = runtime.log_usage_event(payload)
-    response.status_code = status.HTTP_201_CREATED if inserted else status.HTTP_200_OK
+    result = runtime.submit_usage_event(payload)
+    if result.queued:
+        response.status_code = status.HTTP_202_ACCEPTED
+    else:
+        response.status_code = status.HTTP_201_CREATED if result.inserted else status.HTTP_200_OK
     return {
         "ok": True,
         "llm_call_id": payload.llm_call_id,
-        "deduplicated": not inserted,
+        "deduplicated": result.deduplicated,
+        "queued": result.queued,
+        "queue_depth": result.queue_depth,
+        "used_sync_fallback": result.used_sync_fallback,
     }
 
 

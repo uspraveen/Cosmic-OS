@@ -306,7 +306,7 @@ async def post_usage_event(
                 json=payload,
                 timeout=httpx.Timeout(timeout_sec, connect=min(timeout_sec, 2.5)),
             )
-            if response.status_code in {200, 201}:
+            if response.status_code in {200, 201, 202}:
                 return True
             response.raise_for_status()
             return True
@@ -397,4 +397,3 @@ def _read_path(value: Any, path: str) -> Any:
             continue
         current = getattr(current, part, None)
     return current
-
