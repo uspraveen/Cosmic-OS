@@ -171,6 +171,13 @@ class CosmicMemoryClient:
     async def active_search(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._request_json("POST", "/v1/query/active", json_body=payload)
 
+    async def generate_embeddings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self._request_json(
+            "POST",
+            "/v1/embeddings/generate",
+            json_body=payload,
+        )
+
     async def write_memory(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._request_json(
             "POST",

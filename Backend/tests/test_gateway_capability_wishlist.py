@@ -1,13 +1,45 @@
 from __future__ import annotations
 
-import base64
 import json
+import math
 from pathlib import Path
 
 import httpx
 import pytest
 
 from gateway.wishlist import CapabilityWishlistService, CapabilityWishlistStore
+
+
+def _normalized_vector_for_text(text: str, *, dimensions: int = 128) -> list[float]:
+    seed = sum(ord(character) for character in text) or 1
+    vector = [float(((seed + (index * 7)) % 13) - 6) for index in range(dimensions)]
+    magnitude = math.sqrt(sum(component * component for component in vector))
+    return [component / magnitude for component in vector]
+
+
+class StubMemoryClient:
+    def __init__(self, *, enabled: bool = True, dimensions: int = 128) -> None:
+        self.enabled = enabled
+        self.dimensions = dimensions
+        self.calls: list[dict[str, object]] = []
+
+    async def generate_embeddings(self, payload: dict[str, object]) -> dict[str, object]:
+        self.calls.append(payload)
+        texts = list(payload.get("texts") or [])
+        dimensions = int(payload.get("dimensions") or self.dimensions)
+        return {
+            "model": "pplx-embed-v1-4b",
+            "dimensions": dimensions,
+            "items": [
+                {
+                    "index": index,
+                    "vector": _normalized_vector_for_text(str(text), dimensions=dimensions),
+                    "dimensions": dimensions,
+                }
+                for index, text in enumerate(texts)
+            ],
+            "usage": {"prompt_tokens": len(texts), "total_tokens": len(texts)},
+        }
 
 
 @pytest.mark.asyncio
@@ -76,20 +108,9 @@ async def test_capability_wishlist_service_skips_deterministic_duplicate(tmp_pat
 @pytest.mark.asyncio
 async def test_capability_wishlist_service_uses_xai_to_update_similar_entry(tmp_path: Path) -> None:
     usage_events: list[dict[str, object]] = []
-    embedding_calls = {"count": 0}
-    embedding_blob = base64.b64encode(bytes(range(128))).decode("ascii")
+    memory_client = StubMemoryClient(dimensions=128)
 
     async def handler(request: httpx.Request) -> httpx.Response:
-        if request.url == httpx.URL("https://api.perplexity.ai/embeddings"):
-            embedding_calls["count"] += 1
-            return httpx.Response(
-                200,
-                json={
-                    "data": [{"embedding": embedding_blob}],
-                    "usage": {"prompt_tokens": 32, "total_tokens": 32},
-                },
-                headers={"x-request-id": f"pplx-{embedding_calls['count']}"},
-            )
         if request.url == httpx.URL("https://api.x.ai/v1/chat/completions"):
             payload = json.loads(request.content.decode("utf-8"))
             assert payload["messages"][0]["role"] == "system"
@@ -128,7 +149,7 @@ async def test_capability_wishlist_service_uses_xai_to_update_similar_entry(tmp_
     service = CapabilityWishlistService(
         store=store,
         export_dir=tmp_path / "exports",
-        perplexity_api_key="perplexity-key",
+        memory_client=memory_client,
         embedding_dimensions=128,
         xai_api_key="xai-key",
         usage_recorder=lambda event: usage_events.append(
@@ -145,8 +166,11 @@ async def test_capability_wishlist_service_uses_xai_to_update_similar_entry(tmp_
             tags=["channels", "reminders"],
             evidence="The user wanted reminders to reach any linked channel.",
         )
+        service._fuse_candidates = lambda **_kwargs: [  # type: ignore[method-assign]
+            service._serialize_item(store.get_item("cap_000001"))
+        ]
         updated = await service.capture(
-            title="Cross-channel delivery target resolver",
+            title="Channel delivery target resolver for linked channels",
             summary="Resolve a user-linked destination channel so reminders and future actions can target desktop, WhatsApp, or Telegram without raw channel ids.",
             desired_outcome="COSMIC can deliver reminders and future actions to a linked user channel by alias.",
             domain="communications",
@@ -165,7 +189,52 @@ async def test_capability_wishlist_service_uses_xai_to_update_similar_entry(tmp_
         assert "delivery" in yaml_text
 
         operations = [str(event["operation"]) for event in usage_events]
-        assert operations.count("gateway.capability_wishlist.embed_item") == 3
         assert "gateway.capability_wishlist.adjudicate" in operations
+        assert len(memory_client.calls) == 3
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_capability_wishlist_search_backfills_missing_embeddings_via_memory_service(tmp_path: Path) -> None:
+    store = CapabilityWishlistStore(tmp_path / "wishlist.db")
+    bootstrap_service = CapabilityWishlistService(
+        store=store,
+        export_dir=tmp_path / "exports",
+    )
+    await bootstrap_service.initialize()
+    try:
+        created = await bootstrap_service.capture(
+            title="Headless social feed monitor",
+            summary="Watch social feeds and web sources headlessly so COSMIC can notify the user when a tracked list changes.",
+            desired_outcome="COSMIC can monitor a feed or listing source over time and report deltas automatically.",
+            domain="automation",
+            tags=["monitoring", "feeds", "automation"],
+            evidence="The user wanted COSMIC to track new YC company list additions.",
+        )
+        assert created["status"] == "created_new"
+        assert store.get_item("cap_000001")["embedding_vector"] is None
+    finally:
+        await bootstrap_service.close()
+
+    memory_client = StubMemoryClient(dimensions=128)
+    service = CapabilityWishlistService(
+        store=store,
+        export_dir=tmp_path / "exports",
+        memory_client=memory_client,
+        embedding_dimensions=128,
+    )
+    await service.initialize()
+    try:
+        search = await service.search(query="headless social feed monitor", limit=3)
+        assert search["embedding_used"] is True
+        assert search["count"] == 1
+        assert search["matches"][0]["capability_id"] == "cap_000001"
+
+        stored = store.get_item("cap_000001")
+        assert isinstance(stored["embedding_vector"], list)
+        operations = [str(call.get("usage_operation")) for call in memory_client.calls]
+        assert "gateway.capability_wishlist.embed_item" in operations
+        assert "gateway.capability_wishlist.embed_query" in operations
     finally:
         await service.close()

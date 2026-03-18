@@ -487,6 +487,53 @@ class CapabilityWishlistStore:
             raise RuntimeError("Failed to load capability wishlist item after evidence append.")
         return self._row_to_item(row), inserted
 
+    def update_item_embedding(
+        self,
+        capability_id: str,
+        *,
+        embedding_model: str | None,
+        embedding_dimensions: int | None,
+        embedding_vector: list[float],
+        embedding_updated_at: str,
+    ) -> dict[str, Any]:
+        normalized_capability_id = str(capability_id or "").strip()
+        if not normalized_capability_id:
+            raise ValueError("capability_id is required")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT 1 FROM wishlist_items WHERE capability_id = ?",
+                (normalized_capability_id,),
+            ).fetchone()
+            if existing is None:
+                raise KeyError(normalized_capability_id)
+            connection.execute(
+                """
+                UPDATE wishlist_items
+                SET
+                    embedding_model = ?,
+                    embedding_dimensions = ?,
+                    embedding_vector_json = ?,
+                    embedding_updated_at = ?
+                WHERE capability_id = ?
+                """,
+                (
+                    embedding_model,
+                    embedding_dimensions,
+                    _json_dumps(embedding_vector),
+                    embedding_updated_at,
+                    normalized_capability_id,
+                ),
+            )
+            row = connection.execute(
+                self._select_items_sql(where_clause="WHERE i.capability_id = ?"),
+                (normalized_capability_id,),
+            ).fetchone()
+            connection.commit()
+        if row is None:
+            raise RuntimeError("Failed to load capability wishlist item after embedding update.")
+        return self._row_to_item(row)
+
     def touch_duplicate(
         self,
         capability_id: str,

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
 import hashlib
 import json
 import logging
@@ -19,6 +17,7 @@ import yaml
 
 from shared import UsageEvent, begin_metered_call, build_model_key, build_usage_event
 
+from ..memory.client import CosmicMemoryClient
 from ..prompts import capability_wishlist_adjudicator_system_prompt
 from .models import WishlistAdjudicationDecision
 from .store import CapabilityWishlistStore
@@ -48,7 +47,7 @@ class CapabilityWishlistService:
         *,
         store: CapabilityWishlistStore,
         export_dir: Path,
-        perplexity_api_key: str = "",
+        memory_client: CosmicMemoryClient | None = None,
         embedding_model: str = "pplx-embed-v1-4b",
         embedding_dimensions: int = 1024,
         xai_api_key: str = "",
@@ -59,7 +58,7 @@ class CapabilityWishlistService:
     ) -> None:
         self.store = store
         self.export_dir = export_dir
-        self.perplexity_api_key = str(perplexity_api_key or "").strip()
+        self.memory_client = memory_client
         self.embedding_model = str(embedding_model or "").strip() or "pplx-embed-v1-4b"
         self.embedding_dimensions = max(128, int(embedding_dimensions or 1024))
         self.xai_api_key = str(xai_api_key or "").strip()
@@ -84,7 +83,7 @@ class CapabilityWishlistService:
             **self.store.summary(),
             "export_dir": str(self.export_dir),
             "last_export_sync_at": self._last_export_sync_at,
-            "embedding_enabled": bool(self.perplexity_api_key),
+            "embedding_enabled": bool(self.memory_client and self.memory_client.enabled),
             "embedding_model": self.embedding_model,
             "embedding_dimensions": self.embedding_dimensions,
             "adjudicator_enabled": bool(self.xai_api_key),
@@ -111,6 +110,11 @@ class CapabilityWishlistService:
         if not query_text:
             return {"query": "", "matches": [], "count": 0, "embedding_used": False, "message": "Search query is empty."}
         lexical = self.store.search_lexical(query_text, limit=max(max_results, _MAX_CANDIDATES))
+        lexical = await self._hydrate_missing_embeddings(
+            lexical,
+            operation="gateway.capability_wishlist.embed_item",
+            metadata_json={"wishlist_operation": "search_backfill", "query": query_text[:200]},
+        )
         query_embedding = await self._embed_text(
             query_text,
             operation="gateway.capability_wishlist.embed_query",
@@ -200,12 +204,32 @@ class CapabilityWishlistService:
                 ),
                 operation="gateway.capability_wishlist.embed_item",
                 metadata_json={"wishlist_operation": "capture", "title": title_text[:200]},
+                request_id=request_id,
+                session_id=session_id,
+                task_id=task_id,
+                route=route,
+            )
+            lexical_matches = self.store.search_lexical(
+                self._lookup_query(
+                    title=title_text,
+                    summary=summary_text,
+                    desired_outcome=desired_outcome_text,
+                    domain=domain_text,
+                    tags=tag_list,
+                ),
+                limit=_MAX_CANDIDATES,
+            )
+            lexical_matches = await self._hydrate_missing_embeddings(
+                lexical_matches,
+                operation="gateway.capability_wishlist.embed_item",
+                metadata_json={"wishlist_operation": "capture_candidate_backfill", "title": title_text[:200]},
+                request_id=request_id,
+                session_id=session_id,
+                task_id=task_id,
+                route=route,
             )
             matches = self._fuse_candidates(
-                lexical_matches=self.store.search_lexical(
-                    self._lookup_query(title=title_text, summary=summary_text, desired_outcome=desired_outcome_text, domain=domain_text, tags=tag_list),
-                    limit=_MAX_CANDIDATES,
-                ),
+                lexical_matches=lexical_matches,
                 semantic_matches=self._semantic_matches(embedding, limit=_MAX_CANDIDATES),
                 limit=3,
             )
@@ -286,7 +310,8 @@ class CapabilityWishlistService:
         matches: list[dict[str, Any]],
     ) -> dict[str, Any]:
         merged = self._merge_existing_with_incoming(existing=existing, incoming=incoming)
-        if self._wishlist_item_changed(existing=existing, merged=merged):
+        should_backfill_embedding = embedding is not None and not isinstance(existing.get("embedding_vector"), list)
+        if self._wishlist_item_changed(existing=existing, merged=merged) or should_backfill_embedding:
             updated_item, evidence_inserted = self.store.update_item(
                 existing["capability_id"],
                 title=merged["title"],
@@ -576,102 +601,156 @@ class CapabilityWishlistService:
             )
             return None
 
+    async def _hydrate_missing_embeddings(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        operation: str,
+        metadata_json: dict[str, Any],
+        request_id: str | None = None,
+        session_id: str | None = None,
+        task_id: str | None = None,
+        route: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if not items or self.memory_client is None or not self.memory_client.enabled:
+            return items
+        pending: list[tuple[dict[str, Any], str]] = []
+        for item in items:
+            existing_vector = item.get("embedding_vector")
+            if isinstance(existing_vector, list) and existing_vector:
+                continue
+            text = self._embedding_text(
+                title=self._clean_text(item.get("title")),
+                summary=self._clean_text(item.get("summary")),
+                desired_outcome=self._clean_text(item.get("desired_outcome")) or None,
+                domain=self._normalize_domain(item.get("domain")),
+                tags=self._normalize_tags(item.get("tags") or []),
+            )
+            if text:
+                pending.append((item, text))
+        if not pending:
+            return items
+
+        payload = self._embedding_request_payload(
+            texts=[text for _item, text in pending],
+            operation=operation,
+            metadata_json={**metadata_json, "wishlist_embedding_backfill": True, "text_count": len(pending)},
+            request_id=request_id,
+            session_id=session_id,
+            task_id=task_id,
+            route=route,
+        )
+        try:
+            response = await self.memory_client.generate_embeddings(payload)
+        except Exception:
+            logger.exception("gateway.capability_wishlist.embedding_backfill_failed")
+            return items
+
+        response_items = response.get("items")
+        if not isinstance(response_items, list):
+            return items
+        embedding_model = self._clean_text(response.get("model")) or self.embedding_model
+        embedding_dimensions = int(response.get("dimensions") or self.embedding_dimensions)
+        embedding_updated_at = self._utcnow_iso()
+        replacements: dict[str, dict[str, Any]] = {}
+        for index, (item, _text) in enumerate(pending):
+            response_item = response_items[index] if index < len(response_items) else None
+            vector = self._embedding_vector_from_response_item(response_item)
+            capability_id = self._clean_text(item.get("capability_id"))
+            if vector is None or not capability_id:
+                continue
+            try:
+                replacements[capability_id] = self.store.update_item_embedding(
+                    capability_id,
+                    embedding_model=embedding_model,
+                    embedding_dimensions=embedding_dimensions,
+                    embedding_vector=vector,
+                    embedding_updated_at=embedding_updated_at,
+                )
+            except Exception:
+                logger.exception(
+                    "gateway.capability_wishlist.embedding_backfill_store_failed capability_id=%s",
+                    capability_id,
+                )
+
+        hydrated: list[dict[str, Any]] = []
+        for item in items:
+            capability_id = self._clean_text(item.get("capability_id"))
+            hydrated.append(replacements.get(capability_id, item))
+        return hydrated
+
     async def _embed_text(
         self,
         text: str,
         *,
         operation: str,
         metadata_json: dict[str, Any],
+        request_id: str | None = None,
+        session_id: str | None = None,
+        task_id: str | None = None,
+        route: str | None = None,
     ) -> list[float] | None:
         input_text = self._clean_text(text)
-        if not input_text or not self.perplexity_api_key:
+        if not input_text or self.memory_client is None or not self.memory_client.enabled:
             return None
-        metered_call = begin_metered_call(prefix="call")
-        response = None
-        payload: dict[str, Any] | None = None
         try:
-            response = await self._client.post(
-                "https://api.perplexity.ai/embeddings",
-                headers={"Authorization": f"Bearer {self.perplexity_api_key}", "Content-Type": "application/json"},
-                json={
-                    "model": self.embedding_model,
-                    "input": input_text,
-                    "encoding_format": "base64",
-                    "dimensions": self.embedding_dimensions,
-                },
+            payload = self._embedding_request_payload(
+                texts=[input_text],
+                operation=operation,
+                metadata_json=metadata_json,
+                request_id=request_id,
+                session_id=session_id,
+                task_id=task_id,
+                route=route,
             )
-            payload = self._response_json_or_none(response)
-            await self._record_usage_event(
-                build_usage_event(
-                    metered_call=metered_call,
-                    source_component="gateway",
-                    source_id="gateway:capability_wishlist",
-                    route="internal",
-                    operation=operation,
-                    model_key=build_model_key("perplexity", self.embedding_model),
-                    provider_request_id=self._provider_request_id(response),
-                    user_id=self._owner_user_id,
-                    raw_usage=(payload or {}).get("usage") if isinstance(payload, dict) else None,
-                    success=response.status_code < 400,
-                    error_code=None if response.status_code < 400 else f"HTTP_{response.status_code}",
-                    metadata_json=metadata_json,
-                )
-            )
-            if response.status_code >= 400:
-                return None
-            return self._parse_embedding_response(payload)
+            response = await self.memory_client.generate_embeddings(payload)
         except Exception:
             logger.exception("gateway.capability_wishlist.embedding_failed")
-            await self._record_usage_event(
-                build_usage_event(
-                    metered_call=metered_call,
-                    source_component="gateway",
-                    source_id="gateway:capability_wishlist",
-                    route="internal",
-                    operation=operation,
-                    model_key=build_model_key("perplexity", self.embedding_model),
-                    user_id=self._owner_user_id,
-                    raw_usage=(payload or {}).get("usage") if isinstance(payload, dict) else None,
-                    success=False,
-                    error_code="EXCEPTION",
-                    metadata_json=metadata_json,
-                )
-            )
             return None
 
-    def _parse_embedding_response(self, payload: dict[str, Any] | None) -> list[float] | None:
+        items = response.get("items")
+        if not isinstance(items, list) or not items:
+            return None
+        return self._embedding_vector_from_response_item(items[0])
+
+    def _embedding_request_payload(
+        self,
+        *,
+        texts: list[str],
+        operation: str,
+        metadata_json: dict[str, Any],
+        request_id: str | None,
+        session_id: str | None,
+        task_id: str | None,
+        route: str | None,
+    ) -> dict[str, Any]:
+        return {
+            "texts": texts,
+            "dimensions": self.embedding_dimensions,
+            "batch_size": max(1, min(len(texts), 128)),
+            "max_parallel_requests": 1,
+            "normalize": True,
+            "usage_operation": operation,
+            "usage_source_component": "gateway",
+            "usage_source_id": "gateway:capability_wishlist",
+            "usage_request_id": self._clean_text(request_id) or None,
+            "usage_session_id": self._clean_text(session_id) or None,
+            "usage_task_id": self._clean_text(task_id) or None,
+            "usage_route": self._clean_text(route) or "internal",
+            "usage_metadata": {**metadata_json, "embedding_via": "cosmic-memory"},
+        }
+
+    def _embedding_vector_from_response_item(self, payload: Any) -> list[float] | None:
         if not isinstance(payload, dict):
             return None
-        data = payload.get("data")
-        if not isinstance(data, list) or not data:
+        raw_vector = payload.get("vector")
+        if not isinstance(raw_vector, list) or not raw_vector:
             return None
-        item = data[0] if isinstance(data[0], dict) else None
-        if item is None:
-            return None
-        raw_embedding = item.get("embedding")
-        if isinstance(raw_embedding, list):
-            vector = [float(value) for value in raw_embedding]
-        elif isinstance(raw_embedding, str):
-            vector = self._decode_base64_int8(raw_embedding)
-        else:
+        try:
+            vector = [float(value) for value in raw_vector]
+        except (TypeError, ValueError):
             return None
         return self._normalize_vector(vector)
-
-    def _decode_base64_int8(self, raw_value: str) -> list[float] | None:
-        try:
-            decoded = base64.b64decode(raw_value, validate=True)
-        except (ValueError, binascii.Error):
-            return None
-        if not decoded:
-            return None
-        vector = [float(byte - 256 if byte > 127 else byte) for byte in decoded]
-        if self.embedding_dimensions and len(vector) != self.embedding_dimensions:
-            logger.warning(
-                "gateway.capability_wishlist.embedding_dimension_mismatch expected=%s actual=%s",
-                self.embedding_dimensions,
-                len(vector),
-            )
-        return vector
 
     def _semantic_matches(self, embedding: list[float] | None, *, limit: int) -> list[dict[str, Any]]:
         if embedding is None:

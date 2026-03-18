@@ -168,22 +168,22 @@ class GatewayRuntime:
         self.artifact_store = ArtifactStore(config.artifacts_db_path)
         self.delivery_queue_store = DeliveryQueueStore(config.delivery_queue_db_path)
         self.scheduler_store = SchedulerStore(config.scheduler_db_path)
+        self.memory_client = CosmicMemoryClient(
+            base_url=config.cosmic_memory_url,
+            timeout_sec=config.cosmic_memory_timeout_sec,
+            write_timeout_sec=config.cosmic_memory_write_timeout_sec,
+            internal_token=config.internal_token,
+        )
         self.capability_wishlist_service = CapabilityWishlistService(
             store=self.capability_wishlist_store,
             export_dir=config.capability_wishlist_export_dir,
-            perplexity_api_key=config.perplexity_api_key,
+            memory_client=self.memory_client,
             embedding_model=config.capability_wishlist_embedding_model,
             embedding_dimensions=config.capability_wishlist_embedding_dimensions,
             xai_api_key=config.xai_api_key,
             adjudicator_model=config.capability_wishlist_adjudicator_model,
             usage_recorder=self._record_local_usage_event,
             owner_user_id=config.owner_user_id or None,
-        )
-        self.memory_client = CosmicMemoryClient(
-            base_url=config.cosmic_memory_url,
-            timeout_sec=config.cosmic_memory_timeout_sec,
-            write_timeout_sec=config.cosmic_memory_write_timeout_sec,
-            internal_token=config.internal_token,
         )
         self.haiku_adapter = HaikuAdapter(
             api_key=config.haiku_api_key,
