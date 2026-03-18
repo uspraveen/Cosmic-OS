@@ -1757,6 +1757,31 @@ class OrchestratorRuntime:
                 return f"delegated {intent_name} to a specialist agent"
             return "delegated work to a specialist agent"
 
+        if tool_name == "cosmics_capability_wishlist_search":
+            matches = (data or {}).get("matches") if isinstance(data, dict) else None
+            query = self._activity_excerpt(tool_input.get("query"), limit=72)
+            if isinstance(matches, list) and matches:
+                if query:
+                    return f'checked COSMIC\'s capability wishlist for "{query}" and found {len(matches)} similar items'
+                return f"checked COSMIC's capability wishlist and found {len(matches)} similar items"
+            if query:
+                return f'checked COSMIC\'s capability wishlist for "{query}"'
+            return "checked COSMIC's capability wishlist"
+
+        if tool_name == "cosmics_capability_wishlist_capture":
+            status_value = self._activity_excerpt((data or {}).get("status"), limit=48)
+            capability_id = self._activity_excerpt((data or {}).get("capability_id"), limit=24)
+            title = self._activity_excerpt((data or {}).get("title") or tool_input.get("title"), limit=72)
+            if status_value == "created_new" and capability_id and title:
+                return f'captured new capability gap {capability_id}: "{title}"'
+            if status_value == "updated_existing" and capability_id and title:
+                return f'updated capability wishlist entry {capability_id}: "{title}"'
+            if status_value == "appended_evidence" and capability_id and title:
+                return f'added evidence to capability wishlist entry {capability_id}: "{title}"'
+            if status_value == "skipped_duplicate" and capability_id and title:
+                return f'reused existing capability wishlist entry {capability_id}: "{title}"'
+            return self._activity_phrase_from_result_message(data) or "updated COSMIC's capability wishlist"
+
         if tool_name == "firecrawl_scrape":
             url = self._activity_url_label((data or {}).get("url") or tool_input.get("url"))
             formats = (data or {}).get("available_formats") if isinstance(data, dict) else None

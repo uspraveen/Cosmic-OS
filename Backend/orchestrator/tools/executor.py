@@ -290,6 +290,68 @@ class ToolExecutor:
             }
         return response
 
+    async def _cosmics_capability_wishlist_search(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        del context
+        query = str(tool_input.get("query") or "").strip()
+        if not query:
+            return {"error": True, "message": "query is required"}
+        limit = min(max(1, self._coerce_int(tool_input.get("limit"), 3)), 10)
+        payload = await self._request_gateway_json(
+            "POST",
+            "/internal/cosmics-capability-wishlist/search",
+            json_body={"query": query, "limit": limit},
+        )
+        if payload is None:
+            return {"error": True, "message": "Capability wishlist search did not return a payload."}
+        return payload
+
+    async def _cosmics_capability_wishlist_capture(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        title = str(tool_input.get("title") or "").strip()
+        summary = str(tool_input.get("summary") or "").strip()
+        if not title:
+            return {"error": True, "message": "title is required"}
+        if not summary:
+            return {"error": True, "message": "summary is required"}
+        payload: dict[str, Any] = {
+            "title": title,
+            "summary": summary,
+            "desired_outcome": str(tool_input.get("desired_outcome") or "").strip() or None,
+            "domain": str(tool_input.get("domain") or "").strip() or None,
+            "tags": self._normalize_string_list(tool_input.get("tags")),
+            "evidence": str(tool_input.get("evidence") or "").strip() or None,
+            "source_component": "orchestrator",
+            "source_id": context.source_id if context else None,
+            "request_id": context.request_id if context else None,
+            "session_id": context.session_id if context else None,
+            "task_id": context.task_id if context else None,
+            "route": "opus",
+            "created_by": "cosmic/orchestrator:1.0.0",
+            "metadata": self._clean_mapping(
+                {
+                    "task_source": context.source if context else None,
+                    "channel": context.channel if context else None,
+                }
+            ),
+        }
+        gateway_payload = await self._request_gateway_json(
+            "POST",
+            "/internal/cosmics-capability-wishlist/capture",
+            json_body=payload,
+        )
+        if gateway_payload is None:
+            return {"error": True, "message": "Capability wishlist capture did not return a payload."}
+        return gateway_payload
+
     async def _firecrawl_scrape(
         self,
         tool_input: dict[str, Any],

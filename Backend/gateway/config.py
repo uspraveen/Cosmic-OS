@@ -70,10 +70,12 @@ class GatewayConfig:
     usage_db_path: Path = BACKEND_ROOT / "gateway" / "usage.db"
     routing_audit_db_path: Path = BACKEND_ROOT / "gateway" / "routing_audit.db"
     memory_write_audit_db_path: Path = BACKEND_ROOT / "gateway" / "memory_write_audit.db"
+    capability_wishlist_db_path: Path = BACKEND_ROOT / "gateway" / "cosmics_capability_wishlist.db"
     artifacts_db_path: Path = BACKEND_ROOT / "gateway" / "artifacts.db"
     delivery_queue_db_path: Path = BACKEND_ROOT / "gateway" / "delivery_queue.db"
     scheduler_db_path: Path = BACKEND_ROOT / "gateway" / "scheduler.db"
     session_transcript_dir: Path = BACKEND_ROOT / "logs" / "sessions"
+    capability_wishlist_export_dir: Path = BACKEND_ROOT / "logs" / "cosmics_capability_wishlist"
     session_reset_hour: int = 4
     user_timezone_fallback: str = "America/Chicago"
     scheduler_poll_interval_sec: float = 30.0
@@ -89,6 +91,10 @@ class GatewayConfig:
     haiku_thinking_budget_tokens: int = 10000
     perplexity_api_key: str = ""
     perplexity_model: str = "sonar"
+    capability_wishlist_embedding_model: str = "pplx-embed-v1-4b"
+    capability_wishlist_embedding_dimensions: int = 1024
+    xai_api_key: str = ""
+    capability_wishlist_adjudicator_model: str = "grok-4-1-fast-reasoning"
     direct_llm_timeout_sec: float = 90.0
     cosmic_memory_url: str = ""
     cosmic_memory_timeout_sec: float = 12.0
@@ -161,6 +167,12 @@ class GatewayConfig:
                     str(BACKEND_ROOT / "gateway" / "memory_write_audit.db"),
                 )
             ).expanduser(),
+            capability_wishlist_db_path=Path(
+                os.getenv(
+                    "GATEWAY_CAPABILITY_WISHLIST_DB_PATH",
+                    str(BACKEND_ROOT / "gateway" / "cosmics_capability_wishlist.db"),
+                )
+            ).expanduser(),
             artifacts_db_path=Path(
                 os.getenv(
                     "GATEWAY_ARTIFACTS_DB_PATH",
@@ -183,6 +195,12 @@ class GatewayConfig:
                 os.getenv(
                     "GATEWAY_SESSION_TRANSCRIPT_DIR",
                     str(BACKEND_ROOT / "logs" / "sessions"),
+                )
+            ).expanduser(),
+            capability_wishlist_export_dir=Path(
+                os.getenv(
+                    "GATEWAY_CAPABILITY_WISHLIST_EXPORT_DIR",
+                    str(BACKEND_ROOT / "logs" / "cosmics_capability_wishlist"),
                 )
             ).expanduser(),
             session_reset_hour=min(
@@ -233,6 +251,19 @@ class GatewayConfig:
             ),
             perplexity_api_key=os.getenv("PERPLEXITY_API_KEY", "").strip(),
             perplexity_model=os.getenv("PERPLEXITY_MODEL", "sonar").strip(),
+            capability_wishlist_embedding_model=(
+                os.getenv("CAPABILITY_WISHLIST_EMBEDDING_MODEL", "pplx-embed-v1-4b").strip()
+                or "pplx-embed-v1-4b"
+            ),
+            capability_wishlist_embedding_dimensions=max(
+                128,
+                _env_int("CAPABILITY_WISHLIST_EMBEDDING_DIMENSIONS", 1024),
+            ),
+            xai_api_key=os.getenv("XAI_API_KEY", "").strip(),
+            capability_wishlist_adjudicator_model=(
+                os.getenv("CAPABILITY_WISHLIST_ADJUDICATOR_MODEL", "grok-4-1-fast-reasoning").strip()
+                or "grok-4-1-fast-reasoning"
+            ),
             direct_llm_timeout_sec=max(
                 5.0,
                 _env_float("DIRECT_LLM_TIMEOUT_SEC", 90.0),

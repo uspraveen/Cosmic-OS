@@ -83,6 +83,16 @@ def _delegate_to_agent_progress(tool_input: dict[str, Any]) -> str:
     return f"Delegating to specialist intent: {intent_label}" if intent else "Delegating to a specialist agent..."
 
 
+def _wishlist_search_progress(tool_input: dict[str, Any]) -> str:
+    query = str(tool_input.get("query") or "").strip()
+    return f"Checking COSMIC's capability wishlist for: {query}" if query else "Checking COSMIC's capability wishlist..."
+
+
+def _wishlist_capture_progress(tool_input: dict[str, Any]) -> str:
+    title = str(tool_input.get("title") or "").strip()
+    return f"Recording capability gap: {title}" if title else "Recording a capability gap for COSMIC..."
+
+
 def _firecrawl_scrape_progress(tool_input: dict[str, Any]) -> str:
     url = str(tool_input.get("url") or "").strip()
     return f"Scraping via Firecrawl: {url}" if url else "Scraping a page via Firecrawl..."
@@ -295,6 +305,81 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Delegate specialist work by exact intent after discovery. Prefer this over carrying agent-specific tools in your tool list.",
         progress_builder=_delegate_to_agent_progress,
         handler_method="_delegate_to_agent",
+    ),
+    ToolSpec(
+        name="cosmics_capability_wishlist_search",
+        api_definition={
+            "name": "cosmics_capability_wishlist_search",
+            "description": (
+                "Search COSMIC's capability wishlist for existing or similar missing capabilities. "
+                "Use this when you need to inspect previously recorded gaps, roadmap items, or similar wishes."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Capability-gap search query, feature area, or problem description.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of matches to return. Default 3.",
+                        "default": 3,
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+        group="planning",
+        prompt_summary="Search the canonical COSMIC capability wishlist for similar missing capabilities or roadmap items.",
+        progress_builder=_wishlist_search_progress,
+        handler_method="_cosmics_capability_wishlist_search",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="cosmics_capability_wishlist_capture",
+        api_definition={
+            "name": "cosmics_capability_wishlist_capture",
+            "description": (
+                "Capture a meaningful missing COSMIC capability into the canonical capability wishlist. "
+                "The backend automatically searches for similar entries, deduplicates, and may update an existing item."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Short operator-readable capability title.",
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Why this missing capability matters and what gap it would solve.",
+                    },
+                    "desired_outcome": {
+                        "type": "string",
+                        "description": "Optional concrete desired outcome once this capability exists.",
+                    },
+                    "domain": {
+                        "type": "string",
+                        "description": "Optional product area such as scheduling, desktop_ui, memory, agents, or communications.",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional short tags for retrieval and grouping.",
+                    },
+                    "evidence": {
+                        "type": "string",
+                        "description": "Optional concise evidence from the current interaction showing why this capability is needed.",
+                    },
+                },
+                "required": ["title", "summary"],
+            },
+        },
+        group="planning",
+        prompt_summary="Capture a real missing capability when you notice COSMIC would materially help the user better if it had that capability already.",
+        progress_builder=_wishlist_capture_progress,
+        handler_method="_cosmics_capability_wishlist_capture",
     ),
     ToolSpec(
         name="firecrawl_scrape",
@@ -885,11 +970,12 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
 )
 
 _TOOL_BY_NAME = {spec.name: spec for spec in _MODEL_TOOL_SPECS}
-_GROUP_ORDER = ("web", "research", "specialists", "memory", "history", "scheduling")
+_GROUP_ORDER = ("web", "research", "specialists", "planning", "memory", "history", "scheduling")
 _GROUP_TITLES = {
     "web": "Web",
     "research": "Research",
     "specialists": "Specialists",
+    "planning": "Planning & Wishlist",
     "memory": "Memory",
     "history": "History",
     "scheduling": "Scheduling",

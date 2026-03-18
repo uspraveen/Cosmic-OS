@@ -496,6 +496,115 @@ async def test_tool_executor_agent_catalog_search_returns_matches_from_callback(
 
 
 @pytest.mark.asyncio
+async def test_tool_executor_capability_wishlist_search_uses_gateway_internal_route() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == httpx.URL("http://gateway/internal/cosmics-capability-wishlist/search")
+        assert request.headers["X-Internal-Token"] == "internal-token"
+        payload = json.loads(request.content.decode("utf-8"))
+        assert payload == {"query": "desktop task observability", "limit": 3}
+        return httpx.Response(
+            200,
+            json={
+                "query": "desktop task observability",
+                "matches": [
+                    {
+                        "capability_id": "cap_000014",
+                        "title": "Spaces control-center task observability",
+                        "summary": "Show all active tasks and live task flow from desktop.",
+                    }
+                ],
+                "count": 1,
+                "message": "Found 1 matching capability wishlist entry.",
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    executor = ToolExecutor(
+        gateway_url="http://gateway",
+        gateway_internal_token="internal-token",
+        client=client,
+    )
+    try:
+        raw_result = await executor.execute(
+            "cosmics_capability_wishlist_search",
+            {"query": "desktop task observability", "limit": 3},
+        )
+    finally:
+        await client.aclose()
+
+    result = json.loads(raw_result)
+    assert result["matches"][0]["capability_id"] == "cap_000014"
+    assert result["matches"][0]["title"] == "Spaces control-center task observability"
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_capability_wishlist_capture_uses_gateway_internal_route_and_context() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == httpx.URL("http://gateway/internal/cosmics-capability-wishlist/capture")
+        assert request.headers["X-Internal-Token"] == "internal-token"
+        payload = json.loads(request.content.decode("utf-8"))
+        assert payload == {
+            "title": "Cross-channel delivery target resolver",
+            "summary": "Let reminders and future actions target a user-linked channel without requiring a raw channel id.",
+            "desired_outcome": "Opus can schedule delivery to desktop, WhatsApp, or Telegram through a stable resolver.",
+            "domain": "communications",
+            "tags": ["channels", "reminders"],
+            "evidence": "The user explicitly asked for reminders to reach any linked channel.",
+            "source_component": "orchestrator",
+            "source_id": "desktop",
+            "request_id": "req_parent",
+            "session_id": "sess_parent",
+            "task_id": "tsk_parent",
+            "route": "opus",
+            "created_by": "cosmic/orchestrator:1.0.0",
+            "metadata": {"task_source": "user", "channel": "desktop:test"},
+        }
+        return httpx.Response(
+            201,
+            json={
+                "status": "created_new",
+                "capability_id": "cap_000201",
+                "title": "Cross-channel delivery target resolver",
+                "message": "Added new capability wishlist entry cap_000201: Cross-channel delivery target resolver.",
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    executor = ToolExecutor(
+        gateway_url="http://gateway",
+        gateway_internal_token="internal-token",
+        client=client,
+    )
+    context = ToolExecutionContext(
+        task_id="tsk_parent",
+        request_id="req_parent",
+        session_id="sess_parent",
+        channel="desktop:test",
+        source="user",
+        source_id="desktop",
+    )
+    try:
+        raw_result = await executor.execute(
+            "cosmics_capability_wishlist_capture",
+            {
+                "title": "Cross-channel delivery target resolver",
+                "summary": "Let reminders and future actions target a user-linked channel without requiring a raw channel id.",
+                "desired_outcome": "Opus can schedule delivery to desktop, WhatsApp, or Telegram through a stable resolver.",
+                "domain": "communications",
+                "tags": ["channels", "reminders"],
+                "evidence": "The user explicitly asked for reminders to reach any linked channel.",
+            },
+            context=context,
+        )
+    finally:
+        await client.aclose()
+
+    result = json.loads(raw_result)
+    assert result["status"] == "created_new"
+    assert result["capability_id"] == "cap_000201"
+
+
+@pytest.mark.asyncio
 async def test_tool_executor_delegate_to_agent_dispatches_specialist_agent_and_returns_output() -> None:
     observed: dict[str, object] = {}
 

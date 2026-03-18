@@ -147,6 +147,8 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
             "web_fetch",
             "agent_catalog_search",
             "delegate_to_agent",
+            "cosmics_capability_wishlist_search",
+            "cosmics_capability_wishlist_capture",
             "memory_search",
             "memory_fetch",
             "memory_write",
@@ -166,6 +168,8 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
         assert "memory_write_core_fact" in payload["system"]
         assert "agent_catalog_search" in payload["system"]
         assert "delegate_to_agent" in payload["system"]
+        assert "cosmics_capability_wishlist_search" in payload["system"]
+        assert "cosmics_capability_wishlist_capture" in payload["system"]
         assert "firecrawl_extract" not in payload["system"]
         return httpx.Response(
             200,

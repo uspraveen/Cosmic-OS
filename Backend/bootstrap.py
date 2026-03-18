@@ -1488,6 +1488,14 @@ def build_service_env_overrides(
         memory_existing.get("XAI_API_KEY"),
         memory_data.get("XAI_API_KEY"),
     )
+    gateway_xai_api_key = first_meaningful_value(
+        gateway_external.get("XAI_API_KEY"),
+        gateway_existing.get("XAI_API_KEY"),
+        gateway_data.get("XAI_API_KEY"),
+        memory_external.get("XAI_API_KEY"),
+        memory_existing.get("XAI_API_KEY"),
+        memory_data.get("XAI_API_KEY"),
+    )
     memory_data_dir = first_meaningful_value(
         memory_external.get("COSMIC_MEMORY_DATA_DIR"),
         memory_existing.get("COSMIC_MEMORY_DATA_DIR"),
@@ -1581,6 +1589,7 @@ def build_service_env_overrides(
             "WHATSAPP_BRIDGE_TOKEN": bridge_token or secrets.token_urlsafe(32),
             "ANTHROPIC_API_KEY": shared_anthropic_api_key or "<anthropic-api-key>",
             "PERPLEXITY_API_KEY": perplexity_api_key or "<perplexity-api-key>",
+            "XAI_API_KEY": gateway_xai_api_key or "",
             "GATEWAY_PUBLIC_HOST": gateway_public_host or "<gateway.user.example.com>",
             "HAIKU_MODEL": haiku_model or "claude-haiku-4-5",
         },

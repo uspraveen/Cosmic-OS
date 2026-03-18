@@ -10,6 +10,7 @@ from .config import GatewayConfig
 from .memory.routes import router as memory_router
 from .runtime import GatewayRuntime
 from .usage.routes import router as usage_router
+from .wishlist.routes import router as wishlist_router
 
 
 @asynccontextmanager
@@ -32,6 +33,7 @@ app = FastAPI(
 app.include_router(channel_router)
 app.include_router(memory_router)
 app.include_router(usage_router)
+app.include_router(wishlist_router)
 
 
 @app.get("/health")

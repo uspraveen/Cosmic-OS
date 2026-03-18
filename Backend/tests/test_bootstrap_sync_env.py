@@ -480,6 +480,7 @@ def test_materialize_bootstrap_env_files_can_render_memory_env(monkeypatch, tmp_
     (backend_root / "gateway.env.example").write_text(
         "COSMIC_MEMORY_URL=\n"
         "PERPLEXITY_API_KEY=<perplexity-api-key>\n"
+        "XAI_API_KEY=\n"
         "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n",
         encoding="utf-8",
     )
@@ -555,7 +556,9 @@ def test_materialize_bootstrap_env_files_can_render_memory_env(monkeypatch, tmp_
     gateway_env_path = backend_root / "gateway.env"
 
     assert memory_env_path in written
-    assert "COSMIC_MEMORY_URL=http://127.0.0.1:8090" in gateway_env_path.read_text(encoding="utf-8")
+    gateway_rendered = gateway_env_path.read_text(encoding="utf-8")
+    assert "COSMIC_MEMORY_URL=http://127.0.0.1:8090" in gateway_rendered
+    assert "XAI_API_KEY=xai-live" in gateway_rendered
     memory_rendered = memory_env_path.read_text(encoding="utf-8")
     assert "PERPLEXITY_API_KEY=perplexity-live" in memory_rendered
     assert "XAI_API_KEY=xai-live" in memory_rendered

@@ -35,6 +35,7 @@ from .session.summary import (
 )
 from .session_store import SessionStore
 from .usage_store import UsageStore
+from .wishlist import CapabilityWishlistService, CapabilityWishlistStore
 from shared import (
     MeteredCall,
     ModelSpec,
@@ -163,9 +164,21 @@ class GatewayRuntime:
         self.usage_store = UsageStore(config.usage_db_path)
         self.routing_audit_store = RoutingAuditStore(config.routing_audit_db_path)
         self.memory_write_audit_store = MemoryWriteAuditStore(config.memory_write_audit_db_path)
+        self.capability_wishlist_store = CapabilityWishlistStore(config.capability_wishlist_db_path)
         self.artifact_store = ArtifactStore(config.artifacts_db_path)
         self.delivery_queue_store = DeliveryQueueStore(config.delivery_queue_db_path)
         self.scheduler_store = SchedulerStore(config.scheduler_db_path)
+        self.capability_wishlist_service = CapabilityWishlistService(
+            store=self.capability_wishlist_store,
+            export_dir=config.capability_wishlist_export_dir,
+            perplexity_api_key=config.perplexity_api_key,
+            embedding_model=config.capability_wishlist_embedding_model,
+            embedding_dimensions=config.capability_wishlist_embedding_dimensions,
+            xai_api_key=config.xai_api_key,
+            adjudicator_model=config.capability_wishlist_adjudicator_model,
+            usage_recorder=self._record_local_usage_event,
+            owner_user_id=config.owner_user_id or None,
+        )
         self.memory_client = CosmicMemoryClient(
             base_url=config.cosmic_memory_url,
             timeout_sec=config.cosmic_memory_timeout_sec,
@@ -225,6 +238,7 @@ class GatewayRuntime:
         self.artifact_store.initialize()
         self.delivery_queue_store.initialize()
         self.scheduler_store.initialize(default_timezone=self.config.user_timezone_fallback)
+        await self.capability_wishlist_service.initialize()
         self._usage_event_queue = asyncio.Queue(maxsize=self.config.usage_queue_max_size)
         self._sync_system_crons()
         await self.model_router.start()
@@ -303,6 +317,7 @@ class GatewayRuntime:
         await self.model_router.stop()
         await self.orchestrator.stop()
         await self.memory_client.stop()
+        await self.capability_wishlist_service.close()
         await self.haiku_adapter.close()
         await self.perplexity_adapter.close()
         if self._redis is not None:
@@ -1758,6 +1773,38 @@ class GatewayRuntime:
 
     def list_recent_usage(self, *, limit: int = 100) -> list[dict[str, Any]]:
         return self.usage_store.list_recent(limit=limit)
+
+    def capability_wishlist_summary(self) -> dict[str, Any]:
+        return self.capability_wishlist_service.summary()
+
+    def capability_wishlist_recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        return self.capability_wishlist_service.list_recent(limit=limit)
+
+    async def capability_wishlist_get(self, capability_id: str) -> dict[str, Any] | None:
+        return await self.capability_wishlist_service.get_item(capability_id)
+
+    async def capability_wishlist_search(self, payload: dict[str, Any]) -> dict[str, Any]:
+        query = self._safe_text(payload.get("query"))
+        limit = self._coerce_int(payload.get("limit"), 3)
+        return await self.capability_wishlist_service.search(query=query, limit=limit)
+
+    async def capability_wishlist_capture(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self.capability_wishlist_service.capture(
+            title=self._safe_text(payload.get("title")),
+            summary=self._safe_text(payload.get("summary")),
+            desired_outcome=self._safe_text(payload.get("desired_outcome")) or None,
+            domain=self._safe_text(payload.get("domain")) or None,
+            tags=payload.get("tags") if isinstance(payload.get("tags"), list) else [],
+            evidence=self._safe_text(payload.get("evidence")) or None,
+            source_component=self._safe_text(payload.get("source_component")) or None,
+            source_id=self._safe_text(payload.get("source_id")) or None,
+            request_id=self._safe_text(payload.get("request_id")) or None,
+            session_id=self._safe_text(payload.get("session_id")) or None,
+            task_id=self._safe_text(payload.get("task_id")) or None,
+            route=self._safe_text(payload.get("route")) or None,
+            created_by=self._safe_text(payload.get("created_by")) or None,
+            metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+        )
 
     def _record_local_usage_event(self, event: UsageEvent | dict[str, Any]) -> None:
         try:
@@ -4217,6 +4264,7 @@ class GatewayRuntime:
             "channels": self.list_channels(),
             "current_session_id": self._current_session_id(),
             "usage": self._usage_summary(),
+            "capability_wishlist": self.capability_wishlist_service.summary(),
             "delivery_queue": self.delivery_queue_store.summary(),
             "scheduler": self.scheduler_store.summary(),
         }
@@ -4235,6 +4283,7 @@ class GatewayRuntime:
             "cosmic_memory_url": self.config.cosmic_memory_url,
             "memory": memory,
             "usage": self._usage_summary(),
+            "capability_wishlist": self.capability_wishlist_service.summary(),
             "delivery_queue": self.delivery_queue_store.summary(),
             "scheduler": self.scheduler_store.summary(),
         }
