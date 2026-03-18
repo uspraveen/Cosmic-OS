@@ -312,7 +312,8 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "name": "cosmics_capability_wishlist_search",
             "description": (
                 "Search COSMIC's capability wishlist for existing or similar missing capabilities. "
-                "Use this when you need to inspect previously recorded gaps, roadmap items, or similar wishes."
+                "Use this when you need to inspect previously recorded gaps, roadmap items, or similar wishes. "
+                "This is for retrieval and inspection; capture does not require a pre-search just for dedupe."
             ),
             "input_schema": {
                 "type": "object",
@@ -331,7 +332,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             },
         },
         group="planning",
-        prompt_summary="Search the canonical COSMIC capability wishlist for similar missing capabilities or roadmap items.",
+        prompt_summary="Inspect the canonical COSMIC capability wishlist for similar missing capabilities or roadmap items when you need retrieval or awareness.",
         progress_builder=_wishlist_search_progress,
         handler_method="_cosmics_capability_wishlist_search",
         read_only=True,
@@ -342,7 +343,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "name": "cosmics_capability_wishlist_capture",
             "description": (
                 "Capture a meaningful missing COSMIC capability into the canonical capability wishlist. "
-                "The backend automatically searches for similar entries, deduplicates, and may update an existing item."
+                "You can call this directly when you find a real gap; the backend automatically searches for similar entries, deduplicates, and may update an existing item."
             ),
             "input_schema": {
                 "type": "object",
@@ -377,7 +378,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             },
         },
         group="planning",
-        prompt_summary="Capture a real missing capability when you notice COSMIC would materially help the user better if it had that capability already.",
+        prompt_summary="Capture a real missing capability directly when you notice COSMIC would materially help the user better if it already had that capability.",
         progress_builder=_wishlist_capture_progress,
         handler_method="_cosmics_capability_wishlist_capture",
     ),
