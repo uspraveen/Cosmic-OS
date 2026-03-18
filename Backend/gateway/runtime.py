@@ -1785,7 +1785,7 @@ class GatewayRuntime:
 
     async def capability_wishlist_search(self, payload: dict[str, Any]) -> dict[str, Any]:
         query = self._safe_text(payload.get("query"))
-        limit = self._coerce_int(payload.get("limit"), 3)
+        limit = self._coerce_int(payload.get("limit")) or 3
         return await self.capability_wishlist_service.search(query=query, limit=limit)
 
     async def capability_wishlist_capture(self, payload: dict[str, Any]) -> dict[str, Any]:

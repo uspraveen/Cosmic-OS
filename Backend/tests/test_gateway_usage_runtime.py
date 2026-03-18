@@ -89,3 +89,24 @@ async def test_gateway_usage_submit_queues_and_flushes(tmp_path: Path) -> None:
             runtime._usage_worker.cancel()
             await asyncio.gather(runtime._usage_worker, return_exceptions=True)
             runtime._usage_worker = None
+
+
+@pytest.mark.asyncio
+async def test_capability_wishlist_search_runtime_defaults_limit(tmp_path: Path) -> None:
+    runtime = _build_runtime(tmp_path)
+
+    class _StubWishlistService:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int]] = []
+
+        async def search(self, *, query: str, limit: int) -> dict[str, object]:
+            self.calls.append((query, limit))
+            return {"query": query, "count": 0, "matches": [], "limit": limit}
+
+    stub = _StubWishlistService()
+    runtime.capability_wishlist_service = stub  # type: ignore[assignment]
+
+    result = await runtime.capability_wishlist_search({"query": "wishlist tools"})
+
+    assert stub.calls == [("wishlist tools", 3)]
+    assert result["limit"] == 3
