@@ -2038,6 +2038,16 @@ export default function App() {
     } as React.CSSProperties)
     : undefined
   const hasMultiplePendingTaskInputs = orderedPendingTaskInputs.length > 1
+  const composerPlaceholder =
+    authState !== 'authenticated'
+      ? 'Sign in to connect Cosmic to your VM...'
+      : gatewayStatus.connected
+        ? 'Ask Cosmic...'
+        : gatewayStatus.state === 'connecting' || gatewayStatus.state === 'reconnecting'
+          ? 'Connecting to your VM...'
+          : gatewayStatus.state === 'error'
+            ? 'VM connection needs attention...'
+            : 'Connect to your VM...'
 
   return (
     <>
@@ -2062,6 +2072,7 @@ export default function App() {
         }}
         keyStatus={keyStatus}
         authData={authData}
+        gatewayConnection={gatewayStatus}
         onLogout={handleVmLogout}
       />
 
@@ -2185,6 +2196,8 @@ export default function App() {
         <SpacesControlCenter
           active={mode === 'spaces'}
           gatewayState={gatewayStatus.state}
+          gatewayConnected={gatewayStatus.connected}
+          gatewayDetail={gatewayStatus.detail}
           pendingTaskCount={pendingTaskCount}
           pendingCronCount={orderedCronResultNotifications.length}
           selectedModelLabel={MODEL_OPTIONS.find((item) => item.id === selectedModel)?.label || 'Cosmic'}
@@ -2842,7 +2855,7 @@ export default function App() {
                       }}
                       onFocus={() => setIsInputFocused(true)}
                       onBlur={() => setIsInputFocused(false)}
-                      placeholder={gatewayStatus.connected ? "Ask Cosmic..." : "Connecting to your VM..."}
+                      placeholder={composerPlaceholder}
                       spellCheck={false}
                       autoComplete="off"
                       disabled={isStreaming || authState !== 'authenticated'}

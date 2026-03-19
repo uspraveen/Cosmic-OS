@@ -26,6 +26,11 @@ interface SettingsProps {
   islandOpacity: number
   onOpacityChange: (opacity: number) => void
   authData?: any
+  gatewayConnection?: {
+    state: 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error'
+    connected: boolean
+    detail?: string
+  }
   onLogout?: () => void
 }
 
@@ -50,6 +55,7 @@ export default function Settings({
   islandOpacity,
   onOpacityChange,
   authData,
+  gatewayConnection,
   onLogout,
 }: SettingsProps) {
   const [currentView, setCurrentView] = useState<SettingsView>('main')
@@ -101,6 +107,13 @@ export default function Settings({
   const allKeysConfigured =
     Boolean(keyStatus.deepgram) &&
     Boolean(keyStatus.anthropic)
+  const gatewayConnectionLabel = gatewayConnection?.connected
+    ? 'Gateway live'
+    : gatewayConnection?.state === 'connecting' || gatewayConnection?.state === 'reconnecting'
+      ? 'Connecting to VM'
+      : gatewayConnection?.state === 'error'
+        ? 'Gateway unavailable'
+        : 'Signed in to VM'
 
   return (
     <div
@@ -146,7 +159,7 @@ export default function Settings({
                         {authData.fullName || 'Cosmic User'}
                       </div>
                       <div style={{ color: 'rgba(255,255,255,0.45)', fontSize: 12, marginTop: 2 }}>
-                        Connected to VM
+                        {gatewayConnectionLabel}
                       </div>
                     </div>
                     <button

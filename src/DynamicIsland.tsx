@@ -36,6 +36,11 @@ interface DynamicIslandProps {
     anthropic?: boolean
   }
   authData?: any
+  gatewayConnection?: {
+    state: 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error'
+    connected: boolean
+    detail?: string
+  }
   onLogout?: () => void
 }
 
@@ -230,6 +235,7 @@ export default function DynamicIsland({
   onOpacityChange,
   keyStatus,
   authData,
+  gatewayConnection,
   onLogout,
 }: DynamicIslandProps) {
   const [activeSlide, setActiveSlide] = useState(0)
@@ -1603,6 +1609,7 @@ export default function DynamicIsland({
           islandOpacity={islandOpacity}
           onOpacityChange={onOpacityChange}
           authData={authData}
+          gatewayConnection={gatewayConnection}
           onLogout={onLogout}
         />
       )}

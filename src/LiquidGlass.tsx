@@ -6,6 +6,7 @@ interface LiquidGlassProps {
   style?: CSSProperties
   cornerRadius?: number
   disableTilt?: boolean
+  visualTone?: 'default' | 'stealth'
 }
 
 export default function LiquidGlass({
@@ -14,6 +15,7 @@ export default function LiquidGlass({
   style = {},
   cornerRadius = 32,
   disableTilt = false,
+  visualTone = 'default',
 }: LiquidGlassProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [mouse, setMouse] = useState({ x: 0.5, y: 0.5 })
@@ -35,6 +37,7 @@ export default function LiquidGlass({
 
   const tiltX = disableTilt ? 0 : (mouse.x - 0.5) * 3
   const tiltY = disableTilt ? 0 : (mouse.y - 0.5) * -3
+  const stealth = visualTone === 'stealth'
 
   return (
     <div
@@ -59,16 +62,16 @@ export default function LiquidGlass({
           position: 'absolute',
           inset: 0,
           borderRadius: cornerRadius,
-          background: 'rgba(20, 20, 22, 0.6)', // Deep dark tint
+          background: stealth ? 'rgba(10, 10, 12, 0.74)' : 'rgba(20, 20, 22, 0.6)', // Deep dark tint
           backdropFilter: 'blur(32px) saturate(220%)', // Heavy blur + high saturation for "liquid" feel
           WebkitBackdropFilter: 'blur(32px) saturate(220%)',
           boxShadow: `
             0 25px 50px -12px rgba(0, 0, 0, 0.6), /* Drop Shadow */
-            inset 0 1px 1px 0 rgba(255, 255, 255, 0.2), /* Top Inner Highlight */
+            inset 0 1px 1px 0 ${stealth ? 'rgba(255, 255, 255, 0.08)' : 'rgba(255, 255, 255, 0.2)'}, /* Top Inner Highlight */
             inset 0 -1px 1px 0 rgba(0, 0, 0, 0.4), /* Bottom Inner Shadow */
             inset 0 0 20px 0 rgba(0, 0, 0, 0.2) /* Inner Depth */
           `,
-          border: '1px solid rgba(255, 255, 255, 0.08)' // Subtle physical border
+          border: stealth ? '1px solid rgba(255, 255, 255, 0.05)' : '1px solid rgba(255, 255, 255, 0.08)' // Subtle physical border
         }}
       />
 
@@ -78,14 +81,23 @@ export default function LiquidGlass({
           position: 'absolute',
           inset: 0,
           borderRadius: cornerRadius,
-          background: `linear-gradient(
-            135deg, 
-            rgba(255, 255, 255, 0.15) 0%, 
-            rgba(255, 255, 255, 0.02) 20%, 
-            rgba(255, 255, 255, 0.0) 50%,
-            rgba(255, 255, 255, 0.02) 80%,
-            rgba(255, 255, 255, 0.08) 100%
-          )`,
+          background: stealth
+            ? `linear-gradient(
+                135deg,
+                rgba(255, 255, 255, 0.055) 0%,
+                rgba(255, 255, 255, 0.008) 18%,
+                rgba(255, 255, 255, 0.0) 50%,
+                rgba(255, 255, 255, 0.008) 82%,
+                rgba(255, 255, 255, 0.03) 100%
+              )`
+            : `linear-gradient(
+                135deg, 
+                rgba(255, 255, 255, 0.15) 0%, 
+                rgba(255, 255, 255, 0.02) 20%, 
+                rgba(255, 255, 255, 0.0) 50%,
+                rgba(255, 255, 255, 0.02) 80%,
+                rgba(255, 255, 255, 0.08) 100%
+              )`,
           pointerEvents: 'none',
           mixBlendMode: 'overlay'
         }}
@@ -98,20 +110,29 @@ export default function LiquidGlass({
           inset: -1, // Sits slightly outside to hug the curve
           borderRadius: cornerRadius + 1,
           padding: 1.5, // Thickness of the rim
-          background: `linear-gradient(
-            ${140 + (tiltX * 10)}deg, 
-            rgba(255, 255, 255, 0.5) 0%, 
-            rgba(255, 255, 255, 0.1) 25%, 
-            rgba(255, 255, 255, 0.0) 50%, 
-            rgba(255, 255, 255, 0.1) 75%, 
-            rgba(255, 255, 255, 0.4) 100%
-          )`,
+          background: stealth
+            ? `linear-gradient(
+                ${140 + (tiltX * 10)}deg,
+                rgba(255, 255, 255, 0.18) 0%,
+                rgba(255, 255, 255, 0.05) 25%,
+                rgba(255, 255, 255, 0.0) 50%,
+                rgba(255, 255, 255, 0.05) 75%,
+                rgba(255, 255, 255, 0.14) 100%
+              )`
+            : `linear-gradient(
+                ${140 + (tiltX * 10)}deg, 
+                rgba(255, 255, 255, 0.5) 0%, 
+                rgba(255, 255, 255, 0.1) 25%, 
+                rgba(255, 255, 255, 0.0) 50%, 
+                rgba(255, 255, 255, 0.1) 75%, 
+                rgba(255, 255, 255, 0.4) 100%
+              )`,
           mask: 'linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)',
           maskComposite: 'exclude',
           WebkitMask: 'linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)',
           WebkitMaskComposite: 'xor',
           pointerEvents: 'none',
-          opacity: 0.9
+          opacity: stealth ? 0.46 : 0.9
         }}
       />
 
@@ -120,14 +141,25 @@ export default function LiquidGlass({
         style={{
           position: 'absolute',
           top: 0, left: '15%', right: '15%', height: '1px',
-          background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.6), transparent)',
-          opacity: 0.5,
+          background: stealth
+            ? 'linear-gradient(90deg, transparent, rgba(255,255,255,0.18), transparent)'
+            : 'linear-gradient(90deg, transparent, rgba(255,255,255,0.6), transparent)',
+          opacity: stealth ? 0.14 : 0.5,
           pointerEvents: 'none'
         }}
       />
 
       {/* 5. Content Container (Must fill height for scrolling!) */}
-      <div style={{ position: 'relative', zIndex: 10, height: '100%', width: '100%' }}>
+      <div
+        style={{
+          position: 'relative',
+          zIndex: 10,
+          height: '100%',
+          width: '100%',
+          borderRadius: cornerRadius,
+          overflow: 'hidden',
+        }}
+      >
         {children}
       </div>
     </div>

@@ -224,16 +224,15 @@ function syncGatewaySettingsFromPayload(settings: any) {
 }
 
 const GATEWAY_SYSTEM_METRIC_PATHS = [
-  '/system/metrics',
-  '/system/status',
   '/health',
+  '/health/ready',
 ]
 
 async function getGatewaySystemMetrics(config: GatewayConnectionConfig) {
   let lastError: unknown = null
   for (const pathName of GATEWAY_SYSTEM_METRIC_PATHS) {
     try {
-      const payload = await callGatewayJson(config, pathName, { timeoutMs: 10000 })
+      const payload = await callGatewayJson(config, pathName, { timeoutMs: 4000 })
       if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
         return {
           sourceEndpoint: pathName,
@@ -929,7 +928,18 @@ app.whenReady().then(() => {
     if (!config) {
       throw new Error('Gateway connection is not configured.')
     }
-    return getGatewaySystemMetrics(config)
+    const gatewayState = gatewayConnectionManager?.getState()?.status
+    if (gatewayState && !gatewayState.connected) {
+      throw new Error(String(gatewayState.detail || 'The desktop app is not connected to your VM yet.'))
+    }
+    try {
+      return await getGatewaySystemMetrics(config)
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message === 'Gateway request timed out.' && gatewayState?.detail) {
+        throw new Error(gatewayState.detail)
+      }
+      throw error
+    }
   })
 
   ipcMain.on('weather:request', (event) => {
