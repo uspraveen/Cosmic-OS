@@ -69,12 +69,17 @@ FIRECRAWL_AGENT_ENV_NAME = "firecrawl-web-scrape-agent.env"
 FIRECRAWL_AGENT_SERVICE_NAME = "cosmic-firecrawl-web-scrape-agent.service"
 FIRECRAWL_AGENT_ID = "cosmic/firecrawl-web-scrape-agent:1.0.0"
 FIRECRAWL_AGENT_DEFAULT_INSTANCE_ID = "firecrawl-web-scrape-agent-1"
+DOCS_PARSER_AGENT_ENV_NAME = "docs-parser-agent.env"
+DOCS_PARSER_AGENT_SERVICE_NAME = "cosmic-docs-parser-agent.service"
+DOCS_PARSER_AGENT_ID = "cosmic/docs-parser-agent:1.0.0"
+DOCS_PARSER_AGENT_DEFAULT_INSTANCE_ID = "docs-parser-agent-1"
 DEFAULT_POST_PROVISION_TIMEOUT_SEC = 120.0
 DEFAULT_POST_PROVISION_POLL_INTERVAL_SEC = 2.0
 CORE_BACKEND_SERVICE_UNITS = (
     "cosmic-model-router.service",
     "cosmic-orchestrator.service",
     "cosmic-gateway.service",
+    "cosmic-docs-parser-agent.service",
     "cosmic-whatsapp-bridge.service",
 )
 DEFAULT_SUPABASE_URL = "https://hluenippcdiejenmteen.supabase.co"
@@ -721,6 +726,82 @@ def firecrawl_agent_is_configured(env_values: Dict[str, str]) -> bool:
 
 def read_firecrawl_agent_system_env(system_env_dir: Optional[Path] = None) -> Dict[str, str]:
     env_path = firecrawl_agent_system_env_path(system_env_dir)
+    if not env_path.exists():
+        return {}
+    return parse_env_text(read_text_file(env_path, use_sudo=True))
+
+
+def docs_parser_agent_repo_dir() -> Path:
+    return BACKEND_ROOT / "agents" / "docs_parser"
+
+
+def docs_parser_agent_repo_env_path() -> Path:
+    return docs_parser_agent_repo_dir() / "agent.env"
+
+
+def docs_parser_agent_repo_env_example_path() -> Path:
+    return docs_parser_agent_repo_dir() / "agent.env.example"
+
+
+def docs_parser_agent_system_env_path(system_env_dir: Optional[Path] = None) -> Path:
+    return (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "agents" / DOCS_PARSER_AGENT_ENV_NAME
+
+
+def resolve_docs_parser_agent_env_source() -> Path:
+    repo_env = docs_parser_agent_repo_env_path()
+    if repo_env.exists():
+        return repo_env
+    return docs_parser_agent_repo_env_example_path()
+
+
+def build_docs_parser_agent_env_rendered(
+    *,
+    signing_secret: str,
+    shared_internal_token: str,
+    system_env_dir: Optional[Path] = None,
+    existing_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+    external_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Tuple[Path, str, Dict[str, str]]:
+    source_path = resolve_docs_parser_agent_env_source()
+    source_raw = source_path.read_text(encoding="utf-8")
+    source_data = parse_env_text(source_raw)
+    existing_env = (existing_env_by_name or {}).get(DOCS_PARSER_AGENT_ENV_NAME, {})
+    external_env = (external_env_by_name or {}).get(DOCS_PARSER_AGENT_ENV_NAME, {})
+
+    redis_url = first_meaningful_value(
+        external_env.get("REDIS_URL"),
+        existing_env.get("REDIS_URL"),
+        source_data.get("REDIS_URL"),
+        "redis://127.0.0.1:6379/0",
+    )
+    gateway_url = first_meaningful_value(
+        external_env.get("GATEWAY_URL"),
+        existing_env.get("GATEWAY_URL"),
+        source_data.get("GATEWAY_URL"),
+        "http://127.0.0.1:8080",
+    )
+    instance_id = first_meaningful_value(
+        external_env.get("INSTANCE_ID"),
+        existing_env.get("INSTANCE_ID"),
+        source_data.get("INSTANCE_ID"),
+        DOCS_PARSER_AGENT_DEFAULT_INSTANCE_ID,
+    )
+
+    overrides = {
+        "REDIS_URL": redis_url or "redis://127.0.0.1:6379/0",
+        "GATEWAY_URL": gateway_url or "http://127.0.0.1:8080",
+        "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
+        "AGENT_SECRET": signing_secret,
+        "INSTANCE_ID": instance_id or DOCS_PARSER_AGENT_DEFAULT_INSTANCE_ID,
+    }
+
+    rendered = render_env_with_overrides(source_raw, overrides)
+    rendered_data = parse_env_text(rendered)
+    return docs_parser_agent_system_env_path(system_env_dir), rendered, rendered_data
+
+
+def read_docs_parser_agent_system_env(system_env_dir: Optional[Path] = None) -> Dict[str, str]:
+    env_path = docs_parser_agent_system_env_path(system_env_dir)
     if not env_path.exists():
         return {}
     return parse_env_text(read_text_file(env_path, use_sudo=True))
@@ -1697,6 +1778,19 @@ def materialize_bootstrap_env_files(
     firecrawl_repo_path.write_text(firecrawl_rendered, encoding="utf-8")
     written.append(firecrawl_repo_path)
     log("Materialized repo env file from bootstrap inputs: {0}".format(firecrawl_repo_path))
+
+    docs_parser_repo_path = docs_parser_agent_repo_env_path()
+    _docs_parser_dest_path, docs_parser_rendered, _docs_parser_env = build_docs_parser_agent_env_rendered(
+        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
+        system_env_dir=system_env_dir,
+        existing_env_by_name=existing_env_by_name,
+        external_env_by_name=external_env_by_name,
+    )
+    docs_parser_repo_path.parent.mkdir(parents=True, exist_ok=True)
+    docs_parser_repo_path.write_text(docs_parser_rendered, encoding="utf-8")
+    written.append(docs_parser_repo_path)
+    log("Materialized repo env file from bootstrap inputs: {0}".format(docs_parser_repo_path))
     return written
 
 
@@ -1743,6 +1837,19 @@ def install_service_env_files(system_env_dir: Path, *, include_memory: bool = Fa
         install_text_file(firecrawl_dest_path, firecrawl_rendered, mode="600", use_sudo=True)
         installed.append(firecrawl_dest_path)
         log("Installed system env file: {0}".format(firecrawl_dest_path))
+
+    docs_parser_dest_path, docs_parser_rendered, _docs_parser_env = build_docs_parser_agent_env_rendered(
+        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
+        system_env_dir=system_env_dir,
+    )
+    run(["install", "-d", "-m", "755", str(docs_parser_dest_path.parent)], use_sudo=True)
+    if docs_parser_dest_path.exists():
+        log("System env file already exists: {0}".format(docs_parser_dest_path))
+    else:
+        install_text_file(docs_parser_dest_path, docs_parser_rendered, mode="600", use_sudo=True)
+        installed.append(docs_parser_dest_path)
+        log("Installed system env file: {0}".format(docs_parser_dest_path))
 
     return installed
 
@@ -1896,9 +2003,13 @@ def doctor(
     firecrawl_system_data = {}
     if is_linux() and firecrawl_system_path.exists():
         firecrawl_system_data = read_firecrawl_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+    docs_parser_source = resolve_docs_parser_agent_env_source()
+    docs_parser_system_path = docs_parser_agent_system_env_path(DEFAULT_SYSTEM_ENV_DIR)
     print("  firecrawl env src  : {0}".format(firecrawl_source if firecrawl_source.exists() else "missing"))
+    print("  docs parser env src: {0}".format(docs_parser_source if docs_parser_source.exists() else "missing"))
     if is_linux():
         print("  firecrawl system env: {0}".format(firecrawl_system_path if firecrawl_system_path.exists() else "missing"))
+        print("  docs parser system env: {0}".format(docs_parser_system_path if docs_parser_system_path.exists() else "missing"))
     firecrawl_enabled = firecrawl_agent_is_configured(
         firecrawl_system_data if firecrawl_system_data else firecrawl_source_data
     )
@@ -1916,6 +2027,12 @@ def doctor(
             check=False,
         )
         print("  firecrawl service  : {0}".format((firecrawl_status.stdout or "unknown").strip() or "unknown"))
+        docs_parser_status = run(
+            ["systemctl", "is-active", DOCS_PARSER_AGENT_SERVICE_NAME],
+            capture_output=True,
+            check=False,
+        )
+        print("  docs parser service: {0}".format((docs_parser_status.stdout or "unknown").strip() or "unknown"))
     print("  env search roots   : {0}".format(", ".join(str(path) for path in env_search_roots)))
     print("  env templates      : {0}".format(len(env_examples)))
     print("  systemd templates  : {0}".format(systemd_template_dir if systemd_template_dir.exists() else "missing"))
@@ -2015,6 +2132,27 @@ def sync_service_env_files(system_env_dir: Path, *, include_memory: bool = False
         )
         if changed_keys:
             synced.append(firecrawl_dest_path)
+
+    docs_parser_dest_path = docs_parser_agent_system_env_path(system_env_dir)
+    if docs_parser_dest_path.exists():
+        docs_parser_existing_by_name: Dict[str, Dict[str, str]] = {
+            DOCS_PARSER_AGENT_ENV_NAME: parse_env_text(read_text_file(docs_parser_dest_path, use_sudo=True)),
+        }
+        _docs_parser_dest_path, docs_parser_rendered, _docs_parser_env = build_docs_parser_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+            shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
+            system_env_dir=system_env_dir,
+            existing_env_by_name=docs_parser_existing_by_name,
+        )
+        changed_keys = sync_env_file(
+            docs_parser_dest_path,
+            source_raw=docs_parser_rendered,
+            create_missing=False,
+            use_sudo=True,
+            mode="600",
+        )
+        if changed_keys:
+            synced.append(docs_parser_dest_path)
     return synced
 
 

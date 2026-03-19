@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "response": {
+      "type": "string"
+    },
+    "bundle_id": {
+      "type": "string"
+    },
+    "bundle_label": {
+      "type": ["string", "null"]
+    },
+    "document_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "documents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "doc_id": { "type": "string" },
+          "artifact_id": { "type": "string" },
+          "filename": { "type": ["string", "null"] },
+          "mime": { "type": "string" },
+          "title": { "type": ["string", "null"] },
+          "section_count": { "type": "integer", "minimum": 0 },
+          "chunk_count": { "type": "integer", "minimum": 0 },
+          "table_count": { "type": "integer", "minimum": 0 },
+          "figure_count": { "type": "integer", "minimum": 0 },
+          "page_count": { "type": ["integer", "null"], "minimum": 0 },
+          "slide_count": { "type": ["integer", "null"], "minimum": 0 },
+          "artifact_refs": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "required": [
+          "doc_id",
+          "artifact_id",
+          "mime",
+          "section_count",
+          "chunk_count",
+          "table_count",
+          "figure_count",
+          "artifact_refs"
+        ],
+        "additionalProperties": true
+      }
+    }
+  },
+  "required": ["response", "bundle_id", "document_count", "documents"],
+  "additionalProperties": true
+}

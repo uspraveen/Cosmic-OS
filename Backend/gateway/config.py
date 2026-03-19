@@ -72,6 +72,7 @@ class GatewayConfig:
     memory_write_audit_db_path: Path = BACKEND_ROOT / "gateway" / "memory_write_audit.db"
     capability_wishlist_db_path: Path = BACKEND_ROOT / "gateway" / "cosmics_capability_wishlist.db"
     artifacts_db_path: Path = BACKEND_ROOT / "gateway" / "artifacts.db"
+    artifacts_root: Path = BACKEND_ROOT / "runs" / "artifacts"
     delivery_queue_db_path: Path = BACKEND_ROOT / "gateway" / "delivery_queue.db"
     scheduler_db_path: Path = BACKEND_ROOT / "gateway" / "scheduler.db"
     session_transcript_dir: Path = BACKEND_ROOT / "logs" / "sessions"
@@ -84,6 +85,11 @@ class GatewayConfig:
     delivery_max_attempts: int = 12
     usage_queue_max_size: int = 1000
     usage_queue_flush_timeout_sec: float = 5.0
+    artifact_download_timeout_sec: float = 60.0
+    docs_auto_parse_enabled: bool = True
+    docs_parser_agent_id: str = "cosmic/docs-parser-agent:1.0.0"
+    docs_parse_timeout_sec: float = 120.0
+    docs_parse_poll_interval_sec: float = 0.25
     haiku_api_key: str = ""
     haiku_model: str = "claude-haiku-4-5"
     anthropic_version: str = "2023-06-01"
@@ -179,6 +185,12 @@ class GatewayConfig:
                     str(BACKEND_ROOT / "gateway" / "artifacts.db"),
                 )
             ).expanduser(),
+            artifacts_root=Path(
+                os.getenv(
+                    "GATEWAY_ARTIFACTS_ROOT",
+                    str(BACKEND_ROOT / "runs" / "artifacts"),
+                )
+            ).expanduser(),
             delivery_queue_db_path=Path(
                 os.getenv(
                     "GATEWAY_DELIVERY_QUEUE_DB_PATH",
@@ -231,6 +243,23 @@ class GatewayConfig:
             usage_queue_flush_timeout_sec=max(
                 0.25,
                 _env_float("GATEWAY_USAGE_QUEUE_FLUSH_TIMEOUT_SEC", 5.0),
+            ),
+            artifact_download_timeout_sec=max(
+                5.0,
+                _env_float("GATEWAY_ARTIFACT_DOWNLOAD_TIMEOUT_SEC", 60.0),
+            ),
+            docs_auto_parse_enabled=_env_bool("GATEWAY_DOCS_AUTO_PARSE_ENABLED", True),
+            docs_parser_agent_id=(
+                os.getenv("GATEWAY_DOCS_PARSER_AGENT_ID", "cosmic/docs-parser-agent:1.0.0").strip()
+                or "cosmic/docs-parser-agent:1.0.0"
+            ),
+            docs_parse_timeout_sec=max(
+                5.0,
+                _env_float("GATEWAY_DOCS_PARSE_TIMEOUT_SEC", 120.0),
+            ),
+            docs_parse_poll_interval_sec=max(
+                0.05,
+                _env_float("GATEWAY_DOCS_PARSE_POLL_INTERVAL_SEC", 0.25),
             ),
             haiku_api_key=(
                 os.getenv("HAIKU_API_KEY")

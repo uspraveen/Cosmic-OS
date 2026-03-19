@@ -859,6 +859,147 @@ async def test_non_text_inbound_persists_artifacts_and_passes_them_to_opus(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_document_inbound_stages_supported_artifacts_into_runs_tree(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+
+    async def _fake_download(file_id: str) -> tuple[bytes, str | None]:
+        assert file_id == "telegram_file_pdf_1"
+        return (b"%PDF-1.7 fake pdf", "application/pdf")
+
+    runtime.download_telegram_media = _fake_download  # type: ignore[method-assign]
+    await runtime.start()
+    try:
+        result = await runtime.process_incoming_user_message(
+            {
+                "content": "[document]",
+                "channel": "telegram:12345",
+                "metadata": {
+                    "platform": "telegram",
+                    "message_id": "tg_doc_1",
+                    "message_type": "document",
+                    "attachments": [
+                        {
+                            "artifact_id": "tg_doc_art_1",
+                            "kind": "document",
+                            "mime_type": "application/pdf",
+                            "filename": "strategy.pdf",
+                            "download_url": "/internal/channels/telegram/media/telegram_file_pdf_1",
+                            "telegram_file_id": "telegram_file_pdf_1",
+                            "bridge_media_ref": "telegram:file:telegram_file_pdf_1",
+                        }
+                    ],
+                },
+            }
+        )
+
+        assert len(result["input_artifacts"]) == 1
+        staged = result["input_artifacts"][0]
+        assert staged["ingest_state"] == "staged"
+        assert staged["mime"] == "application/pdf"
+        assert staged["path"].startswith("runs/artifacts/tsk_ingest_")
+        assert staged["sha256"]
+
+        stored_artifacts = runtime.artifact_store.list_for_request(result["request_id"])
+        assert stored_artifacts[0]["ingest_state"] == "staged"
+        assert stored_artifacts[0]["path"] == staged["path"]
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_docs_autoparse_enriches_request_record_with_bundle_metadata(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    await runtime.start()
+    try:
+        class _StubRedis:
+            async def aclose(self) -> None:
+                return
+
+        runtime._redis = _StubRedis()  # type: ignore[assignment]
+        request_record = {
+            "route": "opus",
+            "request_id": "req_docs_parse",
+            "session_id": "sess_docs_parse",
+            "channel": "desktop:desk_a",
+            "source": "user",
+            "source_id": "desktop",
+            "input_artifacts": [
+                {
+                    "artifact_id": "art_doc_1",
+                    "kind": "document",
+                    "mime": "application/pdf",
+                    "filename": "strategy.pdf",
+                    "path": "runs/artifacts/tsk_ingest_req_docs_parse/inputs/art_doc_1/original/strategy.pdf",
+                    "sha256": "abc123",
+                    "ingest_state": "staged",
+                }
+            ],
+        }
+        runtime.artifact_store.persist_inbound_attachments(
+            request_id="req_docs_parse",
+            session_id="sess_docs_parse",
+            source_channel="desktop:desk_a",
+            source_platform="desktop",
+            source_message_id=None,
+            attachments=[
+                {
+                    "artifact_id": "art_doc_1",
+                    "kind": "document",
+                    "mime_type": "application/pdf",
+                    "filename": "strategy.pdf",
+                }
+            ],
+        )
+        runtime.artifact_store.update_ingest_state(
+            "art_doc_1",
+            path=request_record["input_artifacts"][0]["path"],
+            sha256="abc123",
+            ingest_state="staged",
+        )
+
+        async def _fake_dispatch(*, request_record, input_artifacts):
+            assert len(input_artifacts) == 1
+            return {
+                "status": "completed",
+                "task_id": "tsk_docs_parse",
+                "output": {
+                    "bundle_id": "bundle_docs_001",
+                    "documents": [
+                        {
+                            "artifact_id": "art_doc_1",
+                            "doc_id": "doc_001",
+                            "title": "Strategy",
+                            "section_count": 3,
+                            "chunk_count": 7,
+                            "paths": {
+                                "document_md": "runs/artifacts/tsk_docs_parse/docs_parser/art_doc_1/document.md",
+                                "document_json": "runs/artifacts/tsk_docs_parse/docs_parser/art_doc_1/document.json",
+                                "chunk_index": "runs/artifacts/tsk_docs_parse/docs_parser/art_doc_1/chunk_index.json",
+                                "manifest": "runs/artifacts/tsk_docs_parse/docs_parser/art_doc_1/manifest.json",
+                            },
+                        }
+                    ],
+                },
+            }
+
+        runtime._dispatch_docs_parse_bundle = _fake_dispatch  # type: ignore[method-assign]
+
+        await runtime._ensure_request_documents_parsed(request_record)  # noqa: SLF001
+
+        enriched = request_record["input_artifacts"][0]
+        assert enriched["ingest_state"] == "parsed"
+        assert enriched["parse_bundle_id"] == "bundle_docs_001"
+        assert enriched["parse_task_id"] == "tsk_docs_parse"
+        assert enriched["parsed_summary"]["doc_id"] == "doc_001"
+
+        stored = runtime.artifact_store.list_for_request("req_docs_parse")[0]
+        assert stored["ingest_state"] == "parsed"
+        assert stored["parse_bundle_id"] == "bundle_docs_001"
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
 async def test_runtime_adds_memory_context_to_direct_and_orchestrator_paths(tmp_path) -> None:
     direct_runtime = build_runtime(tmp_path / "direct", route="haiku")
     direct_runtime.memory_client = FakeMemoryClient(enabled=True)

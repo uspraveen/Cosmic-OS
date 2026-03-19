@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "response": { "type": "string" },
+    "bundle_id": { "type": "string" },
+    "doc_id": { "type": "string" },
+    "title": { "type": ["string", "null"] },
+    "mode": { "type": "string" },
+    "content": { "type": "string" },
+    "citations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  },
+  "required": ["response", "bundle_id", "doc_id", "mode", "content", "citations"],
+  "additionalProperties": true
+}

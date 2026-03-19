@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "bundle_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "doc_id": {
+      "type": "string",
+      "maxLength": 80
+    },
+    "section_id": {
+      "type": "string",
+      "maxLength": 120
+    },
+    "chunk_ids": {
+      "type": "array",
+      "items": { "type": "string", "maxLength": 120 },
+      "maxItems": 8
+    },
+    "max_chars": {
+      "type": "integer",
+      "minimum": 500,
+      "maximum": 12000
+    }
+  },
+  "required": ["bundle_id"],
+  "additionalProperties": false
+}

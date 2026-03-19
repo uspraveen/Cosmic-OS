@@ -53,6 +53,11 @@ class ArtifactStore:
                     sha256 TEXT,
                     bridge_media_ref TEXT,
                     download_url TEXT,
+                    path TEXT,
+                    ingest_state TEXT,
+                    parse_task_id TEXT,
+                    parse_bundle_id TEXT,
+                    parsed_summary_json TEXT,
                     metadata_json TEXT,
                     created_at TEXT NOT NULL
                 );
@@ -64,6 +69,11 @@ class ArtifactStore:
                     ON inbound_artifacts(session_id, created_at);
                 """
             )
+            self._ensure_column(connection, "inbound_artifacts", "path", "TEXT")
+            self._ensure_column(connection, "inbound_artifacts", "ingest_state", "TEXT")
+            self._ensure_column(connection, "inbound_artifacts", "parse_task_id", "TEXT")
+            self._ensure_column(connection, "inbound_artifacts", "parse_bundle_id", "TEXT")
+            self._ensure_column(connection, "inbound_artifacts", "parsed_summary_json", "TEXT")
             connection.commit()
 
     def persist_inbound_attachments(
@@ -149,10 +159,15 @@ class ArtifactStore:
                         sha256,
                         bridge_media_ref,
                         download_url,
+                        path,
+                        ingest_state,
+                        parse_task_id,
+                        parse_bundle_id,
+                        parsed_summary_json,
                         metadata_json,
                         created_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         artifact_id,
@@ -172,6 +187,11 @@ class ArtifactStore:
                         sha256,
                         bridge_media_ref,
                         download_url,
+                        None,
+                        "bridge_reference",
+                        None,
+                        None,
+                        None,
                         metadata_json,
                         created_at,
                     ),
@@ -227,6 +247,11 @@ class ArtifactStore:
                     sha256,
                     bridge_media_ref,
                     download_url,
+                    path,
+                    ingest_state,
+                    parse_task_id,
+                    parse_bundle_id,
+                    parsed_summary_json,
                     metadata_json,
                     created_at
                 FROM inbound_artifacts
@@ -249,6 +274,18 @@ class ArtifactStore:
                     metadata = None
             else:
                 metadata = None
+            if row["parsed_summary_json"]:
+                try:
+                    parsed_summary = json.loads(row["parsed_summary_json"])
+                except json.JSONDecodeError:
+                    logger.exception(
+                        "artifact_store.parsed_summary_parse_failed request_id=%s artifact_id=%s",
+                        request_id,
+                        row["artifact_id"],
+                    )
+                    parsed_summary = None
+            else:
+                parsed_summary = None
             result.append(
                 {
                     "artifact_id": row["artifact_id"],
@@ -268,16 +305,67 @@ class ArtifactStore:
                     "sha256": row["sha256"],
                     "bridge_media_ref": row["bridge_media_ref"],
                     "download_url": row["download_url"],
+                    "path": row["path"],
+                    "ingest_state": row["ingest_state"],
+                    "parse_task_id": row["parse_task_id"],
+                    "parse_bundle_id": row["parse_bundle_id"],
+                    "parsed_summary": parsed_summary,
                     "metadata": metadata,
                     "created_at": row["created_at"],
                 }
             )
         return result
 
+    def update_ingest_state(
+        self,
+        artifact_id: str,
+        *,
+        sha256: str | None = None,
+        path: str | None = None,
+        ingest_state: str | None = None,
+        parse_task_id: str | None = None,
+        parse_bundle_id: str | None = None,
+        parsed_summary: dict[str, Any] | None = None,
+    ) -> None:
+        if not artifact_id:
+            return
+        parsed_summary_json = json.dumps(parsed_summary, ensure_ascii=False) if parsed_summary is not None else None
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE inbound_artifacts
+                SET
+                    sha256 = COALESCE(?, sha256),
+                    path = COALESCE(?, path),
+                    ingest_state = COALESCE(?, ingest_state),
+                    parse_task_id = COALESCE(?, parse_task_id),
+                    parse_bundle_id = COALESCE(?, parse_bundle_id),
+                    parsed_summary_json = COALESCE(?, parsed_summary_json)
+                WHERE artifact_id = ?
+                """,
+                (
+                    self._normalize_text(sha256),
+                    self._normalize_text(path),
+                    self._normalize_text(ingest_state),
+                    self._normalize_text(parse_task_id),
+                    self._normalize_text(parse_bundle_id),
+                    parsed_summary_json,
+                    artifact_id,
+                ),
+            )
+            connection.commit()
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def _ensure_column(self, connection: sqlite3.Connection, table: str, column: str, column_type: str) -> None:
+        rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+        existing = {str(row["name"]) for row in rows}
+        if column in existing:
+            return
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
     def _normalize_text(self, value: Any) -> str | None:
         if value is None:

@@ -4,9 +4,11 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
+import httpx
 import json
 import logging
 from pathlib import Path
+import re
 import time
 from typing import Any
 from uuid import uuid4
@@ -46,10 +48,14 @@ from shared import (
     build_model_key,
     build_usage_event,
     create_redis_client,
+    dispatch_task,
     estimate_text_tokens,
     ensure_stream_group,
     generate_task_id,
+    infer_document_mime_from_extension,
+    is_supported_document_artifact,
     lookup_model_spec,
+    parse_event_envelope,
     parse_stream_payload,
     sign_task_envelope,
     utcnow,
@@ -198,6 +204,11 @@ class GatewayRuntime:
             model=config.perplexity_model,
             timeout_sec=config.direct_llm_timeout_sec,
         )
+        artifact_timeout = httpx.Timeout(
+            config.artifact_download_timeout_sec,
+            connect=min(config.artifact_download_timeout_sec, 15.0),
+        )
+        self._artifact_client = httpx.AsyncClient(timeout=artifact_timeout, http2=True)
         self._redis = create_redis_client(config.redis_url) if config.redis_url else None
         self.started = False
         self.adapter_errors: dict[str, str] = {}
@@ -320,6 +331,7 @@ class GatewayRuntime:
         await self.capability_wishlist_service.close()
         await self.haiku_adapter.close()
         await self.perplexity_adapter.close()
+        await self._artifact_client.aclose()
         if self._redis is not None:
             await self._redis.aclose()
         self._usage_event_queue = None
@@ -1229,7 +1241,7 @@ class GatewayRuntime:
         decision_latency_ms = (time.perf_counter() - decision_started_at) * 1000.0
         classification = routing_decision.classification
         dispatch_target = "orchestrator" if classification["route"] == "opus" else "gateway"
-        input_artifacts = self._persist_inbound_artifacts(
+        input_artifacts = await self._persist_inbound_artifacts(
             request_id=request_id,
             session_id=session_id,
             channel=channel,
@@ -1573,6 +1585,7 @@ class GatewayRuntime:
         send,
         store_assistant_message,
     ) -> None:
+        await self._ensure_request_documents_parsed(request_record)
         task = self._build_orchestrator_task(
             request_record=request_record,
             session_id=session_id,
@@ -4336,7 +4349,7 @@ class GatewayRuntime:
         signature = sign_task_envelope(task, self.config.signing_secret)
         return task.model_copy(update={"signature": signature})
 
-    def _persist_inbound_artifacts(
+    async def _persist_inbound_artifacts(
         self,
         *,
         request_id: str,
@@ -4348,13 +4361,19 @@ class GatewayRuntime:
         if not isinstance(attachments, list) or not attachments:
             return []
         try:
-            return self.artifact_store.persist_inbound_attachments(
+            manifests = self.artifact_store.persist_inbound_attachments(
                 request_id=request_id,
                 session_id=session_id,
                 source_channel=channel,
                 source_platform=self._safe_text(metadata.get("platform")),
                 source_message_id=self._safe_text(metadata.get("message_id")),
                 attachments=attachments,
+            )
+            return await self._stage_document_artifacts(
+                request_id=request_id,
+                session_id=session_id,
+                channel=channel,
+                manifests=manifests,
             )
         except Exception:
             logger.exception(
@@ -4364,6 +4383,308 @@ class GatewayRuntime:
                 len(attachments),
             )
             return []
+
+    async def _stage_document_artifacts(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        channel: str,
+        manifests: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        staged_manifests: list[dict[str, Any]] = []
+        for manifest in manifests:
+            if not isinstance(manifest, dict):
+                continue
+            if not is_supported_document_artifact(manifest):
+                staged_manifests.append(manifest)
+                continue
+            try:
+                staged_manifests.append(
+                    await self._stage_single_document_artifact(
+                        request_id=request_id,
+                        session_id=session_id,
+                        channel=channel,
+                        manifest=manifest,
+                    )
+                )
+            except Exception:
+                artifact_id = self._safe_text(manifest.get("artifact_id"))
+                logger.exception(
+                    "gateway.document_stage_failed request_id=%s artifact_id=%s channel=%s",
+                    request_id,
+                    artifact_id,
+                    channel,
+                )
+                manifest = dict(manifest)
+                manifest["ingest_state"] = "stage_failed"
+                staged_manifests.append(manifest)
+        return staged_manifests
+
+    async def _stage_single_document_artifact(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        channel: str,
+        manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        artifact_id = self._safe_text(manifest.get("artifact_id"))
+        if not artifact_id:
+            return manifest
+
+        content, media_type = await self._download_document_bytes(manifest)
+        if not content:
+            manifest = dict(manifest)
+            manifest["ingest_state"] = "metadata_only"
+            return manifest
+
+        filename = self._safe_text(manifest.get("filename")) or self._default_artifact_filename(
+            artifact_id=artifact_id,
+            media_type=media_type or self._safe_text(manifest.get("mime")),
+        )
+        original_root = self.config.artifacts_root / f"tsk_ingest_{request_id}" / "inputs" / artifact_id / "original"
+        original_root.mkdir(parents=True, exist_ok=True)
+        source_path = original_root / filename
+        source_path.write_bytes(content)
+
+        sha256 = hashlib.sha256(content).hexdigest()
+        logical_path = self._logical_artifact_path(source_path)
+        effective_mime = media_type or self._safe_text(manifest.get("mime")) or infer_document_mime_from_extension(source_path.suffix)
+        metadata = dict(manifest.get("metadata") or {})
+        staged = {
+            **manifest,
+            "session_id": session_id,
+            "source_channel": channel,
+            "mime": effective_mime,
+            "filename": filename,
+            "sha256": sha256,
+            "path": logical_path,
+            "size_bytes": len(content),
+            "ingest_state": "staged",
+            "metadata": metadata or None,
+        }
+        staged_manifest_path = source_path.parent.parent / "manifest.json"
+        staged_manifest_path.write_text(json.dumps(staged, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.artifact_store.update_ingest_state(
+            artifact_id,
+            sha256=sha256,
+            path=logical_path,
+            ingest_state="staged",
+        )
+        return staged
+
+    async def _download_document_bytes(self, manifest: dict[str, Any]) -> tuple[bytes | None, str | None]:
+        download_url = self._safe_text(manifest.get("download_url"))
+        metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
+
+        telegram_file_id = self._safe_text(metadata.get("telegram_file_id"))
+        if not telegram_file_id:
+            bridge_media_ref = self._safe_text(manifest.get("bridge_media_ref"))
+            if bridge_media_ref.startswith("telegram:file:"):
+                telegram_file_id = bridge_media_ref.split("telegram:file:", 1)[1]
+        if not telegram_file_id and download_url.startswith("/internal/channels/telegram/media/"):
+            telegram_file_id = download_url.rsplit("/", 1)[-1]
+        if telegram_file_id:
+            return await self.download_telegram_media(telegram_file_id)
+
+        if not download_url:
+            return None, None
+
+        response = await self._artifact_client.get(download_url)
+        response.raise_for_status()
+        media_type = self._safe_text(response.headers.get("content-type")).split(";", 1)[0].strip() or None
+        return response.content, media_type
+
+    def _default_artifact_filename(self, *, artifact_id: str, media_type: str | None) -> str:
+        mime = self._safe_text(media_type).lower()
+        extension_map = {
+            "application/pdf": ".pdf",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+        }
+        extension = extension_map.get(mime, "")
+        safe_artifact_id = re.sub(r"[^A-Za-z0-9._-]+", "_", artifact_id).strip("._") or "document"
+        return f"{safe_artifact_id}{extension}"
+
+    def _logical_artifact_path(self, path: Path) -> str:
+        resolved = path.resolve()
+        relative = resolved.relative_to(self.config.artifacts_root.resolve())
+        return (Path("runs") / "artifacts" / relative).as_posix()
+
+    async def _ensure_request_documents_parsed(self, request_record: dict[str, Any]) -> None:
+        if not self.config.docs_auto_parse_enabled or self._redis is None:
+            return
+        if self._safe_text(request_record.get("route")) != "opus":
+            return
+        input_artifacts = request_record.get("input_artifacts") if isinstance(request_record.get("input_artifacts"), list) else []
+        document_artifacts = [
+            artifact
+            for artifact in input_artifacts
+            if isinstance(artifact, dict)
+            and is_supported_document_artifact(artifact)
+            and self._safe_text(artifact.get("path"))
+            and self._safe_text(artifact.get("ingest_state")) == "staged"
+        ]
+        if not document_artifacts:
+            return
+
+        try:
+            parse_result = await self._dispatch_docs_parse_bundle(
+                request_record=request_record,
+                input_artifacts=document_artifacts,
+            )
+        except Exception as exc:
+            logger.exception(
+                "gateway.docs_autoparse_failed request_id=%s artifact_count=%s",
+                self._safe_text(request_record.get("request_id")),
+                len(document_artifacts),
+            )
+            parse_result = {
+                "status": "failed",
+                "error_message": str(exc).strip() or "docs.parse_bundle failed",
+            }
+        if parse_result.get("status") != "completed":
+            error_text = self._safe_text(parse_result.get("error_message")) or "docs.parse_bundle failed"
+            for artifact in document_artifacts:
+                artifact["parse_error"] = error_text
+                artifact["ingest_state"] = "parse_failed"
+                self.artifact_store.update_ingest_state(
+                    self._safe_text(artifact.get("artifact_id")),
+                    ingest_state="parse_failed",
+                )
+            return
+
+        output = parse_result.get("output") if isinstance(parse_result.get("output"), dict) else {}
+        bundle_id = self._safe_text(output.get("bundle_id"))
+        parse_task_id = self._safe_text(parse_result.get("task_id"))
+        by_artifact_id: dict[str, dict[str, Any]] = {}
+        for document in output.get("documents", []) if isinstance(output.get("documents"), list) else []:
+            if not isinstance(document, dict):
+                continue
+            artifact_id = self._safe_text(document.get("artifact_id"))
+            if artifact_id:
+                by_artifact_id[artifact_id] = document
+
+        for artifact in document_artifacts:
+            artifact_id = self._safe_text(artifact.get("artifact_id"))
+            document_summary = by_artifact_id.get(artifact_id)
+            if document_summary is None:
+                continue
+            artifact["ingest_state"] = "parsed"
+            artifact["parse_task_id"] = parse_task_id or None
+            artifact["parse_bundle_id"] = bundle_id or None
+            artifact["parsed_summary"] = document_summary
+            artifact["docs_intents"] = ["docs.search_bundle", "docs.read_bundle"]
+            self.artifact_store.update_ingest_state(
+                artifact_id,
+                ingest_state="parsed",
+                parse_task_id=parse_task_id or None,
+                parse_bundle_id=bundle_id or None,
+                parsed_summary=document_summary,
+            )
+
+    async def _dispatch_docs_parse_bundle(
+        self,
+        *,
+        request_record: dict[str, Any],
+        input_artifacts: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        session_id = self._safe_text(request_record.get("session_id"))
+        request_id = self._safe_text(request_record.get("request_id"))
+        channel = self._safe_text(request_record.get("channel"))
+        source = self._safe_text(request_record.get("source")) or "user"
+        source_id = self._safe_text(request_record.get("source_id"))
+        if not session_id or not request_id:
+            return {"status": "failed", "error_message": "Missing session_id or request_id for docs parsing."}
+
+        child_input = {
+            "bundle_label": f"request:{request_id}",
+            "ocr_mode": "auto",
+            "generate_page_images": False,
+            "generate_picture_images": False,
+            "request_id": request_id,
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                [
+                    {
+                        "artifact_id": self._safe_text(item.get("artifact_id")),
+                        "path": self._safe_text(item.get("path")),
+                        "sha256": self._safe_text(item.get("sha256")),
+                    }
+                    for item in input_artifacts
+                ],
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        task = TaskEnvelope(
+            task_id=generate_task_id(),
+            task_list_id=session_id,
+            session_id=session_id,
+            sender="cosmic/gateway:1.0.0",
+            recipient=self.config.docs_parser_agent_id,
+            intent="docs.parse_bundle",
+            input=child_input,
+            input_artifacts=input_artifacts,
+            idempotency_key=f"docs-parse:{request_id}:{fingerprint}",
+            priority=SOURCE_PRIORITY_MAP.get(source, "normal"),
+            signature="",
+            created_at=utcnow(),
+            source=source,
+            source_id=source_id or request_id,
+            channel=channel or None,
+        )
+        task = task.model_copy(update={"signature": sign_task_envelope(task, self.config.signing_secret)})
+        await dispatch_task(task, self._redis)
+        return await self._wait_for_agent_terminal_result(task.task_id, timeout_sec=self.config.docs_parse_timeout_sec)
+
+    async def _wait_for_agent_terminal_result(self, task_id: str, *, timeout_sec: float) -> dict[str, Any]:
+        if self._redis is None:
+            return {"status": "failed", "error_message": "Redis is not available for agent result tracking."}
+        event_ids_key = f"task_events:{task_id}"
+        seen_message_ids: set[str] = set()
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            message_ids = await self._redis.lrange(event_ids_key, 0, -1)
+            for message_id in message_ids:
+                if message_id in seen_message_ids:
+                    continue
+                seen_message_ids.add(message_id)
+                stream_entries = await self._redis.xrange("streams:events", min=message_id, max=message_id)
+                for _, fields in stream_entries:
+                    event = parse_event_envelope(fields)
+                    if event.task_id != task_id:
+                        continue
+                    if event.event_type == "task.completed":
+                        return {
+                            "status": "completed",
+                            "task_id": task_id,
+                            "output": event.payload.get("output") if isinstance(event.payload, dict) else {},
+                            "artifacts": event.payload.get("artifacts") if isinstance(event.payload, dict) else [],
+                        }
+                    if event.event_type == "task.failed":
+                        error = event.payload.get("error") if isinstance(event.payload, dict) else {}
+                        return {
+                            "status": "failed",
+                            "task_id": task_id,
+                            "error_message": self._safe_text(error.get("message")) or "Agent task failed.",
+                            "error": error,
+                        }
+                    if event.event_type == "task.rejected":
+                        return {
+                            "status": "failed",
+                            "task_id": task_id,
+                            "error_message": self._safe_text(event.payload.get("reason")) or "Agent task was rejected.",
+                        }
+            await asyncio.sleep(self.config.docs_parse_poll_interval_sec)
+        return {
+            "status": "failed",
+            "task_id": task_id,
+            "error_message": f"Timed out waiting for {task_id}.",
+        }
 
     async def _handle_orchestrator_event(
         self,

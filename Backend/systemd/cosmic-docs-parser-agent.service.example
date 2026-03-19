@@ -1,0 +1,17 @@
+[Unit]
+Description=COSMIC Docs Parser Agent
+After=network-online.target redis.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<SERVICE_USER>
+Group=<SERVICE_GROUP>
+WorkingDirectory=<BACKEND_ROOT>
+EnvironmentFile=/etc/cosmic/agents/docs-parser-agent.env
+ExecStart=<BACKEND_ROOT>/.venv/bin/python -m agents.docs_parser
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "bundle_label": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "Optional human label for the uploaded document bundle."
+    },
+    "ocr_mode": {
+      "type": "string",
+      "enum": ["auto", "off", "force"],
+      "description": "OCR policy for the parse run."
+    },
+    "generate_page_images": {
+      "type": "boolean",
+      "description": "Whether to render full page images when supported."
+    },
+    "generate_picture_images": {
+      "type": "boolean",
+      "description": "Whether to export extracted picture assets when supported."
+    }
+  },
+  "additionalProperties": false
+}
+

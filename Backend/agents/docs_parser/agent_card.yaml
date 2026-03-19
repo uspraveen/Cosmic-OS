@@ -1,0 +1,78 @@
+agent_id: cosmic/docs-parser-agent:1.0.0
+display_name: Docs Parser Agent
+description: >
+  Specialist agent for parsing uploaded document bundles into durable structured artifacts.
+  It converts PDFs, DOCX, and PPTX inputs into canonical parsed bundles with markdown, lossless
+  JSON, and chunk indexes that the rest of COSMIC can navigate selectively.
+
+intents:
+  - name: docs.parse_bundle
+    description: Parse one or more uploaded document artifacts into canonical parsed bundles and chunk indexes.
+    input_schema: schemas/intents/docs.parse_bundle.input.json
+    output_schema: schemas/intents/docs.parse_bundle.output.json
+    timeout_sec: 240
+  - name: docs.search_bundle
+    description: Search the parsed chunks inside a previously created bundle and return the strongest matching excerpts.
+    input_schema: schemas/intents/docs.search_bundle.input.json
+    output_schema: schemas/intents/docs.search_bundle.output.json
+    timeout_sec: 60
+  - name: docs.read_bundle
+    description: Read targeted content from a parsed bundle by document, section, or chunk identifiers.
+    input_schema: schemas/intents/docs.read_bundle.input.json
+    output_schema: schemas/intents/docs.read_bundle.output.json
+    timeout_sec: 60
+
+artifact_types:
+  - parsed_document_bundle
+  - parsed_markdown
+  - parsed_json
+  - chunk_index
+  - page_image
+  - figure_image
+  - table_extract
+
+policies:
+  network_access: false
+  writable_paths:
+    - runs/artifacts
+    - agents/docs_parser/store
+    - agents/docs_parser/runtime
+  tool_access: []
+  allowed_senders:
+    - cosmic/orchestrator:1.0.0
+    - cosmic/gateway:1.0.0
+  intent_authorization:
+    docs.parse_bundle: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
+    docs.search_bundle: [cosmic/orchestrator:1.0.0]
+    docs.read_bundle: [cosmic/orchestrator:1.0.0]
+
+sla:
+  max_concurrency: 1
+  heartbeat_interval_sec: 10
+  heartbeat_ttl_sec: 30
+  max_task_duration_sec: 240
+  health_endpoint: /health
+  retry_policy:
+    max_attempts: 2
+    backoff: exponential
+    backoff_base_sec: 2
+    backoff_max_sec: 30
+    retryable_codes:
+      - TIMEOUT
+      - PARSER_UNAVAILABLE
+      - PARSE_FAILED
+    non_retryable_codes:
+      - INVALID_INPUT
+      - UNSUPPORTED_ARTIFACT
+      - MISSING_ARTIFACT
+      - SCHEMA_VIOLATION
+      - INTERNAL_ERROR
+
+stream_key: streams:cosmic/docs-parser-agent:1.0.0
+
+version_info:
+  semver: 1.0.0
+  released_at: 2026-03-19
+  deprecated_at: null
+  remove_after: null
+  changelog: CHANGELOG.md

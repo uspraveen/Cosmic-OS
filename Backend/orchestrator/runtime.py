@@ -1515,10 +1515,24 @@ class OrchestratorRuntime:
                     f"kind={str(art.get('kind') or 'unknown').strip()}",
                     f"mime={str(art.get('mime') or 'application/octet-stream').strip()}",
                 ]
-                for key in ("filename", "caption", "bridge_media_ref", "download_url"):
+                for key in ("filename", "caption", "bridge_media_ref", "download_url", "ingest_state", "parse_bundle_id"):
                     v = str(art.get(key) or "").strip()
                     if v:
                         parts.append(f"{key}={v}")
+                parsed_summary = art.get("parsed_summary") if isinstance(art.get("parsed_summary"), dict) else None
+                if parsed_summary is not None:
+                    doc_title = str(parsed_summary.get("title") or "").strip()
+                    doc_id = str(parsed_summary.get("doc_id") or "").strip()
+                    if doc_title:
+                        parts.append(f"parsed_title={doc_title}")
+                    if doc_id:
+                        parts.append(f"doc_id={doc_id}")
+                    chunk_count = parsed_summary.get("chunk_count")
+                    section_count = parsed_summary.get("section_count")
+                    if chunk_count:
+                        parts.append(f"chunk_count={chunk_count}")
+                    if section_count:
+                        parts.append(f"section_count={section_count}")
                 sb = art.get("size_bytes")
                 if sb:
                     parts.append(f"size_bytes={sb}")

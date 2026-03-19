@@ -56,6 +56,12 @@ from .redis_bus import (
     task_stream_name,
 )
 from .sqlite_client import connect_sync
+from .document_artifacts import (
+    SUPPORTED_DOCUMENT_EXTENSIONS,
+    SUPPORTED_DOCUMENT_MIME_TYPES,
+    infer_document_mime_from_extension,
+    is_supported_document_artifact,
+)
 
 __all__ = [
     "ACCEPTED_READ_VERSIONS",
@@ -81,6 +87,8 @@ __all__ = [
     "generate_task_id",
     "generate_event_id",
     "estimate_text_tokens",
+    "infer_document_mime_from_extension",
+    "is_supported_document_artifact",
     "get_model_spec",
     "load_model_specs",
     "lookup_model_spec",
@@ -88,6 +96,8 @@ __all__ = [
     "UsageEvent",
     "begin_metered_call",
     "build_usage_event",
+    "SUPPORTED_DOCUMENT_EXTENSIONS",
+    "SUPPORTED_DOCUMENT_MIME_TYPES",
     "sign_task_envelope",
     "utcnow",
     "validate_outbound_version",

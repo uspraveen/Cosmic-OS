@@ -1,3 +1,4 @@
+docling
 fastapi
 groq
 httpx[http2]
