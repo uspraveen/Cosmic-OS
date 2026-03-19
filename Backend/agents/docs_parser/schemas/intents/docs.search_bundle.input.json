@@ -12,6 +12,15 @@
       "minLength": 1,
       "maxLength": 1000
     },
+    "search_kind": {
+      "type": "string",
+      "enum": ["sections", "chunks"]
+    },
+    "doc_ids": {
+      "type": "array",
+      "items": { "type": "string", "maxLength": 80 },
+      "maxItems": 12
+    },
     "limit": {
       "type": "integer",
       "minimum": 1,

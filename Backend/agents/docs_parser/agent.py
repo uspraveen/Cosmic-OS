@@ -49,6 +49,7 @@ class DocsParserAgent(AgentRuntime):
     BROWSE_BUNDLE_INTENT = "docs.browse_bundle"
     SEARCH_BUNDLE_INTENT = "docs.search_bundle"
     READ_BUNDLE_INTENT = "docs.read_bundle"
+    FETCH_ASSET_INTENT = "docs.fetch_asset"
 
     def __init__(
         self,
@@ -119,6 +120,8 @@ class DocsParserAgent(AgentRuntime):
                 return await self._handle_search_bundle(task)
             if task.intent == self.READ_BUNDLE_INTENT:
                 return await self._handle_read_bundle(task)
+            if task.intent == self.FETCH_ASSET_INTENT:
+                return await self._handle_fetch_asset(task)
             return self._result_error(
                 code="INVALID_INPUT",
                 message=f"Unsupported intent: {task.intent}",
@@ -226,10 +229,10 @@ class DocsParserAgent(AgentRuntime):
     async def _handle_browse_bundle(self, task: TaskEnvelope) -> AgentResult:
         bundle_id = self._require_bundle_id(task.input.get("bundle_id"))
         index_kind = self._safe_text(task.input.get("index_kind")).lower() or "documents"
-        if index_kind not in {"documents", "sections", "chunks"}:
+        if index_kind not in {"documents", "sections", "pages", "slides", "chunks", "tables", "figures", "assets"}:
             raise DocsParserAgentError(
                 code="INVALID_INPUT",
-                message="index_kind must be one of: documents, sections, chunks.",
+                message="index_kind must be one of: documents, sections, pages, slides, chunks, tables, figures, assets.",
                 retryable=False,
                 next_action="revise_input",
             )
@@ -238,6 +241,24 @@ class DocsParserAgent(AgentRuntime):
         documents = bundle_output.get("documents") if isinstance(bundle_output.get("documents"), list) else []
         if index_kind == "documents":
             normalized_documents = [item for item in documents if isinstance(item, dict)]
+            requested_doc_id = self._safe_text(task.input.get("doc_id"))
+            if requested_doc_id:
+                selected_document = self._select_document_for_read(normalized_documents, doc_id=requested_doc_id)
+                chunk_index = self._load_json_artifact(selected_document, "chunk_index")
+                return AgentResult(
+                    status="completed",
+                    output={
+                        "response": f"Loaded document index for parsed bundle {bundle_id}.",
+                        "bundle_id": bundle_id,
+                        "index_kind": "documents",
+                        "document_count": len(normalized_documents),
+                        "doc_id": selected_document["doc_id"],
+                        "title": selected_document.get("title"),
+                        "document_index": self._document_index_payload(selected_document, chunk_index),
+                    },
+                    artifacts=[],
+                    error=None,
+                )
             return AgentResult(
                 status="completed",
                 output={
@@ -256,49 +277,16 @@ class DocsParserAgent(AgentRuntime):
             doc_id=self._safe_text(task.input.get("doc_id")),
         )
         chunk_index = self._load_json_artifact(selected_document, "chunk_index")
-        if index_kind == "sections":
-            sections = chunk_index.get("sections") if isinstance(chunk_index.get("sections"), list) else []
-            normalized_sections = [item for item in sections if isinstance(item, dict)]
-            return AgentResult(
-                status="completed",
-                output={
-                    "response": f"Loaded {len(normalized_sections)} section index item(s) from parsed bundle {bundle_id}.",
-                    "bundle_id": bundle_id,
-                    "index_kind": "sections",
-                    "doc_id": selected_document["doc_id"],
-                    "title": selected_document.get("title"),
-                    "sections": normalized_sections,
-                },
-                artifacts=[],
-                error=None,
-            )
-
-        chunks = chunk_index.get("chunks") if isinstance(chunk_index.get("chunks"), list) else []
-        normalized_chunks = [item for item in chunks if isinstance(item, dict)]
         limit = self._coerce_positive_int(task.input.get("limit"), default=20, minimum=1, maximum=100)
-        chunk_summaries = [
-            {
-                "chunk_id": self._safe_text(item.get("chunk_id")) or None,
-                "section_id": self._safe_text(item.get("section_id")) or None,
-                "section_title": self._safe_text(item.get("section_title")) or None,
-                "estimated_chars": item.get("estimated_chars"),
-                "prev_chunk_id": self._safe_text(item.get("prev_chunk_id")) or None,
-                "next_chunk_id": self._safe_text(item.get("next_chunk_id")) or None,
-                "excerpt": self._bounded_excerpt(item.get("text"), limit=240),
-            }
-            for item in normalized_chunks[:limit]
-        ]
+        browse_payload = self._browse_document_index(
+            index_kind=index_kind,
+            selected_document=selected_document,
+            chunk_index=chunk_index,
+            limit=limit,
+        )
         return AgentResult(
             status="completed",
-            output={
-                "response": f"Loaded {len(chunk_summaries)} chunk index item(s) from parsed bundle {bundle_id}.",
-                "bundle_id": bundle_id,
-                "index_kind": "chunks",
-                "doc_id": selected_document["doc_id"],
-                "title": selected_document.get("title"),
-                "chunk_count": len(normalized_chunks),
-                "chunks": chunk_summaries,
-            },
+            output=browse_payload | {"bundle_id": bundle_id},
             artifacts=[],
             error=None,
         )
@@ -313,15 +301,29 @@ class DocsParserAgent(AgentRuntime):
                 retryable=False,
                 next_action="revise_input",
             )
+        search_kind = self._safe_text(task.input.get("search_kind")).lower() or "chunks"
+        if search_kind not in {"chunks", "sections"}:
+            raise DocsParserAgentError(
+                code="INVALID_INPUT",
+                message="search_kind must be one of: chunks, sections.",
+                retryable=False,
+                next_action="revise_input",
+            )
         limit = self._coerce_positive_int(task.input.get("limit"), default=5, minimum=1, maximum=12)
         bundle_output = self._load_bundle_output(bundle_id)
-        matches = self._search_bundle(bundle_output, query=query, limit=limit)
+        doc_ids = [
+            self._safe_text(item)
+            for item in (task.input.get("doc_ids") if isinstance(task.input.get("doc_ids"), list) else [])
+            if self._safe_text(item)
+        ]
+        matches = self._search_bundle(bundle_output, query=query, limit=limit, search_kind=search_kind, doc_ids=doc_ids)
         return AgentResult(
             status="completed",
             output={
-                "response": f"Found {len(matches)} matching chunk(s) in bundle {bundle_id}.",
+                "response": f"Found {len(matches)} matching {search_kind.rstrip('s')}(s) in bundle {bundle_id}.",
                 "bundle_id": bundle_id,
                 "query": query,
+                "search_kind": search_kind,
                 "count": len(matches),
                 "matches": matches,
             },
@@ -336,16 +338,41 @@ class DocsParserAgent(AgentRuntime):
         requested_doc_id = self._safe_text(task.input.get("doc_id"))
         selected_document = self._select_document_for_read(documents, doc_id=requested_doc_id)
         max_chars = self._coerce_positive_int(task.input.get("max_chars"), default=5000, minimum=500, maximum=12000)
+        read_kind = self._safe_text(task.input.get("read_kind")).lower()
         section_id = self._safe_text(task.input.get("section_id"))
         requested_chunk_ids = [
             self._safe_text(item)
             for item in (task.input.get("chunk_ids") if isinstance(task.input.get("chunk_ids"), list) else [])
             if self._safe_text(item)
         ]
-        content, mode, citations = self._read_bundle_content(
+        if not read_kind:
+            if section_id:
+                read_kind = "section"
+            elif requested_chunk_ids:
+                read_kind = "chunk_ids"
+            else:
+                read_kind = "document"
+        start_page = self._coerce_positive_int(task.input.get("start_page"), default=1, minimum=1, maximum=100000)
+        end_page = self._coerce_positive_int(task.input.get("end_page"), default=start_page, minimum=1, maximum=100000)
+        start_slide = self._coerce_positive_int(task.input.get("start_slide"), default=1, minimum=1, maximum=100000)
+        end_slide = self._coerce_positive_int(task.input.get("end_slide"), default=start_slide, minimum=1, maximum=100000)
+        offset_chars = self._coerce_positive_int(task.input.get("offset_chars"), default=0, minimum=0, maximum=2_000_000)
+        before_chars = self._coerce_positive_int(task.input.get("before_chars"), default=1500, minimum=0, maximum=12000)
+        after_chars = self._coerce_positive_int(task.input.get("after_chars"), default=3500, minimum=0, maximum=12000)
+        anchor_id = self._safe_text(task.input.get("anchor_id"))
+        content, mode, citations, extra = self._read_bundle_content(
             selected_document,
+            read_kind=read_kind,
             section_id=section_id,
             chunk_ids=requested_chunk_ids,
+            start_page=start_page,
+            end_page=end_page,
+            start_slide=start_slide,
+            end_slide=end_slide,
+            anchor_id=anchor_id,
+            offset_chars=offset_chars,
+            before_chars=before_chars,
+            after_chars=after_chars,
             max_chars=max_chars,
         )
         return AgentResult(
@@ -358,9 +385,62 @@ class DocsParserAgent(AgentRuntime):
                 "mode": mode,
                 "content": content,
                 "citations": citations,
-            },
+            } | extra,
             artifacts=[],
             error=None,
+        )
+
+    async def _handle_fetch_asset(self, task: TaskEnvelope) -> AgentResult:
+        bundle_id = self._require_bundle_id(task.input.get("bundle_id"))
+        asset_id = self._safe_text(task.input.get("asset_id"))
+        if not asset_id:
+            raise DocsParserAgentError(
+                code="INVALID_INPUT",
+                message="asset_id is required.",
+                retryable=False,
+                next_action="revise_input",
+            )
+        max_chars = self._coerce_positive_int(task.input.get("max_chars"), default=5000, minimum=500, maximum=12000)
+        bundle_output = self._load_bundle_output(bundle_id)
+        documents = bundle_output.get("documents") if isinstance(bundle_output.get("documents"), list) else []
+        requested_doc_id = self._safe_text(task.input.get("doc_id"))
+        selected_documents = [self._select_document_for_read(documents, doc_id=requested_doc_id)] if requested_doc_id else [
+            item for item in documents if isinstance(item, dict)
+        ]
+        for document in selected_documents:
+            chunk_index = self._load_json_artifact(document, "chunk_index")
+            for asset in chunk_index.get("assets", []) if isinstance(chunk_index.get("assets"), list) else []:
+                if not isinstance(asset, dict):
+                    continue
+                if self._safe_text(asset.get("asset_id")) != asset_id:
+                    continue
+                path = self._safe_text(asset.get("path"))
+                logical_path = path or None
+                content = None
+                mime = self._safe_text(asset.get("mime")) or None
+                if path:
+                    file_path = self._resolve_document_path(path)
+                    if file_path.exists() and file_path.is_file() and mime and mime.startswith("text/"):
+                        content = file_path.read_text(encoding="utf-8")[:max_chars]
+                return AgentResult(
+                    status="completed",
+                    output={
+                        "response": f"Loaded asset {asset_id} from parsed bundle {bundle_id}.",
+                        "bundle_id": bundle_id,
+                        "doc_id": self._safe_text(document.get("doc_id")),
+                        "asset_id": asset_id,
+                        "asset": asset,
+                        "content": content,
+                        "path": logical_path,
+                    },
+                    artifacts=[],
+                    error=None,
+                )
+        raise DocsParserAgentError(
+            code="INVALID_INPUT",
+            message=f"asset_id was not found in the parsed bundle: {asset_id}",
+            retryable=False,
+            next_action="revise_input",
         )
 
     def _build_parse_request(self, payload: dict[str, Any]) -> ParseRequest:
@@ -476,6 +556,20 @@ class DocsParserAgent(AgentRuntime):
         document_md_path = bundle_root / "document.md"
         chunk_index_path = bundle_root / "chunk_index.json"
         manifest_path = bundle_root / "manifest.json"
+        assets_root = bundle_root / "assets"
+
+        asset_file_paths: dict[str, Path] = {}
+        for relative_path, raw_bytes, _mime in parsed.asset_files:
+            target_path = bundle_root / Path(relative_path)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_bytes(raw_bytes)
+            asset_file_paths[relative_path.replace("\\", "/")] = target_path
+
+        normalized_chunk_index = self._normalize_chunk_index_asset_paths(
+            parsed.chunk_index,
+            bundle_root=bundle_root,
+            asset_file_paths=asset_file_paths,
+        )
 
         document_payload = dict(parsed.document_json)
         document_payload.setdefault("doc_id", doc_id)
@@ -502,20 +596,22 @@ class DocsParserAgent(AgentRuntime):
                 "document_json": "document.json",
                 "document_md": "document.md",
                 "chunk_index": "chunk_index.json",
+                "assets_root": "assets",
             },
             "counts": {
                 "section_count": parsed.section_count,
-                "chunk_count": int(parsed.chunk_index.get("chunk_count") or 0),
+                "chunk_count": int(normalized_chunk_index.get("chunk_count") or 0),
                 "table_count": parsed.table_count,
                 "figure_count": parsed.figure_count,
                 "page_count": parsed.page_count,
                 "slide_count": parsed.slide_count,
+                "asset_count": int(normalized_chunk_index.get("asset_count") or 0),
             },
         }
 
         document_json_path.write_text(json.dumps(document_payload, ensure_ascii=False, indent=2), encoding="utf-8")
         document_md_path.write_text(parsed.markdown, encoding="utf-8")
-        chunk_index_path.write_text(json.dumps(parsed.chunk_index, ensure_ascii=False, indent=2), encoding="utf-8")
+        chunk_index_path.write_text(json.dumps(normalized_chunk_index, ensure_ascii=False, indent=2), encoding="utf-8")
         manifest_path.write_text(json.dumps(manifest_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
         artifacts = [
@@ -524,6 +620,9 @@ class DocsParserAgent(AgentRuntime):
             self._artifact_manifest(task.task_id, chunk_index_path, "application/json"),
             self._artifact_manifest(task.task_id, manifest_path, "application/json"),
         ]
+        for relative_path, target_path in asset_file_paths.items():
+            mime = self._infer_asset_mime(target_path)
+            artifacts.append(self._artifact_manifest(task.task_id, target_path, mime))
 
         summary = {
             "doc_id": doc_id,
@@ -532,17 +631,19 @@ class DocsParserAgent(AgentRuntime):
             "mime": artifact["mime"],
             "title": parsed.title,
             "section_count": parsed.section_count,
-            "chunk_count": int(parsed.chunk_index.get("chunk_count") or 0),
+            "chunk_count": int(normalized_chunk_index.get("chunk_count") or 0),
             "table_count": parsed.table_count,
             "figure_count": parsed.figure_count,
             "page_count": parsed.page_count,
             "slide_count": parsed.slide_count,
+            "asset_count": int(normalized_chunk_index.get("asset_count") or 0),
             "artifact_refs": [item.artifact_id for item in artifacts],
             "paths": {
                 "manifest": self._logical_artifact_path(manifest_path),
                 "document_json": self._logical_artifact_path(document_json_path),
                 "document_md": self._logical_artifact_path(document_md_path),
                 "chunk_index": self._logical_artifact_path(chunk_index_path),
+                "assets_root": self._logical_artifact_path(assets_root) if assets_root.exists() else None,
             },
         }
         return summary, artifacts
@@ -567,6 +668,43 @@ class DocsParserAgent(AgentRuntime):
             return (Path("runs") / "artifacts" / relative_to_artifacts).as_posix()
         except ValueError:
             return resolved.relative_to(BACKEND_ROOT.resolve()).as_posix()
+
+    def _normalize_chunk_index_asset_paths(
+        self,
+        chunk_index: dict[str, Any],
+        *,
+        bundle_root: Path,
+        asset_file_paths: dict[str, Path],
+    ) -> dict[str, Any]:
+        normalized = json.loads(json.dumps(chunk_index, ensure_ascii=False))
+        for key in ("pages", "slides", "tables", "figures", "assets"):
+            entries = normalized.get(key)
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                raw_path = self._safe_text(entry.get("path"))
+                if not raw_path:
+                    continue
+                candidate = asset_file_paths.get(raw_path.replace("\\", "/"))
+                if candidate is None:
+                    candidate = bundle_root / raw_path
+                if candidate.exists():
+                    entry["path"] = self._logical_artifact_path(candidate)
+        return normalized
+
+    def _infer_asset_mime(self, file_path: Path) -> str:
+        suffix = file_path.suffix.lower()
+        if suffix == ".png":
+            return "image/png"
+        if suffix == ".md":
+            return "text/markdown"
+        if suffix == ".html":
+            return "text/html"
+        if suffix == ".json":
+            return "application/json"
+        return "application/octet-stream"
 
     def _record_session_run(
         self,
@@ -733,40 +871,182 @@ class DocsParserAgent(AgentRuntime):
             next_action="revise_input",
         )
 
-    def _search_bundle(self, bundle_output: dict[str, Any], *, query: str, limit: int) -> list[dict[str, Any]]:
+    def _document_index_payload(self, document: dict[str, Any], chunk_index: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "doc_id": self._safe_text(document.get("doc_id")),
+            "title": self._safe_text(document.get("title")) or None,
+            "filename": self._safe_text(document.get("filename")) or None,
+            "mime": self._safe_text(document.get("mime")) or None,
+            "paths": document.get("paths") if isinstance(document.get("paths"), dict) else {},
+            "counts": {
+                "section_count": int(chunk_index.get("section_count") or 0),
+                "chunk_count": int(chunk_index.get("chunk_count") or 0),
+                "page_count": int(chunk_index.get("page_count") or 0),
+                "slide_count": int(chunk_index.get("slide_count") or 0),
+                "table_count": int(chunk_index.get("table_count") or 0),
+                "figure_count": int(chunk_index.get("figure_count") or 0),
+                "asset_count": int(chunk_index.get("asset_count") or 0),
+            },
+            "available_indexes": [
+                "documents",
+                "sections",
+                "pages",
+                "slides",
+                "chunks",
+                "tables",
+                "figures",
+                "assets",
+            ],
+            "available_read_kinds": [
+                "document",
+                "section",
+                "page_range",
+                "slide_range",
+                "chunk_ids",
+                "markdown_window",
+            ],
+        }
+
+    def _browse_document_index(
+        self,
+        *,
+        index_kind: str,
+        selected_document: dict[str, Any],
+        chunk_index: dict[str, Any],
+        limit: int,
+    ) -> dict[str, Any]:
+        doc_id = self._safe_text(selected_document.get("doc_id"))
+        title = selected_document.get("title")
+        if index_kind == "sections":
+            sections = chunk_index.get("sections") if isinstance(chunk_index.get("sections"), list) else []
+            normalized = [
+                {
+                    "section_id": self._safe_text(item.get("section_id")) or None,
+                    "title": self._safe_text(item.get("title")) or None,
+                    "level": item.get("level"),
+                    "page_numbers": item.get("page_numbers"),
+                    "slide_numbers": item.get("slide_numbers"),
+                    "start_char": item.get("start_char"),
+                    "end_char": item.get("end_char"),
+                    "excerpt": self._bounded_excerpt(item.get("text"), limit=320),
+                }
+                for item in sections[:limit]
+                if isinstance(item, dict)
+            ]
+            return {
+                "response": f"Loaded {len(normalized)} section index item(s).",
+                "index_kind": "sections",
+                "doc_id": doc_id,
+                "title": title,
+                "section_count": int(chunk_index.get("section_count") or len(sections)),
+                "sections": normalized,
+            }
+        if index_kind == "chunks":
+            chunks = chunk_index.get("chunks") if isinstance(chunk_index.get("chunks"), list) else []
+            normalized = [
+                {
+                    "chunk_id": self._safe_text(item.get("chunk_id")) or None,
+                    "section_id": self._safe_text(item.get("section_id")) or None,
+                    "section_title": self._safe_text(item.get("section_title")) or None,
+                    "page_numbers": item.get("page_numbers"),
+                    "slide_numbers": item.get("slide_numbers"),
+                    "estimated_chars": item.get("estimated_chars"),
+                    "prev_chunk_id": self._safe_text(item.get("prev_chunk_id")) or None,
+                    "next_chunk_id": self._safe_text(item.get("next_chunk_id")) or None,
+                    "excerpt": self._bounded_excerpt(item.get("text"), limit=240),
+                }
+                for item in chunks[:limit]
+                if isinstance(item, dict)
+            ]
+            return {
+                "response": f"Loaded {len(normalized)} chunk index item(s).",
+                "index_kind": "chunks",
+                "doc_id": doc_id,
+                "title": title,
+                "chunk_count": int(chunk_index.get("chunk_count") or len(chunks)),
+                "chunks": normalized,
+            }
+        payload_key = index_kind
+        items = chunk_index.get(index_kind) if isinstance(chunk_index.get(index_kind), list) else []
+        normalized_items = [item for item in items[:limit] if isinstance(item, dict)]
+        return {
+            "response": f"Loaded {len(normalized_items)} {index_kind} index item(s).",
+            "index_kind": index_kind,
+            "doc_id": doc_id,
+            "title": title,
+            f"{index_kind[:-1] if index_kind.endswith('s') else index_kind}_count": len(items),
+            payload_key: normalized_items,
+        }
+
+    def _search_bundle(
+        self,
+        bundle_output: dict[str, Any],
+        *,
+        query: str,
+        limit: int,
+        search_kind: str,
+        doc_ids: list[str],
+    ) -> list[dict[str, Any]]:
         query_tokens = [token for token in re.split(r"[^a-z0-9]+", query.lower()) if token]
         matches: list[dict[str, Any]] = []
+        allowed_doc_ids = set(doc_ids)
         for document in bundle_output.get("documents", []):
             if not isinstance(document, dict):
                 continue
+            doc_id = self._safe_text(document.get("doc_id"))
+            if allowed_doc_ids and doc_id not in allowed_doc_ids:
+                continue
             chunk_index = self._load_json_artifact(document, "chunk_index")
-            chunks = chunk_index.get("chunks") if isinstance(chunk_index.get("chunks"), list) else []
-            for chunk in chunks:
-                if not isinstance(chunk, dict):
+            entries = chunk_index.get("sections") if search_kind == "sections" else chunk_index.get("chunks")
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
                     continue
-                text = self._safe_text(chunk.get("text"))
+                text = self._safe_text(entry.get("text"))
                 haystack = " ".join(
                     (
                         self._safe_text(document.get("title")),
-                        self._safe_text(chunk.get("section_title")),
+                        self._safe_text(entry.get("title") if search_kind == "sections" else entry.get("section_title")),
                         text,
                     )
                 ).lower()
                 score = self._score_text_match(query.lower(), query_tokens, haystack)
                 if score <= 0:
                     continue
-                matches.append(
-                    {
-                        "doc_id": self._safe_text(document.get("doc_id")),
-                        "title": self._safe_text(document.get("title")) or None,
-                        "chunk_id": self._safe_text(chunk.get("chunk_id")),
-                        "section_id": self._safe_text(chunk.get("section_id")) or None,
-                        "section_title": self._safe_text(chunk.get("section_title")) or None,
-                        "score": score,
-                        "excerpt": text[:600],
-                    }
-                )
-        matches.sort(key=lambda item: (int(item.get("score") or 0), str(item.get("chunk_id") or "")), reverse=True)
+                match: dict[str, Any] = {
+                    "doc_id": doc_id,
+                    "title": self._safe_text(document.get("title")) or None,
+                    "score": score,
+                    "excerpt": text[:800],
+                }
+                if search_kind == "sections":
+                    match.update(
+                        {
+                            "section_id": self._safe_text(entry.get("section_id")) or None,
+                            "section_title": self._safe_text(entry.get("title")) or None,
+                            "page_numbers": entry.get("page_numbers"),
+                            "slide_numbers": entry.get("slide_numbers"),
+                        }
+                    )
+                else:
+                    match.update(
+                        {
+                            "chunk_id": self._safe_text(entry.get("chunk_id")),
+                            "section_id": self._safe_text(entry.get("section_id")) or None,
+                            "section_title": self._safe_text(entry.get("section_title")) or None,
+                            "page_numbers": entry.get("page_numbers"),
+                            "slide_numbers": entry.get("slide_numbers"),
+                        }
+                    )
+                matches.append(match)
+        matches.sort(
+            key=lambda item: (
+                int(item.get("score") or 0),
+                str(item.get("section_id") or item.get("chunk_id") or ""),
+            ),
+            reverse=True,
+        )
         return matches[:limit]
 
     def _score_text_match(self, normalized_query: str, query_tokens: list[str], haystack: str) -> int:
@@ -782,16 +1062,38 @@ class DocsParserAgent(AgentRuntime):
         self,
         document: dict[str, Any],
         *,
+        read_kind: str,
         section_id: str,
         chunk_ids: list[str],
+        start_page: int,
+        end_page: int,
+        start_slide: int,
+        end_slide: int,
+        anchor_id: str,
+        offset_chars: int,
+        before_chars: int,
+        after_chars: int,
         max_chars: int,
-    ) -> tuple[str, str, list[dict[str, Any]]]:
+    ) -> tuple[str, str, list[dict[str, Any]], dict[str, Any]]:
         chunk_index = self._load_json_artifact(document, "chunk_index")
+        markdown = self._load_text_artifact(document, "document_md")
         sections = chunk_index.get("sections") if isinstance(chunk_index.get("sections"), list) else []
         chunks = chunk_index.get("chunks") if isinstance(chunk_index.get("chunks"), list) else []
+        pages = chunk_index.get("pages") if isinstance(chunk_index.get("pages"), list) else []
+        slides = chunk_index.get("slides") if isinstance(chunk_index.get("slides"), list) else []
+        tables = chunk_index.get("tables") if isinstance(chunk_index.get("tables"), list) else []
+        figures = chunk_index.get("figures") if isinstance(chunk_index.get("figures"), list) else []
         citations: list[dict[str, Any]] = []
+        extra: dict[str, Any] = {}
 
-        if section_id:
+        if read_kind == "section":
+            if not section_id:
+                raise DocsParserAgentError(
+                    code="INVALID_INPUT",
+                    message="section_id is required when read_kind=section.",
+                    retryable=False,
+                    next_action="revise_input",
+                )
             for section in sections:
                 if not isinstance(section, dict):
                     continue
@@ -808,7 +1110,7 @@ class DocsParserAgent(AgentRuntime):
                         "title": self._safe_text(section.get("title")) or None,
                     }
                 )
-                return text, "section", citations
+                return text, "section", citations, extra
             raise DocsParserAgentError(
                 code="INVALID_INPUT",
                 message=f"section_id was not found in the parsed bundle: {section_id}",
@@ -816,7 +1118,14 @@ class DocsParserAgent(AgentRuntime):
                 next_action="revise_input",
             )
 
-        if chunk_ids:
+        if read_kind == "chunk_ids":
+            if not chunk_ids:
+                raise DocsParserAgentError(
+                    code="INVALID_INPUT",
+                    message="chunk_ids are required when read_kind=chunk_ids.",
+                    retryable=False,
+                    next_action="revise_input",
+                )
             selected_chunks: list[dict[str, Any]] = []
             chunk_id_set = set(chunk_ids)
             for chunk in chunks:
@@ -851,16 +1160,183 @@ class DocsParserAgent(AgentRuntime):
                         "section_title": self._safe_text(chunk.get("section_title")) or None,
                     }
                 )
-            return "\n\n".join(rendered_parts), "chunks", citations
+            return "\n\n".join(rendered_parts), "chunks", citations, extra
 
-        markdown = self._load_text_artifact(document, "document_md")
+        if read_kind == "page_range":
+            return self._read_numbered_range(
+                markdown=markdown,
+                entries=pages,
+                start_number=start_page,
+                end_number=end_page,
+                number_key="page_number",
+                mode="page_range",
+                doc_id=self._safe_text(document.get("doc_id")),
+                max_chars=max_chars,
+            )
+
+        if read_kind == "slide_range":
+            return self._read_numbered_range(
+                markdown=markdown,
+                entries=slides,
+                start_number=start_slide,
+                end_number=end_slide,
+                number_key="slide_number",
+                mode="slide_range",
+                doc_id=self._safe_text(document.get("doc_id")),
+                max_chars=max_chars,
+            )
+
+        if read_kind == "markdown_window":
+            if not anchor_id:
+                raise DocsParserAgentError(
+                    code="INVALID_INPUT",
+                    message="anchor_id is required when read_kind=markdown_window.",
+                    retryable=False,
+                    next_action="revise_input",
+                )
+            anchor = self._find_anchor_entry(anchor_id, sections=sections, chunks=chunks, pages=pages, slides=slides, tables=tables, figures=figures)
+            if anchor is None:
+                raise DocsParserAgentError(
+                    code="INVALID_INPUT",
+                    message=f"anchor_id was not found in the parsed bundle: {anchor_id}",
+                    retryable=False,
+                    next_action="revise_input",
+                )
+            try:
+                anchor_start = int(anchor.get("start_char"))
+                anchor_end = int(anchor.get("end_char"))
+            except (TypeError, ValueError):
+                raise DocsParserAgentError(
+                    code="INVALID_INPUT",
+                    message=f"anchor_id does not have a readable markdown location: {anchor_id}",
+                    retryable=False,
+                    next_action="revise_input",
+                )
+            window_start = max(0, anchor_start - before_chars)
+            window_end = min(len(markdown), anchor_end + after_chars)
+            if window_end - window_start > max_chars:
+                window_end = min(len(markdown), window_start + max_chars)
+            citations.append(
+                {
+                    "doc_id": self._safe_text(document.get("doc_id")),
+                    "anchor_id": anchor_id,
+                    "path": self._document_path(document, "document_md"),
+                }
+            )
+            return markdown[window_start:window_end], "markdown_window", citations, {
+                "anchor_id": anchor_id,
+                "window_start_char": window_start,
+                "window_end_char": window_end,
+            }
+
+        if read_kind != "document":
+            raise DocsParserAgentError(
+                code="INVALID_INPUT",
+                message="read_kind must be one of: document, section, page_range, slide_range, chunk_ids, markdown_window.",
+                retryable=False,
+                next_action="revise_input",
+            )
+
+        start = max(0, offset_chars)
+        end = min(len(markdown), start + max_chars)
         citations.append(
             {
                 "doc_id": self._safe_text(document.get("doc_id")),
                 "path": self._document_path(document, "document_md"),
             }
         )
-        return markdown[:max_chars], "markdown", citations
+        extra.update(
+            {
+                "offset_chars": start,
+                "end_offset_chars": end,
+                "total_chars": len(markdown),
+                "has_more": end < len(markdown),
+                "next_offset_chars": end if end < len(markdown) else None,
+            }
+        )
+        return markdown[start:end], "document", citations, extra
+
+    def _read_numbered_range(
+        self,
+        *,
+        markdown: str,
+        entries: list[Any],
+        start_number: int,
+        end_number: int,
+        number_key: str,
+        mode: str,
+        doc_id: str,
+        max_chars: int,
+    ) -> tuple[str, str, list[dict[str, Any]], dict[str, Any]]:
+        if end_number < start_number:
+            raise DocsParserAgentError(
+                code="INVALID_INPUT",
+                message=f"{number_key} end must be greater than or equal to start.",
+                retryable=False,
+                next_action="revise_input",
+            )
+        selected = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                number = int(entry.get(number_key))
+            except (TypeError, ValueError):
+                continue
+            if start_number <= number <= end_number:
+                selected.append(entry)
+        if not selected:
+            raise DocsParserAgentError(
+                code="INVALID_INPUT",
+                message=f"Requested {mode} is outside the parsed bundle coverage.",
+                retryable=False,
+                next_action="revise_input",
+            )
+        try:
+            start_char = int(selected[0].get("start_char"))
+            end_char = int(selected[-1].get("end_char"))
+        except (TypeError, ValueError):
+            raise DocsParserAgentError(
+                code="INVALID_INPUT",
+                message=f"Requested {mode} is not directly readable from markdown yet.",
+                retryable=False,
+                next_action="revise_input",
+            )
+        citations = [{"doc_id": doc_id, number_key: entry.get(number_key)} for entry in selected]
+        text = markdown[start_char:end_char][:max_chars]
+        return text, mode, citations, {
+            f"start_{number_key}": start_number,
+            f"end_{number_key}": end_number,
+        }
+
+    def _find_anchor_entry(
+        self,
+        anchor_id: str,
+        *,
+        sections: list[Any],
+        chunks: list[Any],
+        pages: list[Any],
+        slides: list[Any],
+        tables: list[Any],
+        figures: list[Any],
+    ) -> dict[str, Any] | None:
+        candidate_lists = [sections, chunks, pages, slides, tables, figures]
+        for entries in candidate_lists:
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                identifiers = {
+                    self._safe_text(entry.get("anchor_id")),
+                    self._safe_text(entry.get("section_id")),
+                    self._safe_text(entry.get("chunk_id")),
+                    self._safe_text(entry.get("page_id")),
+                    self._safe_text(entry.get("slide_id")),
+                    self._safe_text(entry.get("table_id")),
+                    self._safe_text(entry.get("figure_id")),
+                }
+                if anchor_id in identifiers:
+                    return entry
+        return None
 
     def _render_section_from_chunks(self, chunks: list[Any], *, section_id: str) -> str:
         rendered_parts: list[str] = []
@@ -897,6 +1373,12 @@ class DocsParserAgent(AgentRuntime):
     def _load_text_artifact(self, document: dict[str, Any], key: str) -> str:
         return self._document_path(document, key).read_text(encoding="utf-8")
 
+    def _resolve_document_path(self, raw_path: str) -> Path:
+        candidate = Path(raw_path)
+        if candidate.parts[:2] == ("runs", "artifacts"):
+            return (self.artifacts_root / Path(*candidate.parts[2:])).resolve()
+        return (BACKEND_ROOT / candidate).resolve()
+
     def _document_path(self, document: dict[str, Any], key: str) -> Path:
         paths = document.get("paths") if isinstance(document.get("paths"), dict) else {}
         raw = self._safe_text(paths.get(key))
@@ -907,7 +1389,4 @@ class DocsParserAgent(AgentRuntime):
                 retryable=False,
                 next_action="escalate",
             )
-        candidate = Path(raw)
-        if candidate.parts[:2] == ("runs", "artifacts"):
-            return (self.artifacts_root / Path(*candidate.parts[2:])).resolve()
-        return (BACKEND_ROOT / candidate).resolve()
+        return self._resolve_document_path(raw)

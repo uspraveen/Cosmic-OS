@@ -17,6 +17,8 @@ def test_docs_parser_intent_schemas_parse_as_json_and_ocr_enum_matches_runtime()
         "docs.search_bundle.output.json",
         "docs.read_bundle.input.json",
         "docs.read_bundle.output.json",
+        "docs.fetch_asset.input.json",
+        "docs.fetch_asset.output.json",
     ]
     for name in schema_names:
         payload = json.loads((SCHEMA_ROOT / name).read_text(encoding="utf-8"))

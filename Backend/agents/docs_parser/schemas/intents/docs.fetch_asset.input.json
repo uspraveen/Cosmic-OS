@@ -7,20 +7,21 @@
       "minLength": 1,
       "maxLength": 80
     },
-    "index_kind": {
-      "type": "string",
-      "enum": ["documents", "sections", "pages", "slides", "chunks", "tables", "figures", "assets"]
-    },
     "doc_id": {
       "type": "string",
       "maxLength": 80
     },
-    "limit": {
+    "asset_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "max_chars": {
       "type": "integer",
-      "minimum": 1,
-      "maximum": 100
+      "minimum": 500,
+      "maximum": 12000
     }
   },
-  "required": ["bundle_id"],
+  "required": ["bundle_id", "asset_id"],
   "additionalProperties": false
 }

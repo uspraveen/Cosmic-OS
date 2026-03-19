@@ -4665,7 +4665,7 @@ class GatewayRuntime:
             artifact["parse_task_id"] = parse_task_id or None
             artifact["parse_bundle_id"] = bundle_id or None
             artifact["parsed_summary"] = document_summary
-            artifact["docs_tools"] = ["docs_browse", "docs_search", "docs_read"]
+            artifact["docs_tools"] = ["docs_browse", "docs_search", "docs_read", "docs_fetch_asset"]
             self.artifact_store.update_ingest_state(
                 artifact_id,
                 ingest_state="parsed",

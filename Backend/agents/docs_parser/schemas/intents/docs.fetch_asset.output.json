@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "response": { "type": "string" },
+    "bundle_id": { "type": "string" },
+    "doc_id": { "type": "string" },
+    "asset_id": { "type": "string" },
+    "asset": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "content": {
+      "type": ["string", "null"]
+    },
+    "path": {
+      "type": ["string", "null"]
+    }
+  },
+  "required": ["response", "bundle_id", "doc_id", "asset_id", "asset"],
+  "additionalProperties": true
+}

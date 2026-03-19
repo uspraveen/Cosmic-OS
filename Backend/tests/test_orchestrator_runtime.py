@@ -150,6 +150,7 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
             "docs_browse",
             "docs_search",
             "docs_read",
+            "docs_fetch_asset",
             "cosmics_capability_wishlist_search",
             "cosmics_capability_wishlist_capture",
             "memory_search",
@@ -174,6 +175,7 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
         assert "docs_browse" in payload["system"]
         assert "docs_search" in payload["system"]
         assert "docs_read" in payload["system"]
+        assert "docs_fetch_asset" in payload["system"]
         assert "cosmics_capability_wishlist_search" in payload["system"]
         assert "cosmics_capability_wishlist_capture" in payload["system"]
         assert "firecrawl_extract" not in payload["system"]

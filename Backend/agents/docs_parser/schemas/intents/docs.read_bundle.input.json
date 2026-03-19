@@ -11,6 +11,10 @@
       "type": "string",
       "maxLength": 80
     },
+    "read_kind": {
+      "type": "string",
+      "enum": ["document", "section", "page_range", "slide_range", "chunk_ids", "markdown_window"]
+    },
     "section_id": {
       "type": "string",
       "maxLength": 120
@@ -19,6 +23,45 @@
       "type": "array",
       "items": { "type": "string", "maxLength": 120 },
       "maxItems": 8
+    },
+    "start_page": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "end_page": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "start_slide": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "end_slide": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "anchor_id": {
+      "type": "string",
+      "maxLength": 120
+    },
+    "offset_chars": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2000000
+    },
+    "before_chars": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 12000
+    },
+    "after_chars": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 12000
     },
     "max_chars": {
       "type": "integer",

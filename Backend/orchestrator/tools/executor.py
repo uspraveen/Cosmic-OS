@@ -392,6 +392,12 @@ class ToolExecutor:
         if not query:
             return {"error": True, "message": "query is required"}
         payload: dict[str, Any] = {"bundle_id": bundle_id, "query": query}
+        search_kind = str(tool_input.get("search_kind") or "").strip()
+        if search_kind:
+            payload["search_kind"] = search_kind
+        doc_ids = self._normalize_string_list(tool_input.get("doc_ids"))
+        if doc_ids:
+            payload["doc_ids"] = doc_ids[:12]
         limit = self._coerce_int(tool_input.get("limit"), 5)
         if limit > 0:
             payload["limit"] = min(max(limit, 1), 12)
@@ -416,17 +422,54 @@ class ToolExecutor:
         doc_id = str(tool_input.get("doc_id") or "").strip()
         if doc_id:
             payload["doc_id"] = doc_id
+        read_kind = str(tool_input.get("read_kind") or "").strip()
+        if read_kind:
+            payload["read_kind"] = read_kind
         section_id = str(tool_input.get("section_id") or "").strip()
         if section_id:
             payload["section_id"] = section_id
         chunk_ids = self._normalize_string_list(tool_input.get("chunk_ids"))
         if chunk_ids:
             payload["chunk_ids"] = chunk_ids[:8]
+        for key in ("start_page", "end_page", "start_slide", "end_slide", "offset_chars", "before_chars", "after_chars"):
+            value = self._coerce_int(tool_input.get(key), 0)
+            if value > 0:
+                payload[key] = value
+        anchor_id = str(tool_input.get("anchor_id") or "").strip()
+        if anchor_id:
+            payload["anchor_id"] = anchor_id
         max_chars = self._coerce_int(tool_input.get("max_chars"), 5000)
         if max_chars > 0:
             payload["max_chars"] = min(max(max_chars, 500), 12000)
         return await self._dispatch_specialist_agent(
             intent="docs.read_bundle",
+            payload=payload,
+            context=context,
+            agent_id="cosmic/docs-parser-agent:1.0.0",
+            wait_timeout_sec=35.0,
+        )
+
+    async def _docs_fetch_asset(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        bundle_id = str(tool_input.get("bundle_id") or "").strip()
+        asset_id = str(tool_input.get("asset_id") or "").strip()
+        if not bundle_id:
+            return {"error": True, "message": "bundle_id is required"}
+        if not asset_id:
+            return {"error": True, "message": "asset_id is required"}
+        payload: dict[str, Any] = {"bundle_id": bundle_id, "asset_id": asset_id}
+        doc_id = str(tool_input.get("doc_id") or "").strip()
+        if doc_id:
+            payload["doc_id"] = doc_id
+        max_chars = self._coerce_int(tool_input.get("max_chars"), 5000)
+        if max_chars > 0:
+            payload["max_chars"] = min(max(max_chars, 500), 12000)
+        return await self._dispatch_specialist_agent(
+            intent="docs.fetch_asset",
             payload=payload,
             context=context,
             agent_id="cosmic/docs-parser-agent:1.0.0",

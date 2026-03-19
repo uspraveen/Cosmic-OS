@@ -11,6 +11,10 @@
     },
     "doc_id": { "type": ["string", "null"] },
     "title": { "type": ["string", "null"] },
+    "document_index": {
+      "type": "object",
+      "additionalProperties": true
+    },
     "documents": {
       "type": "array",
       "items": {
@@ -30,6 +34,41 @@
       "minimum": 0
     },
     "chunks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "pages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "slides": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "tables": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "figures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "assets": {
       "type": "array",
       "items": {
         "type": "object",

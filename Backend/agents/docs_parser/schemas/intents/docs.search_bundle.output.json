@@ -5,6 +5,7 @@
     "response": { "type": "string" },
     "bundle_id": { "type": "string" },
     "query": { "type": "string" },
+    "search_kind": { "type": "string" },
     "count": {
       "type": "integer",
       "minimum": 0

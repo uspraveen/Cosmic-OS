@@ -12,19 +12,24 @@ intents:
     output_schema: schemas/intents/docs.parse_bundle.output.json
     timeout_sec: 240
   - name: docs.browse_bundle
-    description: Browse parsed-bundle indexes such as documents, sections, or chunk metadata without loading full content.
+    description: Browse parsed-bundle indexes such as documents, sections, pages, slides, chunks, tables, figures, or asset metadata without loading full content.
     input_schema: schemas/intents/docs.browse_bundle.input.json
     output_schema: schemas/intents/docs.browse_bundle.output.json
     timeout_sec: 60
   - name: docs.search_bundle
-    description: Search the parsed chunks inside a previously created bundle and return the strongest matching excerpts.
+    description: Search parsed sections or chunks inside a previously created bundle and return the strongest matching excerpts.
     input_schema: schemas/intents/docs.search_bundle.input.json
     output_schema: schemas/intents/docs.search_bundle.output.json
     timeout_sec: 60
   - name: docs.read_bundle
-    description: Read targeted content from a parsed bundle by document, section, or chunk identifiers.
+    description: Read a parsed bundle by document window, section, page range, slide range, chunk identifiers, or markdown anchor.
     input_schema: schemas/intents/docs.read_bundle.input.json
     output_schema: schemas/intents/docs.read_bundle.output.json
+    timeout_sec: 60
+  - name: docs.fetch_asset
+    description: Fetch exact parsed sidecar asset metadata and lightweight text content for a figure, table, or generated page asset.
+    input_schema: schemas/intents/docs.fetch_asset.input.json
+    output_schema: schemas/intents/docs.fetch_asset.output.json
     timeout_sec: 60
 
 artifact_types:
@@ -51,6 +56,7 @@ policies:
     docs.browse_bundle: [cosmic/orchestrator:1.0.0]
     docs.search_bundle: [cosmic/orchestrator:1.0.0]
     docs.read_bundle: [cosmic/orchestrator:1.0.0]
+    docs.fetch_asset: [cosmic/orchestrator:1.0.0]
 
 sla:
   max_concurrency: 1

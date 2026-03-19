@@ -107,6 +107,12 @@ def _docs_search_progress(tool_input: dict[str, Any]) -> str:
 
 
 def _docs_read_progress(tool_input: dict[str, Any]) -> str:
+    read_kind = str(tool_input.get("read_kind") or "").strip()
+    if read_kind in {"page_range", "slide_range"}:
+        return f"Reading parsed {read_kind.replace('_', ' ')}..."
+    if read_kind == "markdown_window":
+        anchor_id = str(tool_input.get("anchor_id") or "").strip()
+        return f"Reading parsed markdown window around {anchor_id}..." if anchor_id else "Reading parsed markdown window..."
     section_id = str(tool_input.get("section_id") or "").strip()
     if section_id:
         return f"Reading parsed section {section_id}..."
@@ -115,6 +121,11 @@ def _docs_read_progress(tool_input: dict[str, Any]) -> str:
         return f"Reading {len(chunk_ids)} parsed chunk(s)..."
     bundle_id = str(tool_input.get("bundle_id") or "").strip()
     return f"Reading parsed bundle {bundle_id}..." if bundle_id else "Reading parsed document content..."
+
+
+def _docs_fetch_asset_progress(tool_input: dict[str, Any]) -> str:
+    asset_id = str(tool_input.get("asset_id") or "").strip()
+    return f"Fetching parsed asset {asset_id}..." if asset_id else "Fetching a parsed asset..."
 
 
 def _firecrawl_scrape_progress(tool_input: dict[str, Any]) -> str:
@@ -412,7 +423,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "name": "docs_browse",
             "description": (
                 "Browse a parsed document bundle without loading full content. "
-                "Use this to list parsed documents, section indexes, or chunk metadata after uploaded documents have been parsed."
+                "Use this to inspect document, section, page, slide, chunk, table, figure, or asset indexes after uploaded documents have been parsed."
             ),
             "input_schema": {
                 "type": "object",
@@ -423,8 +434,8 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                     },
                     "index_kind": {
                         "type": "string",
-                        "description": "Which index to browse: documents, sections, or chunks.",
-                        "enum": ["documents", "sections", "chunks"],
+                        "description": "Which index to browse: documents, sections, pages, slides, chunks, tables, figures, or assets.",
+                        "enum": ["documents", "sections", "pages", "slides", "chunks", "tables", "figures", "assets"],
                         "default": "documents",
                     },
                     "doc_id": {
@@ -441,7 +452,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             },
         },
         group="documents",
-        prompt_summary="Browse parsed uploaded documents by bundle, document, section, or chunk index before doing selective reads.",
+        prompt_summary="Browse parsed uploaded documents by bundle, document, section, page, slide, chunk, figure, table, or asset index before doing selective reads.",
         progress_builder=_docs_browse_progress,
         handler_method="_docs_browse",
         read_only=True,
@@ -451,7 +462,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         api_definition={
             "name": "docs_search",
             "description": (
-                "Search a parsed document bundle for relevant chunks. "
+                "Search a parsed document bundle for relevant sections or chunks. "
                 "Use this after uploaded documents have been parsed instead of pretending you directly read the whole file."
             ),
             "input_schema": {
@@ -465,9 +476,20 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                         "type": "string",
                         "description": "Search query for the parsed documents.",
                     },
+                    "search_kind": {
+                        "type": "string",
+                        "description": "Search sections for broader semantic coverage or chunks for tighter excerpts.",
+                        "enum": ["sections", "chunks"],
+                        "default": "chunks",
+                    },
+                    "doc_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional doc_ids to limit the search to specific documents inside the bundle.",
+                    },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum number of matching chunks to return. Default 5.",
+                        "description": "Maximum number of matching results to return. Default 5.",
                         "default": 5,
                     }
                 },
@@ -475,7 +497,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             },
         },
         group="documents",
-        prompt_summary="Search parsed uploaded documents for relevant chunks before reading larger sections.",
+        prompt_summary="Search parsed uploaded documents for relevant sections or chunks before reading larger spans.",
         progress_builder=_docs_search_progress,
         handler_method="_docs_search",
         read_only=True,
@@ -485,8 +507,8 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         api_definition={
             "name": "docs_read",
             "description": (
-                "Read targeted content from a parsed document bundle by doc_id, section_id, or chunk_ids. "
-                "Use this for selective reading after docs_search or docs_browse."
+                "Read parsed document content by full-document markdown window, section, page range, slide range, chunk_ids, or anchor window. "
+                "The bundle has a canonical document.md surface; use read_kind=document with offset_chars and next_offset_chars to walk that source of truth sequentially when you need complete coverage."
             ),
             "input_schema": {
                 "type": "object",
@@ -499,6 +521,11 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                         "type": "string",
                         "description": "Optional doc_id. Required when the parsed bundle contains multiple documents.",
                     },
+                    "read_kind": {
+                        "type": "string",
+                        "description": "How to read the parsed bundle: document, section, page_range, slide_range, chunk_ids, or markdown_window.",
+                        "enum": ["document", "section", "page_range", "slide_range", "chunk_ids", "markdown_window"],
+                    },
                     "section_id": {
                         "type": "string",
                         "description": "Optional section_id to load a semantically coherent section.",
@@ -507,6 +534,38 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Optional exact chunk IDs to load after docs_search.",
+                    },
+                    "start_page": {
+                        "type": "integer",
+                        "description": "Start page number when read_kind=page_range.",
+                    },
+                    "end_page": {
+                        "type": "integer",
+                        "description": "End page number when read_kind=page_range.",
+                    },
+                    "start_slide": {
+                        "type": "integer",
+                        "description": "Start slide number when read_kind=slide_range.",
+                    },
+                    "end_slide": {
+                        "type": "integer",
+                        "description": "End slide number when read_kind=slide_range.",
+                    },
+                    "anchor_id": {
+                        "type": "string",
+                        "description": "Section, chunk, page, slide, figure, or table anchor ID when read_kind=markdown_window.",
+                    },
+                    "offset_chars": {
+                        "type": "integer",
+                        "description": "Start offset into document.md when reading the full document sequentially.",
+                    },
+                    "before_chars": {
+                        "type": "integer",
+                        "description": "Characters before the anchor when read_kind=markdown_window.",
+                    },
+                    "after_chars": {
+                        "type": "integer",
+                        "description": "Characters after the anchor when read_kind=markdown_window.",
                     },
                     "max_chars": {
                         "type": "integer",
@@ -518,9 +577,46 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             },
         },
         group="documents",
-        prompt_summary="Read targeted content from parsed uploaded documents by section or chunk instead of loading entire files.",
+        prompt_summary="Read parsed uploaded documents from canonical document.md by sequential windows, sections, page ranges, slide ranges, exact chunk IDs, or anchor windows without pretending the whole file is already in context.",
         progress_builder=_docs_read_progress,
         handler_method="_docs_read",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="docs_fetch_asset",
+        api_definition={
+            "name": "docs_fetch_asset",
+            "description": (
+                "Fetch exact parsed sidecar asset metadata from a document bundle, such as a figure image, table markdown, or generated page image."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "bundle_id": {
+                        "type": "string",
+                        "description": "Parsed bundle ID shown in uploaded document metadata.",
+                    },
+                    "asset_id": {
+                        "type": "string",
+                        "description": "Exact asset_id returned by docs_browse on tables, figures, pages, or assets.",
+                    },
+                    "doc_id": {
+                        "type": "string",
+                        "description": "Optional doc_id when the bundle contains multiple documents and you already know the exact document.",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Maximum amount of text content to inline for text-like assets. Default 5000.",
+                        "default": 5000,
+                    }
+                },
+                "required": ["bundle_id", "asset_id"],
+            },
+        },
+        group="documents",
+        prompt_summary="Fetch an exact parsed sidecar asset when you need table markdown, figure metadata, or generated page-image references from a parsed bundle.",
+        progress_builder=_docs_fetch_asset_progress,
+        handler_method="_docs_fetch_asset",
         read_only=True,
     ),
     ToolSpec(

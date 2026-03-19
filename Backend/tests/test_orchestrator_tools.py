@@ -635,6 +635,20 @@ async def test_tool_executor_docs_tools_delegate_to_docs_parser_agent() -> None:
                 },
                 artifacts=[],
             )
+        if intent == "docs.fetch_asset":
+            return AgentResult(
+                status="completed",
+                output={
+                    "response": "Loaded asset asset_tbl_001.",
+                    "bundle_id": "bundle_docs_001",
+                    "doc_id": "doc_001",
+                    "asset_id": "asset_tbl_001",
+                    "asset": {"asset_id": "asset_tbl_001", "kind": "table_markdown"},
+                    "content": "| Owner |",
+                    "path": "runs/artifacts/tsk_docs_parse/docs_parser/art_doc_1/assets/tables/tbl_001.md",
+                },
+                artifacts=[],
+            )
         return AgentResult(
             status="completed",
             output={
@@ -672,11 +686,19 @@ async def test_tool_executor_docs_tools_delegate_to_docs_parser_agent() -> None:
             context=context,
         )
     )
+    asset_result = json.loads(
+        await executor.execute(
+            "docs_fetch_asset",
+            {"bundle_id": "bundle_docs_001", "doc_id": "doc_001", "asset_id": "asset_tbl_001"},
+            context=context,
+        )
+    )
 
     assert [call["intent"] for call in observed_calls] == [
         "docs.browse_bundle",
         "docs.search_bundle",
         "docs.read_bundle",
+        "docs.fetch_asset",
     ]
     assert observed_calls[0]["agent_id"] == "cosmic/docs-parser-agent:1.0.0"
     assert observed_calls[1]["input_payload"] == {
@@ -690,9 +712,16 @@ async def test_tool_executor_docs_tools_delegate_to_docs_parser_agent() -> None:
         "section_id": "sec_001",
         "max_chars": 5000,
     }
+    assert observed_calls[3]["input_payload"] == {
+        "bundle_id": "bundle_docs_001",
+        "asset_id": "asset_tbl_001",
+        "doc_id": "doc_001",
+        "max_chars": 5000,
+    }
     assert browse_result["index_kind"] == "sections"
     assert search_result["count"] == 1
     assert read_result["mode"] == "section"
+    assert asset_result["asset_id"] == "asset_tbl_001"
 
 
 @pytest.mark.asyncio

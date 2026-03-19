@@ -70,34 +70,117 @@ class StubParser:
             }
         )
         markdown = (
+            "[PAGE 1]\n\n"
             "# Quarterly Strategy\n\n"
             "Overview paragraph.\n\n"
+            "[PAGE 2]\n\n"
+            "[TABLE id=tbl_001 asset_id=asset_tbl_001 page=2 title=\"Ownership Table\"]\n\n"
+            "[FIGURE id=fig_001 asset_id=asset_fig_001 page=2 caption=\"Architecture\"]\n\n"
             "## Key Changes\n\n"
-            "Shift focus to enterprise.\n\n"
-            "[FIGURE id=fig_001 asset_id=art_fig_001 page=2 caption=\"Architecture\"]\n"
+            "Shift focus to enterprise.\n"
         )
+        page_two_start = markdown.index("[PAGE 2]")
         return ParsedDocument(
             title="Quarterly Strategy",
             markdown=markdown,
             document_json={"kind": "docling_document", "source": file_path.name},
             chunk_index={
                 "sections": [
-                    {"section_id": "sec_1", "index": 1, "title": "Quarterly Strategy", "level": 1},
-                    {"section_id": "sec_2", "index": 2, "title": "Key Changes", "level": 2},
+                    {
+                        "section_id": "sec_1",
+                        "index": 1,
+                        "title": "Quarterly Strategy",
+                        "level": 1,
+                        "text": "# Quarterly Strategy\n\nOverview paragraph.",
+                        "start_char": markdown.index("# Quarterly Strategy"),
+                        "end_char": page_two_start - 2,
+                    },
+                    {
+                        "section_id": "sec_2",
+                        "index": 2,
+                        "title": "Key Changes",
+                        "level": 2,
+                        "text": "## Key Changes\n\nShift focus to enterprise.",
+                        "start_char": markdown.index("## Key Changes"),
+                        "end_char": len(markdown),
+                    },
+                ],
+                "pages": [
+                    {"page_id": "page_0001", "page_number": 1, "start_char": 0, "end_char": page_two_start - 2},
+                    {"page_id": "page_0002", "page_number": 2, "start_char": page_two_start, "end_char": len(markdown)},
+                ],
+                "slides": [],
+                "tables": [
+                    {
+                        "table_id": "tbl_001",
+                        "asset_id": "asset_tbl_001",
+                        "title": "Ownership Table",
+                        "page_number": 2,
+                        "start_char": markdown.index("[TABLE id=tbl_001"),
+                        "end_char": markdown.index("[FIGURE id=fig_001") - 2,
+                    }
+                ],
+                "figures": [
+                    {
+                        "figure_id": "fig_001",
+                        "asset_id": "asset_fig_001",
+                        "caption": "Architecture",
+                        "page_number": 2,
+                        "start_char": markdown.index("[FIGURE id=fig_001"),
+                        "end_char": markdown.index("## Key Changes") - 2,
+                    }
+                ],
+                "assets": [
+                    {
+                        "asset_id": "asset_tbl_001",
+                        "kind": "table_markdown",
+                        "table_id": "tbl_001",
+                        "path": "assets/tables/tbl_001.md",
+                        "mime": "text/markdown",
+                    },
+                    {
+                        "asset_id": "asset_fig_001",
+                        "kind": "figure_image",
+                        "figure_id": "fig_001",
+                        "path": "assets/figures/fig_001.png",
+                        "mime": "image/png",
+                    },
                 ],
                 "chunks": [
-                    {"chunk_id": "chk_1", "section_id": "sec_1", "text": "Overview paragraph."},
-                    {"chunk_id": "chk_2", "section_id": "sec_2", "text": "Shift focus to enterprise."},
+                    {
+                        "chunk_id": "chk_1",
+                        "section_id": "sec_1",
+                        "section_title": "Quarterly Strategy",
+                        "text": "Overview paragraph.",
+                        "doc_start_char": markdown.index("Overview paragraph."),
+                        "doc_end_char": markdown.index("Overview paragraph.") + len("Overview paragraph."),
+                    },
+                    {
+                        "chunk_id": "chk_2",
+                        "section_id": "sec_2",
+                        "section_title": "Key Changes",
+                        "text": "Shift focus to enterprise.",
+                        "doc_start_char": markdown.index("Shift focus to enterprise."),
+                        "doc_end_char": markdown.index("Shift focus to enterprise.") + len("Shift focus to enterprise."),
+                    },
                 ],
                 "chunk_count": 2,
                 "section_count": 2,
+                "page_count": 2,
+                "slide_count": 0,
+                "table_count": 1,
+                "figure_count": 1,
+                "asset_count": 2,
             },
             page_count=2,
             slide_count=None,
-            table_count=0,
+            table_count=1,
             figure_count=1,
             section_count=2,
-            asset_files=[],
+            asset_files=[
+                ("assets/tables/tbl_001.md", b"| Owner |\n| --- |\n| Alice |\n", "text/markdown"),
+                ("assets/figures/fig_001.png", b"\x89PNG\r\n\x1a\n", "image/png"),
+            ],
         )
 
 
@@ -172,12 +255,21 @@ def _make_browse_task(*, bundle_id: str, index_kind: str, doc_id: str | None = N
     return task.model_copy(update={"signature": sign_task_envelope(task, "agent-secret")})
 
 
-def _make_read_task(*, bundle_id: str, doc_id: str, section_id: str | None = None, chunk_ids: list[str] | None = None) -> TaskEnvelope:
+def _make_read_task(
+    *,
+    bundle_id: str,
+    doc_id: str,
+    section_id: str | None = None,
+    chunk_ids: list[str] | None = None,
+    extra: dict[str, object] | None = None,
+) -> TaskEnvelope:
     payload: dict[str, object] = {"bundle_id": bundle_id, "doc_id": doc_id}
     if section_id:
         payload["section_id"] = section_id
     if chunk_ids:
         payload["chunk_ids"] = chunk_ids
+    if extra:
+        payload.update(extra)
     task = TaskEnvelope(
         task_id="tsk_docs_read_bundle",
         task_list_id="sess_docs",
@@ -189,6 +281,31 @@ def _make_read_task(*, bundle_id: str, doc_id: str, section_id: str | None = Non
         input=payload,
         input_artifacts=[],
         idempotency_key="idem_docs_read_bundle",
+        priority="normal",
+        signature="",
+        created_at=utcnow(),
+        source="user",
+        source_id="desktop",
+        channel="desktop:test",
+    )
+    return task.model_copy(update={"signature": sign_task_envelope(task, "agent-secret")})
+
+
+def _make_fetch_asset_task(*, bundle_id: str, asset_id: str, doc_id: str | None = None) -> TaskEnvelope:
+    payload: dict[str, object] = {"bundle_id": bundle_id, "asset_id": asset_id}
+    if doc_id:
+        payload["doc_id"] = doc_id
+    task = TaskEnvelope(
+        task_id="tsk_docs_fetch_asset",
+        task_list_id="sess_docs",
+        parent_task_id="tsk_parent",
+        session_id="sess_docs",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/docs-parser-agent:1.0.0",
+        intent="docs.fetch_asset",
+        input=payload,
+        input_artifacts=[],
+        idempotency_key="idem_docs_fetch_asset",
         priority="normal",
         signature="",
         created_at=utcnow(),
@@ -242,7 +359,8 @@ async def test_docs_parser_agent_parse_bundle_persists_canonical_outputs(tmp_pat
     assert document["filename"] == "strategy.pdf"
     assert document["section_count"] == 2
     assert document["chunk_count"] == 2
-    assert len(result.artifacts) == 4
+    assert document["asset_count"] == 2
+    assert len(result.artifacts) == 6
     assert parser.calls
 
     output_root = tmp_path / "runs" / "artifacts" / "tsk_docs_parse_bundle" / "docs_parser" / "art_pdf_001"
@@ -250,10 +368,13 @@ async def test_docs_parser_agent_parse_bundle_persists_canonical_outputs(tmp_pat
     assert (output_root / "document.md").exists()
     assert (output_root / "chunk_index.json").exists()
     assert (output_root / "manifest.json").exists()
+    assert (output_root / "assets" / "tables" / "tbl_001.md").exists()
+    assert (output_root / "assets" / "figures" / "fig_001.png").exists()
 
     manifest = json.loads((output_root / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["source_artifact_id"] == "art_pdf_001"
     assert manifest["counts"]["chunk_count"] == 2
+    assert manifest["counts"]["asset_count"] == 2
 
     bundle_id = result.output["bundle_id"]
     doc_id = document["doc_id"]
@@ -268,6 +389,11 @@ async def test_docs_parser_agent_parse_bundle_persists_canonical_outputs(tmp_pat
     assert browse_result.output["index_kind"] == "sections"
     assert len(browse_result.output["sections"]) == 2
 
+    page_browse_result = await agent.execute(_make_browse_task(bundle_id=bundle_id, index_kind="pages", doc_id=doc_id))
+    assert page_browse_result.status == "completed"
+    assert page_browse_result.output["index_kind"] == "pages"
+    assert len(page_browse_result.output["pages"]) == 2
+
     chunk_browse_result = await agent.execute(_make_browse_task(bundle_id=bundle_id, index_kind="chunks", doc_id=doc_id, limit=1))
     assert chunk_browse_result.status == "completed"
     assert chunk_browse_result.output["index_kind"] == "chunks"
@@ -279,6 +405,35 @@ async def test_docs_parser_agent_parse_bundle_persists_canonical_outputs(tmp_pat
     assert read_result.status == "completed"
     assert read_result.output["mode"] == "section"
     assert "Shift focus to enterprise" in read_result.output["content"]
+
+    document_read_result = await agent.execute(
+        _make_read_task(
+            bundle_id=bundle_id,
+            doc_id=doc_id,
+            extra={"read_kind": "document", "offset_chars": 0, "max_chars": 1200},
+        )
+    )
+    assert document_read_result.status == "completed"
+    assert document_read_result.output["mode"] == "document"
+    assert "[PAGE 1]" in document_read_result.output["content"]
+    assert document_read_result.output["has_more"] is False
+
+    page_read_result = await agent.execute(
+        _make_read_task(
+            bundle_id=bundle_id,
+            doc_id=doc_id,
+            extra={"read_kind": "page_range", "start_page": 2, "end_page": 2},
+        )
+    )
+    assert page_read_result.status == "completed"
+    assert page_read_result.output["mode"] == "page_range"
+    assert "[PAGE 2]" in page_read_result.output["content"]
+    assert "Shift focus to enterprise" in page_read_result.output["content"]
+
+    asset_result = await agent.execute(_make_fetch_asset_task(bundle_id=bundle_id, doc_id=doc_id, asset_id="asset_tbl_001"))
+    assert asset_result.status == "completed"
+    assert asset_result.output["asset"]["kind"] == "table_markdown"
+    assert "| Alice |" in asset_result.output["content"]
 
 
 @pytest.mark.asyncio
