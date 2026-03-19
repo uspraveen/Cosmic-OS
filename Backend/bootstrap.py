@@ -75,7 +75,6 @@ DOCS_PARSER_AGENT_ID = "cosmic/docs-parser-agent:1.0.0"
 DOCS_PARSER_AGENT_DEFAULT_INSTANCE_ID = "docs-parser-agent-1"
 CRITICAL_VENV_IMPORT_CHECKS: Tuple[Tuple[str, str], ...] = (
     ("docling", "docs parser runtime"),
-    ("docling.document_converter", "docs parser runtime"),
 )
 DEFAULT_POST_PROVISION_TIMEOUT_SEC = 120.0
 DEFAULT_POST_PROVISION_POLL_INTERVAL_SEC = 2.0

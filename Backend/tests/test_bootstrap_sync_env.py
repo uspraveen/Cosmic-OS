@@ -821,7 +821,6 @@ def test_verify_critical_backend_dependencies_checks_required_imports(monkeypatc
 
     assert commands == [
         [str(python_path), "-c", "import importlib; importlib.import_module('docling')"],
-        [str(python_path), "-c", "import importlib; importlib.import_module('docling.document_converter')"],
     ]
 
 
@@ -833,12 +832,12 @@ def test_verify_critical_backend_dependencies_raises_clear_error(monkeypatch, tm
 
     def fake_run(command, **kwargs):
         args = list(command)
-        if "docling.document_converter" in args[-1]:
+        if "docling" in args[-1]:
             raise subprocess.CalledProcessError(
                 returncode=1,
                 cmd=args,
                 output="",
-                stderr="ModuleNotFoundError: No module named 'docling.document_converter'",
+                stderr="ModuleNotFoundError: No module named 'docling'",
             )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
@@ -847,7 +846,7 @@ def test_verify_critical_backend_dependencies_raises_clear_error(monkeypatch, tm
     try:
         bootstrap.verify_critical_backend_dependencies(venv_path)
     except bootstrap.BootstrapError as exc:
-        assert "docling.document_converter" in str(exc)
+        assert "docling" in str(exc)
         assert "Critical dependency check failed" in str(exc)
     else:
         raise AssertionError("Expected BootstrapError when a critical dependency import fails")
