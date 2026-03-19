@@ -11,6 +11,8 @@ def test_docs_parser_intent_schemas_parse_as_json_and_ocr_enum_matches_runtime()
     schema_names = [
         "docs.parse_bundle.input.json",
         "docs.parse_bundle.output.json",
+        "docs.browse_bundle.input.json",
+        "docs.browse_bundle.output.json",
         "docs.search_bundle.input.json",
         "docs.search_bundle.output.json",
         "docs.read_bundle.input.json",

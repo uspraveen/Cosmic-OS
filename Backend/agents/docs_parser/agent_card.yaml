@@ -11,6 +11,11 @@ intents:
     input_schema: schemas/intents/docs.parse_bundle.input.json
     output_schema: schemas/intents/docs.parse_bundle.output.json
     timeout_sec: 240
+  - name: docs.browse_bundle
+    description: Browse parsed-bundle indexes such as documents, sections, or chunk metadata without loading full content.
+    input_schema: schemas/intents/docs.browse_bundle.input.json
+    output_schema: schemas/intents/docs.browse_bundle.output.json
+    timeout_sec: 60
   - name: docs.search_bundle
     description: Search the parsed chunks inside a previously created bundle and return the strongest matching excerpts.
     input_schema: schemas/intents/docs.search_bundle.input.json
@@ -43,6 +48,7 @@ policies:
     - cosmic/gateway:1.0.0
   intent_authorization:
     docs.parse_bundle: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
+    docs.browse_bundle: [cosmic/orchestrator:1.0.0]
     docs.search_bundle: [cosmic/orchestrator:1.0.0]
     docs.read_bundle: [cosmic/orchestrator:1.0.0]
 

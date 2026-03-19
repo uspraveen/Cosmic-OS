@@ -3,6 +3,7 @@ fastapi
 groq
 httpx[http2]
 pydantic
+python-multipart
 pyyaml
 redis
 python-dotenv

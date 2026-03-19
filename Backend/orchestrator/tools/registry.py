@@ -93,6 +93,30 @@ def _wishlist_capture_progress(tool_input: dict[str, Any]) -> str:
     return f"Recording capability gap: {title}" if title else "Recording a capability gap for COSMIC..."
 
 
+def _docs_browse_progress(tool_input: dict[str, Any]) -> str:
+    bundle_id = str(tool_input.get("bundle_id") or "").strip()
+    index_kind = str(tool_input.get("index_kind") or "documents").strip() or "documents"
+    if bundle_id:
+        return f"Browsing {index_kind} in parsed bundle {bundle_id}..."
+    return f"Browsing parsed document {index_kind}..."
+
+
+def _docs_search_progress(tool_input: dict[str, Any]) -> str:
+    query = str(tool_input.get("query") or "").strip()
+    return f"Searching parsed documents for: {query}" if query else "Searching parsed documents..."
+
+
+def _docs_read_progress(tool_input: dict[str, Any]) -> str:
+    section_id = str(tool_input.get("section_id") or "").strip()
+    if section_id:
+        return f"Reading parsed section {section_id}..."
+    chunk_ids = tool_input.get("chunk_ids")
+    if isinstance(chunk_ids, list) and chunk_ids:
+        return f"Reading {len(chunk_ids)} parsed chunk(s)..."
+    bundle_id = str(tool_input.get("bundle_id") or "").strip()
+    return f"Reading parsed bundle {bundle_id}..." if bundle_id else "Reading parsed document content..."
+
+
 def _firecrawl_scrape_progress(tool_input: dict[str, Any]) -> str:
     url = str(tool_input.get("url") or "").strip()
     return f"Scraping via Firecrawl: {url}" if url else "Scraping a page via Firecrawl..."
@@ -381,6 +405,123 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Capture a real missing capability directly when you notice COSMIC would materially help the user better if it already had that capability.",
         progress_builder=_wishlist_capture_progress,
         handler_method="_cosmics_capability_wishlist_capture",
+    ),
+    ToolSpec(
+        name="docs_browse",
+        api_definition={
+            "name": "docs_browse",
+            "description": (
+                "Browse a parsed document bundle without loading full content. "
+                "Use this to list parsed documents, section indexes, or chunk metadata after uploaded documents have been parsed."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "bundle_id": {
+                        "type": "string",
+                        "description": "Parsed bundle ID shown in uploaded document metadata, such as bundle_docs_001.",
+                    },
+                    "index_kind": {
+                        "type": "string",
+                        "description": "Which index to browse: documents, sections, or chunks.",
+                        "enum": ["documents", "sections", "chunks"],
+                        "default": "documents",
+                    },
+                    "doc_id": {
+                        "type": "string",
+                        "description": "Optional doc_id when you want a specific document inside a multi-document bundle.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Optional limit for chunk index browsing. Default 20.",
+                        "default": 20,
+                    }
+                },
+                "required": ["bundle_id"],
+            },
+        },
+        group="documents",
+        prompt_summary="Browse parsed uploaded documents by bundle, document, section, or chunk index before doing selective reads.",
+        progress_builder=_docs_browse_progress,
+        handler_method="_docs_browse",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="docs_search",
+        api_definition={
+            "name": "docs_search",
+            "description": (
+                "Search a parsed document bundle for relevant chunks. "
+                "Use this after uploaded documents have been parsed instead of pretending you directly read the whole file."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "bundle_id": {
+                        "type": "string",
+                        "description": "Parsed bundle ID shown in uploaded document metadata, such as bundle_docs_001.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Search query for the parsed documents.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of matching chunks to return. Default 5.",
+                        "default": 5,
+                    }
+                },
+                "required": ["bundle_id", "query"],
+            },
+        },
+        group="documents",
+        prompt_summary="Search parsed uploaded documents for relevant chunks before reading larger sections.",
+        progress_builder=_docs_search_progress,
+        handler_method="_docs_search",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="docs_read",
+        api_definition={
+            "name": "docs_read",
+            "description": (
+                "Read targeted content from a parsed document bundle by doc_id, section_id, or chunk_ids. "
+                "Use this for selective reading after docs_search or docs_browse."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "bundle_id": {
+                        "type": "string",
+                        "description": "Parsed bundle ID shown in uploaded document metadata, such as bundle_docs_001.",
+                    },
+                    "doc_id": {
+                        "type": "string",
+                        "description": "Optional doc_id. Required when the parsed bundle contains multiple documents.",
+                    },
+                    "section_id": {
+                        "type": "string",
+                        "description": "Optional section_id to load a semantically coherent section.",
+                    },
+                    "chunk_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional exact chunk IDs to load after docs_search.",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Maximum number of characters to return. Default 5000.",
+                        "default": 5000,
+                    }
+                },
+                "required": ["bundle_id"],
+            },
+        },
+        group="documents",
+        prompt_summary="Read targeted content from parsed uploaded documents by section or chunk instead of loading entire files.",
+        progress_builder=_docs_read_progress,
+        handler_method="_docs_read",
+        read_only=True,
     ),
     ToolSpec(
         name="firecrawl_scrape",
@@ -971,11 +1112,12 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
 )
 
 _TOOL_BY_NAME = {spec.name: spec for spec in _MODEL_TOOL_SPECS}
-_GROUP_ORDER = ("web", "research", "specialists", "planning", "memory", "history", "scheduling")
+_GROUP_ORDER = ("web", "research", "specialists", "documents", "planning", "memory", "history", "scheduling")
 _GROUP_TITLES = {
     "web": "Web",
     "research": "Research",
     "specialists": "Specialists",
+    "documents": "Documents",
     "planning": "Planning & Wishlist",
     "memory": "Memory",
     "history": "History",

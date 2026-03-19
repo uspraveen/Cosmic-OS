@@ -63,11 +63,11 @@ flowchart TD
         C --> G[Gateway request intake]
         G --> N[Attachment normalization]
         N --> M[Typed ArtifactManifests]
-        N --> S[Durable original-file staging<br/>runs/artifacts/tsk_ingest_request_id/inputs/...]
+        N --> S[Durable original-file staging<br/>runs/artifacts/req_ingest_request_id/inputs/...]
+        G --> D[Gateway auto-dispatches docs.parse_bundle<br/>for current-turn uploaded documents]
         G --> O1[Opus receives compact upload summary<br/>artifact IDs, names, MIME types, sizes]
     end
 
-    O1 --> D[Opus delegates docs.parse_bundle]
     M --> D
     S --> D
 
@@ -84,6 +84,8 @@ flowchart TD
         A1 --> A2[Sidecar assets<br/>tables, figures, pages, slides]
     end
 
+    D --> O2[Opus receives parsed bundle refs<br/>and document summaries]
+
     subgraph Retrieval["Docs retrieval surfaces"]
         J --> R0[Bundle and document indexes<br/>list_bundle_docs, get_bundle_summary, read_doc_index]
         J --> R1[Structure indexes<br/>list_section_index, list_page_index, list_slide_index]
@@ -92,13 +94,13 @@ flowchart TD
         A2 --> R4[Asset and data access<br/>list_tables, get_table, list_figures, get_figure, list_assets, fetch_asset]
     end
 
-    R0 --> O2[Opus performs selective reading over indexes, sections, chunks, and assets]
-    R1 --> O2
-    R2 --> O2
-    R3 --> O2
-    R4 --> O2
+    R0 --> O3[Opus performs selective reading over indexes, sections, chunks, and assets]
+    R1 --> O3
+    R2 --> O3
+    R3 --> O3
+    R4 --> O3
 
-    O2 --> X[Final synthesis<br/>summarize, compare, analyze, or draft new PPT]
+    O3 --> X[Final synthesis<br/>summarize, compare, analyze, or draft new PPT]
     X --> Y[Response to user]
     X --> Z[Output artifacts<br/>deck, summary, citations, notes]
     X --> W[Task summary plus artifact pointers in memory]
@@ -147,9 +149,9 @@ Example user input:
 
 ### 4.2 Orchestration
 
-5. Opus sees that uploaded files exist and that the task depends on document understanding.
-6. Opus delegates a `docs.parse_bundle` task using the uploaded `input_artifacts`.
-7. The docs pipeline parses all inputs and emits parsed bundles plus retrieval indexes.
+5. Gateway sees that current-turn uploaded files are document-like and auto-dispatches `docs.parse_bundle`.
+6. The docs pipeline parses all inputs and emits parsed bundles plus retrieval indexes.
+7. Opus receives the request with parsed bundle references and document summaries already attached.
 8. Opus then uses docs retrieval tools to read only the relevant chunks, sections, tables, or figures.
 9. If the user asked for a new deck, Opus either:
    - drafts the deck directly from retrieved content, or
@@ -195,7 +197,7 @@ To stay aligned with the current artifact-first architecture, the system should 
 Recommended shape:
 
 ```text
-runs/artifacts/tsk_ingest_<request_id>/
+runs/artifacts/req_ingest_<request_id>/
   inputs/
     <artifact_id>/
       original/<safe_filename>
@@ -445,9 +447,9 @@ The internal contract can be rich, but the model-facing tool surface should stay
 Recommended tools or agent intents:
 
 - `docs.parse_bundle`
-- `docs.browse_index`
-- `docs.search`
-- `docs.read`
+- `docs_browse`
+- `docs_search`
+- `docs_read`
 - `docs.fetch_asset`
 
 Where the compact tools support selector arguments such as:
@@ -556,13 +558,13 @@ sequenceDiagram
 
     U->>G: Upload 2 PDFs + 1 PPTX with request
     G->>A: Persist original bytes + manifests
-    G->>O: Send request context with artifact summaries
-    O->>D: docs.parse_bundle(input_artifacts)
+    G->>D: docs.parse_bundle(input_artifacts)
     D->>A: Read original artifacts
     D->>D: Parse with Docling
     D->>A: Write parsed bundles + chunk indexes + sidecar assets
-    D->>O: Return bundle refs + document indexes + summaries
-    O->>D: docs.browse_index / docs.search / docs.read / docs.fetch_asset
+    D->>G: Return bundle refs + document indexes + summaries
+    G->>O: Send request context with parsed bundle refs
+    O->>D: docs_browse / docs_search / docs_read / docs.fetch_asset
     O->>U: Final answer or generated deck
 ```
 
@@ -675,9 +677,9 @@ Opus should then use retrieval tools rather than loading full bundles.
 
 For long docs:
 
-1. `docs.browse_index(index_kind="documents" | "sections" | "pages" | "slides")`
-2. `docs.search(search_kind="sections" | "chunks", query=..., top_k=...)`
-3. `docs.read(read_kind="section" | "page_range" | "slide_range" | "chunk_ids")`
+1. `docs_browse(index_kind="documents" | "sections" | "chunks")`
+2. `docs_search(query=..., top_k=...)`
+3. `docs_read(section_id=... | chunk_ids=... | doc_id=...)`
 4. optional `docs.fetch_asset(asset_id)`
 
 ### 15.2 Beyond-Industry-Standard Selective Reading

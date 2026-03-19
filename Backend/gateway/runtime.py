@@ -2074,6 +2074,19 @@ class GatewayRuntime:
             )
 
         attachments = metadata.get("attachments")
+        if self._contains_document_attachments(attachments):
+            return RoutingDecision(
+                classification={
+                    "route": "opus",
+                    "needs_latest": False,
+                    "needs_citations": False,
+                    "is_task": False,
+                    "is_continuation": False,
+                    "confidence": 1.0,
+                    "signals": ["document_attachments"],
+                },
+                decision_source="document_attachments",
+            )
         if (not content or content.startswith("[")) and isinstance(attachments, list) and attachments:
             return RoutingDecision(
                 classification={
@@ -4384,6 +4397,80 @@ class GatewayRuntime:
             )
             return []
 
+    async def stage_desktop_uploads(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        channel: str,
+        uploads: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        staged_manifests: list[dict[str, Any]] = []
+        if not request_id or not session_id or not channel:
+            return staged_manifests
+
+        for index, upload in enumerate(uploads, start=1):
+            if not isinstance(upload, dict):
+                continue
+            filename = Path(self._safe_text(upload.get("filename")) or "document").name
+            content = upload.get("content")
+            if not filename or not isinstance(content, bytes) or not content:
+                continue
+
+            artifact_id = self._safe_text(upload.get("artifact_id")) or f"art_{uuid4().hex}"
+            supplied_mime = self._safe_text(upload.get("mime_type"))
+            effective_mime = supplied_mime or infer_document_mime_from_extension(Path(filename).suffix)
+            manifest_seed = {
+                "artifact_id": artifact_id,
+                "kind": "document",
+                "mime": effective_mime,
+                "filename": filename,
+            }
+            if not is_supported_document_artifact(manifest_seed):
+                continue
+
+            original_root = self.config.artifacts_root / f"req_ingest_{request_id}" / "inputs" / artifact_id / "original"
+            original_root.mkdir(parents=True, exist_ok=True)
+            source_path = original_root / filename
+            source_path.write_bytes(content)
+
+            sha256 = hashlib.sha256(content).hexdigest()
+            logical_path = self._logical_artifact_path(source_path)
+            staged_manifest = {
+                "artifact_id": artifact_id,
+                "source_channel": channel,
+                "source_platform": "desktop",
+                "source_message_id": None,
+                "kind": "document",
+                "mime": effective_mime,
+                "mime_type": effective_mime,
+                "filename": filename,
+                "caption": None,
+                "size_bytes": len(content),
+                "width": None,
+                "height": None,
+                "duration_ms": None,
+                "sha256": sha256,
+                "bridge_media_ref": None,
+                "download_url": None,
+                "ingest_state": "staged",
+                "path": logical_path,
+                "parse_task_id": None,
+                "parse_bundle_id": None,
+                "parsed_summary": None,
+                "task_id": None,
+                "index": index,
+                "metadata": None,
+            }
+            staged_manifest_path = source_path.parent.parent / "manifest.json"
+            staged_manifest_path.write_text(
+                json.dumps(staged_manifest, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            staged_manifests.append(staged_manifest)
+
+        return staged_manifests
+
     async def _stage_document_artifacts(
         self,
         *,
@@ -4397,6 +4484,9 @@ class GatewayRuntime:
             if not isinstance(manifest, dict):
                 continue
             if not is_supported_document_artifact(manifest):
+                staged_manifests.append(manifest)
+                continue
+            if self._safe_text(manifest.get("path")) and self._safe_text(manifest.get("ingest_state")) in {"staged", "parsed"}:
                 staged_manifests.append(manifest)
                 continue
             try:
@@ -4443,7 +4533,7 @@ class GatewayRuntime:
             artifact_id=artifact_id,
             media_type=media_type or self._safe_text(manifest.get("mime")),
         )
-        original_root = self.config.artifacts_root / f"tsk_ingest_{request_id}" / "inputs" / artifact_id / "original"
+        original_root = self.config.artifacts_root / f"req_ingest_{request_id}" / "inputs" / artifact_id / "original"
         original_root.mkdir(parents=True, exist_ok=True)
         source_path = original_root / filename
         source_path.write_bytes(content)
@@ -4575,7 +4665,7 @@ class GatewayRuntime:
             artifact["parse_task_id"] = parse_task_id or None
             artifact["parse_bundle_id"] = bundle_id or None
             artifact["parsed_summary"] = document_summary
-            artifact["docs_intents"] = ["docs.search_bundle", "docs.read_bundle"]
+            artifact["docs_tools"] = ["docs_browse", "docs_search", "docs_read"]
             self.artifact_store.update_ingest_state(
                 artifact_id,
                 ingest_state="parsed",
@@ -4780,6 +4870,14 @@ class GatewayRuntime:
             text = value.strip()
             return text or None
         return str(value)
+
+    def _contains_document_attachments(self, attachments: Any) -> bool:
+        if not isinstance(attachments, list):
+            return False
+        return any(
+            isinstance(item, dict) and is_supported_document_artifact(item)
+            for item in attachments
+        )
 
     def _normalize_string_list(self, values: Any, *, limit: int = 8) -> list[str]:
         if not isinstance(values, list):

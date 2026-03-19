@@ -10,11 +10,12 @@ import DynamicIsland from './DynamicIsland'
 import CosmicLoginModal from './CosmicLoginModal'
 import LiquidGlassLoader from './LiquidGlassLoader'
 import MeetingMode from './MeetingMode'
+import SpacesControlCenter from './SpacesControlCenter'
 import cosmicGlassyThunderLogo from './assets/cosmic-glassy-thunder-logo.png'
 import './spotlight.css'
 
 export type SearchPosition = 'bottom' | 'middle'
-export type QueryMode = 'chat' | 'task' | 'meeting'
+export type QueryMode = 'chat' | 'task' | 'meeting' | 'spaces'
 export type GatewayModelSelection = 'cosmic' | 'haiku' | 'opus' | 'perplexity'
 type LauncherTileId = 'chat' | 'meeting' | 'task' | 'spaces'
 
@@ -62,8 +63,15 @@ interface GatewayStatus {
   sessionId?: string | null
 }
 
+interface PendingDocumentAttachment {
+  filePath: string
+  filename: string
+  mimeType: string
+  sizeBytes: number
+}
+
 interface SurfaceLaunchState {
-  target: 'chat' | 'meeting'
+  target: 'chat' | 'meeting' | 'spaces'
   token: number
   composerOffsetX: number
   composerOffsetY: number
@@ -71,6 +79,8 @@ interface SurfaceLaunchState {
   responseOffsetY: number
   meetingOffsetX: number
   meetingOffsetY: number
+  spacesOffsetX: number
+  spacesOffsetY: number
 }
 
 type HoverTooltipTone = 'launcher' | 'model' | 'control'
@@ -131,6 +141,26 @@ const buildConversationContext = (messages: Message[]) => {
   }))
 }
 
+const formatAttachmentSize = (sizeBytes: number) => {
+  if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) {
+    return ''
+  }
+  if (sizeBytes >= 1024 * 1024) {
+    return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
+  }
+  return `${Math.max(1, Math.round(sizeBytes / 1024))} KB`
+}
+
+const buildPendingAttachmentSummary = (attachments: PendingDocumentAttachment[]) => {
+  if (attachments.length <= 0) {
+    return ''
+  }
+  if (attachments.length === 1) {
+    return `Attached ${attachments[0].filename}`
+  }
+  return `Attached ${attachments.length} documents`
+}
+
 const normalizeGatewayModelSelection = (value: unknown): GatewayModelSelection => {
   const normalized = String(value || '').trim().toLowerCase()
   if (normalized === 'haiku' || normalized === 'opus' || normalized === 'perplexity') {
@@ -150,7 +180,7 @@ const LAUNCHPAD_TILES: Array<{ id: LauncherTileId; label: string; locked: boolea
   { id: 'chat', label: 'Chat', locked: false },
   { id: 'meeting', label: 'Meeting', locked: false },
   { id: 'task', label: 'Task', locked: false },
-  { id: 'spaces', label: 'Spaces', locked: true },
+  { id: 'spaces', label: 'Spaces', locked: false },
 ]
 
 const normalizePendingTaskInput = (value: any): PendingTaskInput | null => {
@@ -209,6 +239,7 @@ export default function App() {
   const modelDialWheelLockUntilRef = useRef(0)
   const surfaceLaunchResetTimeoutRef = useRef<number | null>(null)
   const meetingSurfaceRef = useRef<HTMLDivElement>(null)
+  const spacesSurfaceRef = useRef<HTMLDivElement>(null)
   const activeAssistantMessageByRequestRef = useRef<Map<string, string>>(new Map())
   const activeAssistantMessageByTaskRef = useRef<Map<string, string>>(new Map())
   const streamedResponseRequestIdsRef = useRef<Set<string>>(new Set())
@@ -227,6 +258,7 @@ export default function App() {
   const seenCronResultKeysRef = useRef<Set<string>>(new Set())
 
   const [query, setQuery] = useState('')
+  const [pendingAttachments, setPendingAttachments] = useState<PendingDocumentAttachment[]>([])
   const [searchState, setSearchState] = useState<'hidden' | 'visible' | 'hiding'>('hidden')
   const [isIslandHovered, setIsIslandHovered] = useState(false)
   const [searchPosition, setSearchPosition] = useState<SearchPosition>('bottom')
@@ -531,6 +563,17 @@ export default function App() {
     }
   }
 
+  const resolveLaunchAnchor = (preferred: HTMLElement | null, fallback: HTMLElement | null) => {
+    if (!preferred) {
+      return fallback
+    }
+    const rect = preferred.getBoundingClientRect()
+    if (rect.width <= 1 || rect.height <= 1) {
+      return fallback
+    }
+    return preferred
+  }
+
   const clearSurfaceLaunch = () => {
     if (surfaceLaunchResetTimeoutRef.current !== null) {
       window.clearTimeout(surfaceLaunchResetTimeoutRef.current)
@@ -539,14 +582,16 @@ export default function App() {
     setSurfaceLaunch(null)
   }
 
-  const startSurfaceLaunch = (target: 'chat' | 'meeting', originX: number, originY: number) => {
+  const startSurfaceLaunch = (target: 'chat' | 'meeting' | 'spaces', originX: number, originY: number) => {
     clearSurfaceLaunch()
     const composerAnchor = composerSurfaceRef.current
-    const responseAnchor = chatResponseSurfaceRef.current || composerAnchor
-    const meetingAnchor = meetingSurfaceRef.current || composerAnchor
+    const responseAnchor = resolveLaunchAnchor(chatResponseSurfaceRef.current, composerAnchor)
+    const meetingAnchor = resolveLaunchAnchor(meetingSurfaceRef.current, composerAnchor)
+    const spacesAnchor = resolveLaunchAnchor(spacesSurfaceRef.current, composerAnchor)
     const composerOffset = measureLaunchOffset(composerAnchor, originX, originY)
     const responseOffset = measureLaunchOffset(responseAnchor, originX, originY)
     const meetingOffset = measureLaunchOffset(meetingAnchor, originX, originY)
+    const spacesOffset = measureLaunchOffset(spacesAnchor, originX, originY)
     setSurfaceLaunch({
       target,
       token: Date.now(),
@@ -556,6 +601,8 @@ export default function App() {
       responseOffsetY: responseOffset.y,
       meetingOffsetX: meetingOffset.x,
       meetingOffsetY: meetingOffset.y,
+      spacesOffsetX: spacesOffset.x,
+      spacesOffsetY: spacesOffset.y,
     })
     surfaceLaunchResetTimeoutRef.current = window.setTimeout(() => {
       setSurfaceLaunch(null)
@@ -731,6 +778,7 @@ export default function App() {
     setShowLauncherTray(false)
     setMode('chat')
     setQuery('')
+    setPendingAttachments([])
     setIsInputFocused(false)
     shouldAutoScrollRef.current = true
     if (inputRef.current) {
@@ -1003,6 +1051,17 @@ export default function App() {
     setIsInputFocused(false)
   }
 
+  const showSpacesSurface = () => {
+    hideHoverTooltip()
+    setSearchState('visible')
+    setMode('spaces')
+    setShowLauncherTray(false)
+    setIsInputFocused(false)
+    if (inputRef.current) {
+      inputRef.current.blur()
+    }
+  }
+
   // --- INIT & MOUSE EVENTS ---
   useEffect(() => {
     const unsubKeys = window.cosmic?.onKeyStatus((status) => {
@@ -1111,7 +1170,7 @@ export default function App() {
     setTimeout(() => {
       setSearchState('hidden')
       setShowLauncherTray(false)
-      if (modeRef.current === 'meeting') setMode('chat')
+      if (modeRef.current === 'meeting' || modeRef.current === 'spaces') setMode('chat')
     }, 250)
   }
 
@@ -1524,19 +1583,62 @@ export default function App() {
     target.style.height = `${newHeight}px`
   }
 
+  const handlePickDocuments = async () => {
+    if (!window.cosmic?.pickGatewayDocuments || isStreaming || authState !== 'authenticated') {
+      return
+    }
+    try {
+      const payload = await window.cosmic.pickGatewayDocuments()
+      const picked = Array.isArray(payload?.documents) ? payload.documents : []
+      if (picked.length === 0) {
+        return
+      }
+      setPendingAttachments((prev) => {
+        const byPath = new Map(prev.map((item) => [item.filePath, item]))
+        for (const item of picked) {
+          const filePath = String(item?.filePath || '').trim()
+          const filename = String(item?.filename || '').trim()
+          if (!filePath || !filename) {
+            continue
+          }
+          byPath.set(filePath, {
+            filePath,
+            filename,
+            mimeType: String(item?.mimeType || '').trim(),
+            sizeBytes: Number(item?.sizeBytes || 0),
+          })
+        }
+        return Array.from(byPath.values())
+      })
+    } catch (error) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          ...createAssistantMessage(),
+          content: error instanceof Error ? error.message : 'Document selection failed.',
+        },
+      ])
+    }
+  }
+
+  const handleRemoveAttachment = (filePath: string) => {
+    setPendingAttachments((prev) => prev.filter((item) => item.filePath !== filePath))
+  }
+
   const handleSubmit = () => {
     if (mode === 'meeting') return
     setIsInputFocused(false)
     if (inputRef.current) inputRef.current.blur()
 
-    if (!query.trim() || isStreaming) return
+    if ((!query.trim() && pendingAttachments.length === 0) || isStreaming) return
 
-    const textToSend = query
+    const textToSend = query.trim()
+    const displayText = textToSend || buildPendingAttachmentSummary(pendingAttachments)
     setQuery('')
     if (inputRef.current) inputRef.current.style.height = '24px'
     shouldAutoScrollRef.current = true
 
-    setMessages(prev => [...prev, createUserMessage(textToSend)])
+    setMessages(prev => [...prev, createUserMessage(displayText)])
     if (authState !== 'authenticated') {
       setMessages(prev => [...prev, {
         ...createAssistantMessage(),
@@ -1588,10 +1690,12 @@ export default function App() {
     window.cosmic.sendGatewayQuery({
       requestId,
       content: textToSend,
-      conversationContext: buildConversationContext([...messages, createUserMessage(textToSend)]),
+      conversationContext: buildConversationContext([...messages, createUserMessage(displayText)]),
       routeOverride: effectiveRouteOverride,
+      attachments: pendingAttachments,
     }).then((result) => {
       const confirmedRequestId = typeof result?.requestId === 'string' ? result.requestId.trim() : ''
+      setPendingAttachments([])
       if (confirmedRequestId && confirmedRequestId !== requestId) {
         activeAssistantMessageByRequestRef.current.delete(requestId)
         activeAssistantMessageByRequestRef.current.set(confirmedRequestId, assistantMessageId)
@@ -1695,6 +1799,7 @@ export default function App() {
 
   const handleShowLauncherTray = () => {
     hideHoverTooltip()
+    setMode('chat')
     setShowLauncherTray(true)
     setIsInputFocused(false)
     if (inputRef.current) {
@@ -1704,15 +1809,16 @@ export default function App() {
 
   const handleLauncherTileClick = (tile: LauncherTileId, event: React.MouseEvent<HTMLButtonElement>) => {
     hideHoverTooltip()
-    if (tile === 'spaces') {
-      return
-    }
     const rect = event.currentTarget.getBoundingClientRect()
     const originX = rect.left + rect.width / 2
     const originY = rect.top + rect.height / 2
-    startSurfaceLaunch(tile === 'meeting' ? 'meeting' : 'chat', originX, originY)
+    startSurfaceLaunch(tile === 'meeting' ? 'meeting' : tile === 'spaces' ? 'spaces' : 'chat', originX, originY)
     if (tile === 'meeting') {
       showMeetingSurface()
+      return
+    }
+    if (tile === 'spaces') {
+      showSpacesSurface()
       return
     }
     if (tile === 'task') {
@@ -1840,8 +1946,9 @@ export default function App() {
     visibleTaskInterrupts.length > 0 &&
     mode !== 'task' &&
     mode !== 'meeting' &&
+    mode !== 'spaces' &&
     !showLauncherTray
-  const shouldShowPrimarySurface = mode !== 'meeting' && !showLauncherTray
+  const shouldShowPrimarySurface = mode !== 'meeting' && mode !== 'spaces' && !showLauncherTray
   const shouldShowResponseSurface = shouldShowPrimarySurface && (mode === 'task' || messages.length > 0)
   const taskRailLayout = useMemo(() => {
     if (!shouldShowTaskInterrupt) {
@@ -1883,12 +1990,13 @@ export default function App() {
   const cronResultShellStyle = {
     ['--cron-result-bottom' as string]: searchState === 'visible' ? '112px' : '24px',
   } as React.CSSProperties
-  const effectivePosition = (messages.length > 0 || mode === 'task') ? 'bottom' : searchPosition
+  const effectivePosition = mode === 'spaces' ? 'bottom' : (messages.length > 0 || mode === 'task') ? 'bottom' : searchPosition
   const overlayClass = [
     searchState === 'hidden' ? '' : 'visible',
     effectivePosition === 'middle' ? 'position-middle' : '',
     shouldShowResponseSurface ? 'has-response' : '',
-    (isInputFocused || shouldShowResponseSurface || isStreaming || mode === 'meeting') ? 'focused' : ''
+    mode === 'spaces' ? 'spaces-active' : '',
+    (isInputFocused || shouldShowResponseSurface || isStreaming || mode === 'meeting' || mode === 'spaces') ? 'focused' : ''
   ].join(' ')
   const composerLaunchClass = surfaceLaunch?.target === 'chat' ? 'launcher-expand' : ''
   const composerLaunchStyle = surfaceLaunch?.target === 'chat'
@@ -1909,6 +2017,13 @@ export default function App() {
     ? ({
       ['--launch-offset-x' as string]: `${surfaceLaunch.meetingOffsetX}px`,
       ['--launch-offset-y' as string]: `${surfaceLaunch.meetingOffsetY}px`,
+    } as React.CSSProperties)
+    : undefined
+  const spacesLaunchClass = surfaceLaunch?.target === 'spaces' ? 'launcher-expand' : ''
+  const spacesLaunchStyle = surfaceLaunch?.target === 'spaces'
+    ? ({
+      ['--launch-offset-x' as string]: `${surfaceLaunch.spacesOffsetX}px`,
+      ['--launch-offset-y' as string]: `${surfaceLaunch.spacesOffsetY}px`,
     } as React.CSSProperties)
     : undefined
   const overlayStyle = {
@@ -2065,6 +2180,22 @@ export default function App() {
           containerRef={meetingSurfaceRef}
           containerClassName={meetingLaunchClass}
           containerStyle={meetingLaunchStyle}
+        />
+
+        <SpacesControlCenter
+          active={mode === 'spaces'}
+          gatewayState={gatewayStatus.state}
+          pendingTaskCount={pendingTaskCount}
+          pendingCronCount={orderedCronResultNotifications.length}
+          selectedModelLabel={MODEL_OPTIONS.find((item) => item.id === selectedModel)?.label || 'Cosmic'}
+          onBackToChat={showChatComposer}
+          onMinimize={handleShowLauncherTray}
+          onClose={() => window.cosmic?.hide()}
+          onShowTooltip={(label, el) => showHoverTooltipForElement(label, el, 'launcher')}
+          onHideTooltip={hideHoverTooltip}
+          containerRef={spacesSurfaceRef}
+          containerClassName={spacesLaunchClass}
+          containerStyle={spacesLaunchStyle}
         />
 
         {shouldShowTaskInterrupt && visibleTaskInterrupts.length > 0 && (
@@ -2551,7 +2682,7 @@ export default function App() {
         )}
 
         {/* INPUT BAR / LAUNCHER */}
-        {mode !== 'meeting' && <div
+        {mode !== 'meeting' && mode !== 'spaces' && <div
           ref={composerSurfaceRef}
           className={`cosmic ${searchState === 'visible' ? 'visible' : searchState === 'hiding' ? 'hiding' : ''} ${showLauncherTray ? 'launchpad-open' : ''} ${composerLaunchClass}`}
           style={composerLaunchStyle}
@@ -2620,6 +2751,42 @@ export default function App() {
                     </button>
                   </div>
                 ) : (
+                  <>
+                    {pendingAttachments.length > 0 && (
+                      <div className="composer-attachment-bar">
+                        {pendingAttachments.map((attachment) => (
+                          <div key={attachment.filePath} className="composer-attachment-chip">
+                            <span className="composer-attachment-icon" aria-hidden="true">
+                              <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
+                                <path
+                                  d="M8.5 12.5L13.7 7.3a3 3 0 1 1 4.24 4.24l-7.07 7.07a5 5 0 1 1-7.07-7.07l8.48-8.49"
+                                  stroke="currentColor"
+                                  strokeWidth="1.9"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                />
+                              </svg>
+                            </span>
+                            <div className="composer-attachment-copy">
+                              <span className="composer-attachment-name">{attachment.filename}</span>
+                              <span className="composer-attachment-meta">
+                                {formatAttachmentSize(attachment.sizeBytes) || attachment.mimeType || 'Document'}
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              className="composer-attachment-remove"
+                              onClick={() => handleRemoveAttachment(attachment.filePath)}
+                              aria-label={`Remove ${attachment.filename}`}
+                            >
+                              <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                                <path d="M1 1L9 9M9 1L1 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                              </svg>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   <div className="input-row">
                     <button
                       className="back-btn"
@@ -2635,6 +2802,29 @@ export default function App() {
                       {pendingTaskCount > 0 && <span className="back-btn-badge">{pendingTaskCount}</span>}
                       <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
                         <path d="M14.71 6.71a1 1 0 0 1 0 1.41L10.83 12l3.88 3.88a1 1 0 0 1-1.41 1.41l-4.59-4.59a1 1 0 0 1 0-1.41l4.59-4.59a1 1 0 0 1 1.41 0z" />
+                      </svg>
+                    </button>
+
+                    <button
+                      className={`attach-btn ${pendingAttachments.length > 0 ? 'active' : ''}`}
+                      onClick={handlePickDocuments}
+                      onMouseEnter={(event) => showHoverTooltipForElement('Attach documents', event.currentTarget, 'control')}
+                      onMouseLeave={hideHoverTooltip}
+                      onFocus={(event) => showHoverTooltipForElement('Attach documents', event.currentTarget, 'control')}
+                      onBlur={hideHoverTooltip}
+                      aria-label="Attach documents"
+                      disabled={isStreaming || authState !== 'authenticated'}
+                      type="button"
+                    >
+                      {pendingAttachments.length > 0 && <span className="attach-btn-badge">{pendingAttachments.length}</span>}
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                        <path
+                          d="M8.5 12.5L13.7 7.3a3 3 0 1 1 4.24 4.24l-7.07 7.07a5 5 0 1 1-7.07-7.07l8.48-8.49"
+                          stroke="currentColor"
+                          strokeWidth="1.9"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
                       </svg>
                     </button>
 
@@ -2723,9 +2913,9 @@ export default function App() {
                       </button>
                     ) : (
                       <button
-                        className={`send-btn ${query.trim() ? 'active' : ''}`}
+                        className={`send-btn ${(query.trim() || pendingAttachments.length > 0) ? 'active' : ''}`}
                         onClick={handleSubmit}
-                        disabled={!query.trim()}
+                        disabled={!query.trim() && pendingAttachments.length === 0}
                         type="button"
                       >
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
@@ -2734,6 +2924,7 @@ export default function App() {
                       </button>
                     )}
                   </div>
+                  </>
                 )
               )}
             </div>

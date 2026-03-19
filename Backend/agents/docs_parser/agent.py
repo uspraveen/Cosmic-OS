@@ -46,6 +46,7 @@ class DocsParserAgentError(RuntimeError):
 
 class DocsParserAgent(AgentRuntime):
     PARSE_BUNDLE_INTENT = "docs.parse_bundle"
+    BROWSE_BUNDLE_INTENT = "docs.browse_bundle"
     SEARCH_BUNDLE_INTENT = "docs.search_bundle"
     READ_BUNDLE_INTENT = "docs.read_bundle"
 
@@ -112,6 +113,8 @@ class DocsParserAgent(AgentRuntime):
         try:
             if task.intent == self.PARSE_BUNDLE_INTENT:
                 return await self._handle_parse_bundle(task)
+            if task.intent == self.BROWSE_BUNDLE_INTENT:
+                return await self._handle_browse_bundle(task)
             if task.intent == self.SEARCH_BUNDLE_INTENT:
                 return await self._handle_search_bundle(task)
             if task.intent == self.READ_BUNDLE_INTENT:
@@ -219,6 +222,86 @@ class DocsParserAgent(AgentRuntime):
             artifacts=produced_artifacts,
         )
         return AgentResult(status="completed", output=output, artifacts=produced_artifacts, error=None)
+
+    async def _handle_browse_bundle(self, task: TaskEnvelope) -> AgentResult:
+        bundle_id = self._require_bundle_id(task.input.get("bundle_id"))
+        index_kind = self._safe_text(task.input.get("index_kind")).lower() or "documents"
+        if index_kind not in {"documents", "sections", "chunks"}:
+            raise DocsParserAgentError(
+                code="INVALID_INPUT",
+                message="index_kind must be one of: documents, sections, chunks.",
+                retryable=False,
+                next_action="revise_input",
+            )
+
+        bundle_output = self._load_bundle_output(bundle_id)
+        documents = bundle_output.get("documents") if isinstance(bundle_output.get("documents"), list) else []
+        if index_kind == "documents":
+            normalized_documents = [item for item in documents if isinstance(item, dict)]
+            return AgentResult(
+                status="completed",
+                output={
+                    "response": f"Loaded {len(normalized_documents)} document summary item(s) from parsed bundle {bundle_id}.",
+                    "bundle_id": bundle_id,
+                    "index_kind": "documents",
+                    "document_count": len(normalized_documents),
+                    "documents": normalized_documents,
+                },
+                artifacts=[],
+                error=None,
+            )
+
+        selected_document = self._select_document_for_read(
+            documents,
+            doc_id=self._safe_text(task.input.get("doc_id")),
+        )
+        chunk_index = self._load_json_artifact(selected_document, "chunk_index")
+        if index_kind == "sections":
+            sections = chunk_index.get("sections") if isinstance(chunk_index.get("sections"), list) else []
+            normalized_sections = [item for item in sections if isinstance(item, dict)]
+            return AgentResult(
+                status="completed",
+                output={
+                    "response": f"Loaded {len(normalized_sections)} section index item(s) from parsed bundle {bundle_id}.",
+                    "bundle_id": bundle_id,
+                    "index_kind": "sections",
+                    "doc_id": selected_document["doc_id"],
+                    "title": selected_document.get("title"),
+                    "sections": normalized_sections,
+                },
+                artifacts=[],
+                error=None,
+            )
+
+        chunks = chunk_index.get("chunks") if isinstance(chunk_index.get("chunks"), list) else []
+        normalized_chunks = [item for item in chunks if isinstance(item, dict)]
+        limit = self._coerce_positive_int(task.input.get("limit"), default=20, minimum=1, maximum=100)
+        chunk_summaries = [
+            {
+                "chunk_id": self._safe_text(item.get("chunk_id")) or None,
+                "section_id": self._safe_text(item.get("section_id")) or None,
+                "section_title": self._safe_text(item.get("section_title")) or None,
+                "estimated_chars": item.get("estimated_chars"),
+                "prev_chunk_id": self._safe_text(item.get("prev_chunk_id")) or None,
+                "next_chunk_id": self._safe_text(item.get("next_chunk_id")) or None,
+                "excerpt": self._bounded_excerpt(item.get("text"), limit=240),
+            }
+            for item in normalized_chunks[:limit]
+        ]
+        return AgentResult(
+            status="completed",
+            output={
+                "response": f"Loaded {len(chunk_summaries)} chunk index item(s) from parsed bundle {bundle_id}.",
+                "bundle_id": bundle_id,
+                "index_kind": "chunks",
+                "doc_id": selected_document["doc_id"],
+                "title": selected_document.get("title"),
+                "chunk_count": len(normalized_chunks),
+                "chunks": chunk_summaries,
+            },
+            artifacts=[],
+            error=None,
+        )
 
     async def _handle_search_bundle(self, task: TaskEnvelope) -> AgentResult:
         bundle_id = self._require_bundle_id(task.input.get("bundle_id"))
@@ -575,6 +658,12 @@ class DocsParserAgent(AgentRuntime):
         except (TypeError, ValueError):
             return default
         return max(minimum, min(maximum, parsed))
+
+    def _bounded_excerpt(self, value: Any, *, limit: int) -> str:
+        text = " ".join(self._safe_text(value).split())
+        if len(text) <= limit:
+            return text
+        return f"{text[: limit - 3].rstrip()}..."
 
     def _load_bundle_output(self, bundle_id: str) -> dict[str, Any]:
         with connect_sync(self.session_db_path) as connection:

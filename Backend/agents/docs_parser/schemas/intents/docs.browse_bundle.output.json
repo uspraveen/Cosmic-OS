@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "response": { "type": "string" },
+    "bundle_id": { "type": "string" },
+    "index_kind": { "type": "string" },
+    "document_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "doc_id": { "type": ["string", "null"] },
+    "title": { "type": ["string", "null"] },
+    "documents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "sections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "chunk_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "chunks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  },
+  "required": ["response", "bundle_id", "index_kind"],
+  "additionalProperties": true
+}

@@ -109,6 +109,11 @@ class ArtifactStore:
                 sha256 = self._normalize_text(attachment.get("sha256"))
                 bridge_media_ref = self._normalize_text(attachment.get("bridge_media_ref"))
                 download_url = self._normalize_text(attachment.get("download_url"))
+                path = self._normalize_text(attachment.get("path"))
+                ingest_state = self._normalize_text(attachment.get("ingest_state")) or "bridge_reference"
+                parse_task_id = self._normalize_text(attachment.get("parse_task_id"))
+                parse_bundle_id = self._normalize_text(attachment.get("parse_bundle_id"))
+                parsed_summary = attachment.get("parsed_summary")
                 passthrough_metadata = {
                     key: value
                     for key, value in attachment.items()
@@ -127,6 +132,11 @@ class ArtifactStore:
                         "sha256",
                         "bridge_media_ref",
                         "download_url",
+                        "path",
+                        "ingest_state",
+                        "parse_task_id",
+                        "parse_bundle_id",
+                        "parsed_summary",
                     }
                 }
                 try:
@@ -139,6 +149,20 @@ class ArtifactStore:
                         kind,
                     )
                     metadata_json = None
+                try:
+                    parsed_summary_json = (
+                        json.dumps(parsed_summary, ensure_ascii=False, default=str)
+                        if parsed_summary is not None
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    logger.exception(
+                        "artifact_store.parsed_summary_serialize_failed request_id=%s artifact_id=%s kind=%s",
+                        request_id,
+                        artifact_id,
+                        kind,
+                    )
+                    parsed_summary_json = None
                 connection.execute(
                     """
                     INSERT OR REPLACE INTO inbound_artifacts (
@@ -187,11 +211,11 @@ class ArtifactStore:
                         sha256,
                         bridge_media_ref,
                         download_url,
-                        None,
-                        "bridge_reference",
-                        None,
-                        None,
-                        None,
+                        path,
+                        ingest_state,
+                        parse_task_id,
+                        parse_bundle_id,
+                        parsed_summary_json,
                         metadata_json,
                         created_at,
                     ),
@@ -213,9 +237,12 @@ class ArtifactStore:
                         "sha256": sha256,
                         "bridge_media_ref": bridge_media_ref,
                         "download_url": download_url,
-                        "ingest_state": "bridge_reference",
-                        "path": None,
-                        "task_id": None,
+                        "ingest_state": ingest_state,
+                        "path": path,
+                        "parse_task_id": parse_task_id,
+                        "parse_bundle_id": parse_bundle_id,
+                        "parsed_summary": parsed_summary if isinstance(parsed_summary, dict) else None,
+                        "task_id": parse_task_id,
                         "index": index,
                         "metadata": passthrough_metadata,
                     }

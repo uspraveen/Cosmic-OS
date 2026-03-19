@@ -896,7 +896,7 @@ async def test_document_inbound_stages_supported_artifacts_into_runs_tree(tmp_pa
         staged = result["input_artifacts"][0]
         assert staged["ingest_state"] == "staged"
         assert staged["mime"] == "application/pdf"
-        assert staged["path"].startswith("runs/artifacts/tsk_ingest_")
+        assert staged["path"].startswith("runs/artifacts/req_ingest_")
         assert staged["sha256"]
 
         stored_artifacts = runtime.artifact_store.list_for_request(result["request_id"])
@@ -904,6 +904,38 @@ async def test_document_inbound_stages_supported_artifacts_into_runs_tree(tmp_pa
         assert stored_artifacts[0]["path"] == staged["path"]
     finally:
         await runtime.stop()
+
+
+def test_artifact_store_preserves_pre_staged_desktop_document_metadata(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    runtime.artifact_store.initialize()
+
+    manifests = runtime.artifact_store.persist_inbound_attachments(
+        request_id="req_desktop_stage_1",
+        session_id="sess_desktop_stage_1",
+        source_channel="desktop:desk_a",
+        source_platform="desktop",
+        source_message_id=None,
+        attachments=[
+            {
+                "artifact_id": "art_desktop_1",
+                "kind": "document",
+                "mime_type": "application/pdf",
+                "filename": "plan.pdf",
+                "sha256": "abc123",
+                "path": "runs/artifacts/req_ingest_req_desktop_stage_1/inputs/art_desktop_1/original/plan.pdf",
+                "ingest_state": "staged",
+            }
+        ],
+    )
+
+    assert manifests[0]["path"] == "runs/artifacts/req_ingest_req_desktop_stage_1/inputs/art_desktop_1/original/plan.pdf"
+    assert manifests[0]["ingest_state"] == "staged"
+
+    stored = runtime.artifact_store.list_for_request("req_desktop_stage_1")
+    assert len(stored) == 1
+    assert stored[0]["path"] == manifests[0]["path"]
+    assert stored[0]["ingest_state"] == "staged"
 
 
 @pytest.mark.asyncio
@@ -929,7 +961,7 @@ async def test_docs_autoparse_enriches_request_record_with_bundle_metadata(tmp_p
                     "kind": "document",
                     "mime": "application/pdf",
                     "filename": "strategy.pdf",
-                    "path": "runs/artifacts/tsk_ingest_req_docs_parse/inputs/art_doc_1/original/strategy.pdf",
+                    "path": "runs/artifacts/req_ingest_req_docs_parse/inputs/art_doc_1/original/strategy.pdf",
                     "sha256": "abc123",
                     "ingest_state": "staged",
                 }
@@ -997,6 +1029,86 @@ async def test_docs_autoparse_enriches_request_record_with_bundle_metadata(tmp_p
         assert stored["parse_bundle_id"] == "bundle_docs_001"
     finally:
         await runtime.stop()
+
+
+def test_desktop_upload_route_stages_documents(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+    runtime.config.artifacts_root = tmp_path / "runs" / "artifacts"
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/channels/desktop/uploads",
+            headers={"Authorization": "Bearer test-token"},
+            data={
+                "request_id": "req_upload_1",
+                "session_id": "sess_upload_1",
+                "device_id": "desk_upload_1",
+            },
+            files=[
+                (
+                    "files",
+                    (
+                        "brief.pdf",
+                        b"%PDF-1.7 fake upload",
+                        "application/pdf",
+                    ),
+                )
+            ],
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["attachments"]) == 1
+    attachment = payload["attachments"][0]
+    assert attachment["ingest_state"] == "staged"
+    assert attachment["mime"] == "application/pdf"
+    assert attachment["path"].startswith("runs/artifacts/req_ingest_req_upload_1/")
+    staged_path = runtime.config.artifacts_root / "req_ingest_req_upload_1" / "inputs" / attachment["artifact_id"] / "original" / "brief.pdf"
+    assert staged_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_document_attachments_force_opus_even_with_text_content(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="haiku")
+    await runtime.start()
+    try:
+        result = await runtime.process_incoming_user_message(
+            {
+                "content": "Use this deck to summarize pricing changes.",
+                "channel": "desktop:desk_docs",
+                "metadata": {
+                    "platform": "desktop",
+                    "message_type": "query",
+                    "attachments": [
+                        {
+                            "artifact_id": "desktop_doc_1",
+                            "kind": "document",
+                            "mime_type": "application/pdf",
+                            "filename": "pricing.pdf",
+                            "ingest_state": "staged",
+                            "path": "runs/artifacts/req_ingest_req_docs_force/inputs/desktop_doc_1/original/pricing.pdf",
+                        }
+                    ],
+                },
+            }
+        )
+    finally:
+        await runtime.stop()
+
+    assert result["route"] == "opus"
+    assert result["classification"]["signals"] == ["document_attachments"]
 
 
 @pytest.mark.asyncio

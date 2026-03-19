@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field
 
 from ..runtime import GatewayRuntime
@@ -573,6 +573,60 @@ async def get_session_history(
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
     return {"session_id": session_id, "messages": runtime.get_session_history(session_id)}
+
+
+@router.post("/channels/desktop/uploads")
+async def upload_desktop_documents(
+    request_id: str = Form(...),
+    device_id: str = Form(...),
+    session_id: str | None = Form(default=None),
+    files: list[UploadFile] = File(...),
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    normalized_request_id = str(request_id or "").strip()
+    normalized_device_id = _normalize_device_id(str(device_id or "").strip())
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_request_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="request_id is required")
+    if not normalized_device_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="device_id is required")
+    if not normalized_session_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="session_id is required")
+    if not files:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one document is required")
+
+    uploads: list[dict[str, Any]] = []
+    for index, upload in enumerate(files, start=1):
+        filename = str(upload.filename or "").strip()
+        if not filename:
+            continue
+        content = await upload.read()
+        if not content:
+            continue
+        uploads.append(
+            {
+                "artifact_id": f"desktop_doc_{normalized_request_id}_{index}",
+                "filename": filename,
+                "mime_type": str(upload.content_type or "").strip() or None,
+                "content": content,
+            }
+        )
+    if not uploads:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No valid documents were uploaded")
+
+    manifests = await runtime.stage_desktop_uploads(
+        request_id=normalized_request_id,
+        session_id=normalized_session_id,
+        channel=f"desktop:{normalized_device_id}",
+        uploads=uploads,
+    )
+    if not manifests:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No supported PDF, DOCX, or PPTX documents were uploaded",
+        )
+    return {"attachments": manifests}
 
 
 @router.post("/tasks/{task_id}/input-reply/{input_request_id}")

@@ -140,7 +140,13 @@ class DesktopAdapter(ChannelAdapter):
         if not channel or not channel.startswith("desktop:"):
             raise ValueError("Desktop inbound payload is missing a valid channel")
 
+        attachments = raw_message.get("attachments")
+        if not isinstance(attachments, list):
+            attachments = []
+
         content = self._coerce_str(raw_message.get("content"))
+        if not content and attachments:
+            content = self._attachment_placeholder(attachments)
         if not content:
             raise ValueError("Desktop query is missing content")
 
@@ -158,6 +164,7 @@ class DesktopAdapter(ChannelAdapter):
             "request_id": request_id,
             "route_override": route_override,
             "conversation_context": conversation_context,
+            "attachments": attachments,
         }
 
         return {
@@ -214,3 +221,11 @@ class DesktopAdapter(ChannelAdapter):
         if isinstance(value, (int, float)):
             return str(value)
         return None
+
+    def _attachment_placeholder(self, attachments: list[Any]) -> str:
+        count = len([item for item in attachments if isinstance(item, dict)])
+        if count <= 0:
+            return "[attachment]"
+        if count == 1:
+            return "[document]"
+        return f"[{count} documents]"

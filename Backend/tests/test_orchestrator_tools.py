@@ -605,6 +605,97 @@ async def test_tool_executor_capability_wishlist_capture_uses_gateway_internal_r
 
 
 @pytest.mark.asyncio
+async def test_tool_executor_docs_tools_delegate_to_docs_parser_agent() -> None:
+    observed_calls: list[dict[str, object]] = []
+
+    async def dispatcher(**kwargs):
+        observed_calls.append(kwargs)
+        intent = kwargs["intent"]
+        if intent == "docs.browse_bundle":
+            return AgentResult(
+                status="completed",
+                output={
+                    "response": "Loaded 1 section index item.",
+                    "bundle_id": "bundle_docs_001",
+                    "index_kind": "sections",
+                    "doc_id": "doc_001",
+                    "sections": [{"section_id": "sec_001", "title": "Executive Summary"}],
+                },
+                artifacts=[],
+            )
+        if intent == "docs.search_bundle":
+            return AgentResult(
+                status="completed",
+                output={
+                    "response": "Found 1 matching chunk.",
+                    "bundle_id": "bundle_docs_001",
+                    "query": "enterprise pricing",
+                    "count": 1,
+                    "matches": [{"chunk_id": "chk_001", "excerpt": "Enterprise pricing changed.", "doc_id": "doc_001", "score": 12}],
+                },
+                artifacts=[],
+            )
+        return AgentResult(
+            status="completed",
+            output={
+                "response": "Loaded section from parsed bundle.",
+                "bundle_id": "bundle_docs_001",
+                "doc_id": "doc_001",
+                "mode": "section",
+                "content": "Enterprise pricing changed.",
+                "citations": [{"section_id": "sec_001"}],
+            },
+            artifacts=[],
+        )
+
+    executor = ToolExecutor(agent_dispatcher=dispatcher)
+    context = ToolExecutionContext(parent_task=_parent_task(), session_id="sess_parent", task_id="tsk_parent")
+
+    browse_result = json.loads(
+        await executor.execute(
+            "docs_browse",
+            {"bundle_id": "bundle_docs_001", "index_kind": "sections", "doc_id": "doc_001"},
+            context=context,
+        )
+    )
+    search_result = json.loads(
+        await executor.execute(
+            "docs_search",
+            {"bundle_id": "bundle_docs_001", "query": "enterprise pricing"},
+            context=context,
+        )
+    )
+    read_result = json.loads(
+        await executor.execute(
+            "docs_read",
+            {"bundle_id": "bundle_docs_001", "doc_id": "doc_001", "section_id": "sec_001"},
+            context=context,
+        )
+    )
+
+    assert [call["intent"] for call in observed_calls] == [
+        "docs.browse_bundle",
+        "docs.search_bundle",
+        "docs.read_bundle",
+    ]
+    assert observed_calls[0]["agent_id"] == "cosmic/docs-parser-agent:1.0.0"
+    assert observed_calls[1]["input_payload"] == {
+        "bundle_id": "bundle_docs_001",
+        "query": "enterprise pricing",
+        "limit": 5,
+    }
+    assert observed_calls[2]["input_payload"] == {
+        "bundle_id": "bundle_docs_001",
+        "doc_id": "doc_001",
+        "section_id": "sec_001",
+        "max_chars": 5000,
+    }
+    assert browse_result["index_kind"] == "sections"
+    assert search_result["count"] == 1
+    assert read_result["mode"] == "section"
+
+
+@pytest.mark.asyncio
 async def test_tool_executor_delegate_to_agent_dispatches_specialist_agent_and_returns_output() -> None:
     observed: dict[str, object] = {}
 

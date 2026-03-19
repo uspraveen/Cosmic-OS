@@ -78,6 +78,12 @@ body,
   transform: translateY(-40px);
 }
 
+.overlay.spaces-active {
+  justify-content: center;
+  padding-bottom: 0;
+  transition: background-color 0.4s ease, backdrop-filter 0.4s ease, opacity 0.3s ease;
+}
+
 /* ========== RESPONSE CONTAINER ========== */
 .response-container {
   width: min(620px, calc(100vw - var(--task-rail-reserve, 0px) - 72px));
@@ -145,6 +151,7 @@ body,
   position: relative;
   background: transparent;
   overflow: hidden;
+  border-radius: inherit;
 }
 
 /* Query Header */
@@ -457,6 +464,86 @@ body,
   gap: 12px;
   padding: 12px 20px;
   position: relative;
+}
+
+.composer-attachment-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px 20px 0;
+}
+
+.composer-attachment-chip {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 8px 9px;
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03)),
+    rgba(14, 16, 20, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 10px 20px rgba(0, 0, 0, 0.12);
+}
+
+.composer-attachment-icon {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.88);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.composer-attachment-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.composer-attachment-name {
+  max-width: 210px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.composer-attachment-meta {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.composer-attachment-remove {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.62);
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease;
+}
+
+.composer-attachment-remove:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: rgba(255, 255, 255, 0.94);
+  transform: scale(1.04);
 }
 
 .task-toolbar {
@@ -1168,13 +1255,16 @@ kbd {
   flex-direction: column;
   gap: 18px;
   margin-bottom: 24px;
+  flex: 1;
+  min-height: 0;
 }
 
 .task-hub-body {
   display: grid;
   grid-template-columns: minmax(138px, 162px) minmax(0, 1fr);
   gap: 10px;
-  min-height: 460px;
+  flex: 1;
+  min-height: 0;
 }
 
 .task-hub-body.single {
@@ -1487,6 +1577,11 @@ kbd {
 }
 
 .task-empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
   padding: 28px 24px;
   border-radius: 22px;
   background: rgba(255, 255, 255, 0.04);
@@ -1614,6 +1709,68 @@ kbd {
 .back-btn:hover {
   background: rgba(255, 255, 255, 0.1);
   color: #fff;
+}
+
+.attach-btn {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02)),
+    rgba(16, 18, 23, 0.42);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.7);
+  width: 32px;
+  height: 32px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform 0.18s ease, background 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+  margin-right: 2px;
+  margin-bottom: 1px;
+  position: relative;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 10px 18px rgba(0, 0, 0, 0.12);
+}
+
+.attach-btn:hover:not(:disabled) {
+  color: rgba(255, 255, 255, 0.96);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.03)),
+    rgba(20, 22, 29, 0.52);
+  transform: translateY(-1px);
+}
+
+.attach-btn.active {
+  color: rgba(255, 255, 255, 0.98);
+  background:
+    linear-gradient(180deg, rgba(140, 208, 255, 0.2), rgba(89, 159, 255, 0.08)),
+    rgba(16, 22, 34, 0.62);
+  border-color: rgba(140, 208, 255, 0.22);
+}
+
+.attach-btn:disabled {
+  opacity: 0.42;
+  cursor: default;
+  box-shadow: none;
+}
+
+.attach-btn-badge {
+  position: absolute;
+  top: -4px;
+  right: -3px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgba(135, 205, 255, 0.96);
+  color: rgba(8, 14, 24, 0.96);
+  font-size: 9px;
+  font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
 }
 
 .back-btn-badge {

@@ -145,6 +145,33 @@ def _make_search_task(*, bundle_id: str, query: str) -> TaskEnvelope:
     return task.model_copy(update={"signature": sign_task_envelope(task, "agent-secret")})
 
 
+def _make_browse_task(*, bundle_id: str, index_kind: str, doc_id: str | None = None, limit: int | None = None) -> TaskEnvelope:
+    payload: dict[str, object] = {"bundle_id": bundle_id, "index_kind": index_kind}
+    if doc_id:
+        payload["doc_id"] = doc_id
+    if limit is not None:
+        payload["limit"] = limit
+    task = TaskEnvelope(
+        task_id="tsk_docs_browse_bundle",
+        task_list_id="sess_docs",
+        parent_task_id="tsk_parent",
+        session_id="sess_docs",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/docs-parser-agent:1.0.0",
+        intent="docs.browse_bundle",
+        input=payload,
+        input_artifacts=[],
+        idempotency_key="idem_docs_browse_bundle",
+        priority="normal",
+        signature="",
+        created_at=utcnow(),
+        source="user",
+        source_id="desktop",
+        channel="desktop:test",
+    )
+    return task.model_copy(update={"signature": sign_task_envelope(task, "agent-secret")})
+
+
 def _make_read_task(*, bundle_id: str, doc_id: str, section_id: str | None = None, chunk_ids: list[str] | None = None) -> TaskEnvelope:
     payload: dict[str, object] = {"bundle_id": bundle_id, "doc_id": doc_id}
     if section_id:
@@ -174,7 +201,7 @@ def _make_read_task(*, bundle_id: str, doc_id: str, section_id: str | None = Non
 
 @pytest.mark.asyncio
 async def test_docs_parser_agent_parse_bundle_persists_canonical_outputs(tmp_path: Path) -> None:
-    source_root = tmp_path / "runs" / "artifacts" / "tsk_ingest_001" / "inputs" / "art_pdf_001"
+    source_root = tmp_path / "runs" / "artifacts" / "req_ingest_001" / "inputs" / "art_pdf_001"
     source_root.mkdir(parents=True, exist_ok=True)
     source_file = source_root / "strategy.pdf"
     source_file.write_bytes(b"%PDF-1.7 fake strategy pdf")
@@ -235,6 +262,18 @@ async def test_docs_parser_agent_parse_bundle_persists_canonical_outputs(tmp_pat
     assert search_result.status == "completed"
     assert search_result.output["count"] >= 1
     assert search_result.output["matches"][0]["doc_id"] == doc_id
+
+    browse_result = await agent.execute(_make_browse_task(bundle_id=bundle_id, index_kind="sections", doc_id=doc_id))
+    assert browse_result.status == "completed"
+    assert browse_result.output["index_kind"] == "sections"
+    assert len(browse_result.output["sections"]) == 2
+
+    chunk_browse_result = await agent.execute(_make_browse_task(bundle_id=bundle_id, index_kind="chunks", doc_id=doc_id, limit=1))
+    assert chunk_browse_result.status == "completed"
+    assert chunk_browse_result.output["index_kind"] == "chunks"
+    assert chunk_browse_result.output["chunk_count"] == 2
+    assert len(chunk_browse_result.output["chunks"]) == 1
+    assert chunk_browse_result.output["chunks"][0]["excerpt"] == "Overview paragraph."
 
     read_result = await agent.execute(_make_read_task(bundle_id=bundle_id, doc_id=doc_id, section_id="sec_2"))
     assert read_result.status == "completed"

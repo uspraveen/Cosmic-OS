@@ -16,6 +16,22 @@ export interface GatewayConnectionStatus {
   sessionId?: string | null
 }
 
+interface DesktopQueryAttachment {
+  artifact_id?: string
+  kind?: string
+  mime?: string
+  mime_type?: string
+  filename?: string
+  size_bytes?: number | null
+  sha256?: string | null
+  path?: string | null
+  ingest_state?: string | null
+  parse_task_id?: string | null
+  parse_bundle_id?: string | null
+  parsed_summary?: Record<string, unknown> | null
+  metadata?: Record<string, unknown> | null
+}
+
 const CONNECT_TIMEOUT_MS = 15000
 const HEARTBEAT_INTERVAL_MS = 25000
 const HEARTBEAT_STALE_MS = 70000
@@ -248,9 +264,16 @@ export class GatewayConnectionManager {
     this.connect()
   }
 
-  sendQuery(content: string, conversationContext: any[] = [], requestId?: string, routeOverride?: string) {
+  sendQuery(
+    content: string,
+    conversationContext: any[] = [],
+    requestId?: string,
+    routeOverride?: string,
+    attachments: DesktopQueryAttachment[] = [],
+  ) {
     const effectiveRequestId = String(requestId || '').trim() || `req_${crypto.randomUUID()}`
     const normalizedRouteOverride = String(routeOverride || '').trim()
+    const normalizedAttachments = Array.isArray(attachments) ? attachments.filter((item) => item && typeof item === 'object') : []
     this.sendJson({
       type: 'query',
       request_id: effectiveRequestId,
@@ -258,8 +281,9 @@ export class GatewayConnectionManager {
       content,
       conversation_context: Array.isArray(conversationContext) ? conversationContext : [],
       route_override: normalizedRouteOverride || undefined,
+      attachments: normalizedAttachments.length > 0 ? normalizedAttachments : undefined,
     })
-    this.recordDesktopQueryInHistory(content, effectiveRequestId)
+    this.recordDesktopQueryInHistory(content, effectiveRequestId, normalizedAttachments)
     return effectiveRequestId
   }
 
@@ -374,8 +398,9 @@ export class GatewayConnectionManager {
     this.historyTail = [...this.historyTail, nextMessage]
   }
 
-  private recordDesktopQueryInHistory(content: string, requestId: string) {
-    const normalizedContent = String(content || '')
+  private recordDesktopQueryInHistory(content: string, requestId: string, attachments: DesktopQueryAttachment[] = []) {
+    const normalizedAttachments = Array.isArray(attachments) ? attachments.filter((item) => item && typeof item === 'object') : []
+    const normalizedContent = String(content || '') || (normalizedAttachments.length > 0 ? this.desktopAttachmentPlaceholder(normalizedAttachments) : '')
     const normalizedRequestId = String(requestId || '').trim()
     if (!normalizedContent.trim() || !normalizedRequestId) {
       return
@@ -393,8 +418,20 @@ export class GatewayConnectionManager {
         pending: true,
         platform: 'desktop',
         message_type: 'query',
+        attachments: normalizedAttachments.length > 0 ? normalizedAttachments : undefined,
       },
     })
+  }
+
+  private desktopAttachmentPlaceholder(attachments: DesktopQueryAttachment[]) {
+    const count = attachments.length
+    if (count <= 0) {
+      return ''
+    }
+    if (count === 1) {
+      return `[document]`
+    }
+    return `[${count} documents]`
   }
 
   private applyEventToHistory(payload: any, eventType: string) {

@@ -1,4 +1,5 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, screen, shell } from 'electron'
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, screen, shell } from 'electron'
+import { promises as fs } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
@@ -49,6 +50,20 @@ interface GatewayConnectionConfig {
   apiToken: string
 }
 
+interface PickedGatewayDocument {
+  filePath: string
+  filename: string
+  mimeType: string
+  sizeBytes: number
+}
+
+interface PendingGatewayDocumentUpload {
+  filePath: string
+  filename: string
+  mimeType?: string
+  sizeBytes?: number
+}
+
 function getDesktopDeviceId() {
   const existing = String(store.get('desktopDeviceId') || '').trim()
   if (existing) {
@@ -80,6 +95,103 @@ function configureGatewayConnection() {
   gatewayConnectionManager.configure(getStoredGatewayTransportConfig())
 }
 
+function inferDesktopDocumentMimeType(filename: string) {
+  const extension = path.extname(String(filename || '')).toLowerCase()
+  if (extension === '.pdf') return 'application/pdf'
+  if (extension === '.docx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+  if (extension === '.pptx') return 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+  return 'application/octet-stream'
+}
+
+async function pickGatewayDocuments() {
+  if (!win) {
+    throw new Error('Main window is not available.')
+  }
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Attach documents',
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      {
+        name: 'Documents',
+        extensions: ['pdf', 'docx', 'pptx'],
+      },
+    ],
+  })
+  if (result.canceled || result.filePaths.length === 0) {
+    return []
+  }
+
+  const picked: PickedGatewayDocument[] = []
+  for (const filePath of result.filePaths) {
+    const filename = path.basename(filePath)
+    const stats = await fs.stat(filePath)
+    if (!stats.isFile()) {
+      continue
+    }
+    picked.push({
+      filePath,
+      filename,
+      mimeType: inferDesktopDocumentMimeType(filename),
+      sizeBytes: stats.size,
+    })
+  }
+  return picked
+}
+
+async function uploadDesktopDocumentsToGateway(
+  config: PersistentGatewayConnectionConfig,
+  requestId: string,
+  sessionId: string,
+  attachments: PendingGatewayDocumentUpload[],
+) {
+  if (!requestId.trim()) {
+    throw new Error('requestId is required before uploading documents.')
+  }
+  if (!sessionId.trim()) {
+    throw new Error('Desktop session is not ready yet. Reconnect to the VM and retry.')
+  }
+  const uploadUrl = new URL('/channels/desktop/uploads', `${config.baseUrl.replace(/\/$/, '')}/`).toString()
+  const formData = new FormData()
+  formData.set('request_id', requestId)
+  formData.set('session_id', sessionId)
+  formData.set('device_id', config.deviceId)
+
+  for (const attachment of attachments) {
+    const filePath = String(attachment?.filePath || '').trim()
+    const filename = String(attachment?.filename || '').trim() || path.basename(filePath)
+    if (!filePath || !filename) {
+      continue
+    }
+    const fileBytes = await fs.readFile(filePath)
+    const mimeType = String(attachment?.mimeType || '').trim() || inferDesktopDocumentMimeType(filename)
+    formData.append('files', new Blob([fileBytes], { type: mimeType }), filename)
+  }
+
+  const response = await fetch(uploadUrl, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.apiToken}`,
+    },
+    body: formData,
+  })
+  if (!response.ok) {
+    let detail = `Document upload failed (${response.status})`
+    try {
+      const body = await response.json()
+      const remoteDetail = typeof body?.detail === 'string' ? body.detail.trim() : ''
+      if (remoteDetail) {
+        detail = remoteDetail
+      }
+    } catch {
+      // ignore parse failure and fall back to generic status text
+    }
+    throw new Error(detail)
+  }
+
+  const payload = await response.json()
+  return Array.isArray(payload?.attachments) ? payload.attachments : []
+}
+
 function syncGatewaySettingsFromPayload(settings: any) {
   if (!settings || typeof settings !== 'object') {
     return
@@ -109,6 +221,41 @@ function syncGatewaySettingsFromPayload(settings: any) {
   }
 
   configureGatewayConnection()
+}
+
+const GATEWAY_SYSTEM_METRIC_PATHS = [
+  '/system/metrics',
+  '/system/status',
+  '/health',
+]
+
+async function getGatewaySystemMetrics(config: GatewayConnectionConfig) {
+  let lastError: unknown = null
+  for (const pathName of GATEWAY_SYSTEM_METRIC_PATHS) {
+    try {
+      const payload = await callGatewayJson(config, pathName, { timeoutMs: 10000 })
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        return {
+          sourceEndpoint: pathName,
+          source: 'gateway-system-metrics',
+          fetchedAt: Date.now(),
+          value: payload,
+        }
+      }
+      return {
+        ...payload,
+        sourceEndpoint: pathName,
+        source: 'gateway-system-metrics',
+        fetchedAt: Date.now(),
+      }
+    } catch (error: unknown) {
+      lastError = error
+    }
+  }
+  if (lastError instanceof Error) {
+    throw lastError
+  }
+  throw new Error('Gateway system metrics endpoint is unavailable.')
 }
 
 function unwrapWhatsAppBridgePayload(payload: any) {
@@ -693,16 +840,44 @@ app.whenReady().then(() => {
     return gatewayConnectionManager?.getState() || null
   })
 
-  ipcMain.handle('gateway:send-query', async (_, payload: { content: string; conversationContext?: any[]; requestId?: string; routeOverride?: string }) => {
+  ipcMain.handle('gateway:pick-documents', async () => {
+    return { documents: await pickGatewayDocuments() }
+  })
+
+  ipcMain.handle('gateway:send-query', async (_, payload: {
+    content: string
+    conversationContext?: any[]
+    requestId?: string
+    routeOverride?: string
+    attachments?: PendingGatewayDocumentUpload[]
+  }) => {
     if (!gatewayConnectionManager) {
       throw new Error('Gateway connection manager is unavailable.')
+    }
+    const effectiveRequestId = String(payload?.requestId || '').trim() || `req_${crypto.randomUUID()}`
+    let stagedAttachments: any[] = []
+    const requestedAttachments = Array.isArray(payload?.attachments) ? payload.attachments : []
+    if (requestedAttachments.length > 0) {
+      const transportConfig = getStoredGatewayTransportConfig()
+      if (!transportConfig) {
+        throw new Error('Gateway transport is not configured.')
+      }
+      const gatewayState = gatewayConnectionManager.getState()
+      const sessionId = String(gatewayState?.sessionId || '').trim()
+      stagedAttachments = await uploadDesktopDocumentsToGateway(
+        transportConfig,
+        effectiveRequestId,
+        sessionId,
+        requestedAttachments,
+      )
     }
     return {
       requestId: gatewayConnectionManager.sendQuery(
         String(payload?.content || ''),
         Array.isArray(payload?.conversationContext) ? payload.conversationContext : [],
-        String(payload?.requestId || ''),
+        effectiveRequestId,
         String(payload?.routeOverride || ''),
+        stagedAttachments,
       ),
     }
   })
@@ -747,6 +922,14 @@ app.whenReady().then(() => {
       throw new Error('Gateway connection is not configured.')
     }
     return callGatewayJson(config, `/sessions/${encodeURIComponent(sessionId)}`)
+  })
+
+  ipcMain.handle('gateway:get-system-metrics', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return getGatewaySystemMetrics(config)
   })
 
   ipcMain.on('weather:request', (event) => {
