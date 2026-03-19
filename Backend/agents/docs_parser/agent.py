@@ -416,6 +416,9 @@ class DocsParserAgent(AgentRuntime):
         raw_path = Path(artifact["path"]).expanduser()
         if raw_path.is_absolute():
             return raw_path.resolve()
+        if len(raw_path.parts) >= 2 and raw_path.parts[0] == "runs" and raw_path.parts[1] == "artifacts":
+            backend_root = self.artifacts_root.parent.parent
+            return (backend_root / raw_path).resolve()
         return (self.artifacts_root / raw_path).resolve()
 
     def _verify_source_file(self, *, source_path: Path, artifact: dict[str, str]) -> Path:

@@ -282,6 +282,48 @@ async def test_docs_parser_agent_parse_bundle_persists_canonical_outputs(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_docs_parser_agent_accepts_gateway_logical_runs_artifacts_path(tmp_path: Path) -> None:
+    source_root = tmp_path / "runs" / "artifacts" / "req_ingest_002" / "inputs" / "art_pdf_002"
+    source_root.mkdir(parents=True, exist_ok=True)
+    source_file = source_root / "partners.pdf"
+    source_file.write_bytes(b"%PDF-1.7 fake partners pdf")
+    sha256 = hashlib.sha256(source_file.read_bytes()).hexdigest()
+
+    parser = StubParser()
+    agent = DocsParserAgent(
+        redis_client=FakeRedis(),
+        config=DocsParserConfig(redis_url="redis://unused", gateway_url="http://gateway", gateway_internal_token="internal-token"),
+        parser=parser,
+        store_root=tmp_path / "store",
+        runtime_root=tmp_path / "runtime",
+        artifacts_root=tmp_path / "runs" / "artifacts",
+        agent_secret="agent-secret",
+    )
+    await agent.on_startup()
+    try:
+        result = await agent.execute(
+            _make_task(
+                payload={"bundle_label": "Partners", "ocr_mode": "auto"},
+                input_artifacts=[
+                    {
+                        "artifact_id": "art_pdf_002",
+                        "path": "runs/artifacts/req_ingest_002/inputs/art_pdf_002/partners.pdf",
+                        "mime": "application/pdf",
+                        "filename": "partners.pdf",
+                        "sha256": sha256,
+                    }
+                ],
+            )
+        )
+    finally:
+        await agent.stop()
+
+    assert result.status == "completed"
+    assert parser.calls
+    assert parser.calls[0]["file_path"] == str(source_file.resolve())
+
+
+@pytest.mark.asyncio
 async def test_docs_parser_agent_rejects_missing_or_unsupported_artifacts(tmp_path: Path) -> None:
     agent = DocsParserAgent(
         redis_client=FakeRedis(),
