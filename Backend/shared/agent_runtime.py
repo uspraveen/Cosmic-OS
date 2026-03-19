@@ -109,9 +109,9 @@ class AgentRuntime:
                 group=WORKER_GROUP,
             )
 
-        await write_heartbeat(self._heartbeat(healthy=False), self.redis, status="starting")
+        await self._publish_heartbeat(healthy=False, status="starting")
         await self.on_startup()
-        await write_heartbeat(self._heartbeat(healthy=True), self.redis, status="healthy")
+        await self._publish_heartbeat(healthy=True, status="healthy")
         self._heartbeat_task = asyncio.create_task(
             self._heartbeat_loop(),
             name=f"{self.agent_id}-heartbeat",
@@ -195,7 +195,7 @@ class AgentRuntime:
 
     async def _heartbeat_loop(self) -> None:
         while True:
-            await write_heartbeat(self._heartbeat(healthy=True), self.redis, status="healthy")
+            await self._publish_heartbeat(healthy=True, status="healthy")
             await asyncio.sleep(self.heartbeat_interval_sec)
 
     async def _claim_stale_messages(self, stream: str) -> bool:
@@ -271,6 +271,7 @@ class AgentRuntime:
         )
 
         self._active_task_count += 1
+        await self._publish_heartbeat(healthy=True, status="healthy")
         try:
             result = await execute_with_idempotency(
                 working_task,
@@ -316,10 +317,14 @@ class AgentRuntime:
             await self.redis.xack(stream, WORKER_GROUP, message_id)
         finally:
             self._active_task_count = max(0, self._active_task_count - 1)
+            await self._publish_heartbeat(healthy=True, status="healthy")
             self.auth = None
             self.step_plan = None
             self.memory_read = None
             self.memory_write = None
+
+    async def _publish_heartbeat(self, *, healthy: bool, status: str | None = None) -> None:
+        await write_heartbeat(self._heartbeat(healthy=healthy), self.redis, status=status)
 
     def _heartbeat(self, *, healthy: bool) -> Heartbeat:
         return Heartbeat(

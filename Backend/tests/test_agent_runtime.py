@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -239,6 +240,19 @@ class DummyAgent(AgentRuntime):
         return self.result
 
 
+class BlockingAgent(AgentRuntime):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.started_event = asyncio.Event()
+        self.finish_event = asyncio.Event()
+
+    async def execute(self, task: TaskEnvelope) -> AgentResult:
+        del task
+        self.started_event.set()
+        await self.finish_event.wait()
+        return AgentResult(status="completed", output={"reply": "done"}, artifacts=[], error=None)
+
+
 @pytest.mark.asyncio
 async def test_agent_runtime_registers_card_and_heartbeats(tmp_path: Path) -> None:
     card_path = _write_agent_card(tmp_path)
@@ -262,6 +276,38 @@ async def test_agent_runtime_registers_card_and_heartbeats(tmp_path: Path) -> No
     assert ("streams:cosmic/test-agent:1.0.0:high", "workers") in client.groups
     assert client.hashes["registry:cosmic/test-agent:1.0.0:inst_001"]["status"] == "healthy"
     assert client.expirations["registry:cosmic/test-agent:1.0.0:inst_001"] == 35
+
+    await agent.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_refreshes_heartbeat_on_load_transition(tmp_path: Path) -> None:
+    card_path = _write_agent_card(tmp_path)
+    client = FakeRedis()
+    agent = BlockingAgent(
+        agent_card_path=card_path,
+        redis_client=client,
+        registry_db_path=tmp_path / "registry.db",
+        instance_id="inst_001",
+        agent_secret="agent-secret",
+    )
+    await agent.register()
+
+    task = _signed_task(agent_id=agent.agent_id, secret="agent-secret")
+    stream = task_stream_name(agent.agent_id, task.priority)
+    client.streams[stream] = [("1-0", {"envelope": task.model_dump_json()})]
+
+    poll_task = asyncio.create_task(agent.poll_once())
+    await asyncio.wait_for(agent.started_event.wait(), timeout=1.0)
+
+    heartbeat_key = "registry:cosmic/test-agent:1.0.0:inst_001"
+    assert client.hashes[heartbeat_key]["current_load"] == "1"
+
+    agent.finish_event.set()
+    handled = await asyncio.wait_for(poll_task, timeout=1.0)
+
+    assert handled is True
+    assert client.hashes[heartbeat_key]["current_load"] == "0"
 
     await agent.stop()
 
