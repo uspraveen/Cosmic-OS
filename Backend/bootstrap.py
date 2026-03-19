@@ -73,6 +73,10 @@ DOCS_PARSER_AGENT_ENV_NAME = "docs-parser-agent.env"
 DOCS_PARSER_AGENT_SERVICE_NAME = "cosmic-docs-parser-agent.service"
 DOCS_PARSER_AGENT_ID = "cosmic/docs-parser-agent:1.0.0"
 DOCS_PARSER_AGENT_DEFAULT_INSTANCE_ID = "docs-parser-agent-1"
+CRITICAL_VENV_IMPORT_CHECKS: Tuple[Tuple[str, str], ...] = (
+    ("docling", "docs parser runtime"),
+    ("docling.document_converter", "docs parser runtime"),
+)
 DEFAULT_POST_PROVISION_TIMEOUT_SEC = 120.0
 DEFAULT_POST_PROVISION_POLL_INTERVAL_SEC = 2.0
 CORE_BACKEND_SERVICE_UNITS = (
@@ -1285,6 +1289,39 @@ def install_python_requirements(venv_path: Path, requirements_path: Path) -> Non
     run_with_retry([str(python_path), "-m", "pip", "install", "-r", str(requirements_path)])
 
 
+def verify_critical_backend_dependencies(venv_path: Path) -> None:
+    python_path = venv_python_path(venv_path)
+    if not python_path.exists():
+        raise BootstrapError("Missing venv python executable at {0}".format(python_path))
+
+    for module_name, check_label in CRITICAL_VENV_IMPORT_CHECKS:
+        display_command = [str(python_path), "-c", "import {0}".format(module_name)]
+        try:
+            run(
+                [
+                    str(python_path),
+                    "-c",
+                    "import importlib; importlib.import_module({0!r})".format(module_name),
+                ],
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            combined_output = "\n".join(
+                part.strip()
+                for part in (exc.stdout or "", exc.stderr or "")
+                if part and part.strip()
+            ).strip()
+            details = combined_output or str(exc)
+            raise BootstrapError(
+                "Critical dependency check failed for {0} ({1}): {2}".format(
+                    module_name,
+                    check_label,
+                    details,
+                )
+            ) from exc
+        log("Verified {0} import for {1}".format(module_name, check_label))
+
+
 def has_node() -> bool:
     return executable_version(["node", "--version"]) is not None
 
@@ -1984,6 +2021,16 @@ def doctor(
     print("  venv available     : {0}".format("yes" if has_venv_module() else "no"))
     print("  target venv        : {0}".format(venv_path))
     print("  venv exists        : {0}".format("yes" if venv_python_path(venv_path).exists() else "no"))
+    docs_parser_dependency_status = "venv missing"
+    if venv_has_pip(venv_path):
+        try:
+            verify_critical_backend_dependencies(venv_path)
+            docs_parser_dependency_status = "ok"
+        except BootstrapError as exc:
+            docs_parser_dependency_status = "failed: {0}".format(exc)
+    elif venv_python_path(venv_path).exists():
+        docs_parser_dependency_status = "venv missing pip"
+    print("  docs parser deps   : {0}".format(docs_parser_dependency_status))
     print("  requirements file  : {0}".format(requirements_path if requirements_path.exists() else "missing"))
     print("  node available     : {0}".format(executable_version(["node", "--version"]) or "no"))
     print("  npm available      : {0}".format(executable_version(["npm", "--version"]) or "no"))
@@ -2191,6 +2238,7 @@ def setup_python(venv_path: Path, requirements_path: Path) -> None:
     ensure_virtualenv(venv_path)
     upgrade_venv_pip(venv_path)
     install_python_requirements(venv_path, requirements_path)
+    verify_critical_backend_dependencies(venv_path)
 
 
 def setup_whatsapp_bridge(bridge_dir: Path) -> None:

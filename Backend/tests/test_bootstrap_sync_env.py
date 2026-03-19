@@ -804,6 +804,80 @@ def test_ensure_memory_repo_checkout_clones_missing_repo(monkeypatch, tmp_path) 
     ]]
 
 
+def test_verify_critical_backend_dependencies_checks_required_imports(monkeypatch, tmp_path) -> None:
+    venv_path = tmp_path / ".venv"
+    python_path = venv_path / "bin" / "python"
+    python_path.parent.mkdir(parents=True, exist_ok=True)
+    python_path.write_text("", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(
+        bootstrap,
+        "run",
+        lambda command, **kwargs: commands.append(list(command)) or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    bootstrap.verify_critical_backend_dependencies(venv_path)
+
+    assert commands == [
+        [str(python_path), "-c", "import importlib; importlib.import_module('docling')"],
+        [str(python_path), "-c", "import importlib; importlib.import_module('docling.document_converter')"],
+    ]
+
+
+def test_verify_critical_backend_dependencies_raises_clear_error(monkeypatch, tmp_path) -> None:
+    venv_path = tmp_path / ".venv"
+    python_path = venv_path / "bin" / "python"
+    python_path.parent.mkdir(parents=True, exist_ok=True)
+    python_path.write_text("", encoding="utf-8")
+
+    def fake_run(command, **kwargs):
+        args = list(command)
+        if "docling.document_converter" in args[-1]:
+            raise subprocess.CalledProcessError(
+                returncode=1,
+                cmd=args,
+                output="",
+                stderr="ModuleNotFoundError: No module named 'docling.document_converter'",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(bootstrap, "run", fake_run)
+
+    try:
+        bootstrap.verify_critical_backend_dependencies(venv_path)
+    except bootstrap.BootstrapError as exc:
+        assert "docling.document_converter" in str(exc)
+        assert "Critical dependency check failed" in str(exc)
+    else:
+        raise AssertionError("Expected BootstrapError when a critical dependency import fails")
+
+
+def test_setup_python_verifies_critical_backend_dependencies(monkeypatch, tmp_path) -> None:
+    calls: list[str] = []
+
+    monkeypatch.setattr(bootstrap, "is_linux", lambda: True)
+    monkeypatch.setattr(bootstrap, "ensure_python3_available", lambda: calls.append("ensure_python3_available"))
+    monkeypatch.setattr(bootstrap, "ensure_pip", lambda: calls.append("ensure_pip"))
+    monkeypatch.setattr(bootstrap, "ensure_venv_support", lambda: calls.append("ensure_venv_support"))
+    monkeypatch.setattr(bootstrap, "ensure_virtualenv", lambda path: calls.append("ensure_virtualenv"))
+    monkeypatch.setattr(bootstrap, "upgrade_venv_pip", lambda path: calls.append("upgrade_venv_pip"))
+    monkeypatch.setattr(bootstrap, "install_python_requirements", lambda venv, reqs: calls.append("install_python_requirements"))
+    monkeypatch.setattr(bootstrap, "verify_critical_backend_dependencies", lambda path: calls.append("verify_critical_backend_dependencies"))
+
+    bootstrap.setup_python(tmp_path / ".venv", tmp_path / "requirements.txt")
+
+    assert calls == [
+        "ensure_python3_available",
+        "ensure_pip",
+        "ensure_venv_support",
+        "ensure_virtualenv",
+        "upgrade_venv_pip",
+        "install_python_requirements",
+        "verify_critical_backend_dependencies",
+    ]
+
+
 def test_ensure_neo4j_apt_repository_writes_repo_and_key(monkeypatch, tmp_path) -> None:
     keyring_path = tmp_path / "etc" / "apt" / "keyrings" / "neotechnology.gpg"
     source_path = tmp_path / "etc" / "apt" / "sources.list.d" / "neo4j.list"
