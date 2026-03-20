@@ -23,6 +23,7 @@ interface Message {
   id: string
   role: 'user' | 'assistant'
   content: string
+  attachments?: MessageAttachment[]
   thinking?: string
   activity?: string
   sources?: Array<{ url: string; title?: string; domain?: string } | string>
@@ -70,6 +71,13 @@ interface PendingDocumentAttachment {
   sizeBytes: number
 }
 
+interface MessageAttachment {
+  filePath: string | null
+  filename: string
+  mimeType: string | null
+  sizeBytes: number | null
+}
+
 interface SurfaceLaunchState {
   target: 'chat' | 'meeting' | 'spaces'
   token: number
@@ -98,6 +106,47 @@ const cleanText = (text: string) => {
   return text.replace(/^PROMPT:/, '')
 }
 
+const normalizeMessageAttachments = (value: unknown): MessageAttachment[] | undefined => {
+  if (!Array.isArray(value)) {
+    return undefined
+  }
+  const normalized = value
+    .map((item) => {
+      if (!item || typeof item !== 'object') {
+        return null
+      }
+      const rawFilePath = typeof (item as any).filePath === 'string'
+        ? (item as any).filePath.trim()
+        : typeof (item as any).file_path === 'string'
+          ? (item as any).file_path.trim()
+          : ''
+      const derivedFilename = rawFilePath
+        ? rawFilePath.split(/[\\/]/).pop() || ''
+        : ''
+      const filename = typeof (item as any).filename === 'string'
+        ? (item as any).filename.trim()
+        : typeof (item as any).file_name === 'string'
+          ? (item as any).file_name.trim()
+          : derivedFilename
+      if (!filename) {
+        return null
+      }
+      const rawSize = Number((item as any).sizeBytes ?? (item as any).size_bytes ?? 0)
+      return {
+        filePath: rawFilePath || null,
+        filename,
+        mimeType: typeof (item as any).mimeType === 'string'
+          ? (item as any).mimeType.trim()
+          : typeof (item as any).mime_type === 'string'
+            ? (item as any).mime_type.trim()
+            : null,
+        sizeBytes: Number.isFinite(rawSize) && rawSize > 0 ? rawSize : null,
+      } satisfies MessageAttachment
+    })
+    .filter((item): item is MessageAttachment => item !== null)
+  return normalized.length > 0 ? normalized : undefined
+}
+
 const historyToMessages = (history: any[] = []): Message[] => {
   return history
     .filter((item) => item && (item.role === 'user' || item.role === 'assistant'))
@@ -105,6 +154,7 @@ const historyToMessages = (history: any[] = []): Message[] => {
       id: String(item.message_id || `${item.role}-${index}-${crypto.randomUUID()}`),
       role: item.role,
       content: String(item.content || ''),
+      attachments: normalizeMessageAttachments(item?.metadata?.attachments),
       thinking: typeof item?.metadata?.thinking_text === 'string' ? item.metadata.thinking_text : undefined,
       sources: Array.isArray(item?.metadata?.sources) ? item.metadata.sources : undefined,
       stopped: Boolean(item?.metadata?.interrupted),
@@ -159,6 +209,44 @@ const buildPendingAttachmentSummary = (attachments: PendingDocumentAttachment[])
     return `Attached ${attachments[0].filename}`
   }
   return `Attached ${attachments.length} documents`
+}
+
+const DocumentAttachmentIcon = () => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
+    <path
+      d="M8.5 12.5L13.7 7.3a3 3 0 1 1 4.24 4.24l-7.07 7.07a5 5 0 1 1-7.07-7.07l8.48-8.49"
+      stroke="currentColor"
+      strokeWidth="1.9"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+)
+
+const UserMessageAttachments = ({ attachments }: { attachments?: MessageAttachment[] }) => {
+  if (!attachments || attachments.length <= 0) {
+    return null
+  }
+  return (
+    <div className="message-attachment-bar">
+      {attachments.map((attachment, index) => (
+        <div
+          key={attachment.filePath || `${attachment.filename}-${index}`}
+          className="message-attachment-chip"
+        >
+          <span className="message-attachment-icon" aria-hidden="true">
+            <DocumentAttachmentIcon />
+          </span>
+          <div className="message-attachment-copy">
+            <span className="message-attachment-name">{attachment.filename}</span>
+            <span className="message-attachment-meta">
+              {formatAttachmentSize(Number(attachment.sizeBytes || 0)) || attachment.mimeType || 'Document'}
+            </span>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 const normalizeGatewayModelSelection = (value: unknown): GatewayModelSelection => {
@@ -354,10 +442,11 @@ export default function App() {
     ...overrides,
   })
 
-  const createUserMessage = (content: string): Message => ({
+  const createUserMessage = (content: string, attachments?: MessageAttachment[]): Message => ({
     id: `user_${crypto.randomUUID()}`,
     role: 'user',
     content,
+    attachments,
   })
 
   const buildCronResultNotificationKey = (value: {
@@ -1633,12 +1722,14 @@ export default function App() {
     if ((!query.trim() && pendingAttachments.length === 0) || isStreaming) return
 
     const textToSend = query.trim()
+    const messageAttachments = normalizeMessageAttachments(pendingAttachments)
     const displayText = textToSend || buildPendingAttachmentSummary(pendingAttachments)
+    const userMessage = createUserMessage(displayText, messageAttachments)
     setQuery('')
     if (inputRef.current) inputRef.current.style.height = '24px'
     shouldAutoScrollRef.current = true
 
-    setMessages(prev => [...prev, createUserMessage(displayText)])
+    setMessages(prev => [...prev, userMessage])
     if (authState !== 'authenticated') {
       setMessages(prev => [...prev, {
         ...createAssistantMessage(),
@@ -1690,7 +1781,7 @@ export default function App() {
     window.cosmic.sendGatewayQuery({
       requestId,
       content: textToSend,
-      conversationContext: buildConversationContext([...messages, createUserMessage(displayText)]),
+      conversationContext: buildConversationContext([...messages, userMessage]),
       routeOverride: effectiveRouteOverride,
       attachments: pendingAttachments,
     }).then((result) => {
@@ -2507,6 +2598,7 @@ export default function App() {
                                     {cleanText(msg.content)}
                                   </span>
                                 </div>
+                                <UserMessageAttachments attachments={msg.attachments} />
                               </div>
                               {pairedResponse && (
                                 <div className="message-row assistant" style={{ marginBottom: 8, display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
@@ -2540,31 +2632,34 @@ export default function App() {
                     <div key={msg.id} className={`message-row ${msg.role}`} style={{ marginBottom: 24, display: 'flex', flexDirection: 'column', alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
 
                     {msg.role === 'user' ? (
-                        <div className="query-pill" style={{ maxWidth: '70%', alignSelf: 'flex-end', position: 'relative' }}>
-                          <span style={{
-                            display: 'inline-block',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                            maxWidth: '100%'
-                          }}>
-                            {cleanText(msg.content)}
-                          </span>
-                          <button
-                            className="copy-btn"
-                            onClick={() => handleCopy(msg.content, `user-${idx}`)}
-                          >
-                            {copiedId === `user-${idx}` ? (
-                              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                                <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
-                              </svg>
-                            ) : (
-                              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                                <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z" />
-                              </svg>
-                            )}
-                          </button>
-                        </div>
+                        <>
+                          <div className="query-pill" style={{ maxWidth: '70%', alignSelf: 'flex-end', position: 'relative' }}>
+                            <span style={{
+                              display: 'inline-block',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                              maxWidth: '100%'
+                            }}>
+                              {cleanText(msg.content)}
+                            </span>
+                            <button
+                              className="copy-btn"
+                              onClick={() => handleCopy(msg.content, `user-${idx}`)}
+                            >
+                              {copiedId === `user-${idx}` ? (
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                                  <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
+                                </svg>
+                              ) : (
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                                  <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z" />
+                                </svg>
+                              )}
+                            </button>
+                          </div>
+                          <UserMessageAttachments attachments={msg.attachments} />
+                        </>
                       ) : (
                         <>
                           {msg.activity && (
@@ -2770,15 +2865,7 @@ export default function App() {
                         {pendingAttachments.map((attachment) => (
                           <div key={attachment.filePath} className="composer-attachment-chip">
                             <span className="composer-attachment-icon" aria-hidden="true">
-                              <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
-                                <path
-                                  d="M8.5 12.5L13.7 7.3a3 3 0 1 1 4.24 4.24l-7.07 7.07a5 5 0 1 1-7.07-7.07l8.48-8.49"
-                                  stroke="currentColor"
-                                  strokeWidth="1.9"
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                />
-                              </svg>
+                              <DocumentAttachmentIcon />
                             </span>
                             <div className="composer-attachment-copy">
                               <span className="composer-attachment-name">{attachment.filename}</span>

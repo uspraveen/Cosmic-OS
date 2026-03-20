@@ -108,6 +108,8 @@ def _docs_search_progress(tool_input: dict[str, Any]) -> str:
 
 def _docs_read_progress(tool_input: dict[str, Any]) -> str:
     read_kind = str(tool_input.get("read_kind") or "").strip()
+    if read_kind == "document":
+        return "Reading canonical full-document markdown..."
     if read_kind in {"page_range", "slide_range"}:
         return f"Reading parsed {read_kind.replace('_', ' ')}..."
     if read_kind == "markdown_window":
@@ -508,8 +510,9 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         api_definition={
             "name": "docs_read",
             "description": (
-                "Read parsed document content by full-document markdown window, section, page range, slide range, chunk_ids, or anchor window. "
-                "The bundle has a canonical document.md surface; use read_kind=document with offset_chars and next_offset_chars to walk that source of truth sequentially when you need complete coverage. "
+                "Read parsed document content from the canonical document.md surface by full-document windows, sections, page ranges, slide ranges, chunk_ids, or anchor windows. "
+                "This is the full-document read/export surface for parsed docs; there is intentionally no separate docs.export_full_md tool. "
+                "Use read_kind=document with offset_chars and next_offset_chars to walk the source of truth sequentially when you need complete coverage. "
                 "In multi-document bundles, provide doc_id once you know which parsed document you want to inspect."
             ),
             "input_schema": {
@@ -525,7 +528,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                     },
                     "read_kind": {
                         "type": "string",
-                        "description": "How to read the parsed bundle: document, section, page_range, slide_range, chunk_ids, or markdown_window.",
+                        "description": "How to read the parsed bundle: document, section, page_range, slide_range, chunk_ids, or markdown_window. Use document for the canonical full-document markdown surface.",
                         "enum": ["document", "section", "page_range", "slide_range", "chunk_ids", "markdown_window"],
                     },
                     "section_id": {
@@ -559,7 +562,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                     },
                     "offset_chars": {
                         "type": "integer",
-                        "description": "Start offset into document.md when reading the full document sequentially.",
+                        "description": "Start offset into canonical document.md when reading the full document sequentially.",
                     },
                     "before_chars": {
                         "type": "integer",
@@ -571,7 +574,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                     },
                     "max_chars": {
                         "type": "integer",
-                        "description": "Maximum number of characters to return. Default 5000.",
+                        "description": "Maximum number of characters to return. For long full-document reads, keep walking document.md with next_offset_chars until done.",
                         "default": 5000,
                     }
                 },
@@ -579,7 +582,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             },
         },
         group="documents",
-        prompt_summary="Read parsed uploaded documents from canonical document.md by sequential windows, sections, page ranges, slide ranges, exact chunk IDs, or anchor windows without pretending the whole file is already in context.",
+        prompt_summary="Read parsed uploaded documents from canonical document.md. Use read_kind=document as the intentional full-document surface, then walk it by sequential windows, sections, page ranges, slide ranges, exact chunk IDs, or anchor windows without pretending the whole file is already in context.",
         progress_builder=_docs_read_progress,
         handler_method="_docs_read",
         read_only=True,
