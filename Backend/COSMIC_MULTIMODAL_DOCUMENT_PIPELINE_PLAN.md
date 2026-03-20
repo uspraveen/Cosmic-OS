@@ -62,6 +62,24 @@ For the current production slice, the ingest and parse path should enforce conse
 
 Files beyond these bounds should be rejected early with a clear user-visible error instead of being staged and then failing deep in the parse path.
 
+### 2.4 Current Visual Enrichment Policy
+
+For the current production slice, visual enrichment should be enabled conservatively:
+
+- **Docling remains the primary parser.**
+- **Picture description is enabled by default for PDF/image-style Docling pipelines when a hosted API key is configured.**
+- **Heavy VLM inference does not run on the COSMIC VM.** The VM only calls a hosted endpoint.
+- **Remote picture description must be allowed explicitly via Docling `enable_remote_services=True`.**
+- **Decorative picture classes should be skipped by default** to avoid wasting cost:
+  - `logo`
+  - `icon`
+  - `signature`
+  - `stamp`
+  - `qr_code`
+  - `bar_code`
+- **If hosted picture description fails, the document parse should fall back to plain parsing instead of failing the whole request.**
+- **In this Docling build, native picture-description controls are strongest on the PDF/image pipeline, not the generic DOCX/PPTX pipeline.**
+
 ---
 
 ## 3. High-Level Architecture

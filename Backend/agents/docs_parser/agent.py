@@ -4,7 +4,7 @@ import hashlib
 import json
 import logging
 import re
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -16,7 +16,7 @@ from shared.sqlite_client import connect_sync
 from shared import infer_document_mime_from_extension, is_supported_document_artifact
 
 from .config import AGENT_ROOT, BACKEND_ROOT, DocsParserConfig
-from .docling_adapter import DoclingAdapter, ParseRequest
+from .docling_adapter import DoclingAdapter, ParseRequest, PictureDescriptionRequest
 
 
 logger = logging.getLogger(__name__)
@@ -183,10 +183,9 @@ class DocsParserAgent(AgentRuntime):
                 f"Parsing document {index}/{len(artifacts)}: {artifact.get('filename') or artifact['artifact_id']}.",
             )
             try:
-                parsed = self.parser.parse_file(
-                    file_path=source_path,
-                    artifact_id=artifact["artifact_id"],
-                    mime_type=artifact["mime"],
+                parsed, enrichment_status = self._parse_with_enrichment_fallback(
+                    source_path=source_path,
+                    artifact=artifact,
                     request=parse_request,
                 )
             except Exception as exc:
@@ -207,6 +206,7 @@ class DocsParserAgent(AgentRuntime):
                 source_path=source_path,
                 parsed=parsed,
                 parse_request=parse_request,
+                enrichment_status=enrichment_status,
             )
             document_summaries.append(summary)
             produced_artifacts.extend(manifests)
@@ -409,6 +409,8 @@ class DocsParserAgent(AgentRuntime):
         ]
         for document in selected_documents:
             chunk_index = self._load_json_artifact(document, "chunk_index")
+            figures = chunk_index.get("figures") if isinstance(chunk_index.get("figures"), list) else []
+            tables = chunk_index.get("tables") if isinstance(chunk_index.get("tables"), list) else []
             for asset in chunk_index.get("assets", []) if isinstance(chunk_index.get("assets"), list) else []:
                 if not isinstance(asset, dict):
                     continue
@@ -430,6 +432,8 @@ class DocsParserAgent(AgentRuntime):
                         "doc_id": self._safe_text(document.get("doc_id")),
                         "asset_id": asset_id,
                         "asset": asset,
+                        "figure": self._match_related_entry(figures, "asset_id", asset_id),
+                        "table": self._match_related_entry(tables, "asset_id", asset_id),
                         "content": content,
                         "path": logical_path,
                     },
@@ -443,6 +447,14 @@ class DocsParserAgent(AgentRuntime):
             next_action="revise_input",
         )
 
+    def _match_related_entry(self, entries: list[Any], key: str, expected: str) -> dict[str, Any] | None:
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if self._safe_text(entry.get(key)) == expected:
+                return entry
+        return None
+
     def _build_parse_request(self, payload: dict[str, Any]) -> ParseRequest:
         ocr_mode = self._safe_text(payload.get("ocr_mode")) or "auto"
         if ocr_mode not in {"auto", "off", "force"}:
@@ -453,21 +465,124 @@ class DocsParserAgent(AgentRuntime):
                 next_action="revise_input",
             )
         enable_ocr = self.config.default_enable_ocr if ocr_mode == "auto" else (ocr_mode == "force")
+        picture_description = self._build_picture_description_request()
+        generate_picture_images = self._coerce_bool(
+            payload.get("generate_picture_images"),
+            default=self.config.default_generate_picture_images,
+        )
+        if picture_description is not None:
+            generate_picture_images = True
         return ParseRequest(
             enable_ocr=enable_ocr,
             generate_page_images=self._coerce_bool(
                 payload.get("generate_page_images"),
                 default=self.config.default_generate_page_images,
             ),
-            generate_picture_images=self._coerce_bool(
-                payload.get("generate_picture_images"),
-                default=self.config.default_generate_picture_images,
-            ),
+            generate_picture_images=generate_picture_images,
+            picture_description=picture_description,
             max_file_size_bytes=self.config.max_input_file_bytes,
             max_num_pages=self.config.max_num_pages,
             max_chunk_chars=self.config.max_chunk_chars,
             chunk_overlap_chars=self.config.chunk_overlap_chars,
         )
+
+    def _build_picture_description_request(self) -> PictureDescriptionRequest | None:
+        if not self.config.default_enable_picture_description:
+            return None
+        api_key = self._safe_text(self.config.picture_description_api_key)
+        api_url = self._safe_text(self.config.picture_description_api_url)
+        model = self._safe_text(self.config.picture_description_model)
+        preset = self._safe_text(self.config.picture_description_preset) or "qwen"
+        prompt = self._safe_text(self.config.picture_description_prompt)
+        if not api_key or not api_url or not model:
+            return None
+        return PictureDescriptionRequest(
+            api_key=api_key,
+            api_url=api_url,
+            model=model,
+            preset=preset,
+            prompt=prompt,
+            timeout_sec=self.config.picture_description_timeout_sec,
+            concurrency=self.config.picture_description_concurrency,
+            batch_size=self.config.picture_description_batch_size,
+            max_new_tokens=self.config.picture_description_max_new_tokens,
+            scale=self.config.picture_description_scale,
+            picture_area_threshold=self.config.picture_description_area_threshold,
+            classification_min_confidence=self.config.picture_description_classification_min_confidence,
+            classification_deny=tuple(self.config.picture_description_classification_deny),
+        )
+
+    def _parse_with_enrichment_fallback(
+        self,
+        *,
+        source_path: Path,
+        artifact: dict[str, str],
+        request: ParseRequest,
+    ) -> tuple[Any, dict[str, Any]]:
+        try:
+            parsed = self.parser.parse_file(
+                file_path=source_path,
+                artifact_id=artifact["artifact_id"],
+                mime_type=artifact["mime"],
+                request=request,
+            )
+            return parsed, self._enrichment_status(request, applied=True, fallback_reason=None)
+        except Exception as exc:
+            if request.picture_description is None or not self._should_retry_without_picture_description(exc):
+                raise
+            fallback_request = replace(request, picture_description=None)
+            parsed = self.parser.parse_file(
+                file_path=source_path,
+                artifact_id=artifact["artifact_id"],
+                mime_type=artifact["mime"],
+                request=fallback_request,
+            )
+            return parsed, self._enrichment_status(
+                request,
+                applied=False,
+                fallback_reason=str(exc).strip() or type(exc).__name__,
+            )
+
+    def _should_retry_without_picture_description(self, exc: Exception) -> bool:
+        normalized = (str(exc) or type(exc).__name__).strip().lower()
+        return any(
+            marker in normalized
+            for marker in (
+                "picture description",
+                "remote services",
+                "api_openai",
+                "openai",
+                "authentication",
+                "unauthorized",
+                "forbidden",
+                "rate limit",
+                "timed out",
+                "timeout",
+                "connection",
+                "ssl",
+            )
+        )
+
+    def _enrichment_status(
+        self,
+        request: ParseRequest,
+        *,
+        applied: bool,
+        fallback_reason: str | None,
+    ) -> dict[str, Any]:
+        if request.picture_description is None:
+            return {
+                "picture_description_requested": False,
+                "picture_description_applied": False,
+                "picture_description_model": None,
+                "picture_description_fallback_reason": None,
+            }
+        return {
+            "picture_description_requested": True,
+            "picture_description_applied": applied,
+            "picture_description_model": request.picture_description.model,
+            "picture_description_fallback_reason": fallback_reason,
+        }
 
     def _normalize_input_artifacts(self, raw_artifacts: list[dict[str, Any]]) -> list[dict[str, str]]:
         normalized: list[dict[str, str]] = []
@@ -579,6 +694,7 @@ class DocsParserAgent(AgentRuntime):
         source_path: Path,
         parsed,
         parse_request: ParseRequest,
+        enrichment_status: dict[str, Any],
     ) -> tuple[dict[str, Any], list[ArtifactManifest]]:
         bundle_root = self.artifacts_root / task.task_id / "docs_parser" / artifact["artifact_id"]
         bundle_root.mkdir(parents=True, exist_ok=True)
@@ -615,6 +731,7 @@ class DocsParserAgent(AgentRuntime):
             },
         )
         document_payload.setdefault("parse_request", asdict(parse_request))
+        document_payload.setdefault("visual_enrichment", enrichment_status)
 
         manifest_payload = {
             "doc_id": doc_id,
@@ -638,6 +755,7 @@ class DocsParserAgent(AgentRuntime):
                 "slide_count": parsed.slide_count,
                 "asset_count": int(normalized_chunk_index.get("asset_count") or 0),
             },
+            "visual_enrichment": enrichment_status,
         }
 
         document_json_path.write_text(json.dumps(document_payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -668,6 +786,7 @@ class DocsParserAgent(AgentRuntime):
             "page_count": parsed.page_count,
             "slide_count": parsed.slide_count,
             "asset_count": int(normalized_chunk_index.get("asset_count") or 0),
+            "visual_enrichment": enrichment_status,
             "artifact_refs": [item.artifact_id for item in artifacts],
             "paths": {
                 "manifest": self._logical_artifact_path(manifest_path),

@@ -125,6 +125,8 @@ class StubParser:
                         "figure_id": "fig_001",
                         "asset_id": "asset_fig_001",
                         "caption": "Architecture",
+                        "description": "A systems architecture diagram connecting gateway, orchestrator, and memory services.",
+                        "classification": {"label": "flow_chart", "confidence": 0.98},
                         "page_number": 2,
                         "start_char": markdown.index("[FIGURE id=fig_001"),
                         "end_char": markdown.index("## Key Changes") - 2,
@@ -144,6 +146,8 @@ class StubParser:
                         "figure_id": "fig_001",
                         "path": "assets/figures/fig_001.png",
                         "mime": "image/png",
+                        "description": "A systems architecture diagram connecting gateway, orchestrator, and memory services.",
+                        "classification": {"label": "flow_chart", "confidence": 0.98},
                     },
                 ],
                 "chunks": [
@@ -198,6 +202,36 @@ class FailingParser:
     ) -> ParsedDocument:
         del file_path, artifact_id, mime_type, request
         raise RuntimeError(self.message)
+
+
+class PictureDescriptionFallbackParser:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def parse_file(
+        self,
+        *,
+        file_path: Path,
+        artifact_id: str,
+        mime_type: str,
+        request: ParseRequest,
+    ) -> ParsedDocument:
+        self.calls.append(
+            {
+                "file_path": str(file_path),
+                "artifact_id": artifact_id,
+                "mime_type": mime_type,
+                "request": request,
+            }
+        )
+        if request.picture_description is not None:
+            raise RuntimeError("OpenAI picture description request timed out.")
+        return StubParser().parse_file(
+            file_path=file_path,
+            artifact_id=artifact_id,
+            mime_type=mime_type,
+            request=request,
+        )
 
 
 def _make_task(*, payload: dict[str, object], input_artifacts: list[dict[str, object]], session_id: str = "sess_docs") -> TaskEnvelope:
@@ -343,7 +377,12 @@ async def test_docs_parser_agent_parse_bundle_persists_canonical_outputs(tmp_pat
     parser = StubParser()
     agent = DocsParserAgent(
         redis_client=FakeRedis(),
-        config=DocsParserConfig(redis_url="redis://unused", gateway_url="http://gateway", gateway_internal_token="internal-token"),
+        config=DocsParserConfig(
+            redis_url="redis://unused",
+            gateway_url="http://gateway",
+            gateway_internal_token="internal-token",
+            picture_description_api_key="test-openai-key",
+        ),
         parser=parser,
         store_root=tmp_path / "store",
         runtime_root=tmp_path / "runtime",
@@ -380,6 +419,8 @@ async def test_docs_parser_agent_parse_bundle_persists_canonical_outputs(tmp_pat
     assert parser.calls
     assert parser.calls[0]["request"].max_file_size_bytes == agent.config.max_input_file_bytes
     assert parser.calls[0]["request"].max_num_pages == agent.config.max_num_pages
+    assert parser.calls[0]["request"].picture_description is not None
+    assert parser.calls[0]["request"].generate_picture_images is True
 
     output_root = tmp_path / "runs" / "artifacts" / "tsk_docs_parse_bundle" / "docs_parser" / "art_pdf_001"
     assert (output_root / "document.json").exists()
@@ -452,6 +493,11 @@ async def test_docs_parser_agent_parse_bundle_persists_canonical_outputs(tmp_pat
     assert asset_result.status == "completed"
     assert asset_result.output["asset"]["kind"] == "table_markdown"
     assert "| Alice |" in asset_result.output["content"]
+
+    figure_asset_result = await agent.execute(_make_fetch_asset_task(bundle_id=bundle_id, doc_id=doc_id, asset_id="asset_fig_001"))
+    assert figure_asset_result.status == "completed"
+    assert figure_asset_result.output["figure"]["classification"]["label"] == "flow_chart"
+    assert "systems architecture diagram" in figure_asset_result.output["figure"]["description"]
 
 
 @pytest.mark.asyncio
@@ -632,3 +678,52 @@ async def test_docs_parser_agent_classifies_docling_limit_failures_as_invalid_in
     assert result.error is not None
     assert result.error.code == "INVALID_INPUT"
     assert result.error.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_docs_parser_agent_falls_back_when_picture_description_fails(tmp_path: Path) -> None:
+    source_root = tmp_path / "runs" / "artifacts" / "req_ingest_005" / "inputs" / "art_pdf_005"
+    source_root.mkdir(parents=True, exist_ok=True)
+    source_file = source_root / "visual.pdf"
+    source_file.write_bytes(b"%PDF-1.7 fake visual pdf")
+
+    parser = PictureDescriptionFallbackParser()
+    agent = DocsParserAgent(
+        redis_client=FakeRedis(),
+        config=DocsParserConfig(
+            redis_url="redis://unused",
+            gateway_url="http://gateway",
+            gateway_internal_token="internal-token",
+            picture_description_api_key="test-openai-key",
+        ),
+        parser=parser,
+        store_root=tmp_path / "store",
+        runtime_root=tmp_path / "runtime",
+        artifacts_root=tmp_path / "runs" / "artifacts",
+        agent_secret="agent-secret",
+    )
+    await agent.on_startup()
+    try:
+        result = await agent.execute(
+            _make_task(
+                payload={},
+                input_artifacts=[
+                    {
+                        "artifact_id": "art_pdf_005",
+                        "path": str(source_file),
+                        "mime": "application/pdf",
+                        "filename": "visual.pdf",
+                    }
+                ],
+            )
+        )
+    finally:
+        await agent.stop()
+
+    assert result.status == "completed"
+    assert len(parser.calls) == 2
+    assert parser.calls[0]["request"].picture_description is not None
+    assert parser.calls[1]["request"].picture_description is None
+    assert result.output["documents"][0]["visual_enrichment"]["picture_description_requested"] is True
+    assert result.output["documents"][0]["visual_enrichment"]["picture_description_applied"] is False
+    assert "timed out" in result.output["documents"][0]["visual_enrichment"]["picture_description_fallback_reason"]

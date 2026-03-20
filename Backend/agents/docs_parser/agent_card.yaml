@@ -42,7 +42,7 @@ artifact_types:
   - table_extract
 
 policies:
-  network_access: false
+  network_access: true
   writable_paths:
     - runs/artifacts
     - agents/docs_parser/store

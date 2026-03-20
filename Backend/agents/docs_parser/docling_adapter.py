@@ -20,10 +20,28 @@ class ParseRequest:
     enable_ocr: bool
     generate_page_images: bool
     generate_picture_images: bool
+    picture_description: "PictureDescriptionRequest | None"
     max_file_size_bytes: int
     max_num_pages: int
     max_chunk_chars: int
     chunk_overlap_chars: int
+
+
+@dataclass(slots=True)
+class PictureDescriptionRequest:
+    api_key: str
+    api_url: str
+    model: str
+    preset: str
+    prompt: str
+    timeout_sec: float
+    concurrency: int
+    batch_size: int
+    max_new_tokens: int
+    scale: float
+    picture_area_threshold: float
+    classification_min_confidence: float
+    classification_deny: tuple[str, ...]
 
 
 @dataclass(slots=True)
@@ -119,8 +137,9 @@ class DoclingAdapter:
     def _convert(self, *, file_path: Path, request: ParseRequest) -> tuple[Any, Any]:
         try:
             from docling.datamodel.base_models import InputFormat
-            from docling.datamodel.pipeline_options import PdfPipelineOptions
-            from docling.document_converter import DocumentConverter, PdfFormatOption
+            from docling.datamodel.pipeline_options import PdfPipelineOptions, PictureDescriptionVlmEngineOptions
+            from docling.datamodel.vlm_engine_options import ApiVlmEngineOptions, VlmEngineType
+            from docling.document_converter import DocumentConverter, ImageFormatOption, PdfFormatOption
         except ImportError as exc:
             raise RuntimeError("Docling is not installed in the current runtime.") from exc
         try:
@@ -129,11 +148,53 @@ class DoclingAdapter:
             TableFormerMode = None
 
         format_options: dict[Any, Any] = {}
-        if file_path.suffix.lower() == ".pdf":
+        pdf_like_options = None
+        if file_path.suffix.lower() in {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}:
             pipeline_options = PdfPipelineOptions()
             pipeline_options.do_ocr = request.enable_ocr
             pipeline_options.generate_page_images = request.generate_page_images
             pipeline_options.generate_picture_images = request.generate_picture_images
+            if request.picture_description is not None:
+                pipeline_options.enable_remote_services = True
+                pipeline_options.do_picture_classification = True
+                pipeline_options.do_picture_description = True
+                pipeline_options.picture_description_options = PictureDescriptionVlmEngineOptions.from_preset(
+                    request.picture_description.preset,
+                    engine_options=ApiVlmEngineOptions(
+                        engine_type=VlmEngineType.API_OPENAI,
+                        url=request.picture_description.api_url,
+                        headers={
+                            "Authorization": f"Bearer {request.picture_description.api_key}",
+                        },
+                        params={
+                            "model": request.picture_description.model,
+                            "max_tokens": request.picture_description.max_new_tokens,
+                            "temperature": 0,
+                        },
+                        timeout=request.picture_description.timeout_sec,
+                        concurrency=request.picture_description.concurrency,
+                    ),
+                )
+                picture_description_options = getattr(pipeline_options, "picture_description_options", None)
+                if picture_description_options is not None:
+                    if hasattr(picture_description_options, "batch_size"):
+                        picture_description_options.batch_size = request.picture_description.batch_size
+                    if hasattr(picture_description_options, "scale"):
+                        picture_description_options.scale = request.picture_description.scale
+                    if hasattr(picture_description_options, "picture_area_threshold"):
+                        picture_description_options.picture_area_threshold = request.picture_description.picture_area_threshold
+                    if hasattr(picture_description_options, "classification_min_confidence"):
+                        picture_description_options.classification_min_confidence = (
+                            request.picture_description.classification_min_confidence
+                        )
+                    if hasattr(picture_description_options, "classification_deny"):
+                        picture_description_options.classification_deny = list(request.picture_description.classification_deny)
+                    if hasattr(picture_description_options, "prompt"):
+                        picture_description_options.prompt = request.picture_description.prompt
+                    generation_config = getattr(picture_description_options, "generation_config", None)
+                    if isinstance(generation_config, dict):
+                        generation_config.setdefault("do_sample", False)
+                        generation_config["max_new_tokens"] = request.picture_description.max_new_tokens
             if hasattr(pipeline_options, "do_table_structure"):
                 pipeline_options.do_table_structure = True
             table_structure_options = getattr(pipeline_options, "table_structure_options", None)
@@ -142,7 +203,10 @@ class DoclingAdapter:
                     table_structure_options.mode = TableFormerMode.ACCURATE
                 except Exception:
                     pass
-            format_options[InputFormat.PDF] = PdfFormatOption(pipeline_options=pipeline_options)
+            pdf_like_options = pipeline_options
+        if pdf_like_options is not None:
+            format_options[InputFormat.PDF] = PdfFormatOption(pipeline_options=pdf_like_options)
+            format_options[InputFormat.IMAGE] = ImageFormatOption(pipeline_options=pdf_like_options)
 
         converter = DocumentConverter(**({"format_options": format_options} if format_options else {}))
         try:
@@ -328,8 +392,10 @@ class DoclingAdapter:
         for index, item in enumerate(self._iter_collection(document, "pictures"), start=1):
             page_number = self._extract_page_number(item)
             caption = self._extract_caption(item, document) or None
+            description = self._extract_picture_description(item)
+            classification = self._extract_picture_classification(item)
             self_ref = str(getattr(item, "self_ref", "") or "")
-            figure_id = f"fig_{self._stable_id(f'figure:{index}:{caption}:{page_number}:{self_ref}')}"
+            figure_id = f"fig_{self._stable_id(f'figure:{index}:{caption}:{description}:{page_number}:{self_ref}')}"
             asset_id = None
             image_bytes = self._image_to_png_bytes(self._extract_item_image(item, document))
             if image_bytes is not None:
@@ -337,9 +403,27 @@ class DoclingAdapter:
                 relative_path = f"assets/figures/{figure_id}.png"
                 asset_files.append((relative_path, image_bytes, "image/png"))
                 asset_entries.append(
-                    {"asset_id": asset_id, "kind": "figure_image", "figure_id": figure_id, "page_number": page_number, "path": relative_path, "mime": "image/png"}
+                    {
+                        "asset_id": asset_id,
+                        "kind": "figure_image",
+                        "figure_id": figure_id,
+                        "page_number": page_number,
+                        "path": relative_path,
+                        "mime": "image/png",
+                        "description": description,
+                        "classification": classification,
+                    }
                 )
-            figure_entries.append({"figure_id": figure_id, "asset_id": asset_id, "caption": caption, "page_number": page_number})
+            figure_entries.append(
+                {
+                    "figure_id": figure_id,
+                    "asset_id": asset_id,
+                    "caption": caption,
+                    "description": description,
+                    "classification": classification,
+                    "page_number": page_number,
+                }
+            )
 
         for index, item in enumerate(self._iter_collection(document, "tables"), start=1):
             page_number = self._extract_page_number(item)
@@ -410,6 +494,39 @@ class DoclingAdapter:
                         return text
         caption = getattr(item, "caption", None)
         return self._flatten_text(caption)
+
+    def _extract_picture_description(self, item: Any) -> str | None:
+        meta = getattr(item, "meta", None)
+        if meta is None:
+            return None
+        description = getattr(meta, "description", None)
+        text = self._flatten_text(getattr(description, "text", None))
+        return text or None
+
+    def _extract_picture_classification(self, item: Any) -> dict[str, Any] | None:
+        meta = getattr(item, "meta", None)
+        if meta is None:
+            return None
+        classification = getattr(meta, "classification", None)
+        predictions = getattr(classification, "predictions", None)
+        if not isinstance(predictions, list) or not predictions:
+            return None
+        best: dict[str, Any] | None = None
+        for prediction in predictions:
+            class_name = self._flatten_text(getattr(prediction, "class_name", None))
+            confidence = getattr(prediction, "confidence", None)
+            if not class_name:
+                continue
+            candidate = {
+                "label": class_name,
+                "confidence": float(confidence) if isinstance(confidence, (int, float)) else None,
+            }
+            if best is None or (
+                candidate["confidence"] is not None
+                and (best.get("confidence") is None or candidate["confidence"] > best["confidence"])
+            ):
+                best = candidate
+        return best
 
     def _export_table_text(self, item: Any, document: Any, *, method_name: str) -> str:
         method = getattr(item, method_name, None)
