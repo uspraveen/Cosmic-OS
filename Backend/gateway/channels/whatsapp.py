@@ -7,6 +7,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -880,6 +881,32 @@ class WhatsAppAdapter(ChannelAdapter):
             json={"number": number, "message": message},
             headers=self._bridge_headers(),
         )
+
+    async def download_media(self, bridge_media_ref: str) -> tuple[bytes, str | None]:
+        await self.ensure_ready()
+        if self._http is None:
+            raise RuntimeError("WhatsApp bridge client is not initialized")
+
+        media_ref = self._coerce_str(bridge_media_ref)
+        message_id, _, attachment_id = media_ref.partition(":")
+        if not message_id or not attachment_id:
+            raise ValueError("Invalid WhatsApp bridge media reference")
+
+        path = f"/media/{quote(message_id, safe='')}/{quote(attachment_id, safe='')}"
+        try:
+            response = await self._http.get(path, headers=self._bridge_headers())
+            response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise RuntimeError("WhatsApp bridge media download timed out") from exc
+        except httpx.HTTPStatusError as exc:
+            detail = self._extract_bridge_error_detail(exc.response)
+            raise RuntimeError(detail) from exc
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"WhatsApp bridge media download failed: {exc}") from exc
+
+        raw_media_type = self._coerce_str(response.headers.get("content-type")) or ""
+        media_type = raw_media_type.split(";", 1)[0].strip() or None
+        return response.content, media_type
 
     async def _request_bridge_json(
         self,

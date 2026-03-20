@@ -334,6 +334,9 @@ class FakeWhatsAppChannelAdapter:
             "self_chat_only": bool(self_chat_only),
         }
 
+    async def download_media(self, bridge_media_ref: str) -> tuple[bytes, str | None]:
+        return (f"whatsapp:{bridge_media_ref}".encode("utf-8"), "image/jpeg")
+
 
 class FakeTelegramChannelAdapter:
     platform = "telegram"
@@ -901,6 +904,12 @@ async def test_runtime_uses_shared_daily_session_across_channels(tmp_path) -> No
 async def test_non_text_inbound_persists_artifacts_and_passes_them_to_opus(tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="opus")
     runtime.config.public_base_url = "https://gateway.example.test"
+
+    async def _fake_download(bridge_media_ref: str) -> tuple[bytes, str | None]:
+        assert bridge_media_ref == "wamid_img_1:att_1"
+        return (b"mock-whatsapp-image", "image/jpeg")
+
+    runtime.download_whatsapp_media = _fake_download  # type: ignore[method-assign]
     await runtime.start()
     try:
         result = await runtime.process_incoming_user_message(
@@ -923,7 +932,6 @@ async def test_non_text_inbound_persists_artifacts_and_passes_them_to_opus(tmp_p
                             "height": 720,
                             "sha256": "abc123",
                             "bridge_media_ref": "wamid_img_1:att_1",
-                            "download_url": "http://127.0.0.1:8091/media/wamid_img_1/att_1",
                         }
                     ],
                 },

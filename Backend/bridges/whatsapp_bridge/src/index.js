@@ -8,6 +8,7 @@ import express from 'express';
 import makeWASocket, {
   Browsers,
   DisconnectReason,
+  downloadContentFromMessage,
   fetchLatestBaileysVersion,
   getContentType,
   useMultiFileAuthState,
@@ -119,6 +120,11 @@ const sessionHealthConfig = {
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
+const inboundMediaStore = new Map();
+const INBOUND_MEDIA_TTL_MS = Math.max(
+  60 * 1000,
+  envInt('WHATSAPP_INBOUND_MEDIA_TTL_MS', 30 * 60 * 1000),
+);
 
 let sock = null;
 let connectPromise = null;
@@ -162,6 +168,69 @@ let bridgeConfig = {
   allowedPhone: normalizePhoneValue(process.env.WHATSAPP_ALLOWED_PHONE ?? ''),
   selfChatOnly: envBool('WHATSAPP_SELF_CHAT_ONLY', false),
 };
+
+function pruneInboundMediaStore(now = Date.now()) {
+  for (const [mediaRef, entry] of inboundMediaStore.entries()) {
+    if (!entry?.createdAt || now - entry.createdAt > INBOUND_MEDIA_TTL_MS) {
+      inboundMediaStore.delete(mediaRef);
+    }
+  }
+}
+
+function rememberInboundMedia(mediaRef, payload) {
+  if (!mediaRef || !payload?.source) {
+    return;
+  }
+  pruneInboundMediaStore();
+  inboundMediaStore.set(mediaRef, {
+    ...payload,
+    createdAt: Date.now(),
+  });
+}
+
+function mediaDownloadTypeForKind(kind) {
+  switch (String(kind || '').toLowerCase()) {
+    case 'image':
+      return 'image';
+    case 'video':
+      return 'video';
+    case 'audio':
+    case 'voice':
+      return 'audio';
+    case 'document':
+      return 'document';
+    case 'sticker':
+      return 'sticker';
+    default:
+      return null;
+  }
+}
+
+async function readInboundMediaBuffer(mediaRef) {
+  pruneInboundMediaStore();
+  const entry = inboundMediaStore.get(mediaRef);
+  if (!entry?.source) {
+    const error = new Error('Media reference not found');
+    error.statusCode = 404;
+    throw error;
+  }
+  const downloadType = mediaDownloadTypeForKind(entry.kind);
+  if (!downloadType) {
+    const error = new Error('Unsupported media kind');
+    error.statusCode = 400;
+    throw error;
+  }
+  const stream = await downloadContentFromMessage(entry.source, downloadType);
+  const chunks = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.from(chunk));
+  }
+  return {
+    buffer: Buffer.concat(chunks),
+    mimeType: entry.mime_type ?? 'application/octet-stream',
+    filename: entry.filename ?? null,
+  };
+}
 
 function isoNow() {
   return new Date().toISOString();
@@ -639,6 +708,7 @@ function buildAttachment(kind, source) {
     height: coerceNumber(source?.height),
     duration_ms: source?.seconds ? coerceNumber(source.seconds) * 1000 : null,
     sha256: source?.fileSha256 ? Buffer.from(source.fileSha256).toString('base64') : null,
+    _source: source ?? null,
   };
 }
 
@@ -836,12 +906,25 @@ function buildInboundPayload(msg) {
   const chatJid = msg?.key?.remoteJid ?? senderJid;
   const senderPhone = identity.senderPhone;
   const details = extractMessageDetails(msg?.message);
-  const attachments = details.attachments.map((attachment, index) => ({
-    id: `att_${index + 1}`,
-    bridge_media_ref: `${messageId}:att_${index + 1}`,
-    download_url: null,
-    ...attachment,
-  }));
+  const attachments = details.attachments.map((attachment, index) => {
+    const attachmentId = `att_${index + 1}`;
+    const mediaRef = `${messageId}:${attachmentId}`;
+    const { _source, ...publicAttachment } = attachment;
+    if (_source) {
+      rememberInboundMedia(mediaRef, {
+        kind: attachment.kind,
+        source: _source,
+        mime_type: attachment.mime_type,
+        filename: attachment.filename,
+      });
+    }
+    return {
+      id: attachmentId,
+      bridge_media_ref: mediaRef,
+      download_url: `/media/${messageId}/${attachmentId}`,
+      ...publicAttachment,
+    };
+  });
 
   return {
     schema_version: 1,
@@ -1129,6 +1212,29 @@ app.get('/config', verifyBridgeToken, async (_req, res) => {
     status: 'ok',
     config: buildBridgeConfigPayload(),
   });
+});
+
+app.get('/media/:messageId/:attachmentId', verifyBridgeToken, async (req, res) => {
+  try {
+    const messageId = String(req.params?.messageId ?? '').trim();
+    const attachmentId = String(req.params?.attachmentId ?? '').trim();
+    if (!messageId || !attachmentId) {
+      res.status(400).json({ error: 'messageId and attachmentId are required' });
+      return;
+    }
+    const mediaRef = `${messageId}:${attachmentId}`;
+    const payload = await readInboundMediaBuffer(mediaRef);
+    if (payload.filename) {
+      const safeFilename = String(payload.filename).replace(/"/g, '');
+      res.setHeader('Content-Disposition', `inline; filename="${safeFilename}"`);
+    }
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    res.type(payload.mimeType || 'application/octet-stream');
+    res.send(payload.buffer);
+  } catch (error) {
+    const statusCode = Number(error?.statusCode) || 500;
+    res.status(statusCode).json({ error: error?.message ?? 'Failed to load media' });
+  }
 });
 
 app.post('/config', verifyBridgeToken, async (req, res) => {

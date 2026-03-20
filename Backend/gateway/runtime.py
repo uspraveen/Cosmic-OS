@@ -4622,6 +4622,14 @@ class GatewayRuntime:
         self.adapter_errors.pop("telegram", None)
         return response
 
+    async def download_whatsapp_media(self, bridge_media_ref: str) -> tuple[bytes, str | None]:
+        adapter = self.registry.adapters.get("whatsapp")
+        if adapter is None:
+            raise KeyError("whatsapp")
+        response = await adapter.download_media(bridge_media_ref)  # type: ignore[attr-defined]
+        self.adapter_errors.pop("whatsapp", None)
+        return response
+
     async def health_payload(self) -> dict[str, Any]:
         memory = dict(self._memory_health_snapshot)
         memory.setdefault("enabled", self.memory_client.enabled)
@@ -4951,17 +4959,22 @@ class GatewayRuntime:
 
     async def _download_artifact_bytes(self, manifest: dict[str, Any]) -> tuple[bytes | None, str | None]:
         download_url = self._safe_text(manifest.get("download_url"))
+        bridge_media_ref = self._safe_text(manifest.get("bridge_media_ref"))
+        source_platform = (self._safe_text(manifest.get("source_platform")) or "").lower()
+        source_channel = (self._safe_text(manifest.get("source_channel")) or "").lower()
         metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
 
         telegram_file_id = self._safe_text(metadata.get("telegram_file_id"))
         if not telegram_file_id:
-            bridge_media_ref = self._safe_text(manifest.get("bridge_media_ref"))
             if bridge_media_ref.startswith("telegram:file:"):
                 telegram_file_id = bridge_media_ref.split("telegram:file:", 1)[1]
-        if not telegram_file_id and download_url.startswith("/internal/channels/telegram/media/"):
+        if not telegram_file_id and download_url and download_url.startswith("/internal/channels/telegram/media/"):
             telegram_file_id = download_url.rsplit("/", 1)[-1]
         if telegram_file_id:
             return await self.download_telegram_media(telegram_file_id)
+
+        if bridge_media_ref and (source_platform == "whatsapp" or source_channel.startswith("whatsapp:")):
+            return await self.download_whatsapp_media(bridge_media_ref)
 
         if not download_url:
             return None, None
