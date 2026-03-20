@@ -9,7 +9,7 @@ import pytest
 
 from agents.docs_parser.agent import DocsParserAgent
 from agents.docs_parser.config import DocsParserConfig
-from agents.docs_parser.docling_adapter import ParseRequest, ParsedDocument
+from agents.docs_parser.docling_adapter import DoclingAdapter, ParseRequest, ParsedDocument
 from agents.docs_parser.office_renderer import RenderedOfficeDocument
 from shared import TaskEnvelope, sign_task_envelope, utcnow
 
@@ -159,16 +159,25 @@ class StubParser:
                         "section_id": "sec_1",
                         "section_title": "Quarterly Strategy",
                         "text": "Overview paragraph.",
+                        "search_text": "Quarterly Strategy Overview paragraph.",
                         "doc_start_char": markdown.index("Overview paragraph."),
                         "doc_end_char": markdown.index("Overview paragraph.") + len("Overview paragraph."),
+                        "prev_chunk_id": None,
+                        "next_chunk_id": "chk_2",
                     },
                     {
                         "chunk_id": "chk_2",
                         "section_id": "sec_2",
                         "section_title": "Key Changes",
                         "text": "Shift focus to enterprise.",
+                        "search_text": (
+                            "Key Changes Shift focus to enterprise. "
+                            "Architecture systems architecture diagram gateway orchestrator memory services."
+                        ),
                         "doc_start_char": markdown.index("Shift focus to enterprise."),
                         "doc_end_char": markdown.index("Shift focus to enterprise.") + len("Shift focus to enterprise."),
+                        "prev_chunk_id": "chk_1",
+                        "next_chunk_id": None,
                     },
                 ],
                 "chunk_count": 2,
@@ -440,7 +449,12 @@ def _make_task(*, payload: dict[str, object], input_artifacts: list[dict[str, ob
     return task.model_copy(update={"signature": sign_task_envelope(task, "agent-secret")})
 
 
-def _make_search_task(*, bundle_id: str, query: str) -> TaskEnvelope:
+def _make_search_task(*, bundle_id: str, query: str, search_kind: str | None = None, doc_ids: list[str] | None = None) -> TaskEnvelope:
+    payload: dict[str, object] = {"bundle_id": bundle_id, "query": query}
+    if search_kind:
+        payload["search_kind"] = search_kind
+    if doc_ids:
+        payload["doc_ids"] = doc_ids
     task = TaskEnvelope(
         task_id="tsk_docs_search_bundle",
         task_list_id="sess_docs",
@@ -449,7 +463,7 @@ def _make_search_task(*, bundle_id: str, query: str) -> TaskEnvelope:
         sender="cosmic/orchestrator:1.0.0",
         recipient="cosmic/docs-parser-agent:1.0.0",
         intent="docs.search_bundle",
-        input={"bundle_id": bundle_id, "query": query},
+        input=payload,
         input_artifacts=[],
         idempotency_key="idem_docs_search_bundle",
         priority="normal",
@@ -626,6 +640,14 @@ async def test_docs_parser_agent_parse_bundle_persists_canonical_outputs(tmp_pat
     assert search_result.status == "completed"
     assert search_result.output["count"] >= 1
     assert search_result.output["matches"][0]["doc_id"] == doc_id
+    assert search_result.output["matches"][0]["recommended_section_id"] is not None
+    assert search_result.output["matches"][0]["recommended_chunk_ids"]
+
+    visual_search_result = await agent.execute(_make_search_task(bundle_id=bundle_id, query="systems architecture diagram"))
+    assert visual_search_result.status == "completed"
+    assert visual_search_result.output["count"] >= 1
+    assert visual_search_result.output["matches"][0]["chunk_id"] == "chk_2"
+    assert visual_search_result.output["matches"][0]["recommended_read_kind"] in {"section", "chunk_ids"}
 
     browse_result = await agent.execute(_make_browse_task(bundle_id=bundle_id, index_kind="sections", doc_id=doc_id))
     assert browse_result.status == "completed"
@@ -682,6 +704,84 @@ async def test_docs_parser_agent_parse_bundle_persists_canonical_outputs(tmp_pat
     assert figure_asset_result.status == "completed"
     assert figure_asset_result.output["figure"]["classification"]["label"] == "flow_chart"
     assert "systems architecture diagram" in figure_asset_result.output["figure"]["description"]
+
+
+def test_docling_adapter_builds_structure_aware_chunks() -> None:
+    adapter = DoclingAdapter()
+    markdown = (
+        "# Strategy Review\n\n"
+        "First paragraph stays whole and ends with a full sentence. Another sentence closes this block.\n\n"
+        "Second paragraph carries the next complete idea and should stay intact for retrieval quality.\n\n"
+        "[FIGURE id=fig_001 asset_id=asset_fig_001 page=1 caption=\"Architecture\"]\n\n"
+        "Figure description follows as its own paragraph so the chunker should preserve it cleanly."
+    )
+    section = {
+        "section_id": "sec_strategy",
+        "title": "Strategy Review",
+        "start_char": 0,
+        "end_char": len(markdown),
+        "text": markdown.strip(),
+    }
+    chunks = adapter._chunk_section(
+        artifact_id="art_test_001",
+        markdown=markdown,
+        section=section,
+        max_chunk_chars=140,
+        chunk_overlap_chars=40,
+    )
+    assert len(chunks) >= 2
+    assert chunks[0]["text"].endswith(".")
+    assert any("Figure description follows" in chunk["text"] for chunk in chunks)
+    assert all("block_kinds" in chunk for chunk in chunks)
+
+
+def test_docling_adapter_enriches_chunk_search_text_with_figures_and_tables() -> None:
+    adapter = DoclingAdapter()
+    markdown = (
+        "[PAGE 1]\n\n"
+        "# Strategy Review\n\n"
+        "[TABLE id=tbl_001 asset_id=asset_tbl_001 page=1 title=\"Ownership Table\"]\n\n"
+        "[FIGURE id=fig_001 asset_id=asset_fig_001 page=1 caption=\"Architecture\"]\n\n"
+        "Gateway and memory coordination summary."
+    )
+    page_entries = [{"page_id": "page_0001", "page_number": 1, "start_char": 0, "end_char": len(markdown), "anchor_id": "page_0001"}]
+    figure_start = markdown.index("[FIGURE id=fig_001")
+    table_start = markdown.index("[TABLE id=tbl_001")
+    chunk_index = adapter._build_chunk_index(
+        artifact_id="art_test_002",
+        markdown=markdown,
+        max_chunk_chars=400,
+        chunk_overlap_chars=40,
+        page_entries=page_entries,
+        slide_entries=[],
+        figure_entries=[
+            {
+                "figure_id": "fig_001",
+                "asset_id": "asset_fig_001",
+                "caption": "Architecture",
+                "description": "A systems architecture diagram connecting gateway, orchestrator, and memory.",
+                "classification": {"label": "flow_chart", "confidence": 0.98},
+                "page_number": 1,
+                "start_char": figure_start,
+                "end_char": figure_start + len("[FIGURE id=fig_001 asset_id=asset_fig_001 page=1 caption=\"Architecture\"]"),
+            }
+        ],
+        table_entries=[
+            {
+                "table_id": "tbl_001",
+                "asset_id": "asset_tbl_001",
+                "title": "Ownership Table",
+                "text_excerpt": "| Owner | Alice |",
+                "page_number": 1,
+                "start_char": table_start,
+                "end_char": table_start + len("[TABLE id=tbl_001 asset_id=asset_tbl_001 page=1 title=\"Ownership Table\"]"),
+            }
+        ],
+        asset_entries=[],
+    )
+    search_text = " ".join(item.get("search_text", "") for item in chunk_index["chunks"])
+    assert "systems architecture diagram" in search_text.lower()
+    assert "ownership table" in search_text.lower()
 
 
 @pytest.mark.asyncio

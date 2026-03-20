@@ -463,7 +463,8 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "name": "docs_search",
             "description": (
                 "Search a parsed document bundle for relevant sections or chunks. "
-                "Use this after uploaded documents have been parsed instead of pretending you directly read the whole file."
+                "Use this after uploaded documents have been parsed instead of pretending you directly read the whole file. "
+                "Results may include recommended section or chunk follow-up reads."
             ),
             "input_schema": {
                 "type": "object",
@@ -497,7 +498,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             },
         },
         group="documents",
-        prompt_summary="Search parsed uploaded documents for relevant sections or chunks before reading larger spans.",
+        prompt_summary="Search parsed uploaded documents for relevant sections or chunks before reading larger spans, then follow any recommended section or chunk read hints when they are present.",
         progress_builder=_docs_search_progress,
         handler_method="_docs_search",
         read_only=True,

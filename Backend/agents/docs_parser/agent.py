@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import re
+from collections import Counter
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1406,8 +1408,11 @@ class DocsParserAgent(AgentRuntime):
         search_kind: str,
         doc_ids: list[str],
     ) -> list[dict[str, Any]]:
-        query_tokens = [token for token in re.split(r"[^a-z0-9]+", query.lower()) if token]
-        matches: list[dict[str, Any]] = []
+        normalized_query = " ".join(self._tokenize_terms(query))
+        query_tokens = self._tokenize_terms(query)
+        if not query_tokens:
+            return []
+        candidates: list[dict[str, Any]] = []
         allowed_doc_ids = set(doc_ids)
         for document in bundle_output.get("documents", []):
             if not isinstance(document, dict):
@@ -1419,46 +1424,99 @@ class DocsParserAgent(AgentRuntime):
             entries = chunk_index.get("sections") if search_kind == "sections" else chunk_index.get("chunks")
             if not isinstance(entries, list):
                 continue
+            section_lengths = self._section_length_map(chunk_index)
             for entry in entries:
                 if not isinstance(entry, dict):
                     continue
                 text = self._safe_text(entry.get("text"))
-                haystack = " ".join(
-                    (
-                        self._safe_text(document.get("title")),
-                        self._safe_text(entry.get("title") if search_kind == "sections" else entry.get("section_title")),
-                        text,
-                    )
-                ).lower()
-                score = self._score_text_match(query.lower(), query_tokens, haystack)
-                if score <= 0:
-                    continue
+                section_title = self._safe_text(entry.get("title") if search_kind == "sections" else entry.get("section_title"))
+                search_text = self._safe_text(entry.get("search_text")) or " ".join(
+                    part for part in (self._safe_text(document.get("title")), section_title, text) if part
+                )
+                candidates.append(
+                    {
+                        "document": document,
+                        "chunk_index": chunk_index,
+                        "entry": entry,
+                        "doc_id": doc_id,
+                        "doc_title": self._safe_text(document.get("title")),
+                        "section_title": section_title,
+                        "body_text": text,
+                        "search_text": search_text,
+                        "search_tokens": self._tokenize_terms(search_text),
+                        "section_lengths": section_lengths,
+                        "search_kind": search_kind,
+                    }
+                )
+        if not candidates:
+            return []
+        idf_map, average_length = self._compute_query_idf(query_tokens, candidates)
+        matches: list[dict[str, Any]] = []
+        for candidate in candidates:
+            score = self._score_search_candidate(
+                normalized_query=normalized_query,
+                query_tokens=query_tokens,
+                candidate=candidate,
+                idf_map=idf_map,
+                average_length=average_length,
+            )
+            if score <= 0:
+                continue
+            entry = candidate["entry"]
+            text = self._safe_text(candidate.get("body_text"))
+            match: dict[str, Any] = {
+                "doc_id": candidate["doc_id"],
+                "title": candidate["doc_title"] or None,
+                "score": score,
+                "excerpt": self._excerpt_around_query(text or self._safe_text(candidate.get("search_text")), query, query_tokens),
+            }
+            if search_kind == "sections":
                 match: dict[str, Any] = {
-                    "doc_id": doc_id,
-                    "title": self._safe_text(document.get("title")) or None,
+                    "doc_id": candidate["doc_id"],
+                    "title": candidate["doc_title"] or None,
                     "score": score,
-                    "excerpt": text[:800],
+                    "excerpt": self._excerpt_around_query(text or self._safe_text(candidate.get("search_text")), query, query_tokens),
+                    "chunk_id": self._safe_text(entry.get("section_id")) or None,
+                    "section_id": self._safe_text(entry.get("section_id")) or None,
+                    "section_title": self._safe_text(entry.get("title")) or None,
+                    "page_numbers": entry.get("page_numbers"),
+                    "slide_numbers": entry.get("slide_numbers"),
+                    "recommended_read_kind": "section",
+                    "recommended_section_id": self._safe_text(entry.get("section_id")) or None,
+                    "recommended_chunk_ids": self._recommended_chunk_ids_for_section(
+                        chunk_index=candidate["chunk_index"],
+                        section_id=self._safe_text(entry.get("section_id")),
+                    ),
                 }
-                if search_kind == "sections":
-                    match.update(
-                        {
-                            "section_id": self._safe_text(entry.get("section_id")) or None,
-                            "section_title": self._safe_text(entry.get("title")) or None,
-                            "page_numbers": entry.get("page_numbers"),
-                            "slide_numbers": entry.get("slide_numbers"),
-                        }
+            else:
+                section_id = self._safe_text(entry.get("section_id")) or None
+                recommended_chunk_ids = [
+                    chunk_id
+                    for chunk_id in (
+                        self._safe_text(entry.get("prev_chunk_id")) or None,
+                        self._safe_text(entry.get("chunk_id")) or None,
+                        self._safe_text(entry.get("next_chunk_id")) or None,
                     )
-                else:
-                    match.update(
-                        {
-                            "chunk_id": self._safe_text(entry.get("chunk_id")),
-                            "section_id": self._safe_text(entry.get("section_id")) or None,
-                            "section_title": self._safe_text(entry.get("section_title")) or None,
-                            "page_numbers": entry.get("page_numbers"),
-                            "slide_numbers": entry.get("slide_numbers"),
-                        }
-                    )
-                matches.append(match)
+                    if chunk_id
+                ]
+                match.update(
+                    {
+                        "chunk_id": self._safe_text(entry.get("chunk_id")),
+                        "section_id": section_id,
+                        "section_title": self._safe_text(entry.get("section_title")) or None,
+                        "page_numbers": entry.get("page_numbers"),
+                        "slide_numbers": entry.get("slide_numbers"),
+                        "prev_chunk_id": self._safe_text(entry.get("prev_chunk_id")) or None,
+                        "next_chunk_id": self._safe_text(entry.get("next_chunk_id")) or None,
+                        "recommended_read_kind": "chunk_ids",
+                        "recommended_section_id": section_id,
+                        "recommended_chunk_ids": recommended_chunk_ids,
+                    }
+                )
+                section_length = candidate["section_lengths"].get(section_id or "", 0)
+                if section_id and section_length and section_length <= 6000:
+                    match["recommended_read_kind"] = "section"
+            matches.append(match)
         matches.sort(
             key=lambda item: (
                 int(item.get("score") or 0),
@@ -1468,14 +1526,161 @@ class DocsParserAgent(AgentRuntime):
         )
         return matches[:limit]
 
-    def _score_text_match(self, normalized_query: str, query_tokens: list[str], haystack: str) -> int:
-        score = 0
-        if normalized_query and normalized_query in haystack:
-            score += 12
+    def _tokenize_terms(self, value: str) -> list[str]:
+        return [token for token in re.split(r"[^a-z0-9]+", value.lower()) if token]
+
+    def _compute_query_idf(self, query_tokens: list[str], candidates: list[dict[str, Any]]) -> tuple[dict[str, float], float]:
+        unique_query_tokens = list(dict.fromkeys(query_tokens))
+        doc_freq = {token: 0 for token in unique_query_tokens}
+        lengths: list[int] = []
+        for candidate in candidates:
+            token_list = candidate.get("search_tokens")
+            if not isinstance(token_list, list):
+                token_list = self._tokenize_terms(self._safe_text(candidate.get("search_text")))
+                candidate["search_tokens"] = token_list
+            lengths.append(len(token_list))
+            token_set = set(token_list)
+            for token in unique_query_tokens:
+                if token in token_set:
+                    doc_freq[token] += 1
+        total_docs = max(1, len(candidates))
+        average_length = sum(lengths) / len(lengths) if lengths else 1.0
+        idf_map = {
+            token: math.log(1.0 + ((total_docs - doc_freq[token] + 0.5) / (doc_freq[token] + 0.5)))
+            for token in unique_query_tokens
+        }
+        return idf_map, max(1.0, average_length)
+
+    def _score_search_candidate(
+        self,
+        *,
+        normalized_query: str,
+        query_tokens: list[str],
+        candidate: dict[str, Any],
+        idf_map: dict[str, float],
+        average_length: float,
+    ) -> int:
+        search_text = self._safe_text(candidate.get("search_text"))
+        body_text = self._safe_text(candidate.get("body_text"))
+        doc_title = self._safe_text(candidate.get("doc_title"))
+        section_title = self._safe_text(candidate.get("section_title"))
+        normalized_search = search_text.lower()
+        normalized_body = body_text.lower()
+        normalized_title = doc_title.lower()
+        normalized_section = section_title.lower()
+        token_list = candidate.get("search_tokens")
+        if not isinstance(token_list, list):
+            token_list = self._tokenize_terms(search_text)
+            candidate["search_tokens"] = token_list
+        counts = Counter(token_list)
+        matched_terms = sum(1 for token in query_tokens if counts.get(token, 0) > 0)
+        if matched_terms == 0:
+            return 0
+        length = max(1, len(token_list))
+        bm25 = 0.0
+        k1 = 1.5
+        b = 0.75
         for token in query_tokens:
-            if token in haystack:
-                score += 3
-        return score
+            tf = counts.get(token, 0)
+            if tf <= 0:
+                continue
+            idf = idf_map.get(token, 0.0)
+            denominator = tf + k1 * (1.0 - b + b * (length / average_length))
+            bm25 += idf * ((tf * (k1 + 1.0)) / denominator)
+        coverage = matched_terms / max(1, len(query_tokens))
+        score = bm25 * 8.0
+        if normalized_query and normalized_query in normalized_body:
+            score += 16.0
+        elif normalized_query and normalized_query in normalized_search:
+            score += 12.0
+        if normalized_query and normalized_query in normalized_section:
+            score += 8.0
+        if normalized_query and normalized_query in normalized_title:
+            score += 6.0
+        score += coverage * 18.0
+        score += self._query_proximity_bonus(query_tokens, token_list)
+        if search_text and body_text and search_text != body_text:
+            score += 2.0
+        return max(1, int(round(score * 10)))
+
+    def _query_proximity_bonus(self, query_tokens: list[str], token_list: list[str]) -> float:
+        if not query_tokens or not token_list:
+            return 0.0
+        positions: list[int] = []
+        for token in dict.fromkeys(query_tokens):
+            try:
+                positions.append(token_list.index(token))
+            except ValueError:
+                return 0.0
+        if not positions:
+            return 0.0
+        spread = max(positions) - min(positions)
+        if spread <= max(8, len(query_tokens) * 3):
+            return 5.0
+        if spread <= max(16, len(query_tokens) * 5):
+            return 2.0
+        return 0.0
+
+    def _excerpt_around_query(self, text: str, query: str, query_tokens: list[str], *, limit: int = 800) -> str:
+        if not text:
+            return ""
+        compact = " ".join(text.split())
+        if len(compact) <= limit:
+            return compact
+        normalized_compact = compact.lower()
+        normalized_query = query.lower().strip()
+        anchor = normalized_compact.find(normalized_query) if normalized_query else -1
+        if anchor < 0:
+            for token in query_tokens:
+                anchor = normalized_compact.find(token)
+                if anchor >= 0:
+                    break
+        if anchor < 0:
+            return self._bounded_excerpt(compact, limit=limit)
+        half = max(120, limit // 2)
+        start = max(0, anchor - half)
+        end = min(len(compact), start + limit)
+        if start > 0:
+            prior_space = compact.rfind(" ", 0, start)
+            if prior_space > 0:
+                start = prior_space + 1
+        if end < len(compact):
+            next_space = compact.find(" ", end)
+            if next_space > 0:
+                end = next_space
+        excerpt = compact[start:end].strip()
+        if start > 0:
+            excerpt = f"...{excerpt}"
+        if end < len(compact):
+            excerpt = f"{excerpt}..."
+        return excerpt
+
+    def _section_length_map(self, chunk_index: dict[str, Any]) -> dict[str, int]:
+        section_lengths: dict[str, int] = {}
+        for section in chunk_index.get("sections", []) if isinstance(chunk_index.get("sections"), list) else []:
+            if not isinstance(section, dict):
+                continue
+            section_id = self._safe_text(section.get("section_id"))
+            if not section_id:
+                continue
+            section_lengths[section_id] = len(self._safe_text(section.get("text")))
+        return section_lengths
+
+    def _recommended_chunk_ids_for_section(self, *, chunk_index: dict[str, Any], section_id: str, limit: int = 3) -> list[str]:
+        if not section_id:
+            return []
+        chunk_ids: list[str] = []
+        for chunk in chunk_index.get("chunks", []) if isinstance(chunk_index.get("chunks"), list) else []:
+            if not isinstance(chunk, dict):
+                continue
+            if self._safe_text(chunk.get("section_id")) != section_id:
+                continue
+            chunk_id = self._safe_text(chunk.get("chunk_id"))
+            if chunk_id:
+                chunk_ids.append(chunk_id)
+            if len(chunk_ids) >= limit:
+                break
+        return chunk_ids
 
     def _read_bundle_content(
         self,
@@ -1559,18 +1764,14 @@ class DocsParserAgent(AgentRuntime):
                     retryable=False,
                     next_action="revise_input",
                 )
-            rendered_parts: list[str] = []
-            rendered_chars = 0
-            for chunk in selected_chunks:
-                text = self._safe_text(chunk.get("text"))
-                if not text:
-                    continue
-                if rendered_parts and rendered_chars >= max_chars:
-                    break
-                remaining = max_chars - rendered_chars
-                rendered = text[:remaining]
-                rendered_parts.append(rendered)
-                rendered_chars += len(rendered)
+            content = self._render_chunks_from_markdown(markdown=markdown, chunks=selected_chunks, max_chars=max_chars)
+            for chunk in sorted(
+                selected_chunks,
+                key=lambda item: (
+                    int(item.get("doc_start_char") or 0) if isinstance(item, dict) else 0,
+                    self._safe_text(item.get("chunk_id")) if isinstance(item, dict) else "",
+                ),
+            ):
                 citations.append(
                     {
                         "doc_id": self._safe_text(document.get("doc_id")),
@@ -1579,7 +1780,10 @@ class DocsParserAgent(AgentRuntime):
                         "section_title": self._safe_text(chunk.get("section_title")) or None,
                     }
                 )
-            return "\n\n".join(rendered_parts), "chunks", citations, extra
+            return content, "chunks", citations, {
+                "requested_chunk_count": len(chunk_ids),
+                "resolved_chunk_count": len(selected_chunks),
+            }
 
         if read_kind == "page_range":
             return self._read_numbered_range(
@@ -1768,6 +1972,52 @@ class DocsParserAgent(AgentRuntime):
             if text:
                 rendered_parts.append(text)
         return "\n\n".join(rendered_parts)
+
+    def _render_chunks_from_markdown(self, *, markdown: str, chunks: list[dict[str, Any]], max_chars: int) -> str:
+        ranges: list[list[int]] = []
+        fallback_parts: list[str] = []
+        for chunk in sorted(
+            (item for item in chunks if isinstance(item, dict)),
+            key=lambda item: (
+                int(item.get("doc_start_char") or 0),
+                self._safe_text(item.get("chunk_id")),
+            ),
+        ):
+            text = self._safe_text(chunk.get("text"))
+            if text:
+                fallback_parts.append(text)
+            try:
+                start = int(chunk.get("doc_start_char"))
+                end = int(chunk.get("doc_end_char"))
+            except (TypeError, ValueError):
+                continue
+            if end <= start:
+                continue
+            if ranges and start <= ranges[-1][1]:
+                ranges[-1][1] = max(ranges[-1][1], end)
+            else:
+                ranges.append([start, end])
+        if not ranges:
+            return "\n\n".join(part[:max_chars] for part in fallback_parts if part)[:max_chars]
+        rendered_parts: list[str] = []
+        rendered_chars = 0
+        for start, end in ranges:
+            if rendered_parts and rendered_chars >= max_chars:
+                break
+            remaining = max_chars - rendered_chars
+            if remaining <= 0:
+                break
+            text = markdown[start:end].strip()
+            if not text:
+                continue
+            rendered = text[:remaining].rstrip()
+            if not rendered:
+                continue
+            rendered_parts.append(rendered)
+            rendered_chars += len(rendered) + (2 if len(rendered_parts) > 1 else 0)
+        if rendered_parts:
+            return "\n\n".join(rendered_parts)
+        return self._bounded_excerpt("\n\n".join(fallback_parts), limit=max_chars)
 
     def _load_json_artifact(self, document: dict[str, Any], key: str) -> dict[str, Any]:
         path = self._document_path(document, key)

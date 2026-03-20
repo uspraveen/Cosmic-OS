@@ -514,7 +514,15 @@ class DoclingAdapter:
                 asset_entries.append(
                     {"asset_id": asset_id, "kind": "table_markdown", "table_id": table_id, "page_number": page_number, "path": relative_path, "mime": "text/markdown"}
                 )
-            table_entries.append({"table_id": table_id, "asset_id": asset_id, "title": title, "page_number": page_number})
+            table_entries.append(
+                {
+                    "table_id": table_id,
+                    "asset_id": asset_id,
+                    "title": title,
+                    "page_number": page_number,
+                    "text_excerpt": self._bounded_excerpt(markdown_text, limit=400) if markdown_text else None,
+                }
+            )
         return asset_files, asset_entries, figure_entries, table_entries, page_image_by_number
 
     def _iter_collection(self, document: Any, attr_name: str) -> list[Any]:
@@ -744,6 +752,7 @@ class DoclingAdapter:
             chunks.extend(
                 self._chunk_section(
                     artifact_id=artifact_id,
+                    markdown=markdown,
                     section=section,
                     max_chunk_chars=max_chunk_chars,
                     chunk_overlap_chars=chunk_overlap_chars,
@@ -757,6 +766,23 @@ class DoclingAdapter:
         for section in sections:
             section["page_numbers"] = self._collect_number_refs(page_entries, section.get("start_char"), section.get("end_char"), "page_number")
             section["slide_numbers"] = self._collect_number_refs(slide_entries, section.get("start_char"), section.get("end_char"), "slide_number")
+            section["search_text"] = self._build_search_text(
+                title=str(section.get("title") or ""),
+                body=str(section.get("text") or ""),
+                page_numbers=section.get("page_numbers"),
+                slide_numbers=section.get("slide_numbers"),
+                overlapping_figures=self._collect_overlapping_entries(figure_entries, section.get("start_char"), section.get("end_char")),
+                overlapping_tables=self._collect_overlapping_entries(table_entries, section.get("start_char"), section.get("end_char")),
+            )
+        for chunk in chunks:
+            chunk["search_text"] = self._build_search_text(
+                title=str(chunk.get("section_title") or ""),
+                body=str(chunk.get("text") or ""),
+                page_numbers=chunk.get("page_numbers"),
+                slide_numbers=chunk.get("slide_numbers"),
+                overlapping_figures=self._collect_overlapping_entries(figure_entries, chunk.get("doc_start_char"), chunk.get("doc_end_char")),
+                overlapping_tables=self._collect_overlapping_entries(table_entries, chunk.get("doc_start_char"), chunk.get("doc_end_char")),
+            )
         return {
             "sections": sections,
             "chunks": chunks,
@@ -847,41 +873,259 @@ class DoclingAdapter:
             )
         return sections
 
-    def _chunk_section(self, *, artifact_id: str, section: dict[str, Any], max_chunk_chars: int, chunk_overlap_chars: int) -> list[dict[str, Any]]:
-        text = str(section.get("text") or "").strip()
-        if not text:
+    def _chunk_section(
+        self,
+        *,
+        artifact_id: str,
+        markdown: str,
+        section: dict[str, Any],
+        max_chunk_chars: int,
+        chunk_overlap_chars: int,
+    ) -> list[dict[str, Any]]:
+        section_text = str(section.get("text") or "").strip()
+        if not section_text:
             return []
-        chunks: list[dict[str, Any]] = []
-        start = 0
-        part = 0
         section_start = int(section.get("start_char") or 0)
+        section_end = int(section.get("end_char") or 0)
+        section_markdown = markdown[section_start:section_end] if section_end > section_start else section_text
+        blocks = self._build_structural_blocks(
+            section_markdown=section_markdown,
+            section_start=section_start,
+            max_chunk_chars=max_chunk_chars,
+        )
+        if not blocks:
+            blocks = [
+                {
+                    "text": section_text,
+                    "start_char": section_start,
+                    "end_char": section_end if section_end > section_start else section_start + len(section_text),
+                    "kind": "text",
+                }
+            ]
+        chunks: list[dict[str, Any]] = []
+        current_blocks: list[dict[str, Any]] = []
+        current_chars = 0
+        part = 0
+
+        def flush(blocks_to_emit: list[dict[str, Any]]) -> None:
+            nonlocal part
+            if not blocks_to_emit:
+                return
+            chunk = self._emit_chunk_from_blocks(
+                artifact_id=artifact_id,
+                section=section,
+                markdown=markdown,
+                blocks=blocks_to_emit,
+                part=part + 1,
+                section_start=section_start,
+            )
+            if chunk is None:
+                return
+            if chunks and int(chunks[-1].get("doc_start_char") or -1) == int(chunk.get("doc_start_char") or -2) and int(chunks[-1].get("doc_end_char") or -1) == int(chunk.get("doc_end_char") or -2):
+                return
+            part += 1
+            chunks.append(chunk)
+
+        for block in blocks:
+            block_len = len(str(block.get("text") or ""))
+            separator_len = 2 if current_blocks else 0
+            if current_blocks and current_chars + separator_len + block_len > max_chunk_chars:
+                emitted_blocks = list(current_blocks)
+                flush(emitted_blocks)
+                overlap_blocks: list[dict[str, Any]] = []
+                overlap_chars = 0
+                for tail_block in reversed(emitted_blocks):
+                    overlap_blocks.insert(0, tail_block)
+                    overlap_chars += len(str(tail_block.get("text") or "")) + (2 if overlap_blocks[:-1] else 0)
+                    if overlap_chars >= chunk_overlap_chars:
+                        break
+                current_blocks = overlap_blocks
+                current_chars = sum(len(str(item.get("text") or "")) for item in current_blocks) + max(0, (len(current_blocks) - 1) * 2)
+                separator_len = 2 if current_blocks else 0
+                if current_blocks and current_chars + separator_len + block_len > max_chunk_chars and len(current_blocks) == 1:
+                    current_blocks = []
+                    current_chars = 0
+            current_blocks.append(block)
+            current_chars += block_len + (2 if len(current_blocks) > 1 else 0)
+        flush(current_blocks)
+        return chunks
+
+    def _build_structural_blocks(self, *, section_markdown: str, section_start: int, max_chunk_chars: int) -> list[dict[str, Any]]:
+        blocks: list[dict[str, Any]] = []
+        for match in re.finditer(r"\S[\s\S]*?(?:(?:\n\s*\n)+|$)", section_markdown):
+            raw_block = match.group(0)
+            leading = len(raw_block) - len(raw_block.lstrip())
+            trailing = len(raw_block) - len(raw_block.rstrip())
+            text = raw_block.strip()
+            if not text:
+                continue
+            absolute_start = section_start + match.start() + leading
+            absolute_end = section_start + match.end() - trailing
+            blocks.extend(
+                self._split_large_block(
+                    text=text,
+                    absolute_start=absolute_start,
+                    max_chunk_chars=max_chunk_chars,
+                    kind=self._classify_block(text),
+                )
+            )
+        return blocks
+
+    def _split_large_block(self, *, text: str, absolute_start: int, max_chunk_chars: int, kind: str) -> list[dict[str, Any]]:
+        if len(text) <= max_chunk_chars:
+            return [{"text": text, "start_char": absolute_start, "end_char": absolute_start + len(text), "kind": kind}]
+        blocks: list[dict[str, Any]] = []
+        start = 0
+        minimum_chunk_chars = max(240, max_chunk_chars // 2)
         while start < len(text):
-            end = min(len(text), start + max_chunk_chars)
+            hard_end = min(len(text), start + max_chunk_chars)
+            if hard_end >= len(text):
+                end = len(text)
+            else:
+                end = self._find_preferred_boundary(text=text, start=start, hard_end=hard_end, minimum_end=min(len(text), start + minimum_chunk_chars))
+            if end <= start:
+                end = hard_end
             slice_text = text[start:end].strip()
             if not slice_text:
                 break
-            part += 1
-            chunk_id = self._stable_id(f"{artifact_id}:{section['section_id']}:{part}:{slice_text[:160]}")
-            chunks.append(
-                {
-                    "chunk_id": chunk_id,
-                    "artifact_id": artifact_id,
-                    "section_id": section["section_id"],
-                    "section_title": section["title"],
-                    "chunk_index_within_section": part,
-                    "start_char": start,
-                    "end_char": end,
-                    "doc_start_char": section_start + start,
-                    "doc_end_char": section_start + end,
-                    "text": slice_text,
-                    "estimated_chars": len(slice_text),
-                    "anchor_id": chunk_id,
-                }
-            )
-            if end >= len(text):
-                break
-            start = max(end - chunk_overlap_chars, start + 1)
-        return chunks
+            leading = len(text[start:end]) - len(text[start:end].lstrip())
+            trailing = len(text[start:end]) - len(text[start:end].rstrip())
+            block_start = absolute_start + start + leading
+            block_end = absolute_start + end - trailing
+            blocks.append({"text": slice_text, "start_char": block_start, "end_char": block_end, "kind": kind})
+            start = end
+        return blocks
+
+    def _find_preferred_boundary(self, *, text: str, start: int, hard_end: int, minimum_end: int) -> int:
+        window = text[start:hard_end]
+        candidate_patterns = [
+            r"(?s).*(?:\n\s*\n)",
+            r"(?s).*[.!?]\s+",
+            r"(?s).*[:;]\s+",
+            r"(?s).*,\s+",
+            r"(?s).*\s+",
+        ]
+        for pattern in candidate_patterns:
+            match = re.match(pattern, window)
+            if match is None:
+                continue
+            candidate_end = start + match.end()
+            if candidate_end >= minimum_end:
+                return candidate_end
+        return hard_end
+
+    def _emit_chunk_from_blocks(
+        self,
+        *,
+        artifact_id: str,
+        section: dict[str, Any],
+        markdown: str,
+        blocks: list[dict[str, Any]],
+        part: int,
+        section_start: int,
+    ) -> dict[str, Any] | None:
+        if not blocks:
+            return None
+        try:
+            doc_start = min(int(item.get("start_char")) for item in blocks)
+            doc_end = max(int(item.get("end_char")) for item in blocks)
+        except (TypeError, ValueError):
+            return None
+        if doc_end <= doc_start:
+            return None
+        slice_text = markdown[doc_start:doc_end].strip()
+        if not slice_text:
+            return None
+        chunk_id = self._stable_id(f"{artifact_id}:{section['section_id']}:{part}:{slice_text[:160]}")
+        return {
+            "chunk_id": chunk_id,
+            "artifact_id": artifact_id,
+            "section_id": section["section_id"],
+            "section_title": section["title"],
+            "chunk_index_within_section": part,
+            "start_char": max(0, doc_start - section_start),
+            "end_char": max(0, doc_end - section_start),
+            "doc_start_char": doc_start,
+            "doc_end_char": doc_end,
+            "text": slice_text,
+            "estimated_chars": len(slice_text),
+            "anchor_id": chunk_id,
+            "block_count": len(blocks),
+            "block_kinds": [str(item.get("kind") or "text") for item in blocks],
+        }
+
+    def _classify_block(self, text: str) -> str:
+        stripped = text.strip()
+        if re.match(r"^#{1,6}\s+", stripped):
+            return "heading"
+        if stripped.startswith("[PAGE ") or stripped.startswith("[SLIDE "):
+            return "page_marker"
+        if stripped.startswith("[TABLE "):
+            return "table_marker"
+        if stripped.startswith("[FIGURE "):
+            return "figure_marker"
+        return "text"
+
+    def _collect_overlapping_entries(self, entries: list[dict[str, Any]], start_char: Any, end_char: Any) -> list[dict[str, Any]]:
+        try:
+            start = int(start_char)
+            end = int(end_char)
+        except (TypeError, ValueError):
+            return []
+        selected: list[dict[str, Any]] = []
+        for entry in entries:
+            try:
+                entry_start = int(entry.get("start_char"))
+                entry_end = int(entry.get("end_char"))
+            except (TypeError, ValueError):
+                continue
+            if entry_end <= start or entry_start >= end:
+                continue
+            selected.append(entry)
+        return selected
+
+    def _build_search_text(
+        self,
+        *,
+        title: str,
+        body: str,
+        page_numbers: Any,
+        slide_numbers: Any,
+        overlapping_figures: list[dict[str, Any]],
+        overlapping_tables: list[dict[str, Any]],
+    ) -> str:
+        parts: list[str] = []
+        clean_title = self._flatten_text(title)
+        clean_body = self._flatten_text(body)
+        if clean_title:
+            parts.append(clean_title)
+        if isinstance(page_numbers, list) and page_numbers:
+            parts.append("pages " + " ".join(str(int(number)) for number in page_numbers if isinstance(number, int)))
+        if isinstance(slide_numbers, list) and slide_numbers:
+            parts.append("slides " + " ".join(str(int(number)) for number in slide_numbers if isinstance(number, int)))
+        for figure in overlapping_figures:
+            caption = self._flatten_text(figure.get("caption"))
+            description = self._flatten_text(figure.get("description"))
+            classification = figure.get("classification") if isinstance(figure.get("classification"), dict) else {}
+            label = self._flatten_text(classification.get("label"))
+            figure_bits = [bit for bit in (caption, description, label) if bit]
+            if figure_bits:
+                parts.append("figure " + " ".join(figure_bits))
+        for table in overlapping_tables:
+            table_title = self._flatten_text(table.get("title"))
+            table_excerpt = self._flatten_text(table.get("text_excerpt"))
+            table_bits = [bit for bit in (table_title, table_excerpt) if bit]
+            if table_bits:
+                parts.append("table " + " ".join(table_bits))
+        if clean_body:
+            parts.append(clean_body)
+        return " ".join(part for part in parts if part).strip()
+
+    def _bounded_excerpt(self, value: Any, *, limit: int) -> str:
+        text = self._flatten_text(value)
+        if len(text) <= limit:
+            return text
+        return f"{text[: limit - 3].rstrip()}..."
 
     def _collect_number_refs(self, entries: list[dict[str, Any]], start_char: Any, end_char: Any, number_key: str) -> list[int]:
         try:
