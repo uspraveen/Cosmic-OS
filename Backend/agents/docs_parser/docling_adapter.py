@@ -137,7 +137,10 @@ class DoclingAdapter:
     def _convert(self, *, file_path: Path, request: ParseRequest) -> tuple[Any, Any]:
         try:
             from docling.datamodel.base_models import InputFormat
-            from docling.datamodel.pipeline_options import PdfPipelineOptions, PictureDescriptionVlmEngineOptions
+            from docling.datamodel.pipeline_options import (
+                PdfPipelineOptions,
+                PictureDescriptionVlmEngineOptions,
+            )
             from docling.datamodel.vlm_engine_options import ApiVlmEngineOptions, VlmEngineType
             from docling.document_converter import DocumentConverter, ImageFormatOption, PdfFormatOption
         except ImportError as exc:
@@ -146,6 +149,10 @@ class DoclingAdapter:
             from docling.datamodel.pipeline_options import TableFormerMode
         except ImportError:
             TableFormerMode = None
+        try:
+            from docling.datamodel.pipeline_options import PictureClassificationLabel
+        except ImportError:
+            PictureClassificationLabel = None
 
         format_options: dict[Any, Any] = {}
         pdf_like_options = None
@@ -188,7 +195,16 @@ class DoclingAdapter:
                             request.picture_description.classification_min_confidence
                         )
                     if hasattr(picture_description_options, "classification_deny"):
-                        picture_description_options.classification_deny = list(request.picture_description.classification_deny)
+                        deny_labels: list[Any] = []
+                        for raw_label in request.picture_description.classification_deny:
+                            if PictureClassificationLabel is None:
+                                deny_labels.append(raw_label)
+                                continue
+                            try:
+                                deny_labels.append(PictureClassificationLabel(raw_label))
+                            except Exception:
+                                deny_labels.append(raw_label)
+                        picture_description_options.classification_deny = deny_labels
                     if hasattr(picture_description_options, "prompt"):
                         picture_description_options.prompt = request.picture_description.prompt
                     generation_config = getattr(picture_description_options, "generation_config", None)
