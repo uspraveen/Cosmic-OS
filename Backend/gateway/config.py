@@ -89,7 +89,8 @@ class GatewayConfig:
     docs_auto_parse_enabled: bool = True
     docs_parser_agent_id: str = "cosmic/docs-parser-agent:1.0.0"
     docs_upload_max_file_bytes: int = 20 * 1024 * 1024
-    docs_parse_timeout_sec: float = 120.0
+    docs_parse_timeout_sec: float = 300.0
+    docs_parse_reconcile_timeout_sec: float = 900.0
     docs_parse_poll_interval_sec: float = 0.25
     haiku_api_key: str = ""
     haiku_model: str = "claude-haiku-4-5"
@@ -260,7 +261,11 @@ class GatewayConfig:
             ),
             docs_parse_timeout_sec=max(
                 5.0,
-                _env_float("GATEWAY_DOCS_PARSE_TIMEOUT_SEC", 120.0),
+                _env_float("GATEWAY_DOCS_PARSE_TIMEOUT_SEC", 300.0),
+            ),
+            docs_parse_reconcile_timeout_sec=max(
+                30.0,
+                _env_float("GATEWAY_DOCS_PARSE_RECONCILE_TIMEOUT_SEC", 900.0),
             ),
             docs_parse_poll_interval_sec=max(
                 0.05,

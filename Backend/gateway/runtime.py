@@ -4618,6 +4618,12 @@ class GatewayRuntime:
         ]
         if not document_artifacts:
             return
+        request_id = self._safe_text(request_record.get("request_id"))
+        artifact_ids = [
+            self._safe_text(artifact.get("artifact_id"))
+            for artifact in document_artifacts
+            if self._safe_text(artifact.get("artifact_id"))
+        ]
 
         try:
             parse_result = await self._dispatch_docs_parse_bundle(
@@ -4634,20 +4640,51 @@ class GatewayRuntime:
                 "status": "failed",
                 "error_message": str(exc).strip() or "docs.parse_bundle failed",
             }
-        if parse_result.get("status") != "completed":
-            error_text = self._safe_text(parse_result.get("error_message")) or "docs.parse_bundle failed"
-            for artifact in document_artifacts:
-                artifact["parse_error"] = error_text
-                artifact["ingest_state"] = "parse_failed"
-                self.artifact_store.update_ingest_state(
-                    self._safe_text(artifact.get("artifact_id")),
-                    ingest_state="parse_failed",
+        status = self._safe_text(parse_result.get("status")) or "failed"
+        if status == "completed":
+            self._apply_docs_parse_success(
+                request_id=request_id,
+                parse_result=parse_result,
+                artifact_ids=artifact_ids,
+            )
+            return
+        task_id = self._safe_text(parse_result.get("task_id")) or None
+        error_text = self._safe_text(parse_result.get("error_message")) or "docs.parse_bundle failed"
+        if status == "pending":
+            self._apply_docs_parse_failure(
+                request_id=request_id,
+                artifact_ids=artifact_ids,
+                error_text=error_text,
+                ingest_state="parse_pending",
+                task_id=task_id,
+            )
+            if request_id and task_id:
+                self._track_background_task(
+                    self._reconcile_docs_parse_bundle(
+                        request_id=request_id,
+                        artifact_ids=artifact_ids,
+                        task_id=task_id,
+                    )
                 )
             return
+        self._apply_docs_parse_failure(
+            request_id=request_id,
+            artifact_ids=artifact_ids,
+            error_text=error_text,
+            ingest_state="parse_failed",
+            task_id=task_id,
+        )
 
+    def _apply_docs_parse_success(
+        self,
+        *,
+        request_id: str,
+        parse_result: dict[str, Any],
+        artifact_ids: list[str],
+    ) -> None:
         output = parse_result.get("output") if isinstance(parse_result.get("output"), dict) else {}
-        bundle_id = self._safe_text(output.get("bundle_id"))
-        parse_task_id = self._safe_text(parse_result.get("task_id"))
+        bundle_id = self._safe_text(output.get("bundle_id")) or None
+        parse_task_id = self._safe_text(parse_result.get("task_id")) or None
         by_artifact_id: dict[str, dict[str, Any]] = {}
         for document in output.get("documents", []) if isinstance(output.get("documents"), list) else []:
             if not isinstance(document, dict):
@@ -4656,23 +4693,115 @@ class GatewayRuntime:
             if artifact_id:
                 by_artifact_id[artifact_id] = document
 
-        for artifact in document_artifacts:
-            artifact_id = self._safe_text(artifact.get("artifact_id"))
+        for artifact_id in artifact_ids:
             document_summary = by_artifact_id.get(artifact_id)
             if document_summary is None:
                 continue
-            artifact["ingest_state"] = "parsed"
-            artifact["parse_task_id"] = parse_task_id or None
-            artifact["parse_bundle_id"] = bundle_id or None
-            artifact["parsed_summary"] = document_summary
-            artifact["docs_tools"] = ["docs_browse", "docs_search", "docs_read", "docs_fetch_asset"]
+            self._update_request_artifact_fields(
+                request_id,
+                artifact_id,
+                ingest_state="parsed",
+                parse_task_id=parse_task_id,
+                parse_bundle_id=bundle_id,
+                parsed_summary=document_summary,
+                docs_tools=["docs_browse", "docs_search", "docs_read", "docs_fetch_asset"],
+                parse_error=None,
+            )
             self.artifact_store.update_ingest_state(
                 artifact_id,
                 ingest_state="parsed",
-                parse_task_id=parse_task_id or None,
-                parse_bundle_id=bundle_id or None,
+                parse_task_id=parse_task_id,
+                parse_bundle_id=bundle_id,
                 parsed_summary=document_summary,
             )
+
+    def _apply_docs_parse_failure(
+        self,
+        *,
+        request_id: str,
+        artifact_ids: list[str],
+        error_text: str,
+        ingest_state: str,
+        task_id: str | None,
+    ) -> None:
+        for artifact_id in artifact_ids:
+            self._update_request_artifact_fields(
+                request_id,
+                artifact_id,
+                parse_error=error_text,
+                ingest_state=ingest_state,
+                parse_task_id=task_id,
+            )
+            self.artifact_store.update_ingest_state(
+                artifact_id,
+                ingest_state=ingest_state,
+                parse_task_id=task_id,
+            )
+
+    def _update_request_artifact_fields(self, request_id: str, artifact_id: str, **fields: Any) -> None:
+        if not request_id or not artifact_id:
+            return
+        request_record = self.request_records.get(request_id)
+        if not isinstance(request_record, dict):
+            return
+        input_artifacts = request_record.get("input_artifacts")
+        if not isinstance(input_artifacts, list):
+            return
+        for artifact in input_artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            if self._safe_text(artifact.get("artifact_id")) != artifact_id:
+                continue
+            for key, value in fields.items():
+                if value is None:
+                    artifact.pop(key, None)
+                else:
+                    artifact[key] = value
+            return
+
+    async def _reconcile_docs_parse_bundle(
+        self,
+        *,
+        request_id: str,
+        artifact_ids: list[str],
+        task_id: str,
+    ) -> None:
+        try:
+            parse_result = await self._wait_for_agent_terminal_result(
+                task_id,
+                timeout_sec=self.config.docs_parse_reconcile_timeout_sec,
+            )
+        except Exception:
+            logger.exception(
+                "gateway.docs_autoparse_reconcile_failed request_id=%s task_id=%s",
+                request_id,
+                task_id,
+            )
+            return
+        status = self._safe_text(parse_result.get("status")) or "failed"
+        if status == "completed":
+            self._apply_docs_parse_success(
+                request_id=request_id,
+                parse_result=parse_result,
+                artifact_ids=artifact_ids,
+            )
+            return
+        if status == "pending":
+            logger.warning(
+                "gateway.docs_autoparse_reconcile_still_pending request_id=%s task_id=%s artifact_count=%s",
+                request_id,
+                task_id,
+                len(artifact_ids),
+            )
+            return
+        error_text = self._safe_text(parse_result.get("error_message")) or "docs.parse_bundle failed"
+        self._apply_docs_parse_failure(
+            request_id=request_id,
+            artifact_ids=artifact_ids,
+            error_text=error_text,
+            ingest_state="parse_failed",
+            task_id=task_id,
+        )
 
     async def _dispatch_docs_parse_bundle(
         self,
@@ -4771,7 +4900,7 @@ class GatewayRuntime:
                         }
             await asyncio.sleep(self.config.docs_parse_poll_interval_sec)
         return {
-            "status": "failed",
+            "status": "pending",
             "task_id": task_id,
             "error_message": f"Timed out waiting for {task_id}.",
         }

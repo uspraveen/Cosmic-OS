@@ -5,6 +5,7 @@ import json
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -1027,6 +1028,183 @@ async def test_docs_autoparse_enriches_request_record_with_bundle_metadata(tmp_p
         stored = runtime.artifact_store.list_for_request("req_docs_parse")[0]
         assert stored["ingest_state"] == "parsed"
         assert stored["parse_bundle_id"] == "bundle_docs_001"
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_docs_autoparse_timeout_marks_parse_pending_and_schedules_reconcile(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    await runtime.start()
+    try:
+        class _StubRedis:
+            async def aclose(self) -> None:
+                return
+
+        runtime._redis = _StubRedis()  # type: ignore[assignment]
+        request_record = {
+            "route": "opus",
+            "request_id": "req_docs_pending",
+            "session_id": "sess_docs_pending",
+            "channel": "desktop:desk_a",
+            "source": "user",
+            "source_id": "desktop",
+            "input_artifacts": [
+                {
+                    "artifact_id": "art_doc_pending",
+                    "kind": "document",
+                    "mime": "application/pdf",
+                    "filename": "newsletter.pdf",
+                    "path": "runs/artifacts/req_ingest_req_docs_pending/inputs/art_doc_pending/original/newsletter.pdf",
+                    "sha256": "abc123",
+                    "ingest_state": "staged",
+                }
+            ],
+        }
+        runtime.request_records["req_docs_pending"] = request_record
+        runtime.artifact_store.persist_inbound_attachments(
+            request_id="req_docs_pending",
+            session_id="sess_docs_pending",
+            source_channel="desktop:desk_a",
+            source_platform="desktop",
+            source_message_id=None,
+            attachments=[
+                {
+                    "artifact_id": "art_doc_pending",
+                    "kind": "document",
+                    "mime_type": "application/pdf",
+                    "filename": "newsletter.pdf",
+                }
+            ],
+        )
+        runtime.artifact_store.update_ingest_state(
+            "art_doc_pending",
+            path=request_record["input_artifacts"][0]["path"],
+            sha256="abc123",
+            ingest_state="staged",
+        )
+
+        async def _fake_dispatch(*, request_record, input_artifacts):
+            assert len(input_artifacts) == 1
+            return {
+                "status": "pending",
+                "task_id": "tsk_docs_pending",
+                "error_message": "Timed out waiting for tsk_docs_pending.",
+            }
+
+        scheduled: list[Any] = []
+
+        def _fake_track_background_task(coroutine) -> None:
+            scheduled.append(coroutine)
+
+        runtime._dispatch_docs_parse_bundle = _fake_dispatch  # type: ignore[method-assign]
+        runtime._track_background_task = _fake_track_background_task  # type: ignore[method-assign]
+
+        await runtime._ensure_request_documents_parsed(request_record)  # noqa: SLF001
+
+        enriched = request_record["input_artifacts"][0]
+        assert enriched["ingest_state"] == "parse_pending"
+        assert enriched["parse_task_id"] == "tsk_docs_pending"
+        assert enriched["parse_error"] == "Timed out waiting for tsk_docs_pending."
+
+        stored = runtime.artifact_store.list_for_request("req_docs_pending")[0]
+        assert stored["ingest_state"] == "parse_pending"
+        assert stored["parse_task_id"] == "tsk_docs_pending"
+        assert len(scheduled) == 1
+        for coroutine in scheduled:
+            coroutine.close()
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_docs_autoparse_reconcile_marks_late_completion_as_parsed(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    await runtime.start()
+    try:
+        request_record = {
+            "route": "opus",
+            "request_id": "req_docs_reconcile",
+            "session_id": "sess_docs_reconcile",
+            "channel": "desktop:desk_a",
+            "source": "user",
+            "source_id": "desktop",
+            "input_artifacts": [
+                {
+                    "artifact_id": "art_doc_reconcile",
+                    "kind": "document",
+                    "mime": "application/pdf",
+                    "filename": "newsletter.pdf",
+                    "path": "runs/artifacts/req_ingest_req_docs_reconcile/inputs/art_doc_reconcile/original/newsletter.pdf",
+                    "sha256": "abc123",
+                    "ingest_state": "parse_pending",
+                    "parse_task_id": "tsk_docs_reconcile",
+                    "parse_error": "Timed out waiting for tsk_docs_reconcile.",
+                }
+            ],
+        }
+        runtime.request_records["req_docs_reconcile"] = request_record
+        runtime.artifact_store.persist_inbound_attachments(
+            request_id="req_docs_reconcile",
+            session_id="sess_docs_reconcile",
+            source_channel="desktop:desk_a",
+            source_platform="desktop",
+            source_message_id=None,
+            attachments=[
+                {
+                    "artifact_id": "art_doc_reconcile",
+                    "kind": "document",
+                    "mime_type": "application/pdf",
+                    "filename": "newsletter.pdf",
+                }
+            ],
+        )
+        runtime.artifact_store.update_ingest_state(
+            "art_doc_reconcile",
+            path=request_record["input_artifacts"][0]["path"],
+            sha256="abc123",
+            ingest_state="parse_pending",
+            parse_task_id="tsk_docs_reconcile",
+        )
+
+        async def _fake_wait(task_id: str, *, timeout_sec: float):
+            assert task_id == "tsk_docs_reconcile"
+            assert timeout_sec == runtime.config.docs_parse_reconcile_timeout_sec
+            return {
+                "status": "completed",
+                "task_id": "tsk_docs_reconcile",
+                "output": {
+                    "bundle_id": "bundle_docs_reconciled",
+                    "documents": [
+                        {
+                            "artifact_id": "art_doc_reconcile",
+                            "doc_id": "doc_reconciled",
+                            "title": "Newsletter",
+                            "section_count": 4,
+                            "chunk_count": 8,
+                        }
+                    ],
+                },
+            }
+
+        runtime._wait_for_agent_terminal_result = _fake_wait  # type: ignore[method-assign]
+
+        await runtime._reconcile_docs_parse_bundle(  # noqa: SLF001
+            request_id="req_docs_reconcile",
+            artifact_ids=["art_doc_reconcile"],
+            task_id="tsk_docs_reconcile",
+        )
+
+        enriched = request_record["input_artifacts"][0]
+        assert enriched["ingest_state"] == "parsed"
+        assert enriched["parse_bundle_id"] == "bundle_docs_reconciled"
+        assert enriched["parsed_summary"]["doc_id"] == "doc_reconciled"
+        assert "parse_error" not in enriched
+
+        stored = runtime.artifact_store.list_for_request("req_docs_reconcile")[0]
+        assert stored["ingest_state"] == "parsed"
+        assert stored["parse_bundle_id"] == "bundle_docs_reconciled"
+        assert stored["parsed_summary"]["doc_id"] == "doc_reconciled"
     finally:
         await runtime.stop()
 
