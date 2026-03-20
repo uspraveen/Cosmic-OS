@@ -16,7 +16,8 @@ from shared.sqlite_client import connect_sync
 from shared import infer_document_mime_from_extension, is_supported_document_artifact
 
 from .config import AGENT_ROOT, BACKEND_ROOT, DocsParserConfig
-from .docling_adapter import DoclingAdapter, ParseRequest, PictureDescriptionRequest
+from .docling_adapter import DoclingAdapter, FullPageVlmRequest, ParseRequest, PictureDescriptionRequest
+from .office_renderer import OfficeDocumentRenderer, RenderedOfficeDocument
 
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,7 @@ class DocsParserAgent(AgentRuntime):
         registry_db_path: str | Path | None = None,
         http_client=None,
         parser: DoclingAdapter | None = None,
+        office_renderer: OfficeDocumentRenderer | None = None,
         agent_root: str | Path | None = None,
         artifacts_root: str | Path | None = None,
         store_root: str | Path | None = None,
@@ -82,6 +84,10 @@ class DocsParserAgent(AgentRuntime):
             Path(artifacts_root).expanduser() if artifacts_root else BACKEND_ROOT / "runs" / "artifacts"
         ).resolve()
         self.parser = parser or DoclingAdapter()
+        self.office_renderer = office_renderer or OfficeDocumentRenderer(
+            binary_path=self.config.office_renderer_path,
+            timeout_sec=self.config.office_render_timeout_sec,
+        )
 
         super().__init__(
             agent_card_path=self.agent_root / "agent_card.yaml",
@@ -188,6 +194,14 @@ class DocsParserAgent(AgentRuntime):
                     artifact=artifact,
                     request=parse_request,
                 )
+                parsed, enrichment_status, rendered_office_document = await self._maybe_apply_full_page_vlm_escalation(
+                    task=task,
+                    source_path=source_path,
+                    artifact=artifact,
+                    request=parse_request,
+                    parsed=parsed,
+                    enrichment_status=enrichment_status,
+                )
             except Exception as exc:
                 text = str(exc).strip() or f"Failed to parse {artifact.get('filename') or artifact['artifact_id']}."
                 code, retryable, next_action = self._classify_parse_failure(text)
@@ -207,6 +221,7 @@ class DocsParserAgent(AgentRuntime):
                 parsed=parsed,
                 parse_request=parse_request,
                 enrichment_status=enrichment_status,
+                rendered_office_document=rendered_office_document,
             )
             document_summaries.append(summary)
             produced_artifacts.extend(manifests)
@@ -464,8 +479,24 @@ class DocsParserAgent(AgentRuntime):
                 retryable=False,
                 next_action="revise_input",
             )
+        full_page_vlm_mode = self._safe_text(payload.get("full_page_vlm_mode")) or "auto"
+        if full_page_vlm_mode not in {"auto", "off", "force"}:
+            raise DocsParserAgentError(
+                code="INVALID_INPUT",
+                message="full_page_vlm_mode must be one of: auto, off, force.",
+                retryable=False,
+                next_action="revise_input",
+            )
         enable_ocr = self.config.default_enable_ocr if ocr_mode == "auto" else (ocr_mode == "force")
         picture_description = self._build_picture_description_request()
+        full_page_vlm = self._build_full_page_vlm_request(enabled=full_page_vlm_mode != "off")
+        if full_page_vlm_mode == "force" and full_page_vlm is None:
+            raise DocsParserAgentError(
+                code="INVALID_INPUT",
+                message="full_page_vlm_mode=force requires hosted full-page VLM configuration.",
+                retryable=False,
+                next_action="revise_input",
+            )
         generate_picture_images = self._coerce_bool(
             payload.get("generate_picture_images"),
             default=self.config.default_generate_picture_images,
@@ -480,6 +511,9 @@ class DocsParserAgent(AgentRuntime):
             ),
             generate_picture_images=generate_picture_images,
             picture_description=picture_description,
+            full_page_vlm_mode=full_page_vlm_mode,
+            use_full_page_vlm=False,
+            full_page_vlm=full_page_vlm,
             max_file_size_bytes=self.config.max_input_file_bytes,
             max_num_pages=self.config.max_num_pages,
             max_chunk_chars=self.config.max_chunk_chars,
@@ -512,6 +546,27 @@ class DocsParserAgent(AgentRuntime):
             classification_deny=tuple(self.config.picture_description_classification_deny),
         )
 
+    def _build_full_page_vlm_request(self, *, enabled: bool) -> FullPageVlmRequest | None:
+        if not enabled or not self.config.default_enable_full_page_vlm:
+            return None
+        api_key = self._safe_text(self.config.full_page_vlm_api_key)
+        api_url = self._safe_text(self.config.full_page_vlm_api_url)
+        model = self._safe_text(self.config.full_page_vlm_model)
+        preset = self._safe_text(self.config.full_page_vlm_preset) or "qwen"
+        if not api_key or not api_url or not model:
+            return None
+        return FullPageVlmRequest(
+            api_key=api_key,
+            api_url=api_url,
+            model=model,
+            preset=preset,
+            timeout_sec=self.config.full_page_vlm_timeout_sec,
+            concurrency=self.config.full_page_vlm_concurrency,
+            batch_size=self.config.full_page_vlm_batch_size,
+            max_new_tokens=self.config.full_page_vlm_max_new_tokens,
+            scale=self.config.full_page_vlm_scale,
+        )
+
     def _parse_with_enrichment_fallback(
         self,
         *,
@@ -525,6 +580,7 @@ class DocsParserAgent(AgentRuntime):
                 artifact_id=artifact["artifact_id"],
                 mime_type=artifact["mime"],
                 request=request,
+                source_filename=artifact["filename"],
             )
             return parsed, self._enrichment_status(request, applied=True, fallback_reason=None)
         except Exception as exc:
@@ -536,6 +592,7 @@ class DocsParserAgent(AgentRuntime):
                 artifact_id=artifact["artifact_id"],
                 mime_type=artifact["mime"],
                 request=fallback_request,
+                source_filename=artifact["filename"],
             )
             return parsed, self._enrichment_status(
                 request,
@@ -583,6 +640,206 @@ class DocsParserAgent(AgentRuntime):
             "picture_description_model": request.picture_description.model,
             "picture_description_fallback_reason": fallback_reason,
         }
+
+    async def _maybe_apply_full_page_vlm_escalation(
+        self,
+        *,
+        task: TaskEnvelope,
+        source_path: Path,
+        artifact: dict[str, str],
+        request: ParseRequest,
+        parsed,
+        enrichment_status: dict[str, Any],
+    ) -> tuple[Any, dict[str, Any], RenderedOfficeDocument | None]:
+        status = self._with_full_page_vlm_defaults(enrichment_status)
+        if not self._is_office_document(artifact):
+            return parsed, status, None
+
+        analysis = self._analyze_image_heavy_document(parsed)
+        status["image_heavy_analysis"] = analysis
+        should_force = request.full_page_vlm_mode == "force"
+        if should_force:
+            analysis["should_escalate"] = True
+            analysis["reasons"] = ["full_page_vlm_mode=force", *analysis.get("reasons", [])]
+        if not analysis.get("should_escalate"):
+            return parsed, status, None
+        if request.full_page_vlm is None:
+            status["escalation_reason"] = "; ".join(analysis.get("reasons") or ["full-page VLM unavailable"])
+            status["full_page_vlm_fallback_reason"] = "Hosted full-page VLM is not configured."
+            return parsed, status, None
+        if not self.config.enable_office_render_fallback:
+            status["escalation_reason"] = "; ".join(analysis.get("reasons") or ["full-page VLM disabled"])
+            status["office_render_fallback_reason"] = "Office rendering fallback is disabled."
+            status["full_page_vlm_fallback_reason"] = "Office rendering fallback is disabled."
+            return parsed, status, None
+
+        status["escalation_reason"] = "; ".join(analysis.get("reasons") or ["image-heavy office document"])
+        status["office_render_requested"] = True
+        status["full_page_vlm_requested"] = True
+        status["full_page_vlm_model"] = request.full_page_vlm.model
+
+        rendered_office_document: RenderedOfficeDocument | None = None
+        try:
+            await self._emit_progress(
+                task.task_id,
+                f"Escalating {artifact.get('filename') or artifact['artifact_id']} through Office render and hosted full-page VLM.",
+            )
+            rendered_office_document = self.office_renderer.render_to_pdf(
+                source_path=source_path,
+                working_root=self.runtime_root / "office_render",
+            )
+            status["office_render_applied"] = True
+            status["office_render_backend"] = rendered_office_document.backend
+            rerun_request = replace(
+                request,
+                enable_ocr=True,
+                generate_page_images=True,
+                generate_picture_images=True,
+                picture_description=None,
+                use_full_page_vlm=True,
+            )
+            rerun_parsed = self.parser.parse_file(
+                file_path=rendered_office_document.rendered_pdf_path,
+                artifact_id=artifact["artifact_id"],
+                mime_type=artifact["mime"],
+                request=rerun_request,
+                source_filename=artifact["filename"],
+            )
+            status["full_page_vlm_applied"] = True
+            return rerun_parsed, status, rendered_office_document
+        except Exception as exc:
+            reason = str(exc).strip() or type(exc).__name__
+            if rendered_office_document is None:
+                status["office_render_fallback_reason"] = reason
+            status["full_page_vlm_fallback_reason"] = reason
+            return parsed, status, rendered_office_document
+
+    def _with_full_page_vlm_defaults(self, status: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(status)
+        merged.setdefault("full_page_vlm_requested", False)
+        merged.setdefault("full_page_vlm_applied", False)
+        merged.setdefault("full_page_vlm_model", None)
+        merged.setdefault("full_page_vlm_fallback_reason", None)
+        merged.setdefault("office_render_requested", False)
+        merged.setdefault("office_render_applied", False)
+        merged.setdefault("office_render_backend", None)
+        merged.setdefault("office_render_fallback_reason", None)
+        merged.setdefault("image_heavy_analysis", None)
+        merged.setdefault("escalation_reason", None)
+        return merged
+
+    def _is_office_document(self, artifact: dict[str, str]) -> bool:
+        mime = self._safe_text(artifact.get("mime")).lower()
+        filename = self._safe_text(artifact.get("filename")) or self._safe_text(artifact.get("path"))
+        ext = Path(filename).suffix.lower()
+        return ext in {".docx", ".pptx"} or mime in {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        }
+
+    def _analyze_image_heavy_document(self, parsed) -> dict[str, Any]:
+        chunk_index = parsed.chunk_index if isinstance(getattr(parsed, "chunk_index", None), dict) else {}
+        slides = chunk_index.get("slides") if isinstance(chunk_index.get("slides"), list) else []
+        pages = chunk_index.get("pages") if isinstance(chunk_index.get("pages"), list) else []
+        units = slides or pages
+        unit_kind = "slides" if slides else "pages"
+        if not units:
+            return {
+                "unit_kind": unit_kind,
+                "unit_count": 0,
+                "avg_text_chars_per_unit": 0.0,
+                "low_text_unit_count": 0,
+                "low_text_unit_ratio": 0.0,
+                "visual_unit_count": 0,
+                "visual_unit_ratio": 0.0,
+                "chunk_density": 0.0,
+                "should_escalate": False,
+                "reasons": [],
+            }
+
+        figures = chunk_index.get("figures") if isinstance(chunk_index.get("figures"), list) else []
+        page_assets = chunk_index.get("assets") if isinstance(chunk_index.get("assets"), list) else []
+        markdown = str(getattr(parsed, "markdown", "") or "")
+        text_lengths: list[int] = []
+        visual_unit_count = 0
+        unit_number_key = "slide_number" if unit_kind == "slides" else "page_number"
+        asset_number_key = "page_number"
+        for unit in units:
+            try:
+                start_char = int(unit.get("start_char"))
+                end_char = int(unit.get("end_char"))
+            except (TypeError, ValueError):
+                start_char = 0
+                end_char = 0
+            segment = markdown[start_char:end_char] if end_char > start_char else ""
+            text_lengths.append(len(self._strip_structural_markers(segment)))
+            try:
+                unit_number = int(unit.get(unit_number_key))
+            except (TypeError, ValueError):
+                unit_number = None
+            if unit_number is None:
+                continue
+            has_visual = any(
+                isinstance(entry, dict) and int(entry.get(asset_number_key) or 0) == unit_number
+                for entry in figures
+            ) or any(
+                isinstance(entry, dict)
+                and int(entry.get(asset_number_key) or 0) == unit_number
+                and self._safe_text(entry.get("kind")).startswith(("figure_", "page_image"))
+                for entry in page_assets
+            )
+            if has_visual:
+                visual_unit_count += 1
+
+        unit_count = len(units)
+        avg_text_chars = sum(text_lengths) / unit_count if unit_count else 0.0
+        low_text_unit_count = sum(
+            1 for length in text_lengths if length <= self.config.image_heavy_low_text_chars_per_unit
+        )
+        low_text_ratio = low_text_unit_count / unit_count if unit_count else 0.0
+        visual_unit_ratio = visual_unit_count / unit_count if unit_count else 0.0
+        chunk_count = int(chunk_index.get("chunk_count") or 0)
+        chunk_density = chunk_count / unit_count if unit_count else 0.0
+
+        reasons: list[str] = []
+        should_escalate = False
+        if (
+            low_text_ratio >= self.config.image_heavy_low_text_unit_ratio_threshold
+            and visual_unit_ratio >= self.config.image_heavy_visual_unit_ratio_threshold
+        ):
+            should_escalate = True
+            reasons.append("image-dominant office pages/slides with weak extracted text")
+        elif (
+            low_text_ratio >= self.config.image_heavy_low_text_unit_ratio_threshold
+            and avg_text_chars <= self.config.image_heavy_very_low_avg_text_chars_threshold
+        ):
+            should_escalate = True
+            reasons.append("very low text coverage across pages/slides")
+        elif (
+            low_text_ratio >= self.config.image_heavy_low_text_unit_ratio_threshold
+            and chunk_density <= self.config.image_heavy_chunk_density_threshold
+            and avg_text_chars <= self.config.image_heavy_low_text_chars_per_unit
+        ):
+            should_escalate = True
+            reasons.append("weak structural extraction across the document")
+
+        return {
+            "unit_kind": unit_kind,
+            "unit_count": unit_count,
+            "avg_text_chars_per_unit": round(avg_text_chars, 2),
+            "low_text_unit_count": low_text_unit_count,
+            "low_text_unit_ratio": round(low_text_ratio, 4),
+            "visual_unit_count": visual_unit_count,
+            "visual_unit_ratio": round(visual_unit_ratio, 4),
+            "chunk_density": round(chunk_density, 4),
+            "should_escalate": should_escalate,
+            "reasons": reasons,
+        }
+
+    def _strip_structural_markers(self, text: str) -> str:
+        without_markers = re.sub(r"(?m)^\[(?:PAGE|SLIDE|FIGURE|TABLE)\b[^\]]*\]\s*$", "", text)
+        normalized = re.sub(r"\s+", " ", without_markers).strip()
+        return normalized
 
     def _normalize_input_artifacts(self, raw_artifacts: list[dict[str, Any]]) -> list[dict[str, str]]:
         normalized: list[dict[str, str]] = []
@@ -695,6 +952,7 @@ class DocsParserAgent(AgentRuntime):
         parsed,
         parse_request: ParseRequest,
         enrichment_status: dict[str, Any],
+        rendered_office_document: RenderedOfficeDocument | None,
     ) -> tuple[dict[str, Any], list[ArtifactManifest]]:
         bundle_root = self.artifacts_root / task.task_id / "docs_parser" / artifact["artifact_id"]
         bundle_root.mkdir(parents=True, exist_ok=True)
@@ -704,6 +962,7 @@ class DocsParserAgent(AgentRuntime):
         chunk_index_path = bundle_root / "chunk_index.json"
         manifest_path = bundle_root / "manifest.json"
         assets_root = bundle_root / "assets"
+        intermediate_root = bundle_root / "intermediate"
 
         asset_file_paths: dict[str, Path] = {}
         for relative_path, raw_bytes, _mime in parsed.asset_files:
@@ -711,6 +970,12 @@ class DocsParserAgent(AgentRuntime):
             target_path.parent.mkdir(parents=True, exist_ok=True)
             target_path.write_bytes(raw_bytes)
             asset_file_paths[relative_path.replace("\\", "/")] = target_path
+
+        rendered_pdf_path: Path | None = None
+        if rendered_office_document is not None:
+            intermediate_root.mkdir(parents=True, exist_ok=True)
+            rendered_pdf_path = intermediate_root / "rendered_source.pdf"
+            rendered_pdf_path.write_bytes(rendered_office_document.rendered_pdf_path.read_bytes())
 
         normalized_chunk_index = self._normalize_chunk_index_asset_paths(
             parsed.chunk_index,
@@ -745,6 +1010,7 @@ class DocsParserAgent(AgentRuntime):
                 "document_md": "document.md",
                 "chunk_index": "chunk_index.json",
                 "assets_root": "assets",
+                "intermediate_root": "intermediate" if intermediate_root.exists() else None,
             },
             "counts": {
                 "section_count": parsed.section_count,
@@ -769,6 +1035,8 @@ class DocsParserAgent(AgentRuntime):
             self._artifact_manifest(task.task_id, chunk_index_path, "application/json"),
             self._artifact_manifest(task.task_id, manifest_path, "application/json"),
         ]
+        if rendered_pdf_path is not None and rendered_pdf_path.exists():
+            artifacts.append(self._artifact_manifest(task.task_id, rendered_pdf_path, "application/pdf"))
         for relative_path, target_path in asset_file_paths.items():
             mime = self._infer_asset_mime(target_path)
             artifacts.append(self._artifact_manifest(task.task_id, target_path, mime))
@@ -794,6 +1062,7 @@ class DocsParserAgent(AgentRuntime):
                 "document_md": self._logical_artifact_path(document_md_path),
                 "chunk_index": self._logical_artifact_path(chunk_index_path),
                 "assets_root": self._logical_artifact_path(assets_root) if assets_root.exists() else None,
+                "rendered_source_pdf": self._logical_artifact_path(rendered_pdf_path) if rendered_pdf_path else None,
             },
         }
         return summary, artifacts

@@ -852,10 +852,29 @@ def test_verify_critical_backend_dependencies_raises_clear_error(monkeypatch, tm
         raise AssertionError("Expected BootstrapError when a critical dependency import fails")
 
 
+def test_ensure_office_renderer_installs_and_verifies(monkeypatch) -> None:
+    install_calls: list[tuple[str, list[str]]] = []
+    versions = [None, "LibreOffice 24.2.7.2"]
+
+    monkeypatch.setattr(bootstrap, "is_linux", lambda: True)
+    monkeypatch.setattr(bootstrap, "detect_package_manager", lambda: "apt-get")
+    monkeypatch.setattr(
+        bootstrap,
+        "install_system_packages",
+        lambda manager, packages: install_calls.append((manager, list(packages))),
+    )
+    monkeypatch.setattr(bootstrap, "office_renderer_version", lambda: versions.pop(0))
+
+    bootstrap.ensure_office_renderer()
+
+    assert install_calls == [("apt-get", ["libreoffice"])]
+
+
 def test_setup_python_verifies_critical_backend_dependencies(monkeypatch, tmp_path) -> None:
     calls: list[str] = []
 
     monkeypatch.setattr(bootstrap, "is_linux", lambda: True)
+    monkeypatch.setattr(bootstrap, "ensure_office_renderer", lambda: calls.append("ensure_office_renderer"))
     monkeypatch.setattr(bootstrap, "ensure_python3_available", lambda: calls.append("ensure_python3_available"))
     monkeypatch.setattr(bootstrap, "ensure_pip", lambda: calls.append("ensure_pip"))
     monkeypatch.setattr(bootstrap, "ensure_venv_support", lambda: calls.append("ensure_venv_support"))
@@ -867,6 +886,7 @@ def test_setup_python_verifies_critical_backend_dependencies(monkeypatch, tmp_pa
     bootstrap.setup_python(tmp_path / ".venv", tmp_path / "requirements.txt")
 
     assert calls == [
+        "ensure_office_renderer",
         "ensure_python3_available",
         "ensure_pip",
         "ensure_venv_support",

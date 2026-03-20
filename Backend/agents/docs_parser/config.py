@@ -61,6 +61,10 @@ class DocsParserConfig:
     default_generate_page_images: bool = False
     default_generate_picture_images: bool = True
     default_enable_picture_description: bool = True
+    default_enable_full_page_vlm: bool = True
+    enable_office_render_fallback: bool = True
+    office_renderer_path: str = "soffice"
+    office_render_timeout_sec: float = 180.0
     picture_description_api_key: str = ""
     picture_description_api_url: str = "https://api.openai.com/v1/chat/completions"
     picture_description_model: str = "gpt-4.1-mini"
@@ -86,6 +90,20 @@ class DocsParserConfig:
         "Focus on chart type, axes, labels, trends, visible text, diagram relationships, and any important values. "
         "Be concise and factual. If text is unreadable, say so.",
     )
+    full_page_vlm_api_key: str = ""
+    full_page_vlm_api_url: str = "https://api.openai.com/v1/chat/completions"
+    full_page_vlm_model: str = "gpt-4.1-mini"
+    full_page_vlm_preset: str = "qwen"
+    full_page_vlm_timeout_sec: float = 120.0
+    full_page_vlm_concurrency: int = 2
+    full_page_vlm_batch_size: int = 2
+    full_page_vlm_max_new_tokens: int = 1200
+    full_page_vlm_scale: float = 2.0
+    image_heavy_low_text_chars_per_unit: int = 160
+    image_heavy_low_text_unit_ratio_threshold: float = 0.55
+    image_heavy_visual_unit_ratio_threshold: float = 0.35
+    image_heavy_chunk_density_threshold: float = 0.35
+    image_heavy_very_low_avg_text_chars_threshold: int = 90
     max_chunk_chars: int = 2400
     chunk_overlap_chars: int = 280
 
@@ -105,6 +123,15 @@ class DocsParserConfig:
             not in {"0", "false", "no"},
             default_enable_picture_description=os.getenv("DOCS_PARSER_ENABLE_PICTURE_DESCRIPTION", "true").strip().lower()
             not in {"0", "false", "no"},
+            default_enable_full_page_vlm=os.getenv("DOCS_PARSER_ENABLE_FULL_PAGE_VLM", "true").strip().lower()
+            not in {"0", "false", "no"},
+            enable_office_render_fallback=os.getenv("DOCS_PARSER_ENABLE_OFFICE_RENDER_FALLBACK", "true").strip().lower()
+            not in {"0", "false", "no"},
+            office_renderer_path=os.getenv("DOCS_PARSER_OFFICE_RENDERER_PATH", "soffice").strip() or "soffice",
+            office_render_timeout_sec=max(
+                10.0,
+                _env_float("DOCS_PARSER_OFFICE_RENDER_TIMEOUT_SEC", 180.0),
+            ),
             picture_description_api_key=(
                 os.getenv("DOCS_PARSER_PICTURE_DESCRIPTION_API_KEY")
                 or os.getenv("OPENAI_API_KEY")
@@ -160,6 +187,61 @@ class DocsParserConfig:
                     )
                 ),
                 cls.picture_description_prompt,
+            ),
+            full_page_vlm_api_key=(
+                os.getenv("DOCS_PARSER_FULL_PAGE_VLM_API_KEY")
+                or os.getenv("OPENAI_API_KEY")
+                or ""
+            ).strip(),
+            full_page_vlm_api_url=(
+                os.getenv("DOCS_PARSER_FULL_PAGE_VLM_API_URL", "https://api.openai.com/v1/chat/completions").strip()
+                or "https://api.openai.com/v1/chat/completions"
+            ),
+            full_page_vlm_model=(
+                os.getenv("DOCS_PARSER_FULL_PAGE_VLM_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
+            ),
+            full_page_vlm_preset=(
+                os.getenv("DOCS_PARSER_FULL_PAGE_VLM_PRESET", "qwen").strip() or "qwen"
+            ),
+            full_page_vlm_timeout_sec=max(
+                10.0,
+                _env_float("DOCS_PARSER_FULL_PAGE_VLM_TIMEOUT_SEC", 120.0),
+            ),
+            full_page_vlm_concurrency=max(
+                1,
+                _env_int("DOCS_PARSER_FULL_PAGE_VLM_CONCURRENCY", 2),
+            ),
+            full_page_vlm_batch_size=max(
+                1,
+                _env_int("DOCS_PARSER_FULL_PAGE_VLM_BATCH_SIZE", 2),
+            ),
+            full_page_vlm_max_new_tokens=max(
+                64,
+                _env_int("DOCS_PARSER_FULL_PAGE_VLM_MAX_NEW_TOKENS", 1200),
+            ),
+            full_page_vlm_scale=max(
+                0.5,
+                _env_float("DOCS_PARSER_FULL_PAGE_VLM_SCALE", 2.0),
+            ),
+            image_heavy_low_text_chars_per_unit=max(
+                1,
+                _env_int("DOCS_PARSER_IMAGE_HEAVY_LOW_TEXT_CHARS_PER_UNIT", 160),
+            ),
+            image_heavy_low_text_unit_ratio_threshold=min(
+                1.0,
+                max(0.0, _env_float("DOCS_PARSER_IMAGE_HEAVY_LOW_TEXT_UNIT_RATIO_THRESHOLD", 0.55)),
+            ),
+            image_heavy_visual_unit_ratio_threshold=min(
+                1.0,
+                max(0.0, _env_float("DOCS_PARSER_IMAGE_HEAVY_VISUAL_UNIT_RATIO_THRESHOLD", 0.35)),
+            ),
+            image_heavy_chunk_density_threshold=min(
+                1.0,
+                max(0.0, _env_float("DOCS_PARSER_IMAGE_HEAVY_CHUNK_DENSITY_THRESHOLD", 0.35)),
+            ),
+            image_heavy_very_low_avg_text_chars_threshold=max(
+                1,
+                _env_int("DOCS_PARSER_IMAGE_HEAVY_VERY_LOW_AVG_TEXT_CHARS_THRESHOLD", 90),
             ),
             max_chunk_chars=max(800, _env_int("DOCS_PARSER_MAX_CHUNK_CHARS", 2400)),
             chunk_overlap_chars=max(0, _env_int("DOCS_PARSER_CHUNK_OVERLAP_CHARS", 280)),

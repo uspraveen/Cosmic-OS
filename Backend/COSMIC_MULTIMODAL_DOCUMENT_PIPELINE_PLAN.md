@@ -79,6 +79,9 @@ For the current production slice, visual enrichment should be enabled conservati
   - `bar_code`
 - **If hosted picture description fails, the document parse should fall back to plain parsing instead of failing the whole request.**
 - **In this Docling build, native picture-description controls are strongest on the PDF/image pipeline, not the generic DOCX/PPTX pipeline.**
+- **For DOCX/PPTX, standard parsing still runs first.** COSMIC only escalates when the parsed result looks image-heavy or structurally weak.
+- **Image-heavy DOCX/PPTX escalation path:** render the original Office file to PDF via headless LibreOffice, then rerun Docling through a hosted full-page VLM pipeline.
+- **If Office render or hosted full-page VLM fails, keep the standard parse bundle** and record the fallback reason in `visual_enrichment` instead of failing the document outright.
 
 ---
 
@@ -107,10 +110,17 @@ flowchart TD
         F -->|yes| OCR[OCR stage on scanned or weak-text pages]
         F -->|no| A1[Structured document assembly]
         OCR --> A1
-        A1 --> J[Canonical parsed bundle<br/>document.json]
-        A1 --> K[Primary model-facing surface<br/>document.md with PAGE / SLIDE / FIGURE / TABLE markers]
-        A1 --> L[Chunk index<br/>chunk_index.json]
-        A1 --> A2[Sidecar assets<br/>tables, figures, pages, slides]
+        A1 --> Q{Image-heavy or weak-text<br/>DOCX / PPTX?}
+        Q -->|yes| RENDER[Headless Office render to PDF]
+        RENDER --> VLM[Docling full-page VLM rerun<br/>over rendered PDF]
+        Q -->|no| J[Canonical parsed bundle<br/>document.json]
+        Q -->|no| K[Primary model-facing surface<br/>document.md with PAGE / SLIDE / FIGURE / TABLE markers]
+        Q -->|no| L[Chunk index<br/>chunk_index.json]
+        Q -->|no| A2[Sidecar assets<br/>tables, figures, pages, slides]
+        VLM --> J
+        VLM --> K
+        VLM --> L
+        VLM --> A2
     end
 
     D --> O2[Opus receives parsed bundle refs<br/>and document summaries]

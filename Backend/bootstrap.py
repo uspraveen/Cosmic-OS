@@ -890,6 +890,30 @@ def setup_local_redis(redis_url: Optional[str]) -> None:
     )
 
 
+def office_renderer_version() -> Optional[str]:
+    return executable_version(["soffice", "--version"])
+
+
+def ensure_office_renderer() -> None:
+    version = office_renderer_version()
+    if version:
+        log("Office renderer available: {0}".format(version))
+        return
+
+    manager = detect_package_manager()
+    if not is_linux() or not manager:
+        raise BootstrapError("LibreOffice/soffice missing and no supported Linux package manager was found.")
+
+    package_name = "libreoffice"
+    log("Installing Office renderer via {0}: {1}".format(manager, package_name))
+    install_system_packages(manager, [package_name])
+
+    version = office_renderer_version()
+    if not version:
+        raise BootstrapError("LibreOffice/soffice is still unavailable after installation.")
+    log("Office renderer available: {0}".format(version))
+
+
 def missing_required_env_keys(env_path: Path, required_keys: Sequence[str]) -> List[str]:
     if not required_keys:
         return []
@@ -2030,6 +2054,7 @@ def doctor(
     elif venv_python_path(venv_path).exists():
         docs_parser_dependency_status = "venv missing pip"
     print("  docs parser deps   : {0}".format(docs_parser_dependency_status))
+    print("  office renderer    : {0}".format(office_renderer_version() or "missing"))
     print("  requirements file  : {0}".format(requirements_path if requirements_path.exists() else "missing"))
     print("  node available     : {0}".format(executable_version(["node", "--version"]) or "no"))
     print("  npm available      : {0}".format(executable_version(["npm", "--version"]) or "no"))
@@ -2231,6 +2256,7 @@ def setup_python(venv_path: Path, requirements_path: Path) -> None:
     if not is_linux():
         raise BootstrapError("This bootstrap flow currently targets Linux VMs only.")
 
+    ensure_office_renderer()
     ensure_python3_available()
     ensure_pip()
     ensure_venv_support()

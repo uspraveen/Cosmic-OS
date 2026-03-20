@@ -10,6 +10,7 @@ import pytest
 from agents.docs_parser.agent import DocsParserAgent
 from agents.docs_parser.config import DocsParserConfig
 from agents.docs_parser.docling_adapter import ParseRequest, ParsedDocument
+from agents.docs_parser.office_renderer import RenderedOfficeDocument
 from shared import TaskEnvelope, sign_task_envelope, utcnow
 
 
@@ -60,7 +61,9 @@ class StubParser:
         artifact_id: str,
         mime_type: str,
         request: ParseRequest,
+        source_filename: str | None = None,
     ) -> ParsedDocument:
+        del source_filename
         self.calls.append(
             {
                 "file_path": str(file_path),
@@ -199,8 +202,9 @@ class FailingParser:
         artifact_id: str,
         mime_type: str,
         request: ParseRequest,
+        source_filename: str | None = None,
     ) -> ParsedDocument:
-        del file_path, artifact_id, mime_type, request
+        del file_path, artifact_id, mime_type, request, source_filename
         raise RuntimeError(self.message)
 
 
@@ -215,7 +219,9 @@ class PictureDescriptionFallbackParser:
         artifact_id: str,
         mime_type: str,
         request: ParseRequest,
+        source_filename: str | None = None,
     ) -> ParsedDocument:
+        del source_filename
         self.calls.append(
             {
                 "file_path": str(file_path),
@@ -231,6 +237,184 @@ class PictureDescriptionFallbackParser:
             artifact_id=artifact_id,
             mime_type=mime_type,
             request=request,
+        )
+
+
+class FakeOfficeRenderer:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def render_to_pdf(self, *, source_path: Path, working_root: Path) -> RenderedOfficeDocument:
+        self.calls.append({"source_path": str(source_path), "working_root": str(working_root)})
+        output_root = working_root / "job_001" / "out"
+        output_root.mkdir(parents=True, exist_ok=True)
+        rendered_path = output_root / f"{source_path.stem}.pdf"
+        rendered_path.write_bytes(b"%PDF-1.7 rendered")
+        return RenderedOfficeDocument(rendered_pdf_path=rendered_path, backend="fake-office-renderer")
+
+
+class FailingOfficeRenderer:
+    def __init__(self, message: str) -> None:
+        self.message = message
+        self.calls: list[dict[str, Any]] = []
+
+    def render_to_pdf(self, *, source_path: Path, working_root: Path) -> RenderedOfficeDocument:
+        self.calls.append({"source_path": str(source_path), "working_root": str(working_root)})
+        raise RuntimeError(self.message)
+
+
+class OfficeEscalationParser:
+    def __init__(self, *, fail_full_page_vlm: bool = False) -> None:
+        self.fail_full_page_vlm = fail_full_page_vlm
+        self.calls: list[dict[str, Any]] = []
+
+    def parse_file(
+        self,
+        *,
+        file_path: Path,
+        artifact_id: str,
+        mime_type: str,
+        request: ParseRequest,
+        source_filename: str | None = None,
+    ) -> ParsedDocument:
+        del source_filename
+        self.calls.append(
+            {
+                "file_path": str(file_path),
+                "artifact_id": artifact_id,
+                "mime_type": mime_type,
+                "request": request,
+            }
+        )
+        if file_path.suffix.lower() == ".pdf" and request.full_page_vlm is not None:
+            if self.fail_full_page_vlm:
+                raise RuntimeError("Hosted full-page VLM timed out.")
+            markdown = (
+                "[SLIDE 1]\n\n"
+                "# Visual Overview\n\n"
+                "A full-slide timeline with three phases: ingest, parse, and synthesize.\n\n"
+                "[SLIDE 2]\n\n"
+                "# Architecture Flow\n\n"
+                "A systems diagram showing gateway, docs parser, orchestrator, and memory.\n"
+            )
+            slide_two_start = markdown.index("[SLIDE 2]")
+            return ParsedDocument(
+                title="Image Heavy Deck",
+                markdown=markdown,
+                document_json={"kind": "docling_document", "source": file_path.name},
+                chunk_index={
+                    "sections": [
+                        {
+                            "section_id": "sec_visual_1",
+                            "index": 1,
+                            "title": "Visual Overview",
+                            "level": 1,
+                            "text": "# Visual Overview\n\nA full-slide timeline with three phases: ingest, parse, and synthesize.",
+                            "start_char": markdown.index("# Visual Overview"),
+                            "end_char": slide_two_start - 2,
+                        },
+                        {
+                            "section_id": "sec_visual_2",
+                            "index": 2,
+                            "title": "Architecture Flow",
+                            "level": 1,
+                            "text": "# Architecture Flow\n\nA systems diagram showing gateway, docs parser, orchestrator, and memory.",
+                            "start_char": markdown.index("# Architecture Flow"),
+                            "end_char": len(markdown),
+                        },
+                    ],
+                    "chunks": [
+                        {
+                            "chunk_id": "chk_visual_1",
+                            "section_id": "sec_visual_1",
+                            "section_title": "Visual Overview",
+                            "text": "A full-slide timeline with three phases: ingest, parse, and synthesize.",
+                            "doc_start_char": markdown.index("A full-slide timeline"),
+                            "doc_end_char": markdown.index("A full-slide timeline") + len("A full-slide timeline with three phases: ingest, parse, and synthesize."),
+                        },
+                        {
+                            "chunk_id": "chk_visual_2",
+                            "section_id": "sec_visual_2",
+                            "section_title": "Architecture Flow",
+                            "text": "A systems diagram showing gateway, docs parser, orchestrator, and memory.",
+                            "doc_start_char": markdown.index("A systems diagram"),
+                            "doc_end_char": markdown.index("A systems diagram") + len("A systems diagram showing gateway, docs parser, orchestrator, and memory."),
+                        },
+                    ],
+                    "pages": [],
+                    "slides": [
+                        {"slide_id": "slide_0001", "slide_number": 1, "start_char": 0, "end_char": slide_two_start - 2, "anchor_id": "slide_0001"},
+                        {"slide_id": "slide_0002", "slide_number": 2, "start_char": slide_two_start, "end_char": len(markdown), "anchor_id": "slide_0002"},
+                    ],
+                    "tables": [],
+                    "figures": [],
+                    "assets": [],
+                    "chunk_count": 2,
+                    "section_count": 2,
+                    "page_count": 0,
+                    "slide_count": 2,
+                    "table_count": 0,
+                    "figure_count": 0,
+                    "asset_count": 0,
+                },
+                page_count=None,
+                slide_count=2,
+                table_count=0,
+                figure_count=0,
+                section_count=2,
+                asset_files=[],
+            )
+
+        markdown = "[SLIDE 1]\n\n[SLIDE 2]"
+        slide_two_start = markdown.index("[SLIDE 2]")
+        return ParsedDocument(
+            title="Image Heavy Deck",
+            markdown=markdown,
+            document_json={"kind": "docling_document", "source": file_path.name},
+            chunk_index={
+                "sections": [
+                    {
+                        "section_id": "sec_weak_1",
+                        "index": 1,
+                        "title": "Document",
+                        "level": 0,
+                        "text": "[SLIDE 1]\n\n[SLIDE 2]",
+                        "start_char": 0,
+                        "end_char": len(markdown),
+                    }
+                ],
+                "chunks": [
+                    {
+                        "chunk_id": "chk_weak_1",
+                        "section_id": "sec_weak_1",
+                        "section_title": "Document",
+                        "text": "[SLIDE 1] [SLIDE 2]",
+                        "doc_start_char": 0,
+                        "doc_end_char": len(markdown),
+                    }
+                ],
+                "pages": [],
+                "slides": [
+                    {"slide_id": "slide_0001", "slide_number": 1, "start_char": 0, "end_char": slide_two_start - 2, "anchor_id": "slide_0001"},
+                    {"slide_id": "slide_0002", "slide_number": 2, "start_char": slide_two_start, "end_char": len(markdown), "anchor_id": "slide_0002"},
+                ],
+                "tables": [],
+                "figures": [],
+                "assets": [],
+                "chunk_count": 1,
+                "section_count": 1,
+                "page_count": 0,
+                "slide_count": 2,
+                "table_count": 0,
+                "figure_count": 0,
+                "asset_count": 0,
+            },
+            page_count=None,
+            slide_count=2,
+            table_count=0,
+            figure_count=0,
+            section_count=1,
+            asset_files=[],
         )
 
 
@@ -727,3 +911,186 @@ async def test_docs_parser_agent_falls_back_when_picture_description_fails(tmp_p
     assert result.output["documents"][0]["visual_enrichment"]["picture_description_requested"] is True
     assert result.output["documents"][0]["visual_enrichment"]["picture_description_applied"] is False
     assert "timed out" in result.output["documents"][0]["visual_enrichment"]["picture_description_fallback_reason"]
+
+
+@pytest.mark.asyncio
+async def test_docs_parser_agent_escalates_image_heavy_pptx_through_office_render_and_full_page_vlm(tmp_path: Path) -> None:
+    source_root = tmp_path / "runs" / "artifacts" / "req_ingest_006" / "inputs" / "art_pptx_001"
+    source_root.mkdir(parents=True, exist_ok=True)
+    source_file = source_root / "visual_deck.pptx"
+    source_file.write_bytes(b"fake pptx bytes")
+
+    parser = OfficeEscalationParser()
+    renderer = FakeOfficeRenderer()
+    agent = DocsParserAgent(
+        redis_client=FakeRedis(),
+        config=DocsParserConfig(
+            redis_url="redis://unused",
+            gateway_url="http://gateway",
+            gateway_internal_token="internal-token",
+            full_page_vlm_api_key="test-openai-key",
+            picture_description_api_key="test-openai-key",
+        ),
+        parser=parser,
+        office_renderer=renderer,
+        store_root=tmp_path / "store",
+        runtime_root=tmp_path / "runtime",
+        artifacts_root=tmp_path / "runs" / "artifacts",
+        agent_secret="agent-secret",
+    )
+    await agent.on_startup()
+    try:
+        result = await agent.execute(
+            _make_task(
+                payload={"bundle_label": "Visual deck"},
+                input_artifacts=[
+                    {
+                        "artifact_id": "art_pptx_001",
+                        "path": str(source_file),
+                        "mime": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        "filename": "visual_deck.pptx",
+                    }
+                ],
+            )
+        )
+    finally:
+        await agent.stop()
+
+    assert result.status == "completed"
+    assert len(parser.calls) == 2
+    assert renderer.calls
+    assert parser.calls[0]["file_path"].endswith("visual_deck.pptx")
+    assert parser.calls[1]["file_path"].endswith("visual_deck.pdf")
+    assert parser.calls[1]["request"].full_page_vlm is not None
+    assert parser.calls[1]["request"].picture_description is None
+    assert parser.calls[1]["request"].generate_page_images is True
+
+    document = result.output["documents"][0]
+    enrichment = document["visual_enrichment"]
+    assert enrichment["full_page_vlm_requested"] is True
+    assert enrichment["full_page_vlm_applied"] is True
+    assert enrichment["office_render_requested"] is True
+    assert enrichment["office_render_applied"] is True
+    assert enrichment["office_render_backend"] == "fake-office-renderer"
+    assert enrichment["image_heavy_analysis"]["should_escalate"] is True
+    assert document["slide_count"] == 2
+    assert document["paths"]["rendered_source_pdf"] is not None
+
+    rendered_output = (
+        tmp_path
+        / "runs"
+        / "artifacts"
+        / "tsk_docs_parse_bundle"
+        / "docs_parser"
+        / "art_pptx_001"
+        / "intermediate"
+        / "rendered_source.pdf"
+    )
+    assert rendered_output.exists()
+
+
+@pytest.mark.asyncio
+async def test_docs_parser_agent_keeps_standard_parse_when_full_page_vlm_fails(tmp_path: Path) -> None:
+    source_root = tmp_path / "runs" / "artifacts" / "req_ingest_007" / "inputs" / "art_pptx_002"
+    source_root.mkdir(parents=True, exist_ok=True)
+    source_file = source_root / "visual_deck_fail.pptx"
+    source_file.write_bytes(b"fake pptx bytes")
+
+    parser = OfficeEscalationParser(fail_full_page_vlm=True)
+    renderer = FakeOfficeRenderer()
+    agent = DocsParserAgent(
+        redis_client=FakeRedis(),
+        config=DocsParserConfig(
+            redis_url="redis://unused",
+            gateway_url="http://gateway",
+            gateway_internal_token="internal-token",
+            full_page_vlm_api_key="test-openai-key",
+        ),
+        parser=parser,
+        office_renderer=renderer,
+        store_root=tmp_path / "store",
+        runtime_root=tmp_path / "runtime",
+        artifacts_root=tmp_path / "runs" / "artifacts",
+        agent_secret="agent-secret",
+    )
+    await agent.on_startup()
+    try:
+        result = await agent.execute(
+            _make_task(
+                payload={},
+                input_artifacts=[
+                    {
+                        "artifact_id": "art_pptx_002",
+                        "path": str(source_file),
+                        "mime": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        "filename": "visual_deck_fail.pptx",
+                    }
+                ],
+            )
+        )
+    finally:
+        await agent.stop()
+
+    assert result.status == "completed"
+    document = result.output["documents"][0]
+    enrichment = document["visual_enrichment"]
+    assert enrichment["full_page_vlm_requested"] is True
+    assert enrichment["full_page_vlm_applied"] is False
+    assert enrichment["office_render_applied"] is True
+    assert "timed out" in (enrichment["full_page_vlm_fallback_reason"] or "")
+    assert document["chunk_count"] == 1
+    assert document["paths"]["rendered_source_pdf"] is not None
+
+
+@pytest.mark.asyncio
+async def test_docs_parser_agent_keeps_standard_parse_when_office_renderer_is_unavailable(tmp_path: Path) -> None:
+    source_root = tmp_path / "runs" / "artifacts" / "req_ingest_008" / "inputs" / "art_docx_001"
+    source_root.mkdir(parents=True, exist_ok=True)
+    source_file = source_root / "brochure.docx"
+    source_file.write_bytes(b"fake docx bytes")
+
+    parser = OfficeEscalationParser()
+    renderer = FailingOfficeRenderer("Office renderer executable was not found: soffice")
+    agent = DocsParserAgent(
+        redis_client=FakeRedis(),
+        config=DocsParserConfig(
+            redis_url="redis://unused",
+            gateway_url="http://gateway",
+            gateway_internal_token="internal-token",
+            full_page_vlm_api_key="test-openai-key",
+        ),
+        parser=parser,
+        office_renderer=renderer,
+        store_root=tmp_path / "store",
+        runtime_root=tmp_path / "runtime",
+        artifacts_root=tmp_path / "runs" / "artifacts",
+        agent_secret="agent-secret",
+    )
+    await agent.on_startup()
+    try:
+        result = await agent.execute(
+            _make_task(
+                payload={},
+                input_artifacts=[
+                    {
+                        "artifact_id": "art_docx_001",
+                        "path": str(source_file),
+                        "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        "filename": "brochure.docx",
+                    }
+                ],
+            )
+        )
+    finally:
+        await agent.stop()
+
+    assert result.status == "completed"
+    assert len(parser.calls) == 1
+    document = result.output["documents"][0]
+    enrichment = document["visual_enrichment"]
+    assert enrichment["full_page_vlm_requested"] is True
+    assert enrichment["full_page_vlm_applied"] is False
+    assert enrichment["office_render_requested"] is True
+    assert enrichment["office_render_applied"] is False
+    assert "soffice" in (enrichment["office_render_fallback_reason"] or "")
+    assert document["paths"]["rendered_source_pdf"] is None

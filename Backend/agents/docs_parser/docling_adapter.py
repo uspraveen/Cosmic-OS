@@ -21,6 +21,9 @@ class ParseRequest:
     generate_page_images: bool
     generate_picture_images: bool
     picture_description: "PictureDescriptionRequest | None"
+    full_page_vlm_mode: str
+    use_full_page_vlm: bool
+    full_page_vlm: "FullPageVlmRequest | None"
     max_file_size_bytes: int
     max_num_pages: int
     max_chunk_chars: int
@@ -45,6 +48,19 @@ class PictureDescriptionRequest:
 
 
 @dataclass(slots=True)
+class FullPageVlmRequest:
+    api_key: str
+    api_url: str
+    model: str
+    preset: str
+    timeout_sec: float
+    concurrency: int
+    batch_size: int
+    max_new_tokens: int
+    scale: float
+
+
+@dataclass(slots=True)
 class ParsedDocument:
     title: str | None
     markdown: str
@@ -66,6 +82,7 @@ class DoclingAdapter:
         artifact_id: str,
         mime_type: str,
         request: ParseRequest,
+        source_filename: str | None = None,
     ) -> ParsedDocument:
         document, result = self._convert(file_path=file_path, request=request)
         page_label = self._page_label(mime_type=mime_type, file_path=file_path)
@@ -118,6 +135,7 @@ class DoclingAdapter:
             document,
             result=result,
             source_path=file_path,
+            source_filename=source_filename or file_path.name,
             artifact_id=artifact_id,
             mime_type=mime_type,
         )
@@ -140,9 +158,12 @@ class DoclingAdapter:
             from docling.datamodel.pipeline_options import (
                 PdfPipelineOptions,
                 PictureDescriptionVlmEngineOptions,
+                VlmConvertOptions,
+                VlmPipelineOptions,
             )
             from docling.datamodel.vlm_engine_options import ApiVlmEngineOptions, VlmEngineType
             from docling.document_converter import DocumentConverter, ImageFormatOption, PdfFormatOption
+            from docling.pipeline.vlm_pipeline import VlmPipeline
         except ImportError as exc:
             raise RuntimeError("Docling is not installed in the current runtime.") from exc
         try:
@@ -155,74 +176,112 @@ class DoclingAdapter:
             PictureClassificationLabel = None
 
         format_options: dict[Any, Any] = {}
-        pdf_like_options = None
-        if file_path.suffix.lower() in {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}:
-            pipeline_options = PdfPipelineOptions()
-            pipeline_options.do_ocr = request.enable_ocr
-            pipeline_options.generate_page_images = request.generate_page_images
-            pipeline_options.generate_picture_images = request.generate_picture_images
-            if request.picture_description is not None:
-                pipeline_options.enable_remote_services = True
-                pipeline_options.do_picture_classification = True
-                pipeline_options.do_picture_description = True
-                pipeline_options.picture_description_options = PictureDescriptionVlmEngineOptions.from_preset(
-                    request.picture_description.preset,
+        pdf_like_suffixes = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+        if file_path.suffix.lower() in pdf_like_suffixes:
+            if request.use_full_page_vlm and request.full_page_vlm is not None:
+                pipeline_options = VlmPipelineOptions()
+                if hasattr(pipeline_options, "enable_remote_services"):
+                    pipeline_options.enable_remote_services = True
+                if hasattr(pipeline_options, "generate_page_images"):
+                    pipeline_options.generate_page_images = request.generate_page_images
+                if hasattr(pipeline_options, "generate_picture_images"):
+                    pipeline_options.generate_picture_images = request.generate_picture_images
+                pipeline_options.vlm_options = VlmConvertOptions.from_preset(
+                    request.full_page_vlm.preset,
                     engine_options=ApiVlmEngineOptions(
                         engine_type=VlmEngineType.API_OPENAI,
-                        url=request.picture_description.api_url,
+                        url=request.full_page_vlm.api_url,
                         headers={
-                            "Authorization": f"Bearer {request.picture_description.api_key}",
+                            "Authorization": f"Bearer {request.full_page_vlm.api_key}",
                         },
                         params={
-                            "model": request.picture_description.model,
-                            "max_tokens": request.picture_description.max_new_tokens,
+                            "model": request.full_page_vlm.model,
+                            "max_tokens": request.full_page_vlm.max_new_tokens,
                             "temperature": 0,
                         },
-                        timeout=request.picture_description.timeout_sec,
-                        concurrency=request.picture_description.concurrency,
+                        timeout=request.full_page_vlm.timeout_sec,
+                        concurrency=request.full_page_vlm.concurrency,
                     ),
                 )
-                picture_description_options = getattr(pipeline_options, "picture_description_options", None)
-                if picture_description_options is not None:
-                    if hasattr(picture_description_options, "batch_size"):
-                        picture_description_options.batch_size = request.picture_description.batch_size
-                    if hasattr(picture_description_options, "scale"):
-                        picture_description_options.scale = request.picture_description.scale
-                    if hasattr(picture_description_options, "picture_area_threshold"):
-                        picture_description_options.picture_area_threshold = request.picture_description.picture_area_threshold
-                    if hasattr(picture_description_options, "classification_min_confidence"):
-                        picture_description_options.classification_min_confidence = (
-                            request.picture_description.classification_min_confidence
-                        )
-                    if hasattr(picture_description_options, "classification_deny"):
-                        deny_labels: list[Any] = []
-                        for raw_label in request.picture_description.classification_deny:
-                            if PictureClassificationLabel is None:
-                                deny_labels.append(raw_label)
-                                continue
-                            try:
-                                deny_labels.append(PictureClassificationLabel(raw_label))
-                            except Exception:
-                                deny_labels.append(raw_label)
-                        picture_description_options.classification_deny = deny_labels
-                    if hasattr(picture_description_options, "prompt"):
-                        picture_description_options.prompt = request.picture_description.prompt
-                    generation_config = getattr(picture_description_options, "generation_config", None)
+                vlm_options = getattr(pipeline_options, "vlm_options", None)
+                if vlm_options is not None:
+                    if hasattr(vlm_options, "batch_size"):
+                        vlm_options.batch_size = request.full_page_vlm.batch_size
+                    if hasattr(vlm_options, "scale"):
+                        vlm_options.scale = request.full_page_vlm.scale
+                    generation_config = getattr(vlm_options, "generation_config", None)
                     if isinstance(generation_config, dict):
                         generation_config.setdefault("do_sample", False)
-                        generation_config["max_new_tokens"] = request.picture_description.max_new_tokens
-            if hasattr(pipeline_options, "do_table_structure"):
-                pipeline_options.do_table_structure = True
-            table_structure_options = getattr(pipeline_options, "table_structure_options", None)
-            if TableFormerMode is not None and table_structure_options is not None and hasattr(table_structure_options, "mode"):
-                try:
-                    table_structure_options.mode = TableFormerMode.ACCURATE
-                except Exception:
-                    pass
-            pdf_like_options = pipeline_options
-        if pdf_like_options is not None:
-            format_options[InputFormat.PDF] = PdfFormatOption(pipeline_options=pdf_like_options)
-            format_options[InputFormat.IMAGE] = ImageFormatOption(pipeline_options=pdf_like_options)
+                        generation_config["max_new_tokens"] = request.full_page_vlm.max_new_tokens
+                format_options[InputFormat.PDF] = PdfFormatOption(
+                    pipeline_cls=VlmPipeline,
+                    pipeline_options=pipeline_options,
+                )
+            else:
+                pipeline_options = PdfPipelineOptions()
+                pipeline_options.do_ocr = request.enable_ocr
+                pipeline_options.generate_page_images = request.generate_page_images
+                pipeline_options.generate_picture_images = request.generate_picture_images
+                if request.picture_description is not None:
+                    pipeline_options.enable_remote_services = True
+                    pipeline_options.do_picture_classification = True
+                    pipeline_options.do_picture_description = True
+                    pipeline_options.picture_description_options = PictureDescriptionVlmEngineOptions.from_preset(
+                        request.picture_description.preset,
+                        engine_options=ApiVlmEngineOptions(
+                            engine_type=VlmEngineType.API_OPENAI,
+                            url=request.picture_description.api_url,
+                            headers={
+                                "Authorization": f"Bearer {request.picture_description.api_key}",
+                            },
+                            params={
+                                "model": request.picture_description.model,
+                                "max_tokens": request.picture_description.max_new_tokens,
+                                "temperature": 0,
+                            },
+                            timeout=request.picture_description.timeout_sec,
+                            concurrency=request.picture_description.concurrency,
+                        ),
+                    )
+                    picture_description_options = getattr(pipeline_options, "picture_description_options", None)
+                    if picture_description_options is not None:
+                        if hasattr(picture_description_options, "batch_size"):
+                            picture_description_options.batch_size = request.picture_description.batch_size
+                        if hasattr(picture_description_options, "scale"):
+                            picture_description_options.scale = request.picture_description.scale
+                        if hasattr(picture_description_options, "picture_area_threshold"):
+                            picture_description_options.picture_area_threshold = request.picture_description.picture_area_threshold
+                        if hasattr(picture_description_options, "classification_min_confidence"):
+                            picture_description_options.classification_min_confidence = (
+                                request.picture_description.classification_min_confidence
+                            )
+                        if hasattr(picture_description_options, "classification_deny"):
+                            deny_labels: list[Any] = []
+                            for raw_label in request.picture_description.classification_deny:
+                                if PictureClassificationLabel is None:
+                                    deny_labels.append(raw_label)
+                                    continue
+                                try:
+                                    deny_labels.append(PictureClassificationLabel(raw_label))
+                                except Exception:
+                                    deny_labels.append(raw_label)
+                            picture_description_options.classification_deny = deny_labels
+                        if hasattr(picture_description_options, "prompt"):
+                            picture_description_options.prompt = request.picture_description.prompt
+                        generation_config = getattr(picture_description_options, "generation_config", None)
+                        if isinstance(generation_config, dict):
+                            generation_config.setdefault("do_sample", False)
+                            generation_config["max_new_tokens"] = request.picture_description.max_new_tokens
+                if hasattr(pipeline_options, "do_table_structure"):
+                    pipeline_options.do_table_structure = True
+                table_structure_options = getattr(pipeline_options, "table_structure_options", None)
+                if TableFormerMode is not None and table_structure_options is not None and hasattr(table_structure_options, "mode"):
+                    try:
+                        table_structure_options.mode = TableFormerMode.ACCURATE
+                    except Exception:
+                        pass
+                format_options[InputFormat.PDF] = PdfFormatOption(pipeline_options=pipeline_options)
+                format_options[InputFormat.IMAGE] = ImageFormatOption(pipeline_options=pipeline_options)
 
         converter = DocumentConverter(**({"format_options": format_options} if format_options else {}))
         try:
@@ -595,7 +654,16 @@ class DoclingAdapter:
             return " ".join(part for part in (self._flatten_text(item) for item in value) if part).strip()
         return str(value).strip()
 
-    def _export_json(self, document: Any, *, result: Any, source_path: Path, artifact_id: str, mime_type: str) -> dict[str, Any]:
+    def _export_json(
+        self,
+        document: Any,
+        *,
+        result: Any,
+        source_path: Path,
+        source_filename: str,
+        artifact_id: str,
+        mime_type: str,
+    ) -> dict[str, Any]:
         payload = self._coerce_json(document)
         if not isinstance(payload, dict):
             payload = {"document": payload}
@@ -603,7 +671,8 @@ class DoclingAdapter:
         payload["parser"].update(
             {
                 "name": "docling",
-                "source_filename": source_path.name,
+                "source_filename": source_filename,
+                "converter_source_filename": source_path.name,
                 "artifact_id": artifact_id,
                 "mime_type": mime_type,
             }
