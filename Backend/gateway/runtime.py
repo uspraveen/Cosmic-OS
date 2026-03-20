@@ -5925,6 +5925,39 @@ class GatewayRuntime:
         tags = self._normalize_string_list(payload.get("tags"), limit=24)
         metadata = dict(payload.get("metadata")) if isinstance(payload.get("metadata"), dict) else {}
         provenance = dict(payload.get("provenance")) if isinstance(payload.get("provenance"), dict) else {}
+        confirmation_status = self._safe_text(payload.get("confirmation_status")) or self._safe_text(
+            metadata.get("confirmation_status")
+        )
+        created_in_session_id = self._safe_text(payload.get("created_in_session_id")) or self._safe_text(
+            metadata.get("created_in_session_id")
+        )
+        created_by_tool = self._safe_text(payload.get("created_by_tool")) or self._safe_text(
+            metadata.get("created_by_tool")
+        )
+        contested_reason = self._safe_text(payload.get("contested_reason")) or self._safe_text(
+            metadata.get("contested_reason")
+        )
+        contested_at = self._safe_text(payload.get("contested_at")) or self._safe_text(
+            metadata.get("contested_at")
+        )
+        derived_from_assistant_inference = self._coerce_bool(
+            payload.get("derived_from_assistant_inference"),
+            self._coerce_bool(metadata.get("derived_from_assistant_inference"), False),
+        )
+        if confirmation_status:
+            metadata["confirmation_status"] = confirmation_status
+        else:
+            metadata.setdefault("confirmation_status", "confirmed")
+        metadata.setdefault(
+            "created_in_session_id",
+            created_in_session_id or self._safe_text(provenance.get("session_id")) or self._safe_text(metadata.get("session_id")),
+        )
+        metadata.setdefault("created_by_tool", created_by_tool or "memory_write_core_fact")
+        metadata["derived_from_assistant_inference"] = derived_from_assistant_inference
+        if contested_reason:
+            metadata["contested_reason"] = contested_reason
+        if contested_at:
+            metadata["contested_at"] = contested_at
 
         normalized_payload: dict[str, Any] = {
             "fact": fact,

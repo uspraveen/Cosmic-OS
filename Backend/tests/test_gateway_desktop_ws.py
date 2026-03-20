@@ -1375,6 +1375,31 @@ async def test_refresh_active_working_set_surfaces_recent_memory_tool_receipts(t
         await runtime.stop()
 
 
+def test_gateway_core_fact_normalization_sets_provenance_defaults(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    normalized, _ = runtime._normalize_tool_core_fact_payload(  # noqa: SLF001 - intentional unit seam
+        {
+            "fact": "Praveen's partner is Priya.",
+            "title": "Partner name",
+            "canonical_key": "relationships.partner.name",
+            "metadata": {
+                "session_id": "sess_core_fact_1",
+            },
+            "provenance": {
+                "source_kind": "orchestrator_tool",
+                "source_id": "req_core_fact_1",
+                "session_id": "sess_core_fact_1",
+            },
+        }
+    )
+
+    metadata = normalized["metadata"]
+    assert metadata["confirmation_status"] == "confirmed"
+    assert metadata["created_in_session_id"] == "sess_core_fact_1"
+    assert metadata["created_by_tool"] == "memory_write_core_fact"
+    assert metadata["derived_from_assistant_inference"] is False
+
+
 def test_desktop_upload_route_stages_documents(tmp_path) -> None:
     runtime = build_runtime(tmp_path)
     runtime.config.artifacts_root = tmp_path / "runs" / "artifacts"
