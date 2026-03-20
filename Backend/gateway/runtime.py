@@ -1212,11 +1212,7 @@ class GatewayRuntime:
         if auto_reply is not None:
             self.request_records[request_id] = auto_reply
             return auto_reply
-        active_working_set = (
-            session_metadata.get("active_working_set")
-            if isinstance(session_metadata.get("active_working_set"), dict)
-            else None
-        )
+        active_working_set = self._refresh_active_working_set(session_id)
         assembled_conversation_context = self._build_conversation_context(
             session_id,
             fallback_context=conversation_context,
@@ -2244,6 +2240,7 @@ class GatewayRuntime:
             ),
             "active_task_refs": self._normalize_string_list(carry_forward.get("active_task_refs")),
             "pending_artifact_pointers": [],
+            "recent_document_artifacts": [],
             "user_preferences_in_play": self._normalize_string_list(
                 carry_forward.get("stable_user_preferences")
             ),
@@ -2312,6 +2309,24 @@ class GatewayRuntime:
         artifact_refs = self._normalize_string_list(working_set.get("pending_artifact_pointers"))
         if artifact_refs:
             lines.extend(["", f"- Pending artifact pointers: {', '.join(artifact_refs[:6])}"])
+        recent_documents = working_set.get("recent_document_artifacts") if isinstance(working_set.get("recent_document_artifacts"), list) else []
+        if recent_documents:
+            lines.extend(["", "- Recent parsed documents:"])
+            for document in recent_documents[:6]:
+                if not isinstance(document, dict):
+                    continue
+                label = self._safe_text(document.get("title")) or self._safe_text(document.get("filename")) or self._safe_text(document.get("artifact_id")) or "document"
+                parts = [label]
+                doc_id = self._safe_text(document.get("doc_id"))
+                bundle_id = self._safe_text(document.get("parse_bundle_id"))
+                ingest_state = self._safe_text(document.get("ingest_state"))
+                if doc_id:
+                    parts.append(f"doc_id={doc_id}")
+                if bundle_id:
+                    parts.append(f"bundle_id={bundle_id}")
+                if ingest_state:
+                    parts.append(f"state={ingest_state}")
+                lines.append("  - " + "; ".join(parts))
 
         return "\n".join(lines) if len(lines) > 1 else None
 
@@ -2977,6 +2992,7 @@ class GatewayRuntime:
         recent_turns = self.session_store.list_turn_ledger(session_id, limit=TURN_LEDGER_WINDOW_SIZE)
         notebooks = self.session_store.list_task_notebooks(session_id, limit=TASK_NOTEBOOK_WINDOW_SIZE)
         awaiting_reply_messages = self.session_store.list_awaiting_reply_messages(session_id, limit=8)
+        session_artifacts = self.artifact_store.list_for_session(session_id, limit=24)
 
         active_task_refs = []
         workstreams = self._normalize_string_list(carry_forward.get("active_workstreams"))
@@ -2985,6 +3001,7 @@ class GatewayRuntime:
         entities = self._normalize_entity_list(carry_forward.get("current_focus_entities"))
         preferences = self._normalize_string_list(carry_forward.get("stable_user_preferences"))
         artifact_pointers = []
+        recent_document_artifacts: list[dict[str, Any]] = []
         goal = self._safe_text(carry_forward.get("goal")) or ""
 
         for turn in recent_turns:
@@ -3041,6 +3058,39 @@ class GatewayRuntime:
                 limit=8,
             )
 
+        latest_artifacts: dict[str, dict[str, Any]] = {}
+        for artifact in reversed(session_artifacts):
+            if not isinstance(artifact, dict):
+                continue
+            artifact_id = self._safe_text(artifact.get("artifact_id"))
+            if not artifact_id:
+                continue
+            latest_artifacts[artifact_id] = artifact
+
+        artifact_pointers = []
+        parsed_document_rows: list[dict[str, Any]] = []
+        for artifact in latest_artifacts.values():
+            ingest_state = self._safe_text(artifact.get("ingest_state")).lower()
+            artifact_id = self._safe_text(artifact.get("artifact_id"))
+            pointer = artifact_id or self._safe_text(artifact.get("path"))
+            if ingest_state in {"staged", "parse_pending", "stage_failed", "metadata_only", "bridge_reference"} and pointer:
+                artifact_pointers = self._normalize_string_list([*artifact_pointers, pointer], limit=8)
+            parsed_summary = artifact.get("parsed_summary") if isinstance(artifact.get("parsed_summary"), dict) else {}
+            if ingest_state == "parsed" or self._safe_text(artifact.get("parse_bundle_id")) or self._safe_text(parsed_summary.get("doc_id")):
+                parsed_document_rows.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "filename": self._safe_text(artifact.get("filename")),
+                        "ingest_state": self._safe_text(artifact.get("ingest_state")),
+                        "parse_bundle_id": self._safe_text(artifact.get("parse_bundle_id")),
+                        "doc_id": self._safe_text(parsed_summary.get("doc_id")),
+                        "title": self._safe_text(parsed_summary.get("title")) or self._safe_text(artifact.get("filename")),
+                        "request_id": self._safe_text(artifact.get("request_id")),
+                    }
+                )
+
+        recent_document_artifacts = parsed_document_rows[:6]
+
         open_loops = self._normalize_string_list(
             [
                 *open_loops,
@@ -3062,6 +3112,7 @@ class GatewayRuntime:
             "current_focus_entities": entities,
             "active_task_refs": active_task_refs,
             "pending_artifact_pointers": artifact_pointers,
+            "recent_document_artifacts": recent_document_artifacts,
             "user_preferences_in_play": preferences,
             "last_updated_at": utcnow_iso(),
         }

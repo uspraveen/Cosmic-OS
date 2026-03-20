@@ -287,6 +287,56 @@ class ArtifactStore:
                 """,
                 (request_id,),
             ).fetchall()
+        return self._deserialize_rows(rows, request_id=request_id, session_id=None)
+
+    def list_for_session(self, session_id: str, *, limit: int = 32) -> list[dict[str, Any]]:
+        if not session_id:
+            return []
+        normalized_limit = max(1, min(int(limit), 256))
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    artifact_id,
+                    request_id,
+                    session_id,
+                    source_channel,
+                    source_platform,
+                    source_message_id,
+                    kind,
+                    mime_type,
+                    filename,
+                    caption,
+                    size_bytes,
+                    width,
+                    height,
+                    duration_ms,
+                    sha256,
+                    bridge_media_ref,
+                    download_url,
+                    path,
+                    ingest_state,
+                    parse_task_id,
+                    parse_bundle_id,
+                    parsed_summary_json,
+                    metadata_json,
+                    created_at
+                FROM inbound_artifacts
+                WHERE session_id = ?
+                ORDER BY created_at DESC, artifact_id DESC
+                LIMIT ?
+                """,
+                (session_id, normalized_limit),
+            ).fetchall()
+        return self._deserialize_rows(rows, request_id=None, session_id=session_id)
+
+    def _deserialize_rows(
+        self,
+        rows: list[sqlite3.Row],
+        *,
+        request_id: str | None,
+        session_id: str | None,
+    ) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         for row in rows:
             if row["metadata_json"]:
@@ -294,8 +344,9 @@ class ArtifactStore:
                     metadata = json.loads(row["metadata_json"])
                 except json.JSONDecodeError:
                     logger.exception(
-                        "artifact_store.metadata_parse_failed request_id=%s artifact_id=%s",
+                        "artifact_store.metadata_parse_failed request_id=%s session_id=%s artifact_id=%s",
                         request_id,
+                        session_id,
                         row["artifact_id"],
                     )
                     metadata = None
@@ -306,8 +357,9 @@ class ArtifactStore:
                     parsed_summary = json.loads(row["parsed_summary_json"])
                 except json.JSONDecodeError:
                     logger.exception(
-                        "artifact_store.parsed_summary_parse_failed request_id=%s artifact_id=%s",
+                        "artifact_store.parsed_summary_parse_failed request_id=%s session_id=%s artifact_id=%s",
                         request_id,
+                        session_id,
                         row["artifact_id"],
                     )
                     parsed_summary = None

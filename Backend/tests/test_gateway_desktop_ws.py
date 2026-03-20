@@ -1209,6 +1209,49 @@ async def test_docs_autoparse_reconcile_marks_late_completion_as_parsed(tmp_path
         await runtime.stop()
 
 
+@pytest.mark.asyncio
+async def test_refresh_active_working_set_uses_latest_session_artifact_state(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    await runtime.start()
+    try:
+        runtime._ensure_session_state_seeded("sess_artifacts")  # noqa: SLF001
+        runtime.artifact_store.persist_inbound_attachments(
+            request_id="req_artifact_old",
+            session_id="sess_artifacts",
+            source_channel="desktop:desk_a",
+            source_platform="desktop",
+            source_message_id=None,
+            attachments=[
+                {
+                    "artifact_id": "art_newsletter",
+                    "kind": "document",
+                    "mime_type": "application/pdf",
+                    "filename": "newsletter.pdf",
+                    "ingest_state": "parsed",
+                    "parse_task_id": "tsk_newsletter",
+                    "parse_bundle_id": "bundle_newsletter",
+                    "parsed_summary": {
+                        "doc_id": "doc_newsletter",
+                        "title": "Newsletter",
+                        "chunk_count": 16,
+                        "section_count": 16,
+                    },
+                }
+            ],
+        )
+
+        working_set = runtime._refresh_active_working_set("sess_artifacts")  # noqa: SLF001
+
+        assert "art_newsletter" not in working_set["pending_artifact_pointers"]
+        assert working_set["recent_document_artifacts"][0]["artifact_id"] == "art_newsletter"
+        assert working_set["recent_document_artifacts"][0]["parse_bundle_id"] == "bundle_newsletter"
+        rendered = runtime._render_active_working_set_context(working_set)  # noqa: SLF001
+        assert "Recent parsed documents" in (rendered or "")
+        assert "bundle_id=bundle_newsletter" in (rendered or "")
+    finally:
+        await runtime.stop()
+
+
 def test_desktop_upload_route_stages_documents(tmp_path) -> None:
     runtime = build_runtime(tmp_path)
     runtime.config.artifacts_root = tmp_path / "runs" / "artifacts"
