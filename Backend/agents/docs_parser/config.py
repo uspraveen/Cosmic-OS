@@ -62,6 +62,7 @@ class DocsParserConfig:
     default_generate_picture_images: bool = True
     default_enable_picture_description: bool = True
     default_enable_full_page_vlm: bool = True
+    default_enable_asset_reinspection: bool = True
     enable_office_render_fallback: bool = True
     office_renderer_path: str = "soffice"
     office_render_timeout_sec: float = 180.0
@@ -99,6 +100,17 @@ class DocsParserConfig:
     full_page_vlm_batch_size: int = 2
     full_page_vlm_max_new_tokens: int = 1200
     full_page_vlm_scale: float = 2.0
+    asset_reinspection_api_key: str = ""
+    asset_reinspection_api_url: str = "https://api.openai.com/v1/chat/completions"
+    asset_reinspection_model: str = "gpt-4.1-mini"
+    asset_reinspection_timeout_sec: float = 90.0
+    asset_reinspection_max_new_tokens: int = 900
+    asset_reinspection_detail: str = "high"
+    asset_reinspection_prompt: str = _load_text(
+        AGENT_ROOT / "prompts" / "asset_reinspection.md",
+        "Return a concise grounded JSON description of this document asset. "
+        "Focus on chart type, labels, visible text, diagram relationships, layout hierarchy, and any important values or callouts.",
+    )
     image_heavy_low_text_chars_per_unit: int = 160
     image_heavy_low_text_unit_ratio_threshold: float = 0.55
     image_heavy_visual_unit_ratio_threshold: float = 0.35
@@ -124,6 +136,8 @@ class DocsParserConfig:
             default_enable_picture_description=os.getenv("DOCS_PARSER_ENABLE_PICTURE_DESCRIPTION", "true").strip().lower()
             not in {"0", "false", "no"},
             default_enable_full_page_vlm=os.getenv("DOCS_PARSER_ENABLE_FULL_PAGE_VLM", "true").strip().lower()
+            not in {"0", "false", "no"},
+            default_enable_asset_reinspection=os.getenv("DOCS_PARSER_ENABLE_ASSET_REINSPECTION", "true").strip().lower()
             not in {"0", "false", "no"},
             enable_office_render_fallback=os.getenv("DOCS_PARSER_ENABLE_OFFICE_RENDER_FALLBACK", "true").strip().lower()
             not in {"0", "false", "no"},
@@ -222,6 +236,38 @@ class DocsParserConfig:
             full_page_vlm_scale=max(
                 0.5,
                 _env_float("DOCS_PARSER_FULL_PAGE_VLM_SCALE", 2.0),
+            ),
+            asset_reinspection_api_key=(
+                os.getenv("DOCS_PARSER_ASSET_REINSPECTION_API_KEY")
+                or os.getenv("OPENAI_API_KEY")
+                or ""
+            ).strip(),
+            asset_reinspection_api_url=(
+                os.getenv("DOCS_PARSER_ASSET_REINSPECTION_API_URL", "https://api.openai.com/v1/chat/completions").strip()
+                or "https://api.openai.com/v1/chat/completions"
+            ),
+            asset_reinspection_model=(
+                os.getenv("DOCS_PARSER_ASSET_REINSPECTION_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
+            ),
+            asset_reinspection_timeout_sec=max(
+                10.0,
+                _env_float("DOCS_PARSER_ASSET_REINSPECTION_TIMEOUT_SEC", 90.0),
+            ),
+            asset_reinspection_max_new_tokens=max(
+                128,
+                _env_int("DOCS_PARSER_ASSET_REINSPECTION_MAX_NEW_TOKENS", 900),
+            ),
+            asset_reinspection_detail=(
+                os.getenv("DOCS_PARSER_ASSET_REINSPECTION_DETAIL", "high").strip().lower() or "high"
+            ),
+            asset_reinspection_prompt=_load_text(
+                Path(
+                    os.getenv(
+                        "DOCS_PARSER_ASSET_REINSPECTION_PROMPT_PATH",
+                        str(AGENT_ROOT / "prompts" / "asset_reinspection.md"),
+                    )
+                ),
+                cls.asset_reinspection_prompt,
             ),
             image_heavy_low_text_chars_per_unit=max(
                 1,

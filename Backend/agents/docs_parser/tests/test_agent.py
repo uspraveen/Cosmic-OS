@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from agents.docs_parser.agent import DocsParserAgent
@@ -427,6 +428,115 @@ class OfficeEscalationParser:
         )
 
 
+class TextHeavyPptxParser:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def parse_file(
+        self,
+        *,
+        file_path: Path,
+        artifact_id: str,
+        mime_type: str,
+        request: ParseRequest,
+        source_filename: str | None = None,
+    ) -> ParsedDocument:
+        del source_filename
+        self.calls.append(
+            {
+                "file_path": str(file_path),
+                "artifact_id": artifact_id,
+                "mime_type": mime_type,
+                "request": request,
+            }
+        )
+        if file_path.suffix.lower() == ".pdf" and request.full_page_vlm is not None:
+            return OfficeEscalationParser().parse_file(
+                file_path=file_path,
+                artifact_id=artifact_id,
+                mime_type=mime_type,
+                request=request,
+            )
+
+        markdown = (
+            "[SLIDE 1]\n\n"
+            "# Growth Plan\n\n"
+            "This slide contains extensive readable text about growth strategy, execution plan, and market sequencing.\n\n"
+            "[SLIDE 2]\n\n"
+            "# Operating Model\n\n"
+            "This slide contains detailed readable text covering operating cadence, owners, and milestones.\n"
+        )
+        slide_two_start = markdown.index("[SLIDE 2]")
+        return ParsedDocument(
+            title="Readable Deck",
+            markdown=markdown,
+            document_json={"kind": "docling_document", "source": file_path.name},
+            chunk_index={
+                "sections": [
+                    {
+                        "section_id": "sec_text_1",
+                        "index": 1,
+                        "title": "Growth Plan",
+                        "level": 1,
+                        "text": "# Growth Plan\n\nThis slide contains extensive readable text about growth strategy, execution plan, and market sequencing.",
+                        "start_char": markdown.index("# Growth Plan"),
+                        "end_char": slide_two_start - 2,
+                    },
+                    {
+                        "section_id": "sec_text_2",
+                        "index": 2,
+                        "title": "Operating Model",
+                        "level": 1,
+                        "text": "# Operating Model\n\nThis slide contains detailed readable text covering operating cadence, owners, and milestones.",
+                        "start_char": markdown.index("# Operating Model"),
+                        "end_char": len(markdown),
+                    },
+                ],
+                "chunks": [
+                    {
+                        "chunk_id": "chk_text_1",
+                        "section_id": "sec_text_1",
+                        "section_title": "Growth Plan",
+                        "text": "This slide contains extensive readable text about growth strategy, execution plan, and market sequencing.",
+                        "doc_start_char": markdown.index("This slide contains extensive"),
+                        "doc_end_char": markdown.index("This slide contains extensive")
+                        + len("This slide contains extensive readable text about growth strategy, execution plan, and market sequencing."),
+                    },
+                    {
+                        "chunk_id": "chk_text_2",
+                        "section_id": "sec_text_2",
+                        "section_title": "Operating Model",
+                        "text": "This slide contains detailed readable text covering operating cadence, owners, and milestones.",
+                        "doc_start_char": markdown.index("This slide contains detailed"),
+                        "doc_end_char": markdown.index("This slide contains detailed")
+                        + len("This slide contains detailed readable text covering operating cadence, owners, and milestones."),
+                    },
+                ],
+                "pages": [],
+                "slides": [
+                    {"slide_id": "slide_0001", "slide_number": 1, "start_char": 0, "end_char": slide_two_start - 2, "anchor_id": "slide_0001"},
+                    {"slide_id": "slide_0002", "slide_number": 2, "start_char": slide_two_start, "end_char": len(markdown), "anchor_id": "slide_0002"},
+                ],
+                "tables": [],
+                "figures": [],
+                "assets": [],
+                "chunk_count": 2,
+                "section_count": 2,
+                "page_count": 0,
+                "slide_count": 2,
+                "table_count": 0,
+                "figure_count": 0,
+                "asset_count": 0,
+            },
+            page_count=None,
+            slide_count=2,
+            table_count=0,
+            figure_count=0,
+            section_count=2,
+            asset_files=[],
+        )
+
+
 def _make_task(*, payload: dict[str, object], input_artifacts: list[dict[str, object]], session_id: str = "sess_docs") -> TaskEnvelope:
     task = TaskEnvelope(
         task_id="tsk_docs_parse_bundle",
@@ -554,6 +664,39 @@ def _make_fetch_asset_task(*, bundle_id: str, asset_id: str, doc_id: str | None 
         input=payload,
         input_artifacts=[],
         idempotency_key="idem_docs_fetch_asset",
+        priority="normal",
+        signature="",
+        created_at=utcnow(),
+        source="user",
+        source_id="desktop",
+        channel="desktop:test",
+    )
+    return task.model_copy(update={"signature": sign_task_envelope(task, "agent-secret")})
+
+
+def _make_reinspect_asset_task(
+    *,
+    bundle_id: str,
+    asset_id: str,
+    doc_id: str | None = None,
+    question: str | None = None,
+) -> TaskEnvelope:
+    payload: dict[str, object] = {"bundle_id": bundle_id, "asset_id": asset_id}
+    if doc_id:
+        payload["doc_id"] = doc_id
+    if question:
+        payload["question"] = question
+    task = TaskEnvelope(
+        task_id="tsk_docs_reinspect_asset",
+        task_list_id="sess_docs",
+        parent_task_id="tsk_parent",
+        session_id="sess_docs",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/docs-parser-agent:1.0.0",
+        intent="docs.reinspect_asset",
+        input=payload,
+        input_artifacts=[],
+        idempotency_key="idem_docs_reinspect_asset",
         priority="normal",
         signature="",
         created_at=utcnow(),
@@ -1090,6 +1233,61 @@ async def test_docs_parser_agent_escalates_image_heavy_pptx_through_office_rende
 
 
 @pytest.mark.asyncio
+async def test_docs_parser_agent_treats_pptx_as_visual_first_in_auto_mode(tmp_path: Path) -> None:
+    source_root = tmp_path / "runs" / "artifacts" / "req_ingest_006b" / "inputs" / "art_pptx_auto"
+    source_root.mkdir(parents=True, exist_ok=True)
+    source_file = source_root / "readable_deck.pptx"
+    source_file.write_bytes(b"fake pptx bytes")
+
+    parser = TextHeavyPptxParser()
+    renderer = FakeOfficeRenderer()
+    agent = DocsParserAgent(
+        redis_client=FakeRedis(),
+        config=DocsParserConfig(
+            redis_url="redis://unused",
+            gateway_url="http://gateway",
+            gateway_internal_token="internal-token",
+            full_page_vlm_api_key="test-openai-key",
+        ),
+        parser=parser,
+        office_renderer=renderer,
+        store_root=tmp_path / "store",
+        runtime_root=tmp_path / "runtime",
+        artifacts_root=tmp_path / "runs" / "artifacts",
+        agent_secret="agent-secret",
+    )
+    await agent.on_startup()
+    try:
+        result = await agent.execute(
+            _make_task(
+                payload={},
+                input_artifacts=[
+                    {
+                        "artifact_id": "art_pptx_auto",
+                        "path": str(source_file),
+                        "mime": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        "filename": "readable_deck.pptx",
+                    }
+                ],
+            )
+        )
+    finally:
+        await agent.stop()
+
+    assert result.status == "completed"
+    assert len(parser.calls) == 2
+    assert renderer.calls
+    assert parser.calls[0]["file_path"].endswith("readable_deck.pptx")
+    assert parser.calls[1]["file_path"].endswith("readable_deck.pdf")
+    assert parser.calls[1]["request"].full_page_vlm is not None
+    enrichment = result.output["documents"][0]["visual_enrichment"]
+    assert enrichment["full_page_vlm_requested"] is True
+    assert enrichment["full_page_vlm_applied"] is True
+    assert enrichment["image_heavy_analysis"]["should_escalate"] is True
+    assert "pptx_visual_first_default" in (enrichment["image_heavy_analysis"]["reasons"] or [])
+
+
+@pytest.mark.asyncio
 async def test_docs_parser_agent_keeps_standard_parse_when_full_page_vlm_fails(tmp_path: Path) -> None:
     source_root = tmp_path / "runs" / "artifacts" / "req_ingest_007" / "inputs" / "art_pptx_002"
     source_root.mkdir(parents=True, exist_ok=True)
@@ -1194,3 +1392,167 @@ async def test_docs_parser_agent_keeps_standard_parse_when_office_renderer_is_un
     assert enrichment["office_render_applied"] is False
     assert "soffice" in (enrichment["office_render_fallback_reason"] or "")
     assert document["paths"]["rendered_source_pdf"] is None
+
+
+@pytest.mark.asyncio
+async def test_docs_parser_agent_reinspects_image_asset_and_uses_cache(tmp_path: Path) -> None:
+    source_root = tmp_path / "runs" / "artifacts" / "req_ingest_009" / "inputs" / "art_pdf_009"
+    source_root.mkdir(parents=True, exist_ok=True)
+    source_file = source_root / "strategy.pdf"
+    source_file.write_bytes(b"%PDF-1.7 fake strategy pdf")
+    request_count = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        assert request.url == httpx.URL("https://api.openai.com/v1/chat/completions")
+        payload = json.loads(request.content.decode("utf-8"))
+        assert payload["model"] == "gpt-4.1-mini"
+        assert payload["response_format"] == {"type": "json_object"}
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "summary": "A systems architecture diagram linking gateway, orchestrator, docs parser, and memory.",
+                                    "visual_type": "diagram",
+                                    "visible_text": ["gateway", "orchestrator", "memory"],
+                                    "chart_observations": [],
+                                    "diagram_relationships": ["Gateway routes into orchestrator and docs parser."],
+                                    "design_observations": ["The gateway node is visually emphasized at the left."],
+                                    "key_entities": ["gateway", "orchestrator", "docs parser", "memory"],
+                                    "uncertainties": [],
+                                    "confidence": "high",
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    parser = StubParser()
+    agent = DocsParserAgent(
+        redis_client=FakeRedis(),
+        config=DocsParserConfig(
+            redis_url="redis://unused",
+            gateway_url="http://gateway",
+            gateway_internal_token="internal-token",
+            asset_reinspection_api_key="test-openai-key",
+        ),
+        parser=parser,
+        http_client=client,
+        store_root=tmp_path / "store",
+        runtime_root=tmp_path / "runtime",
+        artifacts_root=tmp_path / "runs" / "artifacts",
+        agent_secret="agent-secret",
+    )
+    await agent.on_startup()
+    try:
+        parse_result = await agent.execute(
+            _make_task(
+                payload={},
+                input_artifacts=[
+                    {
+                        "artifact_id": "art_pdf_009",
+                        "path": str(source_file),
+                        "mime": "application/pdf",
+                        "filename": "strategy.pdf",
+                    }
+                ],
+            )
+        )
+        document = parse_result.output["documents"][0]
+        bundle_id = parse_result.output["bundle_id"]
+        doc_id = document["doc_id"]
+
+        first = await agent.execute(
+            _make_reinspect_asset_task(
+                bundle_id=bundle_id,
+                doc_id=doc_id,
+                asset_id="asset_fig_001",
+            )
+        )
+        second = await agent.execute(
+            _make_reinspect_asset_task(
+                bundle_id=bundle_id,
+                doc_id=doc_id,
+                asset_id="asset_fig_001",
+            )
+        )
+        fetch = await agent.execute(
+            _make_fetch_asset_task(
+                bundle_id=bundle_id,
+                doc_id=doc_id,
+                asset_id="asset_fig_001",
+            )
+        )
+    finally:
+        await agent.stop()
+        await client.aclose()
+
+    assert request_count == 1
+    assert first.status == "completed"
+    assert first.output["cached"] is False
+    assert first.output["analysis"]["visual_type"] == "diagram"
+    assert second.status == "completed"
+    assert second.output["cached"] is True
+    assert fetch.status == "completed"
+    assert fetch.output["reinspection"]["visual_type"] == "diagram"
+    assert fetch.output["reinspection_path"] is not None
+
+
+@pytest.mark.asyncio
+async def test_docs_parser_agent_rejects_reinspection_for_non_image_asset(tmp_path: Path) -> None:
+    source_root = tmp_path / "runs" / "artifacts" / "req_ingest_010" / "inputs" / "art_pdf_010"
+    source_root.mkdir(parents=True, exist_ok=True)
+    source_file = source_root / "strategy.pdf"
+    source_file.write_bytes(b"%PDF-1.7 fake strategy pdf")
+
+    agent = DocsParserAgent(
+        redis_client=FakeRedis(),
+        config=DocsParserConfig(
+            redis_url="redis://unused",
+            gateway_url="http://gateway",
+            gateway_internal_token="internal-token",
+            asset_reinspection_api_key="test-openai-key",
+        ),
+        parser=StubParser(),
+        store_root=tmp_path / "store",
+        runtime_root=tmp_path / "runtime",
+        artifacts_root=tmp_path / "runs" / "artifacts",
+        agent_secret="agent-secret",
+    )
+    await agent.on_startup()
+    try:
+        parse_result = await agent.execute(
+            _make_task(
+                payload={},
+                input_artifacts=[
+                    {
+                        "artifact_id": "art_pdf_010",
+                        "path": str(source_file),
+                        "mime": "application/pdf",
+                        "filename": "strategy.pdf",
+                    }
+                ],
+            )
+        )
+        document = parse_result.output["documents"][0]
+        result = await agent.execute(
+            _make_reinspect_asset_task(
+                bundle_id=parse_result.output["bundle_id"],
+                doc_id=document["doc_id"],
+                asset_id="asset_tbl_001",
+            )
+        )
+    finally:
+        await agent.stop()
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.code == "INVALID_INPUT"

@@ -52,6 +52,7 @@ class GatewayConfig:
     host: str = "0.0.0.0"
     port: int = 8080
     public_host: str = ""
+    public_base_url: str = ""
     owner_user_id: str = ""
     local_api_token: str = ""
     internal_token: str = ""
@@ -86,6 +87,11 @@ class GatewayConfig:
     usage_queue_max_size: int = 1000
     usage_queue_flush_timeout_sec: float = 5.0
     artifact_download_timeout_sec: float = 60.0
+    artifact_signed_url_ttl_sec: int = 300
+    max_image_attachments_per_message: int = 20
+    llm_image_max_edge_px: int = 1568
+    llm_image_max_pixels: int = 1_150_000
+    llm_image_jpeg_quality: int = 85
     docs_auto_parse_enabled: bool = True
     docs_parser_agent_id: str = "cosmic/docs-parser-agent:1.0.0"
     docs_upload_max_file_bytes: int = 20 * 1024 * 1024
@@ -128,6 +134,7 @@ class GatewayConfig:
             host=os.getenv("GATEWAY_HOST", "0.0.0.0"),
             port=_env_int("GATEWAY_PORT", 8080),
             public_host=os.getenv("GATEWAY_PUBLIC_HOST", "").strip(),
+            public_base_url=os.getenv("GATEWAY_PUBLIC_BASE_URL", "").strip(),
             owner_user_id=os.getenv("COSMIC_USER_ID", "").strip(),
             local_api_token=(
                 os.getenv("GATEWAY_LOCAL_API_TOKEN")
@@ -249,6 +256,26 @@ class GatewayConfig:
             artifact_download_timeout_sec=max(
                 5.0,
                 _env_float("GATEWAY_ARTIFACT_DOWNLOAD_TIMEOUT_SEC", 60.0),
+            ),
+            artifact_signed_url_ttl_sec=max(
+                30,
+                _env_int("GATEWAY_ARTIFACT_SIGNED_URL_TTL_SEC", 300),
+            ),
+            max_image_attachments_per_message=max(
+                1,
+                _env_int("GATEWAY_MAX_IMAGE_ATTACHMENTS_PER_MESSAGE", 20),
+            ),
+            llm_image_max_edge_px=max(
+                512,
+                _env_int("GATEWAY_LLM_IMAGE_MAX_EDGE_PX", 1568),
+            ),
+            llm_image_max_pixels=max(
+                262_144,
+                _env_int("GATEWAY_LLM_IMAGE_MAX_PIXELS", 1_150_000),
+            ),
+            llm_image_jpeg_quality=max(
+                40,
+                min(95, _env_int("GATEWAY_LLM_IMAGE_JPEG_QUALITY", 85)),
             ),
             docs_auto_parse_enabled=_env_bool("GATEWAY_DOCS_AUTO_PARSE_ENABLED", True),
             docs_parser_agent_id=(

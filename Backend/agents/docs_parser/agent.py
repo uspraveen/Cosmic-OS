@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
 import math
 import re
 from collections import Counter
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -47,12 +48,24 @@ class DocsParserAgentError(RuntimeError):
         self.next_action = next_action
 
 
+@dataclass(slots=True)
+class AssetReinspectionRequest:
+    api_key: str
+    api_url: str
+    model: str
+    prompt: str
+    timeout_sec: float
+    max_new_tokens: int
+    detail: str
+
+
 class DocsParserAgent(AgentRuntime):
     PARSE_BUNDLE_INTENT = "docs.parse_bundle"
     BROWSE_BUNDLE_INTENT = "docs.browse_bundle"
     SEARCH_BUNDLE_INTENT = "docs.search_bundle"
     READ_BUNDLE_INTENT = "docs.read_bundle"
     FETCH_ASSET_INTENT = "docs.fetch_asset"
+    REINSPECT_ASSET_INTENT = "docs.reinspect_asset"
 
     def __init__(
         self,
@@ -130,6 +143,8 @@ class DocsParserAgent(AgentRuntime):
                 return await self._handle_read_bundle(task)
             if task.intent == self.FETCH_ASSET_INTENT:
                 return await self._handle_fetch_asset(task)
+            if task.intent == self.REINSPECT_ASSET_INTENT:
+                return await self._handle_reinspect_asset(task)
             return self._result_error(
                 code="INVALID_INPUT",
                 message=f"Unsupported intent: {task.intent}",
@@ -419,8 +434,169 @@ class DocsParserAgent(AgentRuntime):
             )
         max_chars = self._coerce_positive_int(task.input.get("max_chars"), default=5000, minimum=500, maximum=12000)
         bundle_output = self._load_bundle_output(bundle_id)
-        documents = bundle_output.get("documents") if isinstance(bundle_output.get("documents"), list) else []
         requested_doc_id = self._safe_text(task.input.get("doc_id"))
+        resolved = self._resolve_bundle_asset(
+            bundle_output=bundle_output,
+            asset_id=asset_id,
+            requested_doc_id=requested_doc_id,
+        )
+        path = self._safe_text(resolved["asset"].get("path"))
+        logical_path = path or None
+        content = None
+        mime = self._safe_text(resolved["asset"].get("mime")) or None
+        if path:
+            file_path = self._resolve_document_path(path)
+            if file_path.exists() and file_path.is_file() and mime and mime.startswith("text/"):
+                content = file_path.read_text(encoding="utf-8")[:max_chars]
+        cached_reinspection = self._load_cached_reinspection(
+            document=resolved["document"],
+            asset_id=asset_id,
+            question="",
+        )
+        return AgentResult(
+            status="completed",
+            output={
+                "response": f"Loaded asset {asset_id} from parsed bundle {bundle_id}.",
+                "bundle_id": bundle_id,
+                "doc_id": self._safe_text(resolved["document"].get("doc_id")),
+                "asset_id": asset_id,
+                "asset": resolved["asset"],
+                "figure": resolved["figure"],
+                "table": resolved["table"],
+                "content": content,
+                "path": logical_path,
+                "reinspection": cached_reinspection.get("analysis") if cached_reinspection else None,
+                "reinspection_path": cached_reinspection.get("path") if cached_reinspection else None,
+            },
+            artifacts=[],
+            error=None,
+        )
+
+    async def _handle_reinspect_asset(self, task: TaskEnvelope) -> AgentResult:
+        bundle_id = self._require_bundle_id(task.input.get("bundle_id"))
+        asset_id = self._safe_text(task.input.get("asset_id"))
+        if not asset_id:
+            raise DocsParserAgentError(
+                code="INVALID_INPUT",
+                message="asset_id is required.",
+                retryable=False,
+                next_action="revise_input",
+            )
+        bundle_output = self._load_bundle_output(bundle_id)
+        resolved = self._resolve_bundle_asset(
+            bundle_output=bundle_output,
+            asset_id=asset_id,
+            requested_doc_id=self._safe_text(task.input.get("doc_id")),
+        )
+        asset = resolved["asset"]
+        mime = self._safe_text(asset.get("mime")).lower()
+        path = self._safe_text(asset.get("path"))
+        if not mime.startswith("image/"):
+            raise DocsParserAgentError(
+                code="INVALID_INPUT",
+                message=f"Asset {asset_id} is not an image asset and cannot be visually reinspected.",
+                retryable=False,
+                next_action="revise_input",
+            )
+        if not path:
+            raise DocsParserAgentError(
+                code="MISSING_ARTIFACT",
+                message=f"Image asset path is missing for {asset_id}.",
+                retryable=False,
+                next_action="escalate",
+            )
+        image_path = self._resolve_document_path(path)
+        if not image_path.exists() or not image_path.is_file():
+            raise DocsParserAgentError(
+                code="MISSING_ARTIFACT",
+                message=f"Image asset file is missing for {asset_id}.",
+                retryable=False,
+                next_action="escalate",
+            )
+        question = self._safe_text(task.input.get("question"))
+        cached = self._load_cached_reinspection(document=resolved["document"], asset_id=asset_id, question=question)
+        if cached is not None:
+            return AgentResult(
+                status="completed",
+                output={
+                    "response": f"Loaded cached visual reinspection for {asset_id}.",
+                    "bundle_id": bundle_id,
+                    "doc_id": self._safe_text(resolved["document"].get("doc_id")),
+                    "asset_id": asset_id,
+                    "asset": asset,
+                    "figure": resolved["figure"],
+                    "table": resolved["table"],
+                    "cached": True,
+                    "question": question or None,
+                    "analysis": cached.get("analysis"),
+                    "reinspection_path": cached.get("path"),
+                },
+                artifacts=[],
+                error=None,
+            )
+
+        request = self._build_asset_reinspection_request()
+        if request is None:
+            raise DocsParserAgentError(
+                code="PARSER_UNAVAILABLE",
+                message="Asset reinspection requires hosted VLM configuration.",
+                retryable=False,
+                next_action="escalate",
+            )
+        await self._emit_progress(
+            task.task_id,
+            f"Reinspecting visual asset {asset_id} for exact slide or figure understanding.",
+        )
+        analysis = await self._run_asset_reinspection(
+            request=request,
+            image_path=image_path,
+            document=resolved["document"],
+            asset=asset,
+            figure=resolved["figure"],
+            table=resolved["table"],
+            question=question,
+        )
+        cache_path = self._write_reinspection_cache(
+            document=resolved["document"],
+            asset_id=asset_id,
+            question=question,
+            payload={
+                "bundle_id": bundle_id,
+                "doc_id": self._safe_text(resolved["document"].get("doc_id")),
+                "asset_id": asset_id,
+                "question": question or None,
+                "analysis": analysis,
+                "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "model": request.model,
+            },
+        )
+        return AgentResult(
+            status="completed",
+            output={
+                "response": f"Completed visual reinspection for asset {asset_id}.",
+                "bundle_id": bundle_id,
+                "doc_id": self._safe_text(resolved["document"].get("doc_id")),
+                "asset_id": asset_id,
+                "asset": asset,
+                "figure": resolved["figure"],
+                "table": resolved["table"],
+                "cached": False,
+                "question": question or None,
+                "analysis": analysis,
+                "reinspection_path": self._logical_artifact_path(cache_path),
+            },
+            artifacts=[],
+            error=None,
+        )
+
+    def _resolve_bundle_asset(
+        self,
+        *,
+        bundle_output: dict[str, Any],
+        asset_id: str,
+        requested_doc_id: str,
+    ) -> dict[str, Any]:
+        documents = bundle_output.get("documents") if isinstance(bundle_output.get("documents"), list) else []
         selected_documents = [self._select_document_for_read(documents, doc_id=requested_doc_id)] if requested_doc_id else [
             item for item in documents if isinstance(item, dict)
         ]
@@ -433,30 +609,12 @@ class DocsParserAgent(AgentRuntime):
                     continue
                 if self._safe_text(asset.get("asset_id")) != asset_id:
                     continue
-                path = self._safe_text(asset.get("path"))
-                logical_path = path or None
-                content = None
-                mime = self._safe_text(asset.get("mime")) or None
-                if path:
-                    file_path = self._resolve_document_path(path)
-                    if file_path.exists() and file_path.is_file() and mime and mime.startswith("text/"):
-                        content = file_path.read_text(encoding="utf-8")[:max_chars]
-                return AgentResult(
-                    status="completed",
-                    output={
-                        "response": f"Loaded asset {asset_id} from parsed bundle {bundle_id}.",
-                        "bundle_id": bundle_id,
-                        "doc_id": self._safe_text(document.get("doc_id")),
-                        "asset_id": asset_id,
-                        "asset": asset,
-                        "figure": self._match_related_entry(figures, "asset_id", asset_id),
-                        "table": self._match_related_entry(tables, "asset_id", asset_id),
-                        "content": content,
-                        "path": logical_path,
-                    },
-                    artifacts=[],
-                    error=None,
-                )
+                return {
+                    "document": document,
+                    "asset": asset,
+                    "figure": self._match_related_entry(figures, "asset_id", asset_id),
+                    "table": self._match_related_entry(tables, "asset_id", asset_id),
+                }
         raise DocsParserAgentError(
             code="INVALID_INPUT",
             message=f"asset_id was not found in the parsed bundle: {asset_id}",
@@ -471,6 +629,249 @@ class DocsParserAgent(AgentRuntime):
             if self._safe_text(entry.get(key)) == expected:
                 return entry
         return None
+
+    def _build_asset_reinspection_request(self) -> AssetReinspectionRequest | None:
+        if not self.config.default_enable_asset_reinspection:
+            return None
+        api_key = self._safe_text(self.config.asset_reinspection_api_key)
+        api_url = self._safe_text(self.config.asset_reinspection_api_url)
+        model = self._safe_text(self.config.asset_reinspection_model)
+        prompt = self._safe_text(self.config.asset_reinspection_prompt)
+        detail = self._safe_text(self.config.asset_reinspection_detail).lower() or "high"
+        if detail not in {"low", "high", "auto"}:
+            detail = "high"
+        if not api_key or not api_url or not model or not prompt:
+            return None
+        return AssetReinspectionRequest(
+            api_key=api_key,
+            api_url=api_url,
+            model=model,
+            prompt=prompt,
+            timeout_sec=self.config.asset_reinspection_timeout_sec,
+            max_new_tokens=self.config.asset_reinspection_max_new_tokens,
+            detail=detail,
+        )
+
+    async def _run_asset_reinspection(
+        self,
+        *,
+        request: AssetReinspectionRequest,
+        image_path: Path,
+        document: dict[str, Any],
+        asset: dict[str, Any],
+        figure: dict[str, Any] | None,
+        table: dict[str, Any] | None,
+        question: str,
+    ) -> dict[str, Any]:
+        image_bytes = image_path.read_bytes()
+        data_url = self._image_data_url(image_bytes=image_bytes, mime=self._safe_text(asset.get("mime")) or "image/png")
+        context_parts = [
+            f"Document title: {self._safe_text(document.get('title')) or 'unknown'}",
+            f"Filename: {self._safe_text(document.get('filename')) or 'unknown'}",
+            f"Asset kind: {self._safe_text(asset.get('kind')) or 'unknown'}",
+            f"Asset id: {self._safe_text(asset.get('asset_id')) or 'unknown'}",
+        ]
+        if figure:
+            classification = figure.get("classification") if isinstance(figure.get("classification"), dict) else {}
+            context_parts.extend(
+                [
+                    f"Figure caption: {self._safe_text(figure.get('caption')) or 'none'}",
+                    f"Figure page number: {self._safe_text(figure.get('page_number')) or 'unknown'}",
+                    f"Figure slide number: {self._safe_text(figure.get('slide_number')) or 'unknown'}",
+                    f"Existing parsed description: {self._safe_text(figure.get('description')) or 'none'}",
+                    f"Existing parsed classification: {self._safe_text(classification.get('label')) or 'none'}",
+                ]
+            )
+        if table:
+            context_parts.extend(
+                [
+                    f"Table title: {self._safe_text(table.get('title')) or 'none'}",
+                    f"Table page number: {self._safe_text(table.get('page_number')) or 'unknown'}",
+                    f"Table slide number: {self._safe_text(table.get('slide_number')) or 'unknown'}",
+                ]
+            )
+        if question:
+            context_parts.append(f"Specific follow-up question: {question}")
+        payload = {
+            "model": request.model,
+            "temperature": 0,
+            "max_tokens": request.max_new_tokens,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": request.prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "\n".join(context_parts),
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": data_url,
+                                "detail": request.detail,
+                            },
+                        },
+                    ],
+                },
+            ],
+        }
+        response = await self._http_client.post(
+            request.api_url,
+            headers={
+                "Authorization": f"Bearer {request.api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=request.timeout_sec,
+        )
+        if response.status_code >= 400:
+            raise DocsParserAgentError(
+                code="PARSER_UNAVAILABLE",
+                message=f"Asset reinspection API error (status={response.status_code}): {response.text[:240]}",
+                retryable=response.status_code == 429 or response.status_code >= 500,
+                next_action="escalate",
+            )
+        try:
+            response_payload = response.json()
+        except json.JSONDecodeError as exc:
+            raise DocsParserAgentError(
+                code="INTERNAL_ERROR",
+                message="Asset reinspection response was not valid JSON.",
+                retryable=False,
+                next_action="escalate",
+            ) from exc
+        content = self._extract_chat_message_content(response_payload)
+        analysis = self._parse_json_object(content)
+        return self._normalize_asset_reinspection_output(analysis)
+
+    def _extract_chat_message_content(self, payload: dict[str, Any]) -> str:
+        choices = payload.get("choices") if isinstance(payload.get("choices"), list) else []
+        if not choices:
+            raise DocsParserAgentError(
+                code="INTERNAL_ERROR",
+                message="Asset reinspection response did not contain any choices.",
+                retryable=False,
+                next_action="escalate",
+            )
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        if not isinstance(message, dict):
+            raise DocsParserAgentError(
+                code="INTERNAL_ERROR",
+                message="Asset reinspection response did not contain a message payload.",
+                retryable=False,
+                next_action="escalate",
+            )
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            text_parts = []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                text = self._safe_text(item.get("text"))
+                if text:
+                    text_parts.append(text)
+            if text_parts:
+                return "\n".join(text_parts)
+        raise DocsParserAgentError(
+            code="INTERNAL_ERROR",
+            message="Asset reinspection response did not contain textual content.",
+            retryable=False,
+            next_action="escalate",
+        )
+
+    def _parse_json_object(self, raw: str) -> dict[str, Any]:
+        text = raw.strip()
+        if not text:
+            raise DocsParserAgentError(
+                code="INTERNAL_ERROR",
+                message="Asset reinspection returned an empty response.",
+                retryable=False,
+                next_action="escalate",
+            )
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start < 0 or end <= start:
+                raise DocsParserAgentError(
+                    code="INTERNAL_ERROR",
+                    message="Asset reinspection did not return a JSON object.",
+                    retryable=False,
+                    next_action="escalate",
+                ) from None
+            payload = json.loads(text[start : end + 1])
+        if not isinstance(payload, dict):
+            raise DocsParserAgentError(
+                code="INTERNAL_ERROR",
+                message="Asset reinspection returned a non-object JSON payload.",
+                retryable=False,
+                next_action="escalate",
+            )
+        return payload
+
+    def _normalize_asset_reinspection_output(self, payload: dict[str, Any]) -> dict[str, Any]:
+        def _string_list(value: Any, *, limit: int = 16) -> list[str]:
+            if not isinstance(value, list):
+                return []
+            normalized = [self._safe_text(item) for item in value]
+            return [item for item in normalized if item][:limit]
+
+        confidence = self._safe_text(payload.get("confidence")).lower()
+        if confidence not in {"high", "medium", "low"}:
+            confidence = "medium"
+        visual_type = self._safe_text(payload.get("visual_type")).lower() or "other"
+        return {
+            "summary": self._safe_text(payload.get("summary"))[:1600] or "No visual summary returned.",
+            "visual_type": visual_type,
+            "visible_text": _string_list(payload.get("visible_text")),
+            "chart_observations": _string_list(payload.get("chart_observations")),
+            "diagram_relationships": _string_list(payload.get("diagram_relationships")),
+            "design_observations": _string_list(payload.get("design_observations")),
+            "key_entities": _string_list(payload.get("key_entities")),
+            "uncertainties": _string_list(payload.get("uncertainties")),
+            "confidence": confidence,
+        }
+
+    def _image_data_url(self, *, image_bytes: bytes, mime: str) -> str:
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        return f"data:{mime};base64,{encoded}"
+
+    def _reinspection_cache_path(self, *, document: dict[str, Any], asset_id: str, question: str) -> Path:
+        bundle_root = self._document_path(document, "manifest").parent
+        cache_root = bundle_root / "analysis" / "reinspection"
+        suffix = "base" if not question else self._stable_id(question.lower())
+        return cache_root / f"{asset_id}_{suffix}.json"
+
+    def _load_cached_reinspection(self, *, document: dict[str, Any], asset_id: str, question: str) -> dict[str, Any] | None:
+        cache_path = self._reinspection_cache_path(document=document, asset_id=asset_id, question=question)
+        if not cache_path.exists() or not cache_path.is_file():
+            return None
+        try:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        payload["path"] = self._logical_artifact_path(cache_path)
+        return payload
+
+    def _write_reinspection_cache(
+        self,
+        *,
+        document: dict[str, Any],
+        asset_id: str,
+        question: str,
+        payload: dict[str, Any],
+    ) -> Path:
+        cache_path = self._reinspection_cache_path(document=document, asset_id=asset_id, question=question)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return cache_path
 
     def _build_parse_request(self, payload: dict[str, Any]) -> ParseRequest:
         ocr_mode = self._safe_text(payload.get("ocr_mode")) or "auto"
@@ -659,11 +1060,18 @@ class DocsParserAgent(AgentRuntime):
 
         analysis = self._analyze_image_heavy_document(parsed)
         status["image_heavy_analysis"] = analysis
-        should_force = request.full_page_vlm_mode == "force"
-        if should_force:
+        forced_by_policy = request.full_page_vlm_mode == "force"
+        should_escalate = forced_by_policy
+        if request.full_page_vlm_mode == "auto" and self._is_presentation_document(artifact):
+            should_escalate = True
+            analysis["should_escalate"] = True
+            analysis["reasons"] = ["pptx_visual_first_default", *analysis.get("reasons", [])]
+        if forced_by_policy:
             analysis["should_escalate"] = True
             analysis["reasons"] = ["full_page_vlm_mode=force", *analysis.get("reasons", [])]
-        if not analysis.get("should_escalate"):
+        if analysis.get("should_escalate"):
+            should_escalate = True
+        if not should_escalate:
             return parsed, status, None
         if request.full_page_vlm is None:
             status["escalation_reason"] = "; ".join(analysis.get("reasons") or ["full-page VLM unavailable"])
@@ -714,7 +1122,39 @@ class DocsParserAgent(AgentRuntime):
             if rendered_office_document is None:
                 status["office_render_fallback_reason"] = reason
             status["full_page_vlm_fallback_reason"] = reason
-            return parsed, status, rendered_office_document
+            if rendered_office_document is None:
+                return parsed, status, None
+            try:
+                fallback_request = replace(
+                    request,
+                    enable_ocr=True,
+                    generate_page_images=True,
+                    generate_picture_images=True,
+                    use_full_page_vlm=False,
+                )
+                fallback_parsed, fallback_enrichment = self._parse_with_enrichment_fallback(
+                    source_path=rendered_office_document.rendered_pdf_path,
+                    artifact=artifact,
+                    request=fallback_request,
+                )
+                for key in (
+                    "picture_description_requested",
+                    "picture_description_applied",
+                    "picture_description_model",
+                    "picture_description_fallback_reason",
+                ):
+                    if key in fallback_enrichment:
+                        status[key] = fallback_enrichment[key]
+                status["full_page_vlm_requested"] = True
+                status["full_page_vlm_model"] = request.full_page_vlm.model
+                status["office_render_requested"] = True
+                status["office_render_applied"] = True
+                status["office_render_backend"] = rendered_office_document.backend
+                status["escalation_reason"] = "; ".join(analysis.get("reasons") or ["image-heavy office document"])
+                status["full_page_vlm_fallback_reason"] = reason
+                return fallback_parsed, status, rendered_office_document
+            except Exception:
+                return parsed, status, rendered_office_document
 
     def _with_full_page_vlm_defaults(self, status: dict[str, Any]) -> dict[str, Any]:
         merged = dict(status)
@@ -738,6 +1178,12 @@ class DocsParserAgent(AgentRuntime):
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         }
+
+    def _is_presentation_document(self, artifact: dict[str, str]) -> bool:
+        mime = self._safe_text(artifact.get("mime")).lower()
+        filename = self._safe_text(artifact.get("filename")) or self._safe_text(artifact.get("path"))
+        ext = Path(filename).suffix.lower()
+        return ext == ".pptx" or mime == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
     def _analyze_image_heavy_document(self, parsed) -> dict[str, Any]:
         chunk_index = parsed.chunk_index if isinstance(getattr(parsed, "chunk_index", None), dict) else {}

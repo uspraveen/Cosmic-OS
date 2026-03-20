@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from ..runtime import GatewayRuntime
 from .desktop import DesktopAdapter
+from shared import is_supported_image_artifact
 
 router = APIRouter(tags=["channels"])
 logger = logging.getLogger(__name__)
@@ -583,6 +584,39 @@ async def get_session_history(
     return {"session_id": session_id, "messages": runtime.get_session_history(session_id)}
 
 
+@router.get("/artifacts/content/{artifact_id}")
+async def get_signed_artifact_content(
+    artifact_id: str,
+    exp: int,
+    sig: str,
+    purpose: str = "llm_image_fetch",
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> Response:
+    try:
+        payload = runtime.get_signed_artifact_content(
+            artifact_id=artifact_id,
+            purpose=purpose,
+            expires_at=exp,
+            signature=sig,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    filename = str(payload.get("filename") or artifact_id).replace('"', "")
+    return Response(
+        content=payload["content"],
+        media_type=str(payload.get("media_type") or "application/octet-stream"),
+        headers={
+            "Cache-Control": "private, max-age=300",
+            "Content-Disposition": f'inline; filename="{filename}"',
+        },
+    )
+
+
 @router.post("/channels/desktop/uploads")
 async def upload_desktop_documents(
     request_id: str = Form(...),
@@ -602,7 +636,25 @@ async def upload_desktop_documents(
     if not normalized_session_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="session_id is required")
     if not files:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one document is required")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one attachment is required")
+    image_count = sum(
+        1
+        for upload in files
+        if is_supported_image_artifact(
+            {
+                "mime": str(upload.content_type or "").strip(),
+                "filename": str(upload.filename or "").strip(),
+            }
+        )
+    )
+    if image_count > runtime.config.max_image_attachments_per_message:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Up to {runtime.config.max_image_attachments_per_message} images can be attached in one message. "
+                f"You uploaded {image_count}."
+            ),
+        )
 
     uploads: list[dict[str, Any]] = []
     max_file_bytes = max(1024 * 1024, int(runtime.config.docs_upload_max_file_bytes))
@@ -617,12 +669,12 @@ async def upload_desktop_documents(
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail=(
-                    f"Document exceeds the {_format_size_limit(max_file_bytes)} upload limit: {filename}"
+                    f"Attachment exceeds the {_format_size_limit(max_file_bytes)} upload limit: {filename}"
                 ),
             )
         uploads.append(
             {
-                "artifact_id": f"desktop_doc_{normalized_request_id}_{index}",
+                "artifact_id": f"desktop_att_{normalized_request_id}_{index}",
                 "filename": filename,
                 "mime_type": str(upload.content_type or "").strip() or None,
                 "content": content,
@@ -640,7 +692,7 @@ async def upload_desktop_documents(
     if not manifests:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No supported PDF, DOCX, or PPTX documents were uploaded",
+            detail="No supported document or image files were uploaded",
         )
     return {"attachments": manifests}
 

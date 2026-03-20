@@ -428,10 +428,20 @@ export class GatewayConnectionManager {
     if (count <= 0) {
       return ''
     }
-    if (count === 1) {
-      return `[document]`
+    const imageCount = attachments.filter((item) => {
+      const mime = String(item?.mime || item?.mime_type || '').toLowerCase()
+      return mime.startsWith('image/')
+    }).length
+    if (count === 1 && imageCount === 1) {
+      return `[image]`
     }
-    return `[${count} documents]`
+    if (count === 1) {
+      return `[attachment]`
+    }
+    if (imageCount === count) {
+      return `[${count} images]`
+    }
+    return `[${count} attachments]`
   }
 
   private applyEventToHistory(payload: any, eventType: string) {

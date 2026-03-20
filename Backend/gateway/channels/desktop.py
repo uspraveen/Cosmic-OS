@@ -223,9 +223,20 @@ class DesktopAdapter(ChannelAdapter):
         return None
 
     def _attachment_placeholder(self, attachments: list[Any]) -> str:
-        count = len([item for item in attachments if isinstance(item, dict)])
+        normalized = [item for item in attachments if isinstance(item, dict)]
+        count = len(normalized)
         if count <= 0:
             return "[attachment]"
+        image_count = len(
+            [
+                item for item in normalized
+                if str(item.get("mime") or item.get("mime_type") or "").strip().lower().startswith("image/")
+            ]
+        )
+        if count == 1 and image_count == 1:
+            return "[image]"
         if count == 1:
-            return "[document]"
-        return f"[{count} documents]"
+            return "[attachment]"
+        if image_count == count:
+            return f"[{count} images]"
+        return f"[{count} attachments]"

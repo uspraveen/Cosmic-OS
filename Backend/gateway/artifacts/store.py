@@ -330,6 +330,48 @@ class ArtifactStore:
             ).fetchall()
         return self._deserialize_rows(rows, request_id=None, session_id=session_id)
 
+    def get(self, artifact_id: str) -> dict[str, Any] | None:
+        if not artifact_id:
+            return None
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    artifact_id,
+                    request_id,
+                    session_id,
+                    source_channel,
+                    source_platform,
+                    source_message_id,
+                    kind,
+                    mime_type,
+                    filename,
+                    caption,
+                    size_bytes,
+                    width,
+                    height,
+                    duration_ms,
+                    sha256,
+                    bridge_media_ref,
+                    download_url,
+                    path,
+                    ingest_state,
+                    parse_task_id,
+                    parse_bundle_id,
+                    parsed_summary_json,
+                    metadata_json,
+                    created_at
+                FROM inbound_artifacts
+                WHERE artifact_id = ?
+                LIMIT 1
+                """,
+                (artifact_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        records = self._deserialize_rows([row], request_id=row["request_id"], session_id=row["session_id"])
+        return records[0] if records else None
+
     def _deserialize_rows(
         self,
         rows: list[sqlite3.Row],

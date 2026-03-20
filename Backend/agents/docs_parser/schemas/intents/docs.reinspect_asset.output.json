@@ -10,20 +10,20 @@
       "type": "object",
       "additionalProperties": true
     },
-    "content": {
+    "question": {
       "type": ["string", "null"]
     },
-    "path": {
-      "type": ["string", "null"]
+    "cached": {
+      "type": "boolean"
     },
-    "reinspection": {
-      "type": ["object", "null"],
+    "analysis": {
+      "type": "object",
       "additionalProperties": true
     },
     "reinspection_path": {
       "type": ["string", "null"]
     }
   },
-  "required": ["response", "bundle_id", "doc_id", "asset_id", "asset"],
+  "required": ["response", "bundle_id", "doc_id", "asset_id", "asset", "cached", "analysis"],
   "additionalProperties": true
 }

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "bundle_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "description": "Parsed bundle ID that owns the target asset."
+    },
+    "doc_id": {
+      "type": "string",
+      "maxLength": 80,
+      "description": "Optional doc_id when the bundle contains multiple documents."
+    },
+    "asset_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "description": "Exact image asset_id returned by docs_browse or docs_fetch_asset."
+    },
+    "question": {
+      "type": "string",
+      "maxLength": 500,
+      "description": "Optional specific visual question to focus the reinspection on."
+    }
+  },
+  "required": ["bundle_id", "asset_id"],
+  "additionalProperties": false
+}

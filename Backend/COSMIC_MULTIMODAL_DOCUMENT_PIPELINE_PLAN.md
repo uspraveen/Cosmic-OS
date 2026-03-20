@@ -1,7 +1,7 @@
 # COSMIC Multimodal Document Pipeline Plan
 
 **Status:** Finalized implementation plan for the first production document pipeline  
-**Scope:** PDFs, DOCX, PPTX, and image-bearing document workflows  
+**Scope:** PDFs, DOCX, PPTX, standalone image uploads, and image-bearing document workflows  
 **Alignment:** Designed to fit the current COSMIC `input_artifacts` / artifact-manifest architecture in `cosmic_architecture.md`
 
 ---
@@ -17,6 +17,7 @@ This plan is specifically for:
 - PDFs
 - DOCX
 - PPTX
+- standalone image uploads such as screenshots, charts, photos, and diagrams
 - mixed upload bundles such as "2 PDFs and 1 PPTX"
 - downstream tasks such as summarization, comparison, research, and presentation generation
 
@@ -40,6 +41,8 @@ This plan is **not** an "OCR-only" pipeline. OCR is one stage inside a broader d
 10. **`document.md` is the main model-facing readable surface.**
 11. **Tables, figures, and page renders are sidecar assets referenced by stable IDs.**
 12. **Large parsed outputs stay in artifacts, not in shared memory text.**
+13. **Standalone images use native Opus image input via signed Gateway URLs, not base64.**
+14. **All uploaded images are staged durably, but only a bounded subset is sent inline to Opus.**
 
 ### 2.2 Explicit Non-Decisions
 
@@ -59,8 +62,22 @@ For the current production slice, the ingest and parse path should enforce conse
 - maximum input count per parse task: **8 artifacts**
 - maximum parsed document size passed into Docling: **20 MB**
 - maximum pages/slides passed into Docling: **200**
+- maximum standalone image uploads per user message: **20 images**
+- maximum inline Opus/Claude image inputs per turn: **10 images**
 
 Files beyond these bounds should be rejected early with a clear user-visible error instead of being staged and then failing deep in the parse path.
+
+For standalone image uploads:
+
+- **All accepted images are still staged as artifacts** under the request ingest scope.
+- **Only the first 10 images are sent inline to Opus as direct visual input.**
+- **Any additional staged images remain in the attachment manifest** and are explicitly marked as omitted from inline visual input because of the per-turn image cap.
+- **Gateway serves a Claude-optimized image variant for direct model fetches** instead of blindly sending the raw original when the source is oversized.
+- **Claude fetch sizing policy:** resize large JPEG/PNG/WEBP inputs to approximately Anthropic's recommended envelope:
+  - maximum edge: **1568 px**
+  - maximum pixel area: **~1.15 MP**
+- **Original bytes remain preserved in artifact storage.** The resized image is a cached model-input variant, not the canonical artifact.
+- **GIF is currently passed through without resize** to avoid breaking animation/format semantics.
 
 ### 2.4 Current Visual Enrichment Policy
 
@@ -79,9 +96,23 @@ For the current production slice, visual enrichment should be enabled conservati
   - `bar_code`
 - **If hosted picture description fails, the document parse should fall back to plain parsing instead of failing the whole request.**
 - **In this Docling build, native picture-description controls are strongest on the PDF/image pipeline, not the generic DOCX/PPTX pipeline.**
-- **For DOCX/PPTX, standard parsing still runs first.** COSMIC only escalates when the parsed result looks image-heavy or structurally weak.
-- **Image-heavy DOCX/PPTX escalation path:** render the original Office file to PDF via headless LibreOffice, then rerun Docling through a hosted full-page VLM pipeline.
-- **If Office render or hosted full-page VLM fails, keep the standard parse bundle** and record the fallback reason in `visual_enrichment` instead of failing the document outright.
+- **For DOCX, standard parsing still runs first.** COSMIC only escalates when the parsed result looks image-heavy or structurally weak.
+- **For PPTX, visual-first parsing is the default.** In `auto` mode, COSMIC renders the deck through headless LibreOffice and reruns Docling through a hosted full-page VLM pipeline unless the operator explicitly disables that path.
+- **Office escalation path:** render the original Office file to PDF via headless LibreOffice, then rerun Docling through a hosted full-page VLM pipeline.
+- **If hosted full-page VLM fails after Office render, fall back to parsing the rendered PDF** so COSMIC still preserves slide/page images and better visual structure than the original weak Office parse.
+- **If Office render itself fails, keep the best standard parse bundle** and record the fallback reason in `visual_enrichment` instead of failing the document outright.
+- **Exact image/chart follow-up stays inside the docs pipeline.** Opus should use `docs_reinspect_asset` to visually reinspect a figure, chart, screenshot, page image, or slide image instead of reading artifact files directly.
+
+### 2.5 Standalone Image Input Policy
+
+Standalone image uploads are not pushed through the docs parser by default.
+
+- **Gateway stages the original image bytes as normal typed input artifacts.**
+- **Gateway mints short-lived signed public artifact URLs** for provider fetches.
+- **Opus receives native image blocks** for the first 10 staged images in the current turn.
+- **Opus also receives attachment manifest metadata** for every staged image, including any images omitted from direct inline visual input.
+- **No base64 image payloads are used in prompt content.**
+- **If later exact reinspection/caching is needed for a document-derived image, that remains a docs-pipeline concern.**
 
 ---
 
@@ -89,7 +120,7 @@ For the current production slice, visual enrichment should be enabled conservati
 
 ```mermaid
 flowchart TD
-    U[User uploads PDFs / DOCX / PPTX] --> C[Channel adapter]
+    U[User uploads PDFs / DOCX / PPTX / images] --> C[Channel adapter]
 
     subgraph GatewayIngress["Gateway ingest and artifact staging"]
         C --> G[Gateway request intake]
@@ -97,11 +128,13 @@ flowchart TD
         N --> M[Typed ArtifactManifests]
         N --> S[Durable original-file staging<br/>runs/artifacts/req_ingest_request_id/inputs/...]
         G --> D[Gateway auto-dispatches docs.parse_bundle<br/>for current-turn uploaded documents]
+        G --> I[Gateway mints signed image fetch URLs<br/>for current-turn standalone images]
         G --> O1[Opus receives compact upload summary<br/>artifact IDs, names, MIME types, sizes]
     end
 
     M --> D
     S --> D
+    M --> I
 
     subgraph DocsPipeline["Docs pipeline / docs agent"]
         D --> P[Docling parse pipeline]
@@ -110,7 +143,7 @@ flowchart TD
         F -->|yes| OCR[OCR stage on scanned or weak-text pages]
         F -->|no| A1[Structured document assembly]
         OCR --> A1
-        A1 --> Q{Image-heavy or weak-text<br/>DOCX / PPTX?}
+        A1 --> Q{PPTX visual-first default<br/>or image-heavy DOCX?}
         Q -->|yes| RENDER[Headless Office render to PDF]
         RENDER --> VLM[Docling full-page VLM rerun<br/>over rendered PDF]
         Q -->|no| J[Canonical parsed bundle<br/>document.json]
@@ -123,6 +156,7 @@ flowchart TD
         VLM --> A2
     end
 
+    I --> OI[Opus receives native inline image blocks<br/>for first 10 images plus manifest for the rest]
     D --> O2[Opus receives parsed bundle refs<br/>and document summaries]
 
     subgraph Retrieval["Docs retrieval surfaces"]
@@ -130,7 +164,7 @@ flowchart TD
         J --> R1[Structure indexes<br/>list_section_index, list_page_index, list_slide_index]
         K --> R2[Selective reads<br/>read_section, read_page_range, read_slide_range, read_markdown_window]
         L --> R3[Targeted retrieval<br/>list_chunk_index, search_sections, search_chunks, read_chunks, get_chunk_neighbors]
-        A2 --> R4[Asset and data access<br/>list_tables, get_table, list_figures, get_figure, list_assets, fetch_asset]
+        A2 --> R4[Asset and data access<br/>list_tables, get_table, list_figures, get_figure, list_assets, fetch_asset, reinspect_asset]
     end
 
     R0 --> O3[Opus performs selective reading over indexes, sections, chunks, and assets]
@@ -138,6 +172,7 @@ flowchart TD
     R2 --> O3
     R3 --> O3
     R4 --> O3
+    OI --> O3
 
     O3 --> X[Final synthesis<br/>summarize, compare, analyze, or draft new PPT]
     X --> Y[Response to user]
@@ -480,6 +515,7 @@ The internal docs retrieval contract should support all of the following:
 | List figures | `docs.list_figures(doc_id)` | See all figures and captions |
 | Get figure | `docs.get_figure(figure_id)` | Fetch figure metadata and linked asset info |
 | Fetch asset | `docs.fetch_asset(asset_id)` | Fetch the actual referenced sidecar asset |
+| Reinspect asset | `docs.reinspect_asset(asset_id, question?)` | Run an exact visual reread over one chart, diagram, screenshot, page image, or slide image |
 
 ### 8.2 Preferred Tool Surface for Opus
 
@@ -492,6 +528,7 @@ Recommended tools or agent intents:
 - `docs_search`
 - `docs_read`
 - `docs.fetch_asset`
+- `docs_reinspect_asset`
 
 Where the compact tools support selector arguments such as:
 
@@ -549,6 +586,31 @@ VLM analysis should be a later selective enhancement for:
 
 That later stage should operate on the sidecar assets already extracted by the docs pipeline.
 
+### 9.5 Future PPTX VLM Hardening
+
+The current production path makes PPTX visual-first by default, but the hosted full-page VLM step still rides Docling's preset-driven convert path.
+
+Future upgrades should make the PPTX visual path more slide-native:
+
+- add a dedicated full-page PPT/slide-analysis prompt for the hosted VLM path instead of relying only on the generic preset behavior
+- optimize that prompt for:
+  - slide title and section hierarchy
+  - bullet and callout structure
+  - charts, legends, axes, and trend summaries
+  - diagrams, flows, architecture blocks, and arrows
+  - screenshots, product UI, and design mockups
+  - speaker-style framing and key takeaway extraction
+- require the VLM output to preserve slide anchors and avoid flattening complex slide layouts into low-signal prose
+- benchmark the slide-specific prompt against a representative evaluation set of:
+  - investor decks
+  - product decks
+  - chart-heavy decks
+  - screenshot-heavy decks
+  - mixed design/system slides
+- keep the current Docling-first + Office-render contract intact; the future prompt upgrade should improve slide understanding without breaking the canonical `document.md` / `document.json` bundle shape
+- later, if Docling exposes a cleaner prompt override or slide-native preset for full-page conversion, prefer that integration boundary over building a separate parallel PPT parser
+- add a cached slide-reinspection policy so exact follow-up questions on one slide or chart can reuse prior VLM work instead of reprocessing the same asset repeatedly
+
 ---
 
 ## 10. Automatic Parsing vs Task-Driven Parsing
@@ -597,21 +659,28 @@ sequenceDiagram
     participant D as Docs Pipeline
     participant A as Artifact Store
 
-    U->>G: Upload 2 PDFs + 1 PPTX with request
+    U->>G: Upload PDFs / DOCX / PPTX / images with request
     G->>A: Persist original bytes + manifests in req_ingest scope
-    G->>D: docs.parse_bundle(input_artifacts, full_page_vlm_mode="auto")
-    D->>A: Read original artifacts
-    D->>D: Standard Docling parse + OCR + picture description
-    alt Image-heavy DOCX/PPTX detected
-        D->>D: Render Office source to PDF via headless LibreOffice
-        D->>D: Rerun Docling full-page VLM over rendered PDF
-        D->>A: Write rendered_source.pdf + enriched parsed bundle + sidecar assets
-    else Standard parse sufficient
-        D->>A: Write parsed bundles + chunk indexes + sidecar assets
+    alt Current-turn uploaded documents present
+        G->>D: docs.parse_bundle(input_artifacts, full_page_vlm_mode="auto")
+        D->>A: Read original artifacts
+        D->>D: Standard Docling parse + OCR + picture description
+        alt PPTX visual-first default or image-heavy DOCX detected
+            D->>D: Render Office source to PDF via headless LibreOffice
+            D->>D: Rerun Docling full-page VLM over rendered PDF
+            D->>A: Write rendered_source.pdf + enriched parsed bundle + sidecar assets
+        else Standard parse sufficient
+            D->>A: Write parsed bundles + chunk indexes + sidecar assets
+        end
+        D->>G: Return bundle refs + document indexes + visual_enrichment summary
     end
-    D->>G: Return bundle refs + document indexes + visual_enrichment summary
+    alt Standalone images present
+        G->>A: Cache Claude-sized image variants for oversized images on demand
+        G->>O: Send first 10 images as native inline image blocks via signed URLs
+        G->>O: Include all staged images in attachment manifest metadata
+    end
     G->>O: Send request context with parsed bundle refs
-    O->>D: docs_browse / docs_search / docs_read / docs.fetch_asset
+    O->>D: docs_browse / docs_search / docs_read / docs.fetch_asset / docs_reinspect_asset
     O->>U: Final answer or generated deck
 ```
 
@@ -625,6 +694,7 @@ flowchart TD
         A1[original/safe_filename]
         A2[attachment metadata]
         A3[manifest.json]
+        A4[llm_input/*.claude-input.<ext><br/>optional cached model-input image variant]
     end
 
     subgraph ParseTask["runs/artifacts/<docs_parse_task_id>/parsed/<artifact_id>/"]
@@ -637,6 +707,7 @@ flowchart TD
         B6[assets/figures]
         B7[assets/tables]
         B8[assets/slides]
+        B9[analysis/reinspection/*.json<br/>cached exact visual rereads]
     end
 
     subgraph Memory
@@ -649,7 +720,7 @@ flowchart TD
         D1[docs.read_doc_index / docs.list_section_index / docs.list_page_index / docs.list_slide_index]
         D2[docs.search_sections / docs.search_chunks / docs.list_chunk_index]
         D3[docs.read_section / docs.read_page_range / docs.read_slide_range / docs.read_chunks / docs.read_markdown_window]
-        D4[docs.list_tables / docs.get_table / docs.list_figures / docs.get_figure / docs.list_assets / docs.fetch_asset]
+        D4[docs.list_tables / docs.get_table / docs.list_figures / docs.get_figure / docs.list_assets / docs.fetch_asset / docs.reinspect_asset]
     end
 
     A1 --> B0
@@ -661,6 +732,7 @@ flowchart TD
     A1 --> B7
     A1 --> B8
     A1 -->|conditional Office render| B4
+    A1 -->|conditional image resize for direct Opus fetch| A4
 
     B0 --> D0
     B1 --> D1
@@ -735,6 +807,7 @@ For long docs:
 2. `docs_search(query=..., top_k=...)`
 3. `docs_read(section_id=... | chunk_ids=... | doc_id=...)`
 4. optional `docs.fetch_asset(asset_id)`
+5. optional `docs_reinspect_asset(asset_id, question)`
 
 ### 15.2 Beyond-Industry-Standard Selective Reading
 
@@ -769,6 +842,7 @@ Opus does **not** infer a path from this.
 Instead it calls:
 
 - `docs.fetch_asset(asset_id="art_fig_005")`
+- `docs_reinspect_asset(asset_id="art_fig_005", question="What are the chart axes and trends?")`
 
 or a similar docs-surface method.
 
@@ -867,9 +941,17 @@ Useful event types:
 
 **Yes.** They should become typed, durable input artifacts.
 
+### Should standalone uploaded images also go into artifacts?
+
+**Yes.** They should be staged exactly like other typed input artifacts, with the original preserved and an optional cached Claude-sized fetch variant for direct model input.
+
 ### Should Opus just be told file locations?
 
 **No.** It should be told artifact summaries and IDs, not arbitrary filesystem paths.
+
+### Should all staged images be sent directly to Opus?
+
+**No.** All accepted images should be staged, but only a bounded subset should be sent as direct inline model input per turn. The rest should remain available as staged artifacts and be disclosed in manifest metadata.
 
 ### Should we have tools for Opus to fetch parsed content?
 
@@ -906,9 +988,12 @@ The finalized production plan is:
 
 - **Gateway-owned upload ingress**
 - **typed immutable input artifacts**
+- **signed-url native image input for current-turn uploaded standalone images**
+- **20-image upload cap with 10-image inline Opus cap**
 - **task-driven docs parsing**
 - **Docling-first parsing**
 - **OCR fallback**
+- **Claude-sized cached image variants for oversized direct model fetches**
 - **one canonical parsed bundle per document**
 - **`document.json` as truth**
 - **`document.md` as model-facing read surface**

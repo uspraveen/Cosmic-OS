@@ -476,6 +476,33 @@ class ToolExecutor:
             wait_timeout_sec=35.0,
         )
 
+    async def _docs_reinspect_asset(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        bundle_id = str(tool_input.get("bundle_id") or "").strip()
+        asset_id = str(tool_input.get("asset_id") or "").strip()
+        if not bundle_id:
+            return {"error": True, "message": "bundle_id is required"}
+        if not asset_id:
+            return {"error": True, "message": "asset_id is required"}
+        payload: dict[str, Any] = {"bundle_id": bundle_id, "asset_id": asset_id}
+        doc_id = str(tool_input.get("doc_id") or "").strip()
+        if doc_id:
+            payload["doc_id"] = doc_id
+        question = str(tool_input.get("question") or "").strip()
+        if question:
+            payload["question"] = question
+        return await self._dispatch_specialist_agent(
+            intent="docs.reinspect_asset",
+            payload=payload,
+            context=context,
+            agent_id="cosmic/docs-parser-agent:1.0.0",
+            wait_timeout_sec=45.0,
+        )
+
     async def _firecrawl_scrape(
         self,
         tool_input: dict[str, Any],

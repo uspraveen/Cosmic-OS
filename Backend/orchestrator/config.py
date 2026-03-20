@@ -73,6 +73,7 @@ class OrchestratorConfig:
     anthropic_model: str = "claude-opus-4-6"
     anthropic_version: str = "2023-06-01"
     anthropic_prompt_cache_enabled: bool = False
+    anthropic_max_input_images: int = 10
     max_tokens: int = 16000
     request_timeout_sec: float = 300.0
     redis_url: str = ""
@@ -103,6 +104,7 @@ class OrchestratorConfig:
             anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-opus-4-6").strip(),
             anthropic_version=os.getenv("ANTHROPIC_VERSION", "2023-06-01").strip(),
             anthropic_prompt_cache_enabled=_env_bool("ANTHROPIC_PROMPT_CACHE_ENABLED", False),
+            anthropic_max_input_images=max(1, _env_int("ANTHROPIC_MAX_INPUT_IMAGES", 10)),
             max_tokens=max(256, _env_int("OPUS_MAX_TOKENS", 16000)),
             request_timeout_sec=max(30.0, _env_float("ORCHESTRATOR_REQUEST_TIMEOUT_SEC", 300.0)),
             redis_url=os.getenv("REDIS_URL", "").strip(),

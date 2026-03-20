@@ -151,6 +151,7 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
             "docs_search",
             "docs_read",
             "docs_fetch_asset",
+            "docs_reinspect_asset",
             "cosmics_capability_wishlist_search",
             "cosmics_capability_wishlist_capture",
             "memory_search",
@@ -176,6 +177,7 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
         assert "docs_search" in payload["system"]
         assert "docs_read" in payload["system"]
         assert "docs_fetch_asset" in payload["system"]
+        assert "docs_reinspect_asset" in payload["system"]
         assert "cosmics_capability_wishlist_search" in payload["system"]
         assert "cosmics_capability_wishlist_capture" in payload["system"]
         assert "firecrawl_extract" not in payload["system"]
@@ -854,6 +856,90 @@ def test_orchestrator_build_messages_includes_attachment_manifest(tmp_path) -> N
     assert "Attachment manifest:" in messages[-1]["content"]
     assert "bridge_media_ref=wamid_abc:att_1" in messages[-1]["content"]
     assert "Do not claim to have directly viewed" in messages[-1]["content"]
+
+
+def test_orchestrator_build_messages_embeds_provider_fetchable_images(tmp_path) -> None:
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_images.db",
+    )
+    runtime = OrchestratorRuntime(config, client=httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200))))
+    task = _signed_task("signing-secret").model_copy(
+        update={
+            "input_artifacts": [
+                {
+                    "artifact_id": "art_img_001",
+                    "kind": "image",
+                    "mime": "image/png",
+                    "filename": "chart.png",
+                    "caption": "quarterly growth chart",
+                    "provider_url": "https://gateway.example.test/artifacts/content/art_img_001?exp=123&sig=abc",
+                    "provider_access": "signed_url",
+                    "ingest_state": "staged",
+                    "path": "runs/artifacts/req_ingest_req_test123/inputs/art_img_001/original/chart.png",
+                }
+            ]
+        }
+    )
+
+    messages = runtime._build_messages(task)  # noqa: SLF001 - direct unit seam
+
+    assert messages[-1]["role"] == "user"
+    assert isinstance(messages[-1]["content"], list)
+    assert messages[-1]["content"][0] == {
+        "type": "image",
+        "source": {
+            "type": "url",
+            "url": "https://gateway.example.test/artifacts/content/art_img_001?exp=123&sig=abc",
+        },
+    }
+    assert messages[-1]["content"][1]["type"] == "text"
+    assert "model_input=image_block" in messages[-1]["content"][1]["text"]
+
+
+def test_orchestrator_build_messages_omits_images_past_cap(tmp_path) -> None:
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        anthropic_max_input_images=1,
+        task_ledger_db_path=tmp_path / "task_ledger_images_cap.db",
+    )
+    runtime = OrchestratorRuntime(config, client=httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200))))
+    task = _signed_task("signing-secret").model_copy(
+        update={
+            "input_artifacts": [
+                {
+                    "artifact_id": "art_img_001",
+                    "kind": "image",
+                    "mime": "image/png",
+                    "filename": "chart.png",
+                    "provider_url": "https://gateway.example.test/artifacts/content/art_img_001?exp=123&sig=abc",
+                },
+                {
+                    "artifact_id": "art_img_002",
+                    "kind": "image",
+                    "mime": "image/jpeg",
+                    "filename": "photo.jpg",
+                    "provider_url": "https://gateway.example.test/artifacts/content/art_img_002?exp=123&sig=def",
+                },
+            ]
+        }
+    )
+
+    messages = runtime._build_messages(task)  # noqa: SLF001 - direct unit seam
+
+    assert messages[-1]["role"] == "user"
+    assert isinstance(messages[-1]["content"], list)
+    assert len(messages[-1]["content"]) == 2
+    assert messages[-1]["content"][0]["type"] == "image"
+    assert messages[-1]["content"][1]["type"] == "text"
+    assert "model_input=omitted_limit" in messages[-1]["content"][1]["text"]
+    assert "per-turn image cap is 1" in messages[-1]["content"][1]["text"]
 
 
 @pytest.mark.asyncio

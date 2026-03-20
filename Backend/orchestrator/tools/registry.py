@@ -130,6 +130,14 @@ def _docs_fetch_asset_progress(tool_input: dict[str, Any]) -> str:
     return f"Fetching parsed asset {asset_id}..." if asset_id else "Fetching a parsed asset..."
 
 
+def _docs_reinspect_asset_progress(tool_input: dict[str, Any]) -> str:
+    asset_id = str(tool_input.get("asset_id") or "").strip()
+    question = str(tool_input.get("question") or "").strip()
+    if asset_id and question:
+        return f"Reinspecting asset {asset_id}: {question}"
+    return f"Reinspecting asset {asset_id}..." if asset_id else "Reinspecting a parsed visual asset..."
+
+
 def _firecrawl_scrape_progress(tool_input: dict[str, Any]) -> str:
     url = str(tool_input.get("url") or "").strip()
     return f"Scraping via Firecrawl: {url}" if url else "Scraping a page via Firecrawl..."
@@ -622,6 +630,43 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Fetch an exact parsed sidecar asset when you need table markdown, figure metadata, or generated page-image references from a parsed bundle.",
         progress_builder=_docs_fetch_asset_progress,
         handler_method="_docs_fetch_asset",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="docs_reinspect_asset",
+        api_definition={
+            "name": "docs_reinspect_asset",
+            "description": (
+                "Ask the docs parser to visually reinspect one exact parsed image asset such as a chart, diagram, screenshot, page image, or slide image. "
+                "Use this when inline descriptions are not enough and exact visual evidence matters."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "bundle_id": {
+                        "type": "string",
+                        "description": "Parsed bundle ID shown in uploaded document metadata.",
+                    },
+                    "asset_id": {
+                        "type": "string",
+                        "description": "Exact image asset_id returned by docs_browse or docs_fetch_asset.",
+                    },
+                    "doc_id": {
+                        "type": "string",
+                        "description": "Optional doc_id when the bundle contains multiple documents and you already know the exact document.",
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": "Optional focused question for the visual reinspection, such as 'What are the chart axes and trends?' or 'What does this slide layout emphasize?'.",
+                    }
+                },
+                "required": ["bundle_id", "asset_id"],
+            },
+        },
+        group="documents",
+        prompt_summary="Use this when you need an exact visual read of one parsed chart, diagram, screenshot, page image, or slide image. This is the document-system-owned way to inspect an asset; do not pretend docs_fetch_asset alone means you visually inspected the image.",
+        progress_builder=_docs_reinspect_asset_progress,
+        handler_method="_docs_reinspect_asset",
         read_only=True,
     ),
     ToolSpec(

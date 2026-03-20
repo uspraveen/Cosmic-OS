@@ -62,6 +62,12 @@ from .document_artifacts import (
     infer_document_mime_from_extension,
     is_supported_document_artifact,
 )
+from .image_artifacts import (
+    SUPPORTED_IMAGE_EXTENSIONS,
+    SUPPORTED_IMAGE_MIME_TYPES,
+    infer_image_mime_from_extension,
+    is_supported_image_artifact,
+)
 
 __all__ = [
     "ACCEPTED_READ_VERSIONS",
@@ -88,7 +94,9 @@ __all__ = [
     "generate_event_id",
     "estimate_text_tokens",
     "infer_document_mime_from_extension",
+    "infer_image_mime_from_extension",
     "is_supported_document_artifact",
+    "is_supported_image_artifact",
     "get_model_spec",
     "load_model_specs",
     "lookup_model_spec",
@@ -98,6 +106,8 @@ __all__ = [
     "build_usage_event",
     "SUPPORTED_DOCUMENT_EXTENSIONS",
     "SUPPORTED_DOCUMENT_MIME_TYPES",
+    "SUPPORTED_IMAGE_EXTENSIONS",
+    "SUPPORTED_IMAGE_MIME_TYPES",
     "sign_task_envelope",
     "utcnow",
     "validate_outbound_version",

@@ -2,6 +2,7 @@ docling
 fastapi
 groq
 httpx[http2]
+Pillow
 pydantic
 python-multipart
 pyyaml

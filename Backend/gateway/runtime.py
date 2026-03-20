@@ -3,14 +3,17 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import hmac
 import hashlib
 import httpx
 import json
 import logging
+import math
 from pathlib import Path
 import re
 import time
 from typing import Any
+from urllib.parse import urlencode
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -38,6 +41,13 @@ from .session.summary import (
 from .session_store import SessionStore
 from .usage_store import UsageStore
 from .wishlist import CapabilityWishlistService, CapabilityWishlistStore
+try:
+    from PIL import Image, ImageOps, UnidentifiedImageError
+except Exception:  # pragma: no cover - optional import guard for environments missing Pillow
+    Image = None
+    ImageOps = None
+    UnidentifiedImageError = Exception
+
 from shared import (
     MeteredCall,
     ModelSpec,
@@ -53,7 +63,9 @@ from shared import (
     ensure_stream_group,
     generate_task_id,
     infer_document_mime_from_extension,
+    infer_image_mime_from_extension,
     is_supported_document_artifact,
+    is_supported_image_artifact,
     lookup_model_spec,
     parse_event_envelope,
     parse_stream_payload,
@@ -84,6 +96,7 @@ RECENT_MEMORY_TOOL_RECEIPT_LIMIT = 4
 RECENT_MEMORY_TOOL_RECEIPT_SCAN_LIMIT = 12
 CONTESTED_MEMORY_RECENT_WRITE_LIMIT = 3
 CONTESTED_MEMORY_AUDIT_SCAN_LIMIT = 40
+LLM_IMAGE_VARIANT_DIR_NAME = "llm_input"
 MEMORY_CONTEST_PHRASES = (
     "i didn't confirm",
     "i did not confirm",
@@ -2095,7 +2108,7 @@ class GatewayRuntime:
             )
 
         attachments = metadata.get("attachments")
-        if self._contains_document_attachments(attachments):
+        if self._contains_opus_media_attachments(attachments):
             return RoutingDecision(
                 classification={
                     "route": "opus",
@@ -2104,9 +2117,9 @@ class GatewayRuntime:
                     "is_task": False,
                     "is_continuation": False,
                     "confidence": 1.0,
-                    "signals": ["document_attachments"],
+                    "signals": ["media_attachments"],
                 },
-                decision_source="document_attachments",
+                decision_source="media_attachments",
             )
         if (not content or content.startswith("[")) and isinstance(attachments, list) and attachments:
             return RoutingDecision(
@@ -4667,6 +4680,10 @@ class GatewayRuntime:
         if not isinstance(message, dict):
             raise RuntimeError("Request record is missing the normalized message payload.")
 
+        prepared_input_artifacts = self._prepare_input_artifacts_for_model(
+            request_record.get("input_artifacts") if isinstance(request_record.get("input_artifacts"), list) else []
+        )
+
         task = TaskEnvelope(
             task_id=generate_task_id(),
             task_list_id=session_id,
@@ -4681,7 +4698,7 @@ class GatewayRuntime:
                 "memory_context": self._safe_text(request_record.get("memory_context")),
                 "user_timezone": self._safe_text(request_record.get("cron_timezone")) or self.current_user_timezone(),
             },
-            input_artifacts=request_record.get("input_artifacts") or [],
+            input_artifacts=prepared_input_artifacts,
             idempotency_key=self._safe_text(request_record.get("idempotency_key")) or uuid4().hex,
             priority=SOURCE_PRIORITY_MAP.get(self._safe_text(request_record.get("source")) or "user", "normal"),
             signature="",
@@ -4692,6 +4709,20 @@ class GatewayRuntime:
         )
         signature = sign_task_envelope(task, self.config.signing_secret)
         return task.model_copy(update={"signature": signature})
+
+    def _prepare_input_artifacts_for_model(self, input_artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        prepared: list[dict[str, Any]] = []
+        for artifact in input_artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            enriched = dict(artifact)
+            if is_supported_image_artifact(enriched) and self._safe_text(enriched.get("path")):
+                image_url = self.mint_artifact_access_url(enriched, purpose="llm_image_fetch")
+                if image_url:
+                    enriched["provider_url"] = image_url
+                    enriched["provider_access"] = "signed_url"
+            prepared.append(enriched)
+        return prepared
 
     async def _persist_inbound_artifacts(
         self,
@@ -4713,7 +4744,7 @@ class GatewayRuntime:
                 source_message_id=self._safe_text(metadata.get("message_id")),
                 attachments=attachments,
             )
-            return await self._stage_document_artifacts(
+            return await self._stage_supported_input_artifacts(
                 request_id=request_id,
                 session_id=session_id,
                 channel=channel,
@@ -4743,23 +4774,33 @@ class GatewayRuntime:
         for index, upload in enumerate(uploads, start=1):
             if not isinstance(upload, dict):
                 continue
-            filename = Path(self._safe_text(upload.get("filename")) or "document").name
+            filename = Path(self._safe_text(upload.get("filename")) or "attachment").name
             content = upload.get("content")
             if not filename or not isinstance(content, bytes) or not content:
                 continue
 
             artifact_id = self._safe_text(upload.get("artifact_id")) or f"art_{uuid4().hex}"
             supplied_mime = self._safe_text(upload.get("mime_type"))
-            effective_mime = supplied_mime or infer_document_mime_from_extension(Path(filename).suffix)
-            manifest_seed = {
-                "artifact_id": artifact_id,
-                "kind": "document",
-                "mime": effective_mime,
-                "filename": filename,
-            }
-            if not is_supported_document_artifact(manifest_seed):
+            effective_kind = self._supported_artifact_kind(
+                {
+                    "kind": self._safe_text(upload.get("kind")),
+                    "mime": supplied_mime,
+                    "filename": filename,
+                }
+            )
+            if effective_kind is None:
                 continue
-
+            effective_mime = supplied_mime
+            if not effective_mime:
+                if effective_kind == "document":
+                    effective_mime = infer_document_mime_from_extension(Path(filename).suffix)
+                else:
+                    effective_mime = infer_image_mime_from_extension(Path(filename).suffix)
+            width, height = self._extract_image_dimensions(
+                content=content,
+                media_type=effective_mime,
+                filename=filename,
+            ) if effective_kind == "image" else (None, None)
             original_root = self.config.artifacts_root / f"req_ingest_{request_id}" / "inputs" / artifact_id / "original"
             original_root.mkdir(parents=True, exist_ok=True)
             source_path = original_root / filename
@@ -4772,14 +4813,14 @@ class GatewayRuntime:
                 "source_channel": channel,
                 "source_platform": "desktop",
                 "source_message_id": None,
-                "kind": "document",
+                "kind": effective_kind,
                 "mime": effective_mime,
                 "mime_type": effective_mime,
                 "filename": filename,
                 "caption": None,
                 "size_bytes": len(content),
-                "width": None,
-                "height": None,
+                "width": width,
+                "height": height,
                 "duration_ms": None,
                 "sha256": sha256,
                 "bridge_media_ref": None,
@@ -4802,7 +4843,7 @@ class GatewayRuntime:
 
         return staged_manifests
 
-    async def _stage_document_artifacts(
+    async def _stage_supported_input_artifacts(
         self,
         *,
         request_id: str,
@@ -4814,7 +4855,7 @@ class GatewayRuntime:
         for manifest in manifests:
             if not isinstance(manifest, dict):
                 continue
-            if not is_supported_document_artifact(manifest):
+            if self._supported_artifact_kind(manifest) is None:
                 staged_manifests.append(manifest)
                 continue
             if self._safe_text(manifest.get("path")) and self._safe_text(manifest.get("ingest_state")) in {"staged", "parsed"}:
@@ -4822,7 +4863,7 @@ class GatewayRuntime:
                 continue
             try:
                 staged_manifests.append(
-                    await self._stage_single_document_artifact(
+                    await self._stage_single_supported_artifact(
                         request_id=request_id,
                         session_id=session_id,
                         channel=channel,
@@ -4832,7 +4873,7 @@ class GatewayRuntime:
             except Exception:
                 artifact_id = self._safe_text(manifest.get("artifact_id"))
                 logger.exception(
-                    "gateway.document_stage_failed request_id=%s artifact_id=%s channel=%s",
+                    "gateway.artifact_stage_failed request_id=%s artifact_id=%s channel=%s",
                     request_id,
                     artifact_id,
                     channel,
@@ -4842,7 +4883,7 @@ class GatewayRuntime:
                 staged_manifests.append(manifest)
         return staged_manifests
 
-    async def _stage_single_document_artifact(
+    async def _stage_single_supported_artifact(
         self,
         *,
         request_id: str,
@@ -4854,7 +4895,7 @@ class GatewayRuntime:
         if not artifact_id:
             return manifest
 
-        content, media_type = await self._download_document_bytes(manifest)
+        content, media_type = await self._download_artifact_bytes(manifest)
         if not content:
             manifest = dict(manifest)
             manifest["ingest_state"] = "metadata_only"
@@ -4871,17 +4912,30 @@ class GatewayRuntime:
 
         sha256 = hashlib.sha256(content).hexdigest()
         logical_path = self._logical_artifact_path(source_path)
-        effective_mime = media_type or self._safe_text(manifest.get("mime")) or infer_document_mime_from_extension(source_path.suffix)
+        effective_mime = media_type or self._safe_text(manifest.get("mime"))
+        if not effective_mime:
+            if self._supported_artifact_kind(manifest) == "image":
+                effective_mime = infer_image_mime_from_extension(source_path.suffix)
+            else:
+                effective_mime = infer_document_mime_from_extension(source_path.suffix)
+        width, height = self._extract_image_dimensions(
+            content=content,
+            media_type=effective_mime,
+            filename=filename,
+        ) if (self._supported_artifact_kind(manifest) == "image") else (None, None)
         metadata = dict(manifest.get("metadata") or {})
         staged = {
             **manifest,
             "session_id": session_id,
             "source_channel": channel,
+            "kind": self._supported_artifact_kind(manifest) or self._safe_text(manifest.get("kind")) or "unknown",
             "mime": effective_mime,
             "filename": filename,
             "sha256": sha256,
             "path": logical_path,
             "size_bytes": len(content),
+            "width": width if width is not None else manifest.get("width"),
+            "height": height if height is not None else manifest.get("height"),
             "ingest_state": "staged",
             "metadata": metadata or None,
         }
@@ -4895,7 +4949,7 @@ class GatewayRuntime:
         )
         return staged
 
-    async def _download_document_bytes(self, manifest: dict[str, Any]) -> tuple[bytes | None, str | None]:
+    async def _download_artifact_bytes(self, manifest: dict[str, Any]) -> tuple[bytes | None, str | None]:
         download_url = self._safe_text(manifest.get("download_url"))
         metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
 
@@ -4914,24 +4968,256 @@ class GatewayRuntime:
 
         response = await self._artifact_client.get(download_url)
         response.raise_for_status()
-        media_type = self._safe_text(response.headers.get("content-type")).split(";", 1)[0].strip() or None
+        raw_media_type = self._safe_text(response.headers.get("content-type")) or ""
+        media_type = raw_media_type.split(";", 1)[0].strip() or None
         return response.content, media_type
 
+    def _supported_artifact_kind(self, artifact: dict[str, Any] | None) -> str | None:
+        if not isinstance(artifact, dict):
+            return None
+        if is_supported_document_artifact(artifact):
+            return "document"
+        if is_supported_image_artifact(artifact):
+            return "image"
+        return None
+
     def _default_artifact_filename(self, *, artifact_id: str, media_type: str | None) -> str:
-        mime = self._safe_text(media_type).lower()
+        mime = (self._safe_text(media_type) or "").lower()
         extension_map = {
             "application/pdf": ".pdf",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
             "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+            "image/jpeg": ".jpg",
+            "image/png": ".png",
+            "image/gif": ".gif",
+            "image/webp": ".webp",
         }
         extension = extension_map.get(mime, "")
         safe_artifact_id = re.sub(r"[^A-Za-z0-9._-]+", "_", artifact_id).strip("._") or "document"
         return f"{safe_artifact_id}{extension}"
 
+    def _extract_image_dimensions(
+        self,
+        *,
+        content: bytes,
+        media_type: str | None,
+        filename: str | None,
+    ) -> tuple[int | None, int | None]:
+        if Image is None:
+            return None, None
+        if not is_supported_image_artifact(
+            {
+                "mime": self._safe_text(media_type),
+                "filename": self._safe_text(filename),
+            }
+        ):
+            return None, None
+        try:
+            from io import BytesIO
+
+            with Image.open(BytesIO(content)) as image:
+                normalized = ImageOps.exif_transpose(image) if ImageOps is not None else image
+                width, height = normalized.size
+                return int(width), int(height)
+        except Exception:
+            return None, None
+
+    def _llm_image_target_size(self, width: int, height: int) -> tuple[int, int]:
+        max_edge = max(512, int(self.config.llm_image_max_edge_px))
+        max_pixels = max(262_144, int(self.config.llm_image_max_pixels))
+        largest_dimension = max(width, height)
+        if largest_dimension <= 0:
+            return width, height
+        scale = min(1.0, max_edge / float(largest_dimension))
+        scaled_pixels = (width * height) * (scale**2)
+        if scaled_pixels > max_pixels:
+            scale = min(scale, math.sqrt(max_pixels / float(width * height)))
+        if scale >= 0.999:
+            return width, height
+        target_width = max(1, int(width * scale))
+        target_height = max(1, int(height * scale))
+        return target_width, target_height
+
+    def _build_llm_image_variant_path(self, artifact_path: Path, media_type: str) -> Path:
+        suffix_map = {
+            "image/jpeg": ".jpg",
+            "image/png": ".png",
+            "image/webp": ".webp",
+        }
+        suffix = suffix_map.get(media_type, artifact_path.suffix or ".img")
+        stem = artifact_path.stem or "image"
+        return artifact_path.parent.parent / LLM_IMAGE_VARIANT_DIR_NAME / f"{stem}.claude-input{suffix}"
+
+    def _maybe_build_llm_image_variant(
+        self,
+        artifact: dict[str, Any],
+        artifact_path: Path,
+    ) -> tuple[Path, str, str]:
+        media_type = (self._safe_text(artifact.get("mime")) or "application/octet-stream").lower()
+        filename = self._safe_text(artifact.get("filename")) or artifact_path.name
+        if Image is None or media_type not in {"image/jpeg", "image/png", "image/webp"}:
+            return artifact_path, media_type, filename
+        try:
+            with Image.open(artifact_path) as image:
+                normalized = ImageOps.exif_transpose(image) if ImageOps is not None else image
+                width, height = normalized.size
+                target_width, target_height = self._llm_image_target_size(int(width), int(height))
+                if target_width == width and target_height == height:
+                    return artifact_path, media_type, filename
+                variant_path = self._build_llm_image_variant_path(artifact_path, media_type)
+                if variant_path.exists() and variant_path.stat().st_mtime >= artifact_path.stat().st_mtime:
+                    return variant_path, media_type, variant_path.name
+                variant_path.parent.mkdir(parents=True, exist_ok=True)
+                resized = normalized.resize(
+                    (target_width, target_height),
+                    getattr(Image, "Resampling", Image).LANCZOS,
+                )
+                save_kwargs: dict[str, Any]
+                if media_type == "image/jpeg":
+                    if resized.mode not in {"RGB", "L"}:
+                        resized = resized.convert("RGB")
+                    save_kwargs = {
+                        "format": "JPEG",
+                        "quality": int(self.config.llm_image_jpeg_quality),
+                        "optimize": True,
+                        "progressive": True,
+                    }
+                elif media_type == "image/png":
+                    save_kwargs = {"format": "PNG", "optimize": True}
+                else:
+                    save_kwargs = {
+                        "format": "WEBP",
+                        "quality": int(self.config.llm_image_jpeg_quality),
+                        "method": 6,
+                    }
+                resized.save(variant_path, **save_kwargs)
+                return variant_path, media_type, variant_path.name
+        except (FileNotFoundError, PermissionError, UnidentifiedImageError, OSError):
+            return artifact_path, media_type, filename
+        except Exception:
+            logger.exception(
+                "gateway.llm_image_variant_failed artifact_id=%s path=%s",
+                self._safe_text(artifact.get("artifact_id")),
+                artifact_path,
+            )
+            return artifact_path, media_type, filename
+
     def _logical_artifact_path(self, path: Path) -> str:
         resolved = path.resolve()
         relative = resolved.relative_to(self.config.artifacts_root.resolve())
         return (Path("runs") / "artifacts" / relative).as_posix()
+
+    def _resolve_logical_artifact_path(self, logical_path: str | None) -> Path | None:
+        normalized = self._safe_text(logical_path)
+        if not normalized:
+            return None
+        relative = Path(normalized)
+        parts = relative.parts
+        if len(parts) >= 2 and parts[0] == "runs" and parts[1] == "artifacts":
+            relative = Path(*parts[2:])
+        candidate = (self.config.artifacts_root / relative).resolve()
+        try:
+            candidate.relative_to(self.config.artifacts_root.resolve())
+        except ValueError:
+            return None
+        return candidate
+
+    def _public_gateway_base_url(self) -> str | None:
+        explicit = self._safe_text(self.config.public_base_url)
+        if explicit:
+            return explicit.rstrip("/")
+        public_host = self._safe_text(self.config.public_host)
+        if not public_host:
+            return None
+        if public_host.startswith(("http://", "https://")):
+            return public_host.rstrip("/")
+        return f"https://{public_host.rstrip('/')}"
+
+    def _build_artifact_access_signature(
+        self,
+        *,
+        artifact_id: str,
+        purpose: str,
+        expires_at: int,
+        sha256: str | None,
+    ) -> str:
+        secret = self._safe_text(self.config.signing_secret)
+        if not secret:
+            raise RuntimeError("GATEWAY_SIGNING_SECRET is required for signed artifact URLs.")
+        payload = "\n".join(
+            [
+                artifact_id,
+                purpose,
+                str(expires_at),
+                self._safe_text(sha256) or "",
+            ]
+        ).encode("utf-8")
+        return hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+
+    def mint_artifact_access_url(self, artifact: dict[str, Any], *, purpose: str = "llm_image_fetch") -> str | None:
+        if not isinstance(artifact, dict):
+            return None
+        artifact_id = self._safe_text(artifact.get("artifact_id"))
+        if not artifact_id:
+            return None
+        if purpose == "llm_image_fetch" and not is_supported_image_artifact(artifact):
+            return None
+        base_url = self._public_gateway_base_url()
+        if not base_url:
+            return None
+        expires_at = int(time.time()) + max(30, int(self.config.artifact_signed_url_ttl_sec))
+        signature = self._build_artifact_access_signature(
+            artifact_id=artifact_id,
+            purpose=purpose,
+            expires_at=expires_at,
+            sha256=self._safe_text(artifact.get("sha256")),
+        )
+        query = urlencode({"purpose": purpose, "exp": expires_at, "sig": signature})
+        return f"{base_url}/artifacts/content/{artifact_id}?{query}"
+
+    def get_signed_artifact_content(
+        self,
+        *,
+        artifact_id: str,
+        purpose: str,
+        expires_at: int,
+        signature: str,
+    ) -> dict[str, Any]:
+        normalized_artifact_id = self._safe_text(artifact_id)
+        normalized_purpose = self._safe_text(purpose)
+        normalized_signature = self._safe_text(signature)
+        if not normalized_artifact_id or not normalized_purpose or not normalized_signature:
+            raise ValueError("artifact_id, purpose, and sig are required.")
+        now_ts = int(time.time())
+        if expires_at < now_ts:
+            raise PermissionError("Signed artifact URL has expired.")
+        artifact = self.artifact_store.get(normalized_artifact_id)
+        if artifact is None:
+            raise FileNotFoundError("Artifact not found.")
+        if normalized_purpose == "llm_image_fetch" and not is_supported_image_artifact(artifact):
+            raise ValueError("Artifact is not an LLM-fetchable image.")
+        expected_signature = self._build_artifact_access_signature(
+            artifact_id=normalized_artifact_id,
+            purpose=normalized_purpose,
+            expires_at=expires_at,
+            sha256=self._safe_text(artifact.get("sha256")),
+        )
+        if not hmac.compare_digest(normalized_signature, expected_signature):
+            raise PermissionError("Invalid signed artifact URL.")
+        artifact_path = self._resolve_logical_artifact_path(self._safe_text(artifact.get("path")))
+        if artifact_path is None or not artifact_path.exists() or not artifact_path.is_file():
+            raise FileNotFoundError("Artifact bytes are unavailable.")
+        resolved_path = artifact_path
+        media_type = self._safe_text(artifact.get("mime")) or "application/octet-stream"
+        filename = self._safe_text(artifact.get("filename")) or artifact_path.name
+        if normalized_purpose == "llm_image_fetch":
+            resolved_path, media_type, filename = self._maybe_build_llm_image_variant(artifact, artifact_path)
+        return {
+            "artifact": artifact,
+            "content": resolved_path.read_bytes(),
+            "media_type": media_type,
+            "filename": filename,
+        }
 
     async def _ensure_request_documents_parsed(self, request_record: dict[str, Any]) -> None:
         if not self.config.docs_auto_parse_enabled or self._redis is None:
@@ -5338,6 +5624,17 @@ class GatewayRuntime:
             isinstance(item, dict) and is_supported_document_artifact(item)
             for item in attachments
         )
+
+    def _contains_image_attachments(self, attachments: Any) -> bool:
+        if not isinstance(attachments, list):
+            return False
+        return any(
+            isinstance(item, dict) and is_supported_image_artifact(item)
+            for item in attachments
+        )
+
+    def _contains_opus_media_attachments(self, attachments: Any) -> bool:
+        return self._contains_document_attachments(attachments) or self._contains_image_attachments(attachments)
 
     def _normalize_string_list(self, values: Any, *, limit: int = 8) -> list[str]:
         if not isinstance(values, list):

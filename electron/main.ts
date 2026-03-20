@@ -65,6 +65,7 @@ interface PendingGatewayDocumentUpload {
 }
 
 const GATEWAY_DOCUMENT_UPLOAD_MAX_FILE_BYTES = 20 * 1024 * 1024
+const GATEWAY_MAX_IMAGE_ATTACHMENTS_PER_MESSAGE = 20
 
 function formatBinarySize(sizeBytes: number) {
   if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) {
@@ -85,7 +86,19 @@ function buildDocumentSizeLimitError(items: Array<{ filename: string; sizeBytes:
     .map((item) => `${item.filename} (${formatBinarySize(item.sizeBytes)})`)
     .join(', ')
   const suffix = items.length > 3 ? ` and ${items.length - 3} more` : ''
-  return `Documents larger than ${formatBinarySize(GATEWAY_DOCUMENT_UPLOAD_MAX_FILE_BYTES)} are not supported yet: ${rendered}${suffix}.`
+  return `Attachments larger than ${formatBinarySize(GATEWAY_DOCUMENT_UPLOAD_MAX_FILE_BYTES)} are not supported yet: ${rendered}${suffix}.`
+}
+
+function isImageMimeType(mimeType: string | undefined | null) {
+  return String(mimeType || '').trim().toLowerCase().startsWith('image/')
+}
+
+function countImageAttachments(items: Array<{ mimeType?: string | null }>) {
+  return items.reduce((count, item) => count + (isImageMimeType(item?.mimeType) ? 1 : 0), 0)
+}
+
+function buildImageAttachmentLimitError(imageCount: number) {
+  return `Up to ${GATEWAY_MAX_IMAGE_ATTACHMENTS_PER_MESSAGE} images can be attached in one message. You selected ${imageCount}.`
 }
 
 function getDesktopDeviceId() {
@@ -119,11 +132,15 @@ function configureGatewayConnection() {
   gatewayConnectionManager.configure(getStoredGatewayTransportConfig())
 }
 
-function inferDesktopDocumentMimeType(filename: string) {
+function inferDesktopAttachmentMimeType(filename: string) {
   const extension = path.extname(String(filename || '')).toLowerCase()
   if (extension === '.pdf') return 'application/pdf'
   if (extension === '.docx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
   if (extension === '.pptx') return 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+  if (extension === '.jpg' || extension === '.jpeg') return 'image/jpeg'
+  if (extension === '.png') return 'image/png'
+  if (extension === '.gif') return 'image/gif'
+  if (extension === '.webp') return 'image/webp'
   return 'application/octet-stream'
 }
 
@@ -132,12 +149,16 @@ async function pickGatewayDocuments() {
     throw new Error('Main window is not available.')
   }
   const result = await dialog.showOpenDialog(win, {
-    title: 'Attach documents',
+    title: 'Attach files',
     properties: ['openFile', 'multiSelections'],
     filters: [
       {
         name: 'Documents',
         extensions: ['pdf', 'docx', 'pptx'],
+      },
+      {
+        name: 'Images',
+        extensions: ['jpg', 'jpeg', 'png', 'gif', 'webp'],
       },
     ],
   })
@@ -145,6 +166,7 @@ async function pickGatewayDocuments() {
     return []
   }
 
+  let pickedImageCount = 0
   const picked: PickedGatewayDocument[] = []
   const oversized: Array<{ filename: string; sizeBytes: number }> = []
   for (const filePath of result.filePaths) {
@@ -157,15 +179,22 @@ async function pickGatewayDocuments() {
       oversized.push({ filename, sizeBytes: stats.size })
       continue
     }
+    const mimeType = inferDesktopAttachmentMimeType(filename)
+    if (isImageMimeType(mimeType)) {
+      pickedImageCount += 1
+    }
     picked.push({
       filePath,
       filename,
-      mimeType: inferDesktopDocumentMimeType(filename),
+      mimeType,
       sizeBytes: stats.size,
     })
   }
   if (oversized.length > 0) {
     throw new Error(buildDocumentSizeLimitError(oversized))
+  }
+  if (pickedImageCount > GATEWAY_MAX_IMAGE_ATTACHMENTS_PER_MESSAGE) {
+    throw new Error(buildImageAttachmentLimitError(pickedImageCount))
   }
   return picked
 }
@@ -177,7 +206,7 @@ async function uploadDesktopDocumentsToGateway(
   attachments: PendingGatewayDocumentUpload[],
 ) {
   if (!requestId.trim()) {
-    throw new Error('requestId is required before uploading documents.')
+    throw new Error('requestId is required before uploading attachments.')
   }
   if (!sessionId.trim()) {
     throw new Error('Desktop session is not ready yet. Reconnect to the VM and retry.')
@@ -187,6 +216,11 @@ async function uploadDesktopDocumentsToGateway(
   formData.set('request_id', requestId)
   formData.set('session_id', sessionId)
   formData.set('device_id', config.deviceId)
+
+  const imageCount = countImageAttachments(attachments)
+  if (imageCount > GATEWAY_MAX_IMAGE_ATTACHMENTS_PER_MESSAGE) {
+    throw new Error(buildImageAttachmentLimitError(imageCount))
+  }
 
   for (const attachment of attachments) {
     const filePath = String(attachment?.filePath || '').trim()
@@ -202,7 +236,7 @@ async function uploadDesktopDocumentsToGateway(
     if (fileBytes.length > GATEWAY_DOCUMENT_UPLOAD_MAX_FILE_BYTES) {
       throw new Error(buildDocumentSizeLimitError([{ filename, sizeBytes: fileBytes.length }]))
     }
-    const mimeType = String(attachment?.mimeType || '').trim() || inferDesktopDocumentMimeType(filename)
+    const mimeType = String(attachment?.mimeType || '').trim() || inferDesktopAttachmentMimeType(filename)
     formData.append('files', new Blob([fileBytes], { type: mimeType }), filename)
   }
 
@@ -214,7 +248,7 @@ async function uploadDesktopDocumentsToGateway(
     body: formData,
   })
   if (!response.ok) {
-    let detail = `Document upload failed (${response.status})`
+    let detail = `Attachment upload failed (${response.status})`
     try {
       const body = await response.json()
       const remoteDetail = typeof body?.detail === 'string' ? body.detail.trim() : ''

@@ -15,7 +15,7 @@
     "full_page_vlm_mode": {
       "type": "string",
       "enum": ["auto", "off", "force"],
-      "description": "Escalation policy for full-page hosted VLM parsing on image-heavy office documents."
+      "description": "Escalation policy for full-page hosted VLM parsing. In auto mode, PPTX is treated as visual-first by default, while DOCX stays heuristic-based."
     },
     "generate_page_images": {
       "type": "boolean",

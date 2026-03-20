@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -851,6 +853,15 @@ def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
     runtime.perplexity_adapter = FakeDirectAdapter("perplexity")
     runtime.orchestrator = FakeOrchestratorClient()
     runtime.memory_client = FakeMemoryClient(enabled=False)
+    runtime._artifact_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                content=b"mock-artifact-bytes",
+                headers={"content-type": "image/jpeg"},
+            )
+        )
+    )
     return runtime
 
 
@@ -889,6 +900,7 @@ async def test_runtime_uses_shared_daily_session_across_channels(tmp_path) -> No
 @pytest.mark.asyncio
 async def test_non_text_inbound_persists_artifacts_and_passes_them_to_opus(tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="opus")
+    runtime.config.public_base_url = "https://gateway.example.test"
     await runtime.start()
     try:
         result = await runtime.process_incoming_user_message(
@@ -922,6 +934,8 @@ async def test_non_text_inbound_persists_artifacts_and_passes_them_to_opus(tmp_p
         assert len(result["input_artifacts"]) == 1
         assert result["input_artifacts"][0]["kind"] == "image"
         assert result["input_artifacts"][0]["bridge_media_ref"] == "wamid_img_1:att_1"
+        assert result["input_artifacts"][0]["ingest_state"] == "staged"
+        assert result["input_artifacts"][0]["path"].startswith("runs/artifacts/req_ingest_")
 
         stored_artifacts = runtime.artifact_store.list_for_request(result["request_id"])
         assert len(stored_artifacts) == 1
@@ -936,6 +950,8 @@ async def test_non_text_inbound_persists_artifacts_and_passes_them_to_opus(tmp_p
         )
         assert len(task.input_artifacts) == 1
         assert task.input_artifacts[0]["caption"] == "look at this"
+        assert task.input_artifacts[0]["provider_access"] == "signed_url"
+        assert task.input_artifacts[0]["provider_url"].startswith("https://gateway.example.test/artifacts/content/")
 
         history_tail = runtime.session_store.get_history_tail(result["session_id"])
         assert history_tail[-1]["metadata"]["message_type"] == "image"
@@ -1487,7 +1503,55 @@ def test_desktop_upload_route_rejects_oversized_documents(tmp_path) -> None:
         )
 
     assert response.status_code == 413
-    assert response.json()["detail"] == "Document exceeds the 1 MB upload limit: oversized.pdf"
+    assert response.json()["detail"] == "Attachment exceeds the 1 MB upload limit: oversized.pdf"
+
+
+def test_desktop_upload_route_stages_images(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+    runtime.config.artifacts_root = tmp_path / "runs" / "artifacts"
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/channels/desktop/uploads",
+            headers={"Authorization": "Bearer test-token"},
+            data={
+                "request_id": "req_upload_image_1",
+                "session_id": "sess_upload_image_1",
+                "device_id": "desk_upload_image_1",
+            },
+            files=[
+                (
+                    "files",
+                    (
+                        "photo.png",
+                        b"\x89PNG\r\n\x1a\nfake",
+                        "image/png",
+                    ),
+                )
+            ],
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["attachments"]) == 1
+    attachment = payload["attachments"][0]
+    assert attachment["kind"] == "image"
+    assert attachment["mime"] == "image/png"
+    assert attachment["ingest_state"] == "staged"
+    staged_path = runtime.config.artifacts_root / "req_ingest_req_upload_image_1" / "inputs" / attachment["artifact_id"] / "original" / "photo.png"
+    assert staged_path.exists()
 
 
 @pytest.mark.asyncio
@@ -1519,7 +1583,7 @@ async def test_document_attachments_force_opus_even_with_text_content(tmp_path) 
         await runtime.stop()
 
     assert result["route"] == "opus"
-    assert result["classification"]["signals"] == ["document_attachments"]
+    assert result["classification"]["signals"] == ["media_attachments"]
 
 
 @pytest.mark.asyncio
@@ -3238,6 +3302,171 @@ def test_internal_telegram_media_route_uses_internal_token(tmp_path) -> None:
         assert response.status_code == 200
         assert response.content == b"telegram-media"
         assert response.headers["content-type"].startswith("image/jpeg")
+
+
+def test_signed_artifact_content_route_serves_staged_image(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+    runtime.config.artifacts_root = tmp_path / "runs" / "artifacts"
+    runtime.config.public_base_url = "https://gateway.example.test"
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+
+    with TestClient(app) as client:
+        upload_response = client.post(
+            "/channels/desktop/uploads",
+            headers={"Authorization": "Bearer test-token"},
+            data={
+                "request_id": "req_signed_image_1",
+                "session_id": "sess_signed_image_1",
+                "device_id": "desk_signed_image_1",
+            },
+            files=[
+                (
+                    "files",
+                    (
+                        "photo.png",
+                        b"\x89PNG\r\n\x1a\nsigned",
+                        "image/png",
+                    ),
+                )
+            ],
+        )
+        assert upload_response.status_code == 200
+        attachment = upload_response.json()["attachments"][0]
+        runtime.artifact_store.persist_inbound_attachments(
+            request_id="req_signed_image_1",
+            session_id="sess_signed_image_1",
+            source_channel="desktop:desk_signed_image_1",
+            source_platform="desktop",
+            source_message_id=None,
+            attachments=[attachment],
+        )
+        signed_url = runtime.mint_artifact_access_url(attachment)
+        assert signed_url is not None
+        relative_url = signed_url.replace("https://gateway.example.test", "", 1)
+
+        response = client.get(relative_url)
+
+    assert response.status_code == 200
+    assert response.content == b"\x89PNG\r\n\x1a\nsigned"
+    assert response.headers["content-type"].startswith("image/png")
+
+
+def test_desktop_upload_route_rejects_more_than_twenty_images(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+
+    files = [
+        (
+            "files",
+            (f"image_{index}.png", b"fake-image", "image/png"),
+        )
+        for index in range(21)
+    ]
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/channels/desktop/uploads",
+            headers={"Authorization": "Bearer test-token"},
+            data={
+                "request_id": "req_image_cap_1",
+                "session_id": "sess_image_cap_1",
+                "device_id": "desk_image_cap_1",
+            },
+            files=files,
+        )
+
+    assert response.status_code == 400
+    assert "Up to 20 images can be attached in one message" in response.json()["detail"]
+
+
+def test_signed_artifact_content_route_resizes_large_image_for_llm_fetch(tmp_path) -> None:
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    runtime = build_runtime(tmp_path)
+    runtime.config.artifacts_root = tmp_path / "runs" / "artifacts"
+    runtime.config.public_base_url = "https://gateway.example.test"
+
+    image = Image.new("RGB", (4000, 3000), color=(25, 50, 75))
+    image_buffer = io.BytesIO()
+    image.save(image_buffer, format="PNG")
+    source_bytes = image_buffer.getvalue()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+
+    with TestClient(app) as client:
+        upload_response = client.post(
+            "/channels/desktop/uploads",
+            headers={"Authorization": "Bearer test-token"},
+            data={
+                "request_id": "req_signed_image_2",
+                "session_id": "sess_signed_image_2",
+                "device_id": "desk_signed_image_2",
+            },
+            files=[
+                (
+                    "files",
+                    (
+                        "hero.png",
+                        source_bytes,
+                        "image/png",
+                    ),
+                )
+            ],
+        )
+        assert upload_response.status_code == 200
+        attachment = upload_response.json()["attachments"][0]
+        runtime.artifact_store.persist_inbound_attachments(
+            request_id="req_signed_image_2",
+            session_id="sess_signed_image_2",
+            source_channel="desktop:desk_signed_image_2",
+            source_platform="desktop",
+            source_message_id=None,
+            attachments=[attachment],
+        )
+        signed_url = runtime.mint_artifact_access_url(attachment)
+        assert signed_url is not None
+        relative_url = signed_url.replace("https://gateway.example.test", "", 1)
+
+        response = client.get(relative_url)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/png")
+    optimized = Image.open(io.BytesIO(response.content))
+    assert max(optimized.size) <= runtime.config.llm_image_max_edge_px
+    assert optimized.size[0] * optimized.size[1] <= runtime.config.llm_image_max_pixels
 
 
 def test_desktop_websocket_streams_thin_opus_route(test_client: TestClient, tmp_path) -> None:

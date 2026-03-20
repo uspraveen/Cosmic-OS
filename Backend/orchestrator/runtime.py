@@ -1486,12 +1486,12 @@ class OrchestratorRuntime:
             if not isinstance(item, dict):
                 continue
             role = str(item.get("role") or "").strip()
-            content = str(item.get("content") or "").strip()
-            if role not in {"user", "assistant"} or not content:
+            content = self._normalize_message_content(item.get("content"))
+            if role not in {"user", "assistant"} or self._message_content_is_empty(content):
                 continue
             # Collapse consecutive same-role messages (safety)
             if messages and messages[-1]["role"] == role:
-                messages[-1]["content"] += "\n\n" + content
+                messages[-1]["content"] = self._merge_message_content(messages[-1]["content"], content)
                 continue
             messages.append({"role": role, "content": content})
 
@@ -1502,10 +1502,16 @@ class OrchestratorRuntime:
         # ── Build the current user query ──────────────────────────
         user_query = str(task.input.get("query") or "").strip()
         input_artifacts = task.input_artifacts if isinstance(task.input_artifacts, list) else []
+        image_blocks: list[dict[str, Any]] = []
+        max_input_images = max(1, int(self.config.anthropic_max_input_images))
+        omitted_image_blocks = 0
         if input_artifacts:
             manifest_lines = [
                 "The user attached media/artifacts with metadata below.",
-                "You have metadata and references only. Do not claim to have directly viewed or listened to the bytes unless a tool actually loads them.",
+                (
+                    "You have metadata for every attachment. For image attachments, only the image blocks in this same message count as direct visual input. "
+                    "Do not claim to have directly viewed or listened to bytes unless an inline image block or a tool actually loaded them."
+                ),
                 "", "Attachment manifest:",
             ]
             for i, art in enumerate(input_artifacts, 1):
@@ -1519,6 +1525,22 @@ class OrchestratorRuntime:
                     v = str(art.get(key) or "").strip()
                     if v:
                         parts.append(f"{key}={v}")
+                provider_url = str(art.get("provider_url") or "").strip()
+                if provider_url and str(art.get("kind") or "").strip().lower() == "image":
+                    if len(image_blocks) < max_input_images:
+                        parts.append("model_input=image_block")
+                        image_blocks.append(
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "url",
+                                    "url": provider_url,
+                                },
+                            }
+                        )
+                    else:
+                        omitted_image_blocks += 1
+                        parts.append("model_input=omitted_limit")
                 parsed_summary = art.get("parsed_summary") if isinstance(art.get("parsed_summary"), dict) else None
                 if parsed_summary is not None:
                     doc_title = str(parsed_summary.get("title") or "").strip()
@@ -1537,16 +1559,59 @@ class OrchestratorRuntime:
                 if sb:
                     parts.append(f"size_bytes={sb}")
                 manifest_lines.append(f"{i}. " + "; ".join(parts))
+            if omitted_image_blocks:
+                manifest_lines.extend(
+                    [
+                        "",
+                        (
+                            f"{omitted_image_blocks} additional image attachment(s) were staged but not sent as inline visual input "
+                            f"because the per-turn image cap is {max_input_images}."
+                        ),
+                    ]
+                )
             user_query = user_query + "\n\n" + "\n".join(manifest_lines) if user_query else "\n".join(manifest_lines)
+
+        current_user_content: str | list[dict[str, Any]] = user_query
+        if image_blocks:
+            text = user_query or "The user attached images. Analyze the inline image blocks together with the attachment metadata."
+            current_user_content = [*image_blocks, {"type": "text", "text": text}]
 
         # Append the current query — if context somehow ends with user (e.g.
         # a response was never stored), collapse to avoid consecutive user turns.
         if messages and messages[-1]["role"] == "user":
-            messages[-1]["content"] += "\n\n" + user_query
+            messages[-1]["content"] = self._merge_message_content(messages[-1]["content"], current_user_content)
         else:
-            messages.append({"role": "user", "content": user_query})
+            messages.append({"role": "user", "content": current_user_content})
 
         return messages
+
+    def _normalize_message_content(self, value: Any) -> str | list[dict[str, Any]]:
+        if isinstance(value, list):
+            blocks = [item for item in value if isinstance(item, dict)]
+            return blocks
+        return str(value or "").strip()
+
+    def _message_content_is_empty(self, value: Any) -> bool:
+        if isinstance(value, list):
+            return len([item for item in value if isinstance(item, dict)]) <= 0
+        return not str(value or "").strip()
+
+    def _content_to_blocks(self, value: Any) -> list[dict[str, Any]]:
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        text = str(value or "").strip()
+        if not text:
+            return []
+        return [{"type": "text", "text": text}]
+
+    def _merge_message_content(self, existing: Any, incoming: Any) -> str | list[dict[str, Any]]:
+        if isinstance(existing, list) or isinstance(incoming, list):
+            return [*self._content_to_blocks(existing), *self._content_to_blocks(incoming)]
+        existing_text = str(existing or "").strip()
+        incoming_text = str(incoming or "").strip()
+        if existing_text and incoming_text:
+            return existing_text + "\n\n" + incoming_text
+        return existing_text or incoming_text
 
     def _merge_usage(self, existing: dict[str, Any], usage: Any) -> dict[str, Any]:
         if not isinstance(usage, dict):
