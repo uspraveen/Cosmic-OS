@@ -423,7 +423,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "name": "docs_browse",
             "description": (
                 "Browse a parsed document bundle without loading full content. "
-                "Use this to inspect document, section, page, slide, chunk, table, figure, or asset indexes after uploaded documents have been parsed."
+                "Use this to inspect document, section, page, slide, chunk, table, figure, asset, and visual-enrichment indexes after uploaded documents have been parsed."
             ),
             "input_schema": {
                 "type": "object",
@@ -508,7 +508,8 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "name": "docs_read",
             "description": (
                 "Read parsed document content by full-document markdown window, section, page range, slide range, chunk_ids, or anchor window. "
-                "The bundle has a canonical document.md surface; use read_kind=document with offset_chars and next_offset_chars to walk that source of truth sequentially when you need complete coverage."
+                "The bundle has a canonical document.md surface; use read_kind=document with offset_chars and next_offset_chars to walk that source of truth sequentially when you need complete coverage. "
+                "In multi-document bundles, provide doc_id once you know which parsed document you want to inspect."
             ),
             "input_schema": {
                 "type": "object",
@@ -587,7 +588,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         api_definition={
             "name": "docs_fetch_asset",
             "description": (
-                "Fetch exact parsed sidecar asset metadata from a document bundle, such as a figure image, table markdown, or generated page image."
+                "Fetch exact parsed sidecar asset metadata from a document bundle, such as a figure image, inline visual description, table markdown, or generated page or slide image."
             ),
             "input_schema": {
                 "type": "object",

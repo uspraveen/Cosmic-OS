@@ -257,6 +257,8 @@ runs/artifacts/<docs_parse_task_id>/
       document.json
       document.md
       chunk_index.json
+      intermediate/
+        rendered_source.pdf   # optional; present for image-heavy DOCX/PPTX Office-render fallback
       assets/
         pages/
         figures/
@@ -596,12 +598,18 @@ sequenceDiagram
     participant A as Artifact Store
 
     U->>G: Upload 2 PDFs + 1 PPTX with request
-    G->>A: Persist original bytes + manifests
-    G->>D: docs.parse_bundle(input_artifacts)
+    G->>A: Persist original bytes + manifests in req_ingest scope
+    G->>D: docs.parse_bundle(input_artifacts, full_page_vlm_mode="auto")
     D->>A: Read original artifacts
-    D->>D: Parse with Docling
-    D->>A: Write parsed bundles + chunk indexes + sidecar assets
-    D->>G: Return bundle refs + document indexes + summaries
+    D->>D: Standard Docling parse + OCR + picture description
+    alt Image-heavy DOCX/PPTX detected
+        D->>D: Render Office source to PDF via headless LibreOffice
+        D->>D: Rerun Docling full-page VLM over rendered PDF
+        D->>A: Write rendered_source.pdf + enriched parsed bundle + sidecar assets
+    else Standard parse sufficient
+        D->>A: Write parsed bundles + chunk indexes + sidecar assets
+    end
+    D->>G: Return bundle refs + document indexes + visual_enrichment summary
     G->>O: Send request context with parsed bundle refs
     O->>D: docs_browse / docs_search / docs_read / docs.fetch_asset
     O->>U: Final answer or generated deck
@@ -613,19 +621,22 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    subgraph Ingress
-        A1[Uploaded file bytes]
-        A2[Attachment metadata]
-        A3[ArtifactManifest]
+    subgraph Ingress["runs/artifacts/req_ingest_<request_id>/inputs/<artifact_id>/"]
+        A1[original/safe_filename]
+        A2[attachment metadata]
+        A3[manifest.json]
     end
 
     subgraph ParseTask["runs/artifacts/<docs_parse_task_id>/parsed/<artifact_id>/"]
+        B0[manifest.json<br/>visual_enrichment metadata]
         B1[document.json]
         B2[document.md]
         B3[chunk_index.json]
-        B4[assets/pages]
-        B5[assets/figures]
-        B6[assets/tables]
+        B4[intermediate/rendered_source.pdf<br/>optional for image-heavy DOCX/PPTX]
+        B5[assets/pages]
+        B6[assets/figures]
+        B7[assets/tables]
+        B8[assets/slides]
     end
 
     subgraph Memory
@@ -641,21 +652,25 @@ flowchart TD
         D4[docs.list_tables / docs.get_table / docs.list_figures / docs.get_figure / docs.list_assets / docs.fetch_asset]
     end
 
+    A1 --> B0
     A1 --> B1
     A1 --> B2
     A1 --> B3
-    A1 --> B4
     A1 --> B5
     A1 --> B6
+    A1 --> B7
+    A1 --> B8
+    A1 -->|conditional Office render| B4
 
-    B1 --> D0
+    B0 --> D0
     B1 --> D1
     B3 --> D2
     B1 --> D3
     B2 --> D3
-    B4 --> D4
     B5 --> D4
     B6 --> D4
+    B7 --> D4
+    B8 --> D4
 
     B1 --> C1
     B2 --> C2

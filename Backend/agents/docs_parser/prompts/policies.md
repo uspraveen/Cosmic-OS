@@ -14,9 +14,10 @@
 - `document.md` is the model-facing linearized read surface.
 - `chunk_index.json` must be generated even if the first chunking strategy is simple.
 - Preserve asset references whenever available.
+- For DOCX and PPTX, standard parsing should run first. If the result is image-heavy or structurally weak, Office render plus hosted full-page VLM escalation may be applied.
+- If picture description, Office render, or hosted full-page VLM enrichment fails, keep the best standard parse bundle and record the fallback reason instead of inventing content or failing silently.
 
 ## Storage Rules
 - Store all full outputs under `runs/artifacts/<task_id>/docs_parser/<artifact_id>/`.
 - Keep only compact per-task summaries in the private session ledger.
 - Do not write giant parsed documents into shared memory.
-
