@@ -64,6 +64,30 @@ interface PendingGatewayDocumentUpload {
   sizeBytes?: number
 }
 
+const GATEWAY_DOCUMENT_UPLOAD_MAX_FILE_BYTES = 20 * 1024 * 1024
+
+function formatBinarySize(sizeBytes: number) {
+  if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) {
+    return '0 B'
+  }
+  if (sizeBytes >= 1024 * 1024) {
+    return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
+  }
+  if (sizeBytes >= 1024) {
+    return `${Math.max(1, Math.round(sizeBytes / 1024))} KB`
+  }
+  return `${Math.max(1, Math.round(sizeBytes))} B`
+}
+
+function buildDocumentSizeLimitError(items: Array<{ filename: string; sizeBytes: number }>) {
+  const rendered = items
+    .slice(0, 3)
+    .map((item) => `${item.filename} (${formatBinarySize(item.sizeBytes)})`)
+    .join(', ')
+  const suffix = items.length > 3 ? ` and ${items.length - 3} more` : ''
+  return `Documents larger than ${formatBinarySize(GATEWAY_DOCUMENT_UPLOAD_MAX_FILE_BYTES)} are not supported yet: ${rendered}${suffix}.`
+}
+
 function getDesktopDeviceId() {
   const existing = String(store.get('desktopDeviceId') || '').trim()
   if (existing) {
@@ -122,10 +146,15 @@ async function pickGatewayDocuments() {
   }
 
   const picked: PickedGatewayDocument[] = []
+  const oversized: Array<{ filename: string; sizeBytes: number }> = []
   for (const filePath of result.filePaths) {
     const filename = path.basename(filePath)
     const stats = await fs.stat(filePath)
     if (!stats.isFile()) {
+      continue
+    }
+    if (stats.size > GATEWAY_DOCUMENT_UPLOAD_MAX_FILE_BYTES) {
+      oversized.push({ filename, sizeBytes: stats.size })
       continue
     }
     picked.push({
@@ -134,6 +163,9 @@ async function pickGatewayDocuments() {
       mimeType: inferDesktopDocumentMimeType(filename),
       sizeBytes: stats.size,
     })
+  }
+  if (oversized.length > 0) {
+    throw new Error(buildDocumentSizeLimitError(oversized))
   }
   return picked
 }
@@ -162,7 +194,14 @@ async function uploadDesktopDocumentsToGateway(
     if (!filePath || !filename) {
       continue
     }
+    const sizeBytes = Number(attachment?.sizeBytes || 0)
+    if (Number.isFinite(sizeBytes) && sizeBytes > GATEWAY_DOCUMENT_UPLOAD_MAX_FILE_BYTES) {
+      throw new Error(buildDocumentSizeLimitError([{ filename, sizeBytes }]))
+    }
     const fileBytes = await fs.readFile(filePath)
+    if (fileBytes.length > GATEWAY_DOCUMENT_UPLOAD_MAX_FILE_BYTES) {
+      throw new Error(buildDocumentSizeLimitError([{ filename, sizeBytes: fileBytes.length }]))
+    }
     const mimeType = String(attachment?.mimeType || '').trim() || inferDesktopDocumentMimeType(filename)
     formData.append('files', new Blob([fileBytes], { type: mimeType }), filename)
   }

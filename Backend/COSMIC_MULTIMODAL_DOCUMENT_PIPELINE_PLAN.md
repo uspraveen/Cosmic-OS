@@ -51,6 +51,17 @@ This design does **not** do any of the following:
 - make Opus manually stitch together separate table files and image files for normal tasks
 - treat markdown as the only canonical representation of a parsed document
 
+### 2.3 Operational Limits
+
+For the current production slice, the ingest and parse path should enforce conservative bounds:
+
+- maximum upload size: **20 MB per file**
+- maximum input count per parse task: **8 artifacts**
+- maximum parsed document size passed into Docling: **20 MB**
+- maximum pages/slides passed into Docling: **200**
+
+Files beyond these bounds should be rejected early with a clear user-visible error instead of being staged and then failing deep in the parse path.
+
 ---
 
 ## 3. High-Level Architecture

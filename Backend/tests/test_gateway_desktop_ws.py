@@ -1079,6 +1079,48 @@ def test_desktop_upload_route_stages_documents(tmp_path) -> None:
     assert staged_path.exists()
 
 
+def test_desktop_upload_route_rejects_oversized_documents(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+    runtime.config.artifacts_root = tmp_path / "runs" / "artifacts"
+    runtime.config.docs_upload_max_file_bytes = 1024 * 1024
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/channels/desktop/uploads",
+            headers={"Authorization": "Bearer test-token"},
+            data={
+                "request_id": "req_upload_oversized",
+                "session_id": "sess_upload_oversized",
+                "device_id": "desk_upload_oversized",
+            },
+            files=[
+                (
+                    "files",
+                    (
+                        "oversized.pdf",
+                        b"x" * (1024 * 1024 + 1),
+                        "application/pdf",
+                    ),
+                )
+            ],
+        )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "Document exceeds the 1 MB upload limit: oversized.pdf"
+
+
 @pytest.mark.asyncio
 async def test_document_attachments_force_opus_even_with_text_content(tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="haiku")

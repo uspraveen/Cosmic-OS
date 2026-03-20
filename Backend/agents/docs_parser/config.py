@@ -29,7 +29,8 @@ class DocsParserConfig:
     gateway_url: str = "http://127.0.0.1:8080"
     gateway_internal_token: str = ""
     max_input_artifacts: int = 8
-    max_input_file_bytes: int = 75 * 1024 * 1024
+    max_input_file_bytes: int = 20 * 1024 * 1024
+    max_num_pages: int = 200
     default_enable_ocr: bool = True
     default_generate_page_images: bool = False
     default_generate_picture_images: bool = True
@@ -43,7 +44,8 @@ class DocsParserConfig:
             gateway_url=os.getenv("GATEWAY_URL", "http://127.0.0.1:8080").strip() or "http://127.0.0.1:8080",
             gateway_internal_token=os.getenv("GATEWAY_INTERNAL_TOKEN", "").strip(),
             max_input_artifacts=max(1, _env_int("DOCS_PARSER_MAX_INPUT_ARTIFACTS", 8)),
-            max_input_file_bytes=max(1024 * 1024, _env_int("DOCS_PARSER_MAX_INPUT_FILE_BYTES", 75 * 1024 * 1024)),
+            max_input_file_bytes=max(1024 * 1024, _env_int("DOCS_PARSER_MAX_INPUT_FILE_BYTES", 20 * 1024 * 1024)),
+            max_num_pages=max(1, _env_int("DOCS_PARSER_MAX_NUM_PAGES", 200)),
             default_enable_ocr=os.getenv("DOCS_PARSER_ENABLE_OCR", "true").strip().lower() not in {"0", "false", "no"},
             default_generate_page_images=os.getenv("DOCS_PARSER_GENERATE_PAGE_IMAGES", "false").strip().lower()
             in {"1", "true", "yes"},
@@ -52,4 +54,3 @@ class DocsParserConfig:
             max_chunk_chars=max(800, _env_int("DOCS_PARSER_MAX_CHUNK_CHARS", 2400)),
             chunk_overlap_chars=max(0, _env_int("DOCS_PARSER_CHUNK_OVERLAP_CHARS", 280)),
         )
-

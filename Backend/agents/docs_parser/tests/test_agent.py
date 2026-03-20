@@ -184,6 +184,22 @@ class StubParser:
         )
 
 
+class FailingParser:
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+    def parse_file(
+        self,
+        *,
+        file_path: Path,
+        artifact_id: str,
+        mime_type: str,
+        request: ParseRequest,
+    ) -> ParsedDocument:
+        del file_path, artifact_id, mime_type, request
+        raise RuntimeError(self.message)
+
+
 def _make_task(*, payload: dict[str, object], input_artifacts: list[dict[str, object]], session_id: str = "sess_docs") -> TaskEnvelope:
     task = TaskEnvelope(
         task_id="tsk_docs_parse_bundle",
@@ -362,6 +378,8 @@ async def test_docs_parser_agent_parse_bundle_persists_canonical_outputs(tmp_pat
     assert document["asset_count"] == 2
     assert len(result.artifacts) == 6
     assert parser.calls
+    assert parser.calls[0]["request"].max_file_size_bytes == agent.config.max_input_file_bytes
+    assert parser.calls[0]["request"].max_num_pages == agent.config.max_num_pages
 
     output_root = tmp_path / "runs" / "artifacts" / "tsk_docs_parse_bundle" / "docs_parser" / "art_pdf_001"
     assert (output_root / "document.json").exists()
@@ -527,3 +545,90 @@ async def test_docs_parser_agent_rejects_missing_or_unsupported_artifacts(tmp_pa
     assert unsupported_result.status == "failed"
     assert unsupported_result.error is not None
     assert unsupported_result.error.code == "INVALID_INPUT"
+
+
+@pytest.mark.asyncio
+async def test_docs_parser_agent_rejects_oversized_artifacts_before_parse(tmp_path: Path) -> None:
+    source_root = tmp_path / "runs" / "artifacts" / "req_ingest_003" / "inputs" / "art_pdf_003"
+    source_root.mkdir(parents=True, exist_ok=True)
+    source_file = source_root / "oversized.pdf"
+    source_file.write_bytes(b"x" * 9)
+
+    parser = StubParser()
+    agent = DocsParserAgent(
+        redis_client=FakeRedis(),
+        config=DocsParserConfig(
+            redis_url="redis://unused",
+            gateway_url="http://gateway",
+            gateway_internal_token="internal-token",
+            max_input_file_bytes=8,
+        ),
+        parser=parser,
+        store_root=tmp_path / "store",
+        runtime_root=tmp_path / "runtime",
+        artifacts_root=tmp_path / "runs" / "artifacts",
+        agent_secret="agent-secret",
+    )
+    await agent.on_startup()
+    try:
+        result = await agent.execute(
+            _make_task(
+                payload={},
+                input_artifacts=[
+                    {
+                        "artifact_id": "art_pdf_003",
+                        "path": str(source_file),
+                        "mime": "application/pdf",
+                        "filename": "oversized.pdf",
+                    }
+                ],
+            )
+        )
+    finally:
+        await agent.stop()
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.code == "INVALID_INPUT"
+    assert "8 B docs parsing limit" in result.error.message
+    assert parser.calls == []
+
+
+@pytest.mark.asyncio
+async def test_docs_parser_agent_classifies_docling_limit_failures_as_invalid_input(tmp_path: Path) -> None:
+    source_root = tmp_path / "runs" / "artifacts" / "req_ingest_004" / "inputs" / "art_pdf_004"
+    source_root.mkdir(parents=True, exist_ok=True)
+    source_file = source_root / "long.pdf"
+    source_file.write_bytes(b"%PDF-1.7 fake long pdf")
+
+    agent = DocsParserAgent(
+        redis_client=FakeRedis(),
+        config=DocsParserConfig(redis_url="redis://unused", gateway_url="http://gateway", gateway_internal_token="internal-token"),
+        parser=FailingParser("Conversion aborted because max_num_pages was exceeded."),
+        store_root=tmp_path / "store",
+        runtime_root=tmp_path / "runtime",
+        artifacts_root=tmp_path / "runs" / "artifacts",
+        agent_secret="agent-secret",
+    )
+    await agent.on_startup()
+    try:
+        result = await agent.execute(
+            _make_task(
+                payload={},
+                input_artifacts=[
+                    {
+                        "artifact_id": "art_pdf_004",
+                        "path": str(source_file),
+                        "mime": "application/pdf",
+                        "filename": "long.pdf",
+                    }
+                ],
+            )
+        )
+    finally:
+        await agent.stop()
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.code == "INVALID_INPUT"
+    assert result.error.retryable is False

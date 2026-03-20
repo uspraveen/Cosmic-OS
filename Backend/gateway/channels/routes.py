@@ -20,6 +20,14 @@ logger = logging.getLogger(__name__)
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 
+def _format_size_limit(size_bytes: int) -> str:
+    if size_bytes >= 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.0f} MB"
+    if size_bytes >= 1024:
+        return f"{max(1, round(size_bytes / 1024))} KB"
+    return f"{max(1, size_bytes)} B"
+
+
 class WhatsAppPairingRequest(BaseModel):
     refresh: bool = True
     wait_timeout_ms: int = Field(default=15000, ge=1000, le=60000)
@@ -597,6 +605,7 @@ async def upload_desktop_documents(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one document is required")
 
     uploads: list[dict[str, Any]] = []
+    max_file_bytes = max(1024 * 1024, int(runtime.config.docs_upload_max_file_bytes))
     for index, upload in enumerate(files, start=1):
         filename = str(upload.filename or "").strip()
         if not filename:
@@ -604,6 +613,13 @@ async def upload_desktop_documents(
         content = await upload.read()
         if not content:
             continue
+        if len(content) > max_file_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=(
+                    f"Document exceeds the {_format_size_limit(max_file_bytes)} upload limit: {filename}"
+                ),
+            )
         uploads.append(
             {
                 "artifact_id": f"desktop_doc_{normalized_request_id}_{index}",

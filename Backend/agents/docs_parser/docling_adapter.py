@@ -20,6 +20,8 @@ class ParseRequest:
     enable_ocr: bool
     generate_page_images: bool
     generate_picture_images: bool
+    max_file_size_bytes: int
+    max_num_pages: int
     max_chunk_chars: int
     chunk_overlap_chars: int
 
@@ -121,6 +123,10 @@ class DoclingAdapter:
             from docling.document_converter import DocumentConverter, PdfFormatOption
         except ImportError as exc:
             raise RuntimeError("Docling is not installed in the current runtime.") from exc
+        try:
+            from docling.datamodel.pipeline_options import TableFormerMode
+        except ImportError:
+            TableFormerMode = None
 
         format_options: dict[Any, Any] = {}
         if file_path.suffix.lower() == ".pdf":
@@ -128,10 +134,26 @@ class DoclingAdapter:
             pipeline_options.do_ocr = request.enable_ocr
             pipeline_options.generate_page_images = request.generate_page_images
             pipeline_options.generate_picture_images = request.generate_picture_images
+            if hasattr(pipeline_options, "do_table_structure"):
+                pipeline_options.do_table_structure = True
+            table_structure_options = getattr(pipeline_options, "table_structure_options", None)
+            if TableFormerMode is not None and table_structure_options is not None and hasattr(table_structure_options, "mode"):
+                try:
+                    table_structure_options.mode = TableFormerMode.ACCURATE
+                except Exception:
+                    pass
             format_options[InputFormat.PDF] = PdfFormatOption(pipeline_options=pipeline_options)
 
         converter = DocumentConverter(**({"format_options": format_options} if format_options else {}))
-        result = converter.convert(str(file_path))
+        try:
+            result = converter.convert(
+                str(file_path),
+                max_num_pages=request.max_num_pages,
+                max_file_size=request.max_file_size_bytes,
+            )
+        except Exception as exc:
+            message = str(exc).strip() or f"Docling failed to parse {file_path.name}."
+            raise RuntimeError(message) from exc
         document = getattr(result, "document", None)
         if document is None:
             raise RuntimeError("Docling conversion did not return a document object.")

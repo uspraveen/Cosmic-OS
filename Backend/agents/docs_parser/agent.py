@@ -189,14 +189,14 @@ class DocsParserAgent(AgentRuntime):
                     mime_type=artifact["mime"],
                     request=parse_request,
                 )
-            except RuntimeError as exc:
-                text = str(exc)
-                code = "PARSER_UNAVAILABLE" if "Docling is not installed" in text else "PARSE_FAILED"
+            except Exception as exc:
+                text = str(exc).strip() or f"Failed to parse {artifact.get('filename') or artifact['artifact_id']}."
+                code, retryable, next_action = self._classify_parse_failure(text)
                 raise DocsParserAgentError(
                     code=code,
                     message=text,
-                    retryable=(code == "PARSER_UNAVAILABLE"),
-                    next_action="escalate",
+                    retryable=retryable,
+                    next_action=next_action,
                 ) from exc
             doc_id = self._stable_id(f"{artifact['artifact_id']}:{source_path.name}:{parsed.title or ''}")
             summary, manifests = self._persist_parsed_bundle(
@@ -463,6 +463,8 @@ class DocsParserAgent(AgentRuntime):
                 payload.get("generate_picture_images"),
                 default=self.config.default_generate_picture_images,
             ),
+            max_file_size_bytes=self.config.max_input_file_bytes,
+            max_num_pages=self.config.max_num_pages,
             max_chunk_chars=self.config.max_chunk_chars,
             chunk_overlap_chars=self.config.chunk_overlap_chars,
         )
@@ -522,7 +524,10 @@ class DocsParserAgent(AgentRuntime):
         if size_bytes > self.config.max_input_file_bytes:
             raise DocsParserAgentError(
                 code="INVALID_INPUT",
-                message=f"Input artifact {artifact['artifact_id']} exceeds the size limit for docs parsing.",
+                message=(
+                    f"Input artifact {artifact['artifact_id']} exceeds the "
+                    f"{self._format_size_limit(self.config.max_input_file_bytes)} docs parsing limit."
+                ),
                 retryable=False,
                 next_action="revise_input",
             )
@@ -537,6 +542,32 @@ class DocsParserAgent(AgentRuntime):
                     next_action="escalate",
                 )
         return source_path
+
+    def _classify_parse_failure(self, message: str) -> tuple[str, bool, str]:
+        normalized = message.strip().lower()
+        if "docling is not installed" in normalized:
+            return "PARSER_UNAVAILABLE", True, "escalate"
+        if any(
+            marker in normalized
+            for marker in (
+                "max_num_pages",
+                "maximum number of pages",
+                "page limit",
+                "too many pages",
+                "max_file_size",
+                "file size limit",
+                "exceeds the size limit",
+            )
+        ):
+            return "INVALID_INPUT", False, "revise_input"
+        return "PARSE_FAILED", False, "escalate"
+
+    def _format_size_limit(self, size_bytes: int) -> str:
+        if size_bytes >= 1024 * 1024:
+            return f"{size_bytes / (1024 * 1024):.0f} MB"
+        if size_bytes >= 1024:
+            return f"{max(1, round(size_bytes / 1024))} KB"
+        return f"{max(1, size_bytes)} B"
 
     def _persist_parsed_bundle(
         self,

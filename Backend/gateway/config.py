@@ -88,6 +88,7 @@ class GatewayConfig:
     artifact_download_timeout_sec: float = 60.0
     docs_auto_parse_enabled: bool = True
     docs_parser_agent_id: str = "cosmic/docs-parser-agent:1.0.0"
+    docs_upload_max_file_bytes: int = 20 * 1024 * 1024
     docs_parse_timeout_sec: float = 120.0
     docs_parse_poll_interval_sec: float = 0.25
     haiku_api_key: str = ""
@@ -252,6 +253,10 @@ class GatewayConfig:
             docs_parser_agent_id=(
                 os.getenv("GATEWAY_DOCS_PARSER_AGENT_ID", "cosmic/docs-parser-agent:1.0.0").strip()
                 or "cosmic/docs-parser-agent:1.0.0"
+            ),
+            docs_upload_max_file_bytes=max(
+                1024 * 1024,
+                _env_int("GATEWAY_DOCS_UPLOAD_MAX_FILE_BYTES", 20 * 1024 * 1024),
             ),
             docs_parse_timeout_sec=max(
                 5.0,
