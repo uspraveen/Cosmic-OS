@@ -43,3 +43,32 @@ async def test_memory_client_uses_longer_timeout_for_write_endpoints() -> None:
     assert captured["/v1/core-facts"]["read"] == pytest.approx(45.0)
     assert captured["/v1/episodes"]["read"] == pytest.approx(45.0)
     assert captured["/v1/memories/mem_123"]["read"] == pytest.approx(12.0)
+
+
+def test_memory_client_render_prompt_context_includes_keys_and_sources() -> None:
+    client = CosmicMemoryClient(base_url="", timeout_sec=12.0, write_timeout_sec=45.0)
+
+    rendered = client.render_prompt_context(
+        core_fact_items=[
+            {
+                "memory_id": "mem_core_1",
+                "title": "Partner name",
+                "content": "Praveen's partner is Priya.",
+                "canonical_key": "relationships.partner.name",
+            }
+        ],
+        recall_items=[
+            {
+                "memory_id": "mem_task_1",
+                "kind": "task_summary",
+                "title": "Newsletter investigation",
+                "content": "The newsletter parse completed successfully.",
+                "source_kind": "gateway",
+                "canonical_key": "documents.newsletter.status",
+            }
+        ],
+    )
+
+    assert "[key=relationships.partner.name]" in rendered
+    assert "source=gateway" in rendered
+    assert "key=documents.newsletter.status" in rendered

@@ -914,7 +914,8 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "name": "memory_write_core_fact",
             "description": (
                 "Write a stable always-on core fact or standing preference that should surface proactively in the core_fact block. "
-                "Use canonical_key when you are updating an established field such as response style, relationship, or identity fact."
+                "Use canonical_key when you are updating an established field such as response style, relationship, or identity fact. "
+                "Only use this for relationship or identity facts when the user explicitly confirmed the fact or the trusted source directly names it."
             ),
             "input_schema": {
                 "type": "object",
@@ -955,7 +956,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             },
         },
         group="memory",
-        prompt_summary="Persist a stable always-on core fact or standing preference. Prefer this over memory_write when the fact should proactively shape future context.",
+        prompt_summary="Persist a stable always-on core fact or standing preference. Prefer this over memory_write when the fact should proactively shape future context, and only use it for relationship or identity facts when they are explicitly confirmed or directly named by the trusted source.",
         progress_builder=_memory_core_fact_progress,
         handler_method="_memory_write_core_fact",
     ),

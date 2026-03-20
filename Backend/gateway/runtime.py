@@ -80,6 +80,20 @@ MEMORY_WRITE_PREVIEW_CHARS = 400
 SYSTEM_CRON_DAILY_ROLLOVER = "system.daily_rollover"
 TURN_LEDGER_WINDOW_SIZE = 10
 TASK_NOTEBOOK_WINDOW_SIZE = 5
+RECENT_MEMORY_TOOL_RECEIPT_LIMIT = 4
+RECENT_MEMORY_TOOL_RECEIPT_SCAN_LIMIT = 12
+CONTESTED_MEMORY_RECENT_WRITE_LIMIT = 3
+CONTESTED_MEMORY_AUDIT_SCAN_LIMIT = 40
+MEMORY_CONTEST_PHRASES = (
+    "i didn't confirm",
+    "i did not confirm",
+    "i never confirmed",
+    "that was your assumption",
+    "that's your assumption",
+    "it was your assumption",
+    "you assumed",
+    "you made that up",
+)
 EPHEMERAL_CHANNEL_EVENT_TYPES = {
     "route_result",
     "response.chunk",
@@ -948,6 +962,7 @@ class GatewayRuntime:
                 else None
             ),
             "memory_context_payload": {
+                "core_fact_items": memory_prompt_context.core_fact_items,
                 "core_facts_rendered": memory_prompt_context.core_facts_rendered,
                 "items": memory_prompt_context.recall_items,
                 "total_token_count": memory_prompt_context.total_token_count,
@@ -1183,7 +1198,8 @@ class GatewayRuntime:
             message.get("route_override") if message.get("route_override") is not None else metadata.get("route_override")
         )
 
-        session_id = self._resolve_session_id(message.get("session_id"))
+        requested_session_id = self._safe_text(message.get("session_id"))
+        session_id = self._resolve_session_id(requested_session_id)
         source_id = (
             self._safe_text(metadata.get("sender_jid"))
             or self._safe_text(metadata.get("chat_jid"))
@@ -1212,6 +1228,11 @@ class GatewayRuntime:
         if auto_reply is not None:
             self.request_records[request_id] = auto_reply
             return auto_reply
+        self._maybe_record_contested_memory_claims(
+            record_session_id=session_id,
+            source_session_ids=[requested_session_id] if requested_session_id else None,
+            content=content,
+        )
         active_working_set = self._refresh_active_working_set(session_id)
         assembled_conversation_context = self._build_conversation_context(
             session_id,
@@ -1225,6 +1246,10 @@ class GatewayRuntime:
             )
         )
         memory_prompt_context = await memory_context_task
+        memory_prompt_context = self._apply_memory_prompt_overrides(
+            session_id=session_id,
+            memory_prompt_context=memory_prompt_context,
+        )
         routing_decision = await self._classify_message(
             session_id=session_id,
             content=content,
@@ -2327,6 +2352,38 @@ class GatewayRuntime:
                 if ingest_state:
                     parts.append(f"state={ingest_state}")
                 lines.append("  - " + "; ".join(parts))
+        recent_receipts = working_set.get("recent_tool_receipts") if isinstance(working_set.get("recent_tool_receipts"), list) else []
+        if recent_receipts:
+            lines.extend(["", "- Recent tool receipts:"])
+            for receipt in recent_receipts[:RECENT_MEMORY_TOOL_RECEIPT_LIMIT]:
+                if not isinstance(receipt, dict):
+                    continue
+                parts = [
+                    self._safe_text(receipt.get("operation")) or "tool",
+                    self._safe_text(receipt.get("status")) or "status=unknown",
+                ]
+                canonical_key = self._safe_text(receipt.get("canonical_key"))
+                if canonical_key:
+                    parts.append(f"key={canonical_key}")
+                title = self._safe_text(receipt.get("title"))
+                if title:
+                    parts.append(title)
+                created_at = self._safe_text(receipt.get("created_at"))
+                if created_at:
+                    parts.append(f"at={created_at}")
+                lines.append("  - " + "; ".join(parts))
+        contested_claims = working_set.get("contested_memory_claims") if isinstance(working_set.get("contested_memory_claims"), list) else []
+        if contested_claims:
+            lines.extend(["", "- Current user corrections against memory:"])
+            for claim in contested_claims[:6]:
+                if not isinstance(claim, dict):
+                    continue
+                canonical_key = self._safe_text(claim.get("canonical_key"))
+                reason = self._safe_text(claim.get("reason"))
+                parts = [canonical_key or "memory claim"]
+                if reason:
+                    parts.append(reason)
+                lines.append("  - " + "; ".join(parts))
 
         return "\n".join(lines) if len(lines) > 1 else None
 
@@ -3002,6 +3059,8 @@ class GatewayRuntime:
         preferences = self._normalize_string_list(carry_forward.get("stable_user_preferences"))
         artifact_pointers = []
         recent_document_artifacts: list[dict[str, Any]] = []
+        recent_tool_receipts = self._recent_memory_tool_receipts(session_id, limit=RECENT_MEMORY_TOOL_RECEIPT_LIMIT)
+        contested_keys, contested_ids, contested_claims = self._active_contested_memory_refs(session_id)
         goal = self._safe_text(carry_forward.get("goal")) or ""
 
         for turn in recent_turns:
@@ -3113,6 +3172,10 @@ class GatewayRuntime:
             "active_task_refs": active_task_refs,
             "pending_artifact_pointers": artifact_pointers,
             "recent_document_artifacts": recent_document_artifacts,
+            "recent_tool_receipts": recent_tool_receipts,
+            "contested_memory_claims": contested_claims,
+            "contested_memory_keys": sorted(contested_keys),
+            "contested_memory_ids": sorted(contested_ids),
             "user_preferences_in_play": preferences,
             "last_updated_at": utcnow_iso(),
         }
@@ -3124,6 +3187,223 @@ class GatewayRuntime:
             },
         )
         return working_set
+
+    def _recent_memory_tool_receipts(self, session_id: str, *, limit: int) -> list[dict[str, Any]]:
+        entries = self.memory_write_audit_store.list_entries(
+            session_id=session_id,
+            limit=max(limit, RECENT_MEMORY_TOOL_RECEIPT_SCAN_LIMIT),
+        )
+        receipts: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            operation = self._safe_text(entry.get("operation"))
+            status = self._safe_text(entry.get("status"))
+            if operation not in {"memory_write", "memory_write_core_fact"}:
+                continue
+            if status not in {"saved", "deduplicated", "failed", "rate_limited"}:
+                continue
+            receipts.append(
+                {
+                    "operation": operation,
+                    "status": status,
+                    "canonical_key": self._safe_text(entry.get("canonical_key")),
+                    "memory_id": self._safe_text(entry.get("memory_id")),
+                    "title": self._safe_text(entry.get("title")),
+                    "created_at": self._safe_text(entry.get("created_at")),
+                }
+            )
+            if len(receipts) >= limit:
+                break
+        return receipts
+
+    def _maybe_record_contested_memory_claims(
+        self,
+        *,
+        record_session_id: str,
+        source_session_ids: list[str] | None = None,
+        content: str,
+    ) -> None:
+        normalized_content = str(content or "").strip().lower()
+        if not normalized_content:
+            return
+        if not any(phrase in normalized_content for phrase in MEMORY_CONTEST_PHRASES):
+            return
+
+        candidate_session_ids = self._normalize_string_list(
+            [record_session_id, *(source_session_ids or [])],
+            limit=4,
+        )
+        recent_core_fact_entries: list[dict[str, Any]] = []
+        for candidate_session_id in candidate_session_ids:
+            recent_entries = self.memory_write_audit_store.list_entries(
+                session_id=candidate_session_id,
+                limit=CONTESTED_MEMORY_AUDIT_SCAN_LIMIT,
+            )
+            for entry in recent_entries:
+                if not isinstance(entry, dict):
+                    continue
+                if self._safe_text(entry.get("operation")) != "memory_write_core_fact":
+                    continue
+                if self._safe_text(entry.get("status")) not in {"saved", "deduplicated"}:
+                    continue
+                recent_core_fact_entries.append(entry)
+                if len(recent_core_fact_entries) >= CONTESTED_MEMORY_RECENT_WRITE_LIMIT:
+                    break
+            if len(recent_core_fact_entries) >= CONTESTED_MEMORY_RECENT_WRITE_LIMIT:
+                break
+        if not recent_core_fact_entries:
+            return
+
+        metadata = self.session_store.get_session_metadata(record_session_id)
+        contested_keys = (
+            dict(metadata.get("contested_memory_keys"))
+            if isinstance(metadata.get("contested_memory_keys"), dict)
+            else {}
+        )
+        contested_ids = (
+            dict(metadata.get("contested_memory_ids"))
+            if isinstance(metadata.get("contested_memory_ids"), dict)
+            else {}
+        )
+        contested_at = utcnow_iso()
+        reason = self._bounded_excerpt(content, limit=180)
+
+        changed = False
+        for entry in recent_core_fact_entries:
+            canonical_key = self._safe_text(entry.get("canonical_key"))
+            memory_id = self._safe_text(entry.get("memory_id"))
+            if canonical_key:
+                contested_keys[canonical_key] = {
+                    "contested_at": contested_at,
+                    "reason": reason,
+                }
+                changed = True
+            if memory_id:
+                contested_ids[memory_id] = {
+                    "contested_at": contested_at,
+                    "reason": reason,
+                }
+                changed = True
+        if not changed:
+            return
+
+        self.session_store.update_session_metadata(
+            record_session_id,
+            {
+                "contested_memory_keys": contested_keys,
+                "contested_memory_ids": contested_ids,
+            },
+        )
+
+    def _active_contested_memory_refs(
+        self,
+        session_id: str,
+    ) -> tuple[set[str], set[str], list[dict[str, Any]]]:
+        metadata = self.session_store.get_session_metadata(session_id)
+        raw_keys = metadata.get("contested_memory_keys") if isinstance(metadata.get("contested_memory_keys"), dict) else {}
+        raw_ids = metadata.get("contested_memory_ids") if isinstance(metadata.get("contested_memory_ids"), dict) else {}
+        if not raw_keys and not raw_ids:
+            return set(), set(), []
+
+        recent_entries = self.memory_write_audit_store.list_entries(
+            session_id=session_id,
+            limit=CONTESTED_MEMORY_AUDIT_SCAN_LIMIT,
+        )
+        resolved_key_times: dict[str, str] = {}
+        resolved_id_times: dict[str, str] = {}
+        for entry in recent_entries:
+            if not isinstance(entry, dict):
+                continue
+            if self._safe_text(entry.get("operation")) != "memory_write_core_fact":
+                continue
+            if self._safe_text(entry.get("status")) not in {"saved", "deduplicated"}:
+                continue
+            created_at = self._safe_text(entry.get("created_at")) or ""
+            canonical_key = self._safe_text(entry.get("canonical_key"))
+            memory_id = self._safe_text(entry.get("memory_id"))
+            if canonical_key and created_at > (resolved_key_times.get(canonical_key) or ""):
+                resolved_key_times[canonical_key] = created_at
+            if memory_id and created_at > (resolved_id_times.get(memory_id) or ""):
+                resolved_id_times[memory_id] = created_at
+
+        contested_keys: set[str] = set()
+        contested_ids: set[str] = set()
+        contested_claims: list[dict[str, Any]] = []
+
+        for canonical_key, payload in raw_keys.items():
+            if not canonical_key or not isinstance(payload, dict):
+                continue
+            contested_at = self._safe_text(payload.get("contested_at")) or ""
+            latest_write = resolved_key_times.get(canonical_key) or ""
+            if latest_write and contested_at and latest_write > contested_at:
+                continue
+            contested_keys.add(canonical_key)
+            contested_claims.append(
+                {
+                    "canonical_key": canonical_key,
+                    "reason": self._safe_text(payload.get("reason")),
+                    "contested_at": contested_at,
+                }
+            )
+
+        for memory_id, payload in raw_ids.items():
+            if not memory_id or not isinstance(payload, dict):
+                continue
+            contested_at = self._safe_text(payload.get("contested_at")) or ""
+            latest_write = resolved_id_times.get(memory_id) or ""
+            if latest_write and contested_at and latest_write > contested_at:
+                continue
+            contested_ids.add(memory_id)
+
+        return contested_keys, contested_ids, contested_claims
+
+    def _apply_memory_prompt_overrides(
+        self,
+        *,
+        session_id: str,
+        memory_prompt_context: MemoryPromptContext,
+    ) -> MemoryPromptContext:
+        contested_keys, contested_ids, _ = self._active_contested_memory_refs(session_id)
+        if not contested_keys and not contested_ids:
+            return memory_prompt_context
+
+        filtered_core_fact_items = [
+            item
+            for item in memory_prompt_context.core_fact_items
+            if self._safe_text(item.get("canonical_key")) not in contested_keys
+            and self._safe_text(item.get("memory_id")) not in contested_ids
+        ]
+        filtered_recall_items = [
+            item
+            for item in memory_prompt_context.recall_items
+            if self._safe_text(item.get("canonical_key")) not in contested_keys
+            and self._safe_text(item.get("memory_id")) not in contested_ids
+        ]
+
+        if (
+            filtered_core_fact_items == memory_prompt_context.core_fact_items
+            and filtered_recall_items == memory_prompt_context.recall_items
+        ):
+            return memory_prompt_context
+
+        filtered_core_facts_rendered = self.memory_client.render_core_fact_block(
+            core_fact_items=filtered_core_fact_items,
+            core_facts_rendered="",
+        )
+        rendered = self.memory_client.render_prompt_context(
+            core_fact_items=filtered_core_fact_items,
+            core_facts_rendered=filtered_core_facts_rendered,
+            recall_items=filtered_recall_items,
+        )
+        return MemoryPromptContext(
+            core_fact_items=filtered_core_fact_items,
+            core_facts_rendered=filtered_core_facts_rendered,
+            recall_items=filtered_recall_items,
+            total_token_count=memory_prompt_context.total_token_count,
+            rendered=rendered,
+            diagnostics=memory_prompt_context.diagnostics,
+        )
 
     def _compaction_target_model_specs(self) -> list[ModelSpec]:
         specs: list[ModelSpec] = []

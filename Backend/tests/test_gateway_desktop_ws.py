@@ -503,6 +503,17 @@ class FakeMemoryClient:
         if not self.enabled:
             return MemoryPromptContext()
         return MemoryPromptContext(
+            core_fact_items=[
+                {
+                    "memory_id": "mem_core_pref",
+                    "title": "Response style",
+                    "content": "User prefers concise technical answers.",
+                    "canonical_key": "preferences.response_style",
+                    "priority": 100,
+                    "always_include": True,
+                    "tags": ["preferences"],
+                }
+            ],
             core_facts_rendered="- User prefers concise technical answers.",
             recall_items=[
                 {
@@ -510,15 +521,16 @@ class FakeMemoryClient:
                     "kind": "task_summary",
                     "title": "Memory integration work",
                     "content": "We are integrating cosmic-memory into Gateway and should keep the runtime HTTP boundary internal-only.",
+                    "source_kind": "gateway",
                 }
             ],
             total_token_count=42,
             rendered=(
                 "Relevant long-term memory context for this request.\n"
                 "Always-on core facts:\n"
-                "- User prefers concise technical answers.\n\n"
+                "- [key=preferences.response_style] Response style: User prefers concise technical answers.\n\n"
                 "Retrieved long-term memories:\n"
-                "1. [task_summary] Memory integration work\n"
+                "1. [task_summary] Memory integration work (source=gateway)\n"
                 "We are integrating cosmic-memory into Gateway and should keep the runtime HTTP boundary internal-only."
             ),
         )
@@ -581,7 +593,80 @@ class FakeMemoryClient:
 
     async def get_core_fact_block(self, *, max_chars: int = 1500) -> dict[str, object]:
         self.core_fact_requests.append(max_chars)
-        return {"items": [], "rendered": "- User prefers concise technical answers."}
+        return {
+            "items": [
+                {
+                    "memory_id": "mem_core_pref",
+                    "title": "Response style",
+                    "content": "User prefers concise technical answers.",
+                    "canonical_key": "preferences.response_style",
+                }
+            ],
+            "rendered": "- User prefers concise technical answers.",
+        }
+
+    def render_prompt_context(
+        self,
+        *,
+        core_fact_items: list[dict[str, object]] | None = None,
+        core_facts_rendered: str = "",
+        recall_items: list[dict[str, object]] | None = None,
+    ) -> str:
+        rendered_lines = [
+            "Relevant long-term memory context for this request.",
+            "Always-on core facts:",
+        ]
+        if core_fact_items:
+            for item in core_fact_items:
+                key = str(item.get("canonical_key") or "").strip()
+                prefix = f"- [key={key}] " if key else "- "
+                title = str(item.get("title") or "").strip()
+                content = str(item.get("content") or "").strip()
+                if title and title.lower() not in content.lower():
+                    rendered_lines.append(f"{prefix}{title}: {content}")
+                else:
+                    rendered_lines.append(f"{prefix}{content}")
+        elif core_facts_rendered:
+            rendered_lines.append(core_facts_rendered)
+        recall_items = recall_items or []
+        if recall_items:
+            rendered_lines.extend(["", "Retrieved long-term memories:"])
+            for index, item in enumerate(recall_items, start=1):
+                heading = f"{index}. [{item.get('kind') or 'memory'}] {item.get('title') or ''}".rstrip()
+                source_kind = str(item.get("source_kind") or "").strip()
+                canonical_key = str(item.get("canonical_key") or "").strip()
+                details = []
+                if source_kind:
+                    details.append(f"source={source_kind}")
+                if canonical_key:
+                    details.append(f"key={canonical_key}")
+                if details:
+                    heading += f" ({', '.join(details)})"
+                rendered_lines.append(heading)
+                content = str(item.get("content") or "").strip()
+                if content:
+                    rendered_lines.append(content)
+        return "\n".join(rendered_lines)
+
+    def render_core_fact_block(
+        self,
+        *,
+        core_fact_items: list[dict[str, object]] | None = None,
+        core_facts_rendered: str = "",
+    ) -> str:
+        if core_fact_items:
+            lines: list[str] = []
+            for item in core_fact_items:
+                key = str(item.get("canonical_key") or "").strip()
+                prefix = f"- [key={key}] " if key else "- "
+                title = str(item.get("title") or "").strip()
+                content = str(item.get("content") or "").strip()
+                if title and title.lower() not in content.lower():
+                    lines.append(f"{prefix}{title}: {content}")
+                else:
+                    lines.append(f"{prefix}{content}")
+            return "\n".join(lines)
+        return core_facts_rendered
 
     async def index_status(self) -> dict[str, object]:
         return {"enabled": self.enabled}
@@ -1252,6 +1337,44 @@ async def test_refresh_active_working_set_uses_latest_session_artifact_state(tmp
         await runtime.stop()
 
 
+@pytest.mark.asyncio
+async def test_refresh_active_working_set_surfaces_recent_memory_tool_receipts(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    runtime.memory_client = FakeMemoryClient(enabled=True)
+    await runtime.start()
+    try:
+        session_id = "sess_receipts"
+        await runtime.memory_write_core_fact(
+            {
+                "fact": "Praveen's partner is Priya.",
+                "title": "Partner name",
+                "canonical_key": "relationships.partner.name",
+                "metadata": {
+                    "session_id": session_id,
+                    "request_id": "req_receipt_1",
+                    "task_id": "tsk_receipt_1",
+                },
+                "provenance": {
+                    "created_by": "cosmic/orchestrator:1.0.0",
+                    "session_id": session_id,
+                    "request_id": "req_receipt_1",
+                    "task_id": "tsk_receipt_1",
+                    "source_kind": "orchestrator_tool",
+                },
+            }
+        )
+
+        working_set = runtime._refresh_active_working_set(session_id)  # noqa: SLF001
+
+        assert working_set["recent_tool_receipts"][0]["operation"] == "memory_write_core_fact"
+        assert working_set["recent_tool_receipts"][0]["canonical_key"] == "relationships.partner.name"
+        rendered = runtime._render_active_working_set_context(working_set)  # noqa: SLF001
+        assert "Recent tool receipts" in (rendered or "")
+        assert "relationships.partner.name" in (rendered or "")
+    finally:
+        await runtime.stop()
+
+
 def test_desktop_upload_route_stages_documents(tmp_path) -> None:
     runtime = build_runtime(tmp_path)
     runtime.config.artifacts_root = tmp_path / "runs" / "artifacts"
@@ -1416,6 +1539,93 @@ async def test_runtime_adds_memory_context_to_direct_and_orchestrator_paths(tmp_
         assert "Relevant long-term memory context" in str(task.input.get("memory_context") or "")
     finally:
         await opus_runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_suppresses_contested_core_facts_from_memory_context(tmp_path) -> None:
+    class ContestedMemoryClient(FakeMemoryClient):
+        async def build_prompt_context(
+            self,
+            *,
+            query: str,
+            max_results: int,
+            token_budget: int,
+            core_fact_max_chars: int,
+            kinds: tuple[str, ...],
+            include_diagnostics: bool = False,
+        ) -> MemoryPromptContext:
+            self.prompt_context_calls.append(
+                {
+                    "query": query,
+                    "max_results": max_results,
+                    "token_budget": token_budget,
+                    "core_fact_max_chars": core_fact_max_chars,
+                    "kinds": kinds,
+                    "include_diagnostics": include_diagnostics,
+                }
+            )
+            core_fact_items = [
+                {
+                    "memory_id": "mem_partner_name",
+                    "title": "Partner name",
+                    "content": "Praveen's partner is Priya.",
+                    "canonical_key": "relationships.partner.name",
+                    "priority": 100,
+                    "always_include": True,
+                    "tags": ["relationship"],
+                }
+            ]
+            return MemoryPromptContext(
+                core_fact_items=core_fact_items,
+                core_facts_rendered=self.render_core_fact_block(core_fact_items=core_fact_items),
+                recall_items=[],
+                total_token_count=12,
+                rendered=self.render_prompt_context(
+                    core_fact_items=core_fact_items,
+                    recall_items=[],
+                ),
+            )
+
+    runtime = build_runtime(tmp_path, route="opus")
+    runtime.memory_client = ContestedMemoryClient(enabled=True)
+    await runtime.start()
+    try:
+        session_id = "sess_contested"
+        await runtime.memory_write_core_fact(
+            {
+                "fact": "Praveen's partner is Priya.",
+                "title": "Partner name",
+                "canonical_key": "relationships.partner.name",
+                "metadata": {
+                    "session_id": session_id,
+                    "request_id": "req_partner_write",
+                    "task_id": "tsk_partner_write",
+                },
+                "provenance": {
+                    "created_by": "cosmic/orchestrator:1.0.0",
+                    "session_id": session_id,
+                    "request_id": "req_partner_write",
+                    "task_id": "tsk_partner_write",
+                    "source_kind": "orchestrator_tool",
+                },
+            }
+        )
+
+        result = await runtime.process_incoming_user_message(
+            {
+                "content": "No. I didn't confirm that. That was your assumption.",
+                "session_id": session_id,
+                "channel": "desktop:desk_contested",
+                "metadata": {"platform": "desktop"},
+            }
+        )
+
+        memory_context = str(result.get("memory_context") or "")
+        assert "Praveen's partner is Priya." not in memory_context
+        active_working_set = result["active_working_set"]
+        assert active_working_set["contested_memory_claims"][0]["canonical_key"] == "relationships.partner.name"
+    finally:
+        await runtime.stop()
 
 
 @pytest.mark.asyncio

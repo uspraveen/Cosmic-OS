@@ -10,6 +10,7 @@ import httpx
 
 @dataclass(slots=True)
 class MemoryPromptContext:
+    core_fact_items: list[dict[str, Any]] = field(default_factory=list)
     core_facts_rendered: str = ""
     recall_items: list[dict[str, Any]] = field(default_factory=list)
     total_token_count: int = 0
@@ -127,6 +128,7 @@ class CosmicMemoryClient:
             )
         )
 
+        core_fact_items: list[dict[str, Any]] = []
         core_facts_rendered = ""
         recall_items: list[dict[str, Any]] = []
         total_token_count = 0
@@ -139,6 +141,9 @@ class CosmicMemoryClient:
         )
 
         if isinstance(core_result, dict):
+            raw_core_items = core_result.get("items")
+            if isinstance(raw_core_items, list):
+                core_fact_items = [item for item in raw_core_items if isinstance(item, dict)]
             core_facts_rendered = str(core_result.get("rendered") or "").strip()
         elif isinstance(core_result, Exception):
             raise MemoryClientError(f"Failed to fetch core facts: {core_result}") from core_result
@@ -154,10 +159,12 @@ class CosmicMemoryClient:
             raise MemoryClientError(f"Failed to fetch passive recall: {passive_result}") from passive_result
 
         rendered = self._render_prompt_context(
+            core_fact_items=core_fact_items,
             core_facts_rendered=core_facts_rendered,
             recall_items=recall_items,
         )
         return MemoryPromptContext(
+            core_fact_items=core_fact_items,
             core_facts_rendered=core_facts_rendered,
             recall_items=recall_items,
             total_token_count=total_token_count,
@@ -313,6 +320,7 @@ class CosmicMemoryClient:
     def _render_prompt_context(
         self,
         *,
+        core_fact_items: list[dict[str, Any]],
         core_facts_rendered: str,
         recall_items: list[dict[str, Any]],
     ) -> str:
@@ -323,12 +331,16 @@ class CosmicMemoryClient:
             "Do not mention internal memory bookkeeping unless the user explicitly asks.",
         ]
 
-        if core_facts_rendered:
+        rendered_core_facts = self.render_core_fact_block(
+            core_fact_items=core_fact_items,
+            core_facts_rendered=core_facts_rendered,
+        )
+        if rendered_core_facts:
             lines.extend(
                 [
                     "",
                     "Always-on core facts:",
-                    core_facts_rendered,
+                    rendered_core_facts,
                 ]
             )
 
@@ -338,13 +350,61 @@ class CosmicMemoryClient:
                 kind = str(item.get("kind") or "memory").strip()
                 title = str(item.get("title") or "").strip()
                 heading = f"{index}. [{kind}]"
+                source_kind = str(item.get("source_kind") or "").strip()
+                canonical_key = str(item.get("canonical_key") or "").strip()
                 if title:
                     heading += f" {title}"
+                detail_parts: list[str] = []
+                if source_kind:
+                    detail_parts.append(f"source={source_kind}")
+                if canonical_key:
+                    detail_parts.append(f"key={canonical_key}")
+                if detail_parts:
+                    heading += f" ({', '.join(detail_parts)})"
                 lines.append(heading)
                 content = str(item.get("content") or "").strip()
                 if content:
                     lines.append(content)
 
-        if not core_facts_rendered and not recall_items:
+        if not rendered_core_facts and not recall_items:
             return ""
         return "\n".join(lines).strip()
+
+    def render_prompt_context(
+        self,
+        *,
+        core_fact_items: list[dict[str, Any]] | None = None,
+        core_facts_rendered: str = "",
+        recall_items: list[dict[str, Any]] | None = None,
+    ) -> str:
+        return self._render_prompt_context(
+            core_fact_items=list(core_fact_items or []),
+            core_facts_rendered=str(core_facts_rendered or "").strip(),
+            recall_items=list(recall_items or []),
+        )
+
+    def render_core_fact_block(
+        self,
+        *,
+        core_fact_items: list[dict[str, Any]] | None = None,
+        core_facts_rendered: str = "",
+    ) -> str:
+        items = list(core_fact_items or [])
+        if items:
+            rendered_items = [self._render_core_fact_item(item) for item in items]
+            return "\n".join(line for line in rendered_items if line).strip()
+        return str(core_facts_rendered or "").strip()
+
+    def _render_core_fact_item(self, item: dict[str, Any]) -> str:
+        content = str(item.get("content") or "").strip()
+        if not content:
+            return ""
+        title = str(item.get("title") or "").strip()
+        canonical_key = str(item.get("canonical_key") or "").strip()
+        prefix_parts: list[str] = []
+        if canonical_key:
+            prefix_parts.append(f"key={canonical_key}")
+        prefix = f"- [{', '.join(prefix_parts)}] " if prefix_parts else "- "
+        if title and title.lower() not in content.lower():
+            return f"{prefix}{title}: {content}"
+        return f"{prefix}{content}"

@@ -274,6 +274,8 @@ class MemoryWriteAuditStore:
         writer_id: str | None = None,
         operation: str | None = None,
         status: str | None = None,
+        canonical_key: str | None = None,
+        memory_id: str | None = None,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -295,6 +297,12 @@ class MemoryWriteAuditStore:
         if status:
             clauses.append("status = ?")
             params.append(status)
+        if canonical_key:
+            clauses.append("canonical_key = ?")
+            params.append(canonical_key)
+        if memory_id:
+            clauses.append("memory_id = ?")
+            params.append(memory_id)
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
         with self._lock, self._connect() as connection:
