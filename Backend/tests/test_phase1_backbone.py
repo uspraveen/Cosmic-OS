@@ -194,6 +194,31 @@ def test_registry_store_persists_card_and_intents(tmp_path: Path) -> None:
     assert matches[0]["agent_id"] == "cosmic/research-agent:1.0.0"
 
 
+def test_registry_store_tracks_usage_and_refreshes_featured_specialists(tmp_path: Path) -> None:
+    store = RegistryStore(tmp_path / "registry.db")
+    store.initialize()
+    store.upsert_agent_card(_sample_card())
+
+    now = utcnow()
+    store.record_agent_usage(
+        "cosmic/research-agent:1.0.0",
+        "research.topic",
+        used_at=now,
+    )
+    store.record_agent_usage(
+        "cosmic/research-agent:1.0.0",
+        "research.extract",
+        used_at=now - timedelta(days=1),
+    )
+
+    featured = store.refresh_featured_specialists(limit=3, lookback_days=14, refreshed_at=now)
+
+    assert len(featured) == 1
+    assert featured[0]["agent_id"] == "cosmic/research-agent:1.0.0"
+    assert featured[0]["usage_count"] == 2
+    assert featured[0]["common_intents"] == ["research.extract", "research.topic"] or featured[0]["common_intents"] == ["research.topic", "research.extract"]
+
+
 @pytest.mark.asyncio
 async def test_registry_live_state_finds_healthy_available_instance() -> None:
     client = FakeRedis()

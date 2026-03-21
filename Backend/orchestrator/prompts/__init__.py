@@ -48,6 +48,7 @@ def build_agentic_system_prompt(
     memory_context: str | None = None,
     *,
     user_timezone: str | None = None,
+    featured_specialists: list[dict[str, object]] | None = None,
 ) -> str:
     now_utc = datetime.now(timezone.utc)
     date_line = f"Current date and time (UTC): {now_utc.strftime('%A, %B %d, %Y at %H:%M UTC')}."
@@ -64,6 +65,7 @@ def build_agentic_system_prompt(
 
     sections = [
         AGENTIC_ORCHESTRATOR_SYSTEM_PROMPT,
+        build_featured_specialists_prompt(featured_specialists),
         build_tool_prompt_catalog(),
         ORCHESTRATOR_POLICIES_PROMPT,
         date_line,
@@ -73,3 +75,41 @@ def build_agentic_system_prompt(
     if not context:
         return prompt
     return f"{prompt}\n\n{ORCHESTRATOR_MEMORY_AUTHORITY_INSTRUCTION}\n\n{context}"
+
+
+def build_featured_specialists_prompt(featured_specialists: list[dict[str, object]] | None = None) -> str:
+    items = featured_specialists if isinstance(featured_specialists, list) else []
+    normalized: list[dict[str, object]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        display_name = str(item.get("display_name") or "").strip()
+        agent_id = str(item.get("agent_id") or "").strip()
+        if not display_name and not agent_id:
+            continue
+        normalized.append(item)
+    if not normalized:
+        return ""
+
+    lines = [
+        "## Current Specialist Shortlist",
+        "",
+        "This is a small dynamically promoted subset of specialists based on recent successful usage. It is not the full registry.",
+        "Use it as a fast hint, but rely on `agent_catalog_search` when you need capabilities outside this shortlist or need the live exact intent.",
+        "",
+    ]
+    for item in normalized:
+        display_name = str(item.get("display_name") or item.get("agent_id") or "").strip()
+        summary = str(item.get("agent_summary") or "").strip()
+        common_intents = item.get("common_intents") if isinstance(item.get("common_intents"), list) else []
+        intent_suffix = ""
+        trimmed_intents = [str(intent).strip() for intent in common_intents if str(intent).strip()][:2]
+        if trimmed_intents:
+            intent_suffix = f" Common intents: {', '.join(f'`{intent}`' for intent in trimmed_intents)}."
+        body = summary.rstrip(".")
+        if body:
+            lines.append(f"- `{display_name}`: {body}.{intent_suffix}")
+        else:
+            fallback = intent_suffix.strip() or "Specialist agent available via live catalog lookup."
+            lines.append(f"- `{display_name}`: {fallback}")
+    return "\n".join(lines).strip()

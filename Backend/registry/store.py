@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import date, datetime
+from collections import defaultdict
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +54,37 @@ class RegistryStore:
 
                 CREATE INDEX IF NOT EXISTS idx_agent_intents_intent
                     ON agent_intents(intent, agent_id);
+
+                CREATE TABLE IF NOT EXISTS agent_usage_daily (
+                    agent_id TEXT NOT NULL,
+                    intent TEXT NOT NULL,
+                    usage_date TEXT NOT NULL,
+                    usage_count INTEGER NOT NULL DEFAULT 0,
+                    first_used_at TEXT NOT NULL,
+                    last_used_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (agent_id, intent, usage_date),
+                    FOREIGN KEY (agent_id) REFERENCES agents(agent_id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_agent_usage_daily_recent
+                    ON agent_usage_daily(usage_date DESC, last_used_at DESC);
+
+                CREATE TABLE IF NOT EXISTS featured_specialists (
+                    rank INTEGER PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    agent_summary TEXT,
+                    common_intents_json TEXT NOT NULL,
+                    score REAL NOT NULL DEFAULT 0,
+                    usage_count INTEGER NOT NULL DEFAULT 0,
+                    last_used_at TEXT,
+                    refreshed_at TEXT NOT NULL,
+                    FOREIGN KEY (agent_id) REFERENCES agents(agent_id) ON DELETE CASCADE
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_featured_specialists_agent
+                    ON featured_specialists(agent_id);
                 """
             )
             connection.commit()
@@ -229,6 +261,233 @@ class RegistryStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def record_agent_usage(
+        self,
+        agent_id: str,
+        intent: str,
+        *,
+        used_at: datetime | None = None,
+    ) -> None:
+        normalized_agent_id = str(agent_id or "").strip()
+        normalized_intent = str(intent or "").strip()
+        if not normalized_agent_id or not normalized_intent:
+            return
+        used_dt = _coerce_datetime(used_at)
+        used_iso = _datetime_to_iso(used_dt)
+        usage_date = used_dt.date().isoformat()
+
+        with self._lock, self._connect() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM agents WHERE agent_id = ?",
+                (normalized_agent_id,),
+            ).fetchone()
+            if exists is None:
+                return
+            connection.execute(
+                """
+                INSERT INTO agent_usage_daily (
+                    agent_id,
+                    intent,
+                    usage_date,
+                    usage_count,
+                    first_used_at,
+                    last_used_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, 1, ?, ?, ?)
+                ON CONFLICT(agent_id, intent, usage_date) DO UPDATE SET
+                    usage_count = agent_usage_daily.usage_count + 1,
+                    last_used_at = excluded.last_used_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    normalized_agent_id,
+                    normalized_intent,
+                    usage_date,
+                    used_iso,
+                    used_iso,
+                    used_iso,
+                ),
+            )
+            connection.commit()
+
+    def refresh_featured_specialists(
+        self,
+        *,
+        limit: int = 5,
+        lookback_days: int = 14,
+        refreshed_at: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        normalized_limit = max(0, int(limit))
+        normalized_lookback = max(1, int(lookback_days))
+        refresh_dt = _coerce_datetime(refreshed_at)
+        refresh_iso = _datetime_to_iso(refresh_dt)
+
+        if normalized_limit == 0:
+            with self._lock, self._connect() as connection:
+                connection.execute("DELETE FROM featured_specialists")
+                connection.commit()
+            return []
+
+        cards = {
+            str(card.get("agent_id") or "").strip(): card
+            for card in self.list_agent_cards(status="registered")
+            if isinstance(card, dict) and str(card.get("agent_id") or "").strip()
+        }
+        if not cards:
+            with self._lock, self._connect() as connection:
+                connection.execute("DELETE FROM featured_specialists")
+                connection.commit()
+            return []
+
+        cutoff_date = (refresh_dt.date() - timedelta(days=normalized_lookback - 1)).isoformat()
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT agent_id, intent, usage_date, usage_count, last_used_at
+                FROM agent_usage_daily
+                WHERE usage_date >= ?
+                """,
+                (cutoff_date,),
+            ).fetchall()
+
+        usage_by_agent: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            agent_id = str(row["agent_id"] or "").strip()
+            if not agent_id or agent_id not in cards:
+                continue
+            stats = usage_by_agent.setdefault(
+                agent_id,
+                {
+                    "usage_count": 0,
+                    "weighted_usage": 0.0,
+                    "last_used_at": None,
+                    "intents": defaultdict(int),
+                },
+            )
+            usage_count = max(0, int(row["usage_count"] or 0))
+            usage_date = str(row["usage_date"] or "").strip()
+            days_ago = _days_ago(usage_date, refresh_dt.date())
+            stats["usage_count"] += usage_count
+            stats["weighted_usage"] += usage_count * _usage_day_weight(days_ago)
+            last_used_at = _parse_iso_datetime(row["last_used_at"])
+            if last_used_at is not None:
+                current_last = stats["last_used_at"]
+                if current_last is None or last_used_at > current_last:
+                    stats["last_used_at"] = last_used_at
+            intent_name = str(row["intent"] or "").strip()
+            if intent_name:
+                stats["intents"][intent_name] += usage_count
+
+        ranked: list[dict[str, Any]] = []
+        for agent_id, stats in usage_by_agent.items():
+            usage_count = int(stats["usage_count"])
+            if usage_count <= 0:
+                continue
+            last_used_at = stats["last_used_at"]
+            score = float(stats["weighted_usage"]) + _recency_bonus(last_used_at, refresh_dt)
+            top_intents = [
+                intent_name
+                for intent_name, _count in sorted(
+                    stats["intents"].items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[:2]
+            ]
+            card = cards[agent_id]
+            ranked.append(
+                {
+                    "agent_id": agent_id,
+                    "display_name": str(card.get("display_name") or agent_id).strip() or agent_id,
+                    "agent_summary": _build_agent_summary(card, top_intents),
+                    "common_intents": top_intents,
+                    "score": round(score, 3),
+                    "usage_count": usage_count,
+                    "last_used_at": _datetime_to_iso(last_used_at) if last_used_at else None,
+                }
+            )
+
+        ranked.sort(
+            key=lambda item: (
+                float(item.get("score") or 0.0),
+                int(item.get("usage_count") or 0),
+                str(item.get("last_used_at") or ""),
+                str(item.get("display_name") or ""),
+            ),
+            reverse=True,
+        )
+        featured = ranked[:normalized_limit]
+
+        with self._lock, self._connect() as connection:
+            connection.execute("DELETE FROM featured_specialists")
+            for index, item in enumerate(featured, start=1):
+                connection.execute(
+                    """
+                    INSERT INTO featured_specialists (
+                        rank,
+                        agent_id,
+                        display_name,
+                        agent_summary,
+                        common_intents_json,
+                        score,
+                        usage_count,
+                        last_used_at,
+                        refreshed_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        index,
+                        item["agent_id"],
+                        item["display_name"],
+                        item.get("agent_summary"),
+                        json.dumps(item.get("common_intents") or [], ensure_ascii=False),
+                        float(item.get("score") or 0.0),
+                        int(item.get("usage_count") or 0),
+                        item.get("last_used_at"),
+                        refresh_iso,
+                    ),
+                )
+            connection.commit()
+
+        return self.list_featured_specialists(limit=normalized_limit)
+
+    def list_featured_specialists(self, *, limit: int = 5) -> list[dict[str, Any]]:
+        normalized_limit = max(0, int(limit))
+        if normalized_limit == 0:
+            return []
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT rank, agent_id, display_name, agent_summary, common_intents_json, score, usage_count, last_used_at, refreshed_at
+                FROM featured_specialists
+                ORDER BY rank ASC
+                LIMIT ?
+                """,
+                (normalized_limit,),
+            ).fetchall()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                common_intents = json.loads(row["common_intents_json"])
+            except Exception:
+                common_intents = []
+            if not isinstance(common_intents, list):
+                common_intents = []
+            results.append(
+                {
+                    "rank": int(row["rank"]),
+                    "agent_id": str(row["agent_id"] or "").strip(),
+                    "display_name": str(row["display_name"] or "").strip(),
+                    "agent_summary": str(row["agent_summary"] or "").strip(),
+                    "common_intents": [str(item).strip() for item in common_intents if str(item).strip()],
+                    "score": float(row["score"] or 0.0),
+                    "usage_count": int(row["usage_count"] or 0),
+                    "last_used_at": str(row["last_used_at"] or "").strip() or None,
+                    "refreshed_at": str(row["refreshed_at"] or "").strip(),
+                }
+            )
+        return results
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
@@ -245,3 +504,76 @@ def _json_default(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
+
+
+def _coerce_datetime(value: datetime | None) -> datetime:
+    if value is None:
+        return utcnow()
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def _datetime_to_iso(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _days_ago(usage_date: str, today: date) -> int:
+    try:
+        parsed = date.fromisoformat(usage_date)
+    except ValueError:
+        return 9999
+    delta = today - parsed
+    return max(0, delta.days)
+
+
+def _usage_day_weight(days_ago: int) -> float:
+    if days_ago <= 1:
+        return 4.0
+    if days_ago <= 3:
+        return 3.0
+    if days_ago <= 7:
+        return 2.0
+    return 1.0
+
+
+def _recency_bonus(last_used_at: datetime | None, refreshed_at: datetime) -> float:
+    if last_used_at is None:
+        return 0.0
+    age_hours = max(0.0, (refreshed_at - last_used_at).total_seconds() / 3600.0)
+    if age_hours <= 24:
+        return 8.0
+    if age_hours <= 72:
+        return 5.0
+    if age_hours <= 168:
+        return 3.0
+    return 1.0
+
+
+def _build_agent_summary(card: dict[str, Any], top_intents: list[str]) -> str:
+    description = str(card.get("description") or "").strip()
+    if description:
+        return description[:220]
+    intents = card.get("intents") if isinstance(card.get("intents"), list) else []
+    for item in intents:
+        if not isinstance(item, dict):
+            continue
+        intent_name = str(item.get("name") or "").strip()
+        if top_intents and intent_name not in top_intents:
+            continue
+        intent_description = str(item.get("description") or "").strip()
+        if intent_description:
+            return intent_description[:220]
+    if top_intents:
+        return f"Common intents: {', '.join(top_intents[:2])}"
+    return ""

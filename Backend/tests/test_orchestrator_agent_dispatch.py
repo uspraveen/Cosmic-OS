@@ -463,3 +463,43 @@ async def test_search_agent_catalog_returns_intent_level_matches(tmp_path) -> No
     assert match["display_name"] == "Research Agent"
     assert match["healthy"] is True
     assert match["input_schema_summary"]["required"] == ["query"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_agent_task_records_usage_and_refreshes_featured_specialists(tmp_path) -> None:
+    fake_redis = FakeRedis()
+    config = OrchestratorConfig(
+        signing_secret="gateway-secret",
+        agent_signing_secrets={"cosmic/research-agent:1.0.0": "research-secret"},
+        anthropic_api_key="anthropic-key",
+        task_ledger_db_path=tmp_path / "task_ledger_featured.db",
+        agent_registry_db_path=tmp_path / "registry_featured.db",
+        featured_specialists_refresh_sec=300,
+    )
+    await _register_agent(_agent_card(), fake_redis, config.agent_registry_db_path)
+    runtime = OrchestratorRuntime(
+        config,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200))),
+        redis_client=fake_redis,
+    )
+    await runtime.start()
+    try:
+        dispatch_task = asyncio.create_task(
+            runtime.dispatch_agent_task(
+                parent_task=_parent_task("gateway-secret"),
+                intent="research.topic",
+                input_payload={"query": "YC S26 companies"},
+                agent_id="cosmic/research-agent:1.0.0",
+                wait_timeout_sec=0,
+            )
+        )
+        await asyncio.sleep(0)
+        result = await dispatch_task
+        featured = runtime.registry_store.list_featured_specialists(limit=3)
+    finally:
+        await runtime.stop()
+
+    assert isinstance(result, TaskInProgress)
+    assert len(featured) == 1
+    assert featured[0]["agent_id"] == "cosmic/research-agent:1.0.0"
+    assert featured[0]["usage_count"] == 1

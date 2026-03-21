@@ -213,14 +213,18 @@ class OrchestratorRuntime:
         self._pending_agent_results: dict[str, asyncio.Future[AgentResult | TaskInProgress]] = {}
         self._reply_consumer_task: asyncio.Task[None] | None = None
         self._agent_event_consumer_task: asyncio.Task[None] | None = None
+        self._featured_specialists_task: asyncio.Task[None] | None = None
         self._tool_executor: ToolExecutor | None = None
         self._anthropic_loop_stats = AnthropicLoopStats()
         self._agent_dispatch_stats = AgentDispatchStats()
         self._agent_event_consumer_name = f"orchestrator-events-{id(self)}"
+        self._featured_specialists_cache: list[dict[str, Any]] = []
+        self._featured_specialists_refreshed_at: float = 0.0
 
     async def start(self) -> None:
         self.task_ledger.initialize()
         self.registry_store.initialize()
+        self._refresh_featured_specialists(force=True)
         if self._redis is not None:
             await ensure_stream_group(
                 self._redis,
@@ -240,6 +244,11 @@ class OrchestratorRuntime:
                 self._user_reply_consumer_loop(),
                 name="orchestrator-user-reply-consumer",
             )
+        if self.config.featured_specialists_enabled and self.config.featured_specialists_refresh_sec > 0:
+            self._featured_specialists_task = asyncio.create_task(
+                self._featured_specialists_refresh_loop(),
+                name="orchestrator-featured-specialists-refresh",
+            )
 
         self._tool_executor = ToolExecutor(
             perplexity_api_key=self.config.perplexity_api_key,
@@ -253,6 +262,10 @@ class OrchestratorRuntime:
         self.started = True
 
     async def stop(self) -> None:
+        if self._featured_specialists_task is not None:
+            self._featured_specialists_task.cancel()
+            await asyncio.gather(self._featured_specialists_task, return_exceptions=True)
+            self._featured_specialists_task = None
         if self._agent_event_consumer_task is not None:
             self._agent_event_consumer_task.cancel()
             await asyncio.gather(self._agent_event_consumer_task, return_exceptions=True)
@@ -327,9 +340,11 @@ class OrchestratorRuntime:
 
         try:
             messages = self._build_messages(task)
+            self._refresh_featured_specialists()
             system_prompt = build_agentic_system_prompt(
                 str(task.input.get("memory_context") or "").strip() or None,
                 user_timezone=str(task.input.get("user_timezone") or "").strip() or None,
+                featured_specialists=self._featured_specialists_cache,
             )
             tools = get_model_tool_definitions()
             max_iterations = self.config.max_tool_iterations
@@ -338,6 +353,7 @@ class OrchestratorRuntime:
             full_response_text = ""
             full_reasoning_text = ""
             collected_sources: list[dict[str, str]] = []
+            research_paths: set[str] = set()
             container_id: str | None = None
             container_captured = False
             container_reuse_turns = 0
@@ -528,6 +544,10 @@ class OrchestratorRuntime:
                         "code_execution_tool_result",
                     ):
                         turn_server_blocks.append(b)
+                        if b.tool_name == "web_search" or b.block_type == "web_search_tool_result":
+                            research_paths.add("native_web_search")
+                        elif b.tool_name == "web_fetch" or b.block_type == "web_fetch_tool_result":
+                            research_paths.add("native_web_fetch")
                         if b.block_type == "web_search_tool_result" and b.raw_block:
                             self._collect_native_search_sources(b.raw_block, collected_sources)
 
@@ -607,7 +627,10 @@ class OrchestratorRuntime:
                     tool_results: list[dict[str, Any]] = []
                     for tb, pi, result_str in zip(turn_tool_blocks, parsed_inputs, result_strs):
                         if tb.tool_name == "perplexity_research":
+                            research_paths.add("perplexity_research")
                             self._collect_perplexity_sources(result_str, collected_sources)
+                        elif tb.tool_name in {"firecrawl_scrape", "firecrawl_extract", "firecrawl_recall_session"}:
+                            research_paths.add("firecrawl")
 
                         yield {
                             **ev, "type": "tool.result",
@@ -688,6 +711,12 @@ class OrchestratorRuntime:
                     **cumulative_usage,
                 },
             }
+            research_provenance = self._build_research_provenance(
+                research_paths=research_paths,
+                sources=collected_sources,
+            )
+            if research_provenance:
+                complete_event["research_provenance"] = research_provenance
             if collected_sources:
                 complete_event["sources"] = collected_sources
             yield complete_event
@@ -867,6 +896,7 @@ class OrchestratorRuntime:
             "healthy_agents": sum(1 for item in agents if item.get("healthy_instance")),
             "pending_results": len(self._pending_agent_results),
             "stats": self._agent_dispatch_stats.as_dict(),
+            "featured_specialists": self._featured_specialists_cache,
             "agents": agents,
         }
 
@@ -976,6 +1006,8 @@ class OrchestratorRuntime:
         try:
             await dispatch_task(child_task, self._redis)
             self._agent_dispatch_stats.dispatches_started += 1
+            self.registry_store.record_agent_usage(recipient, resolved_intent)
+            self._refresh_featured_specialists_after_usage()
 
             if pending_result is None:
                 result = self._build_in_progress_result(child_task.task_id, normalized_idempotency_key, timeout_sec=timeout_sec)
@@ -1001,6 +1033,35 @@ class OrchestratorRuntime:
         finally:
             if pending_result is None or pending_result.done():
                 self._pending_agent_results.pop(child_task.task_id, None)
+
+    async def _featured_specialists_refresh_loop(self) -> None:
+        interval = max(30, int(self.config.featured_specialists_refresh_sec))
+        while True:
+            try:
+                self._refresh_featured_specialists(force=True)
+            except Exception:
+                logger.exception("orchestrator.featured_specialists_refresh_failed")
+            await asyncio.sleep(interval)
+
+    def _refresh_featured_specialists(self, *, force: bool = False) -> None:
+        if not self.config.featured_specialists_enabled:
+            self._featured_specialists_cache = []
+            self._featured_specialists_refreshed_at = time.monotonic()
+            return
+        now_monotonic = time.monotonic()
+        refresh_interval = max(30, int(self.config.featured_specialists_refresh_sec))
+        if not force and self._featured_specialists_refreshed_at and (now_monotonic - self._featured_specialists_refreshed_at) < refresh_interval:
+            return
+        self._featured_specialists_cache = self.registry_store.refresh_featured_specialists(
+            limit=self.config.featured_specialists_count,
+            lookback_days=self.config.featured_specialists_lookback_days,
+        )
+        self._featured_specialists_refreshed_at = now_monotonic
+
+    def _refresh_featured_specialists_after_usage(self) -> None:
+        if not self.config.featured_specialists_enabled:
+            return
+        self._refresh_featured_specialists(force=True)
 
     async def request_user_input(
         self,
@@ -1711,6 +1772,53 @@ class OrchestratorRuntime:
             except Exception:
                 domain = url
             sources.append({"url": url, "title": title or domain, "domain": domain})
+
+    @classmethod
+    def _build_research_provenance(
+        cls,
+        *,
+        research_paths: set[str],
+        sources: list[dict[str, str]],
+    ) -> dict[str, Any] | None:
+        ordered_paths = [
+            path
+            for path in ("native_web_search", "native_web_fetch", "perplexity_research", "firecrawl")
+            if path in research_paths
+        ]
+
+        source_sample: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+        domains: list[str] = []
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            url = str(source.get("url") or "").strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            title = str(source.get("title") or "").strip()
+            domain = str(source.get("domain") or "").strip()
+            if domain:
+                domains.append(domain)
+            source_sample.append(
+                {
+                    "url": url,
+                    "title": title or domain or url,
+                    "domain": domain,
+                }
+            )
+
+        if not ordered_paths and not source_sample:
+            return None
+
+        provenance: dict[str, Any] = {}
+        if ordered_paths:
+            provenance["paths"] = ordered_paths
+        if source_sample:
+            provenance["source_count"] = len(source_sample)
+            provenance["source_domains"] = cls._dedupe_preserve_order(domains)[:3]
+            provenance["source_sample"] = source_sample[:3]
+        return provenance
 
     def _build_server_tool_loop_message(self, blocks: list[ContentBlock]) -> str:
         search_labels: list[str] = []

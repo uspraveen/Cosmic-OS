@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from orchestrator.config import OrchestratorConfig
+from orchestrator.prompts import build_agentic_system_prompt
 from orchestrator.runtime import ActiveTaskRun, OrchestratorRuntime
 from shared import TaskEnvelope, sign_task_envelope, utcnow
 
@@ -771,6 +772,123 @@ async def test_orchestrator_runtime_summarizes_server_side_web_search_results(tm
         and event["message"] == "Web search found: Extruct S26 Batch (example.com), GrowthList YC S26 (growthlist.co). Continuing..."
         for event in progress_events
     )
+    complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert complete_event["research_provenance"] == {
+        "paths": ["native_web_search"],
+        "source_count": 2,
+        "source_domains": ["example.com", "growthlist.co"],
+        "source_sample": [
+            {
+                "url": "https://example.com/extruct",
+                "title": "Extruct S26 Batch",
+                "domain": "example.com",
+            },
+            {
+                "url": "https://growthlist.co/yc-s26",
+                "title": "GrowthList YC S26",
+                "domain": "growthlist.co",
+            },
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_runtime_emits_local_research_provenance_for_perplexity_and_firecrawl(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_local_research.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    stream_call_count = 0
+
+    async def scripted_stream(
+        *,
+        system_prompt: str,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]] | None = None,
+        container_id: str | None = None,
+    ):
+        del system_prompt, messages, tools, container_id
+        nonlocal stream_call_count
+        stream_call_count += 1
+        if stream_call_count == 1:
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 10}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "tool_px_1", "name": "perplexity_research"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"query\":\"cursor composer 2 kimi k2.5\"}"}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("content_block_start", {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "tool_fc_1", "name": "firecrawl_scrape"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"url\":\"https://cursor.com/blog/composer\"}"}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 1}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 6}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        else:
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 12}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Done."}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 5}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        for event_name, payload in events:
+            yield type("SSE", (), {"event": event_name, "data": json.dumps(payload)})()
+
+    async def fake_execute(
+        tool_name: str,
+        tool_input: dict[str, object],
+        *,
+        context=None,
+    ) -> str:
+        del context
+        if tool_name == "perplexity_research":
+            assert tool_input == {"query": "cursor composer 2 kimi k2.5"}
+            return json.dumps(
+                {
+                    "answer": "Composer likely builds on Kimi K2.5.",
+                    "citations": [
+                        "https://cursor.com/blog/composer-2",
+                        "https://news.ycombinator.com/item?id=44000000",
+                    ],
+                }
+            )
+        assert tool_name == "firecrawl_scrape"
+        assert tool_input == {"url": "https://cursor.com/blog/composer"}
+        return json.dumps({"url": "https://cursor.com/blog/composer", "available_formats": ["markdown"]})
+
+    runtime._stream_anthropic_events = scripted_stream  # type: ignore[method-assign]
+
+    await runtime.start()
+    assert runtime._tool_executor is not None
+    runtime._tool_executor.execute = fake_execute  # type: ignore[method-assign]
+    try:
+        streamed_events = [event async for event in runtime.stream_task(_signed_task("signing-secret"))]
+    finally:
+        await runtime.stop()
+
+    complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert complete_event["research_provenance"] == {
+        "paths": ["perplexity_research", "firecrawl"],
+        "source_count": 2,
+        "source_domains": ["cursor.com", "news.ycombinator.com"],
+        "source_sample": [
+            {
+                "url": "https://cursor.com/blog/composer-2",
+                "title": "cursor.com",
+                "domain": "cursor.com",
+            },
+            {
+                "url": "https://news.ycombinator.com/item?id=44000000",
+                "title": "news.ycombinator.com",
+                "domain": "news.ycombinator.com",
+            },
+        ],
+    }
 
 
 @pytest.mark.asyncio
@@ -856,6 +974,25 @@ def test_orchestrator_build_messages_includes_attachment_manifest(tmp_path) -> N
     assert "Attachment manifest:" in messages[-1]["content"]
     assert "bridge_media_ref=wamid_abc:att_1" in messages[-1]["content"]
     assert "Do not claim to have directly viewed" in messages[-1]["content"]
+
+
+def test_build_agentic_system_prompt_includes_dynamic_specialist_shortlist() -> None:
+    prompt = build_agentic_system_prompt(
+        featured_specialists=[
+            {
+                "agent_id": "cosmic/docs-parser-agent:1.0.0",
+                "display_name": "Docs Parser Agent",
+                "agent_summary": "Parses documents and provides structured retrieval.",
+                "common_intents": ["docs.parse_bundle", "docs.read_bundle"],
+            }
+        ]
+    )
+
+    assert "Current Specialist Shortlist" in prompt
+    assert "small dynamically promoted subset" in prompt
+    assert "not the full registry" in prompt
+    assert "Docs Parser Agent" in prompt
+    assert "docs.parse_bundle" in prompt
 
 
 def test_orchestrator_build_messages_embeds_provider_fetchable_images(tmp_path) -> None:

@@ -134,7 +134,7 @@ Every design decision flows from one mental model. Keep these three layers stric
 | **Webhook Handler** | Gateway module that receives HTTP POST callbacks from external systems (Gmail, GitHub, Jira, Slack). Verifies provider-specific signatures, converts payloads into TaskEnvelopes tagged with `source='webhook'`, and dispatches to the orchestrator. See §26. |
 | **Hooks Engine** | Gateway module that fires TaskEnvelopes in response to internal state changes: gateway startup/shutdown, session reset, compaction, agent registration/deregistration. Configurable hook definitions stored alongside the Gateway. See §28. |
 | **Model Router** | Lightweight stateless classifier. Determines which backend handles a query: `opus` (orchestrator — tasks, continuations, ambiguous input), `haiku` (direct API), or `perplexity` (direct API). Called by Gateway after context assembly — unless `awaiting_reply` sticky routing triggers first (§3.7), which skips the classifier entirely. No `unknown` route — `opus` is the fallback. |
-| **Orchestrator** | Reads context, decomposes goals into subtasks via the Task Planner (§31), queries registry for capable healthy agents, resolves credentials via Gateway internal API when intents require provider access, dispatches via Redis, merges results. Classifies requests as simple (direct dispatch) or complex (structured plan with steps, dependencies, synthesis). Manages multiple concurrent plans. Propagates `source`, `source_id`, and `channel` from parent TaskEnvelope to all child tasks. Creates and manages cron jobs via the Gateway Scheduler internal API. Powered by Claude Opus. |
+| **Orchestrator** | Reads context, decomposes goals into subtasks via the Task Planner (§31), queries registry for capable healthy agents, resolves credentials via Gateway internal API when intents require provider access, dispatches via Redis, merges results. Classifies requests as simple (direct dispatch) or complex (structured plan with steps, dependencies, synthesis). Manages multiple concurrent plans. Propagates `source`, `source_id`, and `channel` from parent TaskEnvelope to all child tasks. Maintains a compact prompt-visible specialist shortlist derived from recent successful specialist usage in the registry; this shortlist is only a hint layer, while live agent discovery still flows through `agent_catalog_search` (§11, §32.6). Creates and manages cron jobs via the Gateway Scheduler internal API. Powered by Claude Opus. |
 | **Sub-Agent Worker** | Single-domain specialist. Consumes Task Envelopes from its Redis stream, emits Event Envelopes, writes artifacts, sends heartbeats. Has access to universal tools (StepPlan, MemoryRead, MemoryWrite — see §32) injected by the agent runtime. |
 | **Browser Agent** | Specialist agent for browser automation via Playwright. Navigates pages, fills forms, clicks elements, extracts content, takes screenshots. Runs in a sandboxed browser context. See §29. |
 | **System Agent** | Specialist agent for OS-level automation. File system operations, process management, clipboard access, app control, shell command execution. Sandboxed by declared tool policies. See §29. |
@@ -3690,7 +3690,34 @@ CREATE TABLE agent_intents (
     PRIMARY KEY (agent_id, intent),
     FOREIGN KEY (agent_id) REFERENCES agents(agent_id)
 );
+
+CREATE TABLE agent_usage_daily (
+    agent_id TEXT NOT NULL,
+    intent TEXT NOT NULL,
+    usage_date TEXT NOT NULL,              -- YYYY-MM-DD (UTC day bucket)
+    usage_count INTEGER NOT NULL DEFAULT 0,
+    first_used_at TIMESTAMP NOT NULL,
+    last_used_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (agent_id, intent, usage_date),
+    FOREIGN KEY (agent_id) REFERENCES agents(agent_id)
+);
+
+CREATE TABLE featured_specialists (
+    rank INTEGER PRIMARY KEY,              -- 1..N prompt shortlist slot
+    agent_id TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    agent_summary TEXT,
+    common_intents_json TEXT NOT NULL,     -- compact JSON array of common intents
+    score REAL NOT NULL DEFAULT 0,
+    usage_count INTEGER NOT NULL DEFAULT 0,
+    last_used_at TIMESTAMP,
+    refreshed_at TIMESTAMP NOT NULL,
+    FOREIGN KEY (agent_id) REFERENCES agents(agent_id)
+);
 ```
+
+`agent_usage_daily` is the durable promotion/demotion input: every successful specialist dispatch increments the `(agent_id, intent, usage_date)` bucket and updates `last_used_at`. `featured_specialists` is the compact prompt-facing snapshot produced from those usage buckets by a periodic orchestrator refresh loop. The snapshot is intentionally small and partial; it does **not** replace live registry lookup.
 
 ### 11.2 Redis Live State (Updated by Heartbeats)
 
@@ -3825,6 +3852,25 @@ async def register(self):
 ```
 
 **Startup sequence contract:** `SQLite write → Redis 'starting' → on_startup() → Redis 'healthy' → begin consuming.` An agent stuck in `starting` beyond `startup_timeout_sec` is marked dead. Orchestrator routing requires `status == 'healthy'`.
+
+### 11.6 Dynamic Specialist Shortlist (Prompt Hint Only)
+
+The orchestrator may surface a **small dynamic specialist shortlist** in its system prompt. This shortlist is **not** the full registry and must never be treated as the source of truth for capability discovery.
+
+Promotion and demotion are deterministic:
+
+1. every successful specialist dispatch increments `agent_usage_daily`
+2. the orchestrator periodically recomputes a ranked shortlist from recent usage + recency
+3. the top `N` specialists are written into `featured_specialists`
+4. prompt assembly injects only that compact snapshot, with explicit wording that it is just a subset
+
+The runtime still uses the full live registry path for real work:
+
+- `agent_catalog_search` remains the authoritative discovery surface for exact intents
+- `delegate_to_agent` still resolves the actual healthy instance from SQLite + Redis
+- the prompt shortlist exists only to help Opus form better first-pass plans without dumping the whole registry into context
+
+This is intentionally lightweight. It should be implemented as a small periodic refresh loop inside the orchestrator runtime or an equivalent same-VM scheduled job. A second LLM is **not required** for promotion/demotion; deterministic scoring from usage frequency and recency is the default.
 
 ---
 
@@ -9500,7 +9546,7 @@ In the current runtime, the Gateway exposes these internal memory/session endpoi
 
 Agent authors should treat these as the canonical same-VM memory/session control surface. Shared memory search/write goes through `/internal/memory/*`; exact historical recovery and live continuity inspection go through `/internal/session/*`. When a prior search or control flow already identified an exact `memory_id`, use `/internal/memory/memories/{memory_id}` to retrieve the full canonical memory block instead of relying on a truncated search hit alone.
 
-**Current implementation note (thin orchestrator):** the current production orchestrator assembles its system prompt from read-only asset files under `orchestrator/prompts/`, generates its exposed tool catalog from the centralized runtime registry in `orchestrator/tools/registry.py`, and exposes both the registry snapshot and prompt-asset SHA-256 hashes on `/health` for drift inspection. The shipped local tool set currently includes `memory_search`, `memory_fetch`, `memory_write`, `session_state`, `session_turns`, `session_history`, `task_notebook`, `session_revisit`, reminder tools, and a compact specialist-agent surface (`agent_catalog_search`, `delegate_to_agent`) alongside server-side `web_search` / `web_fetch`. Specialist capabilities themselves remain registered in agent cards and the runtime registry rather than being flattened into the orchestrator tool list per agent.
+**Current implementation note (thin orchestrator):** the current production orchestrator assembles its system prompt from read-only asset files under `orchestrator/prompts/`, generates its exposed tool catalog from the centralized runtime registry in `orchestrator/tools/registry.py`, and exposes both the registry snapshot and prompt-asset SHA-256 hashes on `/health` for drift inspection. The shipped local tool set currently includes `memory_search`, `memory_fetch`, `memory_write`, `session_state`, `session_turns`, `session_history`, `task_notebook`, `session_revisit`, reminder tools, and a compact specialist-agent surface (`agent_catalog_search`, `delegate_to_agent`) alongside server-side `web_search` / `web_fetch`. The prompt may also include a **Current Specialist Shortlist** derived from recent successful specialist usage in the registry, but that shortlist is explicitly documented as a small dynamic subset rather than the full live catalog. Specialist capabilities themselves remain registered in agent cards and the runtime registry rather than being flattened into the orchestrator tool list per agent.
 
 ### 32.7 How Universal Tools Appear to the LLM
 
