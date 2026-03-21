@@ -505,6 +505,12 @@ export class GatewayConnectionManager {
       if (typeof payload.thinking_text === 'string' && payload.thinking_text.trim()) {
         metadata.thinking_text = payload.thinking_text
       }
+      if (Array.isArray(payload.attachments) && payload.attachments.length > 0) {
+        metadata.attachments = payload.attachments
+      }
+      if (Array.isArray(payload.input_artifacts) && payload.input_artifacts.length > 0) {
+        metadata.input_artifacts = payload.input_artifacts
+      }
       this.historyTail = [
         ...this.historyTail,
         {

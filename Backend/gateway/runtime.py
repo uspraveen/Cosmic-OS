@@ -1317,6 +1317,8 @@ class GatewayRuntime:
                     role="user",
                     content=content or "[non-text inbound message]",
                     channel=channel,
+                    attachments=metadata.get("attachments") if isinstance(metadata.get("attachments"), list) else None,
+                    input_artifacts=input_artifacts,
                 )
             )
 
@@ -3965,6 +3967,8 @@ class GatewayRuntime:
         route: str | None = None,
         sources: list[dict[str, str]] | None = None,
         thinking_text: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
+        input_artifacts: list[dict[str, Any]] | None = None,
     ) -> None:
         """Push a cross-channel message to all connected desktop clients for this session.
 
@@ -3996,6 +4000,10 @@ class GatewayRuntime:
             event["sources"] = sources
         if thinking_text:
             event["thinking_text"] = thinking_text
+        if attachments:
+            event["attachments"] = attachments
+        if input_artifacts:
+            event["input_artifacts"] = input_artifacts
         await desktop_adapter.broadcast_to_session(session_id, event)
 
     def _track_background_task(self, coroutine: asyncio.Future[Any] | asyncio.Task[Any] | Any) -> None:

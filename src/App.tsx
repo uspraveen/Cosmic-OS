@@ -119,6 +119,8 @@ const normalizeMessageAttachments = (value: unknown): MessageAttachment[] | unde
         ? (item as any).filePath.trim()
         : typeof (item as any).file_path === 'string'
           ? (item as any).file_path.trim()
+          : typeof (item as any).path === 'string'
+            ? (item as any).path.trim()
           : ''
       const derivedFilename = rawFilePath
         ? rawFilePath.split(/[\\/]/).pop() || ''
@@ -139,12 +141,18 @@ const normalizeMessageAttachments = (value: unknown): MessageAttachment[] | unde
           ? (item as any).mimeType.trim()
           : typeof (item as any).mime_type === 'string'
             ? (item as any).mime_type.trim()
+            : typeof (item as any).mime === 'string'
+              ? (item as any).mime.trim()
             : null,
         sizeBytes: Number.isFinite(rawSize) && rawSize > 0 ? rawSize : null,
       } satisfies MessageAttachment
     })
     .filter((item): item is MessageAttachment => item !== null)
   return normalized.length > 0 ? normalized : undefined
+}
+
+const extractMessageAttachments = (metadata: any): MessageAttachment[] | undefined => {
+  return normalizeMessageAttachments(metadata?.attachments) ?? normalizeMessageAttachments(metadata?.input_artifacts)
 }
 
 const historyToMessages = (history: any[] = []): Message[] => {
@@ -154,7 +162,7 @@ const historyToMessages = (history: any[] = []): Message[] => {
       id: String(item.message_id || `${item.role}-${index}-${crypto.randomUUID()}`),
       role: item.role,
       content: String(item.content || ''),
-      attachments: normalizeMessageAttachments(item?.metadata?.attachments),
+      attachments: extractMessageAttachments(item?.metadata),
       thinking: typeof item?.metadata?.thinking_text === 'string' ? item.metadata.thinking_text : undefined,
       sources: Array.isArray(item?.metadata?.sources) ? item.metadata.sources : undefined,
       stopped: Boolean(item?.metadata?.interrupted),
@@ -1554,6 +1562,12 @@ export default function App() {
             id: `xchan-${crypto.randomUUID()}`,
             role: role as 'user' | 'assistant',
             content,
+            attachments: role === 'user'
+              ? (extractMessageAttachments({
+                  attachments: event.attachments,
+                  input_artifacts: event.input_artifacts,
+                }))
+              : undefined,
             channel: typeof event.channel === 'string' ? event.channel : null,
             sources: role === 'assistant' && Array.isArray(event.sources) ? event.sources : undefined,
             thinking: role === 'assistant' && typeof event.thinking_text === 'string' ? event.thinking_text : undefined,

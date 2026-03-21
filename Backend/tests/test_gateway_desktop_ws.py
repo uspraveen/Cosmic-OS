@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from gateway.adapters.response_processor import DirectRouteHandoff
 from gateway.channels.base import ChannelUnavailableError, RetryableDeliveryError
+from gateway.channels.desktop import DesktopAdapter
 from gateway.channels.routes import router as channel_router
 from gateway.config import GatewayConfig
 from gateway.memory_client import MemoryClientHTTPError, MemoryPromptContext
@@ -185,6 +186,15 @@ class FakeOrchestratorClient:
 
     async def cancel_task(self, task_id: str) -> bool:
         return False
+
+
+class CapturingDesktopAdapter(DesktopAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[tuple[str, dict[str, Any]]] = []
+
+    async def broadcast_to_session(self, session_id: str, event: dict[str, Any]) -> None:
+        self.events.append((session_id, event))
 
 
 class FakeResearchOrchestratorClient(FakeOrchestratorClient):
@@ -949,6 +959,49 @@ async def test_runtime_uses_shared_daily_session_across_channels(tmp_path) -> No
             "desktop:desk_a",
             "whatsapp:+15551234567",
         ]
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_broadcasts_cross_channel_attachment_metadata_to_desktop(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+    await runtime.start()
+    try:
+        desktop_adapter = CapturingDesktopAdapter()
+        runtime.registry.register(desktop_adapter)
+        attachments = [
+            {
+                "id": "att_1",
+                "kind": "document",
+                "mime_type": "application/pdf",
+                "filename": "newsletter.pdf",
+                "size_bytes": 2048,
+            }
+        ]
+        input_artifacts = [
+            {
+                "artifact_id": "art_1",
+                "kind": "document",
+                "mime": "application/pdf",
+                "filename": "newsletter.pdf",
+                "size_bytes": 2048,
+                "path": "runs/artifacts/req_ingest_x/inputs/art_1/original/newsletter.pdf",
+            }
+        ]
+        await runtime._broadcast_cross_channel_to_desktop(  # noqa: SLF001 - intentional unit seam
+            "sess_test",
+            role="user",
+            content="[document: newsletter.pdf]",
+            channel="whatsapp:+12153079021",
+            attachments=attachments,
+            input_artifacts=input_artifacts,
+        )
+        assert len(desktop_adapter.events) == 1
+        session_id, event = desktop_adapter.events[0]
+        assert session_id == "sess_test"
+        assert event["attachments"] == attachments
+        assert event["input_artifacts"] == input_artifacts
     finally:
         await runtime.stop()
 
