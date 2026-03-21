@@ -980,6 +980,98 @@ async def test_orchestrator_runtime_emits_x_search_sources_as_research_provenanc
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_runtime_inherits_x_search_provenance_from_delegate_to_agent(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_delegate_x_research.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+
+    async def scripted_stream(**kwargs):
+        del kwargs
+        first_call = not getattr(scripted_stream, "_called", False)
+        scripted_stream._called = True  # type: ignore[attr-defined]
+        if first_call:
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 10}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "tool_delegate_1", "name": "delegate_to_agent"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"intent\":\"x.search\",\"input\":{\"query\":\"YC emergent vibecon April 2026\"}}"}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 4}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        else:
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 12}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Here are the latest X posts."}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 5}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        for event_name, payload in events:
+            yield type("SSE", (), {"event": event_name, "data": json.dumps(payload)})()
+
+    async def fake_execute(tool_name: str, tool_input: dict[str, object], *, context=None) -> str:
+        del context
+        assert tool_name == "delegate_to_agent"
+        assert tool_input["intent"] == "x.search"
+        return json.dumps(
+            {
+                "summary": "VibeCon India is getting attention on X.",
+                "notable_posts": [
+                    {
+                        "author_handle": "mukundjha",
+                        "post_url": "https://x.com/mukundjha/status/123",
+                        "excerpt": "Presenting Vibecon India.",
+                        "why_it_matters": "Primary announcement.",
+                    }
+                ],
+                "citations": [],
+                "delegation": {
+                    "intent": "x.search",
+                    "agent_id": "cosmic/x-twitter-search-agent:1.0.0",
+                },
+            }
+        )
+
+    runtime._stream_anthropic_events = scripted_stream  # type: ignore[method-assign]
+
+    await runtime.start()
+    assert runtime._tool_executor is not None
+    runtime._tool_executor.execute = fake_execute  # type: ignore[method-assign]
+    try:
+        streamed_events = [event async for event in runtime.stream_task(_signed_task("signing-secret"))]
+    finally:
+        await runtime.stop()
+
+    complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert complete_event["sources"] == [
+        {
+            "url": "https://x.com/mukundjha/status/123",
+            "title": "@mukundjha on X",
+            "domain": "x.com",
+        }
+    ]
+    assert complete_event["research_provenance"] == {
+        "paths": ["x_search_specialist"],
+        "source_count": 1,
+        "source_domains": ["x.com"],
+        "source_sample": [
+            {
+                "url": "https://x.com/mukundjha/status/123",
+                "title": "@mukundjha on X",
+                "domain": "x.com",
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_runtime_summarizes_generic_specialist_tool_work(tmp_path) -> None:
     client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
     config = OrchestratorConfig(

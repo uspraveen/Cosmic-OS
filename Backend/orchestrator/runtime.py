@@ -634,6 +634,12 @@ class OrchestratorRuntime:
                         elif tb.tool_name in {"x_search", "x_recall_session"}:
                             research_paths.add("x_search_specialist")
                             self._collect_x_specialist_sources(result_str, collected_sources)
+                        elif tb.tool_name == "delegate_to_agent":
+                            self._inherit_specialist_research_provenance(
+                                result_str,
+                                research_paths=research_paths,
+                                sources=collected_sources,
+                            )
 
                         yield {
                             **ev, "type": "tool.result",
@@ -1816,6 +1822,34 @@ class OrchestratorRuntime:
                 handle = str(item.get("author_handle") or "").strip().lstrip("@")
                 title = f"@{handle} on X" if handle else "X Post"
                 append_source(item.get("post_url"), title_value=title)
+
+    def _inherit_specialist_research_provenance(
+        self,
+        result_str: str,
+        *,
+        research_paths: set[str],
+        sources: list[dict[str, str]],
+    ) -> None:
+        try:
+            data = json.loads(result_str)
+        except (json.JSONDecodeError, TypeError):
+            return
+        if not isinstance(data, dict):
+            return
+
+        delegation = data.get("delegation")
+        intent_name = ""
+        if isinstance(delegation, dict):
+            intent_name = str(delegation.get("intent") or "").strip()
+
+        if intent_name in {"x.search", "x.recall_session"}:
+            research_paths.add("x_search_specialist")
+            self._collect_x_specialist_sources(json.dumps(data), sources)
+            return
+
+        if intent_name.startswith("firecrawl."):
+            research_paths.add("firecrawl")
+            return
 
     @classmethod
     def _build_research_provenance(
