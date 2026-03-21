@@ -112,13 +112,6 @@ MEMORY_CONTEST_PHRASES = (
     "you assumed",
     "you made that up",
 )
-_PASTED_RECEIVED_MESSAGE_MARKER_RE = re.compile(
-    r"(?i)^(?:(?:this|that|here)(?:'s| is)?\s+(?:the\s+)?(?:message|text|reply|response)(?:\s+.*)?|(?:this|that|here)(?:'s| is)?\s+what\s+(?:i|we)\s+(?:got|received))(?:[.!?])?$"
-)
-_PASTED_RECEIVED_MESSAGE_HINT = (
-    "[Interpretation hint: The pasted block above is the exact message the user received and wants inspected. "
-    "Treat it as evidence to analyze, not as a missing lead-in.]"
-)
 EPHEMERAL_CHANNEL_EVENT_TYPES = {
     "route_result",
     "response.chunk",
@@ -5187,7 +5180,7 @@ class GatewayRuntime:
             recipient="cosmic/orchestrator:1.0.0",
             intent="orchestrator.process",
             input={
-                "query": self._build_orchestrator_query(self._safe_text(message.get("content")) or ""),
+                "query": self._safe_text(message.get("content")) or "[empty message]",
                 "request_id": request_id,
                 "conversation_context": request_record.get("assembled_conversation_context") or [],
                 "memory_context": self._safe_text(request_record.get("memory_context")),
@@ -5204,42 +5197,6 @@ class GatewayRuntime:
         )
         signature = sign_task_envelope(task, self.config.signing_secret)
         return task.model_copy(update={"signature": signature})
-
-    def _build_orchestrator_query(self, content: str) -> str:
-        normalized = self._safe_text(content) or ""
-        if not normalized:
-            return "[empty message]"
-        reference_hint = self._build_pasted_reference_hint(normalized)
-        if not reference_hint:
-            return normalized
-        return f"{normalized}\n\n{reference_hint}"
-
-    def _build_pasted_reference_hint(self, content: str) -> str | None:
-        normalized = self._safe_text(content) or ""
-        if len(normalized) < 200:
-            return None
-        non_empty_lines = [line.strip() for line in normalized.splitlines() if line.strip()]
-        if len(non_empty_lines) < 3:
-            return None
-        trailing_line = non_empty_lines[-1]
-        if not _PASTED_RECEIVED_MESSAGE_MARKER_RE.match(trailing_line):
-            return None
-        body_lines = non_empty_lines[:-1]
-        if not body_lines:
-            return None
-        body_text = "\n".join(body_lines).strip()
-        if len(body_text) < 160:
-            return None
-        has_structured_block = (
-            any(line.startswith(">") for line in body_lines)
-            or "```" in body_text
-            or "────────" in body_text
-            or "---" in body_text
-            or len(body_lines) >= 5
-        )
-        if not has_structured_block:
-            return None
-        return _PASTED_RECEIVED_MESSAGE_HINT
 
     def _prepare_input_artifacts_for_model(self, input_artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         prepared: list[dict[str, Any]] = []
