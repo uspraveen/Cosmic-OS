@@ -288,6 +288,15 @@ function formatTokenLabel(value: number | null): string {
   return `${Math.round(value)} tokens`
 }
 
+function pickTimestamp(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value !== 'string' || !value.trim()) return null
+  const numeric = Number(value)
+  if (Number.isFinite(numeric)) return numeric
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
 function parseServiceStatus(value: unknown): ManageServiceDatum['status'] {
   const state = typeof value === 'string' ? value.toLowerCase() : ''
   if (!state) return 'idle'
@@ -350,6 +359,7 @@ function parseLiveServices(source: unknown): ManageServiceDatum[] {
       name: pickString(sourceRecord, ['name', 'service', 'id']) || `Service ${index + 1}`,
       status: parseServiceStatus(pickString(sourceRecord, ['status', 'state'])),
       mem: normalizeServiceMemory(
+        pickString(sourceRecord, ['memory_label', 'summary', 'meta']) ??
         pickNumber(sourceRecord, ['memory_bytes', 'memory', 'ram_bytes']) ??
         toRecord(sourceRecord)?.memory_bytes ??
         '',
@@ -845,8 +855,13 @@ export default function SpacesControlCenter({
   const [manageLastUpdatedAt, setManageLastUpdatedAt] = useState<number | null>(null)
   const manageMetricsRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const manageMetricsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const manageMetricsValueRef = useRef<GatewaySystemMetrics | null>(null)
   const manageLastUpdatedAtRef = useRef<number | null>(null)
   const manageMetricsRequestRef = useRef(0)
+
+  useEffect(() => {
+    manageMetricsValueRef.current = manageMetrics
+  }, [manageMetrics])
 
   useEffect(() => {
     const timer = setInterval(() => setNow(new Date()), 60000)
@@ -897,7 +912,7 @@ export default function SpacesControlCenter({
     }
   }, [requestCalendarAgenda])
 
-  const requestManageMetrics = useCallback(async (showSpinner = false) => {
+  const requestManageMetrics = useCallback(async (showSpinner = false, forceRefresh = false) => {
     if (!gatewayConnected) {
       setManageMetrics(null)
       setManageLastUpdatedAt(null)
@@ -926,23 +941,29 @@ export default function SpacesControlCenter({
     }, MANAGE_REFRESH_TIMEOUT_MS)
 
     try {
-      const snapshot = await window.cosmic.getGatewaySystemMetrics()
+      const snapshot = await window.cosmic.getGatewaySystemMetrics(forceRefresh)
       if (requestId !== manageMetricsRequestRef.current) {
         return
       }
       setManageMetrics(snapshot ? (snapshot as GatewaySystemMetrics) : null)
       setManageMetricsError(null)
-      const now = Date.now()
-      setManageLastUpdatedAt(now)
-      manageLastUpdatedAtRef.current = now
+      const snapshotRecord = toRecord(snapshot)
+      const updatedAt =
+        pickTimestamp(snapshotRecord?.fetchedAt) ??
+        pickTimestamp(snapshotRecord?.fetched_at) ??
+        pickTimestamp(snapshotRecord?.timestamp) ??
+        Date.now()
+      setManageLastUpdatedAt(updatedAt)
+      manageLastUpdatedAtRef.current = updatedAt
     } catch (error: unknown) {
       if (requestId !== manageMetricsRequestRef.current) {
         return
       }
       setManageMetricsError(toErrorMessage(error))
-      setManageMetrics(null)
-      manageLastUpdatedAtRef.current = null
-      setManageLastUpdatedAt(null)
+      if (!manageMetricsValueRef.current) {
+        manageLastUpdatedAtRef.current = null
+        setManageLastUpdatedAt(null)
+      }
     } finally {
       if (requestId === manageMetricsRequestRef.current) {
         if (manageMetricsRefreshRef.current) {
@@ -956,18 +977,31 @@ export default function SpacesControlCenter({
 
   useEffect(() => {
     if (!active || page !== 'manage') return
-    requestManageMetrics(true)
+    if (!document.hidden) {
+      requestManageMetrics(true)
+    }
     if (manageMetricsIntervalRef.current) {
       clearInterval(manageMetricsIntervalRef.current)
       manageMetricsIntervalRef.current = null
     }
-    manageMetricsIntervalRef.current = setInterval(() => requestManageMetrics(false), MANAGE_REFRESH_MS)
+    manageMetricsIntervalRef.current = setInterval(() => {
+      if (document.hidden) return
+      requestManageMetrics(false)
+    }, MANAGE_REFRESH_MS)
 
     const offShown = window.cosmic?.onShown?.(() => {
+      if (document.hidden) return
       if (Date.now() - (manageLastUpdatedAtRef.current || 0) > MANAGE_REFRESH_MS) {
         requestManageMetrics(false)
       }
     })
+    const handleVisibilityChange = () => {
+      if (document.hidden) return
+      if (Date.now() - (manageLastUpdatedAtRef.current || 0) > MANAGE_REFRESH_MS) {
+        requestManageMetrics(false)
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
 
     return () => {
       if (manageMetricsIntervalRef.current) {
@@ -978,6 +1012,7 @@ export default function SpacesControlCenter({
         clearTimeout(manageMetricsRefreshRef.current)
         manageMetricsRefreshRef.current = null
       }
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
       offShown?.()
     }
     }, [active, page, requestManageMetrics])
@@ -2312,7 +2347,7 @@ export default function SpacesControlCenter({
           <span className="mg-footer-sep">&middot;</span>
           <span>Refresh {MANAGE_REFRESH_MS / 1000}s</span>
           <button type="button" className="mg-refresh-btn"
-            onClick={() => requestManageMetrics(true)} disabled={manageMetricsRefreshing}>
+            onClick={() => requestManageMetrics(true, true)} disabled={manageMetricsRefreshing}>
             {manageMetricsRefreshing ? 'Refreshing...' : 'Refresh now'}
           </button>
           {manageMetricsError ? <span className="mg-error">{manageMetricsError}</span> : null}

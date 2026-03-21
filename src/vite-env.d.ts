@@ -99,7 +99,7 @@ interface Window {
     getGatewaySessionHistory: (sessionId: string) => Promise<{ session_id: string; messages: any[] }>
     onGatewayEvent: (cb: (data: any) => void) => () => void
     onGatewayStatus: (cb: (data: GatewaySocketState['status']) => void) => () => void
-    getGatewaySystemMetrics: () => Promise<unknown>
+    getGatewaySystemMetrics: (forceRefresh?: boolean) => Promise<unknown>
 
     // Local key status APIs
     onKeyStatus: (

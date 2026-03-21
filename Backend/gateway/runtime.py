@@ -9,8 +9,12 @@ import httpx
 import json
 import logging
 import math
+import os
 from pathlib import Path
+import platform
 import re
+import shutil
+import socket
 import time
 from typing import Any
 from urllib.parse import urlencode
@@ -267,6 +271,11 @@ class GatewayRuntime:
             "enabled": self.memory_client.enabled,
             "status": "disabled" if not self.memory_client.enabled else "starting",
         }
+        self._system_metrics_lock = asyncio.Lock()
+        self._system_metrics_snapshot: dict[str, Any] | None = None
+        self._system_metrics_snapshot_at = 0.0
+        self._system_metrics_cpu_sample: tuple[int, int] | None = None
+        self._system_metrics_network_sample: tuple[int, int, float] | None = None
 
     async def start(self) -> None:
         self.session_store.initialize()
@@ -4629,6 +4638,400 @@ class GatewayRuntime:
         response = await adapter.download_media(bridge_media_ref)  # type: ignore[attr-defined]
         self.adapter_errors.pop("whatsapp", None)
         return response
+
+    async def get_desktop_system_metrics(self, *, force_refresh: bool = False) -> dict[str, Any]:
+        now = time.monotonic()
+        ttl = max(2.0, self.config.desktop_system_metrics_cache_ttl_sec)
+        if (
+            not force_refresh
+            and self._system_metrics_snapshot is not None
+            and (now - self._system_metrics_snapshot_at) < ttl
+        ):
+            return dict(self._system_metrics_snapshot)
+
+        async with self._system_metrics_lock:
+            now = time.monotonic()
+            if (
+                not force_refresh
+                and self._system_metrics_snapshot is not None
+                and (now - self._system_metrics_snapshot_at) < ttl
+            ):
+                return dict(self._system_metrics_snapshot)
+
+            snapshot = await self._build_desktop_system_metrics_snapshot()
+            self._system_metrics_snapshot = snapshot
+            self._system_metrics_snapshot_at = time.monotonic()
+            return dict(snapshot)
+
+    async def _build_desktop_system_metrics_snapshot(self) -> dict[str, Any]:
+        usage_summary = self.usage_store.dashboard_summary()
+        scheduler_summary = self.scheduler_store.summary()
+        delivery_summary = self.delivery_queue_store.summary()
+        wishlist_summary = self.capability_wishlist_service.summary()
+        channels = self.list_channels()
+
+        orchestrator_result, router_result = await asyncio.gather(
+            self._probe_orchestrator_health(),
+            self._probe_model_router_health(),
+        )
+
+        fetched_at_ms = int(time.time() * 1000)
+        return {
+            "sourceEndpoint": "/desktop/system-metrics",
+            "source": "gateway-desktop-system-metrics",
+            "fetched_at": fetched_at_ms,
+            "fetchedAt": fetched_at_ms,
+            "budget": {
+                "used_usd": float(usage_summary.get("total_cost_usd") or 0.0),
+                "currency": "USD",
+                "period": usage_summary.get("period_label") or "Rolling 30d",
+                "calls": int(usage_summary.get("total_calls") or 0),
+                "tokens": int(usage_summary.get("total_tokens") or 0),
+                "latest_call_at": usage_summary.get("latest_call_at"),
+            },
+            "providers": usage_summary.get("providers") or [],
+            "usage_by_feature": usage_summary.get("usage_by_feature") or [],
+            "services": self._build_desktop_services_snapshot(
+                orchestrator_result=orchestrator_result,
+                router_result=router_result,
+                scheduler_summary=scheduler_summary,
+                delivery_summary=delivery_summary,
+                channels=channels,
+            ),
+            "instance": self._host_instance_snapshot(),
+            "system": {
+                "uptime_seconds": self._host_uptime_seconds(),
+                "channel_count": len(channels),
+                "channels": channels,
+                "scheduler": scheduler_summary,
+                "delivery_queue": delivery_summary,
+                "capability_wishlist": wishlist_summary,
+            },
+            "cpu": self._host_cpu_snapshot(),
+            "memory": self._host_memory_snapshot(),
+            "disk": self._host_disk_snapshot(),
+            "network": self._host_network_snapshot(),
+        }
+
+    async def _probe_orchestrator_health(self) -> dict[str, Any]:
+        try:
+            payload = await self.orchestrator.health(timeout_sec=2.0)
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+        result = dict(payload)
+        result.setdefault("status", "ok")
+        return result
+
+    async def _probe_model_router_health(self) -> dict[str, Any]:
+        try:
+            payload = await self.model_router.health(timeout_sec=2.0)
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+        result = dict(payload)
+        result.setdefault("status", "ok")
+        return result
+
+    def _build_desktop_services_snapshot(
+        self,
+        *,
+        orchestrator_result: dict[str, Any],
+        router_result: dict[str, Any],
+        scheduler_summary: dict[str, Any],
+        delivery_summary: dict[str, Any],
+        channels: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        agent_dispatch = orchestrator_result.get("agent_dispatch")
+        if not isinstance(agent_dispatch, dict):
+            agent_dispatch = {}
+        tool_registry = orchestrator_result.get("tool_registry")
+        tool_count = len(tool_registry) if isinstance(tool_registry, list) else 0
+        healthy_channel_count = sum(1 for item in channels if bool(item.get("healthy")))
+        scheduler_live = self._scheduler_worker is not None and not self._scheduler_worker.done()
+        delivery_live = self._delivery_worker is not None and not self._delivery_worker.done()
+        heartbeat_paused = bool(scheduler_summary.get("heartbeat_paused"))
+        pending_delivery = int(delivery_summary.get("pending_count") or 0)
+        cron_count = int(scheduler_summary.get("cron_count") or 0)
+        memory_status = self._safe_text(self._memory_health_snapshot.get("status")) or "starting"
+
+        return [
+            {
+                "name": "Gateway",
+                "status": "active" if self.started else "down",
+                "summary": f"{healthy_channel_count}/{len(channels)} channels healthy",
+            },
+            {
+                "name": "Orchestrator",
+                "status": self._probe_service_status(orchestrator_result),
+                "summary": self._format_service_summary(
+                    primary=int(agent_dispatch.get("healthy_agents") or 0),
+                    primary_suffix="healthy",
+                    secondary=tool_count,
+                    secondary_suffix="tools",
+                    fallback="agent runtime",
+                ),
+            },
+            {
+                "name": "Model Router",
+                "status": self._probe_service_status(router_result),
+                "summary": self._safe_text(router_result.get("classifier_model")) or "classifier",
+            },
+            {
+                "name": "Memory",
+                "status": self._memory_service_status(memory_status),
+                "summary": memory_status or "memory store",
+            },
+            {
+                "name": "Scheduler",
+                "status": "idle" if heartbeat_paused else ("active" if scheduler_live else "down"),
+                "summary": self._format_service_summary(
+                    primary=cron_count,
+                    primary_suffix="cron",
+                    secondary=int(scheduler_summary.get("paused_cron_count") or 0),
+                    secondary_suffix="paused",
+                    fallback="scheduler loop",
+                ),
+            },
+            {
+                "name": "Delivery Queue",
+                "status": "active" if delivery_live else "down",
+                "summary": self._format_service_summary(
+                    primary=pending_delivery,
+                    primary_suffix="pending",
+                    secondary=int(delivery_summary.get("deadletter_count") or 0),
+                    secondary_suffix="deadletter",
+                    fallback="queue worker",
+                ),
+            },
+        ]
+
+    def _probe_service_status(self, payload: dict[str, Any]) -> str:
+        status_text = (self._safe_text(payload.get("status")) or "").strip().lower()
+        if status_text in {"ok", "healthy", "ready", "active", "running", "up"}:
+            return "active"
+        if status_text in {"starting", "degraded", "warming"}:
+            return "idle"
+        if status_text in {"error", "down", "stopped", "failed"}:
+            return "down"
+        return "idle"
+
+    def _memory_service_status(self, status_text: str) -> str:
+        normalized = status_text.strip().lower()
+        if normalized in {"ok", "healthy"}:
+            return "active"
+        if normalized in {"disabled", "starting"}:
+            return "idle"
+        if normalized == "error":
+            return "down"
+        return "idle"
+
+    def _format_service_summary(
+        self,
+        *,
+        primary: int | None,
+        primary_suffix: str,
+        secondary: int | None = None,
+        secondary_suffix: str | None = None,
+        fallback: str = "—",
+    ) -> str:
+        parts: list[str] = []
+        if primary is not None:
+            parts.append(f"{primary} {primary_suffix}")
+        if secondary is not None and secondary_suffix:
+            parts.append(f"{secondary} {secondary_suffix}")
+        return " · ".join(parts) if parts else fallback
+
+    def _host_instance_snapshot(self) -> dict[str, Any]:
+        region = (
+            os.getenv("AWS_REGION", "").strip()
+            or os.getenv("AWS_DEFAULT_REGION", "").strip()
+            or "unknown-region"
+        )
+        provider = "AWS" if (os.getenv("AWS_EXECUTION_ENV") or region != "unknown-region") else "Self-hosted"
+        instance_type = (
+            os.getenv("AWS_INSTANCE_TYPE", "").strip()
+            or os.getenv("EC2_INSTANCE_TYPE", "").strip()
+            or platform.machine()
+            or "VM"
+        )
+        hostname = socket.gethostname() or "unknown-host"
+        return {
+            "name": hostname,
+            "id": hostname,
+            "type": instance_type,
+            "region": region,
+            "provider": provider,
+            "os": f"{platform.system()} {platform.release()}".strip(),
+        }
+
+    def _host_cpu_snapshot(self) -> dict[str, Any]:
+        percent = self._sample_linux_cpu_percent()
+        if percent is None:
+            percent = self._fallback_cpu_percent()
+        return {
+            "percent": round(max(0.0, min(100.0, float(percent or 0.0))), 1),
+            "cores": os.cpu_count() or 1,
+        }
+
+    def _sample_linux_cpu_percent(self) -> float | None:
+        sample = self._read_proc_stat_sample()
+        if sample is None:
+            return None
+        previous = self._system_metrics_cpu_sample
+        self._system_metrics_cpu_sample = sample
+        if previous is None:
+            return None
+        prev_idle, prev_total = previous
+        idle, total = sample
+        total_delta = total - prev_total
+        idle_delta = idle - prev_idle
+        if total_delta <= 0:
+            return None
+        usage = 100.0 * (1.0 - (idle_delta / total_delta))
+        return max(0.0, min(100.0, usage))
+
+    def _read_proc_stat_sample(self) -> tuple[int, int] | None:
+        proc_stat = Path("/proc/stat")
+        if not proc_stat.exists():
+            return None
+        try:
+            line = proc_stat.read_text(encoding="utf-8").splitlines()[0]
+        except (OSError, IndexError, UnicodeDecodeError):
+            return None
+        parts = line.split()
+        if len(parts) < 5 or parts[0] != "cpu":
+            return None
+        try:
+            values = [int(value) for value in parts[1:]]
+        except ValueError:
+            return None
+        idle = values[3] + (values[4] if len(values) > 4 else 0)
+        total = sum(values)
+        return idle, total
+
+    def _fallback_cpu_percent(self) -> float | None:
+        try:
+            load_avg, _, _ = os.getloadavg()
+        except (AttributeError, OSError):
+            return None
+        cores = max(1, os.cpu_count() or 1)
+        return max(0.0, min(100.0, (load_avg / cores) * 100.0))
+
+    def _host_memory_snapshot(self) -> dict[str, Any]:
+        meminfo = self._read_linux_meminfo()
+        total = int(meminfo.get("MemTotal", 0))
+        available = int(meminfo.get("MemAvailable", 0))
+        if total <= 0:
+            return {"total": 0, "used": 0, "available": 0, "percent": 0.0}
+        if available <= 0:
+            available = int(meminfo.get("MemFree", 0))
+        used = max(0, total - available)
+        percent = (used / total) * 100.0 if total > 0 else 0.0
+        return {
+            "total": total,
+            "used": used,
+            "available": available,
+            "percent": round(max(0.0, min(100.0, percent)), 1),
+        }
+
+    def _read_linux_meminfo(self) -> dict[str, int]:
+        meminfo_path = Path("/proc/meminfo")
+        if not meminfo_path.exists():
+            return {}
+        payload: dict[str, int] = {}
+        try:
+            lines = meminfo_path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            return {}
+        for line in lines:
+            if ":" not in line:
+                continue
+            key, raw_value = line.split(":", 1)
+            number_text = raw_value.strip().split(" ", 1)[0]
+            try:
+                payload[key.strip()] = int(number_text) * 1024
+            except ValueError:
+                continue
+        return payload
+
+    def _host_disk_snapshot(self) -> dict[str, Any]:
+        root_path = self._system_root_path()
+        try:
+            usage = shutil.disk_usage(root_path)
+        except OSError:
+            return {"path": str(root_path), "total": 0, "used": 0, "free": 0, "percent": 0.0}
+        used = max(0, usage.total - usage.free)
+        percent = (used / usage.total) * 100.0 if usage.total > 0 else 0.0
+        return {
+            "path": str(root_path),
+            "total": int(usage.total),
+            "used": int(used),
+            "free": int(usage.free),
+            "percent": round(max(0.0, min(100.0, percent)), 1),
+        }
+
+    def _system_root_path(self) -> Path:
+        if os.name == "nt":
+            drive = Path.cwd().anchor or "C:\\"
+            return Path(drive)
+        return Path("/")
+
+    def _host_network_snapshot(self) -> dict[str, Any]:
+        sample = self._read_proc_network_sample()
+        if sample is None:
+            return {"rx_mbps": None, "tx_mbps": None, "throughput_mbps": None}
+        rx_total, tx_total = sample
+        now = time.monotonic()
+        previous = self._system_metrics_network_sample
+        self._system_metrics_network_sample = (rx_total, tx_total, now)
+        if previous is None:
+            return {"rx_mbps": None, "tx_mbps": None, "throughput_mbps": None}
+        prev_rx, prev_tx, prev_ts = previous
+        elapsed = max(0.001, now - prev_ts)
+        rx_delta = max(0, rx_total - prev_rx)
+        tx_delta = max(0, tx_total - prev_tx)
+        rx_mbps = (rx_delta * 8.0) / (1_000_000.0 * elapsed)
+        tx_mbps = (tx_delta * 8.0) / (1_000_000.0 * elapsed)
+        return {
+            "rx_mbps": round(rx_mbps, 2),
+            "tx_mbps": round(tx_mbps, 2),
+            "throughput_mbps": round(rx_mbps + tx_mbps, 2),
+        }
+
+    def _read_proc_network_sample(self) -> tuple[int, int] | None:
+        netdev_path = Path("/proc/net/dev")
+        if not netdev_path.exists():
+            return None
+        try:
+            lines = netdev_path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            return None
+        rx_total = 0
+        tx_total = 0
+        for line in lines[2:]:
+            if ":" not in line:
+                continue
+            interface, raw_metrics = line.split(":", 1)
+            if interface.strip() == "lo":
+                continue
+            fields = raw_metrics.split()
+            if len(fields) < 9:
+                continue
+            try:
+                rx_total += int(fields[0])
+                tx_total += int(fields[8])
+            except ValueError:
+                continue
+        return rx_total, tx_total
+
+    def _host_uptime_seconds(self) -> float | None:
+        uptime_path = Path("/proc/uptime")
+        if uptime_path.exists():
+            try:
+                raw_value = uptime_path.read_text(encoding="utf-8").split(" ", 1)[0]
+                return float(raw_value)
+            except (OSError, UnicodeDecodeError, ValueError):
+                return None
+        return None
 
     async def health_payload(self) -> dict[str, Any]:
         memory = dict(self._memory_health_snapshot)

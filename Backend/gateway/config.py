@@ -86,6 +86,7 @@ class GatewayConfig:
     delivery_max_attempts: int = 12
     usage_queue_max_size: int = 1000
     usage_queue_flush_timeout_sec: float = 5.0
+    desktop_system_metrics_cache_ttl_sec: float = 15.0
     artifact_download_timeout_sec: float = 60.0
     artifact_signed_url_ttl_sec: int = 300
     max_image_attachments_per_message: int = 20
@@ -252,6 +253,10 @@ class GatewayConfig:
             usage_queue_flush_timeout_sec=max(
                 0.25,
                 _env_float("GATEWAY_USAGE_QUEUE_FLUSH_TIMEOUT_SEC", 5.0),
+            ),
+            desktop_system_metrics_cache_ttl_sec=max(
+                2.0,
+                _env_float("GATEWAY_DESKTOP_SYSTEM_METRICS_CACHE_TTL_SEC", 15.0),
             ),
             artifact_download_timeout_sec=max(
                 5.0,

@@ -296,14 +296,51 @@ function syncGatewaySettingsFromPayload(settings: any) {
   configureGatewayConnection()
 }
 
-const GATEWAY_SYSTEM_METRIC_PATHS = [
-  '/health',
+const GATEWAY_SYSTEM_METRIC_PRIMARY_PATH = '/desktop/system-metrics'
+const GATEWAY_SYSTEM_METRIC_FALLBACK_PATHS = [
   '/health/ready',
+  '/health',
 ]
+const GATEWAY_SYSTEM_METRICS_CACHE_TTL_MS = 15_000
 
-async function getGatewaySystemMetrics(config: GatewayConnectionConfig) {
+let gatewaySystemMetricsCache:
+  | { cacheKey: string; fetchedAt: number; payload: any }
+  | null = null
+let gatewaySystemMetricsInFlight:
+  | { cacheKey: string; promise: Promise<any> }
+  | null = null
+
+function gatewaySystemMetricsCacheKey(config: GatewayConnectionConfig) {
+  return `${normalizeGatewayBaseUrl(config?.baseUrl || '')}|${String(config?.apiToken || '').trim()}`
+}
+
+async function fetchGatewaySystemMetrics(config: GatewayConnectionConfig, forceRefresh = false) {
+  const primaryPath = forceRefresh
+    ? `${GATEWAY_SYSTEM_METRIC_PRIMARY_PATH}?force_refresh=1`
+    : GATEWAY_SYSTEM_METRIC_PRIMARY_PATH
+
   let lastError: unknown = null
-  for (const pathName of GATEWAY_SYSTEM_METRIC_PATHS) {
+  try {
+    const payload = await callGatewayJson(config, primaryPath, { timeoutMs: 5000 })
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return {
+        sourceEndpoint: GATEWAY_SYSTEM_METRIC_PRIMARY_PATH,
+        source: 'gateway-system-metrics',
+        fetchedAt: Date.now(),
+        value: payload,
+      }
+    }
+    return {
+      ...payload,
+      sourceEndpoint: payload.sourceEndpoint || GATEWAY_SYSTEM_METRIC_PRIMARY_PATH,
+      source: payload.source || 'gateway-system-metrics',
+      fetchedAt: payload.fetchedAt || Date.now(),
+    }
+  } catch (error: unknown) {
+    lastError = error
+  }
+
+  for (const pathName of GATEWAY_SYSTEM_METRIC_FALLBACK_PATHS) {
     try {
       const payload = await callGatewayJson(config, pathName, { timeoutMs: 4000 })
       if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -328,6 +365,41 @@ async function getGatewaySystemMetrics(config: GatewayConnectionConfig) {
     throw lastError
   }
   throw new Error('Gateway system metrics endpoint is unavailable.')
+}
+
+async function getGatewaySystemMetrics(config: GatewayConnectionConfig, forceRefresh = false) {
+  const cacheKey = gatewaySystemMetricsCacheKey(config)
+  const now = Date.now()
+  if (
+    !forceRefresh &&
+    gatewaySystemMetricsCache &&
+    gatewaySystemMetricsCache.cacheKey === cacheKey &&
+    now - gatewaySystemMetricsCache.fetchedAt < GATEWAY_SYSTEM_METRICS_CACHE_TTL_MS
+  ) {
+    return gatewaySystemMetricsCache.payload
+  }
+  if (gatewaySystemMetricsInFlight && gatewaySystemMetricsInFlight.cacheKey === cacheKey) {
+    return gatewaySystemMetricsInFlight.promise
+  }
+
+  const request = fetchGatewaySystemMetrics(config, forceRefresh).then((payload) => {
+    gatewaySystemMetricsCache = {
+      cacheKey,
+      fetchedAt: Date.now(),
+      payload,
+    }
+    return payload
+  }).finally(() => {
+    if (gatewaySystemMetricsInFlight?.promise === request) {
+      gatewaySystemMetricsInFlight = null
+    }
+  })
+
+  gatewaySystemMetricsInFlight = {
+    cacheKey,
+    promise: request,
+  }
+  return request
 }
 
 function unwrapWhatsAppBridgePayload(payload: any) {
@@ -996,7 +1068,7 @@ app.whenReady().then(() => {
     return callGatewayJson(config, `/sessions/${encodeURIComponent(sessionId)}`)
   })
 
-  ipcMain.handle('gateway:get-system-metrics', async () => {
+  ipcMain.handle('gateway:get-system-metrics', async (_, forceRefresh?: boolean) => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {
       throw new Error('Gateway connection is not configured.')
@@ -1006,7 +1078,7 @@ app.whenReady().then(() => {
       throw new Error(String(gatewayState.detail || 'The desktop app is not connected to your VM yet.'))
     }
     try {
-      return await getGatewaySystemMetrics(config)
+      return await getGatewaySystemMetrics(config, Boolean(forceRefresh))
     } catch (error: unknown) {
       if (error instanceof Error && error.message === 'Gateway request timed out.' && gatewayState?.detail) {
         throw new Error(gatewayState.detail)

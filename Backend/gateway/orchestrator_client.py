@@ -96,6 +96,22 @@ class OrchestratorClient:
         payload = response.json()
         return bool(payload.get("cancelled"))
 
+    async def health(self, *, timeout_sec: float | None = None) -> dict[str, Any]:
+        headers = {
+            "X-Internal-Token": self.internal_token,
+        }
+        response = await self._client.get(
+            f"{self.base_url}/health",
+            headers=headers,
+            timeout=timeout_sec,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(self._error_from_response(response.content, response.status_code))
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("Orchestrator health returned a non-object response")
+        return payload
+
     def _error_from_response(self, body: bytes, status_code: int) -> str:
         try:
             payload = json.loads(body.decode("utf-8"))

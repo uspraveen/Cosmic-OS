@@ -868,6 +868,52 @@ def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
     return runtime
 
 
+def test_desktop_system_metrics_endpoint_returns_cached_snapshot(tmp_path, monkeypatch) -> None:
+    runtime = build_runtime(tmp_path)
+    calls: list[bool] = []
+
+    async def fake_get_desktop_system_metrics(*, force_refresh: bool = False) -> dict[str, Any]:
+        calls.append(force_refresh)
+        return {
+            "sourceEndpoint": "/desktop/system-metrics",
+            "fetchedAt": "2026-03-21T00:00:00Z",
+            "budget": {},
+            "providers": [],
+            "usage_by_feature": [],
+            "services": [],
+        }
+
+    monkeypatch.setattr(runtime, "get_desktop_system_metrics", fake_get_desktop_system_metrics)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/desktop/system-metrics",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert response.status_code == 200
+        assert response.json()["sourceEndpoint"] == "/desktop/system-metrics"
+
+        force_refresh_response = client.get(
+            "/desktop/system-metrics?force_refresh=true",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert force_refresh_response.status_code == 200
+
+    assert calls == [False, True]
+
+
 @pytest.mark.asyncio
 async def test_runtime_uses_shared_daily_session_across_channels(tmp_path) -> None:
     runtime = build_runtime(tmp_path)

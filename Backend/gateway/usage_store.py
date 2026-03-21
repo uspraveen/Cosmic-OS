@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections import defaultdict
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 from shared.usage import UsageEvent
+from shared import utcnow
 
 
 def _json_dumps(value: Any) -> str | None:
@@ -173,6 +176,106 @@ class UsageStore:
             ).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
+    def dashboard_summary(
+        self,
+        *,
+        period_days: int = 30,
+        provider_limit: int = 5,
+        feature_limit: int = 6,
+    ) -> dict[str, Any]:
+        normalized_period = max(1, min(int(period_days), 365))
+        window_start = (utcnow() - timedelta(days=normalized_period)).isoformat()
+        with self._lock, self._connect() as connection:
+            aggregate = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS total_calls,
+                    COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                    COALESCE(SUM(estimated_cost_usd), 0) AS total_cost_usd,
+                    MAX(llm_call_placed_at) AS latest_call_at
+                FROM usage_events
+                WHERE llm_call_placed_at >= ?
+                """,
+                (window_start,),
+            ).fetchone()
+            provider_rows = connection.execute(
+                """
+                SELECT
+                    provider,
+                    COUNT(*) AS call_count,
+                    COALESCE(SUM(total_tokens), 0) AS token_count,
+                    COALESCE(SUM(estimated_cost_usd), 0) AS total_cost_usd
+                FROM usage_events
+                WHERE llm_call_placed_at >= ?
+                GROUP BY provider
+                ORDER BY call_count DESC, token_count DESC, provider ASC
+                LIMIT ?
+                """,
+                (window_start, max(1, min(int(provider_limit), 12))),
+            ).fetchall()
+            feature_rows = connection.execute(
+                """
+                SELECT
+                    source_component,
+                    operation,
+                    COUNT(*) AS call_count
+                FROM usage_events
+                WHERE llm_call_placed_at >= ?
+                GROUP BY source_component, operation
+                ORDER BY call_count DESC, operation ASC
+                """,
+                (window_start,),
+            ).fetchall()
+
+        total_calls = int(aggregate["total_calls"] if aggregate and aggregate["total_calls"] is not None else 0)
+        total_tokens = int(aggregate["total_tokens"] if aggregate and aggregate["total_tokens"] is not None else 0)
+        total_cost_usd = float(aggregate["total_cost_usd"] if aggregate and aggregate["total_cost_usd"] is not None else 0.0)
+        latest_call_at = aggregate["latest_call_at"] if aggregate else None
+
+        providers: list[dict[str, Any]] = []
+        for row in provider_rows:
+            call_count = int(row["call_count"] or 0)
+            token_count = int(row["token_count"] or 0)
+            cost_usd = float(row["total_cost_usd"] or 0.0)
+            providers.append(
+                {
+                    "name": _display_provider_name(str(row["provider"] or "")),
+                    "calls": call_count,
+                    "tokens": token_count,
+                    "cost_usd": round(cost_usd, 6),
+                    "percent": round((call_count / total_calls) * 100.0, 1) if total_calls > 0 else 0.0,
+                }
+            )
+
+        feature_buckets: defaultdict[str, int] = defaultdict(int)
+        for row in feature_rows:
+            label = _feature_label(
+                source_component=str(row["source_component"] or "").strip(),
+                operation=str(row["operation"] or "").strip(),
+            )
+            feature_buckets[label] += int(row["call_count"] or 0)
+
+        usage_by_feature: list[dict[str, Any]] = []
+        for label, count in sorted(feature_buckets.items(), key=lambda item: (-item[1], item[0]))[: max(1, min(int(feature_limit), 12))]:
+            usage_by_feature.append(
+                {
+                    "label": label,
+                    "count": count,
+                    "percent": round((count / total_calls) * 100.0, 1) if total_calls > 0 else 0.0,
+                }
+            )
+
+        return {
+            "period_days": normalized_period,
+            "period_label": f"Rolling {normalized_period}d",
+            "total_calls": total_calls,
+            "total_tokens": total_tokens,
+            "total_cost_usd": total_cost_usd,
+            "latest_call_at": latest_call_at,
+            "providers": providers,
+            "usage_by_feature": usage_by_feature,
+        }
+
     def _row_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
         payload = dict(row)
         if payload.get("metadata_json"):
@@ -187,4 +290,39 @@ class UsageStore:
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
         return connection
+
+
+def _display_provider_name(value: str) -> str:
+    normalized = value.strip().lower()
+    if not normalized:
+        return "Unknown"
+    return {
+        "anthropic": "Anthropic",
+        "openai": "OpenAI",
+        "xai": "xAI",
+        "groq": "Groq",
+        "perplexity": "Perplexity",
+    }.get(normalized, normalized.replace("_", " ").title())
+
+
+def _feature_label(*, source_component: str, operation: str) -> str:
+    op = operation.lower()
+    src = source_component.lower()
+    if "docs." in op or "docs_" in op or "docs-parser" in op:
+        return "Documents"
+    if "memory" in op:
+        return "Memory"
+    if "wishlist" in op:
+        return "Capability wishlist"
+    if "research" in op or "perplexity" in op or "firecrawl" in op or "web_search" in op or "web_fetch" in op:
+        return "Research"
+    if "scheduler" in op or "reminder" in op or src == "scheduler":
+        return "Scheduling"
+    if "router" in op or src == "model_router":
+        return "Routing"
+    if "orchestrator.process" in op or src == "orchestrator":
+        return "Orchestration"
+    if src == "gateway":
+        return "Gateway"
+    return source_component.replace("_", " ").title() if source_component else "Other"
 

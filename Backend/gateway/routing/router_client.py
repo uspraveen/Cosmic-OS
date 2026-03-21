@@ -78,3 +78,17 @@ class ModelRouterClient:
             **payload,
             "classification": classification,
         }
+
+    async def health(self, *, timeout_sec: float | None = None) -> dict[str, Any]:
+        if self._client is None:
+            await self.start()
+
+        if self._client is None:
+            raise RuntimeError("Model router client is not initialized")
+
+        response = await self._client.get("/health", timeout=timeout_sec)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("Model router health returned a non-object response")
+        return payload
