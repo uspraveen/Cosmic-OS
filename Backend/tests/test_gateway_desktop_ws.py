@@ -1692,6 +1692,40 @@ async def test_runtime_adds_memory_context_to_direct_and_orchestrator_paths(tmp_
 
 
 @pytest.mark.asyncio
+async def test_runtime_marks_pasted_received_message_as_reference_content(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    await runtime.start()
+    try:
+        pasted = (
+            "Good news — the cron *already has this exact prompt*. It was updated in our last session and it's live right now.\n\n"
+            "────────\n\n"
+            "> *You're texting Praveen a good morning — as a close friend, not a coach.*\n>\n"
+            "> *Before writing, check memory for what he's been up to lately.*\n\n"
+            "────────\n\n"
+            "Fires *6:30 AM CDT daily* on WhatsApp. Nothing to change — you're already running the version you want.\n\n"
+            "This is the message I got"
+        )
+        result = await runtime.process_incoming_user_message(
+            {
+                "content": pasted,
+                "channel": "whatsapp:+12153079021",
+                "metadata": {"platform": "whatsapp", "message_type": "text"},
+            }
+        )
+        task = runtime._build_orchestrator_task(  # noqa: SLF001 - intentional unit seam
+            request_record=result,
+            session_id=result["session_id"],
+            request_id=result["request_id"],
+            channel=result["channel"],
+        )
+        query = str(task.input.get("query") or "")
+        assert "This is the message I got" in query
+        assert "The pasted block above is the exact message the user received and wants inspected." in query
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
 async def test_runtime_suppresses_contested_core_facts_from_memory_context(tmp_path) -> None:
     class ContestedMemoryClient(FakeMemoryClient):
         async def build_prompt_context(
