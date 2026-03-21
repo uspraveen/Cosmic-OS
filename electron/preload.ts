@@ -205,6 +205,7 @@ contextBridge.exposeInMainWorld('cosmic', {
   syncTelegramWebhook: (payload: any) => ipcRenderer.invoke('telegram:sync-webhook', payload),
   clearTelegramWebhook: (payload: any) => ipcRenderer.invoke('telegram:clear-webhook', payload),
   sendTelegramTest: (payload: any) => ipcRenderer.invoke('telegram:send-test', payload),
+  cosmicMailRequest: (payload: any) => ipcRenderer.invoke('cosmic-mail:request', payload),
   onCalendarAgendaUpdate: (cb: (data: any) => void) => {
     const listener = (_: any, data: any) => cb(data)
     ipcRenderer.on('calendar:agenda', listener)

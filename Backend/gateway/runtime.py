@@ -97,6 +97,7 @@ SYSTEM_CRON_DAILY_ROLLOVER = "system.daily_rollover"
 TURN_LEDGER_WINDOW_SIZE = 10
 TASK_NOTEBOOK_WINDOW_SIZE = 5
 RECENT_MEMORY_TOOL_RECEIPT_LIMIT = 4
+RECENT_RESEARCH_RECEIPT_LIMIT = 3
 RECENT_MEMORY_TOOL_RECEIPT_SCAN_LIMIT = 12
 CONTESTED_MEMORY_RECENT_WRITE_LIMIT = 3
 CONTESTED_MEMORY_AUDIT_SCAN_LIMIT = 40
@@ -2288,6 +2289,7 @@ class GatewayRuntime:
             "active_task_refs": self._normalize_string_list(carry_forward.get("active_task_refs")),
             "pending_artifact_pointers": [],
             "recent_document_artifacts": [],
+            "recent_research_receipts": [],
             "user_preferences_in_play": self._normalize_string_list(
                 carry_forward.get("stable_user_preferences")
             ),
@@ -2394,6 +2396,34 @@ class GatewayRuntime:
                 if created_at:
                     parts.append(f"at={created_at}")
                 lines.append("  - " + "; ".join(parts))
+        recent_research_receipts = (
+            working_set.get("recent_research_receipts")
+            if isinstance(working_set.get("recent_research_receipts"), list)
+            else []
+        )
+        if recent_research_receipts:
+            lines.extend(["", "- Recent research receipts:"])
+            for receipt in recent_research_receipts[:RECENT_RESEARCH_RECEIPT_LIMIT]:
+                if not isinstance(receipt, dict):
+                    continue
+                question = self._safe_text(receipt.get("question"))
+                route = self._safe_text(receipt.get("route"))
+                paths = self._normalize_string_list(receipt.get("paths"), limit=4)
+                domains = self._normalize_string_list(receipt.get("source_domains"), limit=3)
+                source_count = self._coerce_int(receipt.get("source_count"))
+                parts: list[str] = []
+                if question:
+                    parts.append(f'"{self._bounded_excerpt(question, limit=96)}"')
+                if route:
+                    parts.append(f"via {route}")
+                if paths:
+                    parts.append("research=" + ", ".join(self._research_path_label(path) for path in paths))
+                if source_count:
+                    parts.append(f"sources={source_count}")
+                if domains:
+                    parts.append(f"domains={', '.join(domains)}")
+                if parts:
+                    lines.append("  - " + "; ".join(parts))
         contested_claims = working_set.get("contested_memory_claims") if isinstance(working_set.get("contested_memory_claims"), list) else []
         if contested_claims:
             lines.extend(["", "- Current user corrections against memory:"])
@@ -2916,7 +2946,21 @@ class GatewayRuntime:
         awaiting_reply = bool(event.get("awaiting_reply"))
         open_loops = [assistant_excerpt] if awaiting_reply and assistant_excerpt else []
         task_id = self._safe_text(event.get("task_id"))
+        assistant_metadata = (
+            assistant_message.get("metadata")
+            if isinstance(assistant_message, dict) and isinstance(assistant_message.get("metadata"), dict)
+            else {}
+        )
+        research_provenance = self._normalize_research_provenance(
+            event.get("research_provenance")
+            if isinstance(event.get("research_provenance"), dict)
+            else assistant_metadata.get("research_provenance"),
+            fallback_sources=event.get("sources") if isinstance(event.get("sources"), list) else assistant_metadata.get("sources"),
+        )
         tool_summary = [route]
+        for research_label in self._research_tool_summary_labels(research_provenance):
+            if research_label not in tool_summary:
+                tool_summary.append(research_label)
         compact_line_parts = [self._bounded_excerpt(user_message.get("content"), limit=120)]
         if task_id:
             compact_line_parts.append(f"via {route} task {task_id}")
@@ -2959,6 +3003,7 @@ class GatewayRuntime:
                 "awaiting_reply": awaiting_reply,
                 "decision_source": (request_record or {}).get("routing_decision_source"),
                 "input_artifacts": artifacts,
+                "research_provenance": research_provenance,
             },
         }
 
@@ -3084,6 +3129,7 @@ class GatewayRuntime:
         recent_tool_receipts = self._recent_memory_tool_receipts(session_id, limit=RECENT_MEMORY_TOOL_RECEIPT_LIMIT)
         contested_keys, contested_ids, contested_claims = self._active_contested_memory_refs(session_id)
         goal = self._safe_text(carry_forward.get("goal")) or ""
+        recent_research_receipts: list[dict[str, Any]] = []
 
         for turn in recent_turns:
             if not goal:
@@ -3109,6 +3155,11 @@ class GatewayRuntime:
                 [*artifact_pointers, *self._normalize_string_list(turn.get("artifact_refs"), limit=8)],
                 limit=8,
             )
+            research_receipt = self._build_recent_research_receipt(turn)
+            if research_receipt:
+                recent_research_receipts.append(research_receipt)
+                if len(recent_research_receipts) > RECENT_RESEARCH_RECEIPT_LIMIT:
+                    recent_research_receipts = recent_research_receipts[-RECENT_RESEARCH_RECEIPT_LIMIT:]
 
         next_actions: list[str] = []
         for notebook in notebooks:
@@ -3195,6 +3246,7 @@ class GatewayRuntime:
             "pending_artifact_pointers": artifact_pointers,
             "recent_document_artifacts": recent_document_artifacts,
             "recent_tool_receipts": recent_tool_receipts,
+            "recent_research_receipts": recent_research_receipts,
             "contested_memory_claims": contested_claims,
             "contested_memory_keys": sorted(contested_keys),
             "contested_memory_ids": sorted(contested_ids),
@@ -4675,61 +4727,82 @@ class GatewayRuntime:
             self._probe_model_router_health(),
         )
 
+        cpu = self._host_cpu_snapshot()
+        memory = self._host_memory_snapshot()
+        disk = self._host_disk_snapshot()
+        network = self._host_network_snapshot()
+        uptime_seconds = self._host_uptime_seconds()
+
         fetched_at_ms = int(time.time() * 1000)
+        budget = {
+            "used_usd": float(usage_summary.get("total_cost_usd") or 0.0),
+            "currency": "USD",
+            "period": usage_summary.get("period_label") or "Rolling 30d",
+            "calls": int(usage_summary.get("total_calls") or 0),
+            "tokens": int(usage_summary.get("total_tokens") or 0),
+            "latest_call_at": usage_summary.get("latest_call_at"),
+        }
+
+        services = self._build_desktop_services_snapshot(
+            orchestrator_result=orchestrator_result,
+            router_result=router_result,
+            scheduler_summary=scheduler_summary,
+            delivery_summary=delivery_summary,
+            channels=channels,
+        )
+
+        instance = self._host_instance_snapshot()
+        instance.setdefault("type", "VM")
+        instance.setdefault("os", f"{platform.system()} {platform.release()}".strip())
+        system = {
+            "uptime_seconds": uptime_seconds,
+            "channel_count": len(channels),
+            "channels": channels,
+            "scheduler": scheduler_summary,
+            "delivery_queue": delivery_summary,
+            "capability_wishlist": wishlist_summary,
+        }
+
         return {
             "sourceEndpoint": "/desktop/system-metrics",
             "source": "gateway-desktop-system-metrics",
             "fetched_at": fetched_at_ms,
             "fetchedAt": fetched_at_ms,
-            "budget": {
-                "used_usd": float(usage_summary.get("total_cost_usd") or 0.0),
-                "currency": "USD",
-                "period": usage_summary.get("period_label") or "Rolling 30d",
-                "calls": int(usage_summary.get("total_calls") or 0),
-                "tokens": int(usage_summary.get("total_tokens") or 0),
-                "latest_call_at": usage_summary.get("latest_call_at"),
-            },
+            "budget": budget,
             "providers": usage_summary.get("providers") or [],
             "usage_by_feature": usage_summary.get("usage_by_feature") or [],
-            "services": self._build_desktop_services_snapshot(
-                orchestrator_result=orchestrator_result,
-                router_result=router_result,
-                scheduler_summary=scheduler_summary,
-                delivery_summary=delivery_summary,
-                channels=channels,
-            ),
-            "instance": self._host_instance_snapshot(),
-            "system": {
-                "uptime_seconds": self._host_uptime_seconds(),
-                "channel_count": len(channels),
-                "channels": channels,
-                "scheduler": scheduler_summary,
-                "delivery_queue": delivery_summary,
-                "capability_wishlist": wishlist_summary,
-            },
-            "cpu": self._host_cpu_snapshot(),
-            "memory": self._host_memory_snapshot(),
-            "disk": self._host_disk_snapshot(),
-            "network": self._host_network_snapshot(),
+            "services": services,
+            "instance": instance,
+            "system": system,
+            "cpu": cpu,
+            "memory": memory,
+            "disk": disk,
+            "network": network,
         }
 
     async def _probe_orchestrator_health(self) -> dict[str, Any]:
         try:
             payload = await self.orchestrator.health(timeout_sec=2.0)
         except Exception as exc:
-            return {"status": "error", "error": str(exc)}
-        result = dict(payload)
-        result.setdefault("status", "ok")
-        return result
+            return {
+                "status": "error",
+                "error": str(exc),
+            }
+        payload = dict(payload)
+        payload.setdefault("status", "ok")
+        return payload
 
     async def _probe_model_router_health(self) -> dict[str, Any]:
         try:
             payload = await self.model_router.health(timeout_sec=2.0)
         except Exception as exc:
-            return {"status": "error", "error": str(exc)}
-        result = dict(payload)
-        result.setdefault("status", "ok")
-        return result
+            return {
+                "status": "error",
+                "error": str(exc),
+            }
+        payload = dict(payload)
+        payload.setdefault("status", "ok")
+        return payload
 
     def _build_desktop_services_snapshot(
         self,
@@ -4745,6 +4818,7 @@ class GatewayRuntime:
             agent_dispatch = {}
         tool_registry = orchestrator_result.get("tool_registry")
         tool_count = len(tool_registry) if isinstance(tool_registry, list) else 0
+
         healthy_channel_count = sum(1 for item in channels if bool(item.get("healthy")))
         scheduler_live = self._scheduler_worker is not None and not self._scheduler_worker.done()
         delivery_live = self._delivery_worker is not None and not self._delivery_worker.done()
@@ -5956,6 +6030,10 @@ class GatewayRuntime:
                 active_request.task_id = task_id
         if event_type == "response.complete":
             event_channel = self._safe_text(event.get("channel")) or ""
+            research_provenance = self._normalize_research_provenance(
+                event.get("research_provenance"),
+                fallback_sources=event.get("sources") if isinstance(event.get("sources"), list) else None,
+            )
             store_assistant_message(
                 str(event.get("content") or ""),
                 awaiting_reply=bool(event.get("awaiting_reply")),
@@ -5965,6 +6043,7 @@ class GatewayRuntime:
                     "thinking_text": self._safe_text(event.get("thinking_text")),
                     "source": self._safe_text(event.get("source")),
                     "source_id": self._safe_text(event.get("source_id")),
+                    "research_provenance": research_provenance,
                 },
                 channel=event_channel,
                 route="opus",
@@ -6096,6 +6175,108 @@ class GatewayRuntime:
             if len(normalized) >= limit:
                 break
         return normalized
+
+    def _normalize_source_list(self, values: Any, *, limit: int = 8) -> list[dict[str, str]]:
+        if not isinstance(values, list):
+            return []
+        normalized: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            url = self._safe_text(item.get("url"))
+            if not url or url in seen_urls:
+                continue
+            normalized.append(
+                {
+                    "url": url,
+                    "title": self._safe_text(item.get("title")) or self._safe_text(item.get("domain")) or url,
+                    "domain": self._safe_text(item.get("domain")) or "",
+                }
+            )
+            seen_urls.add(url)
+            if len(normalized) >= limit:
+                break
+        return normalized
+
+    def _normalize_research_provenance(
+        self,
+        value: Any,
+        *,
+        fallback_sources: Any = None,
+    ) -> dict[str, Any] | None:
+        paths: list[str] = []
+        source_count: int | None = None
+        source_domains: list[str] = []
+        source_sample: list[dict[str, str]] = []
+        if isinstance(value, dict):
+            paths = self._normalize_string_list(value.get("paths"), limit=4)
+            source_count = self._coerce_int(value.get("source_count"))
+            source_domains = self._normalize_string_list(value.get("source_domains"), limit=3)
+            source_sample = self._normalize_source_list(value.get("source_sample"), limit=3)
+
+        if not source_sample:
+            source_sample = self._normalize_source_list(fallback_sources, limit=3)
+        if source_sample and not source_count:
+            source_count = len(source_sample)
+        if source_sample and not source_domains:
+            source_domains = self._normalize_string_list(
+                [item.get("domain") for item in source_sample if isinstance(item, dict)],
+                limit=3,
+            )
+
+        if not paths and not source_sample and not source_count and not source_domains:
+            return None
+
+        provenance: dict[str, Any] = {}
+        if paths:
+            provenance["paths"] = paths
+        if source_count:
+            provenance["source_count"] = source_count
+        if source_domains:
+            provenance["source_domains"] = source_domains
+        if source_sample:
+            provenance["source_sample"] = source_sample
+        return provenance
+
+    @staticmethod
+    def _research_path_label(path: str) -> str:
+        labels = {
+            "native_web_search": "native web_search",
+            "native_web_fetch": "native web_fetch",
+            "perplexity_research": "perplexity_research",
+            "firecrawl": "firecrawl",
+        }
+        normalized = str(path or "").strip()
+        return labels.get(normalized, normalized)
+
+    def _research_tool_summary_labels(self, provenance: dict[str, Any] | None) -> list[str]:
+        if not isinstance(provenance, dict):
+            return []
+        return self._normalize_string_list(provenance.get("paths"), limit=4)
+
+    def _build_recent_research_receipt(self, turn: dict[str, Any]) -> dict[str, Any] | None:
+        if not isinstance(turn, dict):
+            return None
+        metadata = turn.get("metadata") if isinstance(turn.get("metadata"), dict) else {}
+        provenance = self._normalize_research_provenance(metadata.get("research_provenance"))
+        if not provenance:
+            return None
+        receipt: dict[str, Any] = {
+            "request_id": self._safe_text(turn.get("request_id")),
+            "route": self._safe_text(turn.get("route")) or "opus",
+            "question": self._bounded_excerpt(turn.get("user_message_excerpt"), limit=96),
+            "completed_at": self._safe_text(turn.get("completed_at")),
+        }
+        if isinstance(provenance.get("paths"), list):
+            receipt["paths"] = provenance.get("paths")
+        if self._coerce_int(provenance.get("source_count")):
+            receipt["source_count"] = self._coerce_int(provenance.get("source_count"))
+        if isinstance(provenance.get("source_domains"), list):
+            receipt["source_domains"] = provenance.get("source_domains")
+        if isinstance(provenance.get("source_sample"), list):
+            receipt["source_sample"] = provenance.get("source_sample")
+        return receipt
 
     def _bounded_excerpt(self, value: Any, *, limit: int = 280) -> str:
         text = " ".join(str(value or "").strip().split())

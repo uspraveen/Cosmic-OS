@@ -183,35 +183,38 @@ class UsageStore:
         provider_limit: int = 5,
         feature_limit: int = 6,
     ) -> dict[str, Any]:
-        normalized_period = max(1, min(int(period_days), 365))
-        window_start = (utcnow() - timedelta(days=normalized_period)).isoformat()
+        normalized_period = max(1, int(period_days))
+        cutoff = utcnow() - timedelta(days=normalized_period)
+        cutoff_iso = cutoff.isoformat().replace("+00:00", "Z")
+
         with self._lock, self._connect() as connection:
-            aggregate = connection.execute(
+            totals_row = connection.execute(
                 """
                 SELECT
                     COUNT(*) AS total_calls,
                     COALESCE(SUM(total_tokens), 0) AS total_tokens,
-                    COALESCE(SUM(estimated_cost_usd), 0) AS total_cost_usd,
+                    COALESCE(SUM(COALESCE(estimated_cost_usd, 0)), 0) AS total_cost_usd,
                     MAX(llm_call_placed_at) AS latest_call_at
                 FROM usage_events
                 WHERE llm_call_placed_at >= ?
                 """,
-                (window_start,),
+                (cutoff_iso,),
             ).fetchone()
             provider_rows = connection.execute(
                 """
                 SELECT
                     provider,
+                    model,
                     COUNT(*) AS call_count,
-                    COALESCE(SUM(total_tokens), 0) AS token_count,
-                    COALESCE(SUM(estimated_cost_usd), 0) AS total_cost_usd
+                    COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                    COALESCE(SUM(COALESCE(estimated_cost_usd, 0)), 0) AS total_cost_usd
                 FROM usage_events
                 WHERE llm_call_placed_at >= ?
-                GROUP BY provider
-                ORDER BY call_count DESC, token_count DESC, provider ASC
+                GROUP BY provider, model
+                ORDER BY total_cost_usd DESC, total_tokens DESC, call_count DESC
                 LIMIT ?
                 """,
-                (window_start, max(1, min(int(provider_limit), 12))),
+                (cutoff_iso, max(1, min(int(provider_limit), 10))),
             ).fetchall()
             feature_rows = connection.execute(
                 """
@@ -222,32 +225,36 @@ class UsageStore:
                 FROM usage_events
                 WHERE llm_call_placed_at >= ?
                 GROUP BY source_component, operation
-                ORDER BY call_count DESC, operation ASC
+                ORDER BY call_count DESC, source_component ASC, operation ASC
                 """,
-                (window_start,),
+                (cutoff_iso,),
             ).fetchall()
 
-        total_calls = int(aggregate["total_calls"] if aggregate and aggregate["total_calls"] is not None else 0)
-        total_tokens = int(aggregate["total_tokens"] if aggregate and aggregate["total_tokens"] is not None else 0)
-        total_cost_usd = float(aggregate["total_cost_usd"] if aggregate and aggregate["total_cost_usd"] is not None else 0.0)
-        latest_call_at = aggregate["latest_call_at"] if aggregate else None
+        total_calls = int(totals_row["total_calls"] if totals_row and totals_row["total_calls"] is not None else 0)
+        total_tokens = int(totals_row["total_tokens"] if totals_row and totals_row["total_tokens"] is not None else 0)
+        total_cost_usd = float(totals_row["total_cost_usd"] if totals_row and totals_row["total_cost_usd"] is not None else 0.0)
+        latest_call_at = totals_row["latest_call_at"] if totals_row else None
 
         providers: list[dict[str, Any]] = []
         for row in provider_rows:
             call_count = int(row["call_count"] or 0)
-            token_count = int(row["token_count"] or 0)
-            cost_usd = float(row["total_cost_usd"] or 0.0)
+            provider_cost = float(row["total_cost_usd"] or 0.0)
+            provider_tokens = int(row["total_tokens"] or 0)
+            percent = round((provider_cost / total_cost_usd) * 100.0, 1) if total_cost_usd > 0 else (
+                round((provider_tokens / total_tokens) * 100.0, 1) if total_tokens > 0 else 0.0
+            )
             providers.append(
                 {
-                    "name": _display_provider_name(str(row["provider"] or "")),
-                    "calls": call_count,
-                    "tokens": token_count,
-                    "cost_usd": round(cost_usd, 6),
-                    "percent": round((call_count / total_calls) * 100.0, 1) if total_calls > 0 else 0.0,
+                    "name": _display_provider_name(str(row["provider"] or "").strip()),
+                    "role": str(row["model"] or "").strip() or "metered-model",
+                    "tokens": provider_tokens,
+                    "cost_usd": provider_cost,
+                    "count": call_count,
+                    "percent": percent,
                 }
             )
 
-        feature_buckets: defaultdict[str, int] = defaultdict(int)
+        feature_buckets: dict[str, int] = defaultdict(int)
         for row in feature_rows:
             label = _feature_label(
                 source_component=str(row["source_component"] or "").strip(),
@@ -325,4 +332,3 @@ def _feature_label(*, source_component: str, operation: str) -> str:
     if src == "gateway":
         return "Gateway"
     return source_component.replace("_", " ").title() if source_component else "Other"
-

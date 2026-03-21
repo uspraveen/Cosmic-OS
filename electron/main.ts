@@ -29,6 +29,8 @@ const store = new Store({
     cosmicAuth: null,
     gatewayBaseUrl: '',
     gatewayApiToken: '',
+    cosmicMailBaseUrl: '',
+    cosmicMailApiToken: '',
     desktopDeviceId: '',
   }
 })
@@ -361,6 +363,7 @@ async function fetchGatewaySystemMetrics(config: GatewayConnectionConfig, forceR
       lastError = error
     }
   }
+
   if (lastError instanceof Error) {
     throw lastError
   }
@@ -378,7 +381,10 @@ async function getGatewaySystemMetrics(config: GatewayConnectionConfig, forceRef
   ) {
     return gatewaySystemMetricsCache.payload
   }
-  if (gatewaySystemMetricsInFlight && gatewaySystemMetricsInFlight.cacheKey === cacheKey) {
+  if (
+    gatewaySystemMetricsInFlight &&
+    gatewaySystemMetricsInFlight.cacheKey === cacheKey
+  ) {
     return gatewaySystemMetricsInFlight.promise
   }
 
@@ -424,6 +430,36 @@ function normalizeGatewayBaseUrl(rawBaseUrl: string) {
 
   const url = new URL(withScheme)
   return url.toString().replace(/\/$/, '')
+}
+
+function formatTransportError(serviceLabel: string, baseUrl: string, error: any) {
+  if (error?.name === 'AbortError') {
+    return `${serviceLabel} request timed out.`
+  }
+
+  const causeCode = String(error?.cause?.code || error?.code || '').trim().toUpperCase()
+  const causeMessage = String(error?.cause?.message || error?.message || '').trim()
+
+  if (causeCode === 'ECONNREFUSED') {
+    return `${serviceLabel} is not reachable at ${baseUrl}. The server is not accepting connections on that address or port.`
+  }
+  if (causeCode === 'ENOTFOUND') {
+    return `${serviceLabel} host could not be resolved for ${baseUrl}. Check the URL and hostname.`
+  }
+  if (causeCode === 'ECONNRESET') {
+    return `${serviceLabel} connection was reset by ${baseUrl}. Check whether the server or a proxy closed the connection.`
+  }
+  if (
+    causeCode === 'CERT_HAS_EXPIRED' ||
+    causeCode === 'DEPTH_ZERO_SELF_SIGNED_CERT' ||
+    causeCode === 'ERR_TLS_CERT_ALTNAME_INVALID'
+  ) {
+    return `${serviceLabel} TLS validation failed for ${baseUrl}. Check whether the URL should use http instead of https, or whether the certificate is valid.`
+  }
+  if (causeMessage && causeMessage !== 'fetch failed') {
+    return `${serviceLabel} request failed: ${causeMessage}`
+  }
+  return `${serviceLabel} could not be reached at ${baseUrl}. Check whether the server is running and whether the URL uses the correct http/https scheme.`
 }
 
 async function callGatewayJson(
@@ -480,10 +516,67 @@ async function callGatewayJson(
 
     return payload
   } catch (error: any) {
-    if (error?.name === 'AbortError') {
-      throw new Error('Gateway request timed out.')
+    throw new Error(formatTransportError('Gateway', baseUrl, error))
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+async function callCosmicMailJson(
+  config: GatewayConnectionConfig,
+  pathName: string,
+  init: {
+    method?: string
+    body?: unknown
+    timeoutMs?: number
+  } = {},
+) {
+  const apiToken = String(config?.apiToken || '').trim()
+  if (!apiToken) {
+    throw new Error('Cosmic Mail API token is required.')
+  }
+
+  const baseUrl = normalizeGatewayBaseUrl(config?.baseUrl || '')
+  const requestUrl = new URL(pathName, `${baseUrl}/`).toString()
+  const controller = new AbortController()
+  const timeoutMs = Math.max(1000, init.timeoutMs ?? 20000)
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const response = await fetch(requestUrl, {
+      method: init.method ?? 'GET',
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${apiToken}`,
+        ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      },
+      body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
+      signal: controller.signal,
+    })
+
+    const responseText = await response.text()
+    let payload: any = null
+
+    if (responseText) {
+      try {
+        payload = JSON.parse(responseText)
+      } catch {
+        payload = { raw: responseText }
+      }
     }
-    throw error
+
+    if (!response.ok) {
+      const detail =
+        (typeof payload?.detail === 'string' && payload.detail) ||
+        (typeof payload?.error === 'string' && payload.error) ||
+        response.statusText ||
+        `Cosmic Mail request failed (${response.status})`
+      throw new Error(detail)
+    }
+
+    return payload
+  } catch (error: any) {
+    throw new Error(formatTransportError('Cosmic Mail', baseUrl, error))
   } finally {
     clearTimeout(timeout)
   }
@@ -1176,6 +1269,19 @@ app.whenReady().then(() => {
         chat_id: payload.chatId,
         message: payload.message,
       },
+    })
+  })
+
+  ipcMain.handle('cosmic-mail:request', async (_, payload: GatewayConnectionConfig & {
+    path: string
+    method?: string
+    body?: unknown
+    timeoutMs?: number
+  }) => {
+    return callCosmicMailJson(payload, payload.path, {
+      method: payload.method,
+      body: payload.body,
+      timeoutMs: payload.timeoutMs,
     })
   })
 

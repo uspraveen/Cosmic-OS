@@ -187,6 +187,59 @@ class FakeOrchestratorClient:
         return False
 
 
+class FakeResearchOrchestratorClient(FakeOrchestratorClient):
+    async def stream_task(self, task) -> object:
+        self.last_task = task
+        yield {
+            "type": "task.created",
+            "task_id": task.task_id,
+            "session_id": task.session_id,
+            "channel": task.channel,
+            "route": "opus",
+            "status": "running",
+        }
+        yield {
+            "type": "response.complete",
+            "task_id": task.task_id,
+            "request_id": task.input.get("request_id"),
+            "session_id": task.session_id,
+            "channel": task.channel,
+            "content": "Here is the grounded answer.",
+            "route": "opus",
+            "awaiting_reply": False,
+            "metrics": {"rtt_ms": 48},
+            "research_provenance": {
+                "paths": ["native_web_search"],
+                "source_count": 2,
+                "source_domains": ["cursor.com", "techcrunch.com"],
+                "source_sample": [
+                    {
+                        "url": "https://cursor.com/blog/composer-2",
+                        "title": "Cursor Composer 2",
+                        "domain": "cursor.com",
+                    },
+                    {
+                        "url": "https://techcrunch.com/cursor-composer-2",
+                        "title": "TechCrunch coverage",
+                        "domain": "techcrunch.com",
+                    },
+                ],
+            },
+            "sources": [
+                {"url": "https://cursor.com/blog/composer-2", "title": "Cursor Composer 2", "domain": "cursor.com"},
+                {"url": "https://techcrunch.com/cursor-composer-2", "title": "TechCrunch coverage", "domain": "techcrunch.com"},
+            ],
+        }
+        yield {
+            "type": "task.completed",
+            "task_id": task.task_id,
+            "session_id": task.session_id,
+            "channel": task.channel,
+            "route": "opus",
+            "status": "completed",
+        }
+
+
 class FakeCancellableDirectAdapter:
     def __init__(self, route: str) -> None:
         self.route = route
@@ -866,52 +919,6 @@ def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
         )
     )
     return runtime
-
-
-def test_desktop_system_metrics_endpoint_returns_cached_snapshot(tmp_path, monkeypatch) -> None:
-    runtime = build_runtime(tmp_path)
-    calls: list[bool] = []
-
-    async def fake_get_desktop_system_metrics(*, force_refresh: bool = False) -> dict[str, Any]:
-        calls.append(force_refresh)
-        return {
-            "sourceEndpoint": "/desktop/system-metrics",
-            "fetchedAt": "2026-03-21T00:00:00Z",
-            "budget": {},
-            "providers": [],
-            "usage_by_feature": [],
-            "services": [],
-        }
-
-    monkeypatch.setattr(runtime, "get_desktop_system_metrics", fake_get_desktop_system_metrics)
-
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        app.state.gateway_runtime = runtime
-        await runtime.start()
-        try:
-            yield
-        finally:
-            await runtime.stop()
-
-    app = FastAPI(lifespan=lifespan)
-    app.include_router(channel_router)
-
-    with TestClient(app) as client:
-        response = client.get(
-            "/desktop/system-metrics",
-            headers={"Authorization": "Bearer test-token"},
-        )
-        assert response.status_code == 200
-        assert response.json()["sourceEndpoint"] == "/desktop/system-metrics"
-
-        force_refresh_response = client.get(
-            "/desktop/system-metrics?force_refresh=true",
-            headers={"Authorization": "Bearer test-token"},
-        )
-        assert force_refresh_response.status_code == 200
-
-    assert calls == [False, True]
 
 
 @pytest.mark.asyncio
@@ -2551,6 +2558,36 @@ def test_channels_endpoint_lists_desktop(test_client: TestClient) -> None:
     }
 
 
+def test_desktop_system_metrics_endpoint_returns_cached_snapshot(test_client: TestClient) -> None:
+    runtime = test_client.app.state.gateway_runtime
+    calls: list[bool] = []
+
+    async def fake_get_desktop_system_metrics(*, force_refresh: bool = False) -> dict[str, Any]:
+        calls.append(force_refresh)
+        return {
+            "sourceEndpoint": "/desktop/system-metrics",
+            "services": [{"name": "Gateway", "status": "active", "summary": "1/1 channels healthy"}],
+            "providers": [],
+            "usage_by_feature": [],
+        }
+
+    runtime.get_desktop_system_metrics = fake_get_desktop_system_metrics  # type: ignore[method-assign]
+
+    response = test_client.get(
+        "/desktop/system-metrics",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert response.status_code == 200
+    assert response.json()["sourceEndpoint"] == "/desktop/system-metrics"
+
+    force_response = test_client.get(
+        "/desktop/system-metrics?force_refresh=true",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert force_response.status_code == 200
+    assert calls == [False, True]
+
+
 def test_sessions_endpoints_return_vm_history(test_client: TestClient) -> None:
     with test_client.websocket_connect("/ws?token=test-token&device_id=desk_history") as websocket:
         websocket.send_json(
@@ -3649,6 +3686,109 @@ def test_desktop_websocket_hands_off_direct_route_to_opus_with_escalation_activi
         assert "direct_model_handoff:perplexity->opus" in entries[0]["signals"]
         assert entries[1]["decision_source"] == "model_router"
         assert entries[1]["final_route"] == "perplexity"
+
+
+def test_opus_research_provenance_persists_into_history_turn_ledger_and_working_set(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    runtime.orchestrator = FakeResearchOrchestratorClient()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws?token=test-token&device_id=desk_research") as websocket:
+            websocket.send_json(
+                {
+                    "type": "query",
+                    "request_id": "req_research",
+                    "content": "How was Cursor Composer 2 made?",
+                }
+            )
+            route_result = websocket.receive_json()
+            assert route_result["type"] == "route_result"
+            assert route_result["route"] == "opus"
+            session_id = route_result["session_id"]
+
+            created = websocket.receive_json()
+            assert created["type"] == "task.created"
+
+            complete = websocket.receive_json()
+            assert complete["type"] == "response.complete"
+            assert complete["research_provenance"]["paths"] == ["native_web_search"]
+
+            completed = websocket.receive_json()
+            assert completed["type"] == "task.completed"
+
+        deadline = time.time() + 2.0
+        turn_entry = None
+        while time.time() < deadline:
+            turn_entry = runtime.session_store.get_turn_ledger_entry("req_research")
+            if turn_entry is not None:
+                break
+            time.sleep(0.01)
+
+        assert turn_entry is not None
+        history = runtime.session_store.get_history(session_id)
+        assistant_message = history[-1]
+        assert assistant_message["role"] == "assistant"
+        assert assistant_message["metadata"]["research_provenance"] == {
+            "paths": ["native_web_search"],
+            "source_count": 2,
+            "source_domains": ["cursor.com", "techcrunch.com"],
+            "source_sample": [
+                {
+                    "url": "https://cursor.com/blog/composer-2",
+                    "title": "Cursor Composer 2",
+                    "domain": "cursor.com",
+                },
+                {
+                    "url": "https://techcrunch.com/cursor-composer-2",
+                    "title": "TechCrunch coverage",
+                    "domain": "techcrunch.com",
+                },
+            ],
+        }
+        assert turn_entry["tool_summary"] == ["opus", "native_web_search"]
+        assert turn_entry["metadata"]["research_provenance"]["source_domains"] == ["cursor.com", "techcrunch.com"]
+
+        active_working_set = runtime._refresh_active_working_set(session_id)  # noqa: SLF001 - targeted unit seam
+        assert active_working_set["recent_research_receipts"] == [
+            {
+                "request_id": "req_research",
+                "route": "opus",
+                "question": "How was Cursor Composer 2 made?",
+                "completed_at": turn_entry["completed_at"],
+                "paths": ["native_web_search"],
+                "source_count": 2,
+                "source_domains": ["cursor.com", "techcrunch.com"],
+                "source_sample": [
+                    {
+                        "url": "https://cursor.com/blog/composer-2",
+                        "title": "Cursor Composer 2",
+                        "domain": "cursor.com",
+                    },
+                    {
+                        "url": "https://techcrunch.com/cursor-composer-2",
+                        "title": "TechCrunch coverage",
+                        "domain": "techcrunch.com",
+                    },
+                ],
+            }
+        ]
+        rendered = runtime._render_active_working_set_context(active_working_set)  # noqa: SLF001 - targeted unit seam
+        assert rendered is not None
+        assert "Recent research receipts" in rendered
+        assert "research=native web_search" in rendered
+        assert "domains=cursor.com, techcrunch.com" in rendered
 
 
 def test_desktop_websocket_route_override_bypasses_classifier(test_client: TestClient, tmp_path) -> None:

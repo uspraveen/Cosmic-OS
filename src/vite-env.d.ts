@@ -78,6 +78,12 @@ interface Window {
     syncTelegramWebhook: (payload: GatewayConnectionPayload) => Promise<any>
     clearTelegramWebhook: (payload: GatewayConnectionPayload & { dropPendingUpdates?: boolean }) => Promise<any>
     sendTelegramTest: (payload: GatewayConnectionPayload & { chatId: number; message: string }) => Promise<any>
+    cosmicMailRequest: (payload: GatewayConnectionPayload & {
+      path: string
+      method?: string
+      body?: unknown
+      timeoutMs?: number
+    }) => Promise<any>
     onCalendarAgendaUpdate: (cb: (data: any) => void) => () => void
     onIntegrationsUpdate: (cb: (data: any) => void) => () => void
     onIntegrationEvent: (cb: (data: any) => void) => () => void
