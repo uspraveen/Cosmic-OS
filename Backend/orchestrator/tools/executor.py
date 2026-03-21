@@ -623,7 +623,7 @@ class ToolExecutor:
             )
         max_posts = self._coerce_int(tool_input.get("max_posts"), 8)
         if max_posts > 0:
-            payload["max_posts"] = min(max(max_posts, 1), 12)
+            payload["max_posts"] = min(max(max_posts, 1), 8)
         return await self._dispatch_specialist_agent(
             intent="x.search",
             payload=payload,

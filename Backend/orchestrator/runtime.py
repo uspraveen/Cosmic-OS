@@ -633,6 +633,7 @@ class OrchestratorRuntime:
                             research_paths.add("firecrawl")
                         elif tb.tool_name in {"x_search", "x_recall_session"}:
                             research_paths.add("x_search_specialist")
+                            self._collect_x_specialist_sources(result_str, collected_sources)
 
                         yield {
                             **ev, "type": "tool.result",
@@ -1008,8 +1009,6 @@ class OrchestratorRuntime:
         try:
             await dispatch_task(child_task, self._redis)
             self._agent_dispatch_stats.dispatches_started += 1
-            self.registry_store.record_agent_usage(recipient, resolved_intent)
-            self._refresh_featured_specialists_after_usage()
 
             if pending_result is None:
                 result = self._build_in_progress_result(child_task.task_id, normalized_idempotency_key, timeout_sec=timeout_sec)
@@ -1270,9 +1269,11 @@ class OrchestratorRuntime:
         self._agent_dispatch_stats.events_consumed += 1
 
         if event.event_type == "task.completed":
+            task_record = self.task_ledger.get_task(event.task_id)
             result = self._coerce_agent_result(event)
             self.task_ledger.mark_completed(event.task_id, result=result.model_dump(mode="json"))
             self._agent_dispatch_stats.dispatches_completed += 1
+            self._record_successful_specialist_usage(task_record)
             self._resolve_pending_agent_result(event.task_id, result)
             return
 
@@ -1775,6 +1776,47 @@ class OrchestratorRuntime:
                 domain = url
             sources.append({"url": url, "title": title or domain, "domain": domain})
 
+    @staticmethod
+    def _collect_x_specialist_sources(result_str: str, sources: list[dict[str, str]]) -> None:
+        try:
+            data = json.loads(result_str)
+        except (json.JSONDecodeError, TypeError):
+            return
+        if not isinstance(data, dict):
+            return
+
+        seen_urls = {s["url"] for s in sources}
+
+        def append_source(url_value: Any, *, title_value: Any = None) -> None:
+            url = str(url_value or "").strip()
+            if not url or url in seen_urls:
+                return
+            seen_urls.add(url)
+            title = str(title_value or "").strip()
+            try:
+                parsed = urlparse(url)
+                domain = parsed.netloc.replace("www.", "")
+            except Exception:
+                domain = url
+            sources.append({"url": url, "title": title or domain or url, "domain": domain})
+
+        citations = data.get("citations")
+        if isinstance(citations, list):
+            for item in citations:
+                if isinstance(item, str):
+                    append_source(item)
+                elif isinstance(item, dict):
+                    append_source(item.get("url"), title_value=item.get("title"))
+
+        posts = data.get("notable_posts")
+        if isinstance(posts, list):
+            for item in posts:
+                if not isinstance(item, dict):
+                    continue
+                handle = str(item.get("author_handle") or "").strip().lstrip("@")
+                title = f"@{handle} on X" if handle else "X Post"
+                append_source(item.get("post_url"), title_value=title)
+
     @classmethod
     def _build_research_provenance(
         cls,
@@ -1784,7 +1826,7 @@ class OrchestratorRuntime:
     ) -> dict[str, Any] | None:
         ordered_paths = [
             path
-            for path in ("native_web_search", "native_web_fetch", "perplexity_research", "firecrawl")
+            for path in ("native_web_search", "native_web_fetch", "perplexity_research", "firecrawl", "x_search_specialist")
             if path in research_paths
         ]
 
@@ -1821,6 +1863,18 @@ class OrchestratorRuntime:
             provenance["source_domains"] = cls._dedupe_preserve_order(domains)[:3]
             provenance["source_sample"] = source_sample[:3]
         return provenance
+
+    def _record_successful_specialist_usage(self, task_record: dict[str, Any] | None) -> None:
+        if not isinstance(task_record, dict):
+            return
+        if str(task_record.get("status") or "").strip().lower() == "completed":
+            return
+        recipient = str(task_record.get("recipient") or "").strip()
+        intent = str(task_record.get("intent") or "").strip()
+        if not recipient or not intent:
+            return
+        self.registry_store.record_agent_usage(recipient, intent)
+        self._refresh_featured_specialists_after_usage()
 
     def _build_server_tool_loop_message(self, blocks: list[ContentBlock]) -> str:
         search_labels: list[str] = []

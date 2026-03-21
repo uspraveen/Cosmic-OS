@@ -64,6 +64,23 @@ def test_build_usage_event_clamps_and_backfills_missing_totals() -> None:
     assert event.reasoning_tokens == 4
 
 
+def test_build_usage_event_estimates_cost_from_model_specs_when_provider_cost_missing() -> None:
+    event = build_usage_event(
+        metered_call=begin_metered_call(prefix="call"),
+        source_component="agent",
+        source_id="cosmic/x-twitter-search-agent:1.0.0",
+        operation="agent.x.search",
+        model_key="xai:grok-4.20-beta-0309-reasoning",
+        raw_usage={
+            "prompt_tokens": 1000,
+            "completion_tokens": 500,
+            "cached_prompt_text_tokens": 100,
+        },
+    )
+
+    assert event.estimated_cost_usd == 0.00482
+
+
 def test_post_usage_event_accepts_202_response() -> None:
     class FakeResponse:
         status_code = 202

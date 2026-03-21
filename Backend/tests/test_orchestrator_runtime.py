@@ -892,6 +892,94 @@ async def test_orchestrator_runtime_emits_local_research_provenance_for_perplexi
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_runtime_emits_x_search_sources_as_research_provenance(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_x_search_research.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+
+    async def scripted_stream(**kwargs):
+        del kwargs
+        first_call = not getattr(scripted_stream, "_called", False)
+        scripted_stream._called = True  # type: ignore[attr-defined]
+        if first_call:
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 10}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "tool_x_1", "name": "x_search"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"query\":\"Cursor Composer 2026\",\"max_posts\":8}"}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 4}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        else:
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 12}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Here are the latest tweets."}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 5}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        for event_name, payload in events:
+            yield type("SSE", (), {"event": event_name, "data": json.dumps(payload)})()
+
+    async def fake_execute(tool_name: str, tool_input: dict[str, object], *, context=None) -> str:
+        del context
+        assert tool_name == "x_search"
+        assert tool_input == {"query": "Cursor Composer 2026", "max_posts": 8}
+        return json.dumps(
+            {
+                "summary": "Cursor Composer discourse is split between hype and licensing questions.",
+                "notable_posts": [
+                    {
+                        "author_handle": "leerob",
+                        "post_url": "https://x.com/leerob/status/123",
+                        "excerpt": "Composer 2 is fast.",
+                        "why_it_matters": "Cursor leadership reaction.",
+                    }
+                ],
+                "citations": [],
+            }
+        )
+
+    runtime._stream_anthropic_events = scripted_stream  # type: ignore[method-assign]
+
+    await runtime.start()
+    assert runtime._tool_executor is not None
+    runtime._tool_executor.execute = fake_execute  # type: ignore[method-assign]
+    try:
+        streamed_events = [event async for event in runtime.stream_task(_signed_task("signing-secret"))]
+    finally:
+        await runtime.stop()
+
+    complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert complete_event["sources"] == [
+        {
+            "url": "https://x.com/leerob/status/123",
+            "title": "@leerob on X",
+            "domain": "x.com",
+        }
+    ]
+    assert complete_event["research_provenance"] == {
+        "paths": ["x_search_specialist"],
+        "source_count": 1,
+        "source_domains": ["x.com"],
+        "source_sample": [
+            {
+                "url": "https://x.com/leerob/status/123",
+                "title": "@leerob on X",
+                "domain": "x.com",
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_runtime_summarizes_generic_specialist_tool_work(tmp_path) -> None:
     client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
     config = OrchestratorConfig(

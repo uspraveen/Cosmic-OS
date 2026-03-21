@@ -6,7 +6,7 @@ import pytest
 
 from agents.x_twitter_search.agent import XTwitterSearchAgent
 from agents.x_twitter_search.config import XTwitterSearchConfig
-from shared import TaskEnvelope, sign_task_envelope, utcnow
+from shared import TaskEnvelope, begin_metered_call, sign_task_envelope, utcnow
 
 
 class FakeRedis:
@@ -61,21 +61,29 @@ class FakeResponse:
         self.server_side_tool_usage = {"x_search_queries": 3}
 
 
-class FakeChat:
+class NoCitationResponse(FakeResponse):
     def __init__(self) -> None:
+        super().__init__()
+        self.citations = []
+
+
+class FakeChat:
+    def __init__(self, response_factory=None) -> None:
         self.items: list[str] = []
+        self._response_factory = response_factory or FakeResponse
 
     def append(self, value: str) -> None:
         self.items.append(value)
 
-    def sample(self) -> FakeResponse:
-        return FakeResponse()
+    def sample(self):
+        return self._response_factory()
 
 
 class FakeClient:
-    def __init__(self, api_key: str) -> None:
+    def __init__(self, api_key: str, *, response_factory=None) -> None:
         self.api_key = api_key
         self.last_kwargs = None
+        self._response_factory = response_factory or FakeResponse
 
     @property
     def chat(self) -> "FakeClient":
@@ -83,7 +91,7 @@ class FakeClient:
 
     def create(self, **kwargs):
         self.last_kwargs = kwargs
-        return FakeChat()
+        return FakeChat(response_factory=self._response_factory)
 
 
 def _make_task(*, intent: str, payload: dict[str, object], session_id: str = "sess_x") -> TaskEnvelope:
@@ -257,3 +265,86 @@ async def test_x_search_agent_rejects_mixed_allowed_and_excluded_handles(tmp_pat
     assert result.status == "failed"
     assert result.error is not None
     assert result.error.code == "INVALID_INPUT"
+
+
+@pytest.mark.asyncio
+async def test_x_search_agent_falls_back_to_notable_post_urls_when_provider_citations_missing(tmp_path: Path) -> None:
+    fake_client = FakeClient("xai-key", response_factory=NoCitationResponse)
+    agent = XTwitterSearchAgent(
+        redis_client=FakeRedis(),
+        config=XTwitterSearchConfig(
+            redis_url="redis://unused",
+            gateway_url="http://gateway",
+            gateway_internal_token="internal-token",
+            xai_api_key="xai-key",
+            x_search_model="grok-4.20-beta-0309-reasoning",
+        ),
+        xai_client_factory=lambda api_key: fake_client,
+        store_root=tmp_path / "store",
+        runtime_root=tmp_path / "runtime",
+        artifacts_root=tmp_path / "runs" / "artifacts",
+        agent_secret="agent-secret",
+    )
+    await agent.on_startup()
+    try:
+        result = await agent.execute(
+            _make_task(
+                intent="x.search",
+                payload={"query": "Show actual Cursor Composer tweets", "max_posts": 4},
+            )
+        )
+    finally:
+        await agent.stop()
+
+    assert result.status == "completed"
+    assert result.output["citations"] == [
+        {
+            "title": "@cursor_ai on X",
+            "url": "https://x.com/cursor_ai/status/123",
+            "description": "Composer 2 is live. | Posted 2026-03-21T10:00:00Z",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_x_search_agent_usage_cost_includes_x_search_tool_calls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    async def fake_post_usage_event(*, client, gateway_url, internal_token, event, timeout_sec=5.0, max_attempts=3, base_delay_sec=0.25):
+        del client, gateway_url, internal_token, timeout_sec, max_attempts, base_delay_sec
+        captured["event"] = event
+        return True
+
+    monkeypatch.setattr("agents.x_twitter_search.agent.post_usage_event", fake_post_usage_event)
+
+    agent = XTwitterSearchAgent(
+        redis_client=FakeRedis(),
+        config=XTwitterSearchConfig(
+            redis_url="redis://unused",
+            gateway_url="http://gateway",
+            gateway_internal_token="internal-token",
+            xai_api_key="xai-key",
+            x_search_model="grok-4.20-beta-0309-reasoning",
+        ),
+        xai_client_factory=lambda api_key: FakeClient(api_key),
+        store_root=tmp_path / "store",
+        runtime_root=tmp_path / "runtime",
+        artifacts_root=tmp_path / "runs" / "artifacts",
+        agent_secret="agent-secret",
+    )
+    await agent.on_startup()
+    try:
+        await agent._post_usage(
+            metered_call=begin_metered_call(prefix="call"),
+            task=_make_task(intent="x.search", payload={"query": "Search X for Grok feedback"}),
+            response=FakeResponse(),
+            raw_usage=FakeResponse().usage,
+            success=True,
+            error_code=None,
+            metadata_json={"tool": "x_search"},
+        )
+    finally:
+        await agent.stop()
+
+    event = captured["event"]
+    assert event.estimated_cost_usd == pytest.approx(0.01572, rel=1e-6)

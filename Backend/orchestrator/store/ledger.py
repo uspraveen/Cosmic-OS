@@ -456,6 +456,25 @@ class TaskLedger:
             for row in rows
         ]
 
+    def get_task(self, task_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM tasks
+                WHERE task_id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        if result.get("envelope_json"):
+            result["envelope_json"] = json.loads(result["envelope_json"])
+        if result.get("result_json"):
+            result["result_json"] = json.loads(result["result_json"])
+        return result
+
     def create_task_input_request(
         self,
         *,

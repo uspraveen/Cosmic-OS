@@ -10,7 +10,7 @@ from uuid import uuid4
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .model_specs import build_model_key, get_model_spec, lookup_model_spec
+from .model_specs import build_model_key, get_model_spec
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,7 +241,11 @@ def build_usage_event(
     if latency_ms is None:
         latency_ms = max(0, int((time.perf_counter() - metered_call.started_perf_counter) * 1000))
     if estimated_cost_usd is None:
-        estimated_cost_usd = extract_provider_cost_usd(raw_usage)
+        estimated_cost_usd = estimate_usage_cost_usd(
+            resolved_model_key or build_model_key(resolved_provider, resolved_model),
+            raw_usage=raw_usage,
+            normalized_usage=normalized_usage,
+        )
 
     combined_metadata = _merge_metadata(
         metadata_json,
@@ -278,6 +282,49 @@ def build_usage_event(
         metadata_json=combined_metadata,
         llm_call_placed_at=metered_call.llm_call_placed_at,
     )
+
+
+def estimate_usage_cost_usd(
+    model_key: str,
+    *,
+    raw_usage: Any = None,
+    normalized_usage: dict[str, int] | None = None,
+) -> float | None:
+    provider_cost = extract_provider_cost_usd(raw_usage)
+    if provider_cost is not None:
+        return provider_cost
+
+    normalized_model_key = str(model_key or "").strip()
+    if not normalized_model_key:
+        return None
+
+    usage = normalized_usage or normalize_usage(normalized_model_key, raw_usage)
+    spec = get_model_spec(normalized_model_key)
+    if spec is None or not isinstance(spec.pricing, dict):
+        return None
+
+    input_rate = _coerce_optional_float(spec.pricing.get("input_per_1m_usd"))
+    cached_input_rate = _coerce_optional_float(spec.pricing.get("cached_input_per_1m_usd"))
+    output_rate = _coerce_optional_float(spec.pricing.get("output_per_1m_usd"))
+
+    if input_rate is None and output_rate is None:
+        return None
+
+    prompt_tokens = max(0, int(usage.get("prompt_tokens", 0)))
+    cached_tokens = min(prompt_tokens, max(0, int(usage.get("cached_tokens", 0))))
+    completion_tokens = max(0, int(usage.get("completion_tokens", 0)))
+    uncached_prompt_tokens = max(0, prompt_tokens - cached_tokens)
+
+    effective_cached_rate = cached_input_rate if cached_input_rate is not None else input_rate
+    total_cost = 0.0
+    if input_rate is not None:
+        total_cost += (uncached_prompt_tokens / 1_000_000.0) * input_rate
+    if effective_cached_rate is not None:
+        total_cost += (cached_tokens / 1_000_000.0) * effective_cached_rate
+    if output_rate is not None:
+        total_cost += (completion_tokens / 1_000_000.0) * output_rate
+
+    return round(total_cost, 10)
 
 
 async def post_usage_event(
@@ -333,6 +380,15 @@ def extract_provider_cost_usd(raw_usage: Any) -> float | None:
         except (TypeError, ValueError):
             continue
     return None
+
+
+def _coerce_optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def serialize_usage_metadata(value: Any) -> Any:

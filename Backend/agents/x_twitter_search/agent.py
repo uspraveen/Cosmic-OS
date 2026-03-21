@@ -39,6 +39,7 @@ from shared import (
     begin_metered_call,
     build_model_key,
     build_usage_event,
+    estimate_usage_cost_usd,
     post_usage_event,
 )
 from shared.agent_runtime import AgentRuntime
@@ -273,7 +274,10 @@ class XTwitterSearchAgent(AgentRuntime):
             },
         )
 
-        citations = self._normalize_citations(getattr(response, "citations", None))
+        citations = self._merge_citations(
+            self._normalize_citations(getattr(response, "citations", None)),
+            self._citations_from_notable_posts(structured.notable_posts),
+        )
         provider_response_id = str(getattr(response, "id", "") or "").strip() or None
         tool_usage = {
             "server_side_tool_usage": self._serialize_any(getattr(response, "server_side_tool_usage", None)),
@@ -422,6 +426,7 @@ class XTwitterSearchAgent(AgentRuntime):
             request_id=getattr(task, "request_id", None),
             provider_request_id=str(getattr(response, "id", "") or "").strip() or None,
             raw_usage=raw_usage,
+            estimated_cost_usd=self._estimate_total_usage_cost_usd(response=response, raw_usage=raw_usage),
             success=success,
             error_code=error_code if not success else None,
             metadata_json=metadata_json,
@@ -579,16 +584,19 @@ class XTwitterSearchAgent(AgentRuntime):
         if not isinstance(value, list):
             return []
         citations: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
         for item in value:
             if isinstance(item, str):
                 url = item.strip()
-                if url:
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
                     citations.append({"title": "X Source", "url": url, "description": "Source from X search"})
                 continue
             if isinstance(item, dict):
                 url = str(item.get("url") or "").strip()
-                if not url:
+                if not url or url in seen_urls:
                     continue
+                seen_urls.add(url)
                 citations.append(
                     {
                         "title": str(item.get("title") or "X Source").strip() or "X Source",
@@ -598,6 +606,79 @@ class XTwitterSearchAgent(AgentRuntime):
                     }
                 )
         return citations[:20]
+
+    def _citations_from_notable_posts(self, posts: list[NotablePost]) -> list[dict[str, str]]:
+        citations: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+        for post in posts:
+            url = str(post.post_url or "").strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            handle = str(post.author_handle or "").strip().lstrip("@")
+            posted_at = str(post.posted_at or "").strip()
+            title = f"@{handle} on X" if handle else "X Post"
+            description_parts = []
+            excerpt = str(post.excerpt or "").strip()
+            if excerpt:
+                description_parts.append(excerpt[:240])
+            if posted_at:
+                description_parts.append(f"Posted {posted_at}")
+            citations.append(
+                {
+                    "title": title,
+                    "url": url,
+                    "description": " | ".join(description_parts) or "Source from X search",
+                }
+            )
+        return citations[:20]
+
+    def _merge_citations(
+        self,
+        primary: list[dict[str, str]],
+        fallback: list[dict[str, str]],
+    ) -> list[dict[str, str]]:
+        merged: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+        for item in [*primary, *fallback]:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            merged.append(item)
+            if len(merged) >= 20:
+                break
+        return merged
+
+    def _estimate_total_usage_cost_usd(self, *, response: Any, raw_usage: Any) -> float | None:
+        model_key = build_model_key("xai", self.config.x_search_model)
+        token_cost_usd = estimate_usage_cost_usd(model_key, raw_usage=raw_usage)
+        tool_cost_usd = self._estimate_x_search_tool_cost_usd(response)
+        if token_cost_usd is None and tool_cost_usd is None:
+            return None
+        return round(float(token_cost_usd or 0.0) + float(tool_cost_usd or 0.0), 10)
+
+    def _estimate_x_search_tool_cost_usd(self, response: Any) -> float | None:
+        tool_usage = self._serialize_any(getattr(response, "server_side_tool_usage", None))
+        count = self._extract_x_search_tool_call_count(tool_usage)
+        if count <= 0:
+            return None
+        return round((count / 1000.0) * 5.0, 10)
+
+    def _extract_x_search_tool_call_count(self, value: Any) -> int:
+        if isinstance(value, dict):
+            total = 0
+            for key, item in value.items():
+                normalized_key = str(key or "").strip().lower()
+                if "x_search" in normalized_key:
+                    try:
+                        total += max(0, int(float(item)))
+                    except (TypeError, ValueError):
+                        continue
+            return total
+        return 0
 
     def _serialize_provider_response(self, response: Any) -> dict[str, Any]:
         payload = self._serialize_any(response)

@@ -466,7 +466,7 @@ async def test_search_agent_catalog_returns_intent_level_matches(tmp_path) -> No
 
 
 @pytest.mark.asyncio
-async def test_dispatch_agent_task_records_usage_and_refreshes_featured_specialists(tmp_path) -> None:
+async def test_dispatch_agent_task_records_usage_and_refreshes_featured_specialists_on_successful_completion(tmp_path) -> None:
     fake_redis = FakeRedis()
     config = OrchestratorConfig(
         signing_secret="gateway-secret",
@@ -490,16 +490,30 @@ async def test_dispatch_agent_task_records_usage_and_refreshes_featured_speciali
                 intent="research.topic",
                 input_payload={"query": "YC S26 companies"},
                 agent_id="cosmic/research-agent:1.0.0",
-                wait_timeout_sec=0,
+                wait_timeout_sec=1.0,
             )
         )
-        await asyncio.sleep(0)
+        fields = await _wait_for_stream(fake_redis, "streams:cosmic/research-agent:1.0.0:high")
+        child_task = parse_task_envelope(fields)
+        await fake_redis.xadd(
+            "streams:events",
+            {
+                "event": EventEnvelope(
+                    task_id=child_task.task_id,
+                    agent_id="cosmic/research-agent:1.0.0",
+                    event_type="task.completed",
+                    seq=1,
+                    payload={"status": "completed", "output": {"sources": 2}, "artifacts": []},
+                ).model_dump_json()
+            },
+        )
         result = await dispatch_task
         featured = runtime.registry_store.list_featured_specialists(limit=3)
     finally:
         await runtime.stop()
 
-    assert isinstance(result, TaskInProgress)
+    assert isinstance(result, AgentResult)
+    assert result.status == "completed"
     assert len(featured) == 1
     assert featured[0]["agent_id"] == "cosmic/research-agent:1.0.0"
     assert featured[0]["usage_count"] == 1
