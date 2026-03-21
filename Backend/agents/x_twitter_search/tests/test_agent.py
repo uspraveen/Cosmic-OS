@@ -147,6 +147,8 @@ async def test_x_search_agent_search_persists_artifacts_and_returns_structured_b
     assert result.output["notable_posts"][0]["author_handle"] == "cursor_ai"
     assert result.output["citations"][0]["url"] == "https://x.com/cursor_ai/status/123"
     assert fake_client.last_kwargs["model"] == "grok-4.20-beta-0309-reasoning"
+    assert "tools" in fake_client.last_kwargs
+    assert "search_parameters" not in fake_client.last_kwargs
     assert len(result.artifacts) == 3
 
 
@@ -219,3 +221,39 @@ async def test_x_search_agent_rejects_invalid_date_range_and_missing_session_id(
     assert recall_result.status == "failed"
     assert recall_result.error is not None
     assert recall_result.error.code == "INVALID_INPUT"
+
+
+@pytest.mark.asyncio
+async def test_x_search_agent_rejects_mixed_allowed_and_excluded_handles(tmp_path: Path) -> None:
+    agent = XTwitterSearchAgent(
+        redis_client=FakeRedis(),
+        config=XTwitterSearchConfig(
+            redis_url="redis://unused",
+            gateway_url="http://gateway",
+            gateway_internal_token="internal-token",
+            xai_api_key="xai-key",
+        ),
+        xai_client_factory=lambda api_key: FakeClient(api_key),
+        store_root=tmp_path / "store",
+        runtime_root=tmp_path / "runtime",
+        artifacts_root=tmp_path / "runs" / "artifacts",
+        agent_secret="agent-secret",
+    )
+    await agent.on_startup()
+    try:
+        result = await agent.execute(
+            _make_task(
+                intent="x.search",
+                payload={
+                    "query": "Search X for Grok feedback",
+                    "allowed_x_handles": ["xai"],
+                    "excluded_x_handles": ["openai"],
+                },
+            )
+        )
+    finally:
+        await agent.stop()
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.code == "INVALID_INPUT"
