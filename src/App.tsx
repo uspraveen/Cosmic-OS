@@ -208,7 +208,21 @@ const buildPendingAttachmentSummary = (attachments: PendingDocumentAttachment[])
   if (attachments.length === 1) {
     return `Attached ${attachments[0].filename}`
   }
-  return `Attached ${attachments.length} documents`
+  return `Attached ${attachments.length} files`
+}
+
+const MAX_IMAGE_ATTACHMENTS_PER_MESSAGE = 20
+
+const isImageAttachment = (attachment: Pick<PendingDocumentAttachment, 'mimeType'>) => {
+  return String(attachment.mimeType || '').trim().toLowerCase().startsWith('image/')
+}
+
+const countImageAttachments = (attachments: PendingDocumentAttachment[]) => {
+  return attachments.reduce((count, attachment) => count + (isImageAttachment(attachment) ? 1 : 0), 0)
+}
+
+const buildImageAttachmentLimitError = (imageCount: number) => {
+  return `Up to ${MAX_IMAGE_ATTACHMENTS_PER_MESSAGE} images can be attached in one message. You selected ${imageCount}.`
 }
 
 const DocumentAttachmentIcon = () => (
@@ -240,7 +254,7 @@ const UserMessageAttachments = ({ attachments }: { attachments?: MessageAttachme
           <div className="message-attachment-copy">
             <span className="message-attachment-name">{attachment.filename}</span>
             <span className="message-attachment-meta">
-              {formatAttachmentSize(Number(attachment.sizeBytes || 0)) || attachment.mimeType || 'Document'}
+              {formatAttachmentSize(Number(attachment.sizeBytes || 0)) || attachment.mimeType || 'Attachment'}
             </span>
           </div>
         </div>
@@ -1259,13 +1273,20 @@ export default function App() {
     setTimeout(() => {
       setSearchState('hidden')
       setShowLauncherTray(false)
-      if (modeRef.current === 'meeting' || modeRef.current === 'spaces') setMode('chat')
     }, 250)
   }
 
   useEffect(() => {
     const handleShown = () => {
-      showChatComposer()
+      if (modeRef.current === 'spaces') {
+        showSpacesSurface()
+      } else if (modeRef.current === 'meeting') {
+        showMeetingSurface()
+      } else if (modeRef.current === 'task') {
+        showTaskSurface({ focusComposer: false, forceOpus: false })
+      } else {
+        showChatComposer()
+      }
       maybeRequestGatewayResumeOnShow()
     }
     const off1 = window.cosmic?.onShown(handleShown)
@@ -1682,23 +1703,26 @@ export default function App() {
       if (picked.length === 0) {
         return
       }
-      setPendingAttachments((prev) => {
-        const byPath = new Map(prev.map((item) => [item.filePath, item]))
-        for (const item of picked) {
-          const filePath = String(item?.filePath || '').trim()
-          const filename = String(item?.filename || '').trim()
-          if (!filePath || !filename) {
-            continue
-          }
-          byPath.set(filePath, {
-            filePath,
-            filename,
-            mimeType: String(item?.mimeType || '').trim(),
-            sizeBytes: Number(item?.sizeBytes || 0),
-          })
+      const byPath = new Map(pendingAttachments.map((item) => [item.filePath, item]))
+      for (const item of picked) {
+        const filePath = String(item?.filePath || '').trim()
+        const filename = String(item?.filename || '').trim()
+        if (!filePath || !filename) {
+          continue
         }
-        return Array.from(byPath.values())
-      })
+        byPath.set(filePath, {
+          filePath,
+          filename,
+          mimeType: String(item?.mimeType || '').trim(),
+          sizeBytes: Number(item?.sizeBytes || 0),
+        })
+      }
+      const next = Array.from(byPath.values())
+      const imageCount = countImageAttachments(next)
+      if (imageCount > MAX_IMAGE_ATTACHMENTS_PER_MESSAGE) {
+        throw new Error(buildImageAttachmentLimitError(imageCount))
+      }
+      setPendingAttachments(next)
     } catch (error) {
       setMessages((prev) => [
         ...prev,
@@ -2870,7 +2894,7 @@ export default function App() {
                             <div className="composer-attachment-copy">
                               <span className="composer-attachment-name">{attachment.filename}</span>
                               <span className="composer-attachment-meta">
-                                {formatAttachmentSize(attachment.sizeBytes) || attachment.mimeType || 'Document'}
+                                {formatAttachmentSize(attachment.sizeBytes) || attachment.mimeType || 'Attachment'}
                               </span>
                             </div>
                             <button
@@ -2908,11 +2932,11 @@ export default function App() {
                     <button
                       className={`attach-btn ${pendingAttachments.length > 0 ? 'active' : ''}`}
                       onClick={handlePickDocuments}
-                      onMouseEnter={(event) => showHoverTooltipForElement('Attach documents', event.currentTarget, 'control')}
+                      onMouseEnter={(event) => showHoverTooltipForElement('Attach files', event.currentTarget, 'control')}
                       onMouseLeave={hideHoverTooltip}
-                      onFocus={(event) => showHoverTooltipForElement('Attach documents', event.currentTarget, 'control')}
+                      onFocus={(event) => showHoverTooltipForElement('Attach files', event.currentTarget, 'control')}
                       onBlur={hideHoverTooltip}
-                      aria-label="Attach documents"
+                      aria-label="Attach files"
                       disabled={isStreaming || authState !== 'authenticated'}
                       type="button"
                     >

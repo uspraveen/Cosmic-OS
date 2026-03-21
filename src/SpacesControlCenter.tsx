@@ -14,7 +14,8 @@ import {
   normalizeCalendarAgendaSnapshot,
 } from './calendar'
 
-type SpacesPageId = 'command' | 'calendar' | 'prophet' | 'autopilot' | 'pulse' | 'manage'
+type SpacesPageId = 'command' | 'calendar' | 'prophet' | 'autopilot' | 'pulse' | 'manage' | 'agent-email'
+type AgentEmailViewId = 'overview' | 'agents' | 'inboxes' | 'approvals' | 'settings'
 type AccentTone = 'azure' | 'gold' | 'mint' | 'rose' | 'slate'
 type MetricTone = 'good' | 'warm' | 'cool' | 'muted'
 
@@ -169,6 +170,316 @@ interface GatewaySystemMetrics {
   vm?: Record<string, unknown> | null
 }
 
+type AgentEmailBannerTone = 'success' | 'error' | 'info'
+
+interface AgentEmailChecklistItem {
+  label: string
+  state: string
+  note: string
+  complete: boolean
+}
+
+interface AgentEmailAgent {
+  id: string
+  name: string
+  role: string
+  address: string
+  status: string
+  domain: string
+  inboxes: string[]
+  approvalMode: string
+  lastActivity: string
+  note: string
+  accent: AccentTone
+}
+
+interface AgentEmailInbox {
+  id: string
+  address: string
+  type: string
+  status: string
+  sync: string
+  queue: string
+  linkedAgents: string[]
+  lastSync: string
+  note: string
+  accent: AccentTone
+}
+
+interface AgentEmailThreadMessage {
+  id: string
+  direction: 'inbound' | 'outbound'
+  author: string
+  address: string
+  time: string
+  body: string
+  isRead: boolean
+}
+
+interface AgentEmailThread {
+  id: string
+  subject: string
+  fromName: string
+  fromAddress: string
+  time: string
+  unread: boolean
+  state: string
+  snippet: string
+  lastMessageAt: string
+  messages: AgentEmailThreadMessage[]
+}
+
+interface AgentEmailDomainRecord {
+  label: string
+  status: string
+  value: string
+}
+
+interface AgentEmailDomain {
+  id: string
+  name: string
+  status: string
+  dns: string
+  mailboxes: string
+  provider: string
+  reputation: string
+  note: string
+  records: AgentEmailDomainRecord[]
+  accent: AccentTone
+}
+
+interface AgentEmailApproval {
+  id: string
+  subject: string
+  agent: string
+  mailbox: string
+  recipients: string
+  state: string
+  reason: string
+  time: string
+  summary: string
+  excerpt: string
+  accent: AccentTone
+}
+
+interface CosmicMailAuthContextRead {
+  is_admin: boolean
+  organization_id: string | null
+  api_key_id: string | null
+  api_key_name: string | null
+}
+
+interface CosmicMailOrganizationRead {
+  id: string
+  name: string
+  slug: string
+  created_at: string
+}
+
+interface CosmicMailAgentMailboxBindingRead {
+  mailbox_id: string
+  address: string
+  display_name: string | null
+  domain_id: string
+  domain_name: string
+  label: string | null
+  is_primary: boolean
+  inbound_sync_enabled: boolean
+  last_synced_at: string | null
+  last_sync_error: string | null
+}
+
+interface CosmicMailAgentRead {
+  id: string
+  organization_id: string
+  default_domain_id: string | null
+  default_domain_name: string | null
+  name: string
+  slug: string
+  title: string | null
+  persona_summary: string | null
+  system_prompt: string | null
+  signature: string | null
+  accent_color: string
+  avatar_url: string | null
+  signature_graphic_url: string | null
+  approval_required: boolean
+  status: string
+  created_at: string
+  updated_at: string
+  mailboxes: CosmicMailAgentMailboxBindingRead[]
+}
+
+interface CosmicMailMailboxRead {
+  id: string
+  organization_id: string
+  domain_id: string
+  local_part: string
+  address: string
+  display_name: string | null
+  status: string
+  james_user_created: boolean
+  quota_mb: number
+  quota_messages: number
+  inbound_sync_enabled: boolean
+  last_synced_at: string | null
+  last_sync_error: string | null
+  created_at: string
+}
+
+interface CosmicMailDNSRecord {
+  type: 'MX' | 'TXT'
+  host: string
+  value: string
+  priority?: number | null
+  ttl: number
+}
+
+interface CosmicMailDomainRead {
+  id: string
+  organization_id: string
+  name: string
+  status: string
+  james_domain_created: boolean
+  created_at: string
+  updated_at: string
+  dns_records: CosmicMailDNSRecord[]
+}
+
+interface CosmicMailDomainDeliverabilityRead {
+  domain_id: string
+  status: string
+  james_domain_created: boolean
+  mx_target: string
+  mx_priority: number
+  spf_value: string
+  dmarc_value: string
+  dkim_selector: string
+  dkim_public_key: string
+  dns_records: CosmicMailDNSRecord[]
+}
+
+interface CosmicMailDomainVerificationCheck {
+  type: 'MX' | 'TXT'
+  host: string
+  expected: string
+  observed: string[]
+  matched: boolean
+}
+
+interface CosmicMailDomainVerificationRead {
+  domain_id: string
+  status: string
+  all_records_present: boolean
+  james_domain_created: boolean
+  checks: CosmicMailDomainVerificationCheck[]
+}
+
+interface CosmicMailMailContact {
+  email: string
+  name: string | null
+}
+
+interface CosmicMailDraftRead {
+  id: string
+  organization_id: string
+  mailbox_id: string
+  thread_id: string | null
+  reply_to_message_id: string | null
+  subject: string
+  to_recipients: CosmicMailMailContact[]
+  cc_recipients: CosmicMailMailContact[]
+  bcc_recipients: CosmicMailMailContact[]
+  text_body: string | null
+  html_body: string | null
+  status: string
+  sent_message_id: string | null
+  last_error: string | null
+  created_at: string
+  updated_at: string
+  sent_at: string | null
+}
+
+interface CosmicMailThreadRead {
+  id: string
+  organization_id: string
+  mailbox_id: string
+  subject: string
+  normalized_subject: string
+  snippet: string | null
+  message_count: number
+  last_message_at: string
+  created_at: string
+  updated_at: string
+}
+
+interface CosmicMailMessageRead {
+  id: string
+  organization_id: string
+  mailbox_id: string
+  thread_id: string
+  draft_id: string | null
+  internet_message_id: string
+  source_uid: number | null
+  direction: 'inbound' | 'outbound'
+  folder_name: string
+  subject: string
+  normalized_subject: string
+  in_reply_to: string | null
+  references: string[]
+  from_name: string | null
+  from_address: string
+  to_recipients: CosmicMailMailContact[]
+  cc_recipients: CosmicMailMailContact[]
+  bcc_recipients: CosmicMailMailContact[]
+  reply_to_recipients: CosmicMailMailContact[]
+  text_body: string | null
+  html_body: string | null
+  preview_text: string | null
+  is_read: boolean
+  is_bounce: boolean
+  bounce_type: string | null
+  sent_at: string | null
+  received_at: string | null
+  created_at: string
+}
+
+interface CosmicMailDraftSendResult {
+  draft: CosmicMailDraftRead
+  thread?: CosmicMailThreadRead | null
+  message?: CosmicMailMessageRead | null
+  queued_for_approval?: boolean
+  approval_id?: string | null
+}
+
+interface CosmicMailApprovalRead {
+  id: string
+  organization_id: string
+  agent_id: string | null
+  agent_name: string | null
+  mailbox_id: string
+  mailbox_address: string
+  draft_id: string | null
+  draft: CosmicMailDraftRead | null
+  status: string
+  reviewer_note: string | null
+  created_at: string
+  reviewed_at: string | null
+}
+
+interface CosmicMailMailboxSyncResult {
+  mailbox_id: string
+  imported_count: number
+  skipped_count: number
+  last_inbound_uid: number
+  synced_at: string
+}
+
+const AGENT_EMAIL_SETTINGS_KEYS = {
+  baseUrl: 'cosmicMailBaseUrl',
+  apiToken: 'cosmicMailApiToken',
+} as const
+
 const MANAGE_REFRESH_MS = 30_000
 const MANAGE_REFRESH_TIMEOUT_MS = 8_000
 const MANAGE_PROVIDER_ACCENTS: AccentTone[] = ['azure', 'gold', 'mint', 'rose', 'slate']
@@ -272,6 +583,97 @@ function toErrorMessage(error: unknown): string {
       .replace(/^Error:\s*/i, '')
   }
   return 'Unable to fetch live VM metrics.'
+}
+
+function humanizeAgentEmailValue(value: unknown): string {
+  const source = String(value || '').trim()
+  if (!source) return 'Unknown'
+  return source
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+}
+
+function formatAgentEmailRelative(value: string | null | undefined): string {
+  if (!value) return '—'
+  const timestamp = new Date(value).getTime()
+  if (!Number.isFinite(timestamp)) return '—'
+  const diffMs = Date.now() - timestamp
+  const diffMinutes = Math.round(diffMs / 60000)
+  if (Math.abs(diffMinutes) < 1) return 'now'
+  if (Math.abs(diffMinutes) < 60) return `${Math.abs(diffMinutes)}m ago`
+  const diffHours = Math.round(diffMinutes / 60)
+  if (Math.abs(diffHours) < 24) return `${Math.abs(diffHours)}h ago`
+  const diffDays = Math.round(diffHours / 24)
+  if (Math.abs(diffDays) < 7) return `${Math.abs(diffDays)}d ago`
+  return new Date(value).toLocaleDateString([], { month: 'short', day: 'numeric' })
+}
+
+function formatAgentEmailAbsolute(value: string | null | undefined): string {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return '—'
+  return date.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+}
+
+function getAgentEmailInitials(name: string, maxChars = 2): string {
+  const trimmed = String(name || '').trim()
+  if (!trimmed) return '?'
+  const parts = trimmed.split(/\s+/).filter(Boolean)
+  if (parts.length === 1) {
+    return parts[0].slice(0, maxChars).toUpperCase()
+  }
+  const a = parts[0][0] || ''
+  const b = parts[parts.length - 1][0] || ''
+  return `${a}${b}`.toUpperCase()
+}
+
+function stripAgentEmailHtml(value: string | null | undefined): string {
+  return String(value || '')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function buildAgentEmailMessageBody(message: CosmicMailMessageRead): string {
+  return String(message.text_body || '').trim() || stripAgentEmailHtml(message.html_body) || String(message.preview_text || '').trim() || 'No readable message body.'
+}
+
+function buildAgentEmailSnippet(message: CosmicMailMessageRead | null | undefined, fallback?: string | null): string {
+  if (message) {
+    const preview = String(message.preview_text || '').trim() || buildAgentEmailMessageBody(message)
+    if (preview) return preview.slice(0, 180)
+  }
+  return String(fallback || '').trim() || 'No preview available.'
+}
+
+function mapAgentEmailAccent(value: string, category: 'agent' | 'inbox' | 'domain' | 'approval' | 'thread'): AccentTone {
+  const normalized = value.toLowerCase()
+  if (category === 'approval') {
+    if (normalized.includes('pending')) return 'gold'
+    if (normalized.includes('reject') || normalized.includes('error')) return 'rose'
+    if (normalized.includes('approve') || normalized.includes('ready')) return 'mint'
+    return 'azure'
+  }
+  if (category === 'thread') {
+    if (normalized.includes('escalat')) return 'rose'
+    if (normalized.includes('reply') || normalized.includes('unread')) return 'gold'
+    if (normalized.includes('wait')) return 'azure'
+    return 'mint'
+  }
+  if (normalized.includes('active') || normalized.includes('healthy') || normalized.includes('verified') || normalized.includes('connected')) return 'mint'
+  if (normalized.includes('pending') || normalized.includes('review') || normalized.includes('warm') || normalized.includes('queue')) return 'gold'
+  if (normalized.includes('error') || normalized.includes('block') || normalized.includes('reject') || normalized.includes('attention')) return 'rose'
+  if (normalized.includes('pilot') || normalized.includes('draft')) return 'azure'
+  return category === 'agent' ? 'gold' : 'slate'
 }
 
 function formatNumberShort(value: number | null, unit = 'items'): string {
@@ -577,6 +979,7 @@ const SPACE_PAGES: SpacePageDef[] = [
   { id: 'autopilot', label: 'Autopilot', kicker: 'Autonomous routines', countLabel: '04 routines', accent: 'mint' },
   { id: 'pulse', label: 'Pulse', kicker: 'Health and usage', countLabel: '04 signals', accent: 'rose' },
   { id: 'manage', label: 'Manage', kicker: 'Resources & billing', countLabel: 'Live', accent: 'slate' },
+  { id: 'agent-email', label: 'Agent Email', kicker: 'Mail control for agents', countLabel: 'Mail ops', accent: 'gold' },
 ]
 
 const CALENDAR_WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
@@ -789,6 +1192,15 @@ function SpacesNavIcon({ page }: { page: SpacesPageId }) {
       </svg>
     )
   }
+  if (page === 'agent-email') {
+    return (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="4" y="6" width="16" height="12" rx="2.5" />
+        <path d="m5.5 8.25 6.5 5 6.5-5" />
+        <path d="M8 10.5h8" opacity="0.42" />
+      </svg>
+    )
+  }
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
       <path d="M3.5 12h3.5l2-5.5 3 11 2.5-5.5h6" />
@@ -840,6 +1252,13 @@ export default function SpacesControlCenter({
 }: SpacesControlCenterProps) {
   const [page, setPage] = useState<SpacesPageId>('command')
   const [railCollapsed, setRailCollapsed] = useState(false)
+  const [agentEmailView, setAgentEmailView] = useState<AgentEmailViewId>('overview')
+  const [agentEmailSelectedAgentId, setAgentEmailSelectedAgentId] = useState('')
+  const [agentEmailSelectedInboxId, setAgentEmailSelectedInboxId] = useState('')
+  const [agentEmailSelectedDomainId, setAgentEmailSelectedDomainId] = useState('')
+  const [agentEmailSelectedApprovalId, setAgentEmailSelectedApprovalId] = useState('')
+  const [agentEmailSelectedThreadId, setAgentEmailSelectedThreadId] = useState('')
+  const [agentEmailSettingsSection, setAgentEmailSettingsSection] = useState<'connection' | 'domains' | 'inboxes' | 'agents'>('connection')
 
   /* ── Live calendar state ─────────────────────────────── */
   const [calendarData, setCalendarData] = useState<CalendarAgendaSnapshot>(EMPTY_CALENDAR_AGENDA)
@@ -1348,6 +1767,773 @@ export default function SpacesControlCenter({
 
   const calendarHasAccounts = calendarData.accounts.length > 0
 
+  const [agentEmailBaseUrl, setAgentEmailBaseUrl] = useState('')
+  const [agentEmailApiToken, setAgentEmailApiToken] = useState('')
+  const [agentEmailSettingsLoaded, setAgentEmailSettingsLoaded] = useState(false)
+  const [agentEmailLoading, setAgentEmailLoading] = useState(false)
+  const [agentEmailConfigSaving, setAgentEmailConfigSaving] = useState(false)
+  const [agentEmailSyncingInbox, setAgentEmailSyncingInbox] = useState(false)
+  const [agentEmailReplySending, setAgentEmailReplySending] = useState(false)
+  const [agentEmailCreatingDomain, setAgentEmailCreatingDomain] = useState(false)
+  const [agentEmailCreatingMailbox, setAgentEmailCreatingMailbox] = useState(false)
+  const [agentEmailCreatingNewAgent, setAgentEmailCreatingNewAgent] = useState(false)
+  const [agentEmailVerifyingDomain, setAgentEmailVerifyingDomain] = useState(false)
+  const [agentEmailActionId, setAgentEmailActionId] = useState<string | null>(null)
+  const [agentEmailError, setAgentEmailError] = useState<string | null>(null)
+  const [agentEmailBanner, setAgentEmailBanner] = useState<{ tone: AgentEmailBannerTone; message: string } | null>(null)
+  const [agentEmailOrg, setAgentEmailOrg] = useState<CosmicMailOrganizationRead | null>(null)
+  const [agentEmailChecklist, setAgentEmailChecklist] = useState<AgentEmailChecklistItem[]>([])
+  const [agentEmailAgents, setAgentEmailAgents] = useState<AgentEmailAgent[]>([])
+  const [agentEmailInboxes, setAgentEmailInboxes] = useState<AgentEmailInbox[]>([])
+  const [agentEmailThreads, setAgentEmailThreads] = useState<AgentEmailThread[]>([])
+  const [agentEmailDomains, setAgentEmailDomains] = useState<AgentEmailDomain[]>([])
+  const [agentEmailApprovals, setAgentEmailApprovals] = useState<AgentEmailApproval[]>([])
+  const [agentEmailReplyDraft, setAgentEmailReplyDraft] = useState('')
+  const [agentEmailDomainNameDraft, setAgentEmailDomainNameDraft] = useState('')
+  const [agentEmailMailboxLocalPartDraft, setAgentEmailMailboxLocalPartDraft] = useState('')
+  const [agentEmailMailboxDisplayNameDraft, setAgentEmailMailboxDisplayNameDraft] = useState('')
+  const [agentEmailMailboxDomainIdDraft, setAgentEmailMailboxDomainIdDraft] = useState('')
+  const [agentEmailNewAgentNameDraft, setAgentEmailNewAgentNameDraft] = useState('')
+  const [agentEmailNewAgentSlugDraft, setAgentEmailNewAgentSlugDraft] = useState('')
+  const [agentEmailNewAgentDomainIdDraft, setAgentEmailNewAgentDomainIdDraft] = useState('')
+  const [agentEmailInboxSearchQuery, setAgentEmailInboxSearchQuery] = useState('')
+  const [agentEmailInboxSearchApplied, setAgentEmailInboxSearchApplied] = useState('')
+  /** Inbox: reply composer expanded vs Gmail-style reply strip. */
+  const [agentEmailComposerExpanded, setAgentEmailComposerExpanded] = useState(false)
+  const agentEmailMessagesEndRef = useRef<HTMLDivElement>(null)
+  const agentEmailConfigReady = agentEmailBaseUrl.trim().length > 0 && agentEmailApiToken.trim().length > 0
+
+  const callAgentEmailApi = useCallback(async (
+    path: string,
+    init: {
+      method?: string
+      body?: unknown
+      timeoutMs?: number
+    } = {},
+  ) => {
+    if (!window.cosmic?.cosmicMailRequest) {
+      throw new Error('Cosmic Mail transport bridge is unavailable.')
+    }
+    const normalizedPath = (() => {
+      const cleanPath = path.startsWith('/') ? path : `/${path}`
+      if (cleanPath === '/health' || cleanPath === '/ready' || cleanPath.startsWith('/v1/')) {
+        return cleanPath
+      }
+      return `/v1${cleanPath}`
+    })()
+    return window.cosmic.cosmicMailRequest({
+      baseUrl: agentEmailBaseUrl.trim(),
+      apiToken: agentEmailApiToken.trim(),
+      path: normalizedPath,
+      method: init.method,
+      body: init.body,
+      timeoutMs: init.timeoutMs,
+    })
+  }, [agentEmailApiToken, agentEmailBaseUrl])
+
+  const loadAgentEmailThreads = useCallback(async (
+    mailboxId: string,
+    approvals: AgentEmailApproval[],
+    mailboxAddress?: string,
+    searchQuery?: string,
+  ): Promise<AgentEmailThread[]> => {
+    const q = (searchQuery || '').trim()
+    const threadsRawAll = await callAgentEmailApi(
+      `/threads?${new URLSearchParams({ mailbox_id: mailboxId }).toString()}`,
+    ) as CosmicMailThreadRead[]
+    const needle = q.toLowerCase()
+    const threadsRaw = needle
+      ? threadsRawAll.filter((thread) => {
+          const subject = (thread.subject || '').toLowerCase()
+          const normalized = (thread.normalized_subject || '').toLowerCase()
+          const snippet = (thread.snippet || '').toLowerCase()
+          return subject.includes(needle) || normalized.includes(needle) || snippet.includes(needle)
+        })
+      : threadsRawAll
+    const threads = [...threadsRaw].sort(
+      (a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime(),
+    )
+    const threadEntries = await Promise.all(threads.map(async (thread) => {
+      const messages = await callAgentEmailApi(`/threads/${thread.id}/messages`) as CosmicMailMessageRead[]
+      const sortedMessages = [...messages].sort((a, b) => {
+        const aTime = new Date(a.received_at || a.sent_at || a.created_at).getTime()
+        const bTime = new Date(b.received_at || b.sent_at || b.created_at).getTime()
+        return aTime - bTime
+      })
+      const lastMessage = sortedMessages[sortedMessages.length - 1] || null
+      const unread = sortedMessages.some((message) => message.direction === 'inbound' && !message.is_read)
+      const matchingApproval = approvals.find((approval) => {
+        if (approval.subject !== thread.subject) {
+          return false
+        }
+        if (!mailboxAddress) {
+          return true
+        }
+        return approval.mailbox === mailboxAddress
+      })
+      const state = matchingApproval && matchingApproval.subject === thread.subject
+        ? 'Awaiting approval'
+        : unread
+          ? 'Needs reply'
+          : lastMessage?.direction === 'outbound'
+            ? 'Waiting'
+            : 'Read'
+
+      return {
+        id: thread.id,
+        subject: thread.subject,
+        fromName: lastMessage?.from_name || lastMessage?.from_address || 'Unknown sender',
+        fromAddress: lastMessage?.from_address || '—',
+        time: formatAgentEmailRelative(lastMessage?.received_at || lastMessage?.sent_at || thread.last_message_at),
+        unread,
+        state,
+        snippet: buildAgentEmailSnippet(lastMessage, thread.snippet),
+        lastMessageAt: thread.last_message_at,
+        messages: sortedMessages.map((message) => ({
+          id: message.id,
+          direction: message.direction,
+          author: message.from_name || message.from_address || 'Unknown sender',
+          address: message.from_address,
+          time: formatAgentEmailAbsolute(message.received_at || message.sent_at || message.created_at),
+          body: buildAgentEmailMessageBody(message),
+          isRead: message.is_read,
+        })),
+      } satisfies AgentEmailThread
+    }))
+    return [...threadEntries].sort((a, b) => {
+      if (a.unread !== b.unread) {
+        return a.unread ? -1 : 1
+      }
+      return new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime()
+    })
+  }, [callAgentEmailApi])
+
+  const requestAgentEmailSnapshot = useCallback(async (showSpinner = false) => {
+    if (!agentEmailConfigReady) {
+      setAgentEmailOrg(null)
+      setAgentEmailChecklist([])
+      setAgentEmailAgents([])
+      setAgentEmailInboxes([])
+      setAgentEmailThreads([])
+      setAgentEmailDomains([])
+      setAgentEmailApprovals([])
+      setAgentEmailError(null)
+      return
+    }
+
+    if (showSpinner) {
+      setAgentEmailLoading(true)
+    }
+
+    try {
+      const authContext = await callAgentEmailApi('/system/auth-context') as CosmicMailAuthContextRead
+      const organizations = await callAgentEmailApi('/organizations') as CosmicMailOrganizationRead[]
+      const preferredOrganization =
+        organizations.find((organization) => organization.id === authContext.organization_id) ||
+        organizations.find((organization) => organization.slug.toLowerCase() === 'cosmic' || organization.name.toLowerCase() === 'cosmic') ||
+        organizations[0] ||
+        null
+
+      if (!preferredOrganization) {
+        setAgentEmailOrg(null)
+        setAgentEmailChecklist([
+          {
+            label: 'No organization found',
+            state: 'Needs setup',
+            note: 'Cosmic Mail is reachable, but this API key does not currently expose an organization.',
+            complete: false,
+          },
+        ])
+        setAgentEmailAgents([])
+        setAgentEmailInboxes([])
+        setAgentEmailThreads([])
+        setAgentEmailDomains([])
+        setAgentEmailApprovals([])
+        setAgentEmailError('No Cosmic Mail organization is available for this API key.')
+        return
+      }
+
+      const [agentsRaw, mailboxesRaw, domainsRaw, approvalsRaw] = await Promise.all([
+        callAgentEmailApi('/agents') as Promise<CosmicMailAgentRead[]>,
+        callAgentEmailApi('/mailboxes') as Promise<CosmicMailMailboxRead[]>,
+        callAgentEmailApi('/domains') as Promise<CosmicMailDomainRead[]>,
+        callAgentEmailApi('/approvals') as Promise<CosmicMailApprovalRead[]>,
+      ])
+
+      const organizationAgents = agentsRaw.filter((agent) => agent.organization_id === preferredOrganization.id)
+      const organizationMailboxes = mailboxesRaw.filter((mailbox) => mailbox.organization_id === preferredOrganization.id)
+      const organizationDomains = domainsRaw.filter((domain) => domain.organization_id === preferredOrganization.id)
+      const organizationApprovals = approvalsRaw.filter((approval) => approval.organization_id === preferredOrganization.id)
+
+      const domainDeliverability = await Promise.all(organizationDomains.map(async (domain) => {
+        try {
+          const detail = await callAgentEmailApi(`/domains/${domain.id}/deliverability`) as CosmicMailDomainDeliverabilityRead
+          return [domain.id, detail] as const
+        } catch {
+          return [domain.id, null] as const
+        }
+      }))
+
+      const domainDetailMap = new Map(domainDeliverability)
+      const mailboxAgentNames = new Map<string, string[]>()
+      for (const agent of organizationAgents) {
+        for (const mailbox of agent.mailboxes) {
+          const next = mailboxAgentNames.get(mailbox.mailbox_id) || []
+          next.push(agent.name)
+          mailboxAgentNames.set(mailbox.mailbox_id, next)
+        }
+      }
+
+      const mappedAgents: AgentEmailAgent[] = organizationAgents.map((agent) => ({
+        id: agent.id,
+        name: agent.name,
+        role: agent.title || agent.persona_summary || 'Default operator',
+        address: agent.mailboxes[0]?.address || `${agent.slug}@${agent.default_domain_name || preferredOrganization.slug}`,
+        status: humanizeAgentEmailValue(agent.status),
+        domain: agent.default_domain_name || agent.mailboxes[0]?.domain_name || preferredOrganization.slug,
+        inboxes: agent.mailboxes.map((mailbox) => mailbox.address),
+        approvalMode: agent.approval_required ? 'Required' : 'Autonomous',
+        lastActivity: agent.mailboxes[0]?.last_synced_at ? `Synced ${formatAgentEmailRelative(agent.mailboxes[0].last_synced_at)}` : 'No recent sync activity',
+        note: agent.persona_summary || agent.system_prompt || 'No agent summary has been provided yet.',
+        accent: mapAgentEmailAccent(agent.status, 'agent'),
+      }))
+
+      const mappedInboxes: AgentEmailInbox[] = organizationMailboxes.map((mailbox) => ({
+        id: mailbox.id,
+        address: mailbox.address,
+        type: mailbox.display_name || 'Primary',
+        status: humanizeAgentEmailValue(mailbox.status),
+        sync: mailbox.inbound_sync_enabled ? 'IMAP connected' : 'Sync disabled',
+        queue: mailbox.last_sync_error ? 'Needs attention' : 'Ready',
+        linkedAgents: mailboxAgentNames.get(mailbox.id) || [],
+        lastSync: formatAgentEmailRelative(mailbox.last_synced_at),
+        note: mailbox.last_sync_error || 'Inbound sync is healthy and this inbox is ready for review inside Spaces.',
+        accent: mapAgentEmailAccent(mailbox.status, 'inbox'),
+      }))
+
+      const mappedDomains: AgentEmailDomain[] = organizationDomains.map((domain) => {
+        const detail = domainDetailMap.get(domain.id)
+        const relatedMailboxes = organizationMailboxes.filter((mailbox) => mailbox.domain_id === domain.id)
+        const recordSource = detail?.dns_records || domain.dns_records
+        return {
+          id: domain.id,
+          name: domain.name,
+          status: humanizeAgentEmailValue(domain.status),
+          dns: recordSource.length
+            ? `${recordSource.filter((record) => !!record.value).length} records published`
+            : 'No DNS records available',
+          mailboxes: `${relatedMailboxes.length} inbox${relatedMailboxes.length === 1 ? '' : 'es'}`,
+          provider: 'External DNS',
+          reputation: detail?.status ? humanizeAgentEmailValue(detail.status) : humanizeAgentEmailValue(domain.status),
+          note: detail?.dmarc_value || 'DNS guidance is available once the domain is connected.',
+          records: recordSource.map((record) => ({
+            label: record.type === 'TXT'
+              ? (record.host.includes('_domainkey') ? 'DKIM' : record.host.includes('_dmarc') ? 'DMARC' : 'TXT')
+              : record.type,
+            status: record.value ? 'Published' : 'Missing',
+            value: `${record.host} -> ${record.value}`,
+          })),
+          accent: mapAgentEmailAccent(domain.status, 'domain'),
+        }
+      })
+
+      const mappedApprovals: AgentEmailApproval[] = organizationApprovals.map((approval) => ({
+        id: approval.id,
+        subject: approval.draft?.subject || 'Untitled draft',
+        agent: approval.agent_name || 'Unknown agent',
+        mailbox: approval.mailbox_address,
+        recipients: approval.draft?.to_recipients?.map((recipient) => recipient.email).join(', ') || '—',
+        state: humanizeAgentEmailValue(approval.status),
+        reason: approval.reviewer_note || 'Waiting for review',
+        time: formatAgentEmailRelative(approval.created_at),
+        summary: approval.draft?.text_body || stripAgentEmailHtml(approval.draft?.html_body) || 'No draft body available.',
+        excerpt: approval.draft?.text_body || stripAgentEmailHtml(approval.draft?.html_body) || 'No draft body available.',
+        accent: mapAgentEmailAccent(approval.status, 'approval'),
+      }))
+
+      const nextSelectedInboxId = mappedInboxes.find((inbox) => inbox.id === agentEmailSelectedInboxId)?.id || mappedInboxes[0]?.id || ''
+      const nextSelectedInbox = mappedInboxes.find((inbox) => inbox.id === nextSelectedInboxId)
+      const mappedThreads = nextSelectedInboxId
+        ? await loadAgentEmailThreads(nextSelectedInboxId, mappedApprovals, nextSelectedInbox?.address)
+        : []
+
+      setAgentEmailOrg(preferredOrganization)
+      setAgentEmailChecklist([
+        {
+          label: `${preferredOrganization.name} organization ready`,
+          state: 'Ready',
+          note: 'Spaces is connected to the default Cosmic Mail organization.',
+          complete: true,
+        },
+        {
+          label: 'Primary domain linked',
+          state: organizationDomains.length ? 'Verified' : 'Pending',
+          note: organizationDomains.length ? 'A sending domain is available for the default org.' : 'Link a domain to start sending from your own address.',
+          complete: organizationDomains.length > 0,
+        },
+        {
+          label: 'Default inbox connected',
+          state: organizationMailboxes.length ? 'Live' : 'Pending',
+          note: organizationMailboxes.length ? 'Inbound mail is flowing into the default inbox.' : 'Provision an inbox to begin receiving messages.',
+          complete: organizationMailboxes.length > 0,
+        },
+        {
+          label: 'Spaces live bridge',
+          state: 'Connected',
+          note: 'This screen is pulling live Cosmic Mail data now.',
+          complete: true,
+        },
+      ])
+      setAgentEmailAgents(mappedAgents)
+      setAgentEmailInboxes(mappedInboxes)
+      setAgentEmailThreads(mappedThreads)
+      setAgentEmailDomains(mappedDomains)
+      setAgentEmailApprovals(mappedApprovals)
+      setAgentEmailSelectedAgentId((current) => mappedAgents.find((agent) => agent.id === current)?.id || mappedAgents[0]?.id || '')
+      setAgentEmailSelectedInboxId(nextSelectedInboxId)
+      setAgentEmailSelectedThreadId((current) => mappedThreads.find((thread) => thread.id === current)?.id || mappedThreads[0]?.id || '')
+      setAgentEmailSelectedDomainId((current) => mappedDomains.find((domain) => domain.id === current)?.id || mappedDomains[0]?.id || '')
+      setAgentEmailSelectedApprovalId((current) => mappedApprovals.find((approval) => approval.id === current)?.id || mappedApprovals[0]?.id || '')
+      setAgentEmailError(null)
+    } catch (error: unknown) {
+      setAgentEmailError(toErrorMessage(error))
+    } finally {
+      setAgentEmailLoading(false)
+    }
+  }, [
+    agentEmailConfigReady,
+    agentEmailSelectedApprovalId,
+    agentEmailSelectedDomainId,
+    agentEmailSelectedInboxId,
+    callAgentEmailApi,
+    loadAgentEmailThreads,
+  ])
+
+  useEffect(() => {
+    if (!agentEmailBanner) return
+    const timer = window.setTimeout(() => setAgentEmailBanner(null), 4000)
+    return () => window.clearTimeout(timer)
+  }, [agentEmailBanner])
+
+  useEffect(() => {
+    const offSettings = window.cosmic?.onSettingsUpdate((settings) => {
+      setAgentEmailBaseUrl(String(settings?.[AGENT_EMAIL_SETTINGS_KEYS.baseUrl] ?? ''))
+      setAgentEmailApiToken(String(settings?.[AGENT_EMAIL_SETTINGS_KEYS.apiToken] ?? ''))
+      setAgentEmailSettingsLoaded(true)
+    })
+    window.cosmic?.getSettings()
+    return () => { offSettings?.() }
+  }, [])
+
+  useEffect(() => {
+    if (!active || !agentEmailSettingsLoaded) {
+      return
+    }
+    if (!agentEmailConfigReady) {
+      return
+    }
+    void requestAgentEmailSnapshot(false)
+  }, [active, agentEmailSettingsLoaded, agentEmailConfigReady, requestAgentEmailSnapshot])
+
+  useEffect(() => {
+    if (!active || page !== 'agent-email' || !agentEmailSettingsLoaded) {
+      return
+    }
+    if (!agentEmailConfigReady) {
+      return
+    }
+    void requestAgentEmailSnapshot(true)
+  }, [active, page, agentEmailSettingsLoaded, agentEmailConfigReady, requestAgentEmailSnapshot])
+
+  useEffect(() => {
+    if (!active || page !== 'agent-email' || !agentEmailConfigReady) {
+      return
+    }
+    if (!agentEmailSelectedInboxId) {
+      return
+    }
+    const selectedInboxExists = agentEmailInboxes.some((inbox) => inbox.id === agentEmailSelectedInboxId)
+    if (!selectedInboxExists) {
+      return
+    }
+    void (async () => {
+      try {
+        const selectedInbox = agentEmailInboxes.find((inbox) => inbox.id === agentEmailSelectedInboxId)
+        const threads = await loadAgentEmailThreads(
+          agentEmailSelectedInboxId,
+          agentEmailApprovals,
+          selectedInbox?.address,
+          agentEmailInboxSearchApplied,
+        )
+        setAgentEmailThreads(threads)
+        setAgentEmailSelectedThreadId((current) => threads.find((thread) => thread.id === current)?.id || threads[0]?.id || '')
+      } catch (error: unknown) {
+        setAgentEmailError(toErrorMessage(error))
+      }
+    })()
+  }, [
+    active,
+    agentEmailApprovals,
+    agentEmailConfigReady,
+    agentEmailInboxSearchApplied,
+    agentEmailInboxes,
+    agentEmailSelectedInboxId,
+    loadAgentEmailThreads,
+    page,
+  ])
+
+  useEffect(() => {
+    setAgentEmailReplyDraft('')
+    setAgentEmailComposerExpanded(false)
+  }, [agentEmailSelectedThreadId])
+
+  useEffect(() => {
+    if (!agentEmailThreads.length) {
+      setAgentEmailReplyDraft('')
+      setAgentEmailComposerExpanded(false)
+    }
+  }, [agentEmailThreads.length])
+
+  useEffect(() => {
+    if (!agentEmailConfigReady && agentEmailSettingsSection !== 'connection') {
+      setAgentEmailSettingsSection('connection')
+    }
+  }, [agentEmailConfigReady, agentEmailSettingsSection])
+
+  useEffect(() => {
+    const trimmed = agentEmailInboxSearchQuery.trim()
+    if (!trimmed) {
+      setAgentEmailInboxSearchApplied('')
+      return
+    }
+    const timer = window.setTimeout(() => {
+      setAgentEmailInboxSearchApplied(trimmed)
+    }, 400)
+    return () => window.clearTimeout(timer)
+  }, [agentEmailInboxSearchQuery])
+
+  useEffect(() => {
+    setAgentEmailInboxSearchQuery('')
+    setAgentEmailInboxSearchApplied('')
+  }, [agentEmailSelectedInboxId])
+
+  const agentEmailSelectedAgent = agentEmailAgents.find((agent) => agent.id === agentEmailSelectedAgentId) || agentEmailAgents[0] || null
+  const agentEmailSelectedInbox = agentEmailInboxes.find((inbox) => inbox.id === agentEmailSelectedInboxId) || agentEmailInboxes[0] || null
+  const agentEmailSelectedThread = agentEmailThreads.find((thread) => thread.id === agentEmailSelectedThreadId) || agentEmailThreads[0] || null
+  const agentEmailSelectedDomain = agentEmailDomains.find((domain) => domain.id === agentEmailSelectedDomainId) || agentEmailDomains[0] || null
+  const agentEmailSelectedApproval = agentEmailApprovals.find((approval) => approval.id === agentEmailSelectedApprovalId) || agentEmailApprovals[0] || null
+
+  useEffect(() => {
+    if (!agentEmailSelectedThread) return
+    const frame = window.requestAnimationFrame(() => {
+      agentEmailMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [agentEmailSelectedThread?.id, agentEmailSelectedThread?.messages.length])
+
+  const unreadAgentEmailThreads = agentEmailThreads.filter((thread) => thread.unread).length
+  const pendingAgentEmailApprovals = agentEmailApprovals.filter((approval) => approval.state === 'Pending').length
+  const agentEmailSidebarAttentionCount =
+    agentEmailConfigReady ? pendingAgentEmailApprovals + unreadAgentEmailThreads : 0
+  const activeAgentEmailDomains = agentEmailDomains.filter((domain) => domain.status === 'Active').length
+  const activeAgentEmailAgents = agentEmailAgents.filter((agent) => agent.status === 'Active').length
+  const agentEmailHasData =
+    agentEmailAgents.length > 0 ||
+    agentEmailInboxes.length > 0 ||
+    agentEmailDomains.length > 0 ||
+    agentEmailApprovals.length > 0 ||
+    agentEmailThreads.length > 0
+  const agentEmailConnectionStatus = !agentEmailConfigReady
+    ? { tone: 'rose' as const, label: 'Not connected' }
+    : agentEmailLoading
+      ? { tone: 'azure' as const, label: 'Syncing' }
+      : agentEmailError && !agentEmailHasData
+        ? { tone: 'gold' as const, label: 'Needs attention' }
+        : agentEmailOrg
+          ? { tone: 'mint' as const, label: `${agentEmailOrg.name} live` }
+          : { tone: 'azure' as const, label: 'Connected' }
+
+  const handleAgentEmailSaveConfig = useCallback(async () => {
+    const nextBaseUrl = agentEmailBaseUrl.trim()
+    const nextApiToken = agentEmailApiToken.trim()
+    if (!nextBaseUrl || !nextApiToken) {
+      setAgentEmailBanner({ tone: 'error', message: 'Add both a base URL and an API key.' })
+      return
+    }
+    try {
+      setAgentEmailConfigSaving(true)
+      window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.baseUrl, nextBaseUrl)
+      window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.apiToken, nextApiToken)
+      await requestAgentEmailSnapshot(true)
+      setAgentEmailBanner({ tone: 'success', message: 'Cosmic Mail connection saved.' })
+    } catch (error: unknown) {
+      setAgentEmailBanner({ tone: 'error', message: toErrorMessage(error) })
+    } finally {
+      setAgentEmailConfigSaving(false)
+    }
+  }, [agentEmailApiToken, agentEmailBaseUrl, requestAgentEmailSnapshot])
+
+  const handleAgentEmailSyncInbox = useCallback(async () => {
+    if (!agentEmailSelectedInbox) return
+    try {
+      setAgentEmailSyncingInbox(true)
+      const result = await callAgentEmailApi(`/mailboxes/${agentEmailSelectedInbox.id}/sync-inbox`, {
+        method: 'POST',
+        timeoutMs: 30000,
+      }) as CosmicMailMailboxSyncResult
+      await requestAgentEmailSnapshot(false)
+      setAgentEmailBanner({
+        tone: 'success',
+        message: `Inbox synced. Imported ${result.imported_count} message${result.imported_count === 1 ? '' : 's'}.`,
+      })
+    } catch (error: unknown) {
+      setAgentEmailBanner({ tone: 'error', message: toErrorMessage(error) })
+    } finally {
+      setAgentEmailSyncingInbox(false)
+    }
+  }, [agentEmailSelectedInbox, callAgentEmailApi, requestAgentEmailSnapshot])
+
+  const handleAgentEmailReply = useCallback(async () => {
+    if (!agentEmailSelectedThread || !agentEmailSelectedInbox || !agentEmailReplyDraft.trim()) return
+    try {
+      setAgentEmailReplySending(true)
+      const result = await callAgentEmailApi(`/threads/${agentEmailSelectedThread.id}/reply`, {
+        method: 'POST',
+        body: {
+          mailbox_id: agentEmailSelectedInbox.id,
+          text_body: agentEmailReplyDraft.trim(),
+        },
+        timeoutMs: 30000,
+      }) as CosmicMailDraftSendResult
+      setAgentEmailReplyDraft('')
+      setAgentEmailComposerExpanded(false)
+      await requestAgentEmailSnapshot(false)
+      if (result.queued_for_approval) {
+        setAgentEmailView('approvals')
+        setAgentEmailBanner({ tone: 'info', message: 'Reply queued for approval.' })
+      } else {
+        setAgentEmailBanner({ tone: 'success', message: 'Reply sent.' })
+      }
+    } catch (error: unknown) {
+      setAgentEmailBanner({ tone: 'error', message: toErrorMessage(error) })
+    } finally {
+      setAgentEmailReplySending(false)
+    }
+  }, [agentEmailReplyDraft, agentEmailSelectedInbox, agentEmailSelectedThread, callAgentEmailApi, requestAgentEmailSnapshot])
+
+  const handleAgentEmailCreateDomain = useCallback(async () => {
+    const nextDomain = agentEmailDomainNameDraft.trim()
+    if (!agentEmailOrg || !nextDomain) {
+      setAgentEmailBanner({ tone: 'error', message: 'Add a domain name first.' })
+      return
+    }
+    try {
+      setAgentEmailCreatingDomain(true)
+      const createdDomain = await callAgentEmailApi('/domains', {
+        method: 'POST',
+        body: {
+          organization_id: agentEmailOrg.id,
+          domain: nextDomain,
+        },
+        timeoutMs: 30000,
+      }) as CosmicMailDomainRead
+      setAgentEmailDomainNameDraft('')
+      setAgentEmailSelectedDomainId(createdDomain.id)
+      await requestAgentEmailSnapshot(false)
+      setAgentEmailBanner({ tone: 'success', message: 'Domain added. Publish the DNS records to finish setup.' })
+    } catch (error: unknown) {
+      setAgentEmailBanner({ tone: 'error', message: toErrorMessage(error) })
+    } finally {
+      setAgentEmailCreatingDomain(false)
+    }
+  }, [agentEmailDomainNameDraft, agentEmailOrg, callAgentEmailApi, requestAgentEmailSnapshot])
+
+  const handleAgentEmailVerifyDomain = useCallback(async () => {
+    if (!agentEmailSelectedDomain) return
+    try {
+      setAgentEmailVerifyingDomain(true)
+      const verification = await callAgentEmailApi(`/domains/${agentEmailSelectedDomain.id}/verify-dns`, {
+        method: 'POST',
+        timeoutMs: 30000,
+      }) as CosmicMailDomainVerificationRead
+      await requestAgentEmailSnapshot(false)
+      setAgentEmailBanner({
+        tone: verification.all_records_present ? 'success' : 'info',
+        message: verification.all_records_present ? 'All DNS records are live.' : 'Some DNS records are still missing.',
+      })
+    } catch (error: unknown) {
+      setAgentEmailBanner({ tone: 'error', message: toErrorMessage(error) })
+    } finally {
+      setAgentEmailVerifyingDomain(false)
+    }
+  }, [agentEmailSelectedDomain, callAgentEmailApi, requestAgentEmailSnapshot])
+
+  useEffect(() => {
+    if (agentEmailDomains.length && !agentEmailMailboxDomainIdDraft) {
+      setAgentEmailMailboxDomainIdDraft(agentEmailDomains[0].id)
+    }
+  }, [agentEmailDomains, agentEmailMailboxDomainIdDraft])
+
+  useEffect(() => {
+    if (agentEmailDomains.length && !agentEmailNewAgentDomainIdDraft) {
+      setAgentEmailNewAgentDomainIdDraft(agentEmailDomains[0].id)
+    }
+  }, [agentEmailDomains, agentEmailNewAgentDomainIdDraft])
+
+  const handleAgentEmailCreateMailbox = useCallback(async () => {
+    const localPart = agentEmailMailboxLocalPartDraft.trim()
+    const domainId = agentEmailMailboxDomainIdDraft
+    if (!agentEmailOrg || !localPart || !domainId) {
+      setAgentEmailBanner({ tone: 'error', message: 'Choose a domain and enter a local part (e.g. support).' })
+      return
+    }
+    try {
+      setAgentEmailCreatingMailbox(true)
+      await callAgentEmailApi('/mailboxes', {
+        method: 'POST',
+        body: {
+          organization_id: agentEmailOrg.id,
+          domain_id: domainId,
+          local_part: localPart,
+          ...(agentEmailMailboxDisplayNameDraft.trim() ? { display_name: agentEmailMailboxDisplayNameDraft.trim() } : {}),
+        },
+        timeoutMs: 30000,
+      })
+      setAgentEmailMailboxLocalPartDraft('')
+      setAgentEmailMailboxDisplayNameDraft('')
+      await requestAgentEmailSnapshot(false)
+      setAgentEmailBanner({ tone: 'success', message: 'Mailbox created.' })
+    } catch (error: unknown) {
+      setAgentEmailBanner({ tone: 'error', message: toErrorMessage(error) })
+    } finally {
+      setAgentEmailCreatingMailbox(false)
+    }
+  }, [
+    agentEmailMailboxDisplayNameDraft,
+    agentEmailMailboxDomainIdDraft,
+    agentEmailMailboxLocalPartDraft,
+    agentEmailOrg,
+    callAgentEmailApi,
+    requestAgentEmailSnapshot,
+  ])
+
+  const handleAgentEmailCreateNewAgent = useCallback(async () => {
+    const name = agentEmailNewAgentNameDraft.trim()
+    let slug = agentEmailNewAgentSlugDraft.trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '')
+    if (!slug && name) {
+      slug = name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+    }
+    if (!agentEmailOrg || !name || !slug) {
+      setAgentEmailBanner({ tone: 'error', message: 'Enter a display name and a slug (e.g. billing-agent).' })
+      return
+    }
+    try {
+      setAgentEmailCreatingNewAgent(true)
+      await callAgentEmailApi('/agents', {
+        method: 'POST',
+        body: {
+          organization_id: agentEmailOrg.id,
+          name,
+          slug,
+          ...(agentEmailNewAgentDomainIdDraft ? { default_domain_id: agentEmailNewAgentDomainIdDraft } : {}),
+        },
+        timeoutMs: 30000,
+      })
+      setAgentEmailNewAgentNameDraft('')
+      setAgentEmailNewAgentSlugDraft('')
+      await requestAgentEmailSnapshot(false)
+      setAgentEmailBanner({ tone: 'success', message: 'Agent created.' })
+    } catch (error: unknown) {
+      setAgentEmailBanner({ tone: 'error', message: toErrorMessage(error) })
+    } finally {
+      setAgentEmailCreatingNewAgent(false)
+    }
+  }, [
+    agentEmailNewAgentDomainIdDraft,
+    agentEmailNewAgentNameDraft,
+    agentEmailNewAgentSlugDraft,
+    agentEmailOrg,
+    callAgentEmailApi,
+    requestAgentEmailSnapshot,
+  ])
+
+  const handleAgentEmailApprove = useCallback(async (approvalId: string) => {
+    try {
+      setAgentEmailActionId(approvalId)
+      await callAgentEmailApi(`/approvals/${approvalId}/approve`, {
+        method: 'POST',
+        timeoutMs: 30000,
+      })
+      await requestAgentEmailSnapshot(false)
+      setAgentEmailBanner({ tone: 'success', message: 'Approval released and sent.' })
+    } catch (error: unknown) {
+      setAgentEmailBanner({ tone: 'error', message: toErrorMessage(error) })
+    } finally {
+      setAgentEmailActionId(null)
+    }
+  }, [callAgentEmailApi, requestAgentEmailSnapshot])
+
+  const handleAgentEmailReject = useCallback(async (approvalId: string) => {
+    try {
+      setAgentEmailActionId(approvalId)
+      await callAgentEmailApi(`/approvals/${approvalId}/reject`, {
+        method: 'POST',
+        body: { note: 'Rejected from Spaces.' },
+        timeoutMs: 30000,
+      })
+      await requestAgentEmailSnapshot(false)
+      setAgentEmailBanner({ tone: 'success', message: 'Approval rejected.' })
+    } catch (error: unknown) {
+      setAgentEmailBanner({ tone: 'error', message: toErrorMessage(error) })
+    } finally {
+      setAgentEmailActionId(null)
+    }
+  }, [callAgentEmailApi, requestAgentEmailSnapshot])
+
+  const agentEmailViews: Array<{ id: AgentEmailViewId; label: string; kicker: string; signal: string; detail: string }> = [
+    { id: 'overview', label: 'Overview', kicker: 'Command view', signal: 'Setup + health', detail: 'Start with readiness, the default Cosmic mail setup, and the current operating posture.' },
+    { id: 'agents', label: 'Agent', kicker: '', signal: 'Default identity', detail: 'Default identity for outbound mail and inbox triage.' },
+    { id: 'inboxes', label: 'Inbox', kicker: '', signal: `${unreadAgentEmailThreads} unread`, detail: '' },
+    { id: 'approvals', label: 'Approvals', kicker: '', signal: `${pendingAgentEmailApprovals} waiting`, detail: '' },
+    {
+      id: 'settings',
+      label: 'Settings',
+      kicker: 'Cosmic API',
+      signal: agentEmailConfigReady ? `${agentEmailDomains.length} domain · ${agentEmailConnectionStatus.label}` : agentEmailConnectionStatus.label,
+      detail: 'Connection, sending domains, DNS verification, and console hosts such as thelearnchain.',
+    },
+  ]
+
+  const agentEmailMetrics: Array<{ label: string; value: string; note: string; tone: MetricTone }> = [
+    {
+      label: 'Agent',
+      value: String(agentEmailAgents.length).padStart(2, '0'),
+      note: `${activeAgentEmailAgents} default identity active for the Cosmic org.`,
+      tone: 'cool',
+    },
+    {
+      label: 'Inbox',
+      value: String(agentEmailInboxes.length).padStart(2, '0'),
+      note: `${unreadAgentEmailThreads} unread conversations currently sitting in the primary inbox.`,
+      tone: 'good',
+    },
+    {
+      label: 'Domain',
+      value: `${activeAgentEmailDomains}/${agentEmailDomains.length}`,
+      note: 'The default sending domain is verified and ready for normal operation.',
+      tone: 'muted',
+    },
+    {
+      label: 'Approvals',
+      value: String(pendingAgentEmailApprovals).padStart(2, '0'),
+      note: 'Outbound currently paused for review, policy checks, or send-window timing.',
+      tone: 'warm',
+    },
+  ]
+
   const currentPage = SPACE_PAGES.find((item) => item.id === page) || SPACE_PAGES[0]
 
   /* ── PAGE RENDERERS ───────────────────────────────────── */
@@ -1519,10 +2705,11 @@ export default function SpacesControlCenter({
                 className="cal-detail-back"
                 onClick={() => setSelectedCalEvent(null)}
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                  <path d="M19 12H5" />
+                  <path d="M12 19l-7-7 7-7" />
                 </svg>
-                Back to Calendar
+                Back
               </button>
               <div className="cal-detail-nav-cal">
                 <span className={`cal-detail-nav-dot ${accent}`} />
@@ -2194,6 +3381,1000 @@ export default function SpacesControlCenter({
     </div>
   )
 
+  const renderAgentEmailPage = () => renderAgentEmailPageMinimal()
+
+  const renderAgentEmailPageMinimal = () => {
+    const currentAgentEmailTab = agentEmailViews.find((item) => item.id === agentEmailView) || agentEmailViews[0]
+    const orgName = agentEmailOrg?.name || 'Cosmic'
+    const selectedAgentName = agentEmailSelectedAgent?.name || 'Cosmic Agent'
+    const selectedInboxName = agentEmailSelectedInbox?.address || 'Primary inbox'
+    const primaryDomainLabel = agentEmailSelectedDomain?.name || agentEmailDomains[0]?.name || 'No domain linked'
+
+    const shortenAgentEmailUrl = (value: string, max = 42) => {
+      const t = value.trim()
+      if (!t) return '—'
+      if (t.length <= max) return t
+      return `${t.slice(0, Math.max(0, max - 1))}…`
+    }
+
+    const renderAgentEmailConnectionBanners = () => (
+      <>
+        {agentEmailBanner ? (
+          <div className={`agent-email-banner ${agentEmailBanner.tone}`}>{agentEmailBanner.message}</div>
+        ) : null}
+        {agentEmailError && agentEmailHasData ? (
+          <div className="agent-email-banner warning">{agentEmailError}</div>
+        ) : null}
+      </>
+    )
+
+    const renderAgentEmailEmptyState = (
+      title: string,
+      description: string,
+      actionLabel?: string,
+      onAction?: () => void,
+    ) => (
+      <div className="agent-email-minimal-empty">
+        <strong>{title}</strong>
+        <p>{description}</p>
+        {actionLabel && onAction ? (
+          <button type="button" className="agent-email-console-primary agent-email-empty-action" onClick={onAction}>
+            {actionLabel}
+          </button>
+        ) : null}
+      </div>
+    )
+
+    const renderAgentEmailConnectionPanel = () => (
+      <section className="agent-email-connection-card agent-email-connection-card--settings">
+        <div className="agent-email-connection-head">
+          <div>
+            <div className="spaces-card-kicker">Cosmic Mail API</div>
+            <h3>{agentEmailOrg ? `${agentEmailOrg.name}` : 'Connection'}</h3>
+            <p className="agent-email-connection-lead">Base URL and org API key for your Cosmic Mail control plane.</p>
+          </div>
+          <div className="agent-email-connection-actions">
+            <span className={`agent-email-minimal-pill ${agentEmailConnectionStatus.tone}`}>{agentEmailConnectionStatus.label}</span>
+            <button
+              type="button"
+              className="agent-email-console-secondary"
+              onClick={() => void requestAgentEmailSnapshot(true)}
+              disabled={!agentEmailConfigReady || agentEmailLoading}
+            >
+              {agentEmailLoading ? 'Refreshing…' : 'Refresh'}
+            </button>
+          </div>
+        </div>
+
+        {renderAgentEmailConnectionBanners()}
+
+        <div className="agent-email-form-grid">
+          <label className="agent-email-form-field">
+            <span>Base URL</span>
+            <input
+              className="agent-email-form-input"
+              type="text"
+              value={agentEmailBaseUrl}
+              placeholder="https://console.thelearnchain.com"
+              onChange={(event) => setAgentEmailBaseUrl(event.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </label>
+
+          <label className="agent-email-form-field">
+            <span>API key</span>
+            <input
+              className="agent-email-form-input"
+              type="password"
+              value={agentEmailApiToken}
+              placeholder="Paste a Cosmic Mail org or admin key"
+              onChange={(event) => setAgentEmailApiToken(event.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </label>
+
+          <div className="agent-email-form-field agent-email-form-actions">
+            <span>Actions</span>
+            <div className="agent-email-form-action-row">
+              <button
+                type="button"
+                className="agent-email-console-primary"
+                onClick={() => void handleAgentEmailSaveConfig()}
+                disabled={agentEmailConfigSaving}
+              >
+                {agentEmailConfigSaving ? 'Saving…' : 'Save connection'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+    )
+
+    const renderAgentEmailDomainsSection = () => (
+      <div className="agent-email-settings-domains">
+        <section className="agent-email-settings-domain-add" aria-label="Add domain">
+          <div className="agent-email-settings-domain-add-text">
+            <h4 className="agent-email-settings-section-title">Add a sending domain</h4>
+            <p className="agent-email-settings-section-lead">Creates the domain in Cosmic Mail; you publish DNS at your provider.</p>
+          </div>
+          <div className="agent-email-settings-domain-add-row">
+            <input
+              className="agent-email-form-input agent-email-settings-domain-add-input"
+              type="text"
+              value={agentEmailDomainNameDraft}
+              placeholder="mail.example.com"
+              onChange={(event) => setAgentEmailDomainNameDraft(event.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+              aria-label="Domain name"
+            />
+            <button
+              type="button"
+              className="agent-email-console-primary agent-email-settings-domain-add-btn"
+              onClick={() => void handleAgentEmailCreateDomain()}
+              disabled={agentEmailCreatingDomain || !agentEmailDomainNameDraft.trim() || !agentEmailOrg}
+            >
+              {agentEmailCreatingDomain ? 'Linking…' : 'Link'}
+            </button>
+          </div>
+        </section>
+
+        <div className="agent-email-settings-domain-split">
+          <div className="agent-email-settings-domain-list-panel">
+            <div className="agent-email-settings-panel-label">Your domains</div>
+            {agentEmailDomains.length ? (
+              <div className="agent-email-console-table-wrap agent-email-settings-domain-table-wrap">
+                <table className="agent-email-console-table agent-email-settings-domain-table">
+                  <thead>
+                    <tr>
+                      <th>Domain</th>
+                      <th>Status</th>
+                      <th>Mailboxes</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {agentEmailDomains.map((domain) => (
+                      <tr
+                        key={domain.id}
+                        className={agentEmailSelectedDomain?.id === domain.id ? 'active' : ''}
+                        onClick={() => setAgentEmailSelectedDomainId(domain.id)}
+                      >
+                        <td data-label="Domain"><strong>{domain.name}</strong></td>
+                        <td data-label="Status"><span className={`agent-email-minimal-pill ${domain.accent}`}>{domain.status}</span></td>
+                        <td data-label="Mailboxes">{domain.mailboxes}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              renderAgentEmailEmptyState('No domain yet', 'Link a domain above to generate DNS records.')
+            )}
+          </div>
+
+          <div className="agent-email-settings-domain-detail-panel">
+            <div className="agent-email-settings-panel-label">Details</div>
+            {agentEmailSelectedDomain ? (
+              <article className="agent-email-console-card agent-email-settings-domain-detail-card">
+                <div className="agent-email-console-card-head agent-email-settings-domain-detail-head">
+                  <div>
+                    <h4>{agentEmailSelectedDomain.name}</h4>
+                    <p className="agent-email-settings-domain-detail-provider">{agentEmailSelectedDomain.provider}</p>
+                  </div>
+                  <div className="agent-email-settings-domain-detail-actions">
+                    <span className={`agent-email-minimal-pill ${agentEmailSelectedDomain.accent}`}>{agentEmailSelectedDomain.status}</span>
+                    <button
+                      type="button"
+                      className="agent-email-console-primary agent-email-settings-verify-btn"
+                      onClick={() => void handleAgentEmailVerifyDomain()}
+                      disabled={agentEmailVerifyingDomain}
+                    >
+                      {agentEmailVerifyingDomain ? 'Verifying…' : 'Verify DNS'}
+                    </button>
+                  </div>
+                </div>
+                <div className="agent-email-console-detail-rows">
+                  <div className="agent-email-console-detail-row"><span>DNS posture</span><strong>{agentEmailSelectedDomain.dns}</strong></div>
+                  <div className="agent-email-console-detail-row"><span>Reputation</span><strong>{agentEmailSelectedDomain.reputation}</strong></div>
+                  <div className="agent-email-console-detail-row"><span>Records</span><strong>{agentEmailSelectedDomain.records.length}</strong></div>
+                </div>
+                <div className="agent-email-console-records">
+                  {agentEmailSelectedDomain.records.length ? agentEmailSelectedDomain.records.map((record) => (
+                    <div key={`${record.label}-${record.value}`} className="agent-email-console-record">
+                      <div>
+                        <strong>{record.label}</strong>
+                        <p>{record.value}</p>
+                      </div>
+                      <span>{record.status}</span>
+                    </div>
+                  )) : renderAgentEmailEmptyState('No DNS rows yet', 'Records appear after the domain is provisioned.')}
+                </div>
+                {agentEmailSelectedDomain.note ? (
+                  <div className="agent-email-console-text-block agent-email-settings-domain-notes">
+                    <span>Notes</span>
+                    <p>{agentEmailSelectedDomain.note}</p>
+                  </div>
+                ) : null}
+              </article>
+            ) : (
+              <div className="agent-email-settings-domain-detail-placeholder">
+                {renderAgentEmailEmptyState('Select a domain', 'Pick a row on the left to view DNS and verification.')}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    )
+
+    const renderAgentEmailMailboxesSection = () => (
+      <div className="agent-email-settings-domains">
+        <section className="agent-email-settings-domain-add" aria-label="Add mailbox">
+          <div className="agent-email-settings-domain-add-text">
+            <h4 className="agent-email-settings-section-title">Add an inbox</h4>
+            <p className="agent-email-settings-section-lead">Creates a mailbox on a verified domain via Cosmic Mail.</p>
+          </div>
+          <div className="agent-email-settings-provision-grid">
+            <label className="agent-email-form-field">
+              <span>Domain</span>
+              <select
+                className="agent-email-form-input"
+                value={agentEmailMailboxDomainIdDraft}
+                onChange={(event) => setAgentEmailMailboxDomainIdDraft(event.target.value)}
+                aria-label="Domain for new mailbox"
+              >
+                {agentEmailDomains.length ? agentEmailDomains.map((d) => (
+                  <option key={d.id} value={d.id}>{d.name}</option>
+                )) : (
+                  <option value="">No domain linked</option>
+                )}
+              </select>
+            </label>
+            <label className="agent-email-form-field">
+              <span>Local part</span>
+              <input
+                className="agent-email-form-input"
+                type="text"
+                value={agentEmailMailboxLocalPartDraft}
+                placeholder="support"
+                onChange={(event) => setAgentEmailMailboxLocalPartDraft(event.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+                aria-label="Local part before @"
+              />
+            </label>
+            <label className="agent-email-form-field">
+              <span>Display name (optional)</span>
+              <input
+                className="agent-email-form-input"
+                type="text"
+                value={agentEmailMailboxDisplayNameDraft}
+                placeholder="Support"
+                onChange={(event) => setAgentEmailMailboxDisplayNameDraft(event.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </label>
+            <div className="agent-email-form-field agent-email-settings-provision-actions">
+              <span>&nbsp;</span>
+              <button
+                type="button"
+                className="agent-email-console-primary"
+                onClick={() => void handleAgentEmailCreateMailbox()}
+                disabled={
+                  agentEmailCreatingMailbox
+                  || !agentEmailOrg
+                  || !agentEmailDomains.length
+                  || !agentEmailMailboxLocalPartDraft.trim()
+                }
+              >
+                {agentEmailCreatingMailbox ? 'Creating…' : 'Create mailbox'}
+              </button>
+            </div>
+          </div>
+        </section>
+        <p className="agent-email-settings-hint">
+          Link a domain under Domains first if none appear here.
+        </p>
+      </div>
+    )
+
+    const renderAgentEmailAgentsProvisionSection = () => (
+      <div className="agent-email-settings-domains">
+        <section className="agent-email-settings-domain-add" aria-label="Add agent">
+          <div className="agent-email-settings-domain-add-text">
+            <h4 className="agent-email-settings-section-title">Add an agent</h4>
+            <p className="agent-email-settings-section-lead">Registers a new mail agent identity in your organization.</p>
+          </div>
+          <div className="agent-email-settings-provision-grid">
+            <label className="agent-email-form-field">
+              <span>Display name</span>
+              <input
+                className="agent-email-form-input"
+                type="text"
+                value={agentEmailNewAgentNameDraft}
+                placeholder="Billing assistant"
+                onChange={(event) => setAgentEmailNewAgentNameDraft(event.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </label>
+            <label className="agent-email-form-field">
+              <span>Slug</span>
+              <input
+                className="agent-email-form-input"
+                type="text"
+                value={agentEmailNewAgentSlugDraft}
+                placeholder="billing-assistant"
+                onChange={(event) => setAgentEmailNewAgentSlugDraft(event.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+                aria-label="Agent slug"
+              />
+            </label>
+            <label className="agent-email-form-field">
+              <span>Default domain</span>
+              <select
+                className="agent-email-form-input"
+                value={agentEmailNewAgentDomainIdDraft}
+                onChange={(event) => setAgentEmailNewAgentDomainIdDraft(event.target.value)}
+                aria-label="Default sending domain"
+              >
+                {agentEmailDomains.length ? agentEmailDomains.map((d) => (
+                  <option key={d.id} value={d.id}>{d.name}</option>
+                )) : (
+                  <option value="">No domain linked</option>
+                )}
+              </select>
+            </label>
+            <div className="agent-email-form-field agent-email-settings-provision-actions">
+              <span>&nbsp;</span>
+              <button
+                type="button"
+                className="agent-email-console-primary"
+                onClick={() => void handleAgentEmailCreateNewAgent()}
+                disabled={
+                  agentEmailCreatingNewAgent
+                  || !agentEmailOrg
+                  || !agentEmailNewAgentNameDraft.trim()
+                }
+              >
+                {agentEmailCreatingNewAgent ? 'Creating…' : 'Create agent'}
+              </button>
+            </div>
+          </div>
+        </section>
+      </div>
+    )
+
+    const renderAgentEmailContent = () => {
+      if (agentEmailView === 'settings') {
+        return (
+          <div className="agent-email-settings-page">
+            <div className="agent-email-settings-subnav" role="tablist" aria-label="Settings sections">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={agentEmailSettingsSection === 'connection'}
+                className={`agent-email-settings-subtab ${agentEmailSettingsSection === 'connection' ? 'active' : ''}`}
+                onClick={() => setAgentEmailSettingsSection('connection')}
+              >
+                Connection
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={agentEmailSettingsSection === 'domains'}
+                className={`agent-email-settings-subtab ${agentEmailSettingsSection === 'domains' ? 'active' : ''}`}
+                disabled={!agentEmailConfigReady}
+                onClick={() => {
+                  if (agentEmailConfigReady) {
+                    setAgentEmailSettingsSection('domains')
+                  }
+                }}
+              >
+                Domains
+                {agentEmailConfigReady && agentEmailDomains.length > 0 ? (
+                  <span className="agent-email-settings-subtab-count">{agentEmailDomains.length}</span>
+                ) : null}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={agentEmailSettingsSection === 'inboxes'}
+                className={`agent-email-settings-subtab ${agentEmailSettingsSection === 'inboxes' ? 'active' : ''}`}
+                disabled={!agentEmailConfigReady}
+                onClick={() => {
+                  if (agentEmailConfigReady) {
+                    setAgentEmailSettingsSection('inboxes')
+                  }
+                }}
+              >
+                Inboxes
+                {agentEmailConfigReady && agentEmailInboxes.length > 0 ? (
+                  <span className="agent-email-settings-subtab-count">{agentEmailInboxes.length}</span>
+                ) : null}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={agentEmailSettingsSection === 'agents'}
+                className={`agent-email-settings-subtab ${agentEmailSettingsSection === 'agents' ? 'active' : ''}`}
+                disabled={!agentEmailConfigReady}
+                onClick={() => {
+                  if (agentEmailConfigReady) {
+                    setAgentEmailSettingsSection('agents')
+                  }
+                }}
+              >
+                Agents
+                {agentEmailConfigReady && agentEmailAgents.length > 0 ? (
+                  <span className="agent-email-settings-subtab-count">{agentEmailAgents.length}</span>
+                ) : null}
+              </button>
+            </div>
+            {agentEmailSettingsSection === 'connection' ? renderAgentEmailConnectionPanel() : null}
+            {agentEmailConfigReady && agentEmailSettingsSection === 'domains' ? renderAgentEmailDomainsSection() : null}
+            {agentEmailConfigReady && agentEmailSettingsSection === 'inboxes' ? renderAgentEmailMailboxesSection() : null}
+            {agentEmailConfigReady && agentEmailSettingsSection === 'agents' ? renderAgentEmailAgentsProvisionSection() : null}
+          </div>
+        )
+      }
+
+      if (!agentEmailConfigReady) {
+        return renderAgentEmailEmptyState(
+          'Cosmic Mail',
+          'Configure the API base URL and key in Settings.',
+          'Open Settings',
+          () => setAgentEmailView('settings'),
+        )
+      }
+
+      if (agentEmailLoading && !agentEmailHasData) {
+        return renderAgentEmailEmptyState(
+          'Loading Agent Email',
+          'Spaces is pulling the current organization, inbox, threads, domains, and approval state from Cosmic Mail.',
+        )
+      }
+
+      if (agentEmailError && !agentEmailHasData) {
+        return renderAgentEmailEmptyState(
+          'Unable to load Agent Email',
+          agentEmailError,
+          'Retry',
+          () => { void requestAgentEmailSnapshot(true) },
+        )
+      }
+
+      if (agentEmailView === 'overview') {
+        return (
+          <div className="agent-email-console-overview">
+            <section className="agent-email-console-stats">
+              {agentEmailMetrics.map((metric) => (
+                <article key={metric.label} className="agent-email-console-stat">
+                  <div className="agent-email-console-stat-label">{metric.label}</div>
+                  <div className="agent-email-console-stat-value">{metric.value}</div>
+                  <div className="agent-email-console-stat-meta">{metric.note}</div>
+                </article>
+              ))}
+            </section>
+
+            <section className="agent-email-console-two-col">
+              <div className="agent-email-console-stack">
+                <article className="agent-email-console-card">
+                  <div className="agent-email-console-card-head">
+                    <h4>Setup checklist</h4>
+                  </div>
+                  <div className="agent-email-console-checks">
+                    {agentEmailChecklist.map((item) => (
+                      <div key={item.label} className="agent-email-console-check">
+                        <div className={`agent-email-console-check-dot ${item.complete ? 'complete' : ''}`} />
+                        <div>
+                          <strong>{item.label}</strong>
+                          <p>{item.note}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </article>
+
+                <article className="agent-email-console-card">
+                  <div className="agent-email-console-card-head">
+                    <h4>Default agent</h4>
+                    <button type="button" className="agent-email-console-link" onClick={() => setAgentEmailView('agents')}>
+                      Open
+                    </button>
+                  </div>
+                  <div className="agent-email-console-simple-list">
+                    {agentEmailSelectedAgent ? (
+                      <button
+                        type="button"
+                        className="agent-email-console-simple-row"
+                        onClick={() => {
+                          setAgentEmailSelectedAgentId(agentEmailSelectedAgent.id)
+                          setAgentEmailView('agents')
+                        }}
+                      >
+                        <div>
+                          <strong>{agentEmailSelectedAgent.name}</strong>
+                          <span>{agentEmailSelectedAgent.role}</span>
+                        </div>
+                        <span className={`agent-email-minimal-pill ${agentEmailSelectedAgent.accent}`}>{agentEmailSelectedAgent.status}</span>
+                      </button>
+                    ) : (
+                      renderAgentEmailEmptyState('No agent yet', 'Create or expose a default agent in Cosmic Mail to manage outbound identity here.')
+                    )}
+                  </div>
+                </article>
+              </div>
+
+              <div className="agent-email-console-stack">
+                <article className="agent-email-console-card">
+                  <div className="agent-email-console-card-head">
+                    <h4>System</h4>
+                  </div>
+                  <div className="agent-email-console-detail-rows">
+                    <div className="agent-email-console-detail-row"><span>Organization</span><strong>{orgName}</strong></div>
+                    <div className="agent-email-console-detail-row"><span>Live bridge</span><strong>{agentEmailConnectionStatus.label}</strong></div>
+                    <div className="agent-email-console-detail-row"><span>Approval pressure</span><strong>{pendingAgentEmailApprovals} waiting</strong></div>
+                    <div className="agent-email-console-detail-row"><span>Active domains</span><strong>{activeAgentEmailDomains}/{agentEmailDomains.length}</strong></div>
+                    <div className="agent-email-console-detail-row"><span>Inbox</span><strong>{unreadAgentEmailThreads} unread</strong></div>
+                  </div>
+                </article>
+              </div>
+            </section>
+          </div>
+        )
+      }
+
+      if (agentEmailView === 'agents') {
+        if (!agentEmailSelectedAgent) {
+          return renderAgentEmailEmptyState('No agent available', 'This organization does not currently expose a default agent.')
+        }
+
+        return (
+          <div className="agent-email-console-two-col">
+            <article className="agent-email-console-card">
+              <div className="agent-email-console-card-head">
+                <div>
+                  <h4>{agentEmailSelectedAgent.name}</h4>
+                  <div className="agent-email-console-muted agent-email-console-mono">{agentEmailSelectedAgent.address}</div>
+                </div>
+                <span className={`agent-email-minimal-pill ${agentEmailSelectedAgent.accent}`}>{agentEmailSelectedAgent.status}</span>
+              </div>
+              <div className="agent-email-console-detail-rows">
+                <div className="agent-email-console-detail-row"><span>Organization</span><strong>{orgName}</strong></div>
+                <div className="agent-email-console-detail-row"><span>Role</span><strong>{agentEmailSelectedAgent.role}</strong></div>
+                <div className="agent-email-console-detail-row"><span>Default domain</span><strong>{agentEmailSelectedAgent.domain}</strong></div>
+                <div className="agent-email-console-detail-row"><span>Approval mode</span><strong>{agentEmailSelectedAgent.approvalMode}</strong></div>
+                <div className="agent-email-console-detail-row"><span>Last activity</span><strong>{agentEmailSelectedAgent.lastActivity}</strong></div>
+              </div>
+              <div className="agent-email-console-text-block agent-email-agent-inboxes-block">
+                <span>Linked inboxes</span>
+                {agentEmailSelectedAgent.inboxes.length ? (
+                  <div className="agent-email-agent-inbox-list" role="list">
+                    {agentEmailSelectedAgent.inboxes.map((address) => {
+                      const linkedInbox = agentEmailInboxes.find((inbox) => inbox.address === address)
+                      return (
+                        <button
+                          key={address}
+                          type="button"
+                          role="listitem"
+                          className="agent-email-agent-inbox-row"
+                          disabled={!linkedInbox}
+                          onClick={() => {
+                            if (!linkedInbox) {
+                              return
+                            }
+                            setAgentEmailSelectedInboxId(linkedInbox.id)
+                            setAgentEmailView('inboxes')
+                          }}
+                        >
+                          <div className="agent-email-agent-inbox-row-text">
+                            <strong className="agent-email-agent-inbox-row-address">{address}</strong>
+                            {linkedInbox ? (
+                              <span className="agent-email-agent-inbox-row-meta">
+                                {linkedInbox.id === agentEmailSelectedInboxId
+                                  ? `${unreadAgentEmailThreads} unread`
+                                  : `Updated ${linkedInbox.lastSync}`}
+                              </span>
+                            ) : (
+                              <span className="agent-email-agent-inbox-row-meta agent-email-agent-inbox-row-meta--warn">
+                                Not found in this organization
+                              </span>
+                            )}
+                          </div>
+                          {linkedInbox ? (
+                            <span className={`agent-email-minimal-pill agent-email-agent-inbox-row-pill ${linkedInbox.accent}`}>
+                              {linkedInbox.status}
+                            </span>
+                          ) : null}
+                        </button>
+                      )
+                    })}
+                  </div>
+                ) : (
+                  <p>No inbox is linked to this agent yet.</p>
+                )}
+              </div>
+              <div className="agent-email-console-text-block">
+                <span>Notes</span>
+                <p>{agentEmailSelectedAgent.note}</p>
+              </div>
+            </article>
+
+            <div className="agent-email-console-stack">
+              <article className="agent-email-console-card">
+                <div className="agent-email-console-card-head">
+                  <h4>Controls</h4>
+                </div>
+                <div className="agent-email-console-detail-rows">
+                  <div className="agent-email-console-detail-row"><span>Primary org</span><strong>{orgName}</strong></div>
+                  <div className="agent-email-console-detail-row"><span>Outbound posture</span><strong>{agentEmailSelectedAgent.approvalMode}</strong></div>
+                  <div className="agent-email-console-detail-row"><span>Inbox coverage</span><strong>{agentEmailSelectedAgent.inboxes.length} linked</strong></div>
+                </div>
+              </article>
+            </div>
+          </div>
+        )
+      }
+
+      if (agentEmailView === 'inboxes') {
+        if (!agentEmailSelectedInbox) {
+          return renderAgentEmailEmptyState('No inbox available', 'Create or expose a mailbox in Cosmic Mail to review inbound conversations here.')
+        }
+
+        return (
+          <div className="agent-email-inbox-layout">
+            <aside className="agent-email-inbox-sidebar" aria-label="Threads">
+              <div className="agent-email-inbox-sidebar-top">
+                <div className="agent-email-inbox-sidebar-head">
+                  <div className="agent-email-inbox-sidebar-title">
+                    <div className="agent-email-inbox-mailbox-label-row">
+                      <span className="agent-email-inbox-mailbox-label">Mailbox</span>
+                      {unreadAgentEmailThreads > 0 ? (
+                        <span className="agent-email-inbox-unread-badge" aria-label={`${unreadAgentEmailThreads} unread`}>
+                          {unreadAgentEmailThreads > 99 ? '99+' : unreadAgentEmailThreads}
+                        </span>
+                      ) : null}
+                    </div>
+                    <h4 title={agentEmailSelectedInbox.address}>{agentEmailSelectedInbox.address}</h4>
+                  </div>
+                  <button
+                    type="button"
+                    className="agent-email-inbox-sync"
+                    onClick={() => void handleAgentEmailSyncInbox()}
+                    disabled={agentEmailSyncingInbox}
+                  >
+                    {agentEmailSyncingInbox ? '…' : 'Sync'}
+                  </button>
+                </div>
+                <div className="agent-email-inbox-search">
+                  <input
+                    type="search"
+                    className="agent-email-form-input agent-email-inbox-search-input"
+                    placeholder="Filter by subject or preview…"
+                    value={agentEmailInboxSearchQuery}
+                    onChange={(event) => setAgentEmailInboxSearchQuery(event.target.value)}
+                    aria-label="Filter threads by subject or preview text"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </div>
+              </div>
+              <div className="agent-email-inbox-list-shell">
+                <div className="agent-email-inbox-thread-list">
+                  {agentEmailThreads.length ? agentEmailThreads.map((thread) => (
+                    <button
+                      key={thread.id}
+                      type="button"
+                      className={`agent-email-thread-item ${thread.unread ? 'agent-email-thread-item--unread' : ''} ${agentEmailSelectedThread?.id === thread.id ? 'active' : ''}`}
+                      onClick={() => setAgentEmailSelectedThreadId(thread.id)}
+                    >
+                      <div className="agent-email-thread-row">
+                        <div className="agent-email-thread-avatar" aria-hidden>
+                          {getAgentEmailInitials(thread.fromName)}
+                        </div>
+                        <div className="agent-email-thread-main">
+                          <div className="agent-email-thread-line1">
+                            <span className="agent-email-thread-subject">{thread.subject || '(No subject)'}</span>
+                            <span className="agent-email-thread-time">{thread.time}</span>
+                          </div>
+                          <div className="agent-email-thread-line2">
+                            <span className="agent-email-thread-from">{thread.fromName}</span>
+                          </div>
+                          <p className="agent-email-thread-snippet">{thread.snippet}</p>
+                          <div className="agent-email-thread-foot">
+                            <span className="agent-email-thread-status-pill">{thread.state}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </button>
+                  )) : (
+                    <div className="agent-email-inbox-thread-list-empty">
+                      {renderAgentEmailEmptyState(
+                        'Inbox is clear',
+                        'No conversations are loaded for this inbox yet. Sync once mail has arrived to pull the latest inbound threads.',
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </aside>
+
+            <section className="agent-email-inbox-pane" aria-label="Thread">
+              {agentEmailSelectedThread ? (
+                <div className="agent-email-inbox-pane-column">
+                  <header className="agent-email-inbox-read-head">
+                    <div className="agent-email-inbox-read-hero">
+                      <div className="agent-email-inbox-read-avatar" aria-hidden>
+                        {getAgentEmailInitials(agentEmailSelectedThread.fromName)}
+                      </div>
+                      <div className="agent-email-inbox-read-hero-main">
+                        <div className="agent-email-inbox-read-title-row">
+                          <h4 className="agent-email-inbox-read-subject">{agentEmailSelectedThread.subject || '(No subject)'}</h4>
+                          <span className={`agent-email-inbox-status ${agentEmailSelectedThread.state === 'Awaiting approval' ? 'is-warn' : agentEmailSelectedThread.unread ? 'is-warn' : 'is-ok'}`}>
+                            {agentEmailSelectedThread.state}
+                          </span>
+                        </div>
+                        <p className="agent-email-inbox-read-from">
+                          <span className="agent-email-inbox-read-from-name">{agentEmailSelectedThread.fromName}</span>
+                          <span className="agent-email-inbox-read-from-sep" aria-hidden>·</span>
+                          <span className="agent-email-console-mono agent-email-inbox-read-from-email">{agentEmailSelectedThread.fromAddress}</span>
+                        </p>
+                        <p className="agent-email-inbox-read-meta">
+                          <span className="agent-email-inbox-read-meta-item">{selectedAgentName}</span>
+                          <span className="agent-email-inbox-read-meta-sep" aria-hidden />
+                          <span className="agent-email-console-mono agent-email-inbox-read-meta-item" title={agentEmailSelectedInbox.address}>{agentEmailSelectedInbox.address}</span>
+                          <span className="agent-email-inbox-read-meta-sep" aria-hidden />
+                          <span className="agent-email-inbox-read-meta-item">
+                            {agentEmailSelectedThread.messages.length} {agentEmailSelectedThread.messages.length === 1 ? 'message' : 'messages'}
+                          </span>
+                        </p>
+                      </div>
+                    </div>
+                  </header>
+
+                  <div className="agent-email-inbox-messages-scroll">
+                    <div className="agent-email-inbox-thread-body">
+                      {agentEmailSelectedThread.messages.map((message) => (
+                        <article key={message.id} className={`agent-email-inbox-msg agent-email-inbox-msg--${message.direction}`}>
+                          <div className="agent-email-inbox-msg-inner">
+                            <header className="agent-email-inbox-msg-head">
+                              <div className="agent-email-inbox-msg-who-wrap">
+                                <span className="agent-email-inbox-msg-who">{message.author}</span>
+                                <span className="agent-email-inbox-msg-pill">
+                                  {message.direction === 'inbound' ? 'Inbound' : 'Outbound'}
+                                </span>
+                              </div>
+                              <time className="agent-email-inbox-msg-time">{message.time}</time>
+                            </header>
+                            <div className="agent-email-inbox-msg-body">{message.body}</div>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                    <div ref={agentEmailMessagesEndRef} className="agent-email-inbox-messages-end" aria-hidden />
+                  </div>
+
+                  <div className={`agent-email-compose-dock ${agentEmailComposerExpanded ? 'is-expanded' : 'is-collapsed'}`}>
+                    {agentEmailComposerExpanded ? (
+                      <div className="agent-email-compose-panel">
+                        <div className="agent-email-compose-panel-head">
+                          <span className="agent-email-compose-panel-label">Reply · {selectedAgentName}</span>
+                          <button
+                            type="button"
+                            className="agent-email-compose-dismiss"
+                            onClick={() => setAgentEmailComposerExpanded(false)}
+                            aria-label="Close reply"
+                          >
+                            Done
+                          </button>
+                        </div>
+                        <textarea
+                          className="agent-email-compose-field"
+                          value={agentEmailReplyDraft}
+                          placeholder="Message"
+                          rows={4}
+                          onChange={(event) => setAgentEmailReplyDraft(event.target.value)}
+                          onKeyDown={(event) => {
+                            if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                              event.preventDefault()
+                              void handleAgentEmailReply()
+                            }
+                          }}
+                        />
+                        <div className="agent-email-compose-panel-foot">
+                          <span className="agent-email-compose-kbd-hint">⌘↵</span>
+                          <button
+                            type="button"
+                            className="agent-email-compose-send"
+                            onClick={() => void handleAgentEmailReply()}
+                            disabled={agentEmailReplySending || !agentEmailReplyDraft.trim()}
+                          >
+                            {agentEmailReplySending ? 'Sending…' : 'Send'}
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="agent-email-inbox-reply-toolbar" role="toolbar" aria-label="Reply">
+                        <button
+                          type="button"
+                          className="agent-email-reply-toolbar-primary"
+                          onClick={() => setAgentEmailComposerExpanded(true)}
+                        >
+                          <svg className="agent-email-reply-icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden>
+                            <path
+                              fill="currentColor"
+                              d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"
+                            />
+                          </svg>
+                          <span>{agentEmailReplyDraft.trim() ? 'Continue reply' : 'Reply'}</span>
+                        </button>
+                        <span className="agent-email-reply-toolbar-agent" title={selectedAgentName}>
+                          {selectedAgentName}
+                        </span>
+                        {agentEmailReplyDraft.trim() ? (
+                          <span className="agent-email-reply-toolbar-meta" title="Draft length">
+                            {agentEmailReplyDraft.trim().length} chars
+                          </span>
+                        ) : null}
+                      </div>
+                    )}
+                  </div>
+
+                  {agentEmailSelectedInbox.note ? (
+                    <p className="agent-email-inbox-footnote">{agentEmailSelectedInbox.note}</p>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="agent-email-inbox-pane-empty">
+                  {renderAgentEmailEmptyState('No thread selected', 'Choose a conversation from the list.')}
+                </div>
+              )}
+            </section>
+          </div>
+        )
+      }
+
+      if (agentEmailView === 'approvals') {
+        if (!agentEmailApprovals.length) {
+          return renderAgentEmailEmptyState('No approvals waiting', 'Outbound review is currently clear. Any policy-gated replies will appear here.')
+        }
+
+        return (
+          <div className="agent-email-console-approvals">
+            <div className="agent-email-console-approvals-list">
+              <div className="agent-email-console-filterbar">
+                <span className="agent-email-console-copy">{pendingAgentEmailApprovals} pending review</span>
+              </div>
+              <div className="agent-email-minimal-list compact">
+                {agentEmailApprovals.map((approval) => (
+                  <button
+                    key={approval.id}
+                    type="button"
+                    className={`agent-email-minimal-row ${agentEmailSelectedApproval?.id === approval.id ? 'active' : ''}`}
+                    onClick={() => setAgentEmailSelectedApprovalId(approval.id)}
+                  >
+                    <div className="agent-email-minimal-row-top">
+                      <strong>{approval.subject}</strong>
+                      <span className={`agent-email-minimal-pill ${approval.accent}`}>{approval.state}</span>
+                    </div>
+                    <div className="agent-email-minimal-row-meta">
+                      <span>{approval.mailbox}</span>
+                      <span>{approval.time}</span>
+                    </div>
+                    <p>{approval.reason}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="agent-email-console-approvals-detail">
+              {agentEmailSelectedApproval ? (
+                <div className="agent-email-console-card">
+                  <div className="agent-email-console-card-head">
+                    <h4>{agentEmailSelectedApproval.subject}</h4>
+                    <span className={`agent-email-minimal-pill ${agentEmailSelectedApproval.accent}`}>{agentEmailSelectedApproval.state}</span>
+                  </div>
+                  <div className="agent-email-console-detail-rows">
+                    <div className="agent-email-console-detail-row"><span>Agent</span><strong>{agentEmailSelectedApproval.agent}</strong></div>
+                    <div className="agent-email-console-detail-row"><span>Mailbox</span><strong>{agentEmailSelectedApproval.mailbox}</strong></div>
+                    <div className="agent-email-console-detail-row"><span>Recipients</span><strong>{agentEmailSelectedApproval.recipients}</strong></div>
+                    <div className="agent-email-console-detail-row"><span>Triggered</span><strong>{agentEmailSelectedApproval.time}</strong></div>
+                  </div>
+                  <div className="agent-email-console-text-block">
+                    <span>Reason</span>
+                    <p>{agentEmailSelectedApproval.summary}</p>
+                  </div>
+                  <div className="agent-email-console-text-block">
+                    <span>Draft preview</span>
+                    <p>{agentEmailSelectedApproval.excerpt}</p>
+                  </div>
+                  <div className="agent-email-detail-actions">
+                    <button
+                      type="button"
+                      className="agent-email-console-primary"
+                      onClick={() => void handleAgentEmailApprove(agentEmailSelectedApproval.id)}
+                      disabled={agentEmailActionId === agentEmailSelectedApproval.id || agentEmailSelectedApproval.state !== 'Pending'}
+                    >
+                      {agentEmailActionId === agentEmailSelectedApproval.id ? 'Processing...' : 'Approve and send'}
+                    </button>
+                    <button
+                      type="button"
+                      className="agent-email-console-secondary"
+                      onClick={() => void handleAgentEmailReject(agentEmailSelectedApproval.id)}
+                      disabled={agentEmailActionId === agentEmailSelectedApproval.id || agentEmailSelectedApproval.state !== 'Pending'}
+                    >
+                      Reject
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                renderAgentEmailEmptyState('Select an approval', 'Choose a queued outbound draft to inspect it and release or reject it.')
+              )}
+            </div>
+          </div>
+        )
+      }
+
+      return null
+    }
+
+    return (
+      <div className="spaces-page agent-email-page">
+        <section className="agent-email-minimal-tabs" role="tablist" aria-label="Agent email sections">
+          {agentEmailViews.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              role="tab"
+              aria-selected={agentEmailView === item.id}
+              className={`agent-email-minimal-tab ${agentEmailView === item.id ? 'active' : ''}`}
+              onClick={() => setAgentEmailView(item.id)}
+            >
+              <span className="agent-email-tab-label">{item.label}</span>
+              <span className="agent-email-tab-signal">{item.signal}</span>
+            </button>
+          ))}
+        </section>
+
+        <section className={`agent-email-minimal-shell${agentEmailView === 'inboxes' ? ' agent-email-minimal-shell--inbox' : ''}`}>
+          <div className="agent-email-minimal-shell-head">
+            <div className="agent-email-minimal-shell-head-text">
+              {currentAgentEmailTab.kicker ? (
+                <div className="spaces-card-kicker">{currentAgentEmailTab.kicker}</div>
+              ) : null}
+              <h3>{currentAgentEmailTab.label}</h3>
+              {currentAgentEmailTab.detail ? (
+                <p className="agent-email-shell-subtitle">{currentAgentEmailTab.detail}</p>
+              ) : null}
+            </div>
+            <div className="agent-email-shell-context" aria-label="Current context">
+              {agentEmailView === 'overview' ? <span className="agent-email-context-chip">{orgName}</span> : null}
+              {agentEmailView === 'inboxes' ? (
+                <span className="agent-email-context-chip agent-email-console-mono" title={selectedInboxName}>{selectedInboxName}</span>
+              ) : null}
+              {agentEmailView === 'settings' && agentEmailDomains.length > 0 ? (
+                <span className="agent-email-context-chip agent-email-console-mono" title={primaryDomainLabel}>{primaryDomainLabel}</span>
+              ) : null}
+              {agentEmailView === 'approvals' && pendingAgentEmailApprovals > 0 ? (
+                <span className="agent-email-context-chip agent-email-context-chip-warm">{pendingAgentEmailApprovals} pending</span>
+              ) : null}
+              {agentEmailView === 'settings' && agentEmailBaseUrl.trim() ? (
+                <span className="agent-email-context-chip agent-email-console-mono" title={agentEmailBaseUrl.trim()}>
+                  {shortenAgentEmailUrl(agentEmailBaseUrl)}
+                </span>
+              ) : null}
+            </div>
+          </div>
+          {renderAgentEmailContent()}
+        </section>
+      </div>
+    )
+  }
+
   const renderManagePage = () => {
     const budgetUsagePercent = manageSnapshot.budgetTotal
       ? Math.min(100, Math.max(0, Math.round((manageSnapshot.budgetUsed / manageSnapshot.budgetTotal) * 100)))
@@ -2372,6 +4553,9 @@ export default function SpacesControlCenter({
     if (page === 'manage') {
       return renderManagePage()
     }
+    if (page === 'agent-email') {
+      return renderAgentEmailPage()
+    }
     return renderCommandPage()
   }
 
@@ -2452,6 +4636,11 @@ export default function SpacesControlCenter({
                     >
                       <span className="spaces-rail-icon">
                         <SpacesNavIcon page={item.id} />
+                        {item.id === 'agent-email' && agentEmailSidebarAttentionCount > 0 ? (
+                          <span className="spaces-rail-badge" aria-label={`${agentEmailSidebarAttentionCount} unread or pending`}>
+                            {agentEmailSidebarAttentionCount > 99 ? '99+' : agentEmailSidebarAttentionCount}
+                          </span>
+                        ) : null}
                       </span>
                       <span className="spaces-rail-text">
                         <span className="spaces-rail-label">{item.label}</span>
