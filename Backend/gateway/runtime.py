@@ -935,7 +935,6 @@ class GatewayRuntime:
             else None
         )
         context_packet = metadata.get("context_packet") if isinstance(metadata.get("context_packet"), dict) else None
-        stored_conversation_context = self._scheduler_context_conversation(context_packet)
         cron_context_block = self._render_scheduler_context_block(context_packet)
         memory_prompt_context = await self._assemble_memory_prompt_context(query=prompt)
         combined_memory_context = self._join_context_blocks(
@@ -973,7 +972,11 @@ class GatewayRuntime:
                     "delivery_target": self._safe_text(resolution.get("delivery_target")),
                 },
             },
-            "assembled_conversation_context": stored_conversation_context or self._build_conversation_context(session_id),
+            # Cron jobs should run as fresh tasks. Creation-time chat context stays available in
+            # the stored reminder context block, but we do not replay it as live conversation
+            # history or the model can continue the reminder-creation thread instead of executing
+            # the reminder prompt itself.
+            "assembled_conversation_context": [],
             "memory_context": self._compose_prompt_context(
                 active_working_set=active_working_set,
                 memory_context=combined_memory_context,

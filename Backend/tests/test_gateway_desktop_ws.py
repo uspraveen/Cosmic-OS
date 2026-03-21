@@ -2959,14 +2959,14 @@ async def test_runtime_due_cron_reuses_stored_context_and_resolves_explicit_what
         assert task.source_id == "cron_due_context"
         assert task.channel == "whatsapp:+12153079021"
         assert task.input["query"] == "Check for new YC companies and report additions or no change."
-        assert task.input["conversation_context"] == [
-            {"role": "user", "content": "Keep watching the YC S26 company list."},
-            {"role": "assistant", "content": "I saved the baseline and can diff against it in the morning."},
-        ]
+        assert task.input["conversation_context"] == []
         memory_context = str(task.input["memory_context"] or "")
         assert "## Stored Reminder Context" in memory_context
         assert "Why this exists: Diff the saved YC S26 company baseline and explicitly report additions or no change." in memory_context
         assert "Original request: At 6 AM, check the YC S26 company list against the saved baseline and send the result on WhatsApp." in memory_context
+        assert "### Prior Conversation Snapshot" in memory_context
+        assert "- user: Keep watching the YC S26 company list." in memory_context
+        assert "- assistant: I saved the baseline and can diff against it in the morning." in memory_context
         assert "Saved YC S26 baseline with 25 companies on March 16." in memory_context
 
         cron_record = runtime.get_scheduler_cron("cron_due_context")
