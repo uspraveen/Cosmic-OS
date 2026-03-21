@@ -118,7 +118,7 @@ async def test_x_search_agent_search_persists_artifacts_and_returns_structured_b
             gateway_url="http://gateway",
             gateway_internal_token="internal-token",
             xai_api_key="xai-key",
-            x_search_model="grok-4.20-0309-reasoning",
+            x_search_model="grok-4.20-beta-0309-reasoning",
         ),
         xai_client_factory=lambda api_key: fake_client,
         store_root=tmp_path / "store",
@@ -146,7 +146,7 @@ async def test_x_search_agent_search_persists_artifacts_and_returns_structured_b
     assert "positive" in result.output["summary"].lower()
     assert result.output["notable_posts"][0]["author_handle"] == "cursor_ai"
     assert result.output["citations"][0]["url"] == "https://x.com/cursor_ai/status/123"
-    assert fake_client.last_kwargs["model"] == "grok-4.20-0309-reasoning"
+    assert fake_client.last_kwargs["model"] == "grok-4.20-beta-0309-reasoning"
     assert len(result.artifacts) == 3
 
 

@@ -13,7 +13,8 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, ValidationError
 try:
     from xai_sdk import Client
-    from xai_sdk.search import x_search
+    from xai_sdk.search import SearchParameters
+    from xai_sdk.search import x_source
     try:
         from xai_sdk.chat import system as xai_system_message
         from xai_sdk.chat import user as xai_user_message
@@ -23,7 +24,8 @@ try:
     _XAI_SDK_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised indirectly in local test environments
     Client = None  # type: ignore[assignment]
-    x_search = None  # type: ignore[assignment]
+    SearchParameters = None  # type: ignore[assignment]
+    x_source = None  # type: ignore[assignment]
     xai_system_message = None  # type: ignore[assignment]
     xai_user_message = None  # type: ignore[assignment]
     _XAI_SDK_AVAILABLE = False
@@ -358,19 +360,16 @@ class XTwitterSearchAgent(AgentRuntime):
         normalized_input: dict[str, Any],
     ) -> tuple[Any, XSearchStructuredResponse]:
         client = self._xai_client_factory(self.config.xai_api_key)
-        tool = self._x_search_tool_factory(
-            allowed_x_handles=normalized_input["allowed_x_handles"] or None,
+        x_source_spec = self._x_search_tool_factory(
+            included_x_handles=normalized_input["allowed_x_handles"] or None,
             excluded_x_handles=normalized_input["excluded_x_handles"] or None,
-            from_date=normalized_input["from_date"] or None,
-            to_date=normalized_input["to_date"] or None,
-            enable_image_understanding=normalized_input["enable_image_understanding"],
-            enable_video_understanding=normalized_input["enable_video_understanding"],
         )
+        search_parameters = self._build_search_parameters(normalized_input, x_source_spec)
         chat = client.chat.create(
             model=self.config.x_search_model,
-            tools=[tool],
             response_format=XSearchStructuredResponse,
             max_tokens=self.config.x_search_max_output_tokens,
+            search_parameters=search_parameters,
             include=["inline_citations"],
         )
         self._append_chat_message(chat, role="system", content=system_prompt)
@@ -897,9 +896,40 @@ class XTwitterSearchAgent(AgentRuntime):
         return Client(api_key=api_key)
 
     def _default_x_search_tool_factory(self, **kwargs: Any) -> Any:
-        if x_search is None:
-            return {"tool": "x_search", "kwargs": kwargs}
-        return x_search(**kwargs)
+        if x_source is None:
+            return {"source": "x", "kwargs": kwargs}
+        return x_source(**kwargs)
+
+    def _build_search_parameters(self, normalized_input: dict[str, Any], x_source_spec: Any) -> Any:
+        from_date = self._parse_sdk_datetime(normalized_input.get("from_date"))
+        to_date = self._parse_sdk_datetime(normalized_input.get("to_date"))
+        max_search_results = max(normalized_input["max_posts"], min(normalized_input["max_posts"] * 3, 25))
+        if SearchParameters is None:
+            return {
+                "sources": [x_source_spec],
+                "mode": "on",
+                "from_date": normalized_input.get("from_date"),
+                "to_date": normalized_input.get("to_date"),
+                "return_citations": True,
+                "max_search_results": max_search_results,
+            }
+        return SearchParameters(
+            sources=[x_source_spec],
+            mode="on",
+            from_date=from_date,
+            to_date=to_date,
+            return_citations=True,
+            max_search_results=max_search_results,
+        )
+
+    def _parse_sdk_datetime(self, value: Any) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     def _append_chat_message(self, chat: Any, *, role: str, content: str) -> None:
         helper_payload = None
