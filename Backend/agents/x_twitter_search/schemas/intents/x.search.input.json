@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "minLength": 3,
+      "description": "The X/Twitter search request."
+    },
+    "analysis_goal": {
+      "type": "string",
+      "description": "Optional extra instruction about what the search should determine or compare."
+    },
+    "allowed_x_handles": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 10,
+      "uniqueItems": true,
+      "description": "Optional X handles to include, without leading @."
+    },
+    "excluded_x_handles": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 10,
+      "uniqueItems": true,
+      "description": "Optional X handles to exclude, without leading @."
+    },
+    "from_date": {
+      "type": "string",
+      "description": "Optional ISO-8601 lower bound for X search."
+    },
+    "to_date": {
+      "type": "string",
+      "description": "Optional ISO-8601 upper bound for X search."
+    },
+    "enable_image_understanding": {
+      "type": "boolean",
+      "default": false,
+      "description": "Enable image understanding in X search when visual tweet content matters."
+    },
+    "enable_video_understanding": {
+      "type": "boolean",
+      "default": false,
+      "description": "Enable video understanding in X search when video tweet content matters."
+    },
+    "max_posts": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 12,
+      "default": 8,
+      "description": "Maximum number of notable posts to include in the structured result."
+    }
+  },
+  "required": ["query"]
+}
+

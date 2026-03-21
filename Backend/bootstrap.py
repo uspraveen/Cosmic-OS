@@ -73,6 +73,10 @@ DOCS_PARSER_AGENT_ENV_NAME = "docs-parser-agent.env"
 DOCS_PARSER_AGENT_SERVICE_NAME = "cosmic-docs-parser-agent.service"
 DOCS_PARSER_AGENT_ID = "cosmic/docs-parser-agent:1.0.0"
 DOCS_PARSER_AGENT_DEFAULT_INSTANCE_ID = "docs-parser-agent-1"
+X_TWITTER_SEARCH_AGENT_ENV_NAME = "x-twitter-search-agent.env"
+X_TWITTER_SEARCH_AGENT_SERVICE_NAME = "cosmic-x-twitter-search-agent.service"
+X_TWITTER_SEARCH_AGENT_ID = "cosmic/x-twitter-search-agent:1.0.0"
+X_TWITTER_SEARCH_AGENT_DEFAULT_INSTANCE_ID = "x-twitter-search-agent-1"
 CRITICAL_VENV_IMPORT_CHECKS: Tuple[Tuple[str, str], ...] = (
     ("docling", "docs parser runtime"),
 )
@@ -810,6 +814,93 @@ def read_docs_parser_agent_system_env(system_env_dir: Optional[Path] = None) -> 
     return parse_env_text(read_text_file(env_path, use_sudo=True))
 
 
+def x_twitter_search_agent_repo_dir() -> Path:
+    return BACKEND_ROOT / "agents" / "x_twitter_search"
+
+
+def x_twitter_search_agent_repo_env_path() -> Path:
+    return x_twitter_search_agent_repo_dir() / "agent.env"
+
+
+def x_twitter_search_agent_repo_env_example_path() -> Path:
+    return x_twitter_search_agent_repo_dir() / "agent.env.example"
+
+
+def x_twitter_search_agent_system_env_path(system_env_dir: Optional[Path] = None) -> Path:
+    return (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "agents" / X_TWITTER_SEARCH_AGENT_ENV_NAME
+
+
+def resolve_x_twitter_search_agent_env_source() -> Path:
+    repo_env = x_twitter_search_agent_repo_env_path()
+    if repo_env.exists():
+        return repo_env
+    return x_twitter_search_agent_repo_env_example_path()
+
+
+def build_x_twitter_search_agent_env_rendered(
+    *,
+    signing_secret: str,
+    shared_internal_token: str,
+    system_env_dir: Optional[Path] = None,
+    existing_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+    external_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Tuple[Path, str, Dict[str, str]]:
+    source_path = resolve_x_twitter_search_agent_env_source()
+    source_raw = source_path.read_text(encoding="utf-8")
+    source_data = parse_env_text(source_raw)
+    existing_env = (existing_env_by_name or {}).get(X_TWITTER_SEARCH_AGENT_ENV_NAME, {})
+    external_env = (external_env_by_name or {}).get(X_TWITTER_SEARCH_AGENT_ENV_NAME, {})
+
+    redis_url = first_meaningful_value(
+        external_env.get("REDIS_URL"),
+        existing_env.get("REDIS_URL"),
+        source_data.get("REDIS_URL"),
+        "redis://127.0.0.1:6379/0",
+    )
+    gateway_url = first_meaningful_value(
+        external_env.get("GATEWAY_URL"),
+        existing_env.get("GATEWAY_URL"),
+        source_data.get("GATEWAY_URL"),
+        "http://127.0.0.1:8080",
+    )
+    xai_api_key = first_meaningful_value(
+        external_env.get("XAI_API_KEY"),
+        existing_env.get("XAI_API_KEY"),
+        source_data.get("XAI_API_KEY"),
+    )
+    instance_id = first_meaningful_value(
+        external_env.get("INSTANCE_ID"),
+        existing_env.get("INSTANCE_ID"),
+        source_data.get("INSTANCE_ID"),
+        X_TWITTER_SEARCH_AGENT_DEFAULT_INSTANCE_ID,
+    )
+
+    overrides = {
+        "REDIS_URL": redis_url or "redis://127.0.0.1:6379/0",
+        "GATEWAY_URL": gateway_url or "http://127.0.0.1:8080",
+        "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
+        "AGENT_SECRET": signing_secret,
+        "INSTANCE_ID": instance_id or X_TWITTER_SEARCH_AGENT_DEFAULT_INSTANCE_ID,
+    }
+    if xai_api_key is not None:
+        overrides["XAI_API_KEY"] = xai_api_key
+
+    rendered = render_env_with_overrides(source_raw, overrides)
+    rendered_data = parse_env_text(rendered)
+    return x_twitter_search_agent_system_env_path(system_env_dir), rendered, rendered_data
+
+
+def x_twitter_search_agent_is_configured(env_values: Dict[str, str]) -> bool:
+    return meaningful_env_value(env_values.get("XAI_API_KEY")) is not None
+
+
+def read_x_twitter_search_agent_system_env(system_env_dir: Optional[Path] = None) -> Dict[str, str]:
+    env_path = x_twitter_search_agent_system_env_path(system_env_dir)
+    if not env_path.exists():
+        return {}
+    return parse_env_text(read_text_file(env_path, use_sudo=True))
+
+
 def extract_host_from_url(value: Optional[str]) -> Optional[str]:
     normalized = meaningful_env_value(value)
     if normalized is None:
@@ -974,6 +1065,9 @@ def normalize_bootstrap_env_payload(payload: Dict[str, object]) -> Dict[str, Dic
         firecrawl_agent_env = dict(payload.get("firecrawl_agent_env") or {})
     elif isinstance(payload.get("firecrawl_web_scrape_agent_env"), dict):
         firecrawl_agent_env = dict(payload.get("firecrawl_web_scrape_agent_env") or {})
+    x_twitter_search_agent_env = {}
+    if isinstance(payload.get("x_twitter_search_agent_env"), dict):
+        x_twitter_search_agent_env = dict(payload.get("x_twitter_search_agent_env") or {})
     meeting_env = dict(payload.get("meeting_env") or {}) if isinstance(payload.get("meeting_env"), dict) else {}
     vm_payload = dict(payload.get("vm") or {}) if isinstance(payload.get("vm"), dict) else {}
 
@@ -1012,6 +1106,8 @@ def normalize_bootstrap_env_payload(payload: Dict[str, object]) -> Dict[str, Dic
         normalized["memory.env"] = memory_env
     if firecrawl_agent_env:
         normalized[FIRECRAWL_AGENT_ENV_NAME] = firecrawl_agent_env
+    if x_twitter_search_agent_env:
+        normalized[X_TWITTER_SEARCH_AGENT_ENV_NAME] = x_twitter_search_agent_env
     required_fields = {
         "gateway.env": ("GATEWAY_LOCAL_API_TOKEN", "ANTHROPIC_API_KEY", "PERPLEXITY_API_KEY", "GATEWAY_PUBLIC_HOST"),
         "model-router.env": ("GROQ_API_KEY",),
@@ -1851,6 +1947,19 @@ def materialize_bootstrap_env_files(
     docs_parser_repo_path.write_text(docs_parser_rendered, encoding="utf-8")
     written.append(docs_parser_repo_path)
     log("Materialized repo env file from bootstrap inputs: {0}".format(docs_parser_repo_path))
+
+    x_twitter_repo_path = x_twitter_search_agent_repo_env_path()
+    _x_twitter_dest_path, x_twitter_rendered, _x_twitter_env = build_x_twitter_search_agent_env_rendered(
+        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
+        system_env_dir=system_env_dir,
+        existing_env_by_name=existing_env_by_name,
+        external_env_by_name=external_env_by_name,
+    )
+    x_twitter_repo_path.parent.mkdir(parents=True, exist_ok=True)
+    x_twitter_repo_path.write_text(x_twitter_rendered, encoding="utf-8")
+    written.append(x_twitter_repo_path)
+    log("Materialized repo env file from bootstrap inputs: {0}".format(x_twitter_repo_path))
     return written
 
 
@@ -1910,6 +2019,19 @@ def install_service_env_files(system_env_dir: Path, *, include_memory: bool = Fa
         install_text_file(docs_parser_dest_path, docs_parser_rendered, mode="600", use_sudo=True)
         installed.append(docs_parser_dest_path)
         log("Installed system env file: {0}".format(docs_parser_dest_path))
+
+    x_twitter_dest_path, x_twitter_rendered, _x_twitter_env = build_x_twitter_search_agent_env_rendered(
+        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
+        system_env_dir=system_env_dir,
+    )
+    run(["install", "-d", "-m", "755", str(x_twitter_dest_path.parent)], use_sudo=True)
+    if x_twitter_dest_path.exists():
+        log("System env file already exists: {0}".format(x_twitter_dest_path))
+    else:
+        install_text_file(x_twitter_dest_path, x_twitter_rendered, mode="600", use_sudo=True)
+        installed.append(x_twitter_dest_path)
+        log("Installed system env file: {0}".format(x_twitter_dest_path))
 
     return installed
 
@@ -2076,15 +2198,27 @@ def doctor(
         firecrawl_system_data = read_firecrawl_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
     docs_parser_source = resolve_docs_parser_agent_env_source()
     docs_parser_system_path = docs_parser_agent_system_env_path(DEFAULT_SYSTEM_ENV_DIR)
+    x_twitter_source = resolve_x_twitter_search_agent_env_source()
+    x_twitter_source_data = parse_env_text(x_twitter_source.read_text(encoding="utf-8")) if x_twitter_source.exists() else {}
+    x_twitter_system_path = x_twitter_search_agent_system_env_path(DEFAULT_SYSTEM_ENV_DIR)
+    x_twitter_system_data = {}
+    if is_linux() and x_twitter_system_path.exists():
+        x_twitter_system_data = read_x_twitter_search_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
     print("  firecrawl env src  : {0}".format(firecrawl_source if firecrawl_source.exists() else "missing"))
     print("  docs parser env src: {0}".format(docs_parser_source if docs_parser_source.exists() else "missing"))
+    print("  x search env src   : {0}".format(x_twitter_source if x_twitter_source.exists() else "missing"))
     if is_linux():
         print("  firecrawl system env: {0}".format(firecrawl_system_path if firecrawl_system_path.exists() else "missing"))
         print("  docs parser system env: {0}".format(docs_parser_system_path if docs_parser_system_path.exists() else "missing"))
+        print("  x search system env: {0}".format(x_twitter_system_path if x_twitter_system_path.exists() else "missing"))
     firecrawl_enabled = firecrawl_agent_is_configured(
         firecrawl_system_data if firecrawl_system_data else firecrawl_source_data
     )
+    x_twitter_enabled = x_twitter_search_agent_is_configured(
+        x_twitter_system_data if x_twitter_system_data else x_twitter_source_data
+    )
     print("  firecrawl enabled  : {0}".format("yes" if firecrawl_enabled else "no"))
+    print("  x search enabled   : {0}".format("yes" if x_twitter_enabled else "no"))
     if is_linux() and shutil.which("systemctl") is not None:
         neo4j_status = run(
             ["systemctl", "is-active", DEFAULT_NEO4J_SERVICE_NAME],
@@ -2104,6 +2238,12 @@ def doctor(
             check=False,
         )
         print("  docs parser service: {0}".format((docs_parser_status.stdout or "unknown").strip() or "unknown"))
+        x_twitter_status = run(
+            ["systemctl", "is-active", X_TWITTER_SEARCH_AGENT_SERVICE_NAME],
+            capture_output=True,
+            check=False,
+        )
+        print("  x search service   : {0}".format((x_twitter_status.stdout or "unknown").strip() or "unknown"))
     print("  env search roots   : {0}".format(", ".join(str(path) for path in env_search_roots)))
     print("  env templates      : {0}".format(len(env_examples)))
     print("  systemd templates  : {0}".format(systemd_template_dir if systemd_template_dir.exists() else "missing"))
@@ -2701,6 +2841,7 @@ def run_post_provision_health_checks(
     *,
     include_memory: bool,
     include_firecrawl_agent: bool = False,
+    include_x_twitter_search_agent: bool = False,
     timeout_sec: float = DEFAULT_POST_PROVISION_TIMEOUT_SEC,
     poll_interval_sec: float = DEFAULT_POST_PROVISION_POLL_INTERVAL_SEC,
 ) -> None:
@@ -2744,6 +2885,18 @@ def run_post_provision_health_checks(
         )
         wait_for_orchestrator_agent_ready(
             FIRECRAWL_AGENT_ID,
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+
+    if include_x_twitter_search_agent:
+        wait_for_systemd_unit_active(
+            X_TWITTER_SEARCH_AGENT_SERVICE_NAME,
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+        wait_for_orchestrator_agent_ready(
+            X_TWITTER_SEARCH_AGENT_ID,
             timeout_sec=timeout_sec,
             poll_interval_sec=poll_interval_sec,
         )
@@ -2930,6 +3083,12 @@ def provision_vm(
         log("Firecrawl agent env is configured; bootstrap will enable and start the Firecrawl agent service.")
     else:
         log("Firecrawl agent env is not configured; bootstrap will install the unit but skip enabling the agent service.")
+    x_twitter_env = read_x_twitter_search_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+    enable_x_twitter_search_agent = x_twitter_search_agent_is_configured(x_twitter_env)
+    if enable_x_twitter_search_agent:
+        log("X/Twitter search agent env is configured; bootstrap will enable and start the X/Twitter search agent service.")
+    else:
+        log("X/Twitter search agent env is not configured; bootstrap will install the unit but skip enabling the agent service.")
     installed = install_systemd_units(
         systemd_template_dir,
         enable_units=enable_units,
@@ -2938,6 +3097,7 @@ def provision_vm(
         extra_enable_units=(
             (["cosmic-memory.service"] if enable_units and enable_memory else [])
             + ([FIRECRAWL_AGENT_SERVICE_NAME] if enable_units and enable_firecrawl_agent else [])
+            + ([X_TWITTER_SEARCH_AGENT_SERVICE_NAME] if enable_units and enable_x_twitter_search_agent else [])
         ),
         include_memory_env=enable_memory,
     )
@@ -2945,6 +3105,7 @@ def provision_vm(
         run_post_provision_health_checks(
             include_memory=enable_memory,
             include_firecrawl_agent=enable_firecrawl_agent,
+            include_x_twitter_search_agent=enable_x_twitter_search_agent,
         )
 
     print("")
@@ -3191,6 +3352,8 @@ def main() -> int:
                 install_service_env_files(DEFAULT_SYSTEM_ENV_DIR, include_memory=False)
             firecrawl_env = read_firecrawl_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
             enable_firecrawl_agent = firecrawl_agent_is_configured(firecrawl_env)
+            x_twitter_env = read_x_twitter_search_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+            enable_x_twitter_search_agent = x_twitter_search_agent_is_configured(x_twitter_env)
             installed = install_systemd_units(
                 systemd_template_dir,
                 enable_units=bool(getattr(args, "enable", False)),
@@ -3199,6 +3362,7 @@ def main() -> int:
                 extra_enable_units=(
                     (["cosmic-memory.service"] if memory_repo_dir is not None and bool(getattr(args, "enable", False)) else [])
                     + ([FIRECRAWL_AGENT_SERVICE_NAME] if enable_firecrawl_agent and bool(getattr(args, "enable", False)) else [])
+                    + ([X_TWITTER_SEARCH_AGENT_SERVICE_NAME] if enable_x_twitter_search_agent and bool(getattr(args, "enable", False)) else [])
                 ),
                 include_memory_env=memory_repo_dir is not None,
             )
@@ -3206,6 +3370,7 @@ def main() -> int:
                 run_post_provision_health_checks(
                     include_memory=memory_repo_dir is not None,
                     include_firecrawl_agent=enable_firecrawl_agent,
+                    include_x_twitter_search_agent=enable_x_twitter_search_agent,
                 )
             print("Installed systemd units:")
             for unit_name in installed:

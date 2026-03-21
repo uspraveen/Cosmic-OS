@@ -631,6 +631,8 @@ class OrchestratorRuntime:
                             self._collect_perplexity_sources(result_str, collected_sources)
                         elif tb.tool_name in {"firecrawl_scrape", "firecrawl_extract", "firecrawl_recall_session"}:
                             research_paths.add("firecrawl")
+                        elif tb.tool_name in {"x_search", "x_recall_session"}:
+                            research_paths.add("x_search_specialist")
 
                         yield {
                             **ev, "type": "tool.result",

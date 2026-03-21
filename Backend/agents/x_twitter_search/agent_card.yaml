@@ -1,0 +1,69 @@
+agent_id: cosmic/x-twitter-search-agent:1.0.0
+display_name: X Twitter Search Agent
+description: >
+  Specialist agent for deep search and synthesis over X/Twitter using xAI Grok's
+  native x_search capability. It performs filtered X search, returns structured
+  findings with citations, persists raw provider outputs into task artifacts, and
+  can recall prior X-search runs from its private session ledger.
+
+intents:
+  - name: x.search
+    description: Search X/Twitter with optional handle/date/media filters and return a structured briefing with citations.
+    input_schema: schemas/intents/x.search.input.json
+    output_schema: schemas/intents/x.search.output.json
+    timeout_sec: 120
+
+  - name: x.recall_session
+    description: Recall prior X/Twitter search runs from the agent's private session ledger.
+    input_schema: schemas/intents/x.recall_session.input.json
+    output_schema: schemas/intents/x.recall_session.output.json
+    timeout_sec: 30
+
+artifact_types:
+  - x_search_report
+  - raw_json
+  - markdown_briefing
+
+policies:
+  network_access: true
+  writable_paths:
+    - runs/artifacts
+    - agents/x_twitter_search/store
+    - agents/x_twitter_search/runtime
+  tool_access: []
+  allowed_senders:
+    - cosmic/orchestrator:1.0.0
+  intent_authorization:
+    x.search: [cosmic/orchestrator:1.0.0]
+    x.recall_session: [cosmic/orchestrator:1.0.0]
+
+sla:
+  max_concurrency: 2
+  heartbeat_interval_sec: 10
+  heartbeat_ttl_sec: 30
+  max_task_duration_sec: 180
+  health_endpoint: /health
+  retry_policy:
+    max_attempts: 3
+    backoff: exponential
+    backoff_base_sec: 2
+    backoff_max_sec: 60
+    retryable_codes:
+      - TIMEOUT
+      - NETWORK_ERROR
+      - RATE_LIMITED
+    non_retryable_codes:
+      - INVALID_INPUT
+      - AUTH_ERROR
+      - SCHEMA_VIOLATION
+      - INTERNAL_ERROR
+
+stream_key: streams:cosmic/x-twitter-search-agent:1.0.0
+
+version_info:
+  semver: 1.0.0
+  released_at: 2026-03-21
+  deprecated_at: null
+  remove_after: null
+  changelog: CHANGELOG.md
+

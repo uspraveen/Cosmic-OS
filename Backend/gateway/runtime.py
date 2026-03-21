@@ -6257,6 +6257,7 @@ class GatewayRuntime:
             "native_web_fetch": "native web_fetch",
             "perplexity_research": "perplexity_research",
             "firecrawl": "firecrawl",
+            "x_search_specialist": "x_search_specialist",
         }
         normalized = str(path or "").strip()
         return labels.get(normalized, normalized)

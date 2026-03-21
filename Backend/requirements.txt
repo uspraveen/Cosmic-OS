@@ -8,4 +8,5 @@ python-multipart
 pyyaml
 redis
 python-dotenv
+xai-sdk
 uvicorn[standard]

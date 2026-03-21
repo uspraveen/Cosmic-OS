@@ -159,6 +159,16 @@ def _firecrawl_recall_progress(tool_input: dict[str, Any]) -> str:
     return f"Reviewing prior Firecrawl runs for {session_id}..." if session_id else "Reviewing prior Firecrawl runs..."
 
 
+def _x_search_progress(tool_input: dict[str, Any]) -> str:
+    query = str(tool_input.get("query") or "").strip()
+    return f"Searching X for: {query}" if query else "Searching X..."
+
+
+def _x_recall_progress(tool_input: dict[str, Any]) -> str:
+    session_id = str(tool_input.get("session_id") or "").strip()
+    return f"Reviewing prior X search runs for {session_id}..." if session_id else "Reviewing prior X search runs..."
+
+
 def _memory_search_progress(tool_input: dict[str, Any]) -> str:
     query = str(tool_input.get("query") or "").strip()
     seed_ids = _preview_list(tool_input.get("seed_memory_ids"))
@@ -824,6 +834,98 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Exact recall of the Firecrawl agent's private session ledger so you can reuse or inspect prior Firecrawl work.",
         progress_builder=_firecrawl_recall_progress,
         handler_method="_firecrawl_recall_session",
+        read_only=True,
+        exposed_to_model=False,
+    ),
+    ToolSpec(
+        name="x_search",
+        api_definition={
+            "name": "x_search",
+            "description": (
+                "Use the X/Twitter Search specialist agent to search X deeply through xAI Grok's native x_search capability. "
+                "Use this for current sentiment, reaction analysis, handle-scoped X search, and evidence-grounded X briefings."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The X/Twitter search request.",
+                    },
+                    "analysis_goal": {
+                        "type": "string",
+                        "description": "Optional extra instruction about what the search should determine or compare.",
+                    },
+                    "allowed_x_handles": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional X handles to include, without leading @.",
+                    },
+                    "excluded_x_handles": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional X handles to exclude, without leading @.",
+                    },
+                    "from_date": {
+                        "type": "string",
+                        "description": "Optional ISO-8601 lower bound for X search.",
+                    },
+                    "to_date": {
+                        "type": "string",
+                        "description": "Optional ISO-8601 upper bound for X search.",
+                    },
+                    "enable_image_understanding": {
+                        "type": "boolean",
+                        "description": "Enable image understanding in X search when visual tweet content matters.",
+                        "default": False,
+                    },
+                    "enable_video_understanding": {
+                        "type": "boolean",
+                        "description": "Enable video understanding in X search when video tweet content matters.",
+                        "default": False,
+                    },
+                    "max_posts": {
+                        "type": "integer",
+                        "description": "Maximum number of notable posts to include in the structured result. Default 8.",
+                        "default": 8,
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+        group="research",
+        prompt_summary="Deep X/Twitter search through the X specialist agent when the request depends on current X reactions, handle-scoped search, or evidence-grounded social search.",
+        progress_builder=_x_search_progress,
+        handler_method="_x_search",
+        exposed_to_model=False,
+    ),
+    ToolSpec(
+        name="x_recall_session",
+        api_definition={
+            "name": "x_recall_session",
+            "description": (
+                "Read the X/Twitter Search agent's private run ledger for a prior session. Use this when you need exact recall of what the X specialist already searched."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID whose X-search runs should be recalled.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of X-search runs to return. Default 10.",
+                        "default": 10,
+                    },
+                },
+                "required": ["session_id"],
+            },
+        },
+        group="research",
+        prompt_summary="Exact recall of the X/Twitter Search agent's private session ledger so you can reuse or inspect prior X-search work.",
+        progress_builder=_x_recall_progress,
+        handler_method="_x_recall_session",
         read_only=True,
         exposed_to_model=False,
     ),

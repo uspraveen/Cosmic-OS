@@ -586,6 +586,70 @@ class ToolExecutor:
             wait_timeout_sec=35.0,
         )
 
+    async def _x_search(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        query = str(tool_input.get("query") or "").strip()
+        if not query:
+            return {"error": True, "message": "query is required"}
+        payload: dict[str, Any] = {"query": query}
+        analysis_goal = str(tool_input.get("analysis_goal") or "").strip()
+        if analysis_goal:
+            payload["analysis_goal"] = analysis_goal
+        allowed_x_handles = self._normalize_string_list(tool_input.get("allowed_x_handles"))
+        if allowed_x_handles:
+            payload["allowed_x_handles"] = allowed_x_handles[:10]
+        excluded_x_handles = self._normalize_string_list(tool_input.get("excluded_x_handles"))
+        if excluded_x_handles:
+            payload["excluded_x_handles"] = excluded_x_handles[:10]
+        from_date = str(tool_input.get("from_date") or "").strip()
+        if from_date:
+            payload["from_date"] = from_date
+        to_date = str(tool_input.get("to_date") or "").strip()
+        if to_date:
+            payload["to_date"] = to_date
+        if "enable_image_understanding" in tool_input:
+            payload["enable_image_understanding"] = self._coerce_bool(
+                tool_input.get("enable_image_understanding"),
+                default=False,
+            )
+        if "enable_video_understanding" in tool_input:
+            payload["enable_video_understanding"] = self._coerce_bool(
+                tool_input.get("enable_video_understanding"),
+                default=False,
+            )
+        max_posts = self._coerce_int(tool_input.get("max_posts"), 8)
+        if max_posts > 0:
+            payload["max_posts"] = min(max(max_posts, 1), 12)
+        return await self._dispatch_specialist_agent(
+            intent="x.search",
+            payload=payload,
+            context=context,
+            agent_id="cosmic/x-twitter-search-agent:1.0.0",
+            wait_timeout_sec=35.0,
+        )
+
+    async def _x_recall_session(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        session_id = str(tool_input.get("session_id") or "").strip() or (context.session_id if context else "")
+        if not session_id:
+            return {"error": True, "message": "session_id is required"}
+        limit = self._coerce_int(tool_input.get("limit"), 10)
+        return await self._dispatch_specialist_agent(
+            intent="x.recall_session",
+            payload={"session_id": session_id, "limit": min(max(limit, 1), 50)},
+            context=context,
+            agent_id="cosmic/x-twitter-search-agent:1.0.0",
+            wait_timeout_sec=20.0,
+        )
+
     # ── Memory Search / Write ────────────────────────────────────
 
     async def _memory_search(
