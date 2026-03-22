@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from shared.usage import UsageEvent
+from shared.model_specs import build_model_key
+from shared.usage import estimate_usage_cost_usd
 from shared import utcnow
 
 
@@ -193,28 +195,29 @@ class UsageStore:
                 SELECT
                     COUNT(*) AS total_calls,
                     COALESCE(SUM(total_tokens), 0) AS total_tokens,
-                    COALESCE(SUM(COALESCE(estimated_cost_usd, 0)), 0) AS total_cost_usd,
                     MAX(llm_call_placed_at) AS latest_call_at
                 FROM usage_events
                 WHERE llm_call_placed_at >= ?
                 """,
                 (cutoff_iso,),
             ).fetchone()
-            provider_rows = connection.execute(
+            provider_model_rows = connection.execute(
                 """
                 SELECT
                     provider,
                     model,
                     COUNT(*) AS call_count,
                     COALESCE(SUM(total_tokens), 0) AS total_tokens,
-                    COALESCE(SUM(COALESCE(estimated_cost_usd, 0)), 0) AS total_cost_usd
+                    COALESCE(SUM(CASE WHEN estimated_cost_usd IS NOT NULL THEN estimated_cost_usd ELSE 0 END), 0) AS known_cost_usd,
+                    COALESCE(SUM(CASE WHEN estimated_cost_usd IS NULL THEN prompt_tokens ELSE 0 END), 0) AS missing_prompt_tokens,
+                    COALESCE(SUM(CASE WHEN estimated_cost_usd IS NULL THEN completion_tokens ELSE 0 END), 0) AS missing_completion_tokens,
+                    COALESCE(SUM(CASE WHEN estimated_cost_usd IS NULL THEN cached_tokens ELSE 0 END), 0) AS missing_cached_tokens
                 FROM usage_events
                 WHERE llm_call_placed_at >= ?
                 GROUP BY provider, model
-                ORDER BY total_cost_usd DESC, total_tokens DESC, call_count DESC
-                LIMIT ?
+                ORDER BY known_cost_usd DESC, total_tokens DESC, call_count DESC
                 """,
-                (cutoff_iso, max(1, min(int(provider_limit), 10))),
+                (cutoff_iso,),
             ).fetchall()
             feature_rows = connection.execute(
                 """
@@ -232,21 +235,71 @@ class UsageStore:
 
         total_calls = int(totals_row["total_calls"] if totals_row and totals_row["total_calls"] is not None else 0)
         total_tokens = int(totals_row["total_tokens"] if totals_row and totals_row["total_tokens"] is not None else 0)
-        total_cost_usd = float(totals_row["total_cost_usd"] if totals_row and totals_row["total_cost_usd"] is not None else 0.0)
         latest_call_at = totals_row["latest_call_at"] if totals_row else None
 
-        providers: list[dict[str, Any]] = []
-        for row in provider_rows:
+        provider_buckets: dict[str, dict[str, Any]] = {}
+        total_cost_usd = 0.0
+        for row in provider_model_rows:
+            provider = str(row["provider"] or "").strip()
+            model = str(row["model"] or "").strip()
             call_count = int(row["call_count"] or 0)
-            provider_cost = float(row["total_cost_usd"] or 0.0)
-            provider_tokens = int(row["total_tokens"] or 0)
+            model_tokens = int(row["total_tokens"] or 0)
+            known_cost_usd = float(row["known_cost_usd"] or 0.0)
+            derived_cost_usd = self._estimate_missing_group_cost_usd(
+                provider=provider,
+                model=model,
+                prompt_tokens=int(row["missing_prompt_tokens"] or 0),
+                completion_tokens=int(row["missing_completion_tokens"] or 0),
+                cached_tokens=int(row["missing_cached_tokens"] or 0),
+            )
+            model_cost_usd = round(known_cost_usd + derived_cost_usd, 10)
+            total_cost_usd += model_cost_usd
+
+            bucket = provider_buckets.setdefault(
+                provider,
+                {
+                    "provider": provider,
+                    "tokens": 0,
+                    "cost_usd": 0.0,
+                    "count": 0,
+                    "models": [],
+                },
+            )
+            bucket["tokens"] += model_tokens
+            bucket["cost_usd"] += model_cost_usd
+            bucket["count"] += call_count
+            bucket["models"].append(
+                {
+                    "name": model or "metered-model",
+                    "tokens": model_tokens,
+                    "cost_usd": model_cost_usd,
+                    "count": call_count,
+                }
+            )
+
+        providers: list[dict[str, Any]] = []
+        sorted_provider_buckets = sorted(
+            provider_buckets.values(),
+            key=lambda item: (-float(item["cost_usd"]), -int(item["tokens"]), -int(item["count"]), str(item["provider"])),
+        )[: max(1, min(int(provider_limit), 10))]
+        for bucket in sorted_provider_buckets:
+            provider_cost = round(float(bucket["cost_usd"]), 10)
+            provider_tokens = int(bucket["tokens"])
+            call_count = int(bucket["count"])
+            top_models = sorted(
+                bucket["models"],
+                key=lambda item: (-float(item["cost_usd"]), -int(item["tokens"]), -int(item["count"]), str(item["name"])),
+            )
+            top_model_name = str(top_models[0]["name"]) if top_models else "metered-model"
+            extra_models = max(0, len(top_models) - 1)
+            role = f"{top_model_name} +{extra_models} more" if extra_models > 0 else top_model_name
             percent = round((provider_cost / total_cost_usd) * 100.0, 1) if total_cost_usd > 0 else (
                 round((provider_tokens / total_tokens) * 100.0, 1) if total_tokens > 0 else 0.0
             )
             providers.append(
                 {
-                    "name": _display_provider_name(str(row["provider"] or "").strip()),
-                    "role": str(row["model"] or "").strip() or "metered-model",
+                    "name": _display_provider_name(str(bucket["provider"])),
+                    "role": role,
                     "tokens": provider_tokens,
                     "cost_usd": provider_cost,
                     "count": call_count,
@@ -277,11 +330,38 @@ class UsageStore:
             "period_label": f"Rolling {normalized_period}d",
             "total_calls": total_calls,
             "total_tokens": total_tokens,
-            "total_cost_usd": total_cost_usd,
+            "total_cost_usd": round(total_cost_usd, 10),
             "latest_call_at": latest_call_at,
             "providers": providers,
             "usage_by_feature": usage_by_feature,
         }
+
+    def _estimate_missing_group_cost_usd(
+        self,
+        *,
+        provider: str,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        cached_tokens: int,
+    ) -> float:
+        if not provider or not model:
+            return 0.0
+        if prompt_tokens <= 0 and completion_tokens <= 0:
+            return 0.0
+        model_key = build_model_key(provider, model)
+        derived = estimate_usage_cost_usd(
+            model_key,
+            raw_usage=None,
+            normalized_usage={
+                "prompt_tokens": max(0, int(prompt_tokens)),
+                "completion_tokens": max(0, int(completion_tokens)),
+                "total_tokens": max(0, int(prompt_tokens)) + max(0, int(completion_tokens)),
+                "cached_tokens": max(0, int(cached_tokens)),
+                "reasoning_tokens": 0,
+            },
+        )
+        return float(derived or 0.0)
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
         payload = dict(row)

@@ -93,5 +93,60 @@ def test_usage_store_dashboard_summary_groups_provider_and_feature(tmp_path: Pat
     assert summary["total_tokens"] == 335
     assert summary["providers"][0]["name"] == "Anthropic"
     assert summary["providers"][0]["calls"] == 2
+    assert summary["providers"][0]["role"] == "claude-sonnet-4-6"
     assert summary["usage_by_feature"][0]["label"] == "Documents"
     assert summary["usage_by_feature"][0]["count"] == 2
+
+
+def test_usage_store_dashboard_summary_derives_missing_cost_and_aggregates_provider_models(tmp_path: Path) -> None:
+    store = UsageStore(tmp_path / "usage.db")
+    store.initialize()
+
+    fast_reasoning = build_usage_event(
+        metered_call=begin_metered_call(prefix="call"),
+        source_component="gateway",
+        source_id="gateway:memory",
+        session_id="sess_mem",
+        route="internal",
+        operation="gateway.memory.extract",
+        model_key="xai:grok-4-1-fast-reasoning",
+        request_id="req_mem_1",
+        raw_usage={
+            "prompt_text_tokens": 1000,
+            "output_tokens": 500,
+            "cached_prompt_text_tokens": 100,
+        },
+        metadata_json=None,
+    )
+    # Simulate older rows that logged tokens but missed USD.
+    fast_reasoning = fast_reasoning.model_copy(update={"estimated_cost_usd": None})
+
+    x_search = build_usage_event(
+        metered_call=begin_metered_call(prefix="call"),
+        source_component="agent",
+        source_id="cosmic/x-twitter-search-agent:1.0.0",
+        session_id="sess_x",
+        route="specialist",
+        operation="agent.x.search",
+        model_key="xai:grok-4.20-beta-0309-reasoning",
+        request_id="req_x_1",
+        raw_usage={
+            "prompt_tokens": 1000,
+            "completion_tokens": 500,
+            "cached_prompt_text_tokens": 100,
+        },
+        estimated_cost_usd=0.01572,
+        metadata_json=None,
+    )
+
+    assert store.append(fast_reasoning) is True
+    assert store.append(x_search) is True
+
+    summary = store.dashboard_summary(period_days=30)
+
+    assert summary["total_calls"] == 2
+    assert summary["providers"][0]["name"] == "xAI"
+    assert summary["providers"][0]["calls"] == 2
+    assert summary["providers"][0]["role"] == "grok-4.20-beta-0309-reasoning +1 more"
+    assert summary["providers"][0]["cost_usd"] == 0.016155
+    assert summary["total_cost_usd"] == 0.016155

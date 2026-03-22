@@ -4382,7 +4382,7 @@ export default function SpacesControlCenter({
     const currencySymbol = manageSnapshot.budgetCurrency === 'USD' ? '$' : `${manageSnapshot.budgetCurrency} `
     const budgetCap = `${currencySymbol}${manageSnapshot.budgetTotal.toFixed(2)}`
     const lastUpdatedLabel = manageLastUpdatedAt
-      ? new Date(manageLastUpdatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      ? new Date(manageLastUpdatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
       : '—'
 
     const liveServiceCount = manageSnapshot.services.filter((s) => s.status === 'live').length
