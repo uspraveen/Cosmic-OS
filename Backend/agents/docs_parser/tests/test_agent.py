@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -248,6 +250,48 @@ class PictureDescriptionFallbackParser:
             mime_type=mime_type,
             request=request,
         )
+
+
+class SlowParallelParser:
+    def __init__(self, delay_sec: float = 0.05) -> None:
+        self.delay_sec = delay_sec
+        self.calls: list[dict[str, Any]] = []
+        self._lock = threading.Lock()
+        self._active = 0
+        self.max_active = 0
+
+    def parse_file(
+        self,
+        *,
+        file_path: Path,
+        artifact_id: str,
+        mime_type: str,
+        request: ParseRequest,
+        source_filename: str | None = None,
+    ) -> ParsedDocument:
+        del source_filename
+        with self._lock:
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+        try:
+            time.sleep(self.delay_sec)
+            self.calls.append(
+                {
+                    "file_path": str(file_path),
+                    "artifact_id": artifact_id,
+                    "mime_type": mime_type,
+                    "request": request,
+                }
+            )
+            return StubParser().parse_file(
+                file_path=file_path,
+                artifact_id=artifact_id,
+                mime_type=mime_type,
+                request=request,
+            )
+        finally:
+            with self._lock:
+                self._active -= 1
 
 
 class FakeOfficeRenderer:
@@ -847,6 +891,64 @@ async def test_docs_parser_agent_parse_bundle_persists_canonical_outputs(tmp_pat
     assert figure_asset_result.status == "completed"
     assert figure_asset_result.output["figure"]["classification"]["label"] == "flow_chart"
     assert "systems architecture diagram" in figure_asset_result.output["figure"]["description"]
+
+
+@pytest.mark.asyncio
+async def test_docs_parser_agent_parses_up_to_three_documents_in_parallel(tmp_path: Path) -> None:
+    artifacts: list[dict[str, str]] = []
+    for index in range(1, 4):
+        source_root = tmp_path / "runs" / "artifacts" / f"req_ingest_{index:03d}" / "inputs" / f"art_pdf_{index:03d}"
+        source_root.mkdir(parents=True, exist_ok=True)
+        source_file = source_root / f"strategy_{index}.pdf"
+        source_file.write_bytes(f"%PDF-1.7 fake strategy pdf {index}".encode("utf-8"))
+        artifacts.append(
+            {
+                "artifact_id": f"art_pdf_{index:03d}",
+                "path": str(source_file),
+                "mime": "application/pdf",
+                "filename": source_file.name,
+                "sha256": hashlib.sha256(source_file.read_bytes()).hexdigest(),
+            }
+        )
+
+    parser = SlowParallelParser()
+    agent = DocsParserAgent(
+        redis_client=FakeRedis(),
+        config=DocsParserConfig(
+            redis_url="redis://unused",
+            gateway_url="http://gateway",
+            gateway_internal_token="internal-token",
+            max_parallel_documents=3,
+        ),
+        parser=parser,
+        store_root=tmp_path / "store",
+        runtime_root=tmp_path / "runtime",
+        artifacts_root=tmp_path / "runs" / "artifacts",
+        agent_secret="agent-secret",
+    )
+    await agent.on_startup()
+    try:
+        result = await agent.execute(
+            _make_task(
+                payload={"bundle_label": "Parallel parse smoke", "ocr_mode": "auto"},
+                input_artifacts=artifacts,
+            )
+        )
+    finally:
+        await agent.stop()
+
+    assert result.status == "completed"
+    assert result.output["document_count"] == 3
+    assert [item["filename"] for item in result.output["documents"]] == ["strategy_1.pdf", "strategy_2.pdf", "strategy_3.pdf"]
+    assert len(parser.calls) == 3
+    assert parser.max_active >= 2
+
+
+def test_docs_parser_config_defaults_reflect_parallel_parse_tuning() -> None:
+    config = DocsParserConfig()
+    assert config.max_parallel_documents == 3
+    assert config.picture_description_concurrency == 8
+    assert config.full_page_vlm_concurrency == 6
 
 
 def test_docling_adapter_builds_structure_aware_chunks() -> None:

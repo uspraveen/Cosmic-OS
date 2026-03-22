@@ -4354,7 +4354,24 @@ export default function SpacesControlCenter({
             <div className="agent-email-shell-context" aria-label="Current context">
               {agentEmailView === 'overview' ? <span className="agent-email-context-chip">{orgName}</span> : null}
               {agentEmailView === 'inboxes' ? (
-                <span className="agent-email-context-chip agent-email-console-mono" title={selectedInboxName}>{selectedInboxName}</span>
+                agentEmailInboxes.length > 1 ? (
+                  <select
+                    className="agent-email-shell-mailbox-select agent-email-console-mono"
+                    value={agentEmailSelectedInboxId}
+                    onChange={(event) => setAgentEmailSelectedInboxId(event.target.value)}
+                    aria-label="Active mailbox"
+                  >
+                    {agentEmailInboxes.map((inbox) => (
+                      <option key={inbox.id} value={inbox.id}>
+                        {inbox.address}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <span className="agent-email-context-chip agent-email-console-mono" title={selectedInboxName}>
+                    {selectedInboxName}
+                  </span>
+                )
               ) : null}
               {agentEmailView === 'settings' && agentEmailDomains.length > 0 ? (
                 <span className="agent-email-context-chip agent-email-console-mono" title={primaryDomainLabel}>{primaryDomainLabel}</span>

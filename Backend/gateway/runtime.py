@@ -1635,7 +1635,7 @@ class GatewayRuntime:
         send,
         store_assistant_message,
     ) -> None:
-        await self._ensure_request_documents_parsed(request_record)
+        await self._ensure_request_documents_parsed(request_record, send=send)
         task = self._build_orchestrator_task(
             request_record=request_record,
             session_id=session_id,
@@ -5774,7 +5774,7 @@ class GatewayRuntime:
             "filename": filename,
         }
 
-    async def _ensure_request_documents_parsed(self, request_record: dict[str, Any]) -> None:
+    async def _ensure_request_documents_parsed(self, request_record: dict[str, Any], *, send=None) -> None:
         if not self.config.docs_auto_parse_enabled or self._redis is None:
             return
         if self._safe_text(request_record.get("route")) != "opus":
@@ -5796,11 +5796,29 @@ class GatewayRuntime:
             for artifact in document_artifacts
             if self._safe_text(artifact.get("artifact_id"))
         ]
+        if send is not None and channel.startswith("desktop:"):
+            await send(
+                self._build_docs_parse_progress_event(
+                    request_record=request_record,
+                    status="docs_prepare",
+                    message="Preparing your attached documents for parsing.",
+                    docs_progress={
+                        "kind": "docs_parse",
+                        "stage": "prepare",
+                        "label": "Preparing attached documents",
+                        "detail": f"{len(document_artifacts)} document(s) queued for parsing.",
+                        "current": 0,
+                        "total": len(document_artifacts),
+                        "percent": 0.06,
+                    },
+                )
+            )
 
         try:
             parse_result = await self._dispatch_docs_parse_bundle(
                 request_record=request_record,
                 input_artifacts=document_artifacts,
+                progress_callback=send,
             )
         except Exception as exc:
             logger.exception(
@@ -5819,6 +5837,24 @@ class GatewayRuntime:
                 parse_result=parse_result,
                 artifact_ids=artifact_ids,
             )
+            if send is not None and channel.startswith("desktop:"):
+                await send(
+                    self._build_docs_parse_progress_event(
+                        request_record=request_record,
+                        task_id=self._safe_text(parse_result.get("task_id")) or None,
+                        status="docs_ready",
+                        message="Documents parsed successfully. Preparing the answer.",
+                        docs_progress={
+                            "kind": "docs_parse",
+                            "stage": "ready",
+                            "label": "Documents parsed",
+                            "detail": "Preparing the answer over the parsed bundle.",
+                            "current": len(document_artifacts),
+                            "total": len(document_artifacts),
+                            "percent": 1.0,
+                        },
+                    )
+                )
             return
         task_id = self._safe_text(parse_result.get("task_id")) or None
         error_text = self._safe_text(parse_result.get("error_message")) or "docs.parse_bundle failed"
@@ -5980,6 +6016,7 @@ class GatewayRuntime:
         *,
         request_record: dict[str, Any],
         input_artifacts: list[dict[str, Any]],
+        progress_callback=None,
     ) -> dict[str, Any]:
         session_id = self._safe_text(request_record.get("session_id"))
         request_id = self._safe_text(request_record.get("request_id"))
@@ -6030,9 +6067,28 @@ class GatewayRuntime:
         )
         task = task.model_copy(update={"signature": sign_task_envelope(task, self.config.signing_secret)})
         await dispatch_task(task, self._redis)
-        return await self._wait_for_agent_terminal_result(task.task_id, timeout_sec=self.config.docs_parse_timeout_sec)
+        return await self._wait_for_agent_terminal_result(
+            task.task_id,
+            timeout_sec=self.config.docs_parse_timeout_sec,
+            progress_callback=(
+                (lambda event: progress_callback(
+                    self._build_docs_parse_progress_event(
+                        request_record=request_record,
+                        task_id=task.task_id,
+                        status="docs_parsing",
+                        message=self._safe_text(event.get("message")) or "Parsing attached documents.",
+                        docs_progress=self._derive_docs_parse_progress(
+                            message=self._safe_text(event.get("message")) or "Parsing attached documents.",
+                            total_documents=len(input_artifacts),
+                        ),
+                    )
+                ))
+                if progress_callback is not None and channel.startswith("desktop:")
+                else None
+            ),
+        )
 
-    async def _wait_for_agent_terminal_result(self, task_id: str, *, timeout_sec: float) -> dict[str, Any]:
+    async def _wait_for_agent_terminal_result(self, task_id: str, *, timeout_sec: float, progress_callback=None) -> dict[str, Any]:
         if self._redis is None:
             return {"status": "failed", "error_message": "Redis is not available for agent result tracking."}
         event_ids_key = f"task_events:{task_id}"
@@ -6056,6 +6112,17 @@ class GatewayRuntime:
                             "output": event.payload.get("output") if isinstance(event.payload, dict) else {},
                             "artifacts": event.payload.get("artifacts") if isinstance(event.payload, dict) else [],
                         }
+                    if event.event_type == "task.progress":
+                        if progress_callback is not None:
+                            payload = event.payload if isinstance(event.payload, dict) else {}
+                            await progress_callback(
+                                {
+                                    "task_id": task_id,
+                                    "message": self._safe_text(payload.get("message")),
+                                    "payload": payload,
+                                }
+                            )
+                        continue
                     if event.event_type == "task.failed":
                         error = event.payload.get("error") if isinstance(event.payload, dict) else {}
                         return {
@@ -6075,6 +6142,65 @@ class GatewayRuntime:
             "status": "pending",
             "task_id": task_id,
             "error_message": f"Timed out waiting for {task_id}.",
+        }
+
+    def _derive_docs_parse_progress(self, *, message: str, total_documents: int) -> dict[str, Any]:
+        total = max(1, total_documents)
+        normalized = self._safe_text(message)
+        current = 0
+        stage = "prepare"
+        label = "Preparing attached documents"
+        detail = normalized or "Preparing attached documents."
+        percent = 0.08
+
+        parsing_match = re.search(r"Parsing document\s+(\d+)/(\d+):", normalized, re.IGNORECASE)
+        if parsing_match:
+            current = max(1, int(parsing_match.group(1)))
+            total = max(1, int(parsing_match.group(2)))
+            stage = "parse"
+            label = f"Parsing document {current} of {total}"
+            percent = min(0.72, 0.14 + ((current - 1) / total) * 0.46)
+        elif normalized.lower().startswith("parsing ") and "uploaded document" in normalized.lower():
+            stage = "prepare"
+            label = "Starting document parsing"
+            percent = 0.1
+        elif normalized.lower().startswith("escalating "):
+            stage = "enhance"
+            current = total
+            label = "Running visual enrichment"
+            percent = 0.84
+
+        return {
+            "kind": "docs_parse",
+            "stage": stage,
+            "label": label,
+            "detail": detail,
+            "current": current,
+            "total": total,
+            "percent": percent,
+        }
+
+    def _build_docs_parse_progress_event(
+        self,
+        *,
+        request_record: dict[str, Any],
+        status: str,
+        message: str,
+        docs_progress: dict[str, Any],
+        task_id: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "type": "task.progress",
+            "request_id": self._safe_text(request_record.get("request_id")) or None,
+            "session_id": self._safe_text(request_record.get("session_id")) or None,
+            "channel": self._safe_text(request_record.get("channel")) or None,
+            "source": self._safe_text(request_record.get("source")) or "user",
+            "source_id": self._safe_text(request_record.get("source_id")) or None,
+            "task_id": task_id,
+            "route": "opus",
+            "status": status,
+            "message": message,
+            "docs_progress": docs_progress,
         }
 
     async def _handle_orchestrator_event(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -197,16 +198,72 @@ class DocsParserAgent(AgentRuntime):
         document_summaries: list[dict[str, Any]] = []
         produced_artifacts: list[ArtifactManifest] = []
 
-        await self._emit_progress(task.task_id, f"Parsing {len(artifacts)} uploaded document(s).")
-        for index, artifact in enumerate(artifacts, start=1):
+        parallelism = max(1, min(len(artifacts), self.config.max_parallel_documents))
+        await self._emit_progress(
+            task.task_id,
+            f"Parsing {len(artifacts)} uploaded document(s) with up to {parallelism} documents in parallel.",
+        )
+        semaphore = asyncio.Semaphore(parallelism)
+        results = await asyncio.gather(
+            *[
+                self._parse_bundle_artifact(
+                    task=task,
+                    artifact=artifact,
+                    index=index,
+                    total=len(artifacts),
+                    bundle_id=bundle_id,
+                    parse_request=parse_request,
+                    semaphore=semaphore,
+                )
+                for index, artifact in enumerate(artifacts, start=1)
+            ],
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, Exception):
+                if isinstance(result, DocsParserAgentError):
+                    raise result
+                raise result
+            _, summary, manifests = result
+            document_summaries.append(summary)
+            produced_artifacts.extend(manifests)
+
+        output = {
+            "response": f"Parsed {len(document_summaries)} document(s) into canonical bundles.",
+            "bundle_id": bundle_id,
+            "bundle_label": bundle_label,
+            "document_count": len(document_summaries),
+            "documents": document_summaries,
+        }
+        self._record_session_run(
+            task=task,
+            bundle_id=bundle_id,
+            summary=output,
+            artifacts=produced_artifacts,
+        )
+        return AgentResult(status="completed", output=output, artifacts=produced_artifacts, error=None)
+
+    async def _parse_bundle_artifact(
+        self,
+        *,
+        task: TaskEnvelope,
+        artifact: dict[str, str],
+        index: int,
+        total: int,
+        bundle_id: str,
+        parse_request: ParseRequest,
+        semaphore: asyncio.Semaphore,
+    ) -> tuple[int, dict[str, Any], list[ArtifactManifest]]:
+        async with semaphore:
             source_path = self._resolve_input_artifact_path(artifact)
             source_path = self._verify_source_file(source_path=source_path, artifact=artifact)
             await self._emit_progress(
                 task.task_id,
-                f"Parsing document {index}/{len(artifacts)}: {artifact.get('filename') or artifact['artifact_id']}.",
+                f"Parsing document {index}/{total}: {artifact.get('filename') or artifact['artifact_id']}.",
             )
             try:
-                parsed, enrichment_status = self._parse_with_enrichment_fallback(
+                parsed, enrichment_status = await asyncio.to_thread(
+                    self._parse_with_enrichment_fallback,
                     source_path=source_path,
                     artifact=artifact,
                     request=parse_request,
@@ -229,7 +286,8 @@ class DocsParserAgent(AgentRuntime):
                     next_action=next_action,
                 ) from exc
             doc_id = self._stable_id(f"{artifact['artifact_id']}:{source_path.name}:{parsed.title or ''}")
-            summary, manifests = self._persist_parsed_bundle(
+            summary, manifests = await asyncio.to_thread(
+                self._persist_parsed_bundle,
                 task=task,
                 artifact=artifact,
                 doc_id=doc_id,
@@ -240,23 +298,7 @@ class DocsParserAgent(AgentRuntime):
                 enrichment_status=enrichment_status,
                 rendered_office_document=rendered_office_document,
             )
-            document_summaries.append(summary)
-            produced_artifacts.extend(manifests)
-
-        output = {
-            "response": f"Parsed {len(document_summaries)} document(s) into canonical bundles.",
-            "bundle_id": bundle_id,
-            "bundle_label": bundle_label,
-            "document_count": len(document_summaries),
-            "documents": document_summaries,
-        }
-        self._record_session_run(
-            task=task,
-            bundle_id=bundle_id,
-            summary=output,
-            artifacts=produced_artifacts,
-        )
-        return AgentResult(status="completed", output=output, artifacts=produced_artifacts, error=None)
+            return index, summary, manifests
 
     async def _handle_browse_bundle(self, task: TaskEnvelope) -> AgentResult:
         bundle_id = self._require_bundle_id(task.input.get("bundle_id"))
@@ -1094,7 +1136,8 @@ class DocsParserAgent(AgentRuntime):
                 task.task_id,
                 f"Escalating {artifact.get('filename') or artifact['artifact_id']} through Office render and hosted full-page VLM.",
             )
-            rendered_office_document = self.office_renderer.render_to_pdf(
+            rendered_office_document = await asyncio.to_thread(
+                self.office_renderer.render_to_pdf,
                 source_path=source_path,
                 working_root=self.runtime_root / "office_render",
             )
@@ -1108,7 +1151,8 @@ class DocsParserAgent(AgentRuntime):
                 picture_description=None,
                 use_full_page_vlm=True,
             )
-            rerun_parsed = self.parser.parse_file(
+            rerun_parsed = await asyncio.to_thread(
+                self.parser.parse_file,
                 file_path=rendered_office_document.rendered_pdf_path,
                 artifact_id=artifact["artifact_id"],
                 mime_type=artifact["mime"],
@@ -1132,7 +1176,8 @@ class DocsParserAgent(AgentRuntime):
                     generate_picture_images=True,
                     use_full_page_vlm=False,
                 )
-                fallback_parsed, fallback_enrichment = self._parse_with_enrichment_fallback(
+                fallback_parsed, fallback_enrichment = await asyncio.to_thread(
+                    self._parse_with_enrichment_fallback,
                     source_path=rendered_office_document.rendered_pdf_path,
                     artifact=artifact,
                     request=fallback_request,

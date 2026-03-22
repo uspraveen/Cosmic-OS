@@ -64,6 +64,7 @@ For the current production slice, the ingest and parse path should enforce conse
 - maximum pages/slides passed into Docling: **200**
 - maximum standalone image uploads per user message: **20 images**
 - maximum inline Opus/Claude image inputs per turn: **10 images**
+- maximum documents parsed in parallel inside one docs task: **3**
 
 Files beyond these bounds should be rejected early with a clear user-visible error instead of being staged and then failing deep in the parse path.
 
@@ -85,6 +86,10 @@ For the current production slice, visual enrichment should be enabled conservati
 
 - **Docling remains the primary parser.**
 - **Picture description is enabled by default for PDF/image-style Docling pipelines when a hosted API key is configured.**
+- **Bundle parsing is bounded-parallel, not fully serial.** The docs agent may parse up to **3 documents concurrently** inside one `docs.parse_bundle` task.
+- **Docling remote visual stages are also bounded.** Current production defaults are:
+  - picture description concurrency: **8**
+  - full-page VLM concurrency: **6**
 - **Heavy VLM inference does not run on the COSMIC VM.** The VM only calls a hosted endpoint.
 - **Remote picture description must be allowed explicitly via Docling `enable_remote_services=True`.**
 - **Decorative picture classes should be skipped by default** to avoid wasting cost:

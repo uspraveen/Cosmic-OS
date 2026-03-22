@@ -33,6 +33,7 @@ interface Message {
   source?: string | null
   sourceId?: string | null
   createdAt?: string | null
+  progress?: DocsProgressState
 }
 
 interface PendingTaskInput {
@@ -76,6 +77,16 @@ interface MessageAttachment {
   filename: string
   mimeType: string | null
   sizeBytes: number | null
+}
+
+interface DocsProgressState {
+  kind: 'docs_parse'
+  stage: 'prepare' | 'parse' | 'enhance' | 'ready'
+  label: string
+  detail?: string
+  current: number
+  total: number
+  percent: number
 }
 
 interface SurfaceLaunchState {
@@ -231,6 +242,64 @@ const countImageAttachments = (attachments: PendingDocumentAttachment[]) => {
 
 const buildImageAttachmentLimitError = (imageCount: number) => {
   return `Up to ${MAX_IMAGE_ATTACHMENTS_PER_MESSAGE} images can be attached in one message. You selected ${imageCount}.`
+}
+
+const normalizeDocsProgress = (value: unknown): DocsProgressState | undefined => {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+  const rawStage = String((value as any).stage || '').trim().toLowerCase()
+  const stage: DocsProgressState['stage'] =
+    rawStage === 'parse' || rawStage === 'enhance' || rawStage === 'ready'
+      ? rawStage
+      : 'prepare'
+  const label = String((value as any).label || '').trim()
+  if (!label) {
+    return undefined
+  }
+  const total = Math.max(1, Number((value as any).total || 0) || 1)
+  const current = Math.max(0, Math.min(total, Number((value as any).current || 0) || 0))
+  const rawPercent = Number((value as any).percent || 0)
+  const percent = Math.max(0, Math.min(1, Number.isFinite(rawPercent) ? rawPercent : 0))
+  return {
+    kind: 'docs_parse',
+    stage,
+    label,
+    detail: String((value as any).detail || '').trim() || undefined,
+    current,
+    total,
+    percent,
+  }
+}
+
+const DocsProgressCard = ({ progress }: { progress: DocsProgressState }) => {
+  const percentLabel = `${Math.max(1, Math.round(progress.percent * 100))}%`
+  const showCount = progress.total > 1
+  const stageLabel =
+    progress.stage === 'prepare'
+      ? 'Preparing'
+      : progress.stage === 'parse'
+        ? 'Parsing'
+        : progress.stage === 'enhance'
+          ? 'Enhancing'
+          : 'Ready'
+  return (
+    <div className="docs-progress-card" role="status" aria-live="polite">
+      <div className="docs-progress-head">
+        <span className="docs-progress-kicker">Document Processing</span>
+        <span className={`docs-progress-stage ${progress.stage}`}>{stageLabel}</span>
+      </div>
+      <div className="docs-progress-label">{progress.label}</div>
+      {progress.detail && <div className="docs-progress-detail">{progress.detail}</div>}
+      <div className="docs-progress-bar" aria-hidden="true">
+        <span className="docs-progress-bar-fill" style={{ width: `${Math.max(4, Math.round(progress.percent * 100))}%` }} />
+      </div>
+      <div className="docs-progress-foot">
+        <span>{percentLabel}</span>
+        {showCount && <span>{progress.current}/{progress.total} docs</span>}
+      </div>
+    </div>
+  )
 }
 
 const DocumentAttachmentIcon = () => (
@@ -1434,8 +1503,9 @@ export default function App() {
         }
         const eventStatus = String(event.status || '').trim()
         const statusMessage = String(event.message || '').trim()
+        const docsProgress = normalizeDocsProgress(event.docs_progress)
         const fallbackMessage = eventStatus ? `Task ${eventStatus}...` : 'Working on your request...'
-        const activityText = statusMessage || fallbackMessage
+        const activityText = docsProgress?.label || statusMessage || fallbackMessage
         setStreamingProgress(activityText)
         setMessages((prev) => {
           const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
@@ -1446,6 +1516,7 @@ export default function App() {
             return {
               ...message,
               activity: activityText,
+              progress: docsProgress,
               stopped: false,
             }
           })
@@ -1465,6 +1536,7 @@ export default function App() {
             return {
               ...message,
               content: `${message.content}${String(event.content)}`,
+              progress: undefined,
               stopped: false,
             }
           })
@@ -1484,6 +1556,7 @@ export default function App() {
             return {
               ...message,
               thinking: `${message.thinking || ''}${String(event.content)}`,
+              progress: undefined,
               stopped: false,
             }
           })
@@ -1510,6 +1583,7 @@ export default function App() {
               source: typeof event.source === 'string' ? event.source : message.source,
               sourceId: typeof event.source_id === 'string' ? event.source_id : message.sourceId,
               createdAt: new Date().toISOString(),
+              progress: undefined,
               stopped: false,
             }
           })
@@ -1591,7 +1665,7 @@ export default function App() {
             if (item.id !== messageId) {
               return item
             }
-            return { ...item, content: message }
+            return { ...item, content: message, progress: undefined }
           })
         })
         forgetAssistantMessageBindings(event)
@@ -1628,6 +1702,7 @@ export default function App() {
             }
             return {
               ...item,
+              progress: undefined,
               stopped: true,
             }
           }))
@@ -2069,6 +2144,19 @@ export default function App() {
     window.addEventListener('resize', handleResize)
     return () => window.removeEventListener('resize', handleResize)
   }, [])
+
+  const activeDocsProgressMessage = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]
+      if (message.role !== 'assistant') {
+        continue
+      }
+      if (message.progress?.kind === 'docs_parse' && !String(message.content || '').trim()) {
+        return message
+      }
+    }
+    return null
+  }, [messages])
 
   // Render Classes
   const shouldShowTaskInterrupt =
@@ -2700,7 +2788,10 @@ export default function App() {
                         </>
                       ) : (
                         <>
-                          {msg.activity && (
+                          {msg.progress?.kind === 'docs_parse' && !String(msg.content || '').trim() && (
+                            <DocsProgressCard progress={msg.progress} />
+                          )}
+                          {msg.activity && msg.progress?.kind !== 'docs_parse' && (
                             <div className="assistant-activity" title="Live activity from Opus tool orchestration">
                               {msg.activity}
                             </div>
@@ -2803,7 +2894,7 @@ export default function App() {
                     )
                   })}
 
-                  {mode !== 'task' && isStreaming && (
+                  {mode !== 'task' && isStreaming && !activeDocsProgressMessage && (
                     <div className="streaming-indicator">
                       {streamingProgress && <div className="streaming-status">{streamingProgress}</div>}
                       <div className="streaming-dots">

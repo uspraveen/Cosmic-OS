@@ -55,6 +55,7 @@ class DocsParserConfig:
     gateway_url: str = "http://127.0.0.1:8080"
     gateway_internal_token: str = ""
     max_input_artifacts: int = 8
+    max_parallel_documents: int = 3
     max_input_file_bytes: int = 20 * 1024 * 1024
     max_num_pages: int = 200
     default_enable_ocr: bool = True
@@ -71,7 +72,7 @@ class DocsParserConfig:
     picture_description_model: str = "gpt-4.1-mini"
     picture_description_preset: str = "qwen"
     picture_description_timeout_sec: float = 90.0
-    picture_description_concurrency: int = 4
+    picture_description_concurrency: int = 8
     picture_description_batch_size: int = 4
     picture_description_max_new_tokens: int = 220
     picture_description_scale: float = 2.0
@@ -96,7 +97,7 @@ class DocsParserConfig:
     full_page_vlm_model: str = "gpt-4.1-mini"
     full_page_vlm_preset: str = "qwen"
     full_page_vlm_timeout_sec: float = 120.0
-    full_page_vlm_concurrency: int = 2
+    full_page_vlm_concurrency: int = 6
     full_page_vlm_batch_size: int = 2
     full_page_vlm_max_new_tokens: int = 1200
     full_page_vlm_scale: float = 2.0
@@ -126,6 +127,7 @@ class DocsParserConfig:
             gateway_url=os.getenv("GATEWAY_URL", "http://127.0.0.1:8080").strip() or "http://127.0.0.1:8080",
             gateway_internal_token=os.getenv("GATEWAY_INTERNAL_TOKEN", "").strip(),
             max_input_artifacts=max(1, _env_int("DOCS_PARSER_MAX_INPUT_ARTIFACTS", 8)),
+            max_parallel_documents=max(1, _env_int("DOCS_PARSER_MAX_PARALLEL_DOCUMENTS", 3)),
             max_input_file_bytes=max(1024 * 1024, _env_int("DOCS_PARSER_MAX_INPUT_FILE_BYTES", 20 * 1024 * 1024)),
             max_num_pages=max(1, _env_int("DOCS_PARSER_MAX_NUM_PAGES", 200)),
             default_enable_ocr=os.getenv("DOCS_PARSER_ENABLE_OCR", "true").strip().lower() not in {"0", "false", "no"},
@@ -167,7 +169,7 @@ class DocsParserConfig:
             ),
             picture_description_concurrency=max(
                 1,
-                _env_int("DOCS_PARSER_PICTURE_DESCRIPTION_CONCURRENCY", 4),
+                _env_int("DOCS_PARSER_PICTURE_DESCRIPTION_CONCURRENCY", 8),
             ),
             picture_description_batch_size=max(
                 1,
@@ -223,7 +225,7 @@ class DocsParserConfig:
             ),
             full_page_vlm_concurrency=max(
                 1,
-                _env_int("DOCS_PARSER_FULL_PAGE_VLM_CONCURRENCY", 2),
+                _env_int("DOCS_PARSER_FULL_PAGE_VLM_CONCURRENCY", 6),
             ),
             full_page_vlm_batch_size=max(
                 1,

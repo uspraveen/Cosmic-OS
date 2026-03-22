@@ -3758,7 +3758,46 @@
   gap: 6px;
   justify-content: flex-end;
   align-content: flex-start;
-  max-width: min(100%, 280px);
+  max-width: min(100%, 320px);
+}
+
+.agent-email-shell-mailbox-select {
+  box-sizing: border-box;
+  max-width: min(100%, 300px);
+  min-width: min(180px, 100%);
+  min-height: 30px;
+  padding: 5px 28px 5px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  cursor: pointer;
+  outline: none;
+  appearance: none;
+  background-color: rgba(12, 12, 14, 0.55);
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.55)' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E"),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  background-repeat: no-repeat, no-repeat;
+  background-position: right 9px center, 0 0;
+  background-size: 12px, 100% 100%;
+}
+
+.agent-email-shell-mailbox-select:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.agent-email-shell-mailbox-select:focus-visible {
+  border-color: rgba(255, 255, 255, 0.28);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.06);
+}
+
+.agent-email-shell-mailbox-select option {
+  color: #111;
+  background: #f4f4f5;
 }
 
 .agent-email-context-chip {
