@@ -4598,10 +4598,14 @@ class GatewayRuntime:
             except Exception as exc:
                 self.adapter_errors[platform] = str(exc)
                 status = {"status": "error", "error": str(exc)}
+            pairing_state = self._safe_text(status.get("pairing_state")) or ""
+            connected = bool(status.get("connected"))
+            qr_ready = bool(status.get("qr"))
+            bridge_healthy = connected or qr_ready or pairing_state in {"connecting"}
             return {
                 "platform": platform,
                 "configured": True,
-                "healthy": platform not in self.adapter_errors,
+                "healthy": platform not in self.adapter_errors and bridge_healthy,
                 "last_error": self.adapter_errors.get(platform),
                 "bridge": status,
             }

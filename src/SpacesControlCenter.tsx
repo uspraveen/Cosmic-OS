@@ -35,6 +35,9 @@ interface SpacesControlCenterProps {
   containerRef?: RefObject<HTMLDivElement | null>
   containerClassName?: string
   containerStyle?: CSSProperties
+  /** Increment (e.g. from Dynamic Island) to open Agent Email on the Inbox tab; optional mailbox id to select. */
+  agentEmailNavigateInboxSignal?: number
+  agentEmailNavigateInboxMailboxId?: string | null
 }
 
 interface SpacePageDef {
@@ -214,6 +217,7 @@ interface AgentEmailThreadMessage {
   time: string
   body: string
   isRead: boolean
+  attachments: CosmicMailAttachmentRead[]
 }
 
 interface AgentEmailThread {
@@ -226,6 +230,8 @@ interface AgentEmailThread {
   state: string
   snippet: string
   lastMessageAt: string
+  threadSnapshot: CosmicMailThreadRead
+  messagesSource: CosmicMailMessageRead[]
   messages: AgentEmailThreadMessage[]
 }
 
@@ -380,6 +386,16 @@ interface CosmicMailMailContact {
   name: string | null
 }
 
+interface CosmicMailAttachmentRead {
+  id: string
+  message_id: string | null
+  draft_id: string | null
+  filename: string
+  content_type: string
+  size_bytes: number
+  created_at: string
+}
+
 interface CosmicMailDraftRead {
   id: string
   organization_id: string
@@ -442,6 +458,7 @@ interface CosmicMailMessageRead {
   sent_at: string | null
   received_at: string | null
   created_at: string
+  attachments?: CosmicMailAttachmentRead[]
 }
 
 interface CosmicMailDraftSendResult {
@@ -695,6 +712,78 @@ function buildAgentEmailSnippet(message: CosmicMailMessageRead | null | undefine
     if (preview) return preview.slice(0, 180)
   }
   return String(fallback || '').trim() || 'No preview available.'
+}
+
+function normalizeAgentEmailAddr(value: string | null | undefined): string {
+  return String(value || '').trim().toLowerCase()
+}
+
+function formatAgentEmailAttachmentSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  if (bytes >= 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
+  return `${Math.max(1, Math.round(bytes))} B`
+}
+
+function getElectronLocalFilePath(file: File): string | null {
+  const extended = file as File & { path?: string }
+  if (extended.path && typeof extended.path === 'string') {
+    return extended.path
+  }
+  return null
+}
+
+function buildAgentEmailThreadReplyDraftPayload(
+  thread: CosmicMailThreadRead,
+  mailboxAddress: string,
+  messages: CosmicMailMessageRead[],
+  textBody: string,
+): {
+  mailbox_id: string
+  thread_id: string
+  reply_to_message_id: string | null
+  subject: string
+  to_recipients: CosmicMailMailContact[]
+  cc_recipients: CosmicMailMailContact[]
+  bcc_recipients: CosmicMailMailContact[]
+  text_body: string | null
+  html_body: string | null
+} {
+  const sorted = [...messages].sort((a, b) => {
+    const aTime = new Date(a.received_at || a.sent_at || a.created_at).getTime()
+    const bTime = new Date(b.received_at || b.sent_at || b.created_at).getTime()
+    return aTime - bTime
+  })
+  const lastMessage = sorted[sorted.length - 1]
+  if (!lastMessage) {
+    throw new Error('Cannot reply: thread has no messages.')
+  }
+  const mbox = normalizeAgentEmailAddr(mailboxAddress)
+  const replyTo = lastMessage.reply_to_recipients?.length
+    ? lastMessage.reply_to_recipients
+    : lastMessage.to_recipients
+  let to_recipients: CosmicMailMailContact[]
+  if (normalizeAgentEmailAddr(lastMessage.from_address) !== mbox) {
+    to_recipients = [{ email: lastMessage.from_address, name: lastMessage.from_name }]
+  } else {
+    to_recipients = (replyTo && replyTo.length > 0)
+      ? replyTo
+      : [{ email: lastMessage.from_address, name: lastMessage.from_name }]
+  }
+  const subjectLower = (thread.subject || '').toLowerCase()
+  const subject = subjectLower.startsWith('re:') ? thread.subject : `Re: ${thread.subject}`
+  const trimmed = textBody.trim()
+  return {
+    mailbox_id: thread.mailbox_id,
+    thread_id: thread.id,
+    reply_to_message_id: lastMessage.internet_message_id || null,
+    subject,
+    to_recipients,
+    cc_recipients: [],
+    bcc_recipients: [],
+    text_body: trimmed ? trimmed : null,
+    html_body: null,
+  }
 }
 
 function mapAgentEmailAccent(value: string, category: 'agent' | 'inbox' | 'domain' | 'approval' | 'thread'): AccentTone {
@@ -1304,6 +1393,8 @@ export default function SpacesControlCenter({
   containerRef,
   containerClassName,
   containerStyle,
+  agentEmailNavigateInboxSignal = 0,
+  agentEmailNavigateInboxMailboxId = null,
 }: SpacesControlCenterProps) {
   const [page, setPage] = useState<SpacesPageId>('command')
   const [railCollapsed, setRailCollapsed] = useState(false)
@@ -1933,6 +2024,9 @@ export default function SpacesControlCenter({
   const [agentEmailInboxSearchApplied, setAgentEmailInboxSearchApplied] = useState('')
   /** Inbox: reply composer expanded vs Gmail-style reply strip. */
   const [agentEmailComposerExpanded, setAgentEmailComposerExpanded] = useState(false)
+  const [agentEmailReplyAttachmentFiles, setAgentEmailReplyAttachmentFiles] = useState<File[]>([])
+  const [agentEmailAttachmentActionId, setAgentEmailAttachmentActionId] = useState<string | null>(null)
+  const agentEmailReplyAttachInputRef = useRef<HTMLInputElement>(null)
   const agentEmailMessagesEndRef = useRef<HTMLDivElement>(null)
   const agentEmailConfigReady = agentEmailBaseUrl.trim().length > 0 && agentEmailApiToken.trim().length > 0
 
@@ -2022,6 +2116,8 @@ export default function SpacesControlCenter({
         state,
         snippet: buildAgentEmailSnippet(lastMessage, thread.snippet),
         lastMessageAt: thread.last_message_at,
+        threadSnapshot: thread,
+        messagesSource: sortedMessages,
         messages: sortedMessages.map((message) => ({
           id: message.id,
           direction: message.direction,
@@ -2030,6 +2126,7 @@ export default function SpacesControlCenter({
           time: formatAgentEmailAbsolute(message.received_at || message.sent_at || message.created_at),
           body: buildAgentEmailMessageBody(message),
           isRead: message.is_read,
+          attachments: message.attachments ?? [],
         })),
       } satisfies AgentEmailThread
     }))
@@ -2318,12 +2415,14 @@ export default function SpacesControlCenter({
   useEffect(() => {
     setAgentEmailReplyDraft('')
     setAgentEmailComposerExpanded(false)
+    setAgentEmailReplyAttachmentFiles([])
   }, [agentEmailSelectedThreadId])
 
   useEffect(() => {
     if (!agentEmailThreads.length) {
       setAgentEmailReplyDraft('')
       setAgentEmailComposerExpanded(false)
+      setAgentEmailReplyAttachmentFiles([])
     }
   }, [agentEmailThreads.length])
 
@@ -2349,6 +2448,31 @@ export default function SpacesControlCenter({
     setAgentEmailInboxSearchQuery('')
     setAgentEmailInboxSearchApplied('')
   }, [agentEmailSelectedInboxId])
+
+  const lastAgentEmailNavigateSignalRef = useRef(0)
+  const pendingAgentEmailInboxMailboxIdRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    const sig = agentEmailNavigateInboxSignal ?? 0
+    if (!sig || sig === lastAgentEmailNavigateSignalRef.current) return
+    const mid = (agentEmailNavigateInboxMailboxId && String(agentEmailNavigateInboxMailboxId).trim()) || ''
+    pendingAgentEmailInboxMailboxIdRef.current = mid || null
+    if (!active) return
+    lastAgentEmailNavigateSignalRef.current = sig
+    setPage('agent-email')
+    setAgentEmailView('inboxes')
+  }, [active, agentEmailNavigateInboxSignal, agentEmailNavigateInboxMailboxId])
+
+  useEffect(() => {
+    if (!active) return
+    const want = pendingAgentEmailInboxMailboxIdRef.current
+    if (!want) return
+    if (agentEmailInboxes.length === 0) return
+    if (agentEmailInboxes.some((inbox) => inbox.id === want)) {
+      setAgentEmailSelectedInboxId(want)
+    }
+    pendingAgentEmailInboxMailboxIdRef.current = null
+  }, [active, agentEmailInboxes])
 
   const agentEmailSelectedAgent = agentEmailAgents.find((agent) => agent.id === agentEmailSelectedAgentId) || agentEmailAgents[0] || null
   const agentEmailSelectedInbox = agentEmailInboxes.find((inbox) => inbox.id === agentEmailSelectedInboxId) || agentEmailInboxes[0] || null
@@ -2426,19 +2550,110 @@ export default function SpacesControlCenter({
     }
   }, [agentEmailSelectedInbox, callAgentEmailApi, requestAgentEmailSnapshot])
 
+  const handleAgentEmailDownloadAttachment = useCallback(async (attachment: CosmicMailAttachmentRead) => {
+    if (!window.cosmic?.cosmicMailDownloadAttachment) {
+      setAgentEmailBanner({ tone: 'error', message: 'Attachment download requires the desktop app bridge.' })
+      return
+    }
+    try {
+      setAgentEmailAttachmentActionId(attachment.id)
+      const result = await window.cosmic.cosmicMailDownloadAttachment({
+        baseUrl: agentEmailBaseUrl.trim(),
+        apiToken: agentEmailApiToken.trim(),
+        attachmentId: attachment.id,
+        suggestedFilename: attachment.filename,
+      })
+      if (!result.cancelled) {
+        setAgentEmailBanner({ tone: 'success', message: `Saved ${attachment.filename}.` })
+      }
+    } catch (error: unknown) {
+      setAgentEmailBanner({ tone: 'error', message: toErrorMessage(error) })
+    } finally {
+      setAgentEmailAttachmentActionId(null)
+    }
+  }, [agentEmailApiToken, agentEmailBaseUrl])
+
   const handleAgentEmailReply = useCallback(async () => {
-    if (!agentEmailSelectedThread || !agentEmailSelectedInbox || !agentEmailReplyDraft.trim()) return
+    if (!agentEmailSelectedThread || !agentEmailSelectedInbox) return
+    const bodyText = agentEmailReplyDraft.trim()
+    const hasFiles = agentEmailReplyAttachmentFiles.length > 0
+    if (!bodyText && !hasFiles) return
+
+    if (hasFiles) {
+      const missingPath = agentEmailReplyAttachmentFiles.some((file) => !getElectronLocalFilePath(file))
+      if (missingPath) {
+        setAgentEmailBanner({
+          tone: 'error',
+          message: 'Could not read local file paths for attachments. Reattach files using the file picker (desktop app).',
+        })
+        return
+      }
+    }
+
     try {
       setAgentEmailReplySending(true)
-      const result = await callAgentEmailApi(`/threads/${agentEmailSelectedThread.id}/reply`, {
+
+      if (!hasFiles) {
+        const result = await callAgentEmailApi(`/threads/${agentEmailSelectedThread.id}/reply`, {
+          method: 'POST',
+          body: {
+            mailbox_id: agentEmailSelectedInbox.id,
+            text_body: bodyText,
+          },
+          timeoutMs: 30000,
+        }) as CosmicMailDraftSendResult
+        setAgentEmailReplyDraft('')
+        setAgentEmailComposerExpanded(false)
+        await requestAgentEmailSnapshot(false)
+        if (result.queued_for_approval) {
+          setAgentEmailView('approvals')
+          setAgentEmailBanner({ tone: 'info', message: 'Reply queued for approval.' })
+        } else {
+          setAgentEmailBanner({ tone: 'success', message: 'Reply sent.' })
+        }
+        return
+      }
+
+      if (!window.cosmic?.cosmicMailUploadDraftAttachment) {
+        throw new Error('Attachment upload requires the Cosmic Mail desktop bridge.')
+      }
+
+      const paths = agentEmailReplyAttachmentFiles.map((file) => ({
+        path: getElectronLocalFilePath(file) as string,
+        name: file.name,
+      }))
+
+      const draftPayload = buildAgentEmailThreadReplyDraftPayload(
+        agentEmailSelectedThread.threadSnapshot,
+        agentEmailSelectedInbox.address,
+        agentEmailSelectedThread.messagesSource,
+        agentEmailReplyDraft,
+      )
+
+      const created = await callAgentEmailApi('/drafts', {
         method: 'POST',
-        body: {
-          mailbox_id: agentEmailSelectedInbox.id,
-          text_body: agentEmailReplyDraft.trim(),
-        },
+        body: draftPayload,
+        timeoutMs: 30000,
+      }) as CosmicMailDraftRead
+
+      for (const item of paths) {
+        await window.cosmic.cosmicMailUploadDraftAttachment({
+          baseUrl: agentEmailBaseUrl.trim(),
+          apiToken: agentEmailApiToken.trim(),
+          draftId: created.id,
+          filePath: item.path,
+          filename: item.name,
+          timeoutMs: 120_000,
+        })
+      }
+
+      const result = await callAgentEmailApi(`/drafts/${created.id}/send`, {
+        method: 'POST',
         timeoutMs: 30000,
       }) as CosmicMailDraftSendResult
+
       setAgentEmailReplyDraft('')
+      setAgentEmailReplyAttachmentFiles([])
       setAgentEmailComposerExpanded(false)
       await requestAgentEmailSnapshot(false)
       if (result.queued_for_approval) {
@@ -2452,7 +2667,16 @@ export default function SpacesControlCenter({
     } finally {
       setAgentEmailReplySending(false)
     }
-  }, [agentEmailReplyDraft, agentEmailSelectedInbox, agentEmailSelectedThread, callAgentEmailApi, requestAgentEmailSnapshot])
+  }, [
+    agentEmailApiToken,
+    agentEmailBaseUrl,
+    agentEmailReplyAttachmentFiles,
+    agentEmailReplyDraft,
+    agentEmailSelectedInbox,
+    agentEmailSelectedThread,
+    callAgentEmailApi,
+    requestAgentEmailSnapshot,
+  ])
 
   const handleAgentEmailCreateDomain = useCallback(async () => {
     const nextDomain = agentEmailDomainNameDraft.trim()
@@ -4284,6 +4508,23 @@ export default function SpacesControlCenter({
                               <time className="agent-email-inbox-msg-time">{message.time}</time>
                             </header>
                             <div className="agent-email-inbox-msg-body">{message.body}</div>
+                            {message.attachments.length > 0 ? (
+                              <ul className="agent-email-msg-attachments" aria-label="Attachments">
+                                {message.attachments.map((att) => (
+                                  <li key={att.id}>
+                                    <button
+                                      type="button"
+                                      className="agent-email-attachment-chip"
+                                      onClick={() => void handleAgentEmailDownloadAttachment(att)}
+                                      disabled={agentEmailAttachmentActionId === att.id}
+                                    >
+                                      <span className="agent-email-attachment-name">{att.filename}</span>
+                                      <span className="agent-email-attachment-meta">{formatAgentEmailAttachmentSize(att.size_bytes)}</span>
+                                    </button>
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : null}
                           </div>
                         </article>
                       ))}
@@ -4318,13 +4559,54 @@ export default function SpacesControlCenter({
                             }
                           }}
                         />
+                        <input
+                          ref={agentEmailReplyAttachInputRef}
+                          type="file"
+                          multiple
+                          className="agent-email-compose-file-input"
+                          onChange={(event) => {
+                            const list = event.target.files
+                            if (!list?.length) return
+                            setAgentEmailReplyAttachmentFiles((prev) => [...prev, ...Array.from(list)])
+                            event.target.value = ''
+                          }}
+                        />
+                        {agentEmailReplyAttachmentFiles.length > 0 ? (
+                          <ul className="agent-email-compose-attachments" aria-label="Attachments to send">
+                            {agentEmailReplyAttachmentFiles.map((file, index) => (
+                              <li key={`${file.name}-${index}-${file.size}`} className="agent-email-compose-attachment-row">
+                                <span className="agent-email-compose-attachment-name">{file.name}</span>
+                                <span className="agent-email-compose-attachment-meta">{formatAgentEmailAttachmentSize(file.size)}</span>
+                                <button
+                                  type="button"
+                                  className="agent-email-compose-attachment-remove"
+                                  onClick={() => setAgentEmailReplyAttachmentFiles((prev) => prev.filter((_, i) => i !== index))}
+                                  aria-label={`Remove ${file.name}`}
+                                >
+                                  Remove
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : null}
                         <div className="agent-email-compose-panel-foot">
+                          <button
+                            type="button"
+                            className="agent-email-compose-attach"
+                            onClick={() => agentEmailReplyAttachInputRef.current?.click()}
+                            disabled={agentEmailReplySending}
+                          >
+                            Attach
+                          </button>
                           <span className="agent-email-compose-kbd-hint">⌘↵</span>
                           <button
                             type="button"
                             className="agent-email-compose-send"
                             onClick={() => void handleAgentEmailReply()}
-                            disabled={agentEmailReplySending || !agentEmailReplyDraft.trim()}
+                            disabled={
+                              agentEmailReplySending
+                              || (!agentEmailReplyDraft.trim() && agentEmailReplyAttachmentFiles.length === 0)
+                            }
                           >
                             {agentEmailReplySending ? 'Sending…' : 'Send'}
                           </button>
@@ -4343,11 +4625,16 @@ export default function SpacesControlCenter({
                               d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"
                             />
                           </svg>
-                          <span>{agentEmailReplyDraft.trim() ? 'Continue reply' : 'Reply'}</span>
+                          <span>{agentEmailReplyDraft.trim() || agentEmailReplyAttachmentFiles.length > 0 ? 'Continue reply' : 'Reply'}</span>
                         </button>
                         <span className="agent-email-reply-toolbar-agent" title={selectedAgentName}>
                           {selectedAgentName}
                         </span>
+                        {agentEmailReplyAttachmentFiles.length > 0 ? (
+                          <span className="agent-email-reply-toolbar-meta" title="Draft attachments">
+                            {agentEmailReplyAttachmentFiles.length} file{agentEmailReplyAttachmentFiles.length === 1 ? '' : 's'}
+                          </span>
+                        ) : null}
                         {agentEmailReplyDraft.trim() ? (
                           <span className="agent-email-reply-toolbar-meta" title="Draft length">
                             {agentEmailReplyDraft.trim().length} chars
@@ -4692,94 +4979,134 @@ export default function SpacesControlCenter({
       ? new Date(registryAgentsFetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
       : '—'
     const cardAccents: AccentTone[] = ['azure', 'mint', 'gold', 'rose', 'slate']
+    const connectedCount = registryAgents.filter((a) => a.healthy_instance).length
+    const uniqueIntentCount = new Set(registryAgents.flatMap((a) => a.intents)).size
 
     return (
       <div className="spaces-page spaces-agents-page">
-        <section className="spaces-banner spaces-agents-banner">
-          <div>
-            <div className="spaces-banner-kicker">Orchestrator registry</div>
-            <h2 className="spaces-hero">Specialist agents</h2>
-            <p className="spaces-hero-copy spaces-agents-hero-copy">
-              View-only roster synced from the same registry the orchestrator uses for dispatch. Names and descriptions come from each
-              agent&rsquo;s registered card.
-            </p>
+        <header className="spaces-agents-hero">
+          <div className="spaces-agents-hero-main">
+            <h2 className="spaces-agents-hero-title">Agents</h2>
+            <p className="spaces-agents-hero-lead">Read-only roster synced from the orchestrator registry.</p>
           </div>
-          <div className="spaces-banner-stack">
-            <div className={`spaces-mini-pill ${gatewayStatus.tone}`}>{gatewayStatus.label}</div>
-            <div className="spaces-mini-pill preview">Read-only</div>
+          <div className="spaces-agents-hero-aside">
+            <div className={`spaces-agents-pill spaces-agents-pill--gateway ${gatewayStatus.tone}`}>
+              <span className="spaces-agents-pill-dot" aria-hidden />
+              {gatewayStatus.label}
+            </div>
+            <div className="spaces-agents-pill spaces-agents-pill--badge">View only</div>
           </div>
-        </section>
+        </header>
 
-        <div className="spaces-agents-toolbar">
-          <p className="spaces-agents-toolbar-meta">
-            <span className="spaces-agents-toolbar-count">{registryAgents.length} registered</span>
-            <span className="spaces-agents-toolbar-sep" aria-hidden>
-              &middot;
+        {registryAgents.length > 0 ? (
+          <div className="spaces-agents-stats" role="group" aria-label="Registry summary">
+            <div className="spaces-agents-stat">
+              <span className="spaces-agents-stat-value">{registryAgents.length}</span>
+              <span className="spaces-agents-stat-label">Registered</span>
+            </div>
+            <div className="spaces-agents-stat">
+              <span className="spaces-agents-stat-value">{connectedCount}</span>
+              <span className="spaces-agents-stat-label">Connected</span>
+            </div>
+            <div className="spaces-agents-stat">
+              <span className="spaces-agents-stat-value">{uniqueIntentCount}</span>
+              <span className="spaces-agents-stat-label">Capabilities</span>
+            </div>
+          </div>
+        ) : null}
+
+        <div className="spaces-agents-controls">
+          <div className="spaces-agents-controls-meta">
+            <span className="spaces-agents-controls-updated">Updated {lastUpdatedLabel}</span>
+            <span className="spaces-agents-controls-sep" aria-hidden>
+              ·
             </span>
-            <span>Updated {lastUpdatedLabel}</span>
-            <span className="spaces-agents-toolbar-sep" aria-hidden>
-              &middot;
-            </span>
-            <span>Refresh {SPACES_REGISTRY_REFRESH_MS / 1000}s</span>
-          </p>
+            <span className="spaces-agents-controls-interval">Auto-refresh every {SPACES_REGISTRY_REFRESH_MS / 1000}s</span>
+          </div>
           <button
             type="button"
             className="spaces-agents-refresh"
             onClick={() => requestRegistryAgents(true)}
             disabled={registryAgentsRefreshing}
           >
-            {registryAgentsRefreshing ? 'Refreshing…' : 'Refresh now'}
+            {registryAgentsRefreshing ? (
+              <>
+                <span className="spaces-agents-refresh-spinner" aria-hidden />
+                Refreshing
+              </>
+            ) : (
+              <>
+                <span className="spaces-agents-refresh-glyph" aria-hidden>
+                  ↻
+                </span>
+                Refresh
+              </>
+            )}
           </button>
         </div>
 
         {registryAgentsError ? <div className="spaces-agents-error">{registryAgentsError}</div> : null}
 
         {registryAgentsRefreshing && registryAgents.length === 0 && !registryAgentsError ? (
-          <div className="spaces-agents-loading">Loading registry…</div>
+          <div className="spaces-agents-loading" role="status">
+            <span className="spaces-agents-loading-line" />
+            <span className="spaces-agents-loading-text">Loading registry</span>
+          </div>
         ) : null}
 
         {registryAgents.length === 0 && !registryAgentsError && !registryAgentsRefreshing ? (
           <div className="spaces-agents-empty">
-            <p>No specialists are registered in the gateway registry yet.</p>
-            <p className="spaces-agents-empty-hint">When agents enroll, they will appear here automatically.</p>
+            <p className="spaces-agents-empty-title">No agents yet</p>
+            <p className="spaces-agents-empty-body">When specialists register with your gateway, they will show up here with their capabilities.</p>
           </div>
         ) : null}
 
         {registryAgents.length > 0 ? (
-          <section className="spaces-agents-grid" aria-label="Registered specialist agents">
-            {registryAgents.map((agent, index) => {
-              const accent = cardAccents[index % cardAccents.length]
-              const statusTone: MetricTone = agent.healthy_instance ? 'good' : 'warm'
-              const statusLabel = agent.healthy_instance ? 'Healthy' : 'Offline'
-              const description =
-                agent.description ||
-                (agent.intents.length
-                  ? `Intents: ${agent.intents.slice(0, 4).join(', ')}${agent.intents.length > 4 ? '…' : ''}`
-                  : 'No description on file for this agent card.')
-              return (
-                <article key={agent.agent_id} className={`spaces-registry-card ${accent}`}>
-                  <div className="spaces-registry-card-head">
-                    <div className="spaces-registry-card-title-block">
-                      <h3 className="spaces-registry-card-title">{agent.display_name}</h3>
-                      <div className="spaces-registry-card-id" title={agent.agent_id}>
-                        {agent.agent_id}
+          <section className="spaces-agents-catalog" aria-label="Registered specialist agents">
+            <h3 className="spaces-agents-catalog-heading">All specialists</h3>
+            <div className="spaces-agents-grid">
+              {registryAgents.map((agent, index) => {
+                const accent = cardAccents[index % cardAccents.length]
+                const statusTone: MetricTone = agent.healthy_instance ? 'good' : 'warm'
+                const statusLabel = agent.healthy_instance ? 'Connected' : 'Unavailable'
+                const description =
+                  agent.description ||
+                  (agent.intents.length
+                    ? `${agent.intents.slice(0, 4).join(' · ')}${agent.intents.length > 4 ? ' · …' : ''}`
+                    : 'No description provided on this agent card.')
+                return (
+                  <article key={agent.agent_id} className={`spaces-registry-card ${accent}`}>
+                    <div className="spaces-registry-card-top">
+                      <div className="spaces-registry-card-title-block">
+                        <h3 className="spaces-registry-card-title">{agent.display_name}</h3>
+                        <div className="spaces-registry-card-id-wrap">
+                          <code className="spaces-registry-card-id" title={agent.agent_id}>
+                            {agent.agent_id}
+                          </code>
+                        </div>
+                      </div>
+                      <div className={`spaces-registry-status ${statusTone}`}>
+                        <span className="spaces-registry-status-dot" aria-hidden />
+                        <span className="spaces-registry-status-label">{statusLabel}</span>
                       </div>
                     </div>
-                    <span className={`spaces-registry-status ${statusTone}`}>{statusLabel}</span>
-                  </div>
-                  <p className="spaces-registry-card-desc">{description}</p>
-                  {agent.intents.length > 0 ? (
-                    <div className="spaces-registry-intents" aria-label="Intents">
-                      {agent.intents.map((intent) => (
-                        <span key={`${agent.agent_id}-${intent}`} className="spaces-registry-intent-pill">
-                          {intent}
-                        </span>
-                      ))}
-                    </div>
-                  ) : null}
-                </article>
-              )
-            })}
+                    <p className="spaces-registry-card-desc">{description}</p>
+                    {agent.intents.length > 0 ? (
+                      <div className="spaces-registry-foot">
+                        <span className="spaces-registry-foot-label">Capabilities</span>
+                        <div className="spaces-registry-intents" aria-label="Intents">
+                          {agent.intents.map((intent) => (
+                            <span key={`${agent.agent_id}-${intent}`} className="spaces-registry-intent-pill">
+                              {intent}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                  </article>
+                )
+              })}
+            </div>
           </section>
         ) : null}
       </div>

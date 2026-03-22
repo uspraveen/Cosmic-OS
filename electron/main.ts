@@ -296,6 +296,13 @@ function syncGatewaySettingsFromPayload(settings: any) {
   }
 
   configureGatewayConnection()
+
+  if ('cosmicMailBaseUrl' in settings) {
+    store.set('cosmicMailBaseUrl', String(settings.cosmicMailBaseUrl ?? '').trim())
+  }
+  if ('cosmicMailApiToken' in settings) {
+    store.set('cosmicMailApiToken', String(settings.cosmicMailApiToken ?? '').trim())
+  }
 }
 
 const GATEWAY_SYSTEM_METRIC_PRIMARY_PATH = '/desktop/system-metrics'
@@ -704,6 +711,293 @@ function startMeetingBridge(window: BrowserWindow) {
 
 let settingsProcess: any = null
 
+type CosmicMailDbPending = {
+  resolve: (value: { ok: boolean; result?: unknown; error?: string | null }) => void
+  reject: (reason?: unknown) => void
+  timer: ReturnType<typeof setTimeout>
+}
+const cosmicMailDbPending = new Map<string, CosmicMailDbPending>()
+let cosmicMailDbRequestSeq = 0
+
+function cosmicMailDbRequest(payload: Record<string, unknown>): Promise<{ ok: boolean; result?: unknown; error?: string | null }> {
+  return new Promise((resolve, reject) => {
+    if (!settingsProcess?.stdin) {
+      reject(new Error('Settings bridge is not ready.'))
+      return
+    }
+    const requestId = `cm_${Date.now()}_${++cosmicMailDbRequestSeq}`
+    const line = `COSMIC_MAIL_DB:${JSON.stringify({ ...payload, requestId })}\n`
+    const timer = setTimeout(() => {
+      const pending = cosmicMailDbPending.get(requestId)
+      if (!pending) return
+      cosmicMailDbPending.delete(requestId)
+      pending.reject(new Error('Cosmic Mail DB request timed out.'))
+    }, 12_000)
+    cosmicMailDbPending.set(requestId, { resolve, reject, timer })
+    try {
+      settingsProcess.stdin.write(line)
+    } catch (err) {
+      clearTimeout(timer)
+      cosmicMailDbPending.delete(requestId)
+      reject(err)
+    }
+  })
+}
+
+let cosmicMailPollInterval: ReturnType<typeof setInterval> | null = null
+let cosmicMailPollBusy = false
+
+function normalizeCosmicMailListResponse(payload: unknown): any[] {
+  if (Array.isArray(payload)) return payload
+  if (payload && typeof payload === 'object') {
+    const obj = payload as Record<string, unknown>
+    if (Array.isArray(obj.items)) return obj.items
+    if (Array.isArray(obj.data)) return obj.data
+  }
+  return []
+}
+
+function pickPreferredCosmicMailOrganization(authContext: any, organizations: any[]): any | null {
+  const orgs = Array.isArray(organizations) ? organizations : []
+  const prefId = authContext?.organization_id
+  if (prefId) {
+    const byId = orgs.find((o: any) => o?.id === prefId)
+    if (byId) return byId
+  }
+  const cosmic = orgs.find(
+    (o: any) =>
+      String(o?.slug || '')
+        .toLowerCase()
+        .trim() === 'cosmic' ||
+      String(o?.name || '')
+        .toLowerCase()
+        .trim() === 'cosmic',
+  )
+  return cosmic || orgs[0] || null
+}
+
+function formatCosmicMailBatchFromSummary(
+  items: { fromName: string; fromAddress: string }[],
+): string {
+  const labels = items
+    .slice(0, 4)
+    .map((f) => String(f.fromName || f.fromAddress || '').trim())
+    .filter(Boolean)
+  const unique = [...new Set(labels)]
+  if (unique.length === 0) return 'Multiple senders'
+  if (unique.length === 1) return unique[0]
+  if (items.length <= 3) return unique.join(' · ')
+  return `${unique[0]} · +${items.length - 1} more`
+}
+
+async function runCosmicMailPollTick() {
+  if (cosmicMailPollBusy) return
+  const w = win
+  if (!w || w.isDestroyed()) return
+
+  const baseUrl = String(store.get('cosmicMailBaseUrl') || '').trim()
+  const apiToken = String(store.get('cosmicMailApiToken') || '').trim()
+  if (!baseUrl || !apiToken) return
+
+  cosmicMailPollBusy = true
+  const cfg: GatewayConnectionConfig = { baseUrl, apiToken }
+
+  type FreshInbound = {
+    mailboxId: string
+    mailboxAddress: string
+    threadId: string
+    messageId: string
+    receivedAt: number
+    subject: string
+    fromName: string
+    fromAddress: string
+    snippet: string
+  }
+
+  const fresh: FreshInbound[] = []
+
+  try {
+    const authContext = await callCosmicMailJson(cfg, '/v1/system/auth-context', { timeoutMs: 15_000 })
+    const organizations = normalizeCosmicMailListResponse(
+      await callCosmicMailJson(cfg, '/v1/organizations', { timeoutMs: 15_000 }),
+    )
+    const preferred = pickPreferredCosmicMailOrganization(authContext, organizations)
+    if (!preferred?.id) return
+
+    const mailboxesRaw = normalizeCosmicMailListResponse(
+      await callCosmicMailJson(cfg, '/v1/mailboxes', { timeoutMs: 20_000 }),
+    )
+    const mailboxes = mailboxesRaw.filter((m: any) => m?.organization_id === preferred.id)
+
+    for (const mailbox of mailboxes) {
+      const mailboxId = String(mailbox?.id || '').trim()
+      const mailboxAddress = String(mailbox?.address || mailboxId).trim() || mailboxId
+      if (!mailboxId) continue
+
+      let baselineRes: { ok: boolean; result?: unknown; error?: string | null }
+      try {
+        baselineRes = await cosmicMailDbRequest({ op: 'is_baseline_done', mailboxId })
+      } catch {
+        continue
+      }
+      if (baselineRes.error) continue
+      const baselineDone = !!baselineRes.result
+
+      let threadsRaw: any[] = []
+      try {
+        const qs = new URLSearchParams({ mailbox_id: mailboxId })
+        threadsRaw = normalizeCosmicMailListResponse(
+          await callCosmicMailJson(cfg, `/v1/threads?${qs.toString()}`, { timeoutMs: 20_000 }),
+        )
+      } catch {
+        continue
+      }
+
+      const threads = [...threadsRaw]
+        .sort(
+          (a, b) =>
+            new Date(b?.last_message_at || 0).getTime() - new Date(a?.last_message_at || 0).getTime(),
+        )
+        .slice(0, 18)
+
+      type InboundSnap = {
+        id: string
+        receivedAt: number
+        threadId: string
+        subject: string
+        fromName: string
+        fromAddress: string
+        snippet: string
+      }
+      const inboundSnapshots: InboundSnap[] = []
+
+      for (const thread of threads) {
+        const threadId = String(thread?.id || '').trim()
+        if (!threadId) continue
+        let messages: any[] = []
+        try {
+          messages = normalizeCosmicMailListResponse(
+            await callCosmicMailJson(cfg, `/v1/threads/${threadId}/messages`, { timeoutMs: 20_000 }),
+          )
+        } catch {
+          continue
+        }
+        const sorted = [...messages].sort(
+          (a, b) =>
+            new Date(a?.received_at || a?.sent_at || a?.created_at || 0).getTime() -
+            new Date(b?.received_at || b?.sent_at || b?.created_at || 0).getTime(),
+        )
+        const recent = sorted.slice(-30)
+        const subject = String(thread?.subject || '(No subject)')
+        for (const msg of recent) {
+          if (String(msg?.direction || '') !== 'inbound') continue
+          const messageId = String(msg?.id || '').trim()
+          if (!messageId) continue
+          const receivedAt = new Date(
+            msg?.received_at || msg?.sent_at || msg?.created_at || 0,
+          ).getTime()
+          const snippet = String(
+            msg?.preview_text || msg?.body_plain || thread?.snippet || '',
+          )
+            .trim()
+            .slice(0, 180)
+          inboundSnapshots.push({
+            id: messageId,
+            receivedAt,
+            threadId,
+            subject,
+            fromName: String(msg?.from_name || '').trim(),
+            fromAddress: String(msg?.from_address || '').trim(),
+            snippet: snippet || 'New message',
+          })
+        }
+      }
+
+      if (!baselineDone) {
+        const ids = inboundSnapshots.map((s) => s.id)
+        try {
+          await cosmicMailDbRequest({ op: 'seed_seen', mailboxId, messageIds: ids })
+          await cosmicMailDbRequest({ op: 'set_baseline_done', mailboxId })
+        } catch {
+          // ignore; next poll retries
+        }
+        continue
+      }
+
+      const ordered = [...inboundSnapshots].sort((a, b) => b.receivedAt - a.receivedAt)
+      for (const snap of ordered) {
+        let mark: { ok: boolean; result?: unknown; error?: string | null }
+        try {
+          mark = await cosmicMailDbRequest({ op: 'try_mark_seen', mailboxId, messageId: snap.id })
+        } catch {
+          break
+        }
+        if (mark.error) break
+        if (mark.result === true) {
+          fresh.push({
+            mailboxId,
+            mailboxAddress,
+            threadId: snap.threadId,
+            messageId: snap.id,
+            receivedAt: snap.receivedAt,
+            subject: snap.subject,
+            fromName: snap.fromName,
+            fromAddress: snap.fromAddress,
+            snippet: snap.snippet,
+          })
+        }
+      }
+    }
+
+    if (!fresh.length || !win || win.isDestroyed()) return
+    fresh.sort((a, b) => b.receivedAt - a.receivedAt)
+
+    const payload =
+      fresh.length === 1
+        ? {
+            kind: 'single' as const,
+            mailboxId: fresh[0].mailboxId,
+            mailboxAddress: fresh[0].mailboxAddress,
+            threadId: fresh[0].threadId,
+            messageId: fresh[0].messageId,
+            subject: fresh[0].subject,
+            fromName: fresh[0].fromName,
+            fromAddress: fresh[0].fromAddress,
+            snippet: fresh[0].snippet,
+            receivedAt: fresh[0].receivedAt,
+          }
+        : {
+            kind: 'batch' as const,
+            count: fresh.length,
+            mailboxId: fresh[0].mailboxId,
+            mailboxAddress: fresh[0].mailboxAddress,
+            subject: fresh[0].subject,
+            fromSummary: formatCosmicMailBatchFromSummary(fresh),
+            snippet: fresh[0].snippet,
+            latestReceivedAt: fresh[0].receivedAt,
+          }
+
+    win.webContents.send('cosmic-mail:new-inbound', payload)
+  } catch (err) {
+    console.error('[cosmic-mail poll]', err)
+  } finally {
+    cosmicMailPollBusy = false
+  }
+}
+
+function startCosmicMailPollScheduler() {
+  if (cosmicMailPollInterval) return
+  cosmicMailPollInterval = setInterval(runCosmicMailPollTick, 30_000)
+  setTimeout(runCosmicMailPollTick, 6000)
+}
+
+function stopCosmicMailPollScheduler() {
+  if (cosmicMailPollInterval) {
+    clearInterval(cosmicMailPollInterval)
+    cosmicMailPollInterval = null
+  }
+}
+
 function startSettingsBridge(window: BrowserWindow) {
   const scriptPath = path.join(process.env.APP_ROOT, 'resources', 'settings_bridge.py')
   settingsProcess = spawn('python', ['-u', scriptPath])
@@ -731,6 +1025,23 @@ function startSettingsBridge(window: BrowserWindow) {
         else if (tag === 'CALENDAR_AGENDA') window.webContents.send('calendar:agenda', json)
         else if (tag === 'INTEGRATION_EVENT') window.webContents.send('integration:event', json)
         else if (tag === 'KEY_STATUS') window.webContents.send('key-status', json)
+        else if (tag === 'COSMIC_MAIL_DB_REPLY') {
+          const rid = typeof json?.requestId === 'string' ? json.requestId : ''
+          const pending = rid ? cosmicMailDbPending.get(rid) : undefined
+          if (pending) {
+            clearTimeout(pending.timer)
+            cosmicMailDbPending.delete(rid)
+            if (json?.error) {
+              pending.reject(new Error(String(json.error)))
+            } else {
+              pending.resolve({
+                ok: !!json?.ok,
+                result: json?.result,
+                error: json?.error ?? null,
+              })
+            }
+          }
+        }
       } catch (e) {
         console.error('Settings Parse Error:', e)
       }
@@ -915,6 +1226,13 @@ function cleanupProcesses() {
   kill(windowProcess); windowProcess = null
   kill(weatherProcess); weatherProcess = null
 
+  stopCosmicMailPollScheduler()
+  for (const [, pending] of cosmicMailDbPending) {
+    clearTimeout(pending.timer)
+    pending.reject(new Error('Settings bridge stopped.'))
+  }
+  cosmicMailDbPending.clear()
+
   kill(settingsProcess); settingsProcess = null
   kill(voiceProcess); voiceProcess = null
   kill(meetingProcess); meetingProcess = null
@@ -943,6 +1261,7 @@ app.whenReady().then(() => {
     startMeetingBridge(win)
 
     startSettingsBridge(win)
+    startCosmicMailPollScheduler()
     settingsProcess?.stdin.write('GET_ALL_SETTINGS\n')
     settingsProcess?.stdin.write('GET_KEY_STATUS\n')
     startVoiceBridge(win)
@@ -1295,6 +1614,165 @@ app.whenReady().then(() => {
       body: payload.body,
       timeoutMs: payload.timeoutMs,
     })
+  })
+
+  ipcMain.handle('cosmic-mail:upload-draft-attachment', async (_, payload: GatewayConnectionConfig & {
+    draftId: string
+    filePath: string
+    filename?: string
+    timeoutMs?: number
+  }) => {
+    const apiToken = String(payload?.apiToken || '').trim()
+    if (!apiToken) {
+      throw new Error('Cosmic Mail API token is required.')
+    }
+    const baseUrl = normalizeGatewayBaseUrl(payload?.baseUrl || '')
+    const draftId = String(payload.draftId || '').trim()
+    const filePath = String(payload.filePath || '').trim()
+    if (!draftId || !filePath) {
+      throw new Error('Draft id and file path are required.')
+    }
+
+    const requestUrl = new URL(
+      `/v1/attachments/drafts/${encodeURIComponent(draftId)}`,
+      `${baseUrl}/`,
+    ).toString()
+
+    const controller = new AbortController()
+    const timeoutMs = Math.max(5000, payload.timeoutMs ?? 120_000)
+    const timeout = setTimeout(() => controller.abort(), timeoutMs)
+
+    try {
+      const buf = await fs.readFile(filePath)
+      const blob = new Blob([buf])
+      const form = new FormData()
+      const name = (payload.filename && String(payload.filename).trim()) || path.basename(filePath)
+      form.append('file', blob, name)
+
+      const response = await fetch(requestUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiToken}`,
+          Accept: 'application/json',
+        },
+        body: form,
+        signal: controller.signal,
+      })
+
+      const responseText = await response.text()
+      let parsed: any = null
+      if (responseText) {
+        try {
+          parsed = JSON.parse(responseText)
+        } catch {
+          parsed = { raw: responseText }
+        }
+      }
+
+      if (!response.ok) {
+        const detail =
+          (typeof parsed?.detail === 'string' && parsed.detail) ||
+          (typeof parsed?.error === 'string' && parsed.error) ||
+          response.statusText ||
+          `Upload failed (${response.status})`
+        throw new Error(detail)
+      }
+
+      return parsed
+    } catch (error: any) {
+      throw new Error(formatTransportError('Cosmic Mail', baseUrl, error))
+    } finally {
+      clearTimeout(timeout)
+    }
+  })
+
+  ipcMain.handle('cosmic-mail:download-attachment', async (event, payload: GatewayConnectionConfig & {
+    attachmentId: string
+    suggestedFilename?: string
+    timeoutMs?: number
+  }) => {
+    const apiToken = String(payload?.apiToken || '').trim()
+    if (!apiToken) {
+      throw new Error('Cosmic Mail API token is required.')
+    }
+    const baseUrl = normalizeGatewayBaseUrl(payload?.baseUrl || '')
+    const attachmentId = String(payload.attachmentId || '').trim()
+    if (!attachmentId) {
+      throw new Error('Attachment id is required.')
+    }
+
+    const requestUrl = new URL(
+      `/v1/attachments/${encodeURIComponent(attachmentId)}/download`,
+      `${baseUrl}/`,
+    ).toString()
+
+    const controller = new AbortController()
+    const timeoutMs = Math.max(5000, payload.timeoutMs ?? 120_000)
+    const timeout = setTimeout(() => controller.abort(), timeoutMs)
+
+    try {
+      const response = await fetch(requestUrl, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${apiToken}`,
+        },
+        signal: controller.signal,
+      })
+
+      if (!response.ok) {
+        const responseText = await response.text()
+        let parsed: any = null
+        if (responseText) {
+          try {
+            parsed = JSON.parse(responseText)
+          } catch {
+            parsed = { raw: responseText }
+          }
+        }
+        const detail =
+          (typeof parsed?.detail === 'string' && parsed.detail) ||
+          (typeof parsed?.error === 'string' && parsed.error) ||
+          response.statusText ||
+          `Download failed (${response.status})`
+        throw new Error(detail)
+      }
+
+      const cd = response.headers.get('content-disposition')
+      let filename = (payload.suggestedFilename && String(payload.suggestedFilename).trim()) || 'attachment'
+      if (cd) {
+        const m = /filename\*=UTF-8''([^;]+)|filename="([^"]+)"/i.exec(cd)
+        const raw = m ? (m[1] || m[2]) : null
+        if (raw) {
+          try {
+            filename = decodeURIComponent(raw.trim())
+          } catch {
+            filename = raw.trim()
+          }
+        }
+      }
+
+      const arrayBuffer = await response.arrayBuffer()
+      const buffer = Buffer.from(arrayBuffer)
+
+      const parentWindow = (win && !win.isDestroyed() ? win : null) ?? BrowserWindow.fromWebContents(event.sender)
+      const saveDialogOpts = {
+        title: 'Save attachment',
+        defaultPath: filename,
+      }
+      const { canceled, filePath } = parentWindow
+        ? await dialog.showSaveDialog(parentWindow, saveDialogOpts)
+        : await dialog.showSaveDialog(saveDialogOpts)
+      if (canceled || !filePath) {
+        return { cancelled: true as const }
+      }
+
+      await fs.writeFile(filePath, buffer)
+      return { cancelled: false as const, path: filePath }
+    } catch (error: any) {
+      throw new Error(formatTransportError('Cosmic Mail', baseUrl, error))
+    } finally {
+      clearTimeout(timeout)
+    }
   })
 
 

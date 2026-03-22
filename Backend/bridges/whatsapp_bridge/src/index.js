@@ -1013,6 +1013,19 @@ async function clearAuthState() {
   );
 }
 
+async function resetForFreshPairing() {
+  await closeSocket({ logout: false });
+  await clearAuthState();
+  clearQrState();
+  lastError = null;
+  setConnectionState({
+    connected: false,
+    pairingState: 'idle',
+    lastDisconnectCode: null,
+    connectedJid: null,
+  });
+}
+
 function bindSocketEvents(currentSock, saveCreds) {
   currentSock.ev.on('creds.update', saveCreds);
 
@@ -1270,6 +1283,18 @@ app.post('/pairing/qr', verifyBridgeToken, async (req, res) => {
   );
 
   try {
+    const authExists = await hasExistingAuthState().catch(() => false);
+    if (
+      authExists &&
+      !connectionState.connected &&
+      (
+        connectionState.pairingState === 'logged_out' ||
+        connectionState.lastDisconnectCode === DisconnectReason.loggedOut
+      )
+    ) {
+      await resetForFreshPairing();
+    }
+
     if (!connectionState.connected) {
       await ensureSocketConnected({ refresh });
     }

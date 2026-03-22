@@ -84,6 +84,18 @@ interface Window {
       body?: unknown
       timeoutMs?: number
     }) => Promise<any>
+    cosmicMailUploadDraftAttachment: (payload: GatewayConnectionPayload & {
+      draftId: string
+      filePath: string
+      filename?: string
+      timeoutMs?: number
+    }) => Promise<unknown>
+    cosmicMailDownloadAttachment: (payload: GatewayConnectionPayload & {
+      attachmentId: string
+      suggestedFilename?: string
+      timeoutMs?: number
+    }) => Promise<{ cancelled: true } | { cancelled: false; path: string }>
+    onCosmicMailInbound: (cb: (data: any) => void) => () => void
     onCalendarAgendaUpdate: (cb: (data: any) => void) => () => void
     onIntegrationsUpdate: (cb: (data: any) => void) => () => void
     onIntegrationEvent: (cb: (data: any) => void) => () => void

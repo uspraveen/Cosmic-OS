@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { ArrowLeft, Power, RefreshCw, RotateCw, Video } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import './island.css'
@@ -17,6 +17,66 @@ import {
   type CalendarAgendaEvent,
   type CalendarAgendaSnapshot,
 } from './calendar'
+
+type CosmicMailIslandPayload =
+  | {
+      kind: 'single'
+      mailboxId: string
+      mailboxAddress: string
+      threadId: string
+      messageId: string
+      subject: string
+      fromName: string
+      fromAddress: string
+      snippet: string
+      receivedAt: number
+    }
+  | {
+      kind: 'batch'
+      count: number
+      mailboxId: string
+      mailboxAddress: string
+      subject: string
+      fromSummary: string
+      snippet: string
+      latestReceivedAt: number
+    }
+
+/** Matches default expanded island width; slightly shorter than 160px for a tighter notification strip. */
+const ISLAND_NOTIFICATION_DIMENSIONS: CSSProperties = {
+  width: '540px',
+  height: '148px',
+  borderRadius: '0 0 40px 40px',
+}
+
+function formatIslandInboundRelativeTime(receivedAtMs: number): string {
+  const delta = Date.now() - receivedAtMs
+  if (!Number.isFinite(delta) || delta < 0) return 'Now'
+  const sec = Math.floor(delta / 1000)
+  if (sec < 45) return 'Just now'
+  const min = Math.floor(sec / 60)
+  if (min < 60) return `${min}m ago`
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return `${hr}h ago`
+  const d = Math.floor(hr / 24)
+  return `${d}d ago`
+}
+
+/** Matches Spaces inbox thread avatar initials (Agent Email). */
+function diNotifyInitials(fromName: string, fromAddress: string): string {
+  const n = String(fromName || '').trim()
+  if (n) {
+    const parts = n.split(/\s+/).filter(Boolean)
+    if (parts.length >= 2) {
+      const a = parts[0][0] || ''
+      const b = parts[parts.length - 1][0] || ''
+      return (a + b).toUpperCase()
+    }
+    return n.slice(0, 2).toUpperCase()
+  }
+  const local = String(fromAddress || '').split('@')[0] || ''
+  return (local.slice(0, 2) || '?').toUpperCase()
+}
 
 interface DynamicIslandProps {
   searchActive: boolean
@@ -42,6 +102,8 @@ interface DynamicIslandProps {
     detail?: string
   }
   onLogout?: () => void
+  /** Opens Spaces → Agent Email → Inbox; `mailboxId` selects that inbox when data is loaded. */
+  onOpenAgentEmailInbox?: (mailboxId: string) => void
 }
 
 interface MediaState {
@@ -237,6 +299,7 @@ export default function DynamicIsland({
   authData,
   gatewayConnection,
   onLogout,
+  onOpenAgentEmailInbox,
 }: DynamicIslandProps) {
   const [activeSlide, setActiveSlide] = useState(0)
   const TOTAL_SLIDES = 6
@@ -256,8 +319,11 @@ export default function DynamicIsland({
 
   // New State for Notification
   const [notificationEvent, setNotificationEvent] = useState<CalendarAgendaEvent | null>(null)
+  const [mailInboundNotification, setMailInboundNotification] = useState<CosmicMailIslandPayload | null>(null)
   // Track notified events to prevent double notification
   const notifiedEventsRef = useRef<Set<string>>(new Set())
+  const hoverGateRef = useRef({ searchActive, hovered, internalHover })
+  hoverGateRef.current = { searchActive, hovered, internalHover }
 
   // Temporary Google integration toast (connect / disconnect / remove) — show in island then auto-dismiss
   const [integrationToast, setIntegrationToast] = useState<IntegrationToastState | null>(null)
@@ -297,7 +363,17 @@ export default function DynamicIsland({
   }, [])
 
 
-  const shouldExpand = searchActive || hovered || internalHover || showSettings || isAnchored || !!notificationEvent || !!integrationToast || !!selectedCalendarEvent || voiceActive
+  const shouldExpand =
+    searchActive ||
+    hovered ||
+    internalHover ||
+    showSettings ||
+    isAnchored ||
+    !!notificationEvent ||
+    !!mailInboundNotification ||
+    !!integrationToast ||
+    !!selectedCalendarEvent ||
+    voiceActive
   const [expanded, setExpanded] = useState(shouldExpand)
 
   useEffect(() => {
@@ -323,6 +399,7 @@ export default function DynamicIsland({
       setShowMonthView(false)
       setSelectedCalendarEvent(null)
       setNotificationEvent(null)
+      setMailInboundNotification(null)
       setIntegrationToast(null)
       if (integrationToastTimerRef.current) {
         clearTimeout(integrationToastTimerRef.current)
@@ -407,10 +484,32 @@ export default function DynamicIsland({
   }, [isMusicActive, activeSlide])
 
   const slideContentMap = useMemo(() => {
-    if (notificationEvent) return ['notification'] as const
+    if (notificationEvent || mailInboundNotification) return ['notification'] as const
     if (isMusicActive) return ['music', 'home', 'weather', 'calendar', 'voice', 'utilities'] as const
     return ['home', 'music', 'weather', 'calendar', 'voice', 'utilities'] as const
-  }, [isMusicActive, notificationEvent])
+  }, [isMusicActive, notificationEvent, mailInboundNotification])
+
+  useEffect(() => {
+    if (!window.cosmic?.onCosmicMailInbound) return
+    const unsub = window.cosmic.onCosmicMailInbound((payload: CosmicMailIslandPayload) => {
+      if (!payload || (payload.kind !== 'single' && payload.kind !== 'batch')) return
+      setMailInboundNotification(payload)
+      setExpanded(true)
+    })
+    return () => unsub?.()
+  }, [])
+
+  useEffect(() => {
+    if (!mailInboundNotification) return
+    const t = setTimeout(() => {
+      setMailInboundNotification(null)
+      const g = hoverGateRef.current
+      if (!g.searchActive && !g.hovered && !g.internalHover) {
+        setExpanded(false)
+      }
+    }, 10_000)
+    return () => clearTimeout(t)
+  }, [mailInboundNotification])
 
   useEffect(() => {
     if (!window.cosmic?.onWindowUpdate) return
@@ -736,7 +835,15 @@ export default function DynamicIsland({
   const currentSlideType = slideContentMap[activeSlide]
   const lastWheel = useRef(0)
   const onWheel = (e: React.WheelEvent) => {
-    if (showMonthView || selectedCalendarEvent) return
+    if (
+      showMonthView ||
+      selectedCalendarEvent ||
+      notificationEvent ||
+      mailInboundNotification ||
+      integrationToast
+    ) {
+      return
+    }
     const horizontalDelta = Math.abs(e.deltaX)
     const verticalDelta = Math.abs(e.deltaY)
     if (currentSlideType === 'calendar' && verticalDelta >= horizontalDelta) return
@@ -997,46 +1104,128 @@ export default function DynamicIsland({
     return () => clearInterval(interval)
   }, [calendarData, searchActive, hovered, internalHover])
 
+  const renderCosmicMailNotification = () => {
+    if (!mailInboundNotification) return null
+    const p = mailInboundNotification
+    const isBatch = p.kind === 'batch'
+    const subject = p.subject || '(No subject)'
+    const receivedAtMs = isBatch ? p.latestReceivedAt : p.receivedAt
+    const timeLabel = formatIslandInboundRelativeTime(receivedAtMs)
+
+    const fromLine = isBatch
+      ? p.fromSummary
+      : [p.fromName, p.fromAddress].filter(Boolean).join(' · ') || p.fromAddress || 'Unknown sender'
+    const avatarText = isBatch ? String(Math.min(p.count, 99)) : diNotifyInitials(p.fromName, p.fromAddress)
+
+    return (
+      <div className="slide slide-di-notify slide-di-notify--mail">
+        <div className="di-notify-card di-notify-card--inbound">
+          <span className="di-notify-agent-inbox-label">Agent Inbox</span>
+          <div className="di-notify-strip">
+            <span className="di-notify-strip-label">Inbox</span>
+            <span className="di-notify-strip-mono" title={p.mailboxAddress}>
+              {p.mailboxAddress}
+            </span>
+            <div className="di-notify-strip-actions">
+              {onOpenAgentEmailInbox && p.mailboxId ? (
+                <button
+                  type="button"
+                  className="di-notify-strip-action di-notify-strip-action--primary"
+                  aria-label="Open inbox in Spaces"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onOpenAgentEmailInbox(p.mailboxId)
+                  }}
+                >
+                  Open
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="di-notify-strip-action"
+                aria-label="Close notification"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setMailInboundNotification(null)
+                }}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+
+          <div className="di-notify-thread-row">
+            <div
+              className={`di-notify-avatar${isBatch ? ' di-notify-avatar--batch' : ' di-notify-avatar--unread'}`}
+              aria-hidden
+            >
+              {avatarText}
+            </div>
+            <div className="di-notify-thread-main">
+              <div className="di-notify-line1">
+                <h3 className="di-notify-subject di-notify-subject--emphasis">{subject}</h3>
+                <time className="di-notify-time" dateTime={new Date(receivedAtMs).toISOString()}>
+                  {timeLabel}
+                </time>
+              </div>
+              <div className="di-notify-from">{fromLine}</div>
+              {p.snippet?.trim() ? <p className="di-notify-snippet">{p.snippet}</p> : null}
+              <div className="di-notify-foot">
+                <span className="di-notify-pill">{isBatch ? `${p.count} new` : 'Inbound'}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   const renderNotification = () => {
     if (!notificationEvent) return null
     const startTime = formatCalendarTime(notificationEvent.start, notificationEvent.isAllDay)
+    const calLabel = notificationEvent.calendar_name || notificationEvent.account_label || 'Calendar'
+    const place = (notificationEvent.location || '').trim()
+    const organizer = (notificationEvent.organizer || '').trim()
+    const metaParts = [calLabel, place].filter(Boolean)
+    if (organizer && organizer !== (notificationEvent.email || '').trim()) {
+      metaParts.push(organizer)
+    }
+    const metaText = metaParts.join(' · ')
 
     return (
-      <div className="slide slide-notification" style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: '20px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
-          <div style={{ width: 32, height: 32, background: '#FF3B30', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="white"><path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11z" /></svg>
+      <div className="slide slide-di-notify slide-di-notify--calendar">
+        <div className="di-notify-card di-notify-card--calendar">
+          <div className="di-notify-strip">
+            <span className="di-notify-strip-label">Calendar</span>
+            <span className="di-notify-strip-mono">{startTime}</span>
+            <button
+              type="button"
+              className="di-notify-strip-action"
+              aria-label="Close notification"
+              onClick={(e) => {
+                e.stopPropagation()
+                setNotificationEvent(null)
+              }}
+            >
+              Close
+            </button>
           </div>
-          <div>
-            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', fontWeight: 500 }}>UPCOMING • 5 MIN</div>
-            <div style={{ fontSize: 15, fontWeight: 600, color: '#fff' }}>{startTime}</div>
+
+          <div className="di-notify-thread-row">
+            <div className="di-notify-avatar di-notify-avatar--calendar" aria-hidden>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" className="di-notify-avatar-svg">
+                <path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11z" />
+              </svg>
+            </div>
+            <div className="di-notify-thread-main">
+              <h3 className="di-notify-subject di-notify-subject--emphasis">{notificationEvent.summary}</h3>
+              {metaText ? <p className="di-notify-from">{metaText}</p> : null}
+              <div className="di-notify-foot">
+                <span className="di-notify-pill di-notify-pill--warm">Upcoming · 5 min</span>
+              </div>
+            </div>
           </div>
         </div>
-
-        <div style={{ fontSize: 18, fontWeight: 600, color: '#fff', marginBottom: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          {notificationEvent.summary}
-        </div>
-        <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}>
-          {notificationEvent.location || notificationEvent.account_label}
-        </div>
-
-        <button
-          onClick={(e) => { e.stopPropagation(); setNotificationEvent(null); }}
-          style={{
-            marginTop: 'auto',
-            background: 'rgba(255,255,255,0.15)',
-            border: 'none',
-            color: 'white',
-            padding: '8px',
-            borderRadius: 8,
-            fontSize: 13,
-            fontWeight: 600,
-            cursor: 'pointer',
-            width: '100%'
-          }}
-        >
-          Dismiss
-        </button>
       </div>
     )
   }
@@ -1239,6 +1428,8 @@ export default function DynamicIsland({
   // Managed by App.tsx now
 
 
+  const notificationIslandActive = !!(notificationEvent || mailInboundNotification)
+
   // Override 'expanded' style if Month View or integration toast is open
   const islandStyle = selectedCalendarEvent
     ? {}
@@ -1246,7 +1437,9 @@ export default function DynamicIsland({
       ? { width: '400px', height: '360px', borderRadius: '0 0 36px 36px' }
       : integrationToast
         ? { width: '456px', height: '136px', borderRadius: '0 0 30px 30px' }
-        : (notificationEvent ? { width: '300px', height: '160px' } : {})
+        : notificationIslandActive
+          ? ISLAND_NOTIFICATION_DIMENSIONS
+          : {}
 
   const dynamicBgStyle = { background: `rgba(0, 0, 0, ${islandOpacity})` }
 
@@ -1523,6 +1716,7 @@ export default function DynamicIsland({
     if (integrationToast) return renderIntegrationToast()
     if (notificationEvent) return renderNotification()
     if (selectedCalendarEvent) return renderCalendarDetail()
+    if (mailInboundNotification) return renderCosmicMailNotification()
     const type = slideContentMap[activeSlide]
     if (type === 'home') return renderHome()
     if (type === 'music') return renderMusic()
@@ -1535,13 +1729,15 @@ export default function DynamicIsland({
   return (
     <>
       <div
-        className={`island ${expanded ? 'expanded' : ''} ${integrationToast ? `integration-open tone-${integrationToast.tone}` : ''}`}
+        className={`island ${expanded ? 'expanded' : ''} ${integrationToast ? `integration-open tone-${integrationToast.tone}` : ''} ${expanded && notificationIslandActive ? 'island-notification-slide' : ''}`}
         onMouseEnter={() => setInternalHover(true)}
         onMouseLeave={() => setInternalHover(false)}
         onWheel={onWheel}
         style={{
           ...dynamicBgStyle, // Apply background opacity here
-          ...(expanded && (showMonthView || selectedCalendarEvent || notificationEvent || integrationToast) ? islandStyle : {}),
+          ...(expanded && (showMonthView || selectedCalendarEvent || notificationEvent || mailInboundNotification || integrationToast)
+            ? islandStyle
+            : {}),
           pointerEvents: 'auto'
         }}
       >
@@ -1549,7 +1745,7 @@ export default function DynamicIsland({
 
         {expanded && (
           <>
-            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !integrationToast && (
+            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !mailInboundNotification && !integrationToast && (
               <>
                 <div style={{ position: 'absolute', top: 0, bottom: '50px', left: 0, width: '40px', zIndex: 50, cursor: activeSlide > 0 ? 'w-resize' : 'default' }} onMouseEnter={() => switchSlide('prev')} />
                 <div style={{ position: 'absolute', top: 0, bottom: '50px', right: 0, width: '40px', zIndex: 50, cursor: activeSlide < TOTAL_SLIDES - 1 ? 'e-resize' : 'default' }} onMouseEnter={() => switchSlide('next')} />
@@ -1569,7 +1765,7 @@ export default function DynamicIsland({
               </button>
             )}
 
-            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !integrationToast && (
+            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !mailInboundNotification && !integrationToast && (
               <>
                 <div className="island-anchor-container">
                   <button className={`anchor-btn ${isAnchored ? 'active' : ''}`} onClick={(e) => { e.stopPropagation(); setIsAnchored(!isAnchored) }}>

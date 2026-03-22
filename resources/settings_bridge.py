@@ -226,6 +226,36 @@ def main():
                 account_id = line.split(":", 1)[1]
                 threading.Thread(target=run_google_disconnect, args=(account_id,), daemon=True).start()
 
+            elif line.startswith("COSMIC_MAIL_DB:"):
+                payload = json.loads(line[len("COSMIC_MAIL_DB:") :])
+                request_id = str(payload.get("requestId") or "")
+                op = str(payload.get("op") or "")
+                reply = {"requestId": request_id, "ok": False, "error": None, "result": None}
+                try:
+                    if op == "is_baseline_done":
+                        reply["ok"] = True
+                        reply["result"] = db.cosmic_mail_is_baseline_done(str(payload.get("mailboxId") or ""))
+                    elif op == "set_baseline_done":
+                        db.cosmic_mail_set_baseline_done(str(payload.get("mailboxId") or ""))
+                        reply["ok"] = True
+                    elif op == "seed_seen":
+                        db.cosmic_mail_seed_inbound_seen(
+                            str(payload.get("mailboxId") or ""),
+                            payload.get("messageIds") or [],
+                        )
+                        reply["ok"] = True
+                    elif op == "try_mark_seen":
+                        reply["ok"] = True
+                        reply["result"] = db.cosmic_mail_try_mark_inbound_seen(
+                            str(payload.get("mailboxId") or ""),
+                            str(payload.get("messageId") or ""),
+                        )
+                    else:
+                        reply["error"] = f"unknown op: {op}"
+                except Exception as exc:
+                    reply["error"] = str(exc)
+                emit("COSMIC_MAIL_DB_REPLY", reply)
+
         except Exception as exc:
             logging.error(f"Error processing line '{line}': {exc}")
 

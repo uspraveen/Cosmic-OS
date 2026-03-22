@@ -225,6 +225,25 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_integration_account_tools_account
             ON integration_account_tools(account_id, tool_id)
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS cosmic_mail_inbound_seen (
+                mailbox_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                seen_at REAL NOT NULL,
+                PRIMARY KEY (mailbox_id, message_id)
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_cosmic_mail_inbound_seen_mailbox
+            ON cosmic_mail_inbound_seen(mailbox_id)
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS cosmic_mail_mailbox_poll (
+                mailbox_id TEXT PRIMARY KEY,
+                baseline_done INTEGER NOT NULL DEFAULT 0,
+                updated_at REAL NOT NULL
+            )
+        """)
 
         # Migration Logic: config -> env
         try:
@@ -1005,4 +1024,64 @@ class Database:
                 )
 
         self.conn.commit()
+
+    def cosmic_mail_is_baseline_done(self, mailbox_id: str) -> bool:
+        mailbox_id = str(mailbox_id or "").strip()
+        if not mailbox_id:
+            return False
+        row = self.conn.execute(
+            "SELECT baseline_done FROM cosmic_mail_mailbox_poll WHERE mailbox_id = ?",
+            (mailbox_id,),
+        ).fetchone()
+        return bool(row and int(row["baseline_done"] or 0) == 1)
+
+    def cosmic_mail_set_baseline_done(self, mailbox_id: str) -> None:
+        mailbox_id = str(mailbox_id or "").strip()
+        if not mailbox_id:
+            return
+        self.conn.execute(
+            """
+            INSERT INTO cosmic_mail_mailbox_poll (mailbox_id, baseline_done, updated_at)
+            VALUES (?, 1, strftime('%s','now'))
+            ON CONFLICT(mailbox_id) DO UPDATE SET
+                baseline_done = 1,
+                updated_at = excluded.updated_at
+            """,
+            (mailbox_id,),
+        )
+        self.conn.commit()
+
+    def cosmic_mail_seed_inbound_seen(self, mailbox_id: str, message_ids) -> None:
+        mailbox_id = str(mailbox_id or "").strip()
+        if not mailbox_id:
+            return
+        for raw in message_ids or []:
+            mid = str(raw or "").strip()
+            if not mid:
+                continue
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO cosmic_mail_inbound_seen (mailbox_id, message_id, seen_at)
+                VALUES (?, ?, strftime('%s','now'))
+                """,
+                (mailbox_id, mid),
+            )
+        self.conn.commit()
+
+    def cosmic_mail_try_mark_inbound_seen(self, mailbox_id: str, message_id: str) -> bool:
+        mailbox_id = str(mailbox_id or "").strip()
+        message_id = str(message_id or "").strip()
+        if not mailbox_id or not message_id:
+            return False
+        cur = self.conn.execute(
+            """
+            INSERT OR IGNORE INTO cosmic_mail_inbound_seen (mailbox_id, message_id, seen_at)
+            VALUES (?, ?, strftime('%s','now'))
+            """,
+            (mailbox_id, message_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+
 db = Database()
