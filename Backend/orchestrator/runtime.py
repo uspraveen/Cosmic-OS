@@ -89,8 +89,12 @@ class ContentBlock:
     tool_id: str = ""
     tool_name: str = ""
     input_json: str = ""
-    # Raw block for opaque server-side result blocks (web_search_tool_result, web_fetch_tool_result, code_execution_tool_result)
+    # Raw block for opaque server-side result blocks (*_tool_result)
     raw_block: dict[str, Any] | None = None
+
+    @staticmethod
+    def _is_server_tool_result_block(block_type: str) -> bool:
+        return block_type.endswith("_tool_result")
 
     def to_api_dict(self) -> dict[str, Any]:
         """Convert to the dict format required by the Anthropic Messages API."""
@@ -123,7 +127,7 @@ class ContentBlock:
                 "name": self.tool_name,
                 "input": parsed_input,
             }
-        if self.block_type in ("web_search_tool_result", "web_fetch_tool_result", "code_execution_tool_result"):
+        if self._is_server_tool_result_block(self.block_type):
             # Echo the entire raw block back — the API needs it for multi-turn
             if self.raw_block:
                 return dict(self.raw_block)
@@ -451,7 +455,7 @@ class OrchestratorRuntime:
                         elif btype == "server_tool_use":
                             block.tool_id = str(cb.get("id") or "")
                             block.tool_name = str(cb.get("name") or "")
-                        elif btype in ("web_search_tool_result", "web_fetch_tool_result", "code_execution_tool_result"):
+                        elif ContentBlock._is_server_tool_result_block(btype):
                             block.raw_block = dict(cb)
                         blocks[idx] = block
                         # Emit progress for server-side tool calls
@@ -538,12 +542,7 @@ class OrchestratorRuntime:
                         turn_text_parts.append(b.text)
                     elif b.block_type == "tool_use":
                         turn_tool_blocks.append(b)
-                    elif b.block_type in (
-                        "server_tool_use",
-                        "web_search_tool_result",
-                        "web_fetch_tool_result",
-                        "code_execution_tool_result",
-                    ):
+                    elif b.block_type == "server_tool_use" or ContentBlock._is_server_tool_result_block(b.block_type):
                         turn_server_blocks.append(b)
                         if b.tool_name == "web_search" or b.block_type == "web_search_tool_result":
                             research_paths.add("native_web_search")
