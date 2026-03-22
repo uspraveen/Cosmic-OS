@@ -14,7 +14,7 @@ import {
   normalizeCalendarAgendaSnapshot,
 } from './calendar'
 
-type SpacesPageId = 'command' | 'calendar' | 'prophet' | 'autopilot' | 'pulse' | 'manage' | 'agent-email'
+type SpacesPageId = 'command' | 'calendar' | 'prophet' | 'autopilot' | 'pulse' | 'manage' | 'agents' | 'agent-email'
 type AgentEmailViewId = 'overview' | 'agents' | 'inboxes' | 'approvals' | 'settings'
 type AccentTone = 'azure' | 'gold' | 'mint' | 'rose' | 'slate'
 type MetricTone = 'good' | 'warm' | 'cool' | 'muted'
@@ -571,7 +571,7 @@ function formatBytes(bytes: unknown): string {
   return `${current.toFixed(decimals)} ${units[index]}`
 }
 
-function toErrorMessage(error: unknown): string {
+function toErrorMessage(error: unknown, fallbackMessage = 'Unable to fetch live VM metrics.'): string {
   if (error instanceof Error && typeof error.message === 'string' && error.message.trim()) {
     return error.message
       .replace(/^Error invoking remote method '[^']+':\s*/i, '')
@@ -582,8 +582,50 @@ function toErrorMessage(error: unknown): string {
       .replace(/^Error invoking remote method '[^']+':\s*/i, '')
       .replace(/^Error:\s*/i, '')
   }
-  return 'Unable to fetch live VM metrics.'
+  return fallbackMessage
 }
+
+interface RegistryAgentRow {
+  agent_id: string
+  display_name: string
+  description: string
+  status: string
+  intents: string[]
+  healthy_instance: boolean
+  instance_id: string | null
+}
+
+function normalizeRegistryAgentsPayload(raw: unknown): { agents: RegistryAgentRow[]; fetchedAtMs: number | null } {
+  const rec = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  const agentsRaw = rec.agents
+  const list = Array.isArray(agentsRaw) ? agentsRaw : []
+  const agents: RegistryAgentRow[] = []
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue
+    const a = item as Record<string, unknown>
+    const agentId = String(a.agent_id || '').trim()
+    if (!agentId) continue
+    const displayName = String(a.display_name || agentId).trim() || agentId
+    const intentsRaw = a.intents
+    const intents = Array.isArray(intentsRaw)
+      ? intentsRaw.map((x) => String(x || '').trim()).filter(Boolean)
+      : []
+    agents.push({
+      agent_id: agentId,
+      display_name: displayName,
+      description: typeof a.description === 'string' ? a.description.trim() : '',
+      status: typeof a.status === 'string' ? a.status.trim() : '',
+      intents,
+      healthy_instance: Boolean(a.healthy_instance),
+      instance_id: a.instance_id != null && String(a.instance_id).trim() ? String(a.instance_id).trim() : null,
+    })
+  }
+  const fetchedAtMs =
+    typeof rec.fetched_at_ms === 'number' && Number.isFinite(rec.fetched_at_ms) ? rec.fetched_at_ms : null
+  return { agents, fetchedAtMs }
+}
+
+const SPACES_REGISTRY_REFRESH_MS = 90 * 1000
 
 function humanizeAgentEmailValue(value: unknown): string {
   const source = String(value || '').trim()
@@ -979,6 +1021,7 @@ const SPACE_PAGES: SpacePageDef[] = [
   { id: 'autopilot', label: 'Autopilot', kicker: 'Autonomous routines', countLabel: '04 routines', accent: 'mint' },
   { id: 'pulse', label: 'Pulse', kicker: 'Health and usage', countLabel: '04 signals', accent: 'rose' },
   { id: 'manage', label: 'Manage', kicker: 'Resources & billing', countLabel: 'Live', accent: 'slate' },
+  { id: 'agents', label: 'Agents', kicker: 'Registered specialists', countLabel: 'Registry', accent: 'azure' },
   { id: 'agent-email', label: 'Agent Email', kicker: 'Mail control for agents', countLabel: 'Mail ops', accent: 'gold' },
 ]
 
@@ -1192,6 +1235,18 @@ function SpacesNavIcon({ page }: { page: SpacesPageId }) {
       </svg>
     )
   }
+  if (page === 'agents') {
+    return (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="7" r="2.75" />
+        <circle cx="7" cy="16.5" r="2.75" />
+        <circle cx="17" cy="16.5" r="2.75" />
+        <path d="M12 9.75v2.2" />
+        <path d="M9.2 14.6l-1.1 1" />
+        <path d="M14.8 14.6l1.1 1" />
+      </svg>
+    )
+  }
   if (page === 'agent-email') {
     return (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
@@ -1277,6 +1332,13 @@ export default function SpacesControlCenter({
   const manageMetricsValueRef = useRef<GatewaySystemMetrics | null>(null)
   const manageLastUpdatedAtRef = useRef<number | null>(null)
   const manageMetricsRequestRef = useRef(0)
+
+  const [registryAgents, setRegistryAgents] = useState<RegistryAgentRow[]>([])
+  const [registryAgentsError, setRegistryAgentsError] = useState<string | null>(null)
+  const [registryAgentsRefreshing, setRegistryAgentsRefreshing] = useState(false)
+  const [registryAgentsFetchedAt, setRegistryAgentsFetchedAt] = useState<number | null>(null)
+  const registryAgentsRequestRef = useRef(0)
+  const registryAgentsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
     manageMetricsValueRef.current = manageMetrics
@@ -1435,6 +1497,77 @@ export default function SpacesControlCenter({
       offShown?.()
     }
     }, [active, page, requestManageMetrics])
+
+  const requestRegistryAgents = useCallback(async (showSpinner = false) => {
+    if (!gatewayConnected) {
+      setRegistryAgents([])
+      setRegistryAgentsFetchedAt(null)
+      setRegistryAgentsError(String(gatewayDetail || 'The desktop app is not connected to your VM yet.'))
+      if (window.cosmic?.requestGatewayResume) {
+        window.cosmic.requestGatewayResume().catch(() => { })
+      }
+      return
+    }
+    if (!window.cosmic?.getGatewayRegistryAgents) {
+      setRegistryAgentsError('Gateway transport bridge is unavailable.')
+      return
+    }
+    const requestId = ++registryAgentsRequestRef.current
+    if (showSpinner) {
+      setRegistryAgentsRefreshing(true)
+    }
+    try {
+      const raw = await window.cosmic.getGatewayRegistryAgents()
+      if (requestId !== registryAgentsRequestRef.current) {
+        return
+      }
+      const normalized = normalizeRegistryAgentsPayload(raw)
+      setRegistryAgents(normalized.agents)
+      setRegistryAgentsFetchedAt(normalized.fetchedAtMs ?? Date.now())
+      setRegistryAgentsError(null)
+    } catch (error: unknown) {
+      if (requestId !== registryAgentsRequestRef.current) {
+        return
+      }
+      setRegistryAgentsError(toErrorMessage(error, 'Unable to load the specialist registry.'))
+    } finally {
+      if (requestId === registryAgentsRequestRef.current) {
+        setRegistryAgentsRefreshing(false)
+      }
+    }
+  }, [gatewayConnected, gatewayDetail])
+
+  useEffect(() => {
+    if (!active || page !== 'agents') {
+      return
+    }
+    if (!document.hidden) {
+      requestRegistryAgents(true)
+    }
+    if (registryAgentsIntervalRef.current) {
+      clearInterval(registryAgentsIntervalRef.current)
+      registryAgentsIntervalRef.current = null
+    }
+    registryAgentsIntervalRef.current = setInterval(() => {
+      if (document.hidden) {
+        return
+      }
+      requestRegistryAgents(false)
+    }, SPACES_REGISTRY_REFRESH_MS)
+    const offShown = window.cosmic?.onShown?.(() => {
+      if (document.hidden) {
+        return
+      }
+      requestRegistryAgents(false)
+    })
+    return () => {
+      if (registryAgentsIntervalRef.current) {
+        clearInterval(registryAgentsIntervalRef.current)
+        registryAgentsIntervalRef.current = null
+      }
+      offShown?.()
+    }
+  }, [active, page, requestRegistryAgents])
 
   const gatewayStatus = useMemo(() => normalizeGatewayState(gatewayState), [gatewayState])
   const today = useMemo(() => new Date(), [])
@@ -4554,6 +4687,105 @@ export default function SpacesControlCenter({
     )
   }
 
+  const renderAgentsPage = () => {
+    const lastUpdatedLabel = registryAgentsFetchedAt
+      ? new Date(registryAgentsFetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      : '—'
+    const cardAccents: AccentTone[] = ['azure', 'mint', 'gold', 'rose', 'slate']
+
+    return (
+      <div className="spaces-page spaces-agents-page">
+        <section className="spaces-banner spaces-agents-banner">
+          <div>
+            <div className="spaces-banner-kicker">Orchestrator registry</div>
+            <h2 className="spaces-hero">Specialist agents</h2>
+            <p className="spaces-hero-copy spaces-agents-hero-copy">
+              View-only roster synced from the same registry the orchestrator uses for dispatch. Names and descriptions come from each
+              agent&rsquo;s registered card.
+            </p>
+          </div>
+          <div className="spaces-banner-stack">
+            <div className={`spaces-mini-pill ${gatewayStatus.tone}`}>{gatewayStatus.label}</div>
+            <div className="spaces-mini-pill preview">Read-only</div>
+          </div>
+        </section>
+
+        <div className="spaces-agents-toolbar">
+          <p className="spaces-agents-toolbar-meta">
+            <span className="spaces-agents-toolbar-count">{registryAgents.length} registered</span>
+            <span className="spaces-agents-toolbar-sep" aria-hidden>
+              &middot;
+            </span>
+            <span>Updated {lastUpdatedLabel}</span>
+            <span className="spaces-agents-toolbar-sep" aria-hidden>
+              &middot;
+            </span>
+            <span>Refresh {SPACES_REGISTRY_REFRESH_MS / 1000}s</span>
+          </p>
+          <button
+            type="button"
+            className="spaces-agents-refresh"
+            onClick={() => requestRegistryAgents(true)}
+            disabled={registryAgentsRefreshing}
+          >
+            {registryAgentsRefreshing ? 'Refreshing…' : 'Refresh now'}
+          </button>
+        </div>
+
+        {registryAgentsError ? <div className="spaces-agents-error">{registryAgentsError}</div> : null}
+
+        {registryAgentsRefreshing && registryAgents.length === 0 && !registryAgentsError ? (
+          <div className="spaces-agents-loading">Loading registry…</div>
+        ) : null}
+
+        {registryAgents.length === 0 && !registryAgentsError && !registryAgentsRefreshing ? (
+          <div className="spaces-agents-empty">
+            <p>No specialists are registered in the gateway registry yet.</p>
+            <p className="spaces-agents-empty-hint">When agents enroll, they will appear here automatically.</p>
+          </div>
+        ) : null}
+
+        {registryAgents.length > 0 ? (
+          <section className="spaces-agents-grid" aria-label="Registered specialist agents">
+            {registryAgents.map((agent, index) => {
+              const accent = cardAccents[index % cardAccents.length]
+              const statusTone: MetricTone = agent.healthy_instance ? 'good' : 'warm'
+              const statusLabel = agent.healthy_instance ? 'Healthy' : 'Offline'
+              const description =
+                agent.description ||
+                (agent.intents.length
+                  ? `Intents: ${agent.intents.slice(0, 4).join(', ')}${agent.intents.length > 4 ? '…' : ''}`
+                  : 'No description on file for this agent card.')
+              return (
+                <article key={agent.agent_id} className={`spaces-registry-card ${accent}`}>
+                  <div className="spaces-registry-card-head">
+                    <div className="spaces-registry-card-title-block">
+                      <h3 className="spaces-registry-card-title">{agent.display_name}</h3>
+                      <div className="spaces-registry-card-id" title={agent.agent_id}>
+                        {agent.agent_id}
+                      </div>
+                    </div>
+                    <span className={`spaces-registry-status ${statusTone}`}>{statusLabel}</span>
+                  </div>
+                  <p className="spaces-registry-card-desc">{description}</p>
+                  {agent.intents.length > 0 ? (
+                    <div className="spaces-registry-intents" aria-label="Intents">
+                      {agent.intents.map((intent) => (
+                        <span key={`${agent.agent_id}-${intent}`} className="spaces-registry-intent-pill">
+                          {intent}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                </article>
+              )
+            })}
+          </section>
+        ) : null}
+      </div>
+    )
+  }
+
   const renderCurrentPage = () => {
     if (page === 'calendar') {
       return renderCalendarPage()
@@ -4569,6 +4801,9 @@ export default function SpacesControlCenter({
     }
     if (page === 'manage') {
       return renderManagePage()
+    }
+    if (page === 'agents') {
+      return renderAgentsPage()
     }
     if (page === 'agent-email') {
       return renderAgentEmailPage()

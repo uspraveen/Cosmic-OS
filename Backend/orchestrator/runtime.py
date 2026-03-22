@@ -796,6 +796,14 @@ class OrchestratorRuntime:
         results: list[dict[str, Any]] = []
         for row in rows:
             agent_id = str(row.get("agent_id") or "").strip()
+            card = self.registry_store.get_card(agent_id) if agent_id else None
+            description = ""
+            if isinstance(card, dict):
+                raw_desc = card.get("description")
+                if isinstance(raw_desc, str):
+                    description = raw_desc.strip()
+                elif raw_desc is not None:
+                    description = str(raw_desc).strip()
             intents = [item["intent"] for item in self.registry_store.list_intents(agent_id) if item.get("intent")]
             healthy_instance = False
             instance_id: str | None = None
@@ -806,6 +814,7 @@ class OrchestratorRuntime:
             results.append(
                 {
                     **row,
+                    "description": description,
                     "intents": intents,
                     "healthy_instance": healthy_instance,
                     "instance_id": instance_id,

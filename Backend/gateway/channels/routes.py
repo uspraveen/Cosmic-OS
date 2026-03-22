@@ -946,6 +946,14 @@ async def get_desktop_system_metrics(
     return await runtime.get_desktop_system_metrics(force_refresh=force_refresh)
 
 
+@router.get("/desktop/registry-agents")
+async def get_desktop_registry_agents(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.get_desktop_registry_agents()
+
+
 @router.post("/channels/whatsapp/pairing/qr")
 async def request_whatsapp_pairing_qr(
     body: WhatsAppPairingRequest,

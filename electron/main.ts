@@ -1180,6 +1180,18 @@ app.whenReady().then(() => {
     }
   })
 
+  ipcMain.handle('gateway:get-registry-agents', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const gatewayState = gatewayConnectionManager?.getState()?.status
+    if (gatewayState && !gatewayState.connected) {
+      throw new Error(String(gatewayState.detail || 'The desktop app is not connected to your VM yet.'))
+    }
+    return callGatewayJson(config, '/desktop/registry-agents', { timeoutMs: 25000 })
+  })
+
   ipcMain.on('weather:request', (event) => {
     if (lastWeatherData) event.sender.send('weather:update', lastWeatherData)
   })

@@ -106,6 +106,7 @@ interface Window {
     onGatewayEvent: (cb: (data: any) => void) => () => void
     onGatewayStatus: (cb: (data: GatewaySocketState['status']) => void) => () => void
     getGatewaySystemMetrics: (forceRefresh?: boolean) => Promise<unknown>
+    getGatewayRegistryAgents: () => Promise<unknown>
 
     // Local key status APIs
     onKeyStatus: (

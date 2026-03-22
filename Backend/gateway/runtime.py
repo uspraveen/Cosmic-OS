@@ -4756,6 +4756,10 @@ class GatewayRuntime:
         self.adapter_errors.pop("whatsapp", None)
         return response
 
+    async def get_desktop_registry_agents(self) -> dict[str, Any]:
+        """Read-only roster from the orchestrator registry (backed by registry.db)."""
+        return await self.orchestrator.list_registry_agents()
+
     async def get_desktop_system_metrics(self, *, force_refresh: bool = False) -> dict[str, Any]:
         now = time.monotonic()
         ttl = max(2.0, self.config.desktop_system_metrics_cache_ttl_sec)

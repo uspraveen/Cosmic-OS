@@ -112,6 +112,21 @@ class OrchestratorClient:
             raise RuntimeError("Orchestrator health returned a non-object response")
         return payload
 
+    async def list_registry_agents(self) -> dict[str, Any]:
+        headers = {
+            "X-Internal-Token": self.internal_token,
+        }
+        response = await self._client.get(
+            f"{self.base_url}/internal/registry/agents",
+            headers=headers,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(self._error_from_response(response.content, response.status_code))
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("Orchestrator registry agents returned a non-object response")
+        return payload
+
     def _error_from_response(self, body: bytes, status_code: int) -> str:
         try:
             payload = json.loads(body.decode("utf-8"))

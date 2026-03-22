@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import time
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -87,6 +88,19 @@ async def health(request: Request) -> dict[str, object]:
         "agent_dispatch": agent_dispatch,
         "tool_registry": get_tool_registry_snapshot(),
         "prompt_assets": {"sha256": get_prompt_asset_hashes()},
+    }
+
+
+@app.get("/internal/registry/agents")
+async def list_registry_agents(
+    _: None = Depends(require_internal_token),
+    runtime: OrchestratorRuntime = Depends(get_runtime),
+) -> dict[str, object]:
+    """Read-only specialist roster from the agent registry (for Spaces UI and tooling)."""
+    agents = await runtime.list_registered_agents()
+    return {
+        "agents": agents,
+        "fetched_at_ms": int(time.time() * 1000),
     }
 
 
