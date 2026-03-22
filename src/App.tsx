@@ -967,18 +967,6 @@ export default function App() {
     }
   }
 
-  const hasStreamedResponse = (event: any) => {
-    const requestId = typeof event?.request_id === 'string' ? event.request_id.trim() : ''
-    const taskId = typeof event?.task_id === 'string' ? event.task_id.trim() : ''
-    if (taskId && streamedResponseTaskIdsRef.current.has(taskId)) {
-      return true
-    }
-    if (requestId && streamedResponseRequestIdsRef.current.has(requestId)) {
-      return true
-    }
-    return false
-  }
-
   const ensureAssistantMessageForEvent = (messages: Message[], event: any) => {
     const boundId = findAssistantMessageIdForEvent(event)
     if (boundId) {
@@ -1545,7 +1533,6 @@ export default function App() {
       }
 
       if (eventType === 'response.thinking.chunk') {
-        markResponseStreamSeen(event)
         setMessages((prev) => {
           if (!event.content) return prev
           const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
@@ -1685,7 +1672,6 @@ export default function App() {
           : null
         const shouldRefreshFromHistory =
           eventType === 'task.completed' &&
-          !hasStreamedResponse(event) &&
           (!boundMessage || !String(boundMessage.content || '').trim())
         forgetAssistantMessageBindings(event)
         if (eventType === 'task.cancelled' && messageId && boundMessage && !String(boundMessage.content || '').trim() && !String(boundMessage.thinking || '').trim()) {
@@ -1709,7 +1695,9 @@ export default function App() {
           return
         }
         if (shouldRefreshFromHistory) {
-          void refreshSessionFromGateway(typeof event.session_id === 'string' ? event.session_id : null)
+          window.setTimeout(() => {
+            void refreshSessionFromGateway(typeof event.session_id === 'string' ? event.session_id : null)
+          }, 180)
         }
         return
       }
