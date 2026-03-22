@@ -5779,6 +5779,7 @@ class GatewayRuntime:
             return
         if self._safe_text(request_record.get("route")) != "opus":
             return
+        channel = self._safe_text(request_record.get("channel")) or ""
         input_artifacts = request_record.get("input_artifacts") if isinstance(request_record.get("input_artifacts"), list) else []
         document_artifacts = [
             artifact

@@ -1266,6 +1266,86 @@ async def test_docs_autoparse_enriches_request_record_with_bundle_metadata(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_docs_autoparse_emits_progress_for_desktop_documents(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    await runtime.start()
+    try:
+        class _StubRedis:
+            async def aclose(self) -> None:
+                return
+
+        runtime._redis = _StubRedis()  # type: ignore[assignment]
+        request_record = {
+            "route": "opus",
+            "request_id": "req_docs_progress",
+            "session_id": "sess_docs_progress",
+            "channel": "desktop:desk_a",
+            "source": "user",
+            "source_id": "desktop",
+            "input_artifacts": [
+                {
+                    "artifact_id": "art_doc_progress",
+                    "kind": "document",
+                    "mime": "application/pdf",
+                    "filename": "roadmap.pdf",
+                    "path": "runs/artifacts/req_ingest_req_docs_progress/inputs/art_doc_progress/original/roadmap.pdf",
+                    "sha256": "abc123",
+                    "ingest_state": "staged",
+                }
+            ],
+        }
+
+        async def _fake_dispatch(*, request_record, input_artifacts, progress_callback=None):
+            assert len(input_artifacts) == 1
+            if progress_callback is not None:
+                await progress_callback(
+                    {
+                        "type": "task.progress",
+                        "message": "Parsing document 1/1: roadmap.pdf.",
+                    }
+                )
+            return {
+                "status": "completed",
+                "task_id": "tsk_docs_progress",
+                "output": {
+                    "bundle_id": "bundle_docs_progress",
+                    "documents": [
+                        {
+                            "artifact_id": "art_doc_progress",
+                            "doc_id": "doc_progress",
+                            "title": "Roadmap",
+                            "section_count": 2,
+                            "chunk_count": 4,
+                            "paths": {
+                                "document_md": "runs/artifacts/tsk_docs_progress/docs_parser/art_doc_progress/document.md",
+                                "document_json": "runs/artifacts/tsk_docs_progress/docs_parser/art_doc_progress/document.json",
+                                "chunk_index": "runs/artifacts/tsk_docs_progress/docs_parser/art_doc_progress/chunk_index.json",
+                                "manifest": "runs/artifacts/tsk_docs_progress/docs_parser/art_doc_progress/manifest.json",
+                            },
+                        }
+                    ],
+                },
+            }
+
+        events: list[dict[str, Any]] = []
+
+        async def _capture(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        runtime._dispatch_docs_parse_bundle = _fake_dispatch  # type: ignore[method-assign]
+
+        await runtime._ensure_request_documents_parsed(request_record, send=_capture)  # noqa: SLF001
+
+        progress_events = [event for event in events if event.get("type") == "task.progress"]
+        assert len(progress_events) >= 3
+        assert progress_events[0]["docs_progress"]["stage"] == "prepare"
+        assert any(event["docs_progress"]["stage"] == "parse" for event in progress_events)
+        assert progress_events[-1]["docs_progress"]["stage"] == "ready"
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
 async def test_docs_autoparse_timeout_marks_parse_pending_and_schedules_reconcile(tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="opus")
     await runtime.start()
