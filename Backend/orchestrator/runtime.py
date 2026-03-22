@@ -354,6 +354,7 @@ class OrchestratorRuntime:
             full_reasoning_text = ""
             collected_sources: list[dict[str, str]] = []
             research_paths: set[str] = set()
+            specialist_receipts: list[dict[str, Any]] = []
             container_id: str | None = None
             container_captured = False
             container_reuse_turns = 0
@@ -640,6 +641,12 @@ class OrchestratorRuntime:
                                 research_paths=research_paths,
                                 sources=collected_sources,
                             )
+                        self._collect_specialist_receipt(
+                            tb.tool_name,
+                            pi,
+                            result_str,
+                            specialist_receipts=specialist_receipts,
+                        )
 
                         yield {
                             **ev, "type": "tool.result",
@@ -728,6 +735,8 @@ class OrchestratorRuntime:
                 complete_event["research_provenance"] = research_provenance
             if collected_sources:
                 complete_event["sources"] = collected_sources
+            if specialist_receipts:
+                complete_event["specialist_receipts"] = specialist_receipts
             yield complete_event
             yield {**ev, "type": "task.completed", "route": "opus", "status": "completed"}
 
@@ -1851,6 +1860,149 @@ class OrchestratorRuntime:
             research_paths.add("firecrawl")
             return
 
+    def _collect_specialist_receipt(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        result_str: str,
+        *,
+        specialist_receipts: list[dict[str, Any]],
+    ) -> None:
+        data = self._parse_tool_result_json(result_str)
+        if not isinstance(data, dict):
+            return
+        delegation = data.get("delegation")
+        if not isinstance(delegation, dict):
+            return
+
+        intent_name = self._activity_excerpt(
+            delegation.get("intent") or tool_input.get("intent"),
+            limit=96,
+        )
+        agent_id = self._activity_excerpt(
+            delegation.get("agent_id") or tool_input.get("agent_id"),
+            limit=120,
+        )
+        if not intent_name and not agent_id:
+            return
+
+        activity = self._activity_excerpt(
+            self._summarize_local_tool_activity(tool_name, tool_input, result_str),
+            limit=160,
+        )
+        local_sources = self._extract_specialist_sources(data, intent_name=intent_name)
+        artifact_count = len(data.get("artifacts")) if isinstance(data.get("artifacts"), list) else 0
+        source_domains: list[str] = []
+        if local_sources:
+            seen_domains: set[str] = set()
+            for item in local_sources:
+                if not isinstance(item, dict):
+                    continue
+                domain = str(item.get("domain") or "").strip()
+                if not domain or domain in seen_domains:
+                    continue
+                source_domains.append(domain)
+                seen_domains.add(domain)
+                if len(source_domains) >= 3:
+                    break
+
+        receipt: dict[str, Any] = {
+            "tool_name": tool_name,
+            "intent": intent_name,
+            "agent_id": agent_id,
+            "agent_label": self._activity_agent_label(agent_id),
+            "activity": activity,
+        }
+        if artifact_count > 0:
+            receipt["artifact_count"] = artifact_count
+        if local_sources:
+            receipt["source_count"] = len(local_sources)
+            receipt["source_domains"] = source_domains
+            receipt["source_sample"] = local_sources[:2]
+
+        dedupe_key = json.dumps(
+            {
+                "intent": receipt.get("intent"),
+                "agent_id": receipt.get("agent_id"),
+                "activity": receipt.get("activity"),
+            },
+            sort_keys=True,
+        )
+        existing_keys = {
+            json.dumps(
+                {
+                    "intent": item.get("intent"),
+                    "agent_id": item.get("agent_id"),
+                    "activity": item.get("activity"),
+                },
+                sort_keys=True,
+            )
+            for item in specialist_receipts
+            if isinstance(item, dict)
+        }
+        if dedupe_key in existing_keys:
+            return
+        specialist_receipts.append({key: value for key, value in receipt.items() if value not in (None, "", [], {})})
+        if len(specialist_receipts) > 4:
+            del specialist_receipts[:-4]
+
+    def _extract_specialist_sources(
+        self,
+        data: dict[str, Any],
+        *,
+        intent_name: str | None = None,
+    ) -> list[dict[str, str]]:
+        sources: list[dict[str, str]] = []
+        if intent_name in {"x.search", "x.recall_session"}:
+            self._collect_x_specialist_sources(json.dumps(data), sources)
+
+        raw_sources = data.get("sources")
+        if isinstance(raw_sources, list):
+            for item in raw_sources:
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("url") or "").strip()
+                if not url or any(existing.get("url") == url for existing in sources):
+                    continue
+                title = str(item.get("title") or "").strip()
+                domain = str(item.get("domain") or "").strip()
+                if not domain:
+                    try:
+                        domain = urlparse(url).netloc.replace("www.", "")
+                    except Exception:
+                        domain = ""
+                sources.append({"url": url, "title": title or domain or url, "domain": domain})
+
+        citations = data.get("citations")
+        if isinstance(citations, list):
+            for item in citations:
+                if isinstance(item, str):
+                    url = item.strip()
+                    title = ""
+                elif isinstance(item, dict):
+                    url = str(item.get("url") or "").strip()
+                    title = str(item.get("title") or "").strip()
+                else:
+                    continue
+                if not url or any(existing.get("url") == url for existing in sources):
+                    continue
+                try:
+                    domain = urlparse(url).netloc.replace("www.", "")
+                except Exception:
+                    domain = ""
+                sources.append({"url": url, "title": title or domain or url, "domain": domain})
+
+        direct_url = self._activity_url_label(data.get("url"))
+        if direct_url:
+            url = str(data.get("url") or "").strip()
+            if url and not any(existing.get("url") == url for existing in sources):
+                try:
+                    domain = urlparse(url).netloc.replace("www.", "")
+                except Exception:
+                    domain = ""
+                sources.append({"url": url, "title": domain or url, "domain": domain})
+        return sources
+
     @classmethod
     def _build_research_provenance(
         cls,
@@ -2033,6 +2185,24 @@ class OrchestratorRuntime:
             if intent_name:
                 return f"delegated {intent_name} to a specialist agent"
             return "delegated work to a specialist agent"
+
+        if isinstance(data, dict) and isinstance(data.get("delegation"), dict):
+            delegation = data.get("delegation") or {}
+            intent_name = self._activity_excerpt(
+                delegation.get("intent") or tool_input.get("intent"),
+                limit=80,
+            )
+            agent_label = self._activity_agent_label(delegation.get("agent_id") or tool_input.get("agent_id"))
+            phrase_from_message = self._activity_phrase_from_result_message(data)
+            if phrase_from_message and intent_name and agent_label:
+                return f"used {intent_name} via {agent_label} and {phrase_from_message}"
+            if phrase_from_message and intent_name:
+                return f"used {intent_name} and {phrase_from_message}"
+            if intent_name and agent_label:
+                return f"used {intent_name} via {agent_label}"
+            if intent_name:
+                return f"used {intent_name} via a specialist agent"
+            return "used a specialist agent"
 
         if tool_name == "cosmics_capability_wishlist_search":
             matches = (data or {}).get("matches") if isinstance(data, dict) else None

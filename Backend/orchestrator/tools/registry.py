@@ -886,9 +886,9 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                     },
                     "max_posts": {
                         "type": "integer",
-                        "description": "Maximum number of notable posts to include in the structured result. Maximum 8. Default 8.",
-                        "maximum": 8,
-                        "default": 8,
+                        "description": "Maximum number of notable posts to include in the structured result. Maximum 30. Default 30.",
+                        "maximum": 30,
+                        "default": 30,
                     },
                 },
                 "required": ["query"],

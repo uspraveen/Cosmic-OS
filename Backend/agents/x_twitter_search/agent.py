@@ -475,8 +475,8 @@ class XTwitterSearchAgent(AgentRuntime):
         max_posts = self._optional_int(
             payload.get("max_posts"),
             minimum=1,
-            maximum=min(12, self.config.x_search_max_posts),
-        ) or min(8, self.config.x_search_max_posts)
+            maximum=min(30, self.config.x_search_max_posts),
+        ) or min(30, self.config.x_search_max_posts)
         return {
             "query": query,
             "analysis_goal": str(payload.get("analysis_goal") or "").strip() or None,

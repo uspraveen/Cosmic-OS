@@ -98,6 +98,7 @@ TURN_LEDGER_WINDOW_SIZE = 10
 TASK_NOTEBOOK_WINDOW_SIZE = 5
 RECENT_MEMORY_TOOL_RECEIPT_LIMIT = 4
 RECENT_RESEARCH_RECEIPT_LIMIT = 3
+RECENT_SPECIALIST_RECEIPT_LIMIT = 4
 RECENT_MEMORY_TOOL_RECEIPT_SCAN_LIMIT = 12
 CONTESTED_MEMORY_RECENT_WRITE_LIMIT = 3
 CONTESTED_MEMORY_AUDIT_SCAN_LIMIT = 40
@@ -2295,6 +2296,7 @@ class GatewayRuntime:
             "pending_artifact_pointers": [],
             "recent_document_artifacts": [],
             "recent_research_receipts": [],
+            "recent_specialist_receipts": [],
             "user_preferences_in_play": self._normalize_string_list(
                 carry_forward.get("stable_user_preferences")
             ),
@@ -2427,6 +2429,40 @@ class GatewayRuntime:
                     parts.append(f"sources={source_count}")
                 if domains:
                     parts.append(f"domains={', '.join(domains)}")
+                if parts:
+                    lines.append("  - " + "; ".join(parts))
+        recent_specialist_receipts = (
+            working_set.get("recent_specialist_receipts")
+            if isinstance(working_set.get("recent_specialist_receipts"), list)
+            else []
+        )
+        if recent_specialist_receipts:
+            lines.extend(["", "- Recent specialist receipts:"])
+            for receipt in recent_specialist_receipts[:RECENT_SPECIALIST_RECEIPT_LIMIT]:
+                if not isinstance(receipt, dict):
+                    continue
+                question = self._safe_text(receipt.get("question"))
+                intent_name = self._safe_text(receipt.get("intent"))
+                agent_label = self._safe_text(receipt.get("agent_label")) or self._safe_text(receipt.get("agent_id"))
+                activity = self._safe_text(receipt.get("activity"))
+                domains = self._normalize_string_list(receipt.get("source_domains"), limit=3)
+                source_count = self._coerce_int(receipt.get("source_count"))
+                artifact_count = self._coerce_int(receipt.get("artifact_count"))
+                parts: list[str] = []
+                if question:
+                    parts.append(f'"{self._bounded_excerpt(question, limit=96)}"')
+                if intent_name:
+                    parts.append(intent_name)
+                if agent_label:
+                    parts.append(f"via {agent_label}")
+                if activity:
+                    parts.append(self._bounded_excerpt(activity, limit=120))
+                if source_count:
+                    parts.append(f"sources={source_count}")
+                if domains:
+                    parts.append(f"domains={', '.join(domains)}")
+                if artifact_count:
+                    parts.append(f"artifacts={artifact_count}")
                 if parts:
                     lines.append("  - " + "; ".join(parts))
         contested_claims = working_set.get("contested_memory_claims") if isinstance(working_set.get("contested_memory_claims"), list) else []
@@ -2962,6 +2998,15 @@ class GatewayRuntime:
             else assistant_metadata.get("research_provenance"),
             fallback_sources=event.get("sources") if isinstance(event.get("sources"), list) else assistant_metadata.get("sources"),
         )
+        sources = self._normalize_source_list(
+            event.get("sources") if isinstance(event.get("sources"), list) else assistant_metadata.get("sources"),
+            limit=8,
+        )
+        specialist_receipts = self._normalize_specialist_receipts(
+            event.get("specialist_receipts")
+            if isinstance(event.get("specialist_receipts"), list)
+            else assistant_metadata.get("specialist_receipts")
+        )
         tool_summary = [route]
         for research_label in self._research_tool_summary_labels(research_provenance):
             if research_label not in tool_summary:
@@ -3009,6 +3054,8 @@ class GatewayRuntime:
                 "decision_source": (request_record or {}).get("routing_decision_source"),
                 "input_artifacts": artifacts,
                 "research_provenance": research_provenance,
+                "sources": sources,
+                "specialist_receipts": specialist_receipts,
             },
         }
 
@@ -3135,6 +3182,7 @@ class GatewayRuntime:
         contested_keys, contested_ids, contested_claims = self._active_contested_memory_refs(session_id)
         goal = self._safe_text(carry_forward.get("goal")) or ""
         recent_research_receipts: list[dict[str, Any]] = []
+        recent_specialist_receipts: list[dict[str, Any]] = []
 
         for turn in recent_turns:
             if not goal:
@@ -3165,6 +3213,11 @@ class GatewayRuntime:
                 recent_research_receipts.append(research_receipt)
                 if len(recent_research_receipts) > RECENT_RESEARCH_RECEIPT_LIMIT:
                     recent_research_receipts = recent_research_receipts[-RECENT_RESEARCH_RECEIPT_LIMIT:]
+            specialist_receipts = self._build_recent_specialist_receipts(turn)
+            if specialist_receipts:
+                recent_specialist_receipts.extend(specialist_receipts)
+                if len(recent_specialist_receipts) > RECENT_SPECIALIST_RECEIPT_LIMIT:
+                    recent_specialist_receipts = recent_specialist_receipts[-RECENT_SPECIALIST_RECEIPT_LIMIT:]
 
         next_actions: list[str] = []
         for notebook in notebooks:
@@ -3252,6 +3305,7 @@ class GatewayRuntime:
             "recent_document_artifacts": recent_document_artifacts,
             "recent_tool_receipts": recent_tool_receipts,
             "recent_research_receipts": recent_research_receipts,
+            "recent_specialist_receipts": recent_specialist_receipts,
             "contested_memory_claims": contested_claims,
             "contested_memory_keys": sorted(contested_keys),
             "contested_memory_ids": sorted(contested_ids),
@@ -6055,6 +6109,13 @@ class GatewayRuntime:
                     "source": self._safe_text(event.get("source")),
                     "source_id": self._safe_text(event.get("source_id")),
                     "research_provenance": research_provenance,
+                    "sources": self._normalize_source_list(
+                        event.get("sources") if isinstance(event.get("sources"), list) else None,
+                        limit=8,
+                    ),
+                    "specialist_receipts": self._normalize_specialist_receipts(
+                        event.get("specialist_receipts")
+                    ),
                 },
                 channel=event_channel,
                 route="opus",
@@ -6289,6 +6350,71 @@ class GatewayRuntime:
         if isinstance(provenance.get("source_sample"), list):
             receipt["source_sample"] = provenance.get("source_sample")
         return receipt
+
+    def _normalize_specialist_receipts(self, value: Any, *, limit: int = 4) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            intent_name = self._safe_text(item.get("intent"))
+            agent_id = self._safe_text(item.get("agent_id"))
+            activity = self._safe_text(item.get("activity"))
+            if not intent_name and not agent_id:
+                continue
+            dedupe = f"{intent_name or ''}|{agent_id or ''}|{activity or ''}".casefold()
+            if dedupe in seen:
+                continue
+            receipt: dict[str, Any] = {}
+            for key in ("tool_name", "intent", "agent_id", "agent_label", "activity"):
+                text = self._safe_text(item.get(key))
+                if text:
+                    receipt[key] = text
+            source_count = self._coerce_int(item.get("source_count"))
+            artifact_count = self._coerce_int(item.get("artifact_count"))
+            if source_count:
+                receipt["source_count"] = source_count
+            if artifact_count:
+                receipt["artifact_count"] = artifact_count
+            source_domains = self._normalize_string_list(item.get("source_domains"), limit=3)
+            if source_domains:
+                receipt["source_domains"] = source_domains
+            source_sample = self._normalize_source_list(item.get("source_sample"), limit=2)
+            if source_sample:
+                receipt["source_sample"] = source_sample
+            if receipt:
+                normalized.append(receipt)
+                seen.add(dedupe)
+            if len(normalized) >= limit:
+                break
+        return normalized
+
+    def _build_recent_specialist_receipts(self, turn: dict[str, Any]) -> list[dict[str, Any]]:
+        if not isinstance(turn, dict):
+            return []
+        metadata = turn.get("metadata") if isinstance(turn.get("metadata"), dict) else {}
+        stored = self._normalize_specialist_receipts(metadata.get("specialist_receipts"))
+        if not stored:
+            return []
+        rendered: list[dict[str, Any]] = []
+        question = self._safe_text(turn.get("user_message_excerpt"))
+        completed_at = self._safe_text(turn.get("completed_at"))
+        request_id = self._safe_text(turn.get("request_id"))
+        route = self._safe_text(turn.get("route")) or "opus"
+        for item in stored:
+            receipt = dict(item)
+            if request_id:
+                receipt["request_id"] = request_id
+            if route:
+                receipt["route"] = route
+            if question:
+                receipt["question"] = self._bounded_excerpt(question, limit=96)
+            if completed_at:
+                receipt["completed_at"] = completed_at
+            rendered.append(receipt)
+        return rendered
 
     def _bounded_excerpt(self, value: Any, *, limit: int = 280) -> str:
         text = " ".join(str(value or "").strip().split())

@@ -621,9 +621,9 @@ class ToolExecutor:
                 tool_input.get("enable_video_understanding"),
                 default=False,
             )
-        max_posts = self._coerce_int(tool_input.get("max_posts"), 8)
+        max_posts = self._coerce_int(tool_input.get("max_posts"), 30)
         if max_posts > 0:
-            payload["max_posts"] = min(max(max_posts, 1), 8)
+            payload["max_posts"] = min(max(max_posts, 1), 30)
         return await self._dispatch_specialist_agent(
             intent="x.search",
             payload=payload,

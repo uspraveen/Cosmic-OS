@@ -19,4 +19,4 @@ def test_x_search_intent_schemas_parse_as_json() -> None:
         assert payload["type"] == "object"
 
     search_input = json.loads((SCHEMA_ROOT / "x.search.input.json").read_text(encoding="utf-8"))
-    assert search_input["properties"]["max_posts"]["maximum"] == 12
+    assert search_input["properties"]["max_posts"]["maximum"] == 30

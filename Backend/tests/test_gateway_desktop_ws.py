@@ -239,6 +239,24 @@ class FakeResearchOrchestratorClient(FakeOrchestratorClient):
                 {"url": "https://cursor.com/blog/composer-2", "title": "Cursor Composer 2", "domain": "cursor.com"},
                 {"url": "https://techcrunch.com/cursor-composer-2", "title": "TechCrunch coverage", "domain": "techcrunch.com"},
             ],
+            "specialist_receipts": [
+                {
+                    "tool_name": "x_search",
+                    "intent": "x.search",
+                    "agent_id": "cosmic/x-twitter-search-agent:1.0.0",
+                    "agent_label": "x twitter search agent",
+                    "activity": "delegated x.search to x twitter search agent and found recent source-backed X results",
+                    "source_count": 2,
+                    "source_domains": ["x.com"],
+                    "source_sample": [
+                        {
+                            "url": "https://x.com/mntruell/status/123",
+                            "title": "@mntruell on X",
+                            "domain": "x.com",
+                        }
+                    ],
+                }
+            ],
         }
         yield {
             "type": "task.completed",
@@ -3810,8 +3828,39 @@ def test_opus_research_provenance_persists_into_history_turn_ledger_and_working_
                 },
             ],
         }
+        assert assistant_message["metadata"]["sources"] == [
+            {
+                "url": "https://cursor.com/blog/composer-2",
+                "title": "Cursor Composer 2",
+                "domain": "cursor.com",
+            },
+            {
+                "url": "https://techcrunch.com/cursor-composer-2",
+                "title": "TechCrunch coverage",
+                "domain": "techcrunch.com",
+            },
+        ]
+        assert assistant_message["metadata"]["specialist_receipts"] == [
+            {
+                "tool_name": "x_search",
+                "intent": "x.search",
+                "agent_id": "cosmic/x-twitter-search-agent:1.0.0",
+                "agent_label": "x twitter search agent",
+                "activity": "delegated x.search to x twitter search agent and found recent source-backed X results",
+                "source_count": 2,
+                "source_domains": ["x.com"],
+                "source_sample": [
+                    {
+                        "url": "https://x.com/mntruell/status/123",
+                        "title": "@mntruell on X",
+                        "domain": "x.com",
+                    }
+                ],
+            }
+        ]
         assert turn_entry["tool_summary"] == ["opus", "native_web_search"]
         assert turn_entry["metadata"]["research_provenance"]["source_domains"] == ["cursor.com", "techcrunch.com"]
+        assert turn_entry["metadata"]["specialist_receipts"][0]["intent"] == "x.search"
 
         active_working_set = runtime._refresh_active_working_set(session_id)  # noqa: SLF001 - targeted unit seam
         assert active_working_set["recent_research_receipts"] == [
@@ -3835,6 +3884,28 @@ def test_opus_research_provenance_persists_into_history_turn_ledger_and_working_
                         "domain": "techcrunch.com",
                     },
                 ],
+            }
+        ]
+        assert active_working_set["recent_specialist_receipts"] == [
+            {
+                "tool_name": "x_search",
+                "intent": "x.search",
+                "agent_id": "cosmic/x-twitter-search-agent:1.0.0",
+                "agent_label": "x twitter search agent",
+                "activity": "delegated x.search to x twitter search agent and found recent source-backed X results",
+                "source_count": 2,
+                "source_domains": ["x.com"],
+                "source_sample": [
+                    {
+                        "url": "https://x.com/mntruell/status/123",
+                        "title": "@mntruell on X",
+                        "domain": "x.com",
+                    }
+                ],
+                "request_id": "req_research",
+                "route": "opus",
+                "question": "How was Cursor Composer 2 made?",
+                "completed_at": turn_entry["completed_at"],
             }
         ]
         rendered = runtime._render_active_working_set_context(active_working_set)  # noqa: SLF001 - targeted unit seam

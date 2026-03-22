@@ -911,7 +911,7 @@ async def test_orchestrator_runtime_emits_x_search_sources_as_research_provenanc
             events = [
                 ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 10}}}),
                 ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "tool_x_1", "name": "x_search"}}),
-                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"query\":\"Cursor Composer 2026\",\"max_posts\":8}"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"query\":\"Cursor Composer 2026\",\"max_posts\":30}"}}),
                 ("content_block_stop", {"type": "content_block_stop", "index": 0}),
                 ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 4}}),
                 ("message_stop", {"type": "message_stop"}),
@@ -931,7 +931,7 @@ async def test_orchestrator_runtime_emits_x_search_sources_as_research_provenanc
     async def fake_execute(tool_name: str, tool_input: dict[str, object], *, context=None) -> str:
         del context
         assert tool_name == "x_search"
-        assert tool_input == {"query": "Cursor Composer 2026", "max_posts": 8}
+        assert tool_input == {"query": "Cursor Composer 2026", "max_posts": 30}
         return json.dumps(
             {
                 "summary": "Cursor Composer discourse is split between hype and licensing questions.",
@@ -977,6 +977,24 @@ async def test_orchestrator_runtime_emits_x_search_sources_as_research_provenanc
             }
         ],
     }
+    assert complete_event["specialist_receipts"] == [
+        {
+            "tool_name": "x_search",
+            "intent": "x.search",
+            "agent_id": "cosmic/x-twitter-search-agent:1.0.0",
+            "agent_label": "x twitter search agent",
+            "activity": "used x.search via x twitter search agent",
+            "source_count": 1,
+            "source_domains": ["x.com"],
+            "source_sample": [
+                {
+                    "url": "https://x.com/leerob/status/123",
+                    "title": "@leerob on X",
+                    "domain": "x.com",
+                }
+            ],
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -1069,6 +1087,24 @@ async def test_orchestrator_runtime_inherits_x_search_provenance_from_delegate_t
             }
         ],
     }
+    assert complete_event["specialist_receipts"] == [
+        {
+            "tool_name": "delegate_to_agent",
+            "intent": "x.search",
+            "agent_id": "cosmic/x-twitter-search-agent:1.0.0",
+            "agent_label": "x twitter search agent",
+            "activity": "delegated x.search to x twitter search agent",
+            "source_count": 1,
+            "source_domains": ["x.com"],
+            "source_sample": [
+                {
+                    "url": "https://x.com/mukundjha/status/123",
+                    "title": "@mukundjha on X",
+                    "domain": "x.com",
+                }
+            ],
+        }
+    ]
 
 
 @pytest.mark.asyncio

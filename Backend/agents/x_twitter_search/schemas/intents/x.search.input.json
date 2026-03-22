@@ -46,8 +46,8 @@
     "max_posts": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 8,
-      "default": 8,
+      "maximum": 30,
+      "default": 30,
       "description": "Maximum number of notable posts to include in the structured result."
     }
   },

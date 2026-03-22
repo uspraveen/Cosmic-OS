@@ -42,7 +42,7 @@ class XTwitterSearchConfig:
     x_search_model: str = "grok-4.20-beta-0309-reasoning"
     x_search_max_output_tokens: int = 2200
     x_search_request_timeout_sec: float = 90.0
-    x_search_max_posts: int = 8
+    x_search_max_posts: int = 30
 
     @classmethod
     def from_env(cls) -> "XTwitterSearchConfig":
@@ -55,5 +55,5 @@ class XTwitterSearchConfig:
             or "grok-4.20-beta-0309-reasoning",
             x_search_max_output_tokens=max(600, _env_int("X_SEARCH_MAX_OUTPUT_TOKENS", 2200)),
             x_search_request_timeout_sec=max(15.0, _env_float("X_SEARCH_REQUEST_TIMEOUT_SEC", 90.0)),
-            x_search_max_posts=max(1, min(_env_int("X_SEARCH_MAX_POSTS", 8), 12)),
+            x_search_max_posts=max(1, min(_env_int("X_SEARCH_MAX_POSTS", 30), 30)),
         )

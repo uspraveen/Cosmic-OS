@@ -6259,6 +6259,8 @@ recall_task = TaskEnvelope(
 # Returns: structured edit history with doc_id, account, changes
 ```
 
+**Current implementation note:** the main session still keeps task/sub-agent chatter isolated, but the parent assistant turn now carries a compact `specialist_receipts` summary in its metadata when a specialist/sub-agent produced part of the answer. These receipts are intentionally small and can include the delegated `intent`, `agent_id`, a short activity summary, compact source domains/sample, and artifact counts. The Gateway surfaces only the most recent few receipts into the Active Working Set so Opus can preserve confidence/provenance continuity across follow-up turns without replaying full sub-agent transcripts into prompt history.
+
 **How task memories enter the retrieval store:**
 
 After task completion, the orchestrator writes a task summary to `memory/tasks/<task_id>.md`. This summary includes: what was requested, which agents were involved, the final result, and any artifacts produced. This file is embedded and indexed in Qdrant. When the user later asks "what did we do about quantum computing?", the memory retriever finds this task summary via hybrid search and includes it in the assembled context.
