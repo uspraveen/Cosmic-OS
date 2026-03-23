@@ -46,6 +46,7 @@ Backend/runs/artifacts/
 !.env.example
 Backend/*.env
 Backend/**/.env
+Backend/agents/*/agent.env
 *.key
 *.pem
 *.p12
@@ -95,6 +96,7 @@ resources/secret.key
 
 # Local smoke / scratch artifacts
 Backend/manual_memory_smoke/
+Backend/.codex_manual_tmp/
 test_artifact_bundle/
 Backend/.pytest-*/
 Backend/.pytest_cache/

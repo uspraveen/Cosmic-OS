@@ -126,6 +126,29 @@ class TaskLedger:
 
                 CREATE INDEX IF NOT EXISTS idx_task_input_requests_task_status
                     ON task_input_requests(task_id, status, updated_at);
+
+                CREATE TABLE IF NOT EXISTS task_input_waits (
+                    input_request_id TEXT PRIMARY KEY,
+                    waiting_task_id TEXT NOT NULL,
+                    parent_task_id TEXT,
+                    recipient TEXT NOT NULL,
+                    resume_intent TEXT NOT NULL,
+                    resume_payload_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    resumed_task_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    resumed_at TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_task_input_waits_status_updated
+                    ON task_input_waits(status, updated_at);
+
+                CREATE INDEX IF NOT EXISTS idx_task_input_waits_waiting_task
+                    ON task_input_waits(waiting_task_id, status);
+
+                CREATE INDEX IF NOT EXISTS idx_task_input_waits_resumed_task
+                    ON task_input_waits(resumed_task_id);
                 """
             )
             connection.commit()
@@ -371,6 +394,50 @@ class TaskLedger:
             )
             connection.commit()
 
+    def mark_suspended(self, task_id: str, *, payload: dict[str, Any] | None = None) -> None:
+        updated_at = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status = 'suspended',
+                    result_json = ?,
+                    error_code = NULL,
+                    error_message = NULL,
+                    updated_at = ?,
+                    completed_at = NULL
+                WHERE task_id = ?
+                """,
+                (
+                    json.dumps(payload or {}, ensure_ascii=False),
+                    updated_at,
+                    task_id,
+                ),
+            )
+            connection.commit()
+
+    def mark_resumed(self, task_id: str, *, payload: dict[str, Any] | None = None) -> None:
+        updated_at = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status = 'running',
+                    result_json = ?,
+                    error_code = NULL,
+                    error_message = NULL,
+                    updated_at = ?,
+                    completed_at = NULL
+                WHERE task_id = ?
+                """,
+                (
+                    json.dumps(payload or {}, ensure_ascii=False),
+                    updated_at,
+                    task_id,
+                ),
+            )
+            connection.commit()
+
     def mark_failed(self, task_id: str, *, code: str, message: str) -> None:
         completed_at = utcnow_iso()
         with self._lock, self._connect() as connection:
@@ -422,7 +489,7 @@ class TaskLedger:
         session_id: str | None = None,
         channel: str | None = None,
     ) -> list[dict[str, Any]]:
-        clauses = ["status = 'running'"]
+        clauses = ["status IN ('running', 'suspended')"]
         params: list[Any] = []
         if session_id:
             clauses.append("session_id = ?")
@@ -534,6 +601,105 @@ class TaskLedger:
                 """,
                 (
                     content,
+                    now,
+                    now,
+                    input_request_id,
+                ),
+            )
+            connection.commit()
+
+    def create_task_input_wait(
+        self,
+        *,
+        input_request_id: str,
+        waiting_task_id: str,
+        parent_task_id: str | None,
+        recipient: str,
+        resume_intent: str,
+        resume_payload: dict[str, Any],
+    ) -> None:
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO task_input_waits (
+                    input_request_id,
+                    waiting_task_id,
+                    parent_task_id,
+                    recipient,
+                    resume_intent,
+                    resume_payload_json,
+                    status,
+                    resumed_task_id,
+                    created_at,
+                    updated_at,
+                    resumed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?, NULL)
+                """,
+                (
+                    input_request_id,
+                    waiting_task_id,
+                    parent_task_id,
+                    recipient,
+                    resume_intent,
+                    json.dumps(resume_payload, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+            connection.commit()
+
+    def get_task_input_wait(self, input_request_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM task_input_waits
+                WHERE input_request_id = ?
+                """,
+                (input_request_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["resume_payload_json"] = (
+            json.loads(result["resume_payload_json"]) if result.get("resume_payload_json") else {}
+        )
+        return result
+
+    def get_task_input_wait_by_resumed_task(self, resumed_task_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM task_input_waits
+                WHERE resumed_task_id = ?
+                """,
+                (resumed_task_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["resume_payload_json"] = (
+            json.loads(result["resume_payload_json"]) if result.get("resume_payload_json") else {}
+        )
+        return result
+
+    def mark_task_input_wait_resumed(self, input_request_id: str, *, resumed_task_id: str) -> None:
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE task_input_waits
+                SET status = 'resumed',
+                    resumed_task_id = ?,
+                    updated_at = ?,
+                    resumed_at = ?
+                WHERE input_request_id = ?
+                """,
+                (
+                    resumed_task_id,
                     now,
                     now,
                     input_request_id,

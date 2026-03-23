@@ -33,7 +33,7 @@ interface Message {
   source?: string | null
   sourceId?: string | null
   createdAt?: string | null
-  progress?: DocsProgressState
+  progress?: DocsProgressState | TabularProgressState
 }
 
 interface PendingTaskInput {
@@ -82,6 +82,16 @@ interface MessageAttachment {
 interface DocsProgressState {
   kind: 'docs_parse'
   stage: 'prepare' | 'parse' | 'enhance' | 'ready'
+  label: string
+  detail?: string
+  current: number
+  total: number
+  percent: number
+}
+
+interface TabularProgressState {
+  kind: 'tabular_parse'
+  stage: string
   label: string
   detail?: string
   current: number
@@ -244,6 +254,30 @@ const buildImageAttachmentLimitError = (imageCount: number) => {
   return `Up to ${MAX_IMAGE_ATTACHMENTS_PER_MESSAGE} images can be attached in one message. You selected ${imageCount}.`
 }
 
+const normalizeTabularProgress = (value: unknown): TabularProgressState | undefined => {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+  const label = String((value as any).label || '').trim()
+  if (!label) {
+    return undefined
+  }
+  const rawStage = String((value as any).stage || '').trim().toLowerCase()
+  const total = Math.max(1, Number((value as any).total || 0) || 1)
+  const current = Math.max(0, Math.min(total, Number((value as any).current || 0) || 0))
+  const rawPercent = Number((value as any).percent || 0)
+  const percent = Math.max(0, Math.min(1, Number.isFinite(rawPercent) ? rawPercent : 0))
+  return {
+    kind: 'tabular_parse',
+    stage: rawStage || 'prepare',
+    label,
+    detail: String((value as any).detail || '').trim() || undefined,
+    current,
+    total,
+    percent,
+  }
+}
+
 const normalizeDocsProgress = (value: unknown): DocsProgressState | undefined => {
   if (!value || typeof value !== 'object') {
     return undefined
@@ -270,6 +304,37 @@ const normalizeDocsProgress = (value: unknown): DocsProgressState | undefined =>
     total,
     percent,
   }
+}
+
+const TabularProgressCard = ({ progress }: { progress: TabularProgressState }) => {
+  const percentLabel = `${Math.max(1, Math.round(progress.percent * 100))}%`
+  const showCount = progress.total > 1
+  const st = (progress.stage || '').toLowerCase()
+  const stageLabel =
+    st === 'ready'
+      ? 'Ready'
+      : st === 'parse_sheets' || st === 'parse'
+        ? 'Parsing'
+        : st === 'prepare'
+          ? 'Preparing'
+          : 'Working'
+  return (
+    <div className="docs-progress-card" role="status" aria-live="polite">
+      <div className="docs-progress-head">
+        <span className="docs-progress-kicker">Spreadsheet Processing</span>
+        <span className={`docs-progress-stage ${st === 'ready' ? 'ready' : st}`}>{stageLabel}</span>
+      </div>
+      <div className="docs-progress-label">{progress.label}</div>
+      {progress.detail && <div className="docs-progress-detail">{progress.detail}</div>}
+      <div className="docs-progress-bar" aria-hidden="true">
+        <span className="docs-progress-bar-fill" style={{ width: `${Math.max(4, Math.round(progress.percent * 100))}%` }} />
+      </div>
+      <div className="docs-progress-foot">
+        <span>{percentLabel}</span>
+        {showCount && <span>{progress.current}/{progress.total} files</span>}
+      </div>
+    </div>
+  )
 }
 
 const DocsProgressCard = ({ progress }: { progress: DocsProgressState }) => {
@@ -1501,8 +1566,10 @@ export default function App() {
         const eventStatus = String(event.status || '').trim()
         const statusMessage = String(event.message || '').trim()
         const docsProgress = normalizeDocsProgress(event.docs_progress)
+        const tabularProgress = normalizeTabularProgress((event as any).tabular_progress)
+        const progressState = tabularProgress ?? docsProgress
         const fallbackMessage = eventStatus ? `Task ${eventStatus}...` : 'Working on your request...'
-        const activityText = docsProgress?.label || statusMessage || fallbackMessage
+        const activityText = progressState?.label || statusMessage || fallbackMessage
         setStreamingProgress(activityText)
         setMessages((prev) => {
           const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
@@ -1513,7 +1580,7 @@ export default function App() {
             return {
               ...message,
               activity: activityText,
-              progress: docsProgress,
+              progress: progressState,
               stopped: false,
             }
           })
@@ -2791,7 +2858,10 @@ export default function App() {
                           {msg.progress?.kind === 'docs_parse' && !String(msg.content || '').trim() && (
                             <DocsProgressCard progress={msg.progress} />
                           )}
-                          {msg.activity && msg.progress?.kind !== 'docs_parse' && (
+                          {msg.progress?.kind === 'tabular_parse' && !String(msg.content || '').trim() && (
+                            <TabularProgressCard progress={msg.progress} />
+                          )}
+                          {msg.activity && msg.progress?.kind !== 'docs_parse' && msg.progress?.kind !== 'tabular_parse' && (
                             <div className="assistant-activity" title="Live activity from Opus tool orchestration">
                               {msg.activity}
                             </div>

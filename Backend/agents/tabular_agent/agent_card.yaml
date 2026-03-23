@@ -1,0 +1,77 @@
+agent_id: cosmic/tabular-agent:1.0.0
+display_name: Tabular Spreadsheet Agent
+description: >
+  Specialist for XLSX, CSV, TSV, and XLSB. Produces deterministic Parquet + DuckDB bundles,
+  compact browse/schema/query surfaces, optional MiMo-backed internal summarization, and an
+  internal agentic reasoning path (plan → SQL or COSMIC sandbox → summarize) for orchestrator delegation.
+
+intents:
+  - name: tabular.parse_bundle
+    description: Parse one or more spreadsheet artifacts into canonical tabular bundles.
+    timeout_sec: 300
+  - name: tabular.browse_workbook
+    description: List workbooks and handles for a tabular bundle.
+    timeout_sec: 60
+  - name: tabular.schema_sheet
+    description: Return sheet schema entries from sheet_catalog.json.
+    timeout_sec: 60
+  - name: tabular.preview_sheet
+    description: Return bounded sheet preview markdown.
+    timeout_sec: 60
+  - name: tabular.query_workbook
+    description: Run a read-only SELECT against the DuckDB bundle.
+    timeout_sec: 120
+  - name: tabular.export_result
+    description: Export a SELECT result to CSV or Parquet under the bundle exports folder.
+    timeout_sec: 120
+  - name: tabular.create_sheet
+    description: Create an empty derived sheet (Parquet + DuckDB view) inside an existing bundle.
+    timeout_sec: 60
+  - name: tabular.reason_workbook
+    description: >
+      Internal agentic reasoning over a parsed workbook (inspect → MiMo plan → deterministic SELECT or
+      bounded Python under codes/ + executions/ → summarize). Does not replace granular browse/query tools.
+    timeout_sec: 240
+
+artifact_types:
+  - tabular_workbook_bundle
+  - parquet_table
+  - duckdb_bundle
+
+policies:
+  network_access: true
+  writable_paths:
+    - runs/artifacts
+    - agents/tabular_agent/store
+    - agents/tabular_agent/runtime
+  tool_access: []
+  allowed_senders:
+    - cosmic/orchestrator:1.0.0
+    - cosmic/gateway:1.0.0
+  intent_authorization:
+    tabular.parse_bundle: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
+    tabular.browse_workbook: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
+    tabular.schema_sheet: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
+    tabular.preview_sheet: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
+    tabular.query_workbook: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
+    tabular.export_result: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
+    tabular.create_sheet: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
+    tabular.reason_workbook: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
+
+sla:
+  max_concurrency: 1
+  heartbeat_interval_sec: 10
+  heartbeat_ttl_sec: 30
+  max_task_duration_sec: 420
+  health_endpoint: /health
+  retry_policy:
+    max_attempts: 2
+    backoff: exponential
+    backoff_base_sec: 2
+    backoff_max_sec: 30
+
+stream_key: streams:cosmic/tabular-agent:1.0.0
+
+version_info:
+  semver: 1.0.0
+  released_at: 2026-03-22

@@ -68,8 +68,10 @@ from shared import (
     generate_task_id,
     infer_document_mime_from_extension,
     infer_image_mime_from_extension,
+    infer_tabular_mime_from_extension,
     is_supported_document_artifact,
     is_supported_image_artifact,
+    is_supported_tabular_artifact,
     lookup_model_spec,
     parse_event_envelope,
     parse_stream_payload,
@@ -2295,6 +2297,7 @@ class GatewayRuntime:
             "active_task_refs": self._normalize_string_list(carry_forward.get("active_task_refs")),
             "pending_artifact_pointers": [],
             "recent_document_artifacts": [],
+            "recent_spreadsheet_artifacts": [],
             "recent_research_receipts": [],
             "recent_specialist_receipts": [],
             "user_preferences_in_play": self._normalize_string_list(
@@ -3105,6 +3108,18 @@ class GatewayRuntime:
         if event_type == "task.created":
             notebook["status"] = "active"
             notebook["current_state"] = state_message or "Task created"
+        elif event_type == "task.suspended":
+            notebook["status"] = "waiting_for_input"
+            notebook["current_state"] = state_message or "Task suspended waiting for input"
+            notebook["open_questions"] = self._normalize_string_list(
+                [
+                    *self._normalize_string_list(notebook.get("open_questions")),
+                    self._safe_text(event.get("question")) or state_message,
+                ]
+            )
+        elif event_type == "task.resumed":
+            notebook["status"] = "active"
+            notebook["current_state"] = state_message or "Task resumed"
         elif event_type == "task.input_required":
             notebook["status"] = "waiting_for_input"
             notebook["current_state"] = state_message or "Waiting for user input"
@@ -3259,6 +3274,7 @@ class GatewayRuntime:
 
         artifact_pointers = []
         parsed_document_rows: list[dict[str, Any]] = []
+        parsed_spreadsheet_rows: list[dict[str, Any]] = []
         for artifact in latest_artifacts.values():
             ingest_state = self._safe_text(artifact.get("ingest_state")).lower()
             artifact_id = self._safe_text(artifact.get("artifact_id"))
@@ -3266,7 +3282,27 @@ class GatewayRuntime:
             if ingest_state in {"staged", "parse_pending", "stage_failed", "metadata_only", "bridge_reference"} and pointer:
                 artifact_pointers = self._normalize_string_list([*artifact_pointers, pointer], limit=8)
             parsed_summary = artifact.get("parsed_summary") if isinstance(artifact.get("parsed_summary"), dict) else {}
-            if ingest_state == "parsed" or self._safe_text(artifact.get("parse_bundle_id")) or self._safe_text(parsed_summary.get("doc_id")):
+            kind = self._safe_text(artifact.get("kind")).lower()
+            if kind == "spreadsheet" and (
+                ingest_state == "parsed"
+                or self._safe_text(artifact.get("parse_bundle_id"))
+                or parsed_summary.get("artifact_id")
+            ):
+                parsed_spreadsheet_rows.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "filename": self._safe_text(artifact.get("filename")),
+                        "ingest_state": self._safe_text(artifact.get("ingest_state")),
+                        "parse_bundle_id": self._safe_text(artifact.get("parse_bundle_id")),
+                        "parse_status": self._safe_text(parsed_summary.get("parse_status")),
+                        "request_id": self._safe_text(artifact.get("request_id")),
+                    }
+                )
+            elif kind != "spreadsheet" and (
+                ingest_state == "parsed"
+                or self._safe_text(artifact.get("parse_bundle_id"))
+                or self._safe_text(parsed_summary.get("doc_id"))
+            ):
                 parsed_document_rows.append(
                     {
                         "artifact_id": artifact_id,
@@ -3280,6 +3316,7 @@ class GatewayRuntime:
                 )
 
         recent_document_artifacts = parsed_document_rows[:6]
+        recent_spreadsheet_artifacts = parsed_spreadsheet_rows[:6]
 
         open_loops = self._normalize_string_list(
             [
@@ -3303,6 +3340,7 @@ class GatewayRuntime:
             "active_task_refs": active_task_refs,
             "pending_artifact_pointers": artifact_pointers,
             "recent_document_artifacts": recent_document_artifacts,
+            "recent_spreadsheet_artifacts": recent_spreadsheet_artifacts,
             "recent_tool_receipts": recent_tool_receipts,
             "recent_research_receipts": recent_research_receipts,
             "recent_specialist_receipts": recent_specialist_receipts,
@@ -5352,6 +5390,8 @@ class GatewayRuntime:
             if not effective_mime:
                 if effective_kind == "document":
                     effective_mime = infer_document_mime_from_extension(Path(filename).suffix)
+                elif effective_kind == "spreadsheet":
+                    effective_mime = infer_tabular_mime_from_extension(Path(filename).suffix)
                 else:
                     effective_mime = infer_image_mime_from_extension(Path(filename).suffix)
             width, height = self._extract_image_dimensions(
@@ -5472,8 +5512,11 @@ class GatewayRuntime:
         logical_path = self._logical_artifact_path(source_path)
         effective_mime = media_type or self._safe_text(manifest.get("mime"))
         if not effective_mime:
-            if self._supported_artifact_kind(manifest) == "image":
+            kind = self._supported_artifact_kind(manifest)
+            if kind == "image":
                 effective_mime = infer_image_mime_from_extension(source_path.suffix)
+            elif kind == "spreadsheet":
+                effective_mime = infer_tabular_mime_from_extension(source_path.suffix)
             else:
                 effective_mime = infer_document_mime_from_extension(source_path.suffix)
         width, height = self._extract_image_dimensions(
@@ -5540,6 +5583,8 @@ class GatewayRuntime:
             return None
         if is_supported_document_artifact(artifact):
             return "document"
+        if is_supported_tabular_artifact(artifact):
+            return "spreadsheet"
         if is_supported_image_artifact(artifact):
             return "image"
         return None
@@ -5550,6 +5595,10 @@ class GatewayRuntime:
             "application/pdf": ".pdf",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
             "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+            "application/vnd.ms-excel.sheet.binary.macroEnabled.12": ".xlsb",
+            "text/csv": ".csv",
+            "text/tab-separated-values": ".tsv",
             "image/jpeg": ".jpg",
             "image/png": ".png",
             "image/gif": ".gif",
@@ -5783,9 +5832,11 @@ class GatewayRuntime:
         }
 
     async def _ensure_request_documents_parsed(self, request_record: dict[str, Any], *, send=None) -> None:
-        if not self.config.docs_auto_parse_enabled or self._redis is None:
+        if self._redis is None:
             return
         if self._safe_text(request_record.get("route")) != "opus":
+            return
+        if not self.config.docs_auto_parse_enabled and not self.config.tabular_auto_parse_enabled:
             return
         channel = self._safe_text(request_record.get("channel")) or ""
         input_artifacts = request_record.get("input_artifacts") if isinstance(request_record.get("input_artifacts"), list) else []
@@ -5797,8 +5848,37 @@ class GatewayRuntime:
             and self._safe_text(artifact.get("path"))
             and self._safe_text(artifact.get("ingest_state")) == "staged"
         ]
-        if not document_artifacts:
+        tabular_artifacts = [
+            artifact
+            for artifact in input_artifacts
+            if isinstance(artifact, dict)
+            and is_supported_tabular_artifact(artifact)
+            and self._safe_text(artifact.get("path"))
+            and self._safe_text(artifact.get("ingest_state")) == "staged"
+        ]
+        if not document_artifacts and not tabular_artifacts:
             return
+
+        tasks: list[Any] = []
+        if document_artifacts and self.config.docs_auto_parse_enabled:
+            tasks.append(self._ensure_docs_parsed_for_request(request_record, document_artifacts, send=send, channel=channel))
+        if tabular_artifacts and self.config.tabular_auto_parse_enabled:
+            tasks.append(self._ensure_tabular_parsed_for_request(request_record, tabular_artifacts, send=send, channel=channel))
+        if not tasks:
+            return
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for res in results:
+            if isinstance(res, Exception):
+                logger.exception("gateway.attachments_autoparse_failed request_id=%s", self._safe_text(request_record.get("request_id")))
+
+    async def _ensure_docs_parsed_for_request(
+        self,
+        request_record: dict[str, Any],
+        document_artifacts: list[dict[str, Any]],
+        *,
+        send,
+        channel: str,
+    ) -> None:
         request_id = self._safe_text(request_record.get("request_id"))
         artifact_ids = [
             self._safe_text(artifact.get("artifact_id"))
@@ -5885,6 +5965,103 @@ class GatewayRuntime:
                 )
             return
         self._apply_docs_parse_failure(
+            request_id=request_id,
+            artifact_ids=artifact_ids,
+            error_text=error_text,
+            ingest_state="parse_failed",
+            task_id=task_id,
+        )
+
+    async def _ensure_tabular_parsed_for_request(
+        self,
+        request_record: dict[str, Any],
+        tabular_artifacts: list[dict[str, Any]],
+        *,
+        send,
+        channel: str,
+    ) -> None:
+        request_id = self._safe_text(request_record.get("request_id"))
+        artifact_ids = [
+            self._safe_text(artifact.get("artifact_id"))
+            for artifact in tabular_artifacts
+            if self._safe_text(artifact.get("artifact_id"))
+        ]
+        if send is not None and channel.startswith("desktop:"):
+            await send(
+                self._build_tabular_parse_progress_event(
+                    request_record=request_record,
+                    status="tabular_prepare",
+                    message="Preparing your attached spreadsheets for parsing.",
+                    tabular_progress={
+                        "kind": "tabular_parse",
+                        "stage": "prepare",
+                        "label": "Preparing spreadsheets",
+                        "detail": f"{len(tabular_artifacts)} spreadsheet file(s) queued.",
+                        "current": 0,
+                        "total": len(tabular_artifacts),
+                        "percent": 0.06,
+                    },
+                )
+            )
+        try:
+            parse_result = await self._dispatch_tabular_parse_bundle(
+                request_record=request_record,
+                input_artifacts=tabular_artifacts,
+                progress_callback=send,
+            )
+        except Exception as exc:
+            logger.exception(
+                "gateway.tabular_autoparse_failed request_id=%s artifact_count=%s",
+                request_id,
+                len(tabular_artifacts),
+            )
+            parse_result = {"status": "failed", "error_message": str(exc).strip() or "tabular.parse_bundle failed"}
+        status = self._safe_text(parse_result.get("status")) or "failed"
+        if status == "completed":
+            self._apply_tabular_parse_success(
+                request_id=request_id,
+                parse_result=parse_result,
+                artifact_ids=artifact_ids,
+            )
+            if send is not None and channel.startswith("desktop:"):
+                await send(
+                    self._build_tabular_parse_progress_event(
+                        request_record=request_record,
+                        task_id=self._safe_text(parse_result.get("task_id")) or None,
+                        status="tabular_ready",
+                        message="Spreadsheets parsed. Preparing the answer.",
+                        tabular_progress={
+                            "kind": "tabular_parse",
+                            "stage": "ready",
+                            "label": "Spreadsheets parsed",
+                            "detail": "Preparing the answer over the tabular bundle.",
+                            "current": len(tabular_artifacts),
+                            "total": len(tabular_artifacts),
+                            "percent": 1.0,
+                        },
+                    )
+                )
+            return
+        task_id = self._safe_text(parse_result.get("task_id")) or None
+        error_text = self._safe_text(parse_result.get("error_message")) or "tabular.parse_bundle failed"
+        if status == "pending":
+            self._apply_tabular_parse_failure(
+                request_id=request_id,
+                artifact_ids=artifact_ids,
+                error_text=error_text,
+                ingest_state="parse_pending",
+                task_id=task_id,
+            )
+            if request_id and task_id:
+                self._track_background_task(
+                    self._reconcile_tabular_parse_bundle(
+                        request_id=request_id,
+                        artifact_ids=artifact_ids,
+                        task_id=task_id,
+                    )
+                )
+            return
+        self._apply_tabular_parse_failure(
             request_id=request_id,
             artifact_ids=artifact_ids,
             error_text=error_text,
@@ -6095,9 +6272,93 @@ class GatewayRuntime:
                 if progress_callback is not None and channel.startswith("desktop:")
                 else None
             ),
+            poll_interval_sec=self.config.docs_parse_poll_interval_sec,
         )
 
-    async def _wait_for_agent_terminal_result(self, task_id: str, *, timeout_sec: float, progress_callback=None) -> dict[str, Any]:
+    async def _dispatch_tabular_parse_bundle(
+        self,
+        *,
+        request_record: dict[str, Any],
+        input_artifacts: list[dict[str, Any]],
+        progress_callback=None,
+    ) -> dict[str, Any]:
+        session_id = self._safe_text(request_record.get("session_id"))
+        request_id = self._safe_text(request_record.get("request_id"))
+        channel = self._safe_text(request_record.get("channel"))
+        source = self._safe_text(request_record.get("source")) or "user"
+        source_id = self._safe_text(request_record.get("source_id"))
+        if not session_id or not request_id:
+            return {"status": "failed", "error_message": "Missing session_id or request_id for tabular parsing."}
+
+        child_input = {
+            "bundle_label": f"request:{request_id}",
+            "request_id": request_id,
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                [
+                    {
+                        "artifact_id": self._safe_text(item.get("artifact_id")),
+                        "path": self._safe_text(item.get("path")),
+                        "sha256": self._safe_text(item.get("sha256")),
+                    }
+                    for item in input_artifacts
+                ],
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        task = TaskEnvelope(
+            task_id=generate_task_id(),
+            task_list_id=session_id,
+            session_id=session_id,
+            sender="cosmic/gateway:1.0.0",
+            recipient=self.config.tabular_agent_id,
+            intent="tabular.parse_bundle",
+            input=child_input,
+            input_artifacts=input_artifacts,
+            idempotency_key=f"tabular-parse:{request_id}:{fingerprint}",
+            priority=SOURCE_PRIORITY_MAP.get(source, "normal"),
+            signature="",
+            created_at=utcnow(),
+            source=source,
+            source_id=source_id or request_id,
+            channel=channel or None,
+        )
+        task = task.model_copy(update={"signature": sign_task_envelope(task, self.config.signing_secret)})
+        await dispatch_task(task, self._redis)
+        return await self._wait_for_agent_terminal_result(
+            task.task_id,
+            timeout_sec=self.config.tabular_parse_timeout_sec,
+            progress_callback=(
+                (lambda event: progress_callback(
+                    self._build_tabular_parse_progress_event(
+                        request_record=request_record,
+                        task_id=task.task_id,
+                        status="tabular_parsing",
+                        message=self._safe_text(event.get("message")) or "Parsing spreadsheets.",
+                        tabular_progress=self._derive_tabular_parse_progress(
+                            message=self._safe_text(event.get("message")) or "Parsing spreadsheets.",
+                            payload=event.get("payload") if isinstance(event.get("payload"), dict) else {},
+                            total_files=len(input_artifacts),
+                        ),
+                    )
+                ))
+                if progress_callback is not None and channel.startswith("desktop:")
+                else None
+            ),
+            poll_interval_sec=self.config.tabular_parse_poll_interval_sec,
+        )
+
+    async def _wait_for_agent_terminal_result(
+        self,
+        task_id: str,
+        *,
+        timeout_sec: float,
+        progress_callback=None,
+        poll_interval_sec: float | None = None,
+    ) -> dict[str, Any]:
         if self._redis is None:
             return {"status": "failed", "error_message": "Redis is not available for agent result tracking."}
         event_ids_key = f"task_events:{task_id}"
@@ -6146,11 +6407,40 @@ class GatewayRuntime:
                             "task_id": task_id,
                             "error_message": self._safe_text(event.payload.get("reason")) or "Agent task was rejected.",
                         }
-            await asyncio.sleep(self.config.docs_parse_poll_interval_sec)
+            await asyncio.sleep(poll_interval_sec if poll_interval_sec is not None else self.config.docs_parse_poll_interval_sec)
         return {
             "status": "pending",
             "task_id": task_id,
             "error_message": f"Timed out waiting for {task_id}.",
+        }
+
+    def _derive_tabular_parse_progress(
+        self,
+        *,
+        message: str,
+        payload: dict[str, Any],
+        total_files: int,
+    ) -> dict[str, Any]:
+        total = max(1, total_files)
+        normalized = self._safe_text(message)
+        current = int(payload.get("current_file_index") or 0) or 0
+        stage = self._safe_text(payload.get("stage")) or "parse_sheets"
+        label = "Parsing spreadsheets"
+        detail = normalized or "Parsing spreadsheets."
+        percent = 0.12
+        if current and total:
+            label = f"Parsing file {current} of {total}"
+            percent = min(0.85, 0.12 + ((current - 1) / total) * 0.65)
+        if stage == "ready":
+            percent = 1.0
+        return {
+            "kind": "tabular_parse",
+            "stage": stage,
+            "label": label,
+            "detail": detail,
+            "current": current or 0,
+            "total": total,
+            "percent": percent,
         }
 
     def _derive_docs_parse_progress(self, *, message: str, total_documents: int) -> dict[str, Any]:
@@ -6211,6 +6501,143 @@ class GatewayRuntime:
             "message": message,
             "docs_progress": docs_progress,
         }
+
+    def _build_tabular_parse_progress_event(
+        self,
+        *,
+        request_record: dict[str, Any],
+        status: str,
+        message: str,
+        tabular_progress: dict[str, Any],
+        task_id: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "type": "task.progress",
+            "request_id": self._safe_text(request_record.get("request_id")) or None,
+            "session_id": self._safe_text(request_record.get("session_id")) or None,
+            "channel": self._safe_text(request_record.get("channel")) or None,
+            "source": self._safe_text(request_record.get("source")) or "user",
+            "source_id": self._safe_text(request_record.get("source_id")) or None,
+            "task_id": task_id,
+            "route": "opus",
+            "status": status,
+            "message": message,
+            "tabular_progress": tabular_progress,
+        }
+
+    def _apply_tabular_parse_success(
+        self,
+        *,
+        request_id: str,
+        parse_result: dict[str, Any],
+        artifact_ids: list[str],
+    ) -> None:
+        output = parse_result.get("output") if isinstance(parse_result.get("output"), dict) else {}
+        bundle_id = self._safe_text(output.get("bundle_id")) or None
+        parse_task_id = self._safe_text(parse_result.get("task_id")) or None
+        by_artifact_id: dict[str, dict[str, Any]] = {}
+        for workbook in output.get("workbooks", []) if isinstance(output.get("workbooks"), list) else []:
+            if not isinstance(workbook, dict):
+                continue
+            aid = self._safe_text(workbook.get("artifact_id"))
+            if aid:
+                by_artifact_id[aid] = workbook
+
+        for artifact_id in artifact_ids:
+            wb = by_artifact_id.get(artifact_id)
+            if wb is None:
+                continue
+            self._update_request_artifact_fields(
+                request_id,
+                artifact_id,
+                ingest_state="parsed",
+                parse_task_id=parse_task_id,
+                parse_bundle_id=bundle_id,
+                parsed_summary=wb,
+                tabular_tools=[
+                    "sheets_browse",
+                    "sheets_schema",
+                    "sheets_preview",
+                    "sheets_query",
+                    "sheets_export",
+                    "sheets_create_sheet",
+                ],
+                parse_error=None,
+            )
+            self.artifact_store.update_ingest_state(
+                artifact_id,
+                ingest_state="parsed",
+                parse_task_id=parse_task_id,
+                parse_bundle_id=bundle_id,
+                parsed_summary=wb,
+            )
+
+    def _apply_tabular_parse_failure(
+        self,
+        *,
+        request_id: str,
+        artifact_ids: list[str],
+        error_text: str,
+        ingest_state: str,
+        task_id: str | None,
+    ) -> None:
+        for artifact_id in artifact_ids:
+            self._update_request_artifact_fields(
+                request_id,
+                artifact_id,
+                parse_error=error_text,
+                ingest_state=ingest_state,
+                parse_task_id=task_id,
+            )
+            self.artifact_store.update_ingest_state(
+                artifact_id,
+                ingest_state=ingest_state,
+                parse_task_id=task_id,
+            )
+
+    async def _reconcile_tabular_parse_bundle(
+        self,
+        *,
+        request_id: str,
+        artifact_ids: list[str],
+        task_id: str,
+    ) -> None:
+        try:
+            parse_result = await self._wait_for_agent_terminal_result(
+                task_id,
+                timeout_sec=self.config.tabular_parse_reconcile_timeout_sec,
+                poll_interval_sec=self.config.tabular_parse_poll_interval_sec,
+            )
+        except Exception:
+            logger.exception(
+                "gateway.tabular_autoparse_reconcile_failed request_id=%s task_id=%s",
+                request_id,
+                task_id,
+            )
+            return
+        status = self._safe_text(parse_result.get("status")) or "failed"
+        if status == "completed":
+            self._apply_tabular_parse_success(
+                request_id=request_id,
+                parse_result=parse_result,
+                artifact_ids=artifact_ids,
+            )
+            return
+        if status == "pending":
+            logger.warning(
+                "gateway.tabular_autoparse_reconcile_still_pending request_id=%s task_id=%s",
+                request_id,
+                task_id,
+            )
+            return
+        error_text = self._safe_text(parse_result.get("error_message")) or "tabular.parse_bundle failed"
+        self._apply_tabular_parse_failure(
+            request_id=request_id,
+            artifact_ids=artifact_ids,
+            error_text=error_text,
+            ingest_state="parse_failed",
+            task_id=task_id,
+        )
 
     async def _handle_orchestrator_event(
         self,

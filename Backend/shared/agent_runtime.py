@@ -238,24 +238,36 @@ class AgentRuntime:
             await self.redis.xack(stream, WORKER_GROUP, message_id)
             return
 
-        if not self._sender_allowed(task):
+        task_input = dict(task.input)
+        self.auth = task_input.pop("auth", None) if isinstance(task_input.get("auth"), dict) else None
+        provisional_task = task.model_copy(update={"input": task_input})
+        try:
+            working_task = self._inflate_resume_task(provisional_task)
+        except Exception as exc:
             await self.emit_event(
                 task.task_id,
                 "task.rejected",
-                {"reason": "unauthorized_sender", "sender": task.sender, "intent": task.intent},
+                {"reason": "invalid_resume_payload", "sender": task.sender, "intent": task.intent, "error": str(exc)[:400]},
             )
             await self.redis.xack(stream, WORKER_GROUP, message_id)
+            self.auth = None
+            return
+
+        if not self._sender_allowed(working_task):
+            await self.emit_event(
+                task.task_id,
+                "task.rejected",
+                {"reason": "unauthorized_sender", "sender": task.sender, "intent": working_task.intent},
+            )
+            await self.redis.xack(stream, WORKER_GROUP, message_id)
+            self.auth = None
             return
 
         await self.emit_event(
             task.task_id,
             "task.accepted",
-            {"sender": task.sender, "intent": task.intent, "stream": stream},
+            {"sender": task.sender, "intent": working_task.intent, "stream": stream},
         )
-
-        task_input = dict(task.input)
-        self.auth = task_input.pop("auth", None) if isinstance(task_input.get("auth"), dict) else None
-        working_task = task.model_copy(update={"input": task_input})
         self.step_plan = StepPlan(task_id=task.task_id, emit_event_fn=self.emit_event)
         self.memory_read = MemoryRead(
             gateway_url=self.gateway_url,
@@ -322,6 +334,31 @@ class AgentRuntime:
             self.step_plan = None
             self.memory_read = None
             self.memory_write = None
+
+    def _inflate_resume_task(self, task: TaskEnvelope) -> TaskEnvelope:
+        if task.intent != "agent.resume":
+            return task
+
+        resume_intent = str(task.input.get("resume_intent") or "").strip()
+        resume_input = task.input.get("resume_input")
+        resume_reply = task.input.get("reply") if isinstance(task.input.get("reply"), dict) else {}
+        resume_state = task.input.get("resume_state") if isinstance(task.input.get("resume_state"), dict) else {}
+        resume_of_task_id = str(task.input.get("resume_of_task_id") or "").strip() or None
+        input_request_id = str(task.input.get("input_request_id") or "").strip() or None
+
+        if not resume_intent:
+            raise ValueError("agent.resume requires resume_intent")
+        if not isinstance(resume_input, dict):
+            raise ValueError("agent.resume requires resume_input object")
+
+        merged_input = dict(resume_input)
+        merged_input["_resume"] = {
+            "resume_of_task_id": resume_of_task_id,
+            "input_request_id": input_request_id,
+            "reply": dict(resume_reply),
+            "resume_state": dict(resume_state),
+        }
+        return task.model_copy(update={"intent": resume_intent, "input": merged_input})
 
     async def _publish_heartbeat(self, *, healthy: bool, status: str | None = None) -> None:
         await write_heartbeat(self._heartbeat(healthy=healthy), self.redis, status=status)

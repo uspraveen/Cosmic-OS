@@ -512,6 +512,104 @@ async def test_dispatch_agent_task_records_usage_and_refreshes_featured_speciali
     finally:
         await runtime.stop()
 
+
+@pytest.mark.asyncio
+async def test_orchestrator_dispatch_tracks_suspended_and_resumed_until_completed(tmp_path) -> None:
+    fake_redis = FakeRedis()
+    config = OrchestratorConfig(
+        signing_secret="gateway-secret",
+        agent_signing_secrets={"cosmic/research-agent:1.0.0": "research-secret"},
+        anthropic_api_key="anthropic-key",
+        task_ledger_db_path=tmp_path / "task_ledger_suspended.db",
+        agent_registry_db_path=tmp_path / "registry_suspended.db",
+    )
+    await _register_agent(_agent_card(), fake_redis, config.agent_registry_db_path)
+    runtime = OrchestratorRuntime(
+        config,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200))),
+        redis_client=fake_redis,
+    )
+    await runtime.start()
+    try:
+        dispatch = asyncio.create_task(
+            runtime.dispatch_agent_task(
+                parent_task=_parent_task("gateway-secret"),
+                intent="research.topic",
+                input_payload={"query": "Which of these companies should I use?"},
+                wait_timeout_sec=1.5,
+            )
+        )
+        fields = await _wait_for_stream(fake_redis, "streams:cosmic/research-agent:1.0.0:high")
+        child_task = parse_task_envelope(fields)
+
+        await fake_redis.xadd(
+            "streams:events",
+            {
+                "event": EventEnvelope(
+                    task_id=child_task.task_id,
+                    agent_id="cosmic/research-agent:1.0.0",
+                    event_type="task.suspended",
+                    seq=1,
+                    payload={"reason": "clarify", "question": "Use source A or B?"},
+                ).model_dump_json()
+            },
+        )
+
+        deadline = asyncio.get_running_loop().time() + 1.0
+        suspended_row = None
+        while asyncio.get_running_loop().time() < deadline:
+            suspended_row = runtime.task_ledger.get_task(child_task.task_id)
+            if suspended_row and suspended_row["status"] == "suspended":
+                break
+            await asyncio.sleep(0.01)
+        assert suspended_row is not None
+        assert suspended_row["status"] == "suspended"
+        assert dispatch.done() is False
+
+        await fake_redis.xadd(
+            "streams:events",
+            {
+                "event": EventEnvelope(
+                    task_id=child_task.task_id,
+                    agent_id="cosmic/research-agent:1.0.0",
+                    event_type="task.resumed",
+                    seq=2,
+                    payload={"clarify_status": "answered", "reply_excerpt": "source A"},
+                ).model_dump_json()
+            },
+        )
+
+        deadline = asyncio.get_running_loop().time() + 1.0
+        resumed_row = None
+        while asyncio.get_running_loop().time() < deadline:
+            resumed_row = runtime.task_ledger.get_task(child_task.task_id)
+            if resumed_row and resumed_row["status"] == "running":
+                break
+            await asyncio.sleep(0.01)
+        assert resumed_row is not None
+        assert resumed_row["status"] == "running"
+        assert dispatch.done() is False
+
+        await fake_redis.xadd(
+            "streams:events",
+            {
+                "event": EventEnvelope(
+                    task_id=child_task.task_id,
+                    agent_id="cosmic/research-agent:1.0.0",
+                    event_type="task.completed",
+                    seq=3,
+                    payload={"status": "completed", "output": {"answer": "source A"}, "artifacts": []},
+                ).model_dump_json()
+            },
+        )
+
+        result = await asyncio.wait_for(dispatch, timeout=2.0)
+        assert isinstance(result, AgentResult)
+        assert result.status == "completed"
+        assert result.output == {"answer": "source A"}
+    finally:
+        await runtime.stop()
+
     assert isinstance(result, AgentResult)
     assert result.status == "completed"
     assert len(featured) == 1

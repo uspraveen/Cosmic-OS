@@ -99,6 +99,11 @@ class GatewayConfig:
     docs_parse_timeout_sec: float = 300.0
     docs_parse_reconcile_timeout_sec: float = 900.0
     docs_parse_poll_interval_sec: float = 0.25
+    tabular_auto_parse_enabled: bool = True
+    tabular_agent_id: str = "cosmic/tabular-agent:1.0.0"
+    tabular_parse_timeout_sec: float = 300.0
+    tabular_parse_reconcile_timeout_sec: float = 900.0
+    tabular_parse_poll_interval_sec: float = 0.25
     haiku_api_key: str = ""
     haiku_model: str = "claude-haiku-4-5"
     anthropic_version: str = "2023-06-01"
@@ -302,6 +307,23 @@ class GatewayConfig:
             docs_parse_poll_interval_sec=max(
                 0.05,
                 _env_float("GATEWAY_DOCS_PARSE_POLL_INTERVAL_SEC", 0.25),
+            ),
+            tabular_auto_parse_enabled=_env_bool("GATEWAY_TABULAR_AUTO_PARSE_ENABLED", True),
+            tabular_agent_id=(
+                os.getenv("GATEWAY_TABULAR_AGENT_ID", "cosmic/tabular-agent:1.0.0").strip()
+                or "cosmic/tabular-agent:1.0.0"
+            ),
+            tabular_parse_timeout_sec=max(
+                5.0,
+                _env_float("GATEWAY_TABULAR_PARSE_TIMEOUT_SEC", 300.0),
+            ),
+            tabular_parse_reconcile_timeout_sec=max(
+                30.0,
+                _env_float("GATEWAY_TABULAR_PARSE_RECONCILE_TIMEOUT_SEC", 900.0),
+            ),
+            tabular_parse_poll_interval_sec=max(
+                0.05,
+                _env_float("GATEWAY_TABULAR_PARSE_POLL_INTERVAL_SEC", 0.25),
             ),
             haiku_api_key=(
                 os.getenv("HAIKU_API_KEY")

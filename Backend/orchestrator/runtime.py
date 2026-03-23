@@ -1260,9 +1260,94 @@ class OrchestratorRuntime:
         )
 
     def _resolve_pending_agent_result(self, task_id: str, result: AgentResult | TaskInProgress) -> None:
-        future = self._pending_agent_results.pop(task_id, None)
-        if future is not None and not future.done():
+        future = self._pending_agent_results.get(task_id)
+        if future is None:
+            return
+        aliases = [key for key, value in self._pending_agent_results.items() if value is future]
+        for key in aliases:
+            self._pending_agent_results.pop(key, None)
+        if not future.done():
             future.set_result(result)
+
+    def _link_pending_agent_result_alias(self, *, alias_task_id: str, canonical_task_id: str) -> None:
+        future = self._pending_agent_results.get(canonical_task_id)
+        if future is not None and not future.done():
+            self._pending_agent_results[alias_task_id] = future
+
+    def _register_task_input_wait_from_suspension(self, task_id: str, payload: dict[str, Any]) -> None:
+        input_request_id = str(payload.get("input_request_id") or "").strip()
+        if not input_request_id:
+            return
+        task_record = self.task_ledger.get_task(task_id)
+        if task_record is None:
+            return
+        resume_payload = payload.get("resume_payload") if isinstance(payload.get("resume_payload"), dict) else {}
+        resume_intent = str(payload.get("resume_intent") or "agent.resume").strip() or "agent.resume"
+        self.task_ledger.create_task_input_wait(
+            input_request_id=input_request_id,
+            waiting_task_id=task_id,
+            parent_task_id=str(task_record.get("parent_task_id") or "").strip() or None,
+            recipient=str(task_record.get("recipient") or "").strip(),
+            resume_intent=resume_intent,
+            resume_payload=resume_payload,
+        )
+
+    async def _dispatch_resumed_task_for_input_reply(self, reply: dict[str, Any]) -> None:
+        if self._redis is None:
+            return
+        input_request_id = str(reply.get("input_request_id") or "").strip()
+        if not input_request_id:
+            return
+        wait = self.task_ledger.get_task_input_wait(input_request_id)
+        if wait is None or str(wait.get("status") or "").strip() != "pending":
+            return
+
+        waiting_task_id = str(wait.get("waiting_task_id") or "").strip()
+        waiting_record = self.task_ledger.get_task(waiting_task_id)
+        if waiting_record is None:
+            return
+        waiting_envelope = waiting_record.get("envelope_json") if isinstance(waiting_record.get("envelope_json"), dict) else {}
+        resume_input = {
+            "resume_of_task_id": waiting_task_id,
+            "resume_intent": str(waiting_record.get("intent") or "").strip(),
+            "resume_input": dict(waiting_envelope.get("input") or {}),
+            "resume_state": wait.get("resume_payload_json") if isinstance(wait.get("resume_payload_json"), dict) else {},
+            "reply": dict(reply),
+            "input_request_id": input_request_id,
+        }
+        resume_task = TaskEnvelope(
+            task_id=generate_task_id(),
+            task_list_id=str(waiting_record.get("task_list_id") or "").strip(),
+            parent_task_id=waiting_task_id,
+            session_id=str(waiting_record.get("session_id") or "").strip() or None,
+            sender=self.config.orchestrator_agent_id,
+            recipient=str(wait.get("recipient") or waiting_record.get("recipient") or "").strip(),
+            intent=str(wait.get("resume_intent") or "agent.resume").strip() or "agent.resume",
+            input=resume_input,
+            input_artifacts=list(waiting_envelope.get("input_artifacts") or []),
+            idempotency_key=f"{str(waiting_record.get('idempotency_key') or '').strip()}:resume:{input_request_id}",
+            deadline_ts=None,
+            priority=str(waiting_record.get("priority") or "normal").strip() or "normal",
+            leader_epoch=None,
+            signature="",
+            source=str(waiting_record.get("source") or "agent").strip() or "agent",
+            source_id=str(waiting_record.get("source_id") or "").strip() or None,
+            channel=str(waiting_record.get("channel") or "").strip() or None,
+        )
+        signature = sign_task_envelope(resume_task, self._resolve_agent_secret(resume_task.recipient))
+        resume_task = resume_task.model_copy(update={"signature": signature})
+        self.task_ledger.create_task(resume_task)
+        self.task_ledger.mark_task_input_wait_resumed(input_request_id, resumed_task_id=resume_task.task_id)
+        self.task_ledger.mark_resumed(
+            waiting_task_id,
+            payload={
+                "input_request_id": input_request_id,
+                "resume_task_id": resume_task.task_id,
+                "reply_excerpt": str(reply.get("content") or "").strip()[:2000],
+            },
+        )
+        self._link_pending_agent_result_alias(alias_task_id=resume_task.task_id, canonical_task_id=waiting_task_id)
+        await dispatch_task(resume_task, self._redis)
 
     async def _agent_event_consumer_loop(self) -> None:
         assert self._redis is not None
@@ -1290,14 +1375,18 @@ class OrchestratorRuntime:
 
     async def _handle_agent_event(self, event: EventEnvelope) -> None:
         self._agent_dispatch_stats.events_consumed += 1
+        resume_wait = self.task_ledger.get_task_input_wait_by_resumed_task(event.task_id)
+        canonical_task_id = str(resume_wait.get("waiting_task_id") or "").strip() if resume_wait else event.task_id
 
         if event.event_type == "task.completed":
-            task_record = self.task_ledger.get_task(event.task_id)
+            task_record = self.task_ledger.get_task(canonical_task_id)
             result = self._coerce_agent_result(event)
             self.task_ledger.mark_completed(event.task_id, result=result.model_dump(mode="json"))
+            if canonical_task_id != event.task_id:
+                self.task_ledger.mark_completed(canonical_task_id, result=result.model_dump(mode="json"))
             self._agent_dispatch_stats.dispatches_completed += 1
             self._record_successful_specialist_usage(task_record)
-            self._resolve_pending_agent_result(event.task_id, result)
+            self._resolve_pending_agent_result(canonical_task_id, result)
             return
 
         if event.event_type in {"task.failed", "task.dlq"}:
@@ -1309,23 +1398,40 @@ class OrchestratorRuntime:
                 next_action="escalate",
             )
             self.task_ledger.mark_failed(event.task_id, code=error.code, message=error.message)
+            if canonical_task_id != event.task_id:
+                self.task_ledger.mark_failed(canonical_task_id, code=error.code, message=error.message)
             self._agent_dispatch_stats.failed_events += 1
-            self._resolve_pending_agent_result(event.task_id, result)
+            self._resolve_pending_agent_result(canonical_task_id, result)
             return
 
         if event.event_type == "task.deferred":
+            task_record = self.task_ledger.get_task(canonical_task_id)
+            if task_record is not None and str(task_record.get("status") or "").strip() == "suspended":
+                self._agent_dispatch_stats.deferred_events += 1
+                return
             try:
                 result = TaskInProgress.model_validate(event.payload)
             except Exception as exc:
                 result = self._build_in_progress_result(
-                    event.task_id,
-                    idempotency_key=f"deferred:{event.task_id}",
+                    canonical_task_id,
+                    idempotency_key=f"deferred:{canonical_task_id}",
                     timeout_sec=30,
                 )
                 logger.warning("orchestrator.agent_event_invalid_deferred task_id=%s error=%s", event.task_id, exc)
             self.task_ledger.mark_deferred(event.task_id, result=result.model_dump(mode="json"))
+            if canonical_task_id != event.task_id:
+                self.task_ledger.mark_deferred(canonical_task_id, result=result.model_dump(mode="json"))
             self._agent_dispatch_stats.deferred_events += 1
-            self._resolve_pending_agent_result(event.task_id, result)
+            self._resolve_pending_agent_result(canonical_task_id, result)
+            return
+
+        if event.event_type == "task.suspended":
+            self.task_ledger.mark_suspended(canonical_task_id, payload=event.payload)
+            self._register_task_input_wait_from_suspension(canonical_task_id, event.payload)
+            return
+
+        if event.event_type == "task.resumed":
+            self.task_ledger.mark_resumed(canonical_task_id, payload=event.payload)
             return
 
         if event.event_type == "task.rejected":
@@ -1335,8 +1441,10 @@ class OrchestratorRuntime:
             error = result.error
             assert error is not None
             self.task_ledger.mark_failed(event.task_id, code=error.code, message=error.message)
+            if canonical_task_id != event.task_id:
+                self.task_ledger.mark_failed(canonical_task_id, code=error.code, message=error.message)
             self._agent_dispatch_stats.rejected_events += 1
-            self._resolve_pending_agent_result(event.task_id, result)
+            self._resolve_pending_agent_result(canonical_task_id, result)
             return
 
     # ════════════════════════════════════════════════════════════
@@ -2552,6 +2660,7 @@ class OrchestratorRuntime:
                         future = self._pending_input_futures.get(irid)
                         if future is not None and not future.done():
                             future.set_result(reply)
+                        await self._dispatch_resumed_task_for_input_reply(reply)
                         self._pending_input_futures.pop(irid, None)
                         await self._redis.xack(
                             self.config.task_input_replies_stream,

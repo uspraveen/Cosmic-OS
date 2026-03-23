@@ -14,7 +14,7 @@ from urllib.parse import quote
 
 import httpx
 
-from shared import begin_metered_call, build_model_key, build_usage_event, post_usage_event
+from shared import begin_metered_call, build_model_key, build_usage_event, post_usage_event, validate_safe_sheet_id
 from shared.contracts import AgentResult, TaskEnvelope, TaskInProgress
 
 from .registry import get_local_tool_spec
@@ -501,6 +501,172 @@ class ToolExecutor:
             context=context,
             agent_id="cosmic/docs-parser-agent:1.0.0",
             wait_timeout_sec=45.0,
+        )
+
+    async def _sheets_browse(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        bundle_id = str(tool_input.get("bundle_id") or "").strip()
+        if not bundle_id:
+            return {"error": True, "message": "bundle_id is required"}
+        return await self._dispatch_specialist_agent(
+            intent="tabular.browse_workbook",
+            payload={"bundle_id": bundle_id},
+            context=context,
+            agent_id="cosmic/tabular-agent:1.0.0",
+            wait_timeout_sec=35.0,
+        )
+
+    async def _sheets_schema(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        bundle_id = str(tool_input.get("bundle_id") or "").strip()
+        artifact_id = str(tool_input.get("artifact_id") or "").strip()
+        if not bundle_id or not artifact_id:
+            return {"error": True, "message": "bundle_id and artifact_id are required"}
+        payload: dict[str, Any] = {"bundle_id": bundle_id, "artifact_id": artifact_id}
+        sheet_id = str(tool_input.get("sheet_id") or "").strip()
+        if sheet_id:
+            try:
+                payload["sheet_id"] = validate_safe_sheet_id(sheet_id)
+            except ValueError as exc:
+                return {"error": True, "message": str(exc)}
+        return await self._dispatch_specialist_agent(
+            intent="tabular.schema_sheet",
+            payload=payload,
+            context=context,
+            agent_id="cosmic/tabular-agent:1.0.0",
+            wait_timeout_sec=35.0,
+        )
+
+    async def _sheets_preview(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        bundle_id = str(tool_input.get("bundle_id") or "").strip()
+        artifact_id = str(tool_input.get("artifact_id") or "").strip()
+        sheet_id = str(tool_input.get("sheet_id") or "").strip()
+        if not bundle_id or not artifact_id or not sheet_id:
+            return {"error": True, "message": "bundle_id, artifact_id, and sheet_id are required"}
+        try:
+            sheet_id = validate_safe_sheet_id(sheet_id)
+        except ValueError as exc:
+            return {"error": True, "message": str(exc)}
+        return await self._dispatch_specialist_agent(
+            intent="tabular.preview_sheet",
+            payload={"bundle_id": bundle_id, "artifact_id": artifact_id, "sheet_id": sheet_id},
+            context=context,
+            agent_id="cosmic/tabular-agent:1.0.0",
+            wait_timeout_sec=35.0,
+        )
+
+    async def _sheets_query(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        bundle_id = str(tool_input.get("bundle_id") or "").strip()
+        artifact_id = str(tool_input.get("artifact_id") or "").strip()
+        sql = str(tool_input.get("sql") or "").strip()
+        if not bundle_id or not artifact_id or not sql:
+            return {"error": True, "message": "bundle_id, artifact_id, and sql are required"}
+        return await self._dispatch_specialist_agent(
+            intent="tabular.query_workbook",
+            payload={"bundle_id": bundle_id, "artifact_id": artifact_id, "sql": sql},
+            context=context,
+            agent_id="cosmic/tabular-agent:1.0.0",
+            wait_timeout_sec=90.0,
+        )
+
+    async def _sheets_export(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        bundle_id = str(tool_input.get("bundle_id") or "").strip()
+        artifact_id = str(tool_input.get("artifact_id") or "").strip()
+        sql = str(tool_input.get("sql") or "").strip()
+        if not bundle_id or not artifact_id or not sql:
+            return {"error": True, "message": "bundle_id, artifact_id, and sql are required"}
+        fmt = str(tool_input.get("format") or "parquet").strip().lower()
+        payload: dict[str, Any] = {"bundle_id": bundle_id, "artifact_id": artifact_id, "sql": sql, "format": fmt}
+        return await self._dispatch_specialist_agent(
+            intent="tabular.export_result",
+            payload=payload,
+            context=context,
+            agent_id="cosmic/tabular-agent:1.0.0",
+            wait_timeout_sec=120.0,
+        )
+
+    async def _sheets_create_sheet(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        bundle_id = str(tool_input.get("bundle_id") or "").strip()
+        artifact_id = str(tool_input.get("artifact_id") or "").strip()
+        sheet_id = str(tool_input.get("sheet_id") or "").strip()
+        columns = tool_input.get("columns")
+        if not bundle_id or not artifact_id or not sheet_id:
+            return {"error": True, "message": "bundle_id, artifact_id, and sheet_id are required"}
+        try:
+            sheet_id = validate_safe_sheet_id(sheet_id)
+        except ValueError as exc:
+            return {"error": True, "message": str(exc)}
+        if not isinstance(columns, list) or len(columns) < 1:
+            return {"error": True, "message": "columns must be a non-empty array of column name strings"}
+        display_name = str(tool_input.get("display_name") or "").strip()
+        payload: dict[str, Any] = {
+            "bundle_id": bundle_id,
+            "artifact_id": artifact_id,
+            "sheet_id": sheet_id,
+            "columns": [str(c) for c in columns],
+        }
+        if display_name:
+            payload["display_name"] = display_name
+        return await self._dispatch_specialist_agent(
+            intent="tabular.create_sheet",
+            payload=payload,
+            context=context,
+            agent_id="cosmic/tabular-agent:1.0.0",
+            wait_timeout_sec=60.0,
+        )
+
+    async def _sheets_reason(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        bundle_id = str(tool_input.get("bundle_id") or "").strip()
+        artifact_id = str(tool_input.get("artifact_id") or "").strip()
+        goal = str(tool_input.get("goal") or "").strip()
+        if not bundle_id or not artifact_id or not goal:
+            return {"error": True, "message": "bundle_id, artifact_id, and goal are required"}
+        payload: dict[str, Any] = {
+            "bundle_id": bundle_id,
+            "artifact_id": artifact_id,
+            "goal": goal,
+        }
+        if "allow_python" in tool_input:
+            payload["allow_python"] = bool(tool_input.get("allow_python"))
+        return await self._dispatch_specialist_agent(
+            intent="tabular.reason_workbook",
+            payload=payload,
+            context=context,
+            agent_id="cosmic/tabular-agent:1.0.0",
+            wait_timeout_sec=200.0,
         )
 
     async def _firecrawl_scrape(

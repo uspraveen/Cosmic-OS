@@ -63,6 +63,13 @@ from .document_artifacts import (
     infer_document_mime_from_extension,
     is_supported_document_artifact,
 )
+from .tabular_artifacts import (
+    SUPPORTED_TABULAR_EXTENSIONS,
+    SUPPORTED_TABULAR_MIME_TYPES,
+    infer_tabular_mime_from_extension,
+    is_supported_tabular_artifact,
+    validate_safe_sheet_id,
+)
 from .image_artifacts import (
     SUPPORTED_IMAGE_EXTENSIONS,
     SUPPORTED_IMAGE_MIME_TYPES,
@@ -96,8 +103,11 @@ __all__ = [
     "estimate_text_tokens",
     "infer_document_mime_from_extension",
     "infer_image_mime_from_extension",
+    "infer_tabular_mime_from_extension",
     "is_supported_document_artifact",
     "is_supported_image_artifact",
+    "is_supported_tabular_artifact",
+    "validate_safe_sheet_id",
     "get_model_spec",
     "load_model_specs",
     "lookup_model_spec",
@@ -110,6 +120,8 @@ __all__ = [
     "SUPPORTED_DOCUMENT_MIME_TYPES",
     "SUPPORTED_IMAGE_EXTENSIONS",
     "SUPPORTED_IMAGE_MIME_TYPES",
+    "SUPPORTED_TABULAR_EXTENSIONS",
+    "SUPPORTED_TABULAR_MIME_TYPES",
     "sign_task_envelope",
     "utcnow",
     "validate_outbound_version",

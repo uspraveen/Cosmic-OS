@@ -130,6 +130,41 @@ def _docs_fetch_asset_progress(tool_input: dict[str, Any]) -> str:
     return f"Fetching parsed asset {asset_id}..." if asset_id else "Fetching a parsed asset..."
 
 
+def _sheets_browse_progress(tool_input: dict[str, Any]) -> str:
+    bundle_id = str(tool_input.get("bundle_id") or "").strip()
+    return f"Browsing spreadsheet bundle {bundle_id}..." if bundle_id else "Browsing spreadsheet bundle..."
+
+
+def _sheets_schema_progress(tool_input: dict[str, Any]) -> str:
+    sheet_id = str(tool_input.get("sheet_id") or "").strip()
+    return f"Loading sheet schema{f' for {sheet_id}' if sheet_id else ''}..."
+
+
+def _sheets_preview_progress(tool_input: dict[str, Any]) -> str:
+    sheet_id = str(tool_input.get("sheet_id") or "").strip()
+    return f"Previewing sheet {sheet_id}..." if sheet_id else "Previewing spreadsheet sheet..."
+
+
+def _sheets_query_progress(tool_input: dict[str, Any]) -> str:
+    return "Running deterministic SQL over parsed spreadsheet data..."
+
+
+def _sheets_export_progress(tool_input: dict[str, Any]) -> str:
+    return "Exporting spreadsheet query results to artifacts..."
+
+
+def _sheets_reason_progress(tool_input: dict[str, Any]) -> str:
+    g = str(tool_input.get("goal") or "").strip()
+    if g:
+        return f"Tabular specialist reasoning ({g[:72]}{'…' if len(g) > 72 else ''})"
+    return "Tabular specialist internal reasoning over spreadsheet bundle."
+
+
+def _sheets_create_sheet_progress(tool_input: dict[str, Any]) -> str:
+    sheet_id = str(tool_input.get("sheet_id") or "").strip()
+    return f"Creating sheet {sheet_id}..." if sheet_id else "Creating spreadsheet sheet..."
+
+
 def _docs_reinspect_asset_progress(tool_input: dict[str, Any]) -> str:
     asset_id = str(tool_input.get("asset_id") or "").strip()
     question = str(tool_input.get("question") or "").strip()
@@ -678,6 +713,195 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_docs_reinspect_asset_progress,
         handler_method="_docs_reinspect_asset",
         read_only=True,
+    ),
+    ToolSpec(
+        name="sheets_browse",
+        api_definition={
+            "name": "sheets_browse",
+            "description": (
+                "Browse a parsed spreadsheet bundle (tabular.parse_bundle output) without loading full tables. "
+                "Use bundle_id from uploaded spreadsheet metadata after parsing."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "bundle_id": {"type": "string", "description": "Tabular bundle_id from spreadsheet parse metadata."},
+                },
+                "required": ["bundle_id"],
+            },
+        },
+        group="spreadsheets",
+        prompt_summary="List spreadsheet workbooks and handles for a parsed tabular bundle before schema/preview/query.",
+        progress_builder=_sheets_browse_progress,
+        handler_method="_sheets_browse",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="sheets_schema",
+        api_definition={
+            "name": "sheets_schema",
+            "description": "Return typed schema rows from sheet_catalog for one workbook artifact.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "bundle_id": {"type": "string"},
+                    "artifact_id": {"type": "string", "description": "Workbook artifact_id from the parsed bundle."},
+                    "sheet_id": {
+                        "type": "string",
+                        "description": "Optional filter to one sheet_id; must match ^[A-Za-z0-9_]{1,80}$ when set.",
+                        "pattern": "^[A-Za-z0-9_]{1,80}$",
+                    },
+                },
+                "required": ["bundle_id", "artifact_id"],
+            },
+        },
+        group="spreadsheets",
+        prompt_summary="Inspect column names, inferred types, and header detection for spreadsheet sheets.",
+        progress_builder=_sheets_schema_progress,
+        handler_method="_sheets_schema",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="sheets_preview",
+        api_definition={
+            "name": "sheets_preview",
+            "description": "Return bounded preview markdown for one sheet.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "bundle_id": {"type": "string"},
+                    "artifact_id": {"type": "string"},
+                    "sheet_id": {
+                        "type": "string",
+                        "description": "Must match ^[A-Za-z0-9_]{1,80}$.",
+                        "pattern": "^[A-Za-z0-9_]{1,80}$",
+                    },
+                },
+                "required": ["bundle_id", "artifact_id", "sheet_id"],
+            },
+        },
+        group="spreadsheets",
+        prompt_summary="Read a small markdown preview of one parsed sheet.",
+        progress_builder=_sheets_preview_progress,
+        handler_method="_sheets_preview",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="sheets_query",
+        api_definition={
+            "name": "sheets_query",
+            "description": (
+                "Run a read-only SELECT against the DuckDB bundle. Views are named s_<sheet_id>. "
+                "Only SELECT statements; no writes."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "bundle_id": {"type": "string"},
+                    "artifact_id": {"type": "string"},
+                    "sql": {"type": "string", "description": "Single SELECT statement."},
+                },
+                "required": ["bundle_id", "artifact_id", "sql"],
+            },
+        },
+        group="spreadsheets",
+        prompt_summary="Deterministic SQL over parsed spreadsheet Parquet-backed views.",
+        progress_builder=_sheets_query_progress,
+        handler_method="_sheets_query",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="sheets_export",
+        api_definition={
+            "name": "sheets_export",
+            "description": "Export a SELECT result to CSV or Parquet under the bundle exports folder.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "bundle_id": {"type": "string"},
+                    "artifact_id": {"type": "string"},
+                    "sql": {"type": "string"},
+                    "format": {"type": "string", "description": "parquet or csv", "enum": ["parquet", "csv"]},
+                },
+                "required": ["bundle_id", "artifact_id", "sql"],
+            },
+        },
+        group="spreadsheets",
+        prompt_summary="Persist a derived table from a SELECT query into spreadsheet artifacts.",
+        progress_builder=_sheets_export_progress,
+        handler_method="_sheets_export",
+        read_only=False,
+    ),
+    ToolSpec(
+        name="sheets_create_sheet",
+        api_definition={
+            "name": "sheets_create_sheet",
+            "description": (
+                "Create an empty sheet (Parquet + DuckDB view) inside an existing parsed workbook bundle. "
+                "Updates sheet_catalog and workbook metadata so browse/schema/preview stay consistent."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "bundle_id": {"type": "string"},
+                    "artifact_id": {"type": "string", "description": "Workbook artifact_id from the parsed bundle."},
+                    "sheet_id": {
+                        "type": "string",
+                        "description": "Stable id; becomes DuckDB view s_<sheet_id>. Must match ^[A-Za-z0-9_]{1,80}$.",
+                        "pattern": "^[A-Za-z0-9_]{1,80}$",
+                    },
+                    "columns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Column names for the empty sheet.",
+                    },
+                    "display_name": {
+                        "type": "string",
+                        "description": "Optional human label shown in sheet catalog; defaults to sheet_id.",
+                    },
+                },
+                "required": ["bundle_id", "artifact_id", "sheet_id", "columns"],
+            },
+        },
+        group="spreadsheets",
+        prompt_summary="Add an empty derived sheet to a parsed spreadsheet bundle with explicit columns.",
+        progress_builder=_sheets_create_sheet_progress,
+        handler_method="_sheets_create_sheet",
+        read_only=False,
+    ),
+    ToolSpec(
+        name="sheets_reason",
+        api_definition={
+            "name": "sheets_reason",
+            "description": (
+                "Delegate a **single goal** to the tabular specialist's internal agentic workflow: it inspects "
+                "catalog/preview, plans one SQL or bounded-Python step, runs deterministic DuckDB or the COSMIC "
+                "sandbox (codes/ + executions/), and returns a summary. Prefer granular sheets_schema / sheets_query "
+                "when you already know the SQL; use this for exploratory or multi-step reasoning without raw workbook bytes."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "bundle_id": {"type": "string"},
+                    "artifact_id": {"type": "string", "description": "Workbook artifact_id from the parsed bundle."},
+                    "goal": {
+                        "type": "string",
+                        "description": "What to find or compute over the bundle (natural language).",
+                    },
+                    "allow_python": {
+                        "type": "boolean",
+                        "description": "Allow bounded sandbox Python under the bundle (default true). Set false for SQL-only.",
+                        "default": True,
+                    },
+                },
+                "required": ["bundle_id", "artifact_id", "goal"],
+            },
+        },
+        group="spreadsheets",
+        prompt_summary="Internal tabular specialist reasoning (plan + execute + summarize); use when granular tools are insufficient.",
+        progress_builder=_sheets_reason_progress,
+        handler_method="_sheets_reason",
+        read_only=False,
     ),
     ToolSpec(
         name="firecrawl_scrape",
@@ -1362,12 +1586,13 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
 )
 
 _TOOL_BY_NAME = {spec.name: spec for spec in _MODEL_TOOL_SPECS}
-_GROUP_ORDER = ("web", "research", "specialists", "documents", "planning", "memory", "history", "scheduling")
+_GROUP_ORDER = ("web", "research", "specialists", "documents", "spreadsheets", "planning", "memory", "history", "scheduling")
 _GROUP_TITLES = {
     "web": "Web",
     "research": "Research",
     "specialists": "Specialists",
     "documents": "Documents",
+    "spreadsheets": "Spreadsheets",
     "planning": "Planning & Wishlist",
     "memory": "Memory",
     "history": "History",

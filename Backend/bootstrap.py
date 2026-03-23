@@ -77,6 +77,10 @@ X_TWITTER_SEARCH_AGENT_ENV_NAME = "x-twitter-search-agent.env"
 X_TWITTER_SEARCH_AGENT_SERVICE_NAME = "cosmic-x-twitter-search-agent.service"
 X_TWITTER_SEARCH_AGENT_ID = "cosmic/x-twitter-search-agent:1.0.0"
 X_TWITTER_SEARCH_AGENT_DEFAULT_INSTANCE_ID = "x-twitter-search-agent-1"
+TABULAR_AGENT_ENV_NAME = "tabular-agent.env"
+TABULAR_AGENT_SERVICE_NAME = "cosmic-tabular-agent.service"
+TABULAR_AGENT_ID = "cosmic/tabular-agent:1.0.0"
+TABULAR_AGENT_DEFAULT_INSTANCE_ID = "tabular-agent-1"
 CRITICAL_VENV_IMPORT_CHECKS: Tuple[Tuple[str, str], ...] = (
     ("docling", "docs parser runtime"),
 )
@@ -87,6 +91,7 @@ CORE_BACKEND_SERVICE_UNITS = (
     "cosmic-orchestrator.service",
     "cosmic-gateway.service",
     "cosmic-docs-parser-agent.service",
+    "cosmic-tabular-agent.service",
     "cosmic-whatsapp-bridge.service",
 )
 DEFAULT_SUPABASE_URL = "https://hluenippcdiejenmteen.supabase.co"
@@ -901,6 +906,120 @@ def read_x_twitter_search_agent_system_env(system_env_dir: Optional[Path] = None
     return parse_env_text(read_text_file(env_path, use_sudo=True))
 
 
+def tabular_agent_repo_dir() -> Path:
+    return BACKEND_ROOT / "agents" / "tabular_agent"
+
+
+def tabular_agent_repo_env_path() -> Path:
+    return tabular_agent_repo_dir() / "agent.env"
+
+
+def tabular_agent_repo_env_example_path() -> Path:
+    return tabular_agent_repo_dir() / "agent.env.example"
+
+
+def tabular_agent_system_env_path(system_env_dir: Optional[Path] = None) -> Path:
+    return (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "agents" / TABULAR_AGENT_ENV_NAME
+
+
+def resolve_tabular_agent_env_source() -> Path:
+    repo_env = tabular_agent_repo_env_path()
+    if repo_env.exists():
+        return repo_env
+    return tabular_agent_repo_env_example_path()
+
+
+def build_tabular_agent_env_rendered(
+    *,
+    signing_secret: str,
+    shared_internal_token: str,
+    system_env_dir: Optional[Path] = None,
+    existing_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+    external_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Tuple[Path, str, Dict[str, str]]:
+    source_path = resolve_tabular_agent_env_source()
+    source_raw = source_path.read_text(encoding="utf-8")
+    source_data = parse_env_text(source_raw)
+    existing_env = (existing_env_by_name or {}).get(TABULAR_AGENT_ENV_NAME, {})
+    external_env = (external_env_by_name or {}).get(TABULAR_AGENT_ENV_NAME, {})
+
+    redis_url = first_meaningful_value(
+        external_env.get("REDIS_URL"),
+        existing_env.get("REDIS_URL"),
+        source_data.get("REDIS_URL"),
+        "redis://127.0.0.1:6379/0",
+    )
+    gateway_url = first_meaningful_value(
+        external_env.get("GATEWAY_URL"),
+        existing_env.get("GATEWAY_URL"),
+        source_data.get("GATEWAY_URL"),
+        "http://127.0.0.1:8080",
+    )
+    orchestrator_url = first_meaningful_value(
+        external_env.get("TABULAR_AGENT_ORCHESTRATOR_URL"),
+        external_env.get("ORCHESTRATOR_URL"),
+        existing_env.get("TABULAR_AGENT_ORCHESTRATOR_URL"),
+        existing_env.get("ORCHESTRATOR_URL"),
+        source_data.get("TABULAR_AGENT_ORCHESTRATOR_URL"),
+        source_data.get("ORCHESTRATOR_URL"),
+        "http://127.0.0.1:8743",
+    )
+    mimo_api_key = first_meaningful_value(
+        external_env.get("TABULAR_AGENT_MIMO_API_KEY"),
+        external_env.get("MIMO_API_KEY"),
+        existing_env.get("TABULAR_AGENT_MIMO_API_KEY"),
+        existing_env.get("MIMO_API_KEY"),
+        source_data.get("TABULAR_AGENT_MIMO_API_KEY"),
+        source_data.get("MIMO_API_KEY"),
+    )
+    mimo_base_url = first_meaningful_value(
+        external_env.get("TABULAR_AGENT_MIMO_BASE_URL"),
+        external_env.get("MIMO_OPENAI_BASE_URL"),
+        existing_env.get("TABULAR_AGENT_MIMO_BASE_URL"),
+        existing_env.get("MIMO_OPENAI_BASE_URL"),
+        source_data.get("TABULAR_AGENT_MIMO_BASE_URL"),
+        source_data.get("MIMO_OPENAI_BASE_URL"),
+    )
+    mimo_model = first_meaningful_value(
+        external_env.get("TABULAR_AGENT_MIMO_MODEL"),
+        existing_env.get("TABULAR_AGENT_MIMO_MODEL"),
+        source_data.get("TABULAR_AGENT_MIMO_MODEL"),
+        "mimo-v2-pro",
+    )
+    instance_id = first_meaningful_value(
+        external_env.get("INSTANCE_ID"),
+        existing_env.get("INSTANCE_ID"),
+        source_data.get("INSTANCE_ID"),
+        TABULAR_AGENT_DEFAULT_INSTANCE_ID,
+    )
+
+    overrides = {
+        "REDIS_URL": redis_url or "redis://127.0.0.1:6379/0",
+        "GATEWAY_URL": gateway_url or "http://127.0.0.1:8080",
+        "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
+        "AGENT_SECRET": signing_secret,
+        "INSTANCE_ID": instance_id or TABULAR_AGENT_DEFAULT_INSTANCE_ID,
+        "TABULAR_AGENT_ORCHESTRATOR_URL": orchestrator_url or "http://127.0.0.1:8743",
+        "TABULAR_AGENT_ORCHESTRATOR_INTERNAL_TOKEN": shared_internal_token,
+        "TABULAR_AGENT_MIMO_MODEL": mimo_model or "mimo-v2-pro",
+    }
+    if mimo_api_key is not None:
+        overrides["TABULAR_AGENT_MIMO_API_KEY"] = mimo_api_key
+    if mimo_base_url is not None:
+        overrides["TABULAR_AGENT_MIMO_BASE_URL"] = mimo_base_url
+
+    rendered = render_env_with_overrides(source_raw, overrides)
+    rendered_data = parse_env_text(rendered)
+    return tabular_agent_system_env_path(system_env_dir), rendered, rendered_data
+
+
+def read_tabular_agent_system_env(system_env_dir: Optional[Path] = None) -> Dict[str, str]:
+    env_path = tabular_agent_system_env_path(system_env_dir)
+    if not env_path.exists():
+        return {}
+    return parse_env_text(read_text_file(env_path, use_sudo=True))
+
+
 def extract_host_from_url(value: Optional[str]) -> Optional[str]:
     normalized = meaningful_env_value(value)
     if normalized is None:
@@ -1068,6 +1187,9 @@ def normalize_bootstrap_env_payload(payload: Dict[str, object]) -> Dict[str, Dic
     x_twitter_search_agent_env = {}
     if isinstance(payload.get("x_twitter_search_agent_env"), dict):
         x_twitter_search_agent_env = dict(payload.get("x_twitter_search_agent_env") or {})
+    tabular_agent_env = {}
+    if isinstance(payload.get("tabular_agent_env"), dict):
+        tabular_agent_env = dict(payload.get("tabular_agent_env") or {})
     meeting_env = dict(payload.get("meeting_env") or {}) if isinstance(payload.get("meeting_env"), dict) else {}
     vm_payload = dict(payload.get("vm") or {}) if isinstance(payload.get("vm"), dict) else {}
 
@@ -1108,6 +1230,8 @@ def normalize_bootstrap_env_payload(payload: Dict[str, object]) -> Dict[str, Dic
         normalized[FIRECRAWL_AGENT_ENV_NAME] = firecrawl_agent_env
     if x_twitter_search_agent_env:
         normalized[X_TWITTER_SEARCH_AGENT_ENV_NAME] = x_twitter_search_agent_env
+    if tabular_agent_env:
+        normalized[TABULAR_AGENT_ENV_NAME] = tabular_agent_env
     required_fields = {
         "gateway.env": ("GATEWAY_LOCAL_API_TOKEN", "ANTHROPIC_API_KEY", "PERPLEXITY_API_KEY", "GATEWAY_PUBLIC_HOST"),
         "model-router.env": ("GROQ_API_KEY",),
@@ -1960,6 +2084,19 @@ def materialize_bootstrap_env_files(
     x_twitter_repo_path.write_text(x_twitter_rendered, encoding="utf-8")
     written.append(x_twitter_repo_path)
     log("Materialized repo env file from bootstrap inputs: {0}".format(x_twitter_repo_path))
+
+    tabular_repo_path = tabular_agent_repo_env_path()
+    _tabular_dest_path, tabular_rendered, _tabular_env = build_tabular_agent_env_rendered(
+        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
+        system_env_dir=system_env_dir,
+        existing_env_by_name=existing_env_by_name,
+        external_env_by_name=external_env_by_name,
+    )
+    tabular_repo_path.parent.mkdir(parents=True, exist_ok=True)
+    tabular_repo_path.write_text(tabular_rendered, encoding="utf-8")
+    written.append(tabular_repo_path)
+    log("Materialized repo env file from bootstrap inputs: {0}".format(tabular_repo_path))
     return written
 
 
@@ -2032,6 +2169,19 @@ def install_service_env_files(system_env_dir: Path, *, include_memory: bool = Fa
         install_text_file(x_twitter_dest_path, x_twitter_rendered, mode="600", use_sudo=True)
         installed.append(x_twitter_dest_path)
         log("Installed system env file: {0}".format(x_twitter_dest_path))
+
+    tabular_dest_path, tabular_rendered, _tabular_env = build_tabular_agent_env_rendered(
+        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
+        system_env_dir=system_env_dir,
+    )
+    run(["install", "-d", "-m", "755", str(tabular_dest_path.parent)], use_sudo=True)
+    if tabular_dest_path.exists():
+        log("System env file already exists: {0}".format(tabular_dest_path))
+    else:
+        install_text_file(tabular_dest_path, tabular_rendered, mode="600", use_sudo=True)
+        installed.append(tabular_dest_path)
+        log("Installed system env file: {0}".format(tabular_dest_path))
 
     return installed
 
@@ -2364,6 +2514,26 @@ def sync_service_env_files(system_env_dir: Path, *, include_memory: bool = False
         )
         if changed_keys:
             synced.append(docs_parser_dest_path)
+    tabular_dest_path = tabular_agent_system_env_path(system_env_dir)
+    if tabular_dest_path.exists():
+        tabular_existing_by_name: Dict[str, Dict[str, str]] = {
+            TABULAR_AGENT_ENV_NAME: parse_env_text(read_text_file(tabular_dest_path, use_sudo=True)),
+        }
+        _tabular_dest_path, tabular_rendered, _tabular_env = build_tabular_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+            shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
+            system_env_dir=system_env_dir,
+            existing_env_by_name=tabular_existing_by_name,
+        )
+        changed_keys = sync_env_file(
+            tabular_dest_path,
+            source_raw=tabular_rendered,
+            create_missing=False,
+            use_sudo=True,
+            mode="600",
+        )
+        if changed_keys:
+            synced.append(tabular_dest_path)
     return synced
 
 
@@ -2842,6 +3012,7 @@ def run_post_provision_health_checks(
     include_memory: bool,
     include_firecrawl_agent: bool = False,
     include_x_twitter_search_agent: bool = False,
+    include_tabular_agent: bool = True,
     timeout_sec: float = DEFAULT_POST_PROVISION_TIMEOUT_SEC,
     poll_interval_sec: float = DEFAULT_POST_PROVISION_POLL_INTERVAL_SEC,
 ) -> None:
@@ -2897,6 +3068,18 @@ def run_post_provision_health_checks(
         )
         wait_for_orchestrator_agent_ready(
             X_TWITTER_SEARCH_AGENT_ID,
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+
+    if include_tabular_agent:
+        wait_for_systemd_unit_active(
+            TABULAR_AGENT_SERVICE_NAME,
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+        wait_for_orchestrator_agent_ready(
+            TABULAR_AGENT_ID,
             timeout_sec=timeout_sec,
             poll_interval_sec=poll_interval_sec,
         )
@@ -3041,6 +3224,7 @@ def provision_vm(
 ) -> None:
     enable_memory = memory_repo_dir is not None
     enable_firecrawl_agent = False
+    enable_tabular_agent = True
     bootstrap(
         venv_path,
         requirements_path,
@@ -3089,6 +3273,11 @@ def provision_vm(
         log("X/Twitter search agent env is configured; bootstrap will enable and start the X/Twitter search agent service.")
     else:
         log("X/Twitter search agent env is not configured; bootstrap will install the unit but skip enabling the agent service.")
+    tabular_env = read_tabular_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+    if meaningful_env_value(tabular_env.get("TABULAR_AGENT_MIMO_API_KEY")) is not None:
+        log("Tabular agent env includes MiMo credentials; bootstrap will enable and start the tabular agent service with internal LLM support.")
+    else:
+        log("Tabular agent env does not include MiMo credentials; bootstrap will still enable and start the tabular agent service for deterministic spreadsheet work.")
     installed = install_systemd_units(
         systemd_template_dir,
         enable_units=enable_units,
@@ -3098,6 +3287,7 @@ def provision_vm(
             (["cosmic-memory.service"] if enable_units and enable_memory else [])
             + ([FIRECRAWL_AGENT_SERVICE_NAME] if enable_units and enable_firecrawl_agent else [])
             + ([X_TWITTER_SEARCH_AGENT_SERVICE_NAME] if enable_units and enable_x_twitter_search_agent else [])
+            + ([TABULAR_AGENT_SERVICE_NAME] if enable_units and enable_tabular_agent else [])
         ),
         include_memory_env=enable_memory,
     )
@@ -3106,6 +3296,7 @@ def provision_vm(
             include_memory=enable_memory,
             include_firecrawl_agent=enable_firecrawl_agent,
             include_x_twitter_search_agent=enable_x_twitter_search_agent,
+            include_tabular_agent=enable_tabular_agent,
         )
 
     print("")
@@ -3354,6 +3545,7 @@ def main() -> int:
             enable_firecrawl_agent = firecrawl_agent_is_configured(firecrawl_env)
             x_twitter_env = read_x_twitter_search_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
             enable_x_twitter_search_agent = x_twitter_search_agent_is_configured(x_twitter_env)
+            enable_tabular_agent = True
             installed = install_systemd_units(
                 systemd_template_dir,
                 enable_units=bool(getattr(args, "enable", False)),
@@ -3363,6 +3555,7 @@ def main() -> int:
                     (["cosmic-memory.service"] if memory_repo_dir is not None and bool(getattr(args, "enable", False)) else [])
                     + ([FIRECRAWL_AGENT_SERVICE_NAME] if enable_firecrawl_agent and bool(getattr(args, "enable", False)) else [])
                     + ([X_TWITTER_SEARCH_AGENT_SERVICE_NAME] if enable_x_twitter_search_agent and bool(getattr(args, "enable", False)) else [])
+                    + ([TABULAR_AGENT_SERVICE_NAME] if enable_tabular_agent and bool(getattr(args, "enable", False)) else [])
                 ),
                 include_memory_env=memory_repo_dir is not None,
             )
@@ -3371,6 +3564,7 @@ def main() -> int:
                     include_memory=memory_repo_dir is not None,
                     include_firecrawl_agent=enable_firecrawl_agent,
                     include_x_twitter_search_agent=enable_x_twitter_search_agent,
+                    include_tabular_agent=enable_tabular_agent,
                 )
             print("Installed systemd units:")
             for unit_name in installed:
