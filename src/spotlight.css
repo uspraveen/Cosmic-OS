@@ -988,6 +988,20 @@ kbd {
   z-index: 9105;
 }
 
+.artifact-ready-shell {
+  position: fixed;
+  right: 24px;
+  bottom: var(--artifact-ready-bottom, 24px);
+  width: min(340px, calc(100vw - 32px));
+  max-height: min(320px, calc(100vh - var(--artifact-ready-bottom, 24px) - 48px));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  pointer-events: none;
+  z-index: 9104;
+}
+
 .cron-result-stack {
   width: 100%;
   display: flex;
@@ -999,6 +1013,20 @@ kbd {
 }
 
 .cron-result-stack::-webkit-scrollbar {
+  display: none;
+}
+
+.artifact-ready-stack {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  scrollbar-width: none;
+  pointer-events: auto;
+}
+
+.artifact-ready-stack::-webkit-scrollbar {
   display: none;
 }
 
@@ -1029,6 +1057,64 @@ kbd {
   min-height: 72px;
   -webkit-line-clamp: 3;
   line-clamp: 3;
+}
+
+.artifact-ready-card {
+  pointer-events: auto;
+}
+
+.artifact-ready-chip {
+  background:
+    linear-gradient(180deg, rgba(172, 224, 255, 0.24), rgba(172, 224, 255, 0.08)),
+    rgba(172, 224, 255, 0.08);
+  border-top-color: rgba(210, 238, 255, 0.24);
+  border-right-color: rgba(176, 223, 255, 0.18);
+  border-left-color: rgba(198, 233, 255, 0.22);
+  color: rgba(240, 250, 255, 0.96);
+}
+
+.artifact-ready-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.artifact-ready-preview-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(244, 247, 255, 0.94);
+  letter-spacing: -0.01em;
+}
+
+.artifact-ready-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.artifact-ready-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.055);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.artifact-ready-item-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(246, 249, 255, 0.92);
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.artifact-ready-item-meta {
+  font-size: 11px;
+  color: rgba(214, 221, 238, 0.7);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .task-interrupt-stack {

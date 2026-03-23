@@ -59,6 +59,17 @@ interface CronResultNotification {
   createdAt?: string | null
 }
 
+interface ProducedArtifactNotification {
+  id: string
+  messageId: string
+  requestId?: string | null
+  sourceId?: string | null
+  sessionId?: string | null
+  channel?: string | null
+  createdAt?: string | null
+  artifacts: ProducedArtifact[]
+}
+
 interface GatewayStatus {
   state: 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error'
   connected: boolean
@@ -541,6 +552,25 @@ const formatProducedArtifactKind = (artifact: ProducedArtifact) => {
   return 'file'
 }
 
+const formatProducedArtifactNotificationSummary = (artifacts: ProducedArtifact[]) => {
+  if (!artifacts || artifacts.length === 0) {
+    return 'A file is ready to download.'
+  }
+  const names = artifacts
+    .slice(0, 3)
+    .map((item) => String(item.filename || '').trim())
+    .filter(Boolean)
+  if (artifacts.length === 1) {
+    return names[0] || 'A file is ready to download.'
+  }
+  const listed = names.join(' · ')
+  const remainder = artifacts.length - names.length
+  if (remainder > 0) {
+    return `${listed} · +${remainder} more`
+  }
+  return listed || `${artifacts.length} files are ready to download.`
+}
+
 const normalizeGatewayModelSelection = (value: unknown): GatewayModelSelection => {
   const normalized = String(value || '').trim().toLowerCase()
   if (normalized === 'haiku' || normalized === 'opus' || normalized === 'perplexity') {
@@ -636,6 +666,7 @@ export default function App() {
   const shouldAutoScrollRef = useRef(true)
   const selectedModelRef = useRef<GatewayModelSelection>('cosmic')
   const seenCronResultKeysRef = useRef<Set<string>>(new Set())
+  const seenArtifactReadyKeysRef = useRef<Set<string>>(new Set())
 
   const [query, setQuery] = useState('')
   const [pendingAttachments, setPendingAttachments] = useState<PendingDocumentAttachment[]>([])
@@ -686,6 +717,7 @@ export default function App() {
   const [taskInterruptIndex, setTaskInterruptIndex] = useState(0)
   const [cronResultNotifications, setCronResultNotifications] = useState<CronResultNotification[]>([])
   const [cronResultIndex, setCronResultIndex] = useState(0)
+  const [artifactReadyNotifications, setArtifactReadyNotifications] = useState<ProducedArtifactNotification[]>([])
   const pendingTaskCount = pendingTaskInputs.length
   const orderedPendingTaskInputs = useMemo(() => [...pendingTaskInputs].reverse(), [pendingTaskInputs])
   const visibleTaskInterrupts = useMemo(
@@ -695,6 +727,10 @@ export default function App() {
   const orderedCronResultNotifications = useMemo(
     () => [...cronResultNotifications].reverse(),
     [cronResultNotifications],
+  )
+  const orderedArtifactReadyNotifications = useMemo(
+    () => [...artifactReadyNotifications].reverse(),
+    [artifactReadyNotifications],
   )
   const selectedTaskInput = useMemo(() => {
     if (orderedPendingTaskInputs.length === 0) {
@@ -772,7 +808,39 @@ export default function App() {
     return content ? `content:${content.slice(0, 120)}` : ''
   }
 
+  const buildArtifactReadyNotificationKey = (value: {
+    messageId?: string | null
+    requestId?: string | null
+    sourceId?: string | null
+    artifactIds?: string[]
+  }) => {
+    const messageId = String(value.messageId || '').trim()
+    if (messageId) {
+      return `message:${messageId}`
+    }
+    const requestId = String(value.requestId || '').trim()
+    if (requestId) {
+      return `request:${requestId}`
+    }
+    const sourceId = String(value.sourceId || '').trim()
+    const artifactIds = Array.isArray(value.artifactIds)
+      ? value.artifactIds.map((item) => String(item || '').trim()).filter(Boolean)
+      : []
+    if (sourceId && artifactIds.length > 0) {
+      return `source:${sourceId}:${artifactIds.join(',')}`
+    }
+    return artifactIds.length > 0 ? `artifacts:${artifactIds.join(',')}` : ''
+  }
+
   const isCronResultChatInactive = () => {
+    return (
+      searchStateRef.current !== 'visible' ||
+      modeRef.current !== 'chat' ||
+      showLauncherTrayRef.current
+    )
+  }
+
+  const isProducedArtifactChatInactive = () => {
     return (
       searchStateRef.current !== 'visible' ||
       modeRef.current !== 'chat' ||
@@ -809,8 +877,39 @@ export default function App() {
     })
   }
 
+  const enqueueArtifactReadyNotification = (notification: ProducedArtifactNotification) => {
+    const dedupeKey = buildArtifactReadyNotificationKey({
+      messageId: notification.messageId,
+      requestId: notification.requestId,
+      sourceId: notification.sourceId,
+      artifactIds: notification.artifacts.map((item) => item.artifactId),
+    })
+    if (!dedupeKey || seenArtifactReadyKeysRef.current.has(dedupeKey)) {
+      return
+    }
+    seenArtifactReadyKeysRef.current.add(dedupeKey)
+    setArtifactReadyNotifications((prev) => {
+      const exists = prev.some((item) => (
+        buildArtifactReadyNotificationKey({
+          messageId: item.messageId,
+          requestId: item.requestId,
+          sourceId: item.sourceId,
+          artifactIds: item.artifacts.map((artifact) => artifact.artifactId),
+        }) === dedupeKey
+      ))
+      if (exists) {
+        return prev
+      }
+      return [...prev, notification]
+    })
+  }
+
   const dismissCronResultNotification = (notificationId: string) => {
     setCronResultNotifications((prev) => prev.filter((item) => item.id !== notificationId))
+  }
+
+  const dismissArtifactReadyNotification = (notificationId: string) => {
+    setArtifactReadyNotifications((prev) => prev.filter((item) => item.id !== notificationId))
   }
 
   const clearCronResultNotifications = () => {
@@ -818,9 +917,28 @@ export default function App() {
     setCronResultIndex(0)
   }
 
+  const clearArtifactReadyNotifications = () => {
+    setArtifactReadyNotifications([])
+  }
+
   const openChatFromCronNotification = () => {
     shouldAutoScrollRef.current = true
     clearCronResultNotifications()
+    setMode('chat')
+    setShowLauncherTray(false)
+    if (searchStateRef.current !== 'visible') {
+      window.cosmic?.toggle?.()
+    } else {
+      showChatComposer()
+    }
+    window.setTimeout(() => {
+      responseEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }, 140)
+  }
+
+  const openChatFromArtifactNotification = () => {
+    shouldAutoScrollRef.current = true
+    clearArtifactReadyNotifications()
     setMode('chat')
     setShowLauncherTray(false)
     if (searchStateRef.current !== 'visible') {
@@ -1148,6 +1266,7 @@ export default function App() {
     resetInFlightAssistantMaps()
     clearActiveStreamingRefs()
     seenCronResultKeysRef.current.clear()
+    seenArtifactReadyKeysRef.current.clear()
     setStreamingProgress('')
     setMessages([])
     setActiveSessionId(null)
@@ -1158,6 +1277,7 @@ export default function App() {
     setDismissedTaskInterruptIds([])
     setSelectedTaskInputId(null)
     clearCronResultNotifications()
+    clearArtifactReadyNotifications()
     setIsStreaming(false)
     setGatewayStatus({ state: 'idle', connected: false, detail, sessionId: null })
     setShowLauncherTray(false)
@@ -1768,9 +1888,9 @@ export default function App() {
         markResponseStreamSeen(event)
         setStreamingProgress('')
         setActiveSessionId((prev) => typeof event.session_id === 'string' ? event.session_id : prev)
+        const producedArtifacts = normalizeProducedArtifacts((event as any).produced_artifacts)
         setMessages((prev) => {
           const sources = Array.isArray(event.sources) ? event.sources : undefined
-          const producedArtifacts = normalizeProducedArtifacts((event as any).produced_artifacts)
           const persistedMessageId = typeof (event as any).message_id === 'string'
             ? (event as any).message_id.trim()
             : ''
@@ -1811,6 +1931,23 @@ export default function App() {
             createdAt: new Date().toISOString(),
           })
         }
+        if (producedArtifacts && producedArtifacts.length > 0 && isProducedArtifactChatInactive()) {
+          const messageId = typeof (event as any).message_id === 'string' && (event as any).message_id.trim()
+            ? (event as any).message_id.trim()
+            : typeof event.request_id === 'string' && event.request_id.trim()
+              ? `pending_assistant_${event.request_id.trim()}`
+              : `artifact_ready_${crypto.randomUUID()}`
+          enqueueArtifactReadyNotification({
+            id: `artifact_ready_${messageId}`,
+            messageId,
+            requestId: typeof event.request_id === 'string' ? event.request_id : null,
+            sourceId: typeof event.source_id === 'string' ? event.source_id : null,
+            sessionId: typeof event.session_id === 'string' ? event.session_id : null,
+            channel: typeof event.channel === 'string' ? event.channel : null,
+            createdAt: new Date().toISOString(),
+            artifacts: producedArtifacts,
+          })
+        }
         setIsStreaming(false)
         clearActiveStreamingRefs()
         return
@@ -1821,7 +1958,10 @@ export default function App() {
         const role = String(event.role || '').trim()
         if (role !== 'user' && role !== 'assistant') return
         const content = String(event.content || '').trim()
-        if (!content) return
+        const producedArtifacts = role === 'assistant'
+          ? normalizeProducedArtifacts((event as any).produced_artifacts)
+          : undefined
+        if (!content && (!producedArtifacts || producedArtifacts.length === 0)) return
         const eventSessionId = typeof event.session_id === 'string' ? event.session_id : null
 
         // If the session rolled over, show a divider and clear old messages
@@ -1850,7 +1990,7 @@ export default function App() {
                 }))
               : undefined,
             producedArtifacts: role === 'assistant'
-              ? normalizeProducedArtifacts((event as any).produced_artifacts)
+              ? producedArtifacts
               : undefined,
             channel: typeof event.channel === 'string' ? event.channel : null,
             sources: role === 'assistant' && Array.isArray(event.sources) ? event.sources : undefined,
@@ -1858,6 +1998,21 @@ export default function App() {
           }
           return [...prev, newMsg]
         })
+        if (role === 'assistant' && producedArtifacts && producedArtifacts.length > 0 && isProducedArtifactChatInactive()) {
+          const messageId = typeof event.message_id === 'string' && event.message_id.trim()
+            ? event.message_id.trim()
+            : `xchan_${crypto.randomUUID()}`
+          enqueueArtifactReadyNotification({
+            id: `artifact_ready_${messageId}`,
+            messageId,
+            requestId: typeof event.request_id === 'string' ? event.request_id : null,
+            sourceId: typeof event.source_id === 'string' ? event.source_id : null,
+            sessionId: eventSessionId,
+            channel: typeof event.channel === 'string' ? event.channel : null,
+            createdAt: new Date().toISOString(),
+            artifacts: producedArtifacts,
+          })
+        }
         return
       }
 
@@ -1971,6 +2126,16 @@ export default function App() {
       clearCronResultNotifications()
     }
   }, [cronResultNotifications.length, mode, searchState, showLauncherTray])
+
+  useEffect(() => {
+    const isChatInactiveNow =
+      searchState !== 'visible' ||
+      mode !== 'chat' ||
+      showLauncherTray
+    if (!isChatInactiveNow && artifactReadyNotifications.length > 0) {
+      clearArtifactReadyNotifications()
+    }
+  }, [artifactReadyNotifications.length, mode, searchState, showLauncherTray])
 
   useEffect(() => {
     if (authState !== 'authenticated') {
@@ -2316,19 +2481,31 @@ export default function App() {
 
   const handleDownloadProducedArtifact = async (messageId: string, artifact: ProducedArtifact) => {
     if (!messageId || !artifact?.artifactId || !window.cosmic?.downloadGatewayOutputArtifact) {
-      return
+      return null
     }
     setDownloadingArtifactId(artifact.artifactId)
     try {
-      await window.cosmic.downloadGatewayOutputArtifact({
+      return await window.cosmic.downloadGatewayOutputArtifact({
         messageId,
         artifactId: artifact.artifactId,
         suggestedFilename: artifact.filename,
       })
     } catch (err) {
       console.error('Failed to download produced artifact:', err)
+      return null
     } finally {
       setDownloadingArtifactId((current) => (current === artifact.artifactId ? null : current))
+    }
+  }
+
+  const handleDownloadArtifactNotification = async (notification: ProducedArtifactNotification) => {
+    const primaryArtifact = notification.artifacts[0]
+    if (!primaryArtifact) {
+      return
+    }
+    const result = await handleDownloadProducedArtifact(notification.messageId, primaryArtifact)
+    if (result && !(result as any).cancelled) {
+      dismissArtifactReadyNotification(notification.id)
     }
   }
 
@@ -2435,6 +2612,18 @@ export default function App() {
     )
   const cronResultShellStyle = {
     ['--cron-result-bottom' as string]: searchState === 'visible' ? '112px' : '24px',
+  } as React.CSSProperties
+  const shouldShowArtifactReadySurface =
+    orderedArtifactReadyNotifications.length > 0 &&
+    (
+      searchState !== 'visible' ||
+      mode !== 'chat' ||
+      showLauncherTray
+    )
+  const artifactReadyShellStyle = {
+    ['--artifact-ready-bottom' as string]: shouldShowCronResultSurface
+      ? (searchState === 'visible' ? '424px' : '336px')
+      : (searchState === 'visible' ? '112px' : '24px'),
   } as React.CSSProperties
   const effectivePosition = mode === 'spaces' ? 'bottom' : (messages.length > 0 || mode === 'task') ? 'bottom' : searchPosition
   const overlayClass = [
@@ -2621,6 +2810,101 @@ export default function App() {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {shouldShowArtifactReadySurface && (
+        <div className="artifact-ready-shell" style={artifactReadyShellStyle}>
+          <div className="artifact-ready-stack" role="list" aria-label={`${orderedArtifactReadyNotifications.length} file result${orderedArtifactReadyNotifications.length === 1 ? '' : 's'} ready`}>
+            {orderedArtifactReadyNotifications.map((notification) => {
+              const primaryArtifact = notification.artifacts[0] || null
+              const canDirectDownload = notification.artifacts.length === 1 && !!primaryArtifact?.downloadable
+              return (
+                <LiquidGlass
+                  key={notification.id}
+                  disableTilt={true}
+                  cornerRadius={30}
+                  className="task-interrupt-glass"
+                  style={{ width: '100%' }}
+                >
+                  <div className="task-interrupt-card artifact-ready-card">
+                    <div className="task-interrupt-head">
+                      <div className="task-interrupt-title-cluster">
+                        <div className="task-interrupt-logo-shell" aria-hidden="true">
+                          <img
+                            src={cosmicGlassyThunderLogo}
+                            alt=""
+                            className="task-interrupt-logo"
+                            draggable={false}
+                          />
+                        </div>
+                        <div className="task-interrupt-copy">
+                          <div className="task-interrupt-kicker">File ready</div>
+                          <div className="task-interrupt-meta">
+                            {notification.artifacts.length === 1
+                              ? 'A produced file is ready on your desktop'
+                              : `${notification.artifacts.length} produced files are ready on your desktop`}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="task-interrupt-chip-row">
+                        {notification.channel && channelLabel(notification.channel) && (
+                          <div className="task-interrupt-chip artifact-ready-chip">
+                            {channelLabel(notification.channel)}
+                          </div>
+                        )}
+                        <div className="task-interrupt-chip artifact-ready-chip">Download</div>
+                      </div>
+                    </div>
+                    <div className="task-interrupt-preview artifact-ready-preview">
+                      <div className="artifact-ready-preview-title">
+                        {formatProducedArtifactNotificationSummary(notification.artifacts)}
+                      </div>
+                      {notification.artifacts.length > 0 && (
+                        <div className="artifact-ready-list" role="list">
+                          {notification.artifacts.slice(0, 3).map((artifact) => (
+                            <div key={artifact.artifactId} className="artifact-ready-item" role="listitem">
+                              <span className="artifact-ready-item-name">{artifact.filename}</span>
+                              <span className="artifact-ready-item-meta">
+                                {formatProducedArtifactKind(artifact)}
+                                {artifact.sizeBytes ? ` · ${formatAttachmentSize(artifact.sizeBytes)}` : ''}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <div className="task-interrupt-actions">
+                      <button
+                        type="button"
+                        className="task-interrupt-btn secondary"
+                        onClick={() => dismissArtifactReadyNotification(notification.id)}
+                      >
+                        Later
+                      </button>
+                      {canDirectDownload && primaryArtifact ? (
+                        <button
+                          type="button"
+                          className="task-interrupt-btn primary"
+                          onClick={() => handleDownloadArtifactNotification(notification)}
+                        >
+                          Download now
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="task-interrupt-btn primary"
+                          onClick={openChatFromArtifactNotification}
+                        >
+                          Open chat
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </LiquidGlass>
+              )
+            })}
+          </div>
         </div>
       )}
 
