@@ -1571,6 +1571,7 @@ class DocsParserAgent(AgentRuntime):
             path=logical_path,
             created_by_agent=self.agent_id,
             kind="output",
+            audience="supporting",
         )
 
     def _logical_artifact_path(self, file_path: Path) -> str:

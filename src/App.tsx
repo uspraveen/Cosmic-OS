@@ -209,6 +209,12 @@ const normalizeProducedArtifacts = (value: unknown): ProducedArtifact[] | undefi
     if (!item || typeof item !== 'object') {
       continue
     }
+    const audience = typeof (item as any).audience === 'string'
+      ? (item as any).audience.trim()
+      : ''
+    if (audience && audience !== 'deliverable') {
+      continue
+    }
     const artifactId = typeof (item as any).artifact_id === 'string'
       ? (item as any).artifact_id.trim()
       : typeof (item as any).artifactId === 'string'

@@ -315,6 +315,8 @@ This mirrors the current document pipeline pattern and keeps Opus out of raw wor
 Produced file rule:
 
 - if the tabular specialist creates a user-facing file such as an exported workbook, derived CSV/XLSX, scenario pack, or chart bundle, it must return compact produced-artifact descriptors on the parent result
+- only artifacts marked `audience=deliverable` should appear in the default Produced Files UI
+- internal scrape/query/parse byproducts should be marked `audience=supporting` or `audience=debug` and stay hidden unless explicitly requested
 - Gateway should persist those descriptors in assistant-message metadata
 - desktop should render those as downloadable output-file cards
 - delivery should stay artifact-first and Gateway-owned rather than exposing raw bundle paths to the user
@@ -910,6 +912,7 @@ Recommended first tool surface:
 - `sheets_preview`
 - `sheets_query`
 - `sheets_export`
+- `sheets_export_sheet`
 - `sheets_create_workbook`
 
 Recommended expanded financial-analysis surface after the core browse/query layer is stable:
@@ -1002,7 +1005,40 @@ Typical outputs:
 - exported Parquet
 - compact markdown preview of the derived result
 
-### 9.6 `sheets_create_workbook`
+Visibility rule:
+
+- derived query exports that the user explicitly asked for should be returned as `deliverable` produced artifacts
+- internal staging files created during reasoning should remain `supporting`
+
+### 9.6 `sheets_export_sheet`
+
+Purpose:
+
+- export one existing parsed sheet directly to `csv`, `xlsx`, or `parquet` without requiring SQL
+- support follow-up requests like:
+  - "give me the same sheet as CSV"
+  - "export this parsed workbook tab as XLSX"
+  - "turn that generated workbook tab into a flat CSV"
+
+Typical outputs:
+
+- one downloadable output artifact for the requested format
+- compact export metadata:
+  - `bundle_id`
+  - `artifact_id`
+  - `sheet_id`
+  - `display_name`
+  - `row_count`
+  - `format`
+  - `filename`
+
+Architectural rules:
+
+- `sheets_export_sheet` operates on an existing parsed bundle and should not require raw code execution for normal format conversion
+- exported files are user-facing deliverables and should be marked `audience=deliverable`
+- if the workbook was created in a previous turn through `sheets_create_workbook`, the created bundle should already be in the working set so the specialist can export from it immediately without re-upload
+
+### 9.7 `sheets_create_workbook`
 
 Purpose:
 
@@ -1024,7 +1060,7 @@ Architectural rules:
 - the source of truth remains the parsed workbook bundle (`bundle.duckdb`, `sheet_catalog.json`, `preview.md`, per-sheet parquet/profile/preview)
 - workbook creation should not bypass the canonical bundle structure just because the workbook originated from conversation data instead of an uploaded file
 
-### 9.7 Future Edit/Create Surface
+### 9.8 Future Edit/Create Surface
 
 After the browse/query foundation is stable, the spreadsheet specialist should expose explicit write-oriented intents such as:
 

@@ -877,6 +877,7 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
             path=relative_path,
             source_url=source_url,
             created_by_agent=self.agent_id,
+            audience="supporting",
         )
 
     def _artifact_ref(self, artifact: ArtifactManifest) -> dict[str, str]:

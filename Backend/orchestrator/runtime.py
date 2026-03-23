@@ -2111,6 +2111,9 @@ class OrchestratorRuntime:
         for item in raw_artifacts:
             if not isinstance(item, dict):
                 continue
+            audience = self._activity_excerpt(item.get("audience"), limit=32) or "deliverable"
+            if audience != "deliverable":
+                continue
             artifact_id = self._activity_excerpt(item.get("artifact_id"), limit=160)
             path = self._activity_excerpt(item.get("path"), limit=400)
             mime = self._activity_excerpt(item.get("mime"), limit=160)
@@ -2119,6 +2122,7 @@ class OrchestratorRuntime:
             created_by_agent = self._activity_excerpt(item.get("created_by_agent"), limit=160)
             source_url = self._activity_excerpt(item.get("source_url"), limit=400)
             sha256 = self._activity_excerpt(item.get("sha256"), limit=160)
+            filename = self._activity_excerpt(item.get("filename"), limit=240)
             dedupe_key = (artifact_id or "", path or "")
             if not any(dedupe_key):
                 continue
@@ -2134,6 +2138,8 @@ class OrchestratorRuntime:
                         "mime": mime,
                         "path": path,
                         "kind": kind,
+                        "audience": audience,
+                        "filename": filename,
                         "created_by_agent": created_by_agent,
                         "source_url": source_url,
                         "sha256": sha256,

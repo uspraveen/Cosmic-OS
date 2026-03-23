@@ -67,6 +67,7 @@ class TabularAgent(AgentRuntime):
     PREVIEW = "tabular.preview_sheet"
     QUERY = "tabular.query_workbook"
     EXPORT = "tabular.export_result"
+    EXPORT_SHEET = "tabular.export_sheet"
     CREATE_SHEET = "tabular.create_sheet"
     CREATE_WORKBOOK = "tabular.create_workbook"
     REASON_WORKBOOK = "tabular.reason_workbook"
@@ -132,6 +133,8 @@ class TabularAgent(AgentRuntime):
                 result = await self._handle_query(task)
             elif task.intent == self.EXPORT:
                 result = await self._handle_export(task)
+            elif task.intent == self.EXPORT_SHEET:
+                result = await self._handle_export_sheet(task)
             elif task.intent == self.CREATE_SHEET:
                 result = await self._handle_create_sheet(task)
             elif task.intent == self.CREATE_WORKBOOK:
@@ -189,6 +192,7 @@ class TabularAgent(AgentRuntime):
             self.PREVIEW: "tabular.preview_sheet",
             self.QUERY: "tabular.query_workbook",
             self.EXPORT: "tabular.export_result",
+            self.EXPORT_SHEET: "tabular.export_sheet",
             self.CREATE_SHEET: "tabular.create_sheet",
             self.CREATE_WORKBOOK: "tabular.create_workbook",
             self.REASON_WORKBOOK: "tabular.reason_workbook",
@@ -205,6 +209,11 @@ class TabularAgent(AgentRuntime):
         elif intent == self.EXPORT:
             meta["row_count"] = out.get("row_count")
             meta["format"] = out.get("format")
+        elif intent == self.EXPORT_SHEET:
+            meta["row_count"] = out.get("row_count")
+            meta["format"] = out.get("format")
+            meta["sheet_id"] = out.get("sheet_id")
+            meta["artifact_id"] = out.get("artifact_id")
         elif intent == self.CREATE_SHEET:
             meta["sheet_id"] = out.get("sheet_id")
             meta["artifact_id"] = out.get("artifact_id")
@@ -397,6 +406,7 @@ class TabularAgent(AgentRuntime):
             path=handles["bundle_root"],
             created_by_agent=self.agent_id,
             kind="output",
+            audience="supporting",
         )
         return {"summary": summary, "manifests": [art]}
 
@@ -510,6 +520,19 @@ class TabularAgent(AgentRuntime):
             message="artifact_id not found for this bundle.",
             retryable=False,
             next_action="revise_input",
+        )
+
+    def _output_artifact_manifest(self, *, task_id: str, output_path: Path, mime: str) -> ArtifactManifest:
+        output_path = output_path.resolve()
+        return ArtifactManifest(
+            artifact_id=f"out_{uuid4().hex[:12]}",
+            task_id=task_id,
+            mime=mime,
+            sha256=hashlib.sha256(output_path.read_bytes()).hexdigest(),
+            path=logical_artifact_path(output_path, self.artifacts_root),
+            created_by_agent=self.agent_id,
+            kind="output",
+            audience="deliverable",
         )
 
     def _logical_to_path(self, logical: str) -> Path:
@@ -642,19 +665,104 @@ class TabularAgent(AgentRuntime):
         out_path = export_dir / f"{export_id}.{ 'parquet' if fmt != 'csv' else 'csv'}"
         if fmt == "csv":
             df.to_csv(out_path, index=False)
+            mime = "text/csv"
         else:
             df.to_parquet(out_path, index=False)
-        rel = str(out_path.relative_to(self.artifacts_root)).replace("\\", "/")
+            mime = "application/x-parquet"
+        logical_path = logical_artifact_path(out_path, self.artifacts_root)
+        artifact = self._output_artifact_manifest(task_id=task.task_id, output_path=out_path, mime=mime)
         return AgentResult(
             status="completed",
             output={
                 "bundle_id": bundle_id,
                 "artifact_id": artifact_id,
-                "export_path": rel,
+                "export_path": logical_path,
                 "row_count": len(df),
                 "format": fmt,
+                "filename": out_path.name,
             },
-            artifacts=[],
+            artifacts=[artifact],
+            error=None,
+        )
+
+    async def _handle_export_sheet(self, task: TaskEnvelope) -> AgentResult:
+        bundle_id = self._require(self._safe(task.input.get("bundle_id")))
+        artifact_id = self._require(self._safe(task.input.get("artifact_id")))
+        raw_sheet = self._require(self._safe(task.input.get("sheet_id")))
+        try:
+            sheet_id = validate_safe_sheet_id(raw_sheet)
+        except ValueError as exc:
+            raise TabularAgentError(
+                code="INVALID_INPUT",
+                message=str(exc),
+                retryable=False,
+                next_action="revise_input",
+            ) from exc
+        fmt = (self._safe(task.input.get("format")) or "csv").lower()
+        if fmt not in {"csv", "xlsx", "parquet"}:
+            raise TabularAgentError(
+                code="INVALID_INPUT",
+                message="format must be one of csv, xlsx, parquet.",
+                retryable=False,
+                next_action="revise_input",
+            )
+
+        root = self._bundle_disk_path(bundle_id, artifact_id)
+        parquet_path = root / "sheets" / f"{sheet_id}.parquet"
+        if not parquet_path.exists():
+            raise TabularAgentError(
+                code="INVALID_INPUT",
+                message="Unknown sheet parquet for export.",
+                retryable=False,
+                next_action="revise_input",
+            )
+        catalog = json.loads((root / "sheet_catalog.json").read_text(encoding="utf-8"))
+        workbook_manifest = json.loads((root / "workbook_manifest.json").read_text(encoding="utf-8"))
+        entry = next(
+            (
+                item
+                for item in catalog.get("sheets", [])
+                if isinstance(item, dict) and self._safe(item.get("sheet_id")) == sheet_id
+            ),
+            {},
+        )
+        display_name = self._safe(entry.get("display_name")) or sheet_id
+        workbook_filename = self._safe(workbook_manifest.get("filename")) or "workbook.xlsx"
+        workbook_stem = Path(workbook_filename).stem or "workbook"
+        safe_display = re.sub(r"[^A-Za-z0-9._-]+", "_", display_name).strip("._-") or sheet_id
+        export_dir = root / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        output_name = f"{workbook_stem}__{safe_display}.{fmt}"
+        out_path = export_dir / output_name
+
+        import pandas as pd
+
+        df = await asyncio.to_thread(pd.read_parquet, parquet_path)
+        if fmt == "csv":
+            await asyncio.to_thread(df.to_csv, out_path, index=False)
+            mime = "text/csv"
+        elif fmt == "parquet":
+            await asyncio.to_thread(df.to_parquet, out_path, index=False)
+            mime = "application/x-parquet"
+        else:
+            excel_sheet_name = (display_name[:31] or sheet_id[:31] or "Sheet1")
+            await asyncio.to_thread(df.to_excel, out_path, index=False, sheet_name=excel_sheet_name)
+            mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+        artifact = self._output_artifact_manifest(task_id=task.task_id, output_path=out_path, mime=mime)
+        return AgentResult(
+            status="completed",
+            output={
+                "bundle_id": bundle_id,
+                "artifact_id": artifact_id,
+                "sheet_id": sheet_id,
+                "display_name": display_name,
+                "row_count": int(len(df)),
+                "format": fmt,
+                "filename": output_name,
+                "export_path": logical_artifact_path(out_path, self.artifacts_root),
+            },
+            artifacts=[artifact],
             error=None,
         )
 
@@ -831,6 +939,7 @@ class TabularAgent(AgentRuntime):
             path=handles["generated_workbook_xlsx"],
             created_by_agent=self.agent_id,
             kind="output",
+            audience="deliverable",
         )
         return AgentResult(status="completed", output=output, artifacts=[xlsx_artifact], error=None)
 

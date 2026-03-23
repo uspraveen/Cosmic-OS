@@ -218,6 +218,58 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
     assert streamed_events[2]["content"] == "Thinking..."
     assert streamed_events[3]["type"] == "task.progress"
     assert streamed_events[3]["status"] == "responding"
+
+
+def test_collect_specialist_artifacts_only_keeps_deliverables(tmp_path) -> None:
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger.db",
+    )
+    runtime = OrchestratorRuntime(config)
+    produced_artifacts: list[dict[str, object]] = []
+
+    runtime._collect_specialist_artifacts(
+        json.dumps(
+            {
+                "artifacts": [
+                    {
+                        "artifact_id": "art_supporting_1",
+                        "task_id": "tsk_supporting",
+                        "mime": "application/json",
+                        "path": "runs/artifacts/tsk_supporting/supporting.json",
+                        "filename": "supporting.json",
+                        "kind": "output",
+                        "audience": "supporting",
+                    },
+                    {
+                        "artifact_id": "art_deliverable_1",
+                        "task_id": "tsk_deliverable",
+                        "mime": "text/csv",
+                        "path": "runs/artifacts/tsk_deliverable/output.csv",
+                        "filename": "output.csv",
+                        "kind": "output",
+                        "audience": "deliverable",
+                    },
+                ]
+            }
+        ),
+        produced_artifacts=produced_artifacts,
+    )
+
+    assert produced_artifacts == [
+        {
+            "artifact_id": "art_deliverable_1",
+            "task_id": "tsk_deliverable",
+            "mime": "text/csv",
+            "path": "runs/artifacts/tsk_deliverable/output.csv",
+            "kind": "output",
+            "audience": "deliverable",
+            "filename": "output.csv",
+        }
+    ]
     assert streamed_events[4]["type"] == "response.chunk"
     assert "Rayleigh scattering" in streamed_events[4]["content"]
     assert streamed_events[5]["type"] == "response.complete"

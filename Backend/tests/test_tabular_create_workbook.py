@@ -29,14 +29,20 @@ def _make_agent(tmp_path: Path) -> TabularAgent:
     )
 
 
-def _make_task(agent: TabularAgent, *, input_payload: dict[str, object]) -> TaskEnvelope:
+def _make_task(
+    agent: TabularAgent,
+    *,
+    input_payload: dict[str, object],
+    intent: str | None = None,
+    task_id: str = "tsk_create_workbook_test",
+) -> TaskEnvelope:
     return TaskEnvelope(
-        task_id="tsk_create_workbook_test",
+        task_id=task_id,
         task_list_id="req_test_create_workbook",
         session_id="sess_tabular_create",
         sender="cosmic/orchestrator:1.0.0",
         recipient=agent.agent_id,
-        intent=agent.CREATE_WORKBOOK,
+        intent=intent or agent.CREATE_WORKBOOK,
         input=input_payload,
         input_artifacts=[],
         idempotency_key="idem_tabular_create_workbook",
@@ -138,3 +144,63 @@ async def test_create_workbook_supports_array_rows_and_filename_auto_suffix(tmp_
     assert workbook["parsed_sheet_count"] == 1
     assert workbook["notable_tabs"] == ["Forecast"]
     assert result.artifacts[0].path.endswith("/generated/Simple_Output.xlsx")
+
+
+@pytest.mark.asyncio
+async def test_export_sheet_returns_deliverable_artifact_for_created_workbook(tmp_path: Path) -> None:
+    agent = _make_agent(tmp_path)
+    await agent.on_startup()
+    agent._emit_stage = AsyncMock()  # type: ignore[method-assign]
+
+    create_task = _make_task(
+        agent,
+        input_payload={
+            "filename": "YC_Spring_2026_Companies.xlsx",
+            "sheets": [
+                {
+                    "sheet_id": "yc_companies",
+                    "display_name": "YC Companies",
+                    "columns": ["#", "Company", "Batch"],
+                    "rows": [
+                        {"#": 1, "Company": "Alpha", "Batch": "X26"},
+                        {"#": 2, "Company": "Beta", "Batch": "X26"},
+                    ],
+                }
+            ],
+        },
+        task_id="tsk_create_bundle_for_export",
+    )
+    create_result = await agent._handle_create_workbook(create_task)
+    workbook = create_result.output["workbooks"][0]
+
+    export_task = _make_task(
+        agent,
+        intent=agent.EXPORT_SHEET,
+        task_id="tsk_export_sheet_test",
+        input_payload={
+            "bundle_id": create_result.output["bundle_id"],
+            "artifact_id": workbook["artifact_id"],
+            "sheet_id": "yc_companies",
+            "format": "csv",
+        },
+    )
+    export_result = await agent._handle_export_sheet(export_task)
+
+    assert export_result.status == "completed"
+    assert export_result.error is None
+    assert export_result.output["sheet_id"] == "yc_companies"
+    assert export_result.output["format"] == "csv"
+    assert export_result.output["filename"].endswith(".csv")
+    assert export_result.output["row_count"] == 2
+    assert len(export_result.artifacts) == 1
+    artifact = export_result.artifacts[0]
+    assert artifact.mime == "text/csv"
+    assert artifact.kind == "output"
+    assert artifact.audience == "deliverable"
+    assert artifact.path.endswith(".csv")
+
+    exported_path = tmp_path / Path(*artifact.path.split("/"))
+    assert exported_path.is_file()
+    csv_text = exported_path.read_text(encoding="utf-8")
+    assert "Company" in csv_text
+    assert "Alpha" in csv_text

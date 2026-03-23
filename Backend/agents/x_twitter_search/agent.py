@@ -848,6 +848,7 @@ class XTwitterSearchAgent(AgentRuntime):
             path=artifact_path,
             source_url=None,
             created_by_agent=self.agent_id,
+            audience="supporting",
         )
 
     def _artifact_ref(self, artifact: ArtifactManifest) -> dict[str, str]:

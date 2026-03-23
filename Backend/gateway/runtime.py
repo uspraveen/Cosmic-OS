@@ -6647,6 +6647,7 @@ class GatewayRuntime:
                     "sheets_preview",
                     "sheets_query",
                     "sheets_export",
+                    "sheets_export_sheet",
                     "sheets_create_workbook",
                     "sheets_create_sheet",
                 ],

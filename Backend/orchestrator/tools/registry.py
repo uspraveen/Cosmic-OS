@@ -153,6 +153,14 @@ def _sheets_export_progress(tool_input: dict[str, Any]) -> str:
     return "Exporting spreadsheet query results to artifacts..."
 
 
+def _sheets_export_sheet_progress(tool_input: dict[str, Any]) -> str:
+    sheet_id = str(tool_input.get("sheet_id") or "").strip()
+    fmt = str(tool_input.get("format") or "csv").strip().lower()
+    if sheet_id:
+        return f"Exporting sheet {sheet_id} as {fmt}..."
+    return f"Exporting spreadsheet sheet as {fmt}..."
+
+
 def _sheets_reason_progress(tool_input: dict[str, Any]) -> str:
     g = str(tool_input.get("goal") or "").strip()
     if g:
@@ -835,6 +843,36 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Persist a derived table from a SELECT query into spreadsheet artifacts.",
         progress_builder=_sheets_export_progress,
         handler_method="_sheets_export",
+        read_only=False,
+    ),
+    ToolSpec(
+        name="sheets_export_sheet",
+        api_definition={
+            "name": "sheets_export_sheet",
+            "description": "Export one existing parsed sheet directly to CSV, XLSX, or Parquet without writing SQL.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "bundle_id": {"type": "string"},
+                    "artifact_id": {"type": "string"},
+                    "sheet_id": {
+                        "type": "string",
+                        "description": "Existing sheet_id to export; must match ^[A-Za-z0-9_]{1,80}$.",
+                        "pattern": "^[A-Za-z0-9_]{1,80}$",
+                    },
+                    "format": {
+                        "type": "string",
+                        "description": "csv, xlsx, or parquet",
+                        "enum": ["csv", "xlsx", "parquet"],
+                    },
+                },
+                "required": ["bundle_id", "artifact_id", "sheet_id"],
+            },
+        },
+        group="spreadsheets",
+        prompt_summary="Export one existing sheet from a parsed spreadsheet bundle to a downloadable file.",
+        progress_builder=_sheets_export_sheet_progress,
+        handler_method="_sheets_export_sheet",
         read_only=False,
     ),
     ToolSpec(

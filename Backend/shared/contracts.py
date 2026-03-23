@@ -41,6 +41,7 @@ def validate_outbound_version(contract_version: str) -> None:
 
 
 ArtifactKind = Literal["input", "output", "intermediate"]
+ArtifactAudience = Literal["deliverable", "supporting", "debug"]
 EventType = Literal[
     "task.accepted",
     "task.progress",
@@ -76,6 +77,7 @@ class ArtifactManifest(BaseModel):
     created_by_agent: str
     created_at: datetime = Field(default_factory=utcnow)
     kind: ArtifactKind = "output"
+    audience: ArtifactAudience = "deliverable"
 
 
 class TaskEnvelope(BaseModel):

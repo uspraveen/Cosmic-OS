@@ -3155,6 +3155,8 @@ class ArtifactManifest(BaseModel):
     source_url: str | None
     created_by_agent: str   # agent_id
     created_at: datetime
+    kind: Literal['input', 'output', 'intermediate'] = 'output'
+    audience: Literal['deliverable', 'supporting', 'debug'] = 'deliverable'
 ```
 
 #### User-Facing Produced Artifact Delivery
@@ -3165,9 +3167,16 @@ When a specialist creates a user-facing file:
 
 - the file must be persisted under the normal task-scoped artifact tree
 - the producing `AgentResult.artifacts` must contain the relevant `ArtifactManifest`
+- only artifacts with `audience='deliverable'` should flow into default user-facing `produced_artifacts`
 - the orchestrator should preserve a compact `produced_artifacts` list on the parent turn
 - Gateway should persist those compact artifact descriptors in assistant-message metadata
 - client surfaces may render those as downloadable output-file cards
+
+Supporting notes:
+
+- `audience='supporting'` is for internal byproducts such as scrape payloads, page markdown, parse-bundle manifests, and other artifacts that help the specialist do its work but are not the user's requested deliverable
+- `audience='debug'` is for diagnostics and should stay hidden from normal user-facing output flows unless explicitly requested
+- this prevents specialists from dumping research/supporting files next to the actual deliverable file in the default UI
 
 The client must **not** receive raw filesystem paths as a UX contract. Download/open flows should resolve through Gateway-owned artifact delivery endpoints or channel-native delivery paths.
 

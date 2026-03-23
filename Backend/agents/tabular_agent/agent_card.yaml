@@ -24,6 +24,9 @@ intents:
   - name: tabular.export_result
     description: Export a SELECT result to CSV or Parquet under the bundle exports folder.
     timeout_sec: 120
+  - name: tabular.export_sheet
+    description: Export one existing parsed sheet to CSV, XLSX, or Parquet without writing SQL.
+    timeout_sec: 120
   - name: tabular.create_sheet
     description: Create an empty derived sheet (Parquet + DuckDB view) inside an existing bundle.
     timeout_sec: 60
@@ -58,6 +61,7 @@ policies:
     tabular.preview_sheet: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
     tabular.query_workbook: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
     tabular.export_result: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
+    tabular.export_sheet: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
     tabular.create_sheet: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
     tabular.create_workbook: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
     tabular.reason_workbook: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]

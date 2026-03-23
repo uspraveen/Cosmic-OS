@@ -608,6 +608,36 @@ class ToolExecutor:
             wait_timeout_sec=120.0,
         )
 
+    async def _sheets_export_sheet(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        bundle_id = str(tool_input.get("bundle_id") or "").strip()
+        artifact_id = str(tool_input.get("artifact_id") or "").strip()
+        sheet_id = str(tool_input.get("sheet_id") or "").strip()
+        if not bundle_id or not artifact_id or not sheet_id:
+            return {"error": True, "message": "bundle_id, artifact_id, and sheet_id are required"}
+        try:
+            sheet_id = validate_safe_sheet_id(sheet_id)
+        except ValueError as exc:
+            return {"error": True, "message": str(exc)}
+        fmt = str(tool_input.get("format") or "csv").strip().lower()
+        payload: dict[str, Any] = {
+            "bundle_id": bundle_id,
+            "artifact_id": artifact_id,
+            "sheet_id": sheet_id,
+            "format": fmt,
+        }
+        return await self._dispatch_specialist_agent(
+            intent="tabular.export_sheet",
+            payload=payload,
+            context=context,
+            agent_id="cosmic/tabular-agent:1.0.0",
+            wait_timeout_sec=120.0,
+        )
+
     async def _sheets_create_workbook(
         self,
         tool_input: dict[str, Any],
