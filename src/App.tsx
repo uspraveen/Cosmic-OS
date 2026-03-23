@@ -27,6 +27,7 @@ interface Message {
   producedArtifacts?: ProducedArtifact[]
   thinking?: string
   activity?: string
+  activityLog?: ActivityLogEntry[]
   sources?: Array<{ url: string; title?: string; domain?: string } | string>
   stopped?: boolean
   channel?: string | null
@@ -101,6 +102,16 @@ interface ProducedArtifact {
   createdByAgent?: string | null
   createdAt?: string | null
   downloadable: boolean
+}
+
+interface ActivityLogEntry {
+  id: string
+  label: string
+  detail?: string
+  status?: string | null
+  stage?: string | null
+  kind?: string | null
+  createdAt: string
 }
 
 interface DocsProgressState {
@@ -258,6 +269,126 @@ const normalizeProducedArtifacts = (value: unknown): ProducedArtifact[] | undefi
   return normalized.length > 0 ? normalized : undefined
 }
 
+const appendStreamText = (current: string | undefined, incoming: unknown): string => {
+  const prev = String(current || '')
+  const next = String(incoming || '')
+  if (!next) {
+    return prev
+  }
+  if (!prev) {
+    return next
+  }
+
+  const prevEnd = prev.slice(-1)
+  const nextStart = next.slice(0, 1)
+  if (!prevEnd || !nextStart || /\s/.test(prevEnd) || /\s/.test(nextStart)) {
+    return `${prev}${next}`
+  }
+  if (/[\.\!\?\:\u2026]/.test(prevEnd) && /[A-Z0-9"'`(\[]/.test(nextStart)) {
+    return `${prev}\n\n${next}`
+  }
+  if (/[A-Za-z0-9]/.test(prevEnd) && /[A-Za-z0-9]/.test(nextStart)) {
+    return `${prev} ${next}`
+  }
+  return `${prev}${next}`
+}
+
+const mergeCompletedStreamText = (current: string | undefined, completed: unknown): string => {
+  const prev = String(current || '')
+  const finalText = String(completed || '')
+  if (!prev) {
+    return finalText
+  }
+  if (!finalText) {
+    return prev
+  }
+  const normalizedPrev = prev.replace(/\s+/g, ' ').trim()
+  const normalizedFinal = finalText.replace(/\s+/g, ' ').trim()
+  if (normalizedPrev && normalizedFinal && normalizedPrev === normalizedFinal) {
+    return prev
+  }
+  if (normalizedPrev && normalizedFinal && normalizedFinal.startsWith(normalizedPrev)) {
+    return prev
+  }
+  return finalText
+}
+
+const appendActivityLogEntry = (
+  current: ActivityLogEntry[] | undefined,
+  entry: Omit<ActivityLogEntry, 'id' | 'createdAt'>,
+): ActivityLogEntry[] => {
+  const nextEntry: ActivityLogEntry = {
+    id: `activity_${crypto.randomUUID()}`,
+    createdAt: new Date().toISOString(),
+    ...entry,
+  }
+  const existing = Array.isArray(current) ? current : []
+  const last = existing[existing.length - 1]
+  if (
+    last &&
+    last.label === nextEntry.label &&
+    (last.detail || '') === (nextEntry.detail || '') &&
+    (last.status || '') === (nextEntry.status || '') &&
+    (last.stage || '') === (nextEntry.stage || '') &&
+    (last.kind || '') === (nextEntry.kind || '')
+  ) {
+    return existing
+  }
+  return [...existing, nextEntry]
+}
+
+const normalizeActivityLog = (value: unknown): ActivityLogEntry[] | undefined => {
+  if (!Array.isArray(value)) {
+    return undefined
+  }
+  const normalized: ActivityLogEntry[] = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object') {
+      continue
+    }
+    const label = typeof (item as any).label === 'string' ? (item as any).label.trim() : ''
+    if (!label) {
+      continue
+    }
+    const entry: ActivityLogEntry = {
+      id: typeof (item as any).id === 'string' && (item as any).id.trim()
+        ? (item as any).id.trim()
+        : `activity_${crypto.randomUUID()}`,
+      label,
+      detail: typeof (item as any).detail === 'string' && (item as any).detail.trim()
+        ? (item as any).detail.trim()
+        : undefined,
+      status: typeof (item as any).status === 'string' && (item as any).status.trim()
+        ? (item as any).status.trim()
+        : null,
+      stage: typeof (item as any).stage === 'string' && (item as any).stage.trim()
+        ? (item as any).stage.trim()
+        : null,
+      kind: typeof (item as any).kind === 'string' && (item as any).kind.trim()
+        ? (item as any).kind.trim()
+        : null,
+      createdAt: typeof (item as any).created_at === 'string' && (item as any).created_at.trim()
+        ? (item as any).created_at.trim()
+        : typeof (item as any).createdAt === 'string' && (item as any).createdAt.trim()
+          ? (item as any).createdAt.trim()
+          : new Date().toISOString(),
+    }
+    const last = normalized[normalized.length - 1]
+    if (
+      last &&
+      last.label === entry.label &&
+      (last.detail || '') === (entry.detail || '') &&
+      (last.status || '') === (entry.status || '') &&
+      (last.stage || '') === (entry.stage || '') &&
+      (last.kind || '') === (entry.kind || '')
+    ) {
+      continue
+    }
+    normalized.push(entry)
+  }
+  return normalized.length > 0 ? normalized : undefined
+}
+
 const historyToMessages = (history: any[] = []): Message[] => {
   return history
     .filter((item) => item && (item.role === 'user' || item.role === 'assistant'))
@@ -268,6 +399,7 @@ const historyToMessages = (history: any[] = []): Message[] => {
       attachments: extractMessageAttachments(item?.metadata),
       producedArtifacts: normalizeProducedArtifacts(item?.metadata?.produced_artifacts),
       thinking: typeof item?.metadata?.thinking_text === 'string' ? item.metadata.thinking_text : undefined,
+      activityLog: normalizeActivityLog(item?.metadata?.activity_log),
       sources: Array.isArray(item?.metadata?.sources) ? item.metadata.sources : undefined,
       stopped: Boolean(item?.metadata?.interrupted),
       channel: typeof item?.channel === 'string' ? item.channel : null,
@@ -484,6 +616,32 @@ const UserMessageAttachments = ({ attachments }: { attachments?: MessageAttachme
           </div>
         </div>
       ))}
+    </div>
+  )
+}
+
+const AssistantFlowTimeline = ({ entries }: { entries?: ActivityLogEntry[] }) => {
+  if (!entries || entries.length <= 0) {
+    return null
+  }
+  return (
+    <div className="assistant-flow" title="Agentic flow captured during this response">
+      <div className="assistant-flow-label">Flow</div>
+      <div className="assistant-flow-list">
+        {entries.map((entry, index) => (
+          <div key={entry.id} className="assistant-flow-item">
+            <div className="assistant-flow-marker" aria-hidden="true">
+              <span>{index + 1}</span>
+            </div>
+            <div className="assistant-flow-copy">
+              <div className="assistant-flow-title">{entry.label}</div>
+              {entry.detail && entry.detail !== entry.label && (
+                <div className="assistant-flow-detail">{entry.detail}</div>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
@@ -777,6 +935,7 @@ export default function App() {
     content: '',
     thinking: '',
     activity: '',
+    activityLog: [],
     ...overrides,
   })
 
@@ -1843,6 +2002,13 @@ export default function App() {
             return {
               ...message,
               activity: activityText,
+              activityLog: appendActivityLogEntry(message.activityLog, {
+                label: activityText,
+                detail: statusMessage || undefined,
+                status: eventStatus || null,
+                stage: progressState?.stage || null,
+                kind: progressState?.kind || 'generic',
+              }),
               progress: progressState,
               stopped: false,
             }
@@ -1862,7 +2028,7 @@ export default function App() {
             }
             return {
               ...message,
-              content: `${message.content}${String(event.content)}`,
+              content: appendStreamText(message.content, event.content),
               progress: undefined,
               stopped: false,
             }
@@ -1881,7 +2047,7 @@ export default function App() {
             }
             return {
               ...message,
-              thinking: `${message.thinking || ''}${String(event.content)}`,
+              thinking: appendStreamText(message.thinking, event.content),
               progress: undefined,
               stopped: false,
             }
@@ -1895,6 +2061,7 @@ export default function App() {
         setStreamingProgress('')
         setActiveSessionId((prev) => typeof event.session_id === 'string' ? event.session_id : prev)
         const producedArtifacts = normalizeProducedArtifacts((event as any).produced_artifacts)
+        const activityLog = normalizeActivityLog((event as any).activity_log)
         setMessages((prev) => {
           const sources = Array.isArray(event.sources) ? event.sources : undefined
           const persistedMessageId = typeof (event as any).message_id === 'string'
@@ -1908,9 +2075,10 @@ export default function App() {
             return {
               ...message,
               id: persistedMessageId || message.id,
-              content: String(event.content || message.content || ''),
+              content: mergeCompletedStreamText(message.content, event.content),
               sources,
               producedArtifacts,
+              activityLog: activityLog ?? message.activityLog,
               requestId: typeof event.request_id === 'string' ? event.request_id : message.requestId,
               source: typeof event.source === 'string' ? event.source : message.source,
               sourceId: typeof event.source_id === 'string' ? event.source_id : message.sourceId,
@@ -2056,11 +2224,7 @@ export default function App() {
           : null
         const shouldRefreshFromHistory =
           eventType === 'task.completed' &&
-          (
-            !boundMessage ||
-            !String(boundMessage.content || '').trim() ||
-            !Array.isArray(boundMessage.producedArtifacts)
-          )
+          (!boundMessage || !String(boundMessage.content || '').trim())
         forgetAssistantMessageBindings(event)
         if (eventType === 'task.cancelled' && messageId && boundMessage && !String(boundMessage.content || '').trim() && !String(boundMessage.thinking || '').trim()) {
           setMessages((prev) => prev.filter((item) => item.id !== messageId))
@@ -3337,6 +3501,7 @@ export default function App() {
                               <div className="thinking-text">{msg.thinking}</div>
                             </div>
                           )}
+                          <AssistantFlowTimeline entries={msg.activityLog} />
                           <ReactMarkdown
                             remarkPlugins={[remarkGfm, remarkMath]}
                             rehypePlugins={[rehypeKatex]}

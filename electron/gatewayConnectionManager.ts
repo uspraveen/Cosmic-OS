@@ -470,6 +470,9 @@ export class GatewayConnectionManager {
       if (Array.isArray(payload.produced_artifacts) && payload.produced_artifacts.length > 0) {
         metadata.produced_artifacts = payload.produced_artifacts
       }
+      if (Array.isArray(payload.activity_log) && payload.activity_log.length > 0) {
+        metadata.activity_log = payload.activity_log
+      }
       if (payload.awaiting_reply === true) {
         metadata.awaiting_reply = true
       }
@@ -520,6 +523,9 @@ export class GatewayConnectionManager {
       }
       if (Array.isArray(payload.produced_artifacts) && payload.produced_artifacts.length > 0) {
         metadata.produced_artifacts = payload.produced_artifacts
+      }
+      if (Array.isArray(payload.activity_log) && payload.activity_log.length > 0) {
+        metadata.activity_log = payload.activity_log
       }
       this.historyTail = [
         ...this.historyTail,

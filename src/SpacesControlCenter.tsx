@@ -1,5 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, RefObject } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
+import 'katex/dist/katex.min.css'
 import LiquidGlass from './LiquidGlass'
 import './spaces-control.css'
 import type { CalendarAgendaEvent, CalendarAgendaSnapshot } from './calendar'
@@ -14,7 +19,7 @@ import {
   normalizeCalendarAgendaSnapshot,
 } from './calendar'
 
-type SpacesPageId = 'command' | 'calendar' | 'prophet' | 'autopilot' | 'pulse' | 'manage' | 'agents' | 'agent-email'
+type SpacesPageId = 'command' | 'calendar' | 'prophet' | 'autopilot' | 'pulse' | 'manage' | 'agents' | 'sessions' | 'agent-email'
 type AgentEmailViewId = 'overview' | 'agents' | 'inboxes' | 'approvals' | 'settings'
 type AccentTone = 'azure' | 'gold' | 'mint' | 'rose' | 'slate'
 type MetricTone = 'good' | 'warm' | 'cool' | 'muted'
@@ -171,6 +176,35 @@ interface GatewaySystemMetrics {
   usage?: Record<string, unknown> | null
   usage_by_feature?: unknown[] | null
   vm?: Record<string, unknown> | null
+}
+
+interface GatewaySessionRow {
+  id: string
+  title: string
+  created_at: string | null
+  updated_at: string | null
+}
+
+interface GatewaySessionHistoryMessage {
+  id: string
+  role: string
+  content: string
+  created_at: string | null
+  metadata: Record<string, unknown> | null
+}
+
+function gatewaySessionRecencyMs(session: Pick<GatewaySessionRow, 'updated_at' | 'created_at'>): number {
+  const raw = session.updated_at || session.created_at
+  if (!raw) return 0
+  const t = new Date(raw).getTime()
+  return Number.isFinite(t) ? t : 0
+}
+
+function gatewaySessionMessageMs(message: Pick<GatewaySessionHistoryMessage, 'created_at'>): number {
+  const raw = message.created_at
+  if (!raw) return 0
+  const t = new Date(raw).getTime()
+  return Number.isFinite(t) ? t : 0
 }
 
 type AgentEmailBannerTone = 'success' | 'error' | 'info'
@@ -643,6 +677,150 @@ function normalizeRegistryAgentsPayload(raw: unknown): { agents: RegistryAgentRo
 }
 
 const SPACES_REGISTRY_REFRESH_MS = 90 * 1000
+const SPACES_SESSIONS_REFRESH_MS = 120 * 1000
+
+function normalizeGatewaySessionsPayload(raw: unknown): GatewaySessionRow[] {
+  const source = toRecord(raw)
+  const sessionsRaw = toArray(source?.sessions)
+  const sessions: GatewaySessionRow[] = []
+  for (const item of sessionsRaw) {
+    const row = toRecord(item)
+    if (!row) continue
+    const id = String(row.id || '').trim()
+    if (!id) continue
+    const title = String(row.title || id).trim() || id
+    const createdAt = typeof row.created_at === 'string' && row.created_at.trim() ? row.created_at.trim() : null
+    const updatedAt = typeof row.updated_at === 'string' && row.updated_at.trim() ? row.updated_at.trim() : null
+    sessions.push({
+      id,
+      title,
+      created_at: createdAt,
+      updated_at: updatedAt,
+    })
+  }
+  return sessions
+}
+
+function normalizeGatewaySessionHistoryPayload(raw: unknown): { sessionId: string | null; messages: GatewaySessionHistoryMessage[] } {
+  const source = toRecord(raw)
+  const sessionId = typeof source?.session_id === 'string' && source.session_id.trim() ? source.session_id.trim() : null
+  const messagesRaw = toArray(source?.messages)
+  const messages: GatewaySessionHistoryMessage[] = []
+  for (const item of messagesRaw) {
+    const row = toRecord(item)
+    if (!row) continue
+    const createdAt = typeof row.created_at === 'string' && row.created_at.trim() ? row.created_at.trim() : null
+    const contentValue = row.content
+    let content = ''
+    if (typeof contentValue === 'string') {
+      content = contentValue
+    } else if (contentValue != null) {
+      try {
+        content = JSON.stringify(contentValue)
+      } catch {
+        content = String(contentValue)
+      }
+    }
+    messages.push({
+      id: String(row.id || `${row.role || 'message'}:${createdAt || messages.length}`).trim(),
+      role: String(row.role || 'unknown').trim() || 'unknown',
+      content: content.trim(),
+      created_at: createdAt,
+      metadata: toRecord(row.metadata),
+    })
+  }
+  return { sessionId, messages }
+}
+
+function formatSessionDayLabel(value: string | null): string {
+  if (!value) return 'Unknown date'
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return 'Unknown date'
+  const today = new Date()
+  const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime()
+  const targetMidnight = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
+  const diffDays = Math.round((todayMidnight - targetMidnight) / 86400000)
+  if (diffDays === 0) return 'Today'
+  if (diffDays === 1) return 'Yesterday'
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+function formatSessionRowTime(value: string | null): string {
+  if (!value) return 'Unknown'
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return 'Unknown'
+  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+
+function formatSessionAbsolute(value: string | null): string {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return '—'
+  return date.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+}
+
+/** Short date/time for compact session header meta (no shouting labels). */
+function formatSessionMetaStamp(value: string | null): string {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return '—'
+  return date.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+}
+
+const SESSION_MARKDOWN_REMARK = [remarkGfm, remarkMath]
+const SESSION_MARKDOWN_REHYPE = [rehypeKatex]
+
+function SessionMessageMarkdown({ source }: { source: string }) {
+  const text = String(source ?? '').trim()
+  return (
+    <div className="response-content spaces-sessions-msg-markdown-host">
+      <ReactMarkdown
+        remarkPlugins={SESSION_MARKDOWN_REMARK}
+        rehypePlugins={SESSION_MARKDOWN_REHYPE}
+        components={{
+          table: ({ node: _node, ...props }) => (
+            <div className="table-wrapper">
+              <table {...props} />
+            </div>
+          ),
+          code: ({ node: _node, inline, className, children, ...props }: any) => {
+            if (inline) {
+              return (
+                <code className="inline-code" {...props}>
+                  {children}
+                </code>
+              )
+            }
+            return (
+              <div className="code-block">
+                <code {...props}>{children}</code>
+              </div>
+            )
+          },
+          a: ({ node: _node, ...props }) => <a target="_blank" rel="noopener noreferrer" {...props} />,
+        }}
+      >
+        {text || '*No readable content.*'}
+      </ReactMarkdown>
+    </div>
+  )
+}
+
+function sessionRoleLabel(role: string): string {
+  const normalized = String(role || '').trim().toLowerCase()
+  if (!normalized) return 'Unknown'
+  if (normalized === 'assistant') return 'Assistant'
+  if (normalized === 'user') return 'You'
+  if (normalized === 'system') return 'System'
+  if (normalized === 'tool') return 'Tool'
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1)
+}
 
 function humanizeAgentEmailValue(value: unknown): string {
   const source = String(value || '').trim()
@@ -1111,6 +1289,7 @@ const SPACE_PAGES: SpacePageDef[] = [
   { id: 'pulse', label: 'Pulse', kicker: 'Health and usage', countLabel: '04 signals', accent: 'rose' },
   { id: 'manage', label: 'Manage', kicker: 'Resources & billing', countLabel: 'Live', accent: 'slate' },
   { id: 'agents', label: 'Agents', kicker: 'Registered specialists', countLabel: 'Registry', accent: 'azure' },
+  { id: 'sessions', label: 'Sessions', kicker: 'Daily memory lanes', countLabel: 'Archive', accent: 'mint' },
   { id: 'agent-email', label: 'Agent Email', kicker: 'Mail control for agents', countLabel: 'Mail ops', accent: 'gold' },
 ]
 
@@ -1310,6 +1489,13 @@ function SpacesNavIcon({ page }: { page: SpacesPageId }) {
       </svg>
     )
   }
+  if (page === 'pulse') {
+    return (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3.5 12h3.5l2-5.5 3 11 2.5-5.5h6" />
+      </svg>
+    )
+  }
   if (page === 'manage') {
     return (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
@@ -1336,6 +1522,16 @@ function SpacesNavIcon({ page }: { page: SpacesPageId }) {
       </svg>
     )
   }
+  if (page === 'sessions') {
+    return (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="5" y="4" width="14" height="16" rx="2.25" />
+        <path d="M8.5 9h7.5" />
+        <path d="M8.5 12.25h5.5" />
+        <path d="M8.5 15.5h7" />
+      </svg>
+    )
+  }
   if (page === 'agent-email') {
     return (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
@@ -1347,7 +1543,8 @@ function SpacesNavIcon({ page }: { page: SpacesPageId }) {
   }
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3.5 12h3.5l2-5.5 3 11 2.5-5.5h6" />
+      <circle cx="12" cy="12" r="7.5" />
+      <path d="M12 8.25v4.25l2.75 1.75" />
     </svg>
   )
 }
@@ -1430,6 +1627,22 @@ export default function SpacesControlCenter({
   const [registryAgentsFetchedAt, setRegistryAgentsFetchedAt] = useState<number | null>(null)
   const registryAgentsRequestRef = useRef(0)
   const registryAgentsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [sessionsList, setSessionsList] = useState<GatewaySessionRow[]>([])
+  const [sessionsError, setSessionsError] = useState<string | null>(null)
+  const [sessionsRefreshing, setSessionsRefreshing] = useState(false)
+  const [sessionsFetchedAt, setSessionsFetchedAt] = useState<number | null>(null)
+  const [selectedSessionId, setSelectedSessionId] = useState('')
+  const [selectedSessionMessages, setSelectedSessionMessages] = useState<GatewaySessionHistoryMessage[]>([])
+  const [selectedSessionLoading, setSelectedSessionLoading] = useState(false)
+  const [selectedSessionError, setSelectedSessionError] = useState<string | null>(null)
+  const [selectedSessionFetchedAt, setSelectedSessionFetchedAt] = useState<number | null>(null)
+  const [sessionsListCollapsed, setSessionsListCollapsed] = useState(false)
+  const [sessionsJumpToBottomVisible, setSessionsJumpToBottomVisible] = useState(false)
+  const sessionsDetailScrollRef = useRef<HTMLDivElement>(null)
+  const sessionsDetailAnchorRef = useRef<HTMLDivElement>(null)
+  const sessionsRequestRef = useRef(0)
+  const sessionsDetailRequestRef = useRef(0)
+  const sessionsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
     manageMetricsValueRef.current = manageMetrics
@@ -1660,9 +1873,253 @@ export default function SpacesControlCenter({
     }
   }, [active, page, requestRegistryAgents])
 
+  const requestSessionsList = useCallback(async (showSpinner = false) => {
+    if (!gatewayConnected) {
+      setSessionsList([])
+      setSessionsFetchedAt(null)
+      setSessionsError(String(gatewayDetail || 'The desktop app is not connected to your VM yet.'))
+      if (window.cosmic?.requestGatewayResume) {
+        window.cosmic.requestGatewayResume().catch(() => { })
+      }
+      return
+    }
+    if (!window.cosmic?.listGatewaySessions) {
+      setSessionsError('Gateway transport bridge is unavailable.')
+      return
+    }
+    const requestId = ++sessionsRequestRef.current
+    if (showSpinner) {
+      setSessionsRefreshing(true)
+    }
+    try {
+      const raw = await window.cosmic.listGatewaySessions()
+      if (requestId !== sessionsRequestRef.current) {
+        return
+      }
+      const normalized = normalizeGatewaySessionsPayload(raw)
+      setSessionsList(normalized)
+      setSessionsFetchedAt(Date.now())
+      setSessionsError(null)
+      setSelectedSessionId((current) => {
+        if (current && normalized.some((session) => session.id === current)) {
+          return current
+        }
+        if (normalized.length === 0) {
+          return ''
+        }
+        let latest = normalized[0]
+        let latestMs = gatewaySessionRecencyMs(latest)
+        for (let i = 1; i < normalized.length; i += 1) {
+          const row = normalized[i]
+          const ms = gatewaySessionRecencyMs(row)
+          if (ms >= latestMs) {
+            latest = row
+            latestMs = ms
+          }
+        }
+        return latest.id
+      })
+    } catch (error: unknown) {
+      if (requestId !== sessionsRequestRef.current) {
+        return
+      }
+      setSessionsError(toErrorMessage(error, 'Unable to load session history lanes.'))
+    } finally {
+      if (requestId === sessionsRequestRef.current) {
+        setSessionsRefreshing(false)
+      }
+    }
+  }, [gatewayConnected, gatewayDetail])
+
+  const requestSelectedSessionHistory = useCallback(async (sessionId: string, showSpinner = false) => {
+    const targetId = String(sessionId || '').trim()
+    if (!targetId) {
+      setSelectedSessionMessages([])
+      setSelectedSessionFetchedAt(null)
+      setSelectedSessionError(null)
+      return
+    }
+    if (!gatewayConnected) {
+      setSelectedSessionMessages([])
+      setSelectedSessionFetchedAt(null)
+      setSelectedSessionError(String(gatewayDetail || 'The desktop app is not connected to your VM yet.'))
+      return
+    }
+    if (!window.cosmic?.getGatewaySessionHistory) {
+      setSelectedSessionError('Gateway transport bridge is unavailable.')
+      return
+    }
+    const requestId = ++sessionsDetailRequestRef.current
+    if (showSpinner) {
+      setSelectedSessionLoading(true)
+    }
+    try {
+      const raw = await window.cosmic.getGatewaySessionHistory(targetId)
+      if (requestId !== sessionsDetailRequestRef.current) {
+        return
+      }
+      const normalized = normalizeGatewaySessionHistoryPayload(raw)
+      setSelectedSessionMessages(normalized.messages)
+      setSelectedSessionFetchedAt(Date.now())
+      setSelectedSessionError(null)
+    } catch (error: unknown) {
+      if (requestId !== sessionsDetailRequestRef.current) {
+        return
+      }
+      setSelectedSessionMessages([])
+      setSelectedSessionFetchedAt(null)
+      setSelectedSessionError(toErrorMessage(error, 'Unable to load this session.'))
+    } finally {
+      if (requestId === sessionsDetailRequestRef.current) {
+        setSelectedSessionLoading(false)
+      }
+    }
+  }, [gatewayConnected, gatewayDetail])
+
+  useEffect(() => {
+    if (!active || page !== 'sessions') {
+      return
+    }
+    if (!document.hidden) {
+      requestSessionsList(true)
+    }
+    if (sessionsIntervalRef.current) {
+      clearInterval(sessionsIntervalRef.current)
+      sessionsIntervalRef.current = null
+    }
+    sessionsIntervalRef.current = setInterval(() => {
+      if (document.hidden) {
+        return
+      }
+      requestSessionsList(false)
+    }, SPACES_SESSIONS_REFRESH_MS)
+    const offShown = window.cosmic?.onShown?.(() => {
+      if (document.hidden) {
+        return
+      }
+      requestSessionsList(false)
+    })
+    return () => {
+      if (sessionsIntervalRef.current) {
+        clearInterval(sessionsIntervalRef.current)
+        sessionsIntervalRef.current = null
+      }
+      offShown?.()
+    }
+  }, [active, page, requestSessionsList])
+
+  useEffect(() => {
+    if (!active || page !== 'sessions') {
+      setSessionsListCollapsed(false)
+    }
+  }, [active, page])
+
+  useEffect(() => {
+    if (!active || page !== 'sessions') {
+      return
+    }
+    if (!selectedSessionId) {
+      setSelectedSessionMessages([])
+      setSelectedSessionFetchedAt(null)
+      setSelectedSessionError(null)
+      return
+    }
+    requestSelectedSessionHistory(selectedSessionId, true)
+  }, [active, page, selectedSessionId, requestSelectedSessionHistory])
+
   const gatewayStatus = useMemo(() => normalizeGatewayState(gatewayState), [gatewayState])
   const today = useMemo(() => new Date(), [])
   const manageSnapshot = useMemo(() => buildManageSnapshot(manageMetrics), [manageMetrics])
+  const groupedSessions = useMemo(() => {
+    const sorted = [...sessionsList].sort(
+      (a, b) => gatewaySessionRecencyMs(a) - gatewaySessionRecencyMs(b),
+    )
+    const groups: Array<{ key: string; label: string; sessions: GatewaySessionRow[] }> = []
+    const indexByKey = new Map<string, number>()
+    for (const session of sorted) {
+      const keySource = session.updated_at || session.created_at || session.id
+      const groupKey = typeof keySource === 'string' && keySource.length >= 10 ? keySource.slice(0, 10) : session.id
+      const groupLabel = formatSessionDayLabel(session.updated_at || session.created_at)
+      let groupIndex = indexByKey.get(groupKey)
+      if (groupIndex == null) {
+        groupIndex = groups.length
+        indexByKey.set(groupKey, groupIndex)
+        groups.push({ key: groupKey, label: groupLabel, sessions: [] })
+      }
+      groups[groupIndex].sessions.push(session)
+    }
+    groups.sort((a, b) => a.key.localeCompare(b.key))
+    return groups
+  }, [sessionsList])
+  const selectedSession = useMemo(
+    () => sessionsList.find((session) => session.id === selectedSessionId) || null,
+    [sessionsList, selectedSessionId],
+  )
+  const selectedSessionCompactedSummary = useMemo(() => {
+    const summaryMessage = selectedSessionMessages.find(
+      (message) =>
+        Boolean(message.metadata?.compacted_summary) ||
+        (message.role === 'system' && message.content.startsWith('[Compacted session summary]')),
+    )
+    return summaryMessage?.content || null
+  }, [selectedSessionMessages])
+  const selectedSessionPreviewMessages = useMemo(() => {
+    const filtered = selectedSessionMessages.filter(
+      (message) => !(message.role === 'system' && Boolean(message.metadata?.compacted_summary)),
+    )
+    const chronological = [...filtered].sort((a, b) => gatewaySessionMessageMs(a) - gatewaySessionMessageMs(b))
+    return chronological.slice(-18)
+  }, [selectedSessionMessages])
+
+  const updateSessionsJumpVisibility = useCallback(() => {
+    const el = sessionsDetailScrollRef.current
+    if (!el) {
+      setSessionsJumpToBottomVisible(false)
+      return
+    }
+    const threshold = 72
+    const gap = el.scrollHeight - el.scrollTop - el.clientHeight
+    setSessionsJumpToBottomVisible(gap > threshold)
+  }, [])
+
+  const scrollSessionsDetailToBottom = useCallback(
+    (smooth: boolean) => {
+      const el = sessionsDetailScrollRef.current
+      if (!el) return
+      if (smooth) {
+        el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+      } else {
+        el.scrollTop = el.scrollHeight
+      }
+      window.setTimeout(updateSessionsJumpVisibility, smooth ? 380 : 0)
+    },
+    [updateSessionsJumpVisibility],
+  )
+
+  useLayoutEffect(() => {
+    if (!active || page !== 'sessions' || !selectedSessionId) {
+      setSessionsJumpToBottomVisible(false)
+      return
+    }
+    if (selectedSessionLoading) {
+      return
+    }
+    const el = sessionsDetailScrollRef.current
+    if (!el) return
+    const run = () => {
+      el.scrollTop = el.scrollHeight
+      updateSessionsJumpVisibility()
+    }
+    run()
+    const raf = requestAnimationFrame(run)
+    const t1 = window.setTimeout(run, 60)
+    const t2 = window.setTimeout(run, 240)
+    return () => {
+      cancelAnimationFrame(raf)
+      clearTimeout(t1)
+      clearTimeout(t2)
+    }
+  }, [active, page, selectedSessionId, selectedSessionLoading, selectedSessionFetchedAt, updateSessionsJumpVisibility])
 
   const handleMiniDayClick = useCallback((date: Date | null) => {
     if (!date) return
@@ -3511,29 +3968,50 @@ export default function SpacesControlCenter({
 
         <div className="prophet-double-rule" />
 
-        {/* Stories by section — clean two-column grid */}
+        {/* Magazine well — editorial grids; cosmic page BG unchanged */}
         <div className="prophet-body">
-          {prophetSections.map((section) => (
-            <section key={section.key} className="prophet-section">
-              <div className="prophet-section-head">
-                <h2 className="prophet-section-title">{section.label}</h2>
-                <div className="prophet-section-rule" />
-              </div>
-              <div className="prophet-section-stories">
-                {section.articles.map((article) => (
-                  <article key={article.id} className="prophet-story">
-                    <h3 className="prophet-story-headline">{article.headline}</h3>
-                    <p className="prophet-story-body">{article.summary}</p>
-                    <div className="prophet-story-byline">
-                      <span>{article.source}</span>
-                      <span className="prophet-byline-dot" />
-                      <span>{article.timeAgo}</span>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </section>
-          ))}
+          <div className="prophet-magazine">
+            {prophetSections.map((section) => {
+              const n = section.articles.length
+              const storiesClass =
+                n <= 1 ? 'prophet-section-stories prophet-section-stories--n1' :
+                n === 2 ? 'prophet-section-stories prophet-section-stories--n2' :
+                'prophet-section-stories prophet-section-stories--n3'
+              return (
+                <section key={section.key} className={`prophet-section prophet-section--${section.key}`}>
+                  <div className="prophet-section-head">
+                    <span className="prophet-section-ornament" aria-hidden>
+                      ◆
+                    </span>
+                    <h2 className="prophet-section-title">{section.label}</h2>
+                    <div className="prophet-section-rule" />
+                    <span className="prophet-section-ornament" aria-hidden>
+                      ◆
+                    </span>
+                  </div>
+                  <div className={storiesClass}>
+                    {section.articles.map((article, index) => {
+                      const isFeature = n >= 3 && index === 0
+                      return (
+                        <article
+                          key={article.id}
+                          className={`prophet-story prophet-story--accent-${article.accent} ${isFeature ? 'prophet-story--feature' : ''}`}
+                        >
+                          <h3 className="prophet-story-headline">{article.headline}</h3>
+                          <p className="prophet-story-body">{article.summary}</p>
+                          <div className="prophet-story-byline">
+                            <span>{article.source}</span>
+                            <span className="prophet-byline-dot" />
+                            <span>{article.timeAgo}</span>
+                          </div>
+                        </article>
+                      )
+                    })}
+                  </div>
+                </section>
+              )
+            })}
+          </div>
         </div>
 
         <footer className="prophet-footer">
@@ -5113,6 +5591,262 @@ export default function SpacesControlCenter({
     )
   }
 
+  const renderSessionsPage = () => {
+    const lastUpdatedLabel = sessionsFetchedAt
+      ? new Date(sessionsFetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      : '—'
+    const selectedMessageCount = selectedSessionMessages.length
+    const selectedLastUpdatedLabel = selectedSessionFetchedAt
+      ? new Date(selectedSessionFetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      : '—'
+    const sessionDetailMetaLine = [
+      `Started ${formatSessionMetaStamp(selectedSession?.created_at ?? null)}`,
+      `Active ${formatSessionMetaStamp(selectedSession?.updated_at ?? null)}`,
+      `${selectedMessageCount} ${selectedMessageCount === 1 ? 'message' : 'messages'}`,
+      selectedSessionCompactedSummary ? 'Summary on file' : 'No summary',
+      `History ${selectedLastUpdatedLabel}`,
+    ].join(' · ')
+
+    return (
+      <div className="spaces-page spaces-sessions-page">
+        {sessionsError ? <div className="spaces-agents-error">{sessionsError}</div> : null}
+
+        {sessionsRefreshing && sessionsList.length === 0 && !sessionsError ? (
+          <div className="spaces-agents-loading" role="status">
+            <span className="spaces-agents-loading-line" />
+            <span className="spaces-agents-loading-text">Loading session lanes</span>
+          </div>
+        ) : null}
+
+        {sessionsList.length === 0 && !sessionsError && !sessionsRefreshing ? (
+          <div className="spaces-sessions-page-empty">
+            <p className="spaces-agents-empty-title">No prior sessions yet</p>
+            <p className="spaces-agents-empty-body">
+              Once COSMIC rolls over or stores more daily lanes, they will appear here by date.
+            </p>
+          </div>
+        ) : null}
+
+        {sessionsList.length > 0 ? (
+          <div
+            className={`agent-email-inbox-layout spaces-sessions-archive-root ${sessionsListCollapsed ? 'spaces-sessions-rail-collapsed' : ''}`}
+          >
+            <aside
+              className={`agent-email-inbox-sidebar spaces-sessions-rail ${sessionsListCollapsed ? 'is-collapsed' : ''}`}
+              aria-label="Sessions by date"
+            >
+              {sessionsListCollapsed ? (
+                <button
+                  type="button"
+                  className="spaces-sessions-rail-reveal"
+                  onClick={() => setSessionsListCollapsed(false)}
+                  aria-expanded="false"
+                  aria-label="Expand session list"
+                >
+                  <span aria-hidden>›</span>
+                </button>
+              ) : (
+                <>
+                  <div className="agent-email-inbox-sidebar-top">
+                    <div className="agent-email-inbox-sidebar-head">
+                      <div className="agent-email-inbox-sidebar-title">
+                        <div className="agent-email-inbox-mailbox-label-row">
+                          <span className="agent-email-inbox-mailbox-label">Sessions</span>
+                          <span className="agent-email-inbox-unread-badge" aria-label={`${sessionsList.length} lanes`}>
+                            {sessionsList.length > 99 ? '99+' : sessionsList.length}
+                          </span>
+                        </div>
+                        <h4 title={`Gateway list · Auto-refresh every ${SPACES_SESSIONS_REFRESH_MS / 1000}s`}>
+                          Updated {lastUpdatedLabel} · {SPACES_SESSIONS_REFRESH_MS / 1000}s refresh
+                        </h4>
+                      </div>
+                      <div className="spaces-sessions-rail-actions">
+                        <button
+                          type="button"
+                          className="spaces-sessions-rail-collapse"
+                          onClick={() => setSessionsListCollapsed(true)}
+                          aria-expanded="true"
+                          aria-label="Collapse session list"
+                        >
+                          <span aria-hidden>‹</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="agent-email-inbox-sync"
+                          onClick={() => requestSessionsList(true)}
+                          disabled={sessionsRefreshing}
+                        >
+                          {sessionsRefreshing ? '…' : 'Sync'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="agent-email-inbox-list-shell">
+                    <div className="agent-email-inbox-thread-list">
+                      {groupedSessions.map((group) => (
+                        <div key={group.key} className="spaces-sessions-day-group">
+                          <div className="spaces-sessions-day-heading">{group.label}</div>
+                          {group.sessions.map((session) => {
+                            const isActive = session.id === selectedSessionId
+                            const relative = formatAgentEmailRelative(session.updated_at || session.created_at)
+                            const clock = formatSessionRowTime(session.updated_at || session.created_at)
+                            return (
+                              <button
+                                key={session.id}
+                                type="button"
+                                className={`agent-email-thread-item ${isActive ? 'active' : ''}`}
+                                onClick={() => setSelectedSessionId(session.id)}
+                              >
+                                <div className="agent-email-thread-row">
+                                  <div className="agent-email-thread-avatar" aria-hidden>
+                                    {getAgentEmailInitials(session.title)}
+                                  </div>
+                                  <div className="agent-email-thread-main">
+                                    <div className="agent-email-thread-line1">
+                                      <span className="agent-email-thread-subject">{session.title}</span>
+                                      <span className="agent-email-thread-time">{clock}</span>
+                                    </div>
+                                    <div className="agent-email-thread-line2">
+                                      <span className="agent-email-thread-from">{relative}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              </button>
+                            )
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
+            </aside>
+
+            <section className="agent-email-inbox-pane" aria-label="Selected session detail">
+              {selectedSession ? (
+                <div className="agent-email-inbox-pane-column">
+                  <header className="agent-email-inbox-read-head">
+                    <div className="agent-email-inbox-read-hero">
+                      <div className="agent-email-inbox-read-avatar" aria-hidden>
+                        {getAgentEmailInitials(selectedSession.title)}
+                      </div>
+                      <div className="agent-email-inbox-read-hero-main">
+                        <div className="agent-email-inbox-read-title-row">
+                          <h4 className="agent-email-inbox-read-subject">{selectedSession.title}</h4>
+                          <span className="agent-email-inbox-status is-ok">
+                            {selectedSessionCompactedSummary ? 'Compacted' : 'Live'}
+                          </span>
+                        </div>
+                        <div className="spaces-sessions-read-sub">
+                          <p className="spaces-sessions-read-session-id" title={selectedSession.id}>
+                            {selectedSession.id}
+                          </p>
+                          <p className="spaces-sessions-read-meta-line">{sessionDetailMetaLine}</p>
+                        </div>
+                      </div>
+                    </div>
+                  </header>
+
+                  <div className="spaces-sessions-detail-scroll-wrap">
+                    <div
+                      ref={sessionsDetailScrollRef}
+                      className="agent-email-inbox-messages-scroll"
+                      onScroll={updateSessionsJumpVisibility}
+                    >
+                      {selectedSessionError ? <div className="spaces-agents-error">{selectedSessionError}</div> : null}
+
+                      {selectedSessionLoading ? (
+                        <div className="spaces-sessions-detail-placeholder">
+                          <strong>Loading session detail</strong>
+                          <p>Pulling the selected lane from Gateway.</p>
+                        </div>
+                      ) : null}
+
+                      {!selectedSessionLoading && selectedSessionCompactedSummary ? (
+                        <section className="agent-email-console-card spaces-sessions-summary-card">
+                          <div className="agent-email-console-card-head">
+                            <h4>Compacted summary</h4>
+                            <span className="agent-email-console-muted">Rollover memory</span>
+                          </div>
+                          <div className="spaces-sessions-summary">{selectedSessionCompactedSummary}</div>
+                        </section>
+                      ) : null}
+
+                      {!selectedSessionLoading ? (
+                        <section className="agent-email-console-card spaces-sessions-transcript-card">
+                          <div className="agent-email-console-card-head">
+                            <h4>Recent transcript</h4>
+                            <span className="agent-email-console-muted">
+                              Last {selectedSessionPreviewMessages.length} messages
+                            </span>
+                          </div>
+                          {selectedSessionPreviewMessages.length > 0 ? (
+                            <div className="spaces-sessions-transcript spaces-sessions-transcript--chat">
+                              {selectedSessionPreviewMessages.map((message) => {
+                                const roleKey = String(message.role || '').toLowerCase()
+                                const chatLane =
+                                  roleKey === 'user' ? 'user' : roleKey === 'system' ? 'system' : 'assistant'
+                                return (
+                                  <article
+                                    key={message.id}
+                                    className={`spaces-sessions-msg spaces-sessions-msg--${chatLane}`}
+                                  >
+                                    <div className="spaces-sessions-msg-inner">
+                                      <header className="spaces-sessions-msg-head">
+                                        <div className="spaces-sessions-msg-who-wrap">
+                                          <span className="spaces-sessions-msg-who">{sessionRoleLabel(message.role)}</span>
+                                          <span className="spaces-sessions-msg-pill">{message.role}</span>
+                                        </div>
+                                        <time className="spaces-sessions-msg-time">{formatSessionAbsolute(message.created_at)}</time>
+                                      </header>
+                                      <div className="spaces-sessions-msg-body">
+                                        <SessionMessageMarkdown source={message.content} />
+                                      </div>
+                                    </div>
+                                  </article>
+                                )
+                              })}
+                            </div>
+                          ) : (
+                            <div className="spaces-sessions-detail-placeholder">
+                              <strong>No transcript yet</strong>
+                              <p>This session exists, but there is no readable message history to show yet.</p>
+                            </div>
+                          )}
+                        </section>
+                      ) : null}
+                      <div ref={sessionsDetailAnchorRef} className="spaces-sessions-scroll-anchor" aria-hidden />
+                    </div>
+                    {sessionsJumpToBottomVisible ? (
+                      <button
+                        type="button"
+                        className="spaces-sessions-jump-bottom"
+                        onClick={() => scrollSessionsDetailToBottom(true)}
+                        aria-label="Jump to latest message"
+                      >
+                        <span className="spaces-sessions-jump-bottom-icon" aria-hidden>
+                          ↓
+                        </span>
+                        <span>Latest</span>
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              ) : (
+                <div className="agent-email-inbox-pane-empty">
+                  <div className="spaces-sessions-detail-placeholder">
+                    <strong>Select a session</strong>
+                    <p>Pick a lane on the left to load its summary and transcript.</p>
+                  </div>
+                </div>
+              )}
+            </section>
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+
   const renderCurrentPage = () => {
     if (page === 'calendar') {
       return renderCalendarPage()
@@ -5131,6 +5865,9 @@ export default function SpacesControlCenter({
     }
     if (page === 'agents') {
       return renderAgentsPage()
+    }
+    if (page === 'sessions') {
+      return renderSessionsPage()
     }
     if (page === 'agent-email') {
       return renderAgentEmailPage()
