@@ -357,6 +357,7 @@ class OrchestratorRuntime:
             full_response_text = ""
             full_reasoning_text = ""
             collected_sources: list[dict[str, str]] = []
+            produced_artifacts: list[dict[str, Any]] = []
             research_paths: set[str] = set()
             specialist_receipts: list[dict[str, Any]] = []
             container_id: str | None = None
@@ -640,6 +641,10 @@ class OrchestratorRuntime:
                                 research_paths=research_paths,
                                 sources=collected_sources,
                             )
+                        self._collect_specialist_artifacts(
+                            result_str,
+                            produced_artifacts=produced_artifacts,
+                        )
                         self._collect_specialist_receipt(
                             tb.tool_name,
                             pi,
@@ -736,6 +741,8 @@ class OrchestratorRuntime:
                 complete_event["sources"] = collected_sources
             if specialist_receipts:
                 complete_event["specialist_receipts"] = specialist_receipts
+            if produced_artifacts:
+                complete_event["produced_artifacts"] = produced_artifacts
             yield complete_event
             yield {**ev, "type": "task.completed", "route": "opus", "status": "completed"}
 
@@ -2029,6 +2036,24 @@ class OrchestratorRuntime:
             "agent_label": self._activity_agent_label(agent_id),
             "activity": activity,
         }
+        if intent_name == "tabular.create_workbook":
+            bundle_id = self._activity_excerpt(data.get("bundle_id"), limit=96)
+            workbooks = data.get("workbooks") if isinstance(data.get("workbooks"), list) else []
+            first_workbook = workbooks[0] if workbooks and isinstance(workbooks[0], dict) else {}
+            artifact_id = self._activity_excerpt(first_workbook.get("artifact_id"), limit=96)
+            filename = self._activity_excerpt(first_workbook.get("filename"), limit=160)
+            parse_status = self._activity_excerpt(first_workbook.get("parse_status"), limit=48)
+            sheet_count = first_workbook.get("sheet_count")
+            if bundle_id:
+                receipt["bundle_id"] = bundle_id
+            if artifact_id:
+                receipt["artifact_id"] = artifact_id
+            if filename:
+                receipt["filename"] = filename
+            if parse_status:
+                receipt["parse_status"] = parse_status
+            if isinstance(sheet_count, int):
+                receipt["sheet_count"] = sheet_count
         if artifact_count > 0:
             receipt["artifact_count"] = artifact_count
         if local_sources:
@@ -2061,6 +2086,64 @@ class OrchestratorRuntime:
         specialist_receipts.append({key: value for key, value in receipt.items() if value not in (None, "", [], {})})
         if len(specialist_receipts) > 4:
             del specialist_receipts[:-4]
+
+    def _collect_specialist_artifacts(
+        self,
+        result_str: str,
+        *,
+        produced_artifacts: list[dict[str, Any]],
+    ) -> None:
+        data = self._parse_tool_result_json(result_str)
+        if not isinstance(data, dict):
+            return
+        raw_artifacts = data.get("artifacts")
+        if not isinstance(raw_artifacts, list):
+            return
+
+        existing_keys = {
+            (
+                str(item.get("artifact_id") or "").strip(),
+                str(item.get("path") or "").strip(),
+            )
+            for item in produced_artifacts
+            if isinstance(item, dict)
+        }
+        for item in raw_artifacts:
+            if not isinstance(item, dict):
+                continue
+            artifact_id = self._activity_excerpt(item.get("artifact_id"), limit=160)
+            path = self._activity_excerpt(item.get("path"), limit=400)
+            mime = self._activity_excerpt(item.get("mime"), limit=160)
+            task_id = self._activity_excerpt(item.get("task_id"), limit=160)
+            kind = self._activity_excerpt(item.get("kind"), limit=64)
+            created_by_agent = self._activity_excerpt(item.get("created_by_agent"), limit=160)
+            source_url = self._activity_excerpt(item.get("source_url"), limit=400)
+            sha256 = self._activity_excerpt(item.get("sha256"), limit=160)
+            dedupe_key = (artifact_id or "", path or "")
+            if not any(dedupe_key):
+                continue
+            if dedupe_key in existing_keys:
+                continue
+            existing_keys.add(dedupe_key)
+            produced_artifacts.append(
+                {
+                    key: value
+                    for key, value in {
+                        "artifact_id": artifact_id,
+                        "task_id": task_id,
+                        "mime": mime,
+                        "path": path,
+                        "kind": kind,
+                        "created_by_agent": created_by_agent,
+                        "source_url": source_url,
+                        "sha256": sha256,
+                        "created_at": item.get("created_at"),
+                    }.items()
+                    if value not in (None, "", [], {})
+                }
+            )
+            if len(produced_artifacts) >= 12:
+                break
 
     def _extract_specialist_sources(
         self,

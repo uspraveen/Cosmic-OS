@@ -608,6 +608,30 @@ class ToolExecutor:
             wait_timeout_sec=120.0,
         )
 
+    async def _sheets_create_workbook(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        sheets = tool_input.get("sheets")
+        if not isinstance(sheets, list) or not sheets:
+            return {"error": True, "message": "sheets must be a non-empty array"}
+        payload: dict[str, Any] = {"sheets": sheets}
+        filename = str(tool_input.get("filename") or "").strip()
+        if filename:
+            payload["filename"] = filename
+        bundle_label = str(tool_input.get("bundle_label") or "").strip()
+        if bundle_label:
+            payload["bundle_label"] = bundle_label
+        return await self._dispatch_specialist_agent(
+            intent="tabular.create_workbook",
+            payload=payload,
+            context=context,
+            agent_id="cosmic/tabular-agent:1.0.0",
+            wait_timeout_sec=90.0,
+        )
+
     async def _sheets_create_sheet(
         self,
         tool_input: dict[str, Any],

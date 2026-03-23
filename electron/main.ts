@@ -1511,6 +1511,96 @@ app.whenReady().then(() => {
     return callGatewayJson(config, '/desktop/registry-agents', { timeoutMs: 25000 })
   })
 
+  ipcMain.handle('gateway:download-output-artifact', async (_, payload: {
+    messageId?: string
+    artifactId?: string
+    suggestedFilename?: string
+    timeoutMs?: number
+  }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const messageId = String(payload?.messageId || '').trim()
+    const artifactId = String(payload?.artifactId || '').trim()
+    if (!messageId || !artifactId) {
+      throw new Error('messageId and artifactId are required.')
+    }
+
+    const requestUrl = new URL(
+      `/desktop/messages/${encodeURIComponent(messageId)}/artifacts/${encodeURIComponent(artifactId)}/download`,
+      `${normalizeGatewayBaseUrl(config.baseUrl)}/`,
+    ).toString()
+
+    const controller = new AbortController()
+    const timeoutMs = Math.max(5000, Number(payload?.timeoutMs ?? 120000))
+    const timeout = setTimeout(() => controller.abort(), timeoutMs)
+
+    try {
+      const response = await fetch(requestUrl, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${config.apiToken}`,
+        },
+        signal: controller.signal,
+      })
+      if (!response.ok) {
+        const responseText = await response.text()
+        let parsed: any = null
+        if (responseText) {
+          try {
+            parsed = JSON.parse(responseText)
+          } catch {
+            parsed = { raw: responseText }
+          }
+        }
+        const detail =
+          (typeof parsed?.detail === 'string' && parsed.detail) ||
+          (typeof parsed?.error === 'string' && parsed.error) ||
+          response.statusText ||
+          `Download failed (${response.status})`
+        throw new Error(detail)
+      }
+
+      const cd = response.headers.get('content-disposition')
+      let filename = (payload?.suggestedFilename && String(payload.suggestedFilename).trim()) || 'artifact'
+      if (cd) {
+        const m = /filename\*=UTF-8''([^;]+)|filename=\"([^\"]+)\"/i.exec(cd)
+        const raw = m ? (m[1] || m[2]) : null
+        if (raw) {
+          try {
+            filename = decodeURIComponent(raw)
+          } catch {
+            filename = raw
+          }
+        }
+      }
+
+      const saveTarget = win
+        ? await dialog.showSaveDialog(win, {
+            defaultPath: filename,
+          })
+        : await dialog.showSaveDialog({
+            defaultPath: filename,
+          })
+      if (saveTarget.canceled || !saveTarget.filePath) {
+        return { cancelled: true }
+      }
+
+      const bytes = Buffer.from(await response.arrayBuffer())
+      await fs.writeFile(saveTarget.filePath, bytes)
+      return {
+        cancelled: false,
+        filePath: saveTarget.filePath,
+        filename: path.basename(saveTarget.filePath),
+      }
+    } catch (error: any) {
+      throw new Error(formatTransportError('Gateway artifact download', normalizeGatewayBaseUrl(config.baseUrl), error))
+    } finally {
+      clearTimeout(timeout)
+    }
+  })
+
   ipcMain.on('weather:request', (event) => {
     if (lastWeatherData) event.sender.send('weather:update', lastWeatherData)
   })

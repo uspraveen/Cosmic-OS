@@ -716,6 +716,47 @@ class SessionStore:
             )
         return awaiting_messages
 
+    def get_message(self, message_id: str) -> dict[str, Any] | None:
+        if not message_id:
+            return None
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    message_id,
+                    session_id,
+                    role,
+                    content,
+                    route,
+                    request_id,
+                    awaiting_reply,
+                    channel,
+                    created_at,
+                    metadata_json
+                FROM messages
+                WHERE message_id = ?
+                LIMIT 1
+                """,
+                (message_id,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else None
+        return {
+            "message_id": row["message_id"],
+            "session_id": row["session_id"],
+            "role": row["role"],
+            "content": row["content"],
+            "route": row["route"],
+            "request_id": row["request_id"],
+            "awaiting_reply": bool(row["awaiting_reply"]),
+            "channel": row["channel"],
+            "created_at": row["created_at"],
+            "metadata": metadata,
+        }
+
     def clear_awaiting_reply(self, message_id: str) -> None:
         with self._lock, self._connect() as connection:
             connection.execute(

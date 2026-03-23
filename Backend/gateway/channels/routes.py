@@ -954,6 +954,34 @@ async def get_desktop_registry_agents(
     return await runtime.get_desktop_registry_agents()
 
 
+@router.get("/desktop/messages/{message_id}/artifacts/{artifact_id}/download")
+async def download_desktop_output_artifact(
+    message_id: str,
+    artifact_id: str,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> Response:
+    try:
+        payload = runtime.get_desktop_output_artifact_content(
+            message_id=message_id,
+            artifact_id=artifact_id,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    filename = str(payload.get("filename") or artifact_id).replace('"', "")
+    return Response(
+        content=payload["content"],
+        media_type=str(payload.get("media_type") or "application/octet-stream"),
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
+
 @router.post("/channels/whatsapp/pairing/qr")
 async def request_whatsapp_pairing_qr(
     body: WhatsAppPairingRequest,

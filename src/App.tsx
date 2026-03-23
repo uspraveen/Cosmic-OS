@@ -24,6 +24,7 @@ interface Message {
   role: 'user' | 'assistant'
   content: string
   attachments?: MessageAttachment[]
+  producedArtifacts?: ProducedArtifact[]
   thinking?: string
   activity?: string
   sources?: Array<{ url: string; title?: string; domain?: string } | string>
@@ -77,6 +78,18 @@ interface MessageAttachment {
   filename: string
   mimeType: string | null
   sizeBytes: number | null
+}
+
+interface ProducedArtifact {
+  artifactId: string
+  taskId?: string | null
+  filename: string
+  mimeType: string | null
+  sizeBytes: number | null
+  kind?: string | null
+  createdByAgent?: string | null
+  createdAt?: string | null
+  downloadable: boolean
 }
 
 interface DocsProgressState {
@@ -176,6 +189,58 @@ const extractMessageAttachments = (metadata: any): MessageAttachment[] | undefin
   return normalizeMessageAttachments(metadata?.attachments) ?? normalizeMessageAttachments(metadata?.input_artifacts)
 }
 
+const normalizeProducedArtifacts = (value: unknown): ProducedArtifact[] | undefined => {
+  if (!Array.isArray(value)) {
+    return undefined
+  }
+  const normalized: ProducedArtifact[] = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object') {
+      continue
+    }
+    const artifactId = typeof (item as any).artifact_id === 'string'
+      ? (item as any).artifact_id.trim()
+      : typeof (item as any).artifactId === 'string'
+        ? (item as any).artifactId.trim()
+        : ''
+    const filename = typeof (item as any).filename === 'string'
+      ? (item as any).filename.trim()
+      : ''
+    if (!artifactId || !filename) {
+      continue
+    }
+    const rawSize = Number((item as any).size_bytes ?? (item as any).sizeBytes ?? 0)
+    normalized.push({
+      artifactId,
+      taskId: typeof (item as any).task_id === 'string'
+        ? (item as any).task_id.trim()
+        : typeof (item as any).taskId === 'string'
+          ? (item as any).taskId.trim()
+          : null,
+      filename,
+      mimeType: typeof (item as any).mime_type === 'string'
+        ? (item as any).mime_type.trim()
+        : typeof (item as any).mimeType === 'string'
+          ? (item as any).mimeType.trim()
+          : null,
+      sizeBytes: Number.isFinite(rawSize) && rawSize > 0 ? rawSize : null,
+      kind: typeof (item as any).kind === 'string' ? (item as any).kind.trim() : null,
+      createdByAgent: typeof (item as any).created_by_agent === 'string'
+        ? (item as any).created_by_agent.trim()
+        : typeof (item as any).createdByAgent === 'string'
+          ? (item as any).createdByAgent.trim()
+          : null,
+      createdAt: typeof (item as any).created_at === 'string'
+        ? (item as any).created_at.trim()
+        : typeof (item as any).createdAt === 'string'
+          ? (item as any).createdAt.trim()
+          : null,
+      downloadable: (item as any).downloadable !== false,
+    })
+  }
+  return normalized.length > 0 ? normalized : undefined
+}
+
 const historyToMessages = (history: any[] = []): Message[] => {
   return history
     .filter((item) => item && (item.role === 'user' || item.role === 'assistant'))
@@ -184,6 +249,7 @@ const historyToMessages = (history: any[] = []): Message[] => {
       role: item.role,
       content: String(item.content || ''),
       attachments: extractMessageAttachments(item?.metadata),
+      producedArtifacts: normalizeProducedArtifacts(item?.metadata?.produced_artifacts),
       thinking: typeof item?.metadata?.thinking_text === 'string' ? item.metadata.thinking_text : undefined,
       sources: Array.isArray(item?.metadata?.sources) ? item.metadata.sources : undefined,
       stopped: Boolean(item?.metadata?.interrupted),
@@ -405,6 +471,76 @@ const UserMessageAttachments = ({ attachments }: { attachments?: MessageAttachme
   )
 }
 
+const AssistantProducedArtifacts = ({
+  messageId,
+  artifacts,
+  downloadingArtifactId,
+  onDownload,
+}: {
+  messageId: string
+  artifacts?: ProducedArtifact[]
+  downloadingArtifactId: string | null
+  onDownload: (messageId: string, artifact: ProducedArtifact) => void
+}) => {
+  if (!artifacts || artifacts.length <= 0) {
+    return null
+  }
+  return (
+    <div className="produced-artifacts-section">
+      <div className="sources-header">PRODUCED FILES</div>
+      <div className="sources-grid produced-artifacts-grid">
+        {artifacts.map((artifact) => {
+          const isDownloading = downloadingArtifactId === artifact.artifactId
+          return (
+            <div key={artifact.artifactId} className="source-card produced-artifact-card">
+              <div className="source-header-row produced-artifact-header">
+                <div className="produced-artifact-icon" aria-hidden="true">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm0 2.5L18.5 9H14V4.5zM12 17l-4-4h2.5v-3h3v3H16l-4 4z" />
+                  </svg>
+                </div>
+                <div className="source-title produced-artifact-title" title={artifact.filename}>
+                  {artifact.filename}
+                </div>
+              </div>
+              <div className="source-snippet produced-artifact-snippet">
+                {formatProducedArtifactKind(artifact)}
+                {artifact.sizeBytes ? ` · ${formatAttachmentSize(artifact.sizeBytes)}` : ''}
+                {artifact.createdByAgent ? ` · ${artifact.createdByAgent}` : ''}
+              </div>
+              <div className="source-footer produced-artifact-footer">
+                <span className="source-idx">
+                  {artifact.downloadable ? '↓' : '•'}
+                </span>
+                <button
+                  type="button"
+                  className="produced-artifact-download"
+                  onClick={() => onDownload(messageId, artifact)}
+                  disabled={!artifact.downloadable || isDownloading}
+                >
+                  {isDownloading ? 'Saving…' : artifact.downloadable ? 'Download' : 'Unavailable'}
+                </button>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+const formatProducedArtifactKind = (artifact: ProducedArtifact) => {
+  const kind = String(artifact.kind || '').trim()
+  if (kind) {
+    return kind.replace(/[_-]+/g, ' ')
+  }
+  const mime = String(artifact.mimeType || '').trim()
+  if (mime.startsWith('application/pdf')) return 'pdf'
+  if (mime.includes('spreadsheet') || mime.includes('excel')) return 'spreadsheet'
+  if (mime.startsWith('image/')) return 'image'
+  return 'file'
+}
+
 const normalizeGatewayModelSelection = (value: unknown): GatewayModelSelection => {
   const normalized = String(value || '').trim().toLowerCase()
   if (normalized === 'haiku' || normalized === 'opus' || normalized === 'perplexity') {
@@ -529,6 +665,7 @@ export default function App() {
   const [messages, setMessages] = useState<Message[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
   const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [downloadingArtifactId, setDownloadingArtifactId] = useState<string | null>(null)
   const [showScrollButton, setShowScrollButton] = useState(false)
   const [streamingProgress, setStreamingProgress] = useState('')
   const [expandedCrossChannelIds, setExpandedCrossChannelIds] = useState<Set<string>>(new Set())
@@ -1633,6 +1770,10 @@ export default function App() {
         setActiveSessionId((prev) => typeof event.session_id === 'string' ? event.session_id : prev)
         setMessages((prev) => {
           const sources = Array.isArray(event.sources) ? event.sources : undefined
+          const producedArtifacts = normalizeProducedArtifacts((event as any).produced_artifacts)
+          const persistedMessageId = typeof (event as any).message_id === 'string'
+            ? (event as any).message_id.trim()
+            : ''
           const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
           const updatedMessages = nextMessages.map((message) => {
             if (message.id !== messageId) {
@@ -1640,8 +1781,10 @@ export default function App() {
             }
             return {
               ...message,
+              id: persistedMessageId || message.id,
               content: String(event.content || message.content || ''),
               sources,
+              producedArtifacts,
               requestId: typeof event.request_id === 'string' ? event.request_id : message.requestId,
               source: typeof event.source === 'string' ? event.source : message.source,
               sourceId: typeof event.source_id === 'string' ? event.source_id : message.sourceId,
@@ -1695,8 +1838,9 @@ export default function App() {
         }
 
         setMessages((prev) => {
+          const eventMessageId = typeof event.message_id === 'string' ? event.message_id.trim() : ''
           const newMsg: Message = {
-            id: `xchan-${crypto.randomUUID()}`,
+            id: eventMessageId || `xchan-${crypto.randomUUID()}`,
             role: role as 'user' | 'assistant',
             content,
             attachments: role === 'user'
@@ -1704,6 +1848,9 @@ export default function App() {
                   attachments: event.attachments,
                   input_artifacts: event.input_artifacts,
                 }))
+              : undefined,
+            producedArtifacts: role === 'assistant'
+              ? normalizeProducedArtifacts((event as any).produced_artifacts)
               : undefined,
             channel: typeof event.channel === 'string' ? event.channel : null,
             sources: role === 'assistant' && Array.isArray(event.sources) ? event.sources : undefined,
@@ -2164,6 +2311,24 @@ export default function App() {
       setTimeout(() => setCopiedId(null), 2000)
     } catch (err) {
       console.error('Failed to copy:', err)
+    }
+  }
+
+  const handleDownloadProducedArtifact = async (messageId: string, artifact: ProducedArtifact) => {
+    if (!messageId || !artifact?.artifactId || !window.cosmic?.downloadGatewayOutputArtifact) {
+      return
+    }
+    setDownloadingArtifactId(artifact.artifactId)
+    try {
+      await window.cosmic.downloadGatewayOutputArtifact({
+        messageId,
+        artifactId: artifact.artifactId,
+        suggestedFilename: artifact.filename,
+      })
+    } catch (err) {
+      console.error('Failed to download produced artifact:', err)
+    } finally {
+      setDownloadingArtifactId((current) => (current === artifact.artifactId ? null : current))
     }
   }
 
@@ -2806,6 +2971,12 @@ export default function App() {
                                     }}>
                                     {pairedResponse.content}
                                   </ReactMarkdown>
+                                  <AssistantProducedArtifacts
+                                    messageId={pairedResponse.id}
+                                    artifacts={pairedResponse.producedArtifacts}
+                                    downloadingArtifactId={downloadingArtifactId}
+                                    onDownload={handleDownloadProducedArtifact}
+                                  />
                                 </div>
                               )}
                             </div>
@@ -2886,6 +3057,12 @@ export default function App() {
                           >
                             {msg.content}
                           </ReactMarkdown>
+                          <AssistantProducedArtifacts
+                            messageId={msg.id}
+                            artifacts={msg.producedArtifacts}
+                            downloadingArtifactId={downloadingArtifactId}
+                            onDownload={handleDownloadProducedArtifact}
+                          />
 
                           {/* Copy Button for AI Response (Bottom) */}
                           <button

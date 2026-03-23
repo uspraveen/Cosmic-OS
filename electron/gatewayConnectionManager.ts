@@ -467,11 +467,18 @@ export class GatewayConnectionManager {
       if (Array.isArray(payload.sources) && payload.sources.length > 0) {
         metadata.sources = payload.sources
       }
+      if (Array.isArray(payload.produced_artifacts) && payload.produced_artifacts.length > 0) {
+        metadata.produced_artifacts = payload.produced_artifacts
+      }
       if (payload.awaiting_reply === true) {
         metadata.awaiting_reply = true
       }
       this.upsertHistoryMessage({
-        message_id: requestId ? `pending_assistant_${requestId}` : `pending_assistant_${crypto.randomUUID()}`,
+        message_id: typeof payload.message_id === 'string' && payload.message_id.trim()
+          ? payload.message_id.trim()
+          : requestId
+            ? `pending_assistant_${requestId}`
+            : `pending_assistant_${crypto.randomUUID()}`,
         role: 'assistant',
         content,
         route: typeof payload.route === 'string' ? payload.route : undefined,
@@ -511,10 +518,15 @@ export class GatewayConnectionManager {
       if (Array.isArray(payload.input_artifacts) && payload.input_artifacts.length > 0) {
         metadata.input_artifacts = payload.input_artifacts
       }
+      if (Array.isArray(payload.produced_artifacts) && payload.produced_artifacts.length > 0) {
+        metadata.produced_artifacts = payload.produced_artifacts
+      }
       this.historyTail = [
         ...this.historyTail,
         {
-          message_id: `crosschannel_${crypto.randomUUID()}`,
+          message_id: typeof payload.message_id === 'string' && payload.message_id.trim()
+            ? payload.message_id.trim()
+            : `crosschannel_${crypto.randomUUID()}`,
           role,
           content,
           channel: typeof payload.channel === 'string' ? payload.channel : null,

@@ -119,6 +119,11 @@ interface Window {
     onGatewayStatus: (cb: (data: GatewaySocketState['status']) => void) => () => void
     getGatewaySystemMetrics: (forceRefresh?: boolean) => Promise<unknown>
     getGatewayRegistryAgents: () => Promise<unknown>
+    downloadGatewayOutputArtifact: (payload: {
+      messageId: string
+      artifactId: string
+      suggestedFilename?: string
+    }) => Promise<{ cancelled: true } | { cancelled: false; filePath: string; filename: string }>
 
     // Local key status APIs
     onKeyStatus: (

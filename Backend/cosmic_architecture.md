@@ -3157,6 +3157,20 @@ class ArtifactManifest(BaseModel):
     created_at: datetime
 ```
 
+#### User-Facing Produced Artifact Delivery
+
+`ArtifactManifest` is also the canonical bridge between specialist outputs and user-deliverable files.
+
+When a specialist creates a user-facing file:
+
+- the file must be persisted under the normal task-scoped artifact tree
+- the producing `AgentResult.artifacts` must contain the relevant `ArtifactManifest`
+- the orchestrator should preserve a compact `produced_artifacts` list on the parent turn
+- Gateway should persist those compact artifact descriptors in assistant-message metadata
+- client surfaces may render those as downloadable output-file cards
+
+The client must **not** receive raw filesystem paths as a UX contract. Download/open flows should resolve through Gateway-owned artifact delivery endpoints or channel-native delivery paths.
+
 ---
 
 ## 8. Redis Streams: Queue Design

@@ -103,6 +103,10 @@ def _df_to_parquet_codec(df: pd.DataFrame, path: Path) -> str:
     return "none"
 
 
+def _duckdb_sql_string(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
 @dataclass
 class SheetWork:
     sheet_id: str
@@ -549,7 +553,8 @@ def persist_parse_outcome(
                 continue
             view = f"s_{sh.sheet_id}"
             con.execute(f'DROP VIEW IF EXISTS "{view}"')
-            con.execute(f'CREATE VIEW "{view}" AS SELECT * FROM read_parquet(?)', [str(pq.resolve())])
+            parquet_path_sql = _duckdb_sql_string(str(pq.resolve()).replace("\\", "/"))
+            con.execute(f'CREATE VIEW "{view}" AS SELECT * FROM read_parquet({parquet_path_sql})')
     finally:
         con.close()
 
@@ -642,6 +647,221 @@ def append_created_sheet_to_bundle(
         base = pm.read_text(encoding="utf-8").rstrip()
         extra = f"\n- Added sheet `{display_name}` (`{sheet_id}`), {int(df.shape[1])} column(s), {int(df.shape[0])} row(s).\n"
         pm.write_text(base + extra, encoding="utf-8")
+
+
+def _normalize_created_columns(columns: list[Any] | None, width: int) -> list[str]:
+    raw_columns = columns if isinstance(columns, list) else []
+    normalized: list[str] = []
+    seen: dict[str, int] = {}
+    target_width = max(width, len(raw_columns))
+    for index in range(target_width):
+        raw = raw_columns[index] if index < len(raw_columns) else None
+        base = str(raw).strip() if raw is not None and str(raw).strip() else f"col_{index}"
+        count = seen.get(base, 0) + 1
+        seen[base] = count
+        normalized.append(base if count == 1 else f"{base}_{count}")
+    return normalized
+
+
+def _dataframe_from_created_sheet(sheet: dict[str, Any], index: int) -> tuple[str, str, pd.DataFrame]:
+    display_name = str(
+        sheet.get("display_name")
+        or sheet.get("sheet_name")
+        or sheet.get("title")
+        or sheet.get("sheet_id")
+        or f"Sheet {index}"
+    ).strip() or f"Sheet {index}"
+    raw_sheet_id = str(sheet.get("sheet_id") or "").strip()
+    sheet_id = validate_safe_sheet_id(raw_sheet_id) if raw_sheet_id else sanitize_sheet_id(display_name, index)
+
+    rows = sheet.get("rows")
+    if rows is None:
+        rows = sheet.get("records")
+    if rows is None:
+        rows = []
+    if not isinstance(rows, list):
+        raise ValueError(f"rows for sheet {display_name!r} must be an array")
+
+    raw_columns = sheet.get("columns")
+    columns = raw_columns if isinstance(raw_columns, list) else []
+    if not rows and not columns:
+        raise ValueError(f"sheet {display_name!r} must provide columns or at least one row")
+
+    if rows and isinstance(rows[0], dict):
+        ordered_keys: list[str] = []
+        seen_keys: set[str] = set()
+        if columns:
+            for value in columns:
+                key = str(value).strip()
+                if key and key not in seen_keys:
+                    ordered_keys.append(key)
+                    seen_keys.add(key)
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError(f"rows for sheet {display_name!r} must all be objects when using record rows")
+            for key in row.keys():
+                key_text = str(key).strip()
+                if key_text and key_text not in seen_keys:
+                    ordered_keys.append(key_text)
+                    seen_keys.add(key_text)
+        if not ordered_keys:
+            ordered_keys = _normalize_created_columns(columns, 0)
+        if not ordered_keys:
+            raise ValueError(f"sheet {display_name!r} has no usable columns")
+        records = [{column: row.get(column) for column in ordered_keys} for row in rows]
+        df = pd.DataFrame(records, columns=ordered_keys)
+        df.columns = _normalize_created_columns(list(df.columns), len(df.columns))
+        return sheet_id, display_name, df
+
+    if rows and isinstance(rows[0], (list, tuple)):
+        max_width = max(len(list(row)) for row in rows if isinstance(row, (list, tuple)))
+        normalized_columns = _normalize_created_columns(columns, max_width)
+        if not normalized_columns:
+            raise ValueError(f"sheet {display_name!r} has no usable columns")
+        padded_rows: list[list[Any]] = []
+        for row in rows:
+            if not isinstance(row, (list, tuple)):
+                raise ValueError(f"rows for sheet {display_name!r} must all be arrays when using row arrays")
+            values = list(row)[: len(normalized_columns)]
+            if len(values) < len(normalized_columns):
+                values.extend([None] * (len(normalized_columns) - len(values)))
+            padded_rows.append(values)
+        df = pd.DataFrame(padded_rows, columns=normalized_columns)
+        return sheet_id, display_name, df
+
+    if rows:
+        raise ValueError(f"rows for sheet {display_name!r} must be objects or arrays")
+
+    normalized_columns = _normalize_created_columns(columns, len(columns))
+    if not normalized_columns:
+        raise ValueError(f"sheet {display_name!r} has no usable columns")
+    df = pd.DataFrame(columns=normalized_columns)
+    return sheet_id, display_name, df
+
+
+def _safe_excel_sheet_name(name: str, *, index: int, seen: set[str]) -> str:
+    base = (str(name or "").strip() or f"Sheet {index}")[:31]
+    candidate = base or f"Sheet {index}"
+    suffix = 2
+    while candidate.lower() in seen:
+        marker = f"_{suffix}"
+        trimmed = (base[: max(1, 31 - len(marker))] or "Sheet")[: 31 - len(marker)]
+        candidate = f"{trimmed}{marker}"
+        suffix += 1
+    seen.add(candidate.lower())
+    return candidate
+
+
+def build_created_workbook_outcome(
+    *,
+    filename: str,
+    sheets_input: list[dict[str, Any]],
+    cfg: TabularAgentConfig,
+) -> ParseOutcome:
+    if not isinstance(sheets_input, list) or not sheets_input:
+        raise ValueError("create_workbook requires a non-empty sheets array")
+
+    sheets_out: list[SheetWork] = []
+    catalog: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    preview_lines = [f"# {filename}", "", "- Format: xlsx", f"- Parsed sheets: {len(sheets_input)}", "- Origin: user_created"]
+
+    for index, raw_sheet in enumerate(sheets_input, start=1):
+        if not isinstance(raw_sheet, dict):
+            raise ValueError("each sheets[] entry must be an object")
+        sheet_id, display_name, df = _dataframe_from_created_sheet(raw_sheet, index)
+        sw_list: list[str] = []
+        if df.shape[1] > cfg.wide_column_warning_threshold:
+            sw_list.append(f"wide_table:{df.shape[1]}_columns")
+        header_summary = build_header_detection_v1(header_idx=0, data_start=1)
+        header_summary = dict(header_summary)
+        header_summary["notes"] = list(header_summary.get("notes") or []) + [
+            "User-created workbook; rows/columns came from structured input rather than uploaded source bytes."
+        ]
+        profile = {
+            "sheet_id": sheet_id,
+            "header_detection": header_summary,
+            "shape": {"rows": int(df.shape[0]), "cols": int(df.shape[1])},
+            "dtypes": {str(c): str(t) for c, t in df.dtypes.items()},
+            "null_density": round(float(df.isna().mean().mean()) if df.size else 0.0, 5),
+            "warnings": sw_list,
+            "origin": "user_created",
+        }
+        sheet_work = SheetWork(
+            sheet_id=sheet_id,
+            display_name=display_name,
+            parquet_relative=f"sheets/{sheet_id}.parquet",
+            profile_relative=f"sheets/{sheet_id}_profile.json",
+            preview_relative=f"sheets/{sheet_id}_preview.md",
+            row_count=int(df.shape[0]),
+            col_count=int(df.shape[1]),
+            warnings=sw_list,
+        )
+        sheet_work.__dict__["_df"] = df  # noqa: SLF001
+        sheet_work.__dict__["_profile"] = profile  # noqa: SLF001
+        sheets_out.append(sheet_work)
+        catalog.append(
+            {
+                "sheet_id": sheet_id,
+                "display_name": display_name,
+                "row_count": int(df.shape[0]),
+                "column_count": int(df.shape[1]),
+                "hidden": False,
+                "inferred_types": profile["dtypes"],
+                "header_summary": header_summary,
+                "multi_table_warning": False,
+                "merged_cell_warning": False,
+                "origin": "user_created",
+            }
+        )
+        preview_lines.append(
+            f"- `{display_name}` (`{sheet_id}`): {int(df.shape[0])} row(s), {int(df.shape[1])} column(s)"
+        )
+
+    manifest = {
+        "filename": filename,
+        "format": "xlsx",
+        "origin": "user_created",
+        "sheet_count": len(sheets_out),
+        "visible_sheet_count": len(sheets_out),
+        "hidden_sheet_count": 0,
+        "workbook_warnings": warnings,
+    }
+    return ParseOutcome(
+        workbook_manifest=manifest,
+        sheet_catalog={"sheets": catalog, "skipped": []},
+        preview_md="\n".join(preview_lines) + "\n",
+        formulas=[],
+        named_ranges=[],
+        merged_cells=[],
+        sheets=sheets_out,
+        duckdb_relative="bundle.duckdb",
+        parse_status="parsed_with_warnings" if warnings else "parsed",
+        warnings=warnings,
+        skipped_sheets=[],
+    )
+
+
+def write_created_workbook_xlsx(
+    *,
+    output_path: Path,
+    outcome: ParseOutcome,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    seen_sheet_names: set[str] = set()
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        for index, sheet in enumerate(outcome.sheets, start=1):
+            df = getattr(sheet, "_df", None)
+            if df is None:
+                continue
+            excel_sheet_name = _safe_excel_sheet_name(sheet.display_name, index=index, seen=seen_sheet_names)
+            df.to_excel(writer, sheet_name=excel_sheet_name, index=False)
+
+
+def logical_artifact_path(path: Path, artifacts_root: Path) -> str:
+    resolved = path.resolve()
+    relative_to_artifacts = resolved.relative_to(artifacts_root.resolve())
+    return (Path("runs") / "artifacts" / relative_to_artifacts).as_posix()
 
 
 def logical_bundle_paths(bundle_root: Path, artifacts_root: Path) -> dict[str, str]:

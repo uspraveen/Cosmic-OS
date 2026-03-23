@@ -9,7 +9,7 @@ This document records how `cosmic/tabular-agent:1.0.0` fits into COSMIC’s exis
 | `agent_card.yaml` → `agent_id` | `cosmic/tabular-agent:1.0.0` |
 | `agent_card.yaml` → `stream_key` | `streams:cosmic/tabular-agent:1.0.0` |
 | Gateway `GATEWAY_TABULAR_AGENT_ID` (default in `gateway/config.py`) | `cosmic/tabular-agent:1.0.0` |
-| Orchestrator `sheets_*` tools (`executor.py`) | `agent_id="cosmic/tabular-agent:1.0.0"` (includes `sheets_reason` → `tabular.reason_workbook`) |
+| Orchestrator `sheets_*` tools (`executor.py`) | `agent_id="cosmic/tabular-agent:1.0.0"` (includes `sheets_reason` → `tabular.reason_workbook`, `sheets_create_workbook` → `tabular.create_workbook`) |
 
 If any of these drift, gateway parse dispatch or orchestrator delegation will target the wrong recipient or fail discovery.
 
@@ -49,7 +49,7 @@ The tabular worker verifies inbound tasks with `verify_task_envelope` / shared r
 ## Gateway vs orchestrator
 
 - **Gateway** dispatches `tabular.parse_bundle` directly to the tabular agent for uploaded spreadsheets (same agent id config).
-- **Orchestrator** dispatches other tabular intents via `sheets_*` tools when Opus runs tools (same `TaskEnvelope` path as above).
+- **Orchestrator** dispatches other tabular intents via `sheets_*` tools when Opus runs tools (same `TaskEnvelope` path as above), including new-workbook creation through `sheets_create_workbook`.
 
 Both paths assume the tabular worker is registered and healthy.
 
@@ -60,6 +60,9 @@ Both paths assume the tabular worker is registered and healthy.
 3. `AGENT_SECRET` for tabular agent matches signing secret configured for that agent id.
 4. `python -m agents.tabular_agent` (or your process manager) shows healthy heartbeat.
 5. `tabular.reason_workbook` returns **`failed`** (not `completed`) when internal reasoning is unavailable (e.g. MiMo disabled); check `AgentResult.status` and `error.code`.
+6. `tabular.create_workbook` returns both:
+   - a reusable bundle summary (`bundle_id`, `workbooks[]`, internal `artifact_id`)
+   - a downloadable `.xlsx` output artifact under `runs/artifacts/<task_id>/parsed/<artifact_id>/generated/...`
 
 6. Optional: MiMo API smoke test (no Redis):
    - From **`Backend/`:** `python scripts/local_test_mimo_langchain.py`

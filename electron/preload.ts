@@ -97,6 +97,7 @@ contextBridge.exposeInMainWorld('cosmic', {
   requestGatewayResume: () => ipcRenderer.invoke('gateway:request-resume'),
   getGatewaySystemMetrics: (forceRefresh?: boolean) => ipcRenderer.invoke('gateway:get-system-metrics', forceRefresh),
   getGatewayRegistryAgents: () => ipcRenderer.invoke('gateway:get-registry-agents'),
+  downloadGatewayOutputArtifact: (payload: { messageId: string; artifactId: string; suggestedFilename?: string; timeoutMs?: number }) => ipcRenderer.invoke('gateway:download-output-artifact', payload),
   pickGatewayDocuments: () => ipcRenderer.invoke('gateway:pick-documents'),
   sendGatewayQuery: (payload: { content: string; conversationContext?: any[]; requestId?: string; routeOverride?: string; attachments?: any[] }) => ipcRenderer.invoke('gateway:send-query', payload),
   submitGatewayTaskInputReply: (payload: { inputRequestId: string; taskId: string; content: string }) => ipcRenderer.invoke('gateway:submit-task-input-reply', payload),

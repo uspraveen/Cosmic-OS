@@ -215,6 +215,7 @@ This agent should follow the normal COSMIC runtime contract:
 - usage logging to Gateway
 - artifact persistence under `runs/artifacts/<task_id>/...`
 - recall support for prior runs
+- produced user-facing files should follow the same COSMIC produced-artifact delivery contract as other specialists
 
 ---
 
@@ -310,6 +311,13 @@ Pre-query gating rule for current-turn uploads:
 - once parse completes, Gateway enriches the active working set with workbook handles and then Opus receives the user query over that typed surface
 
 This mirrors the current document pipeline pattern and keeps Opus out of raw workbook state.
+
+Produced file rule:
+
+- if the tabular specialist creates a user-facing file such as an exported workbook, derived CSV/XLSX, scenario pack, or chart bundle, it must return compact produced-artifact descriptors on the parent result
+- Gateway should persist those descriptors in assistant-message metadata
+- desktop should render those as downloadable output-file cards
+- delivery should stay artifact-first and Gateway-owned rather than exposing raw bundle paths to the user
 
 ### 6.4 Usage Ledger Contract
 
@@ -618,6 +626,8 @@ runs/artifacts/<tabular_parse_task_id>/parsed/
     named_ranges.json
     visual_index.json             # optional / phase-gated
     bundle.duckdb
+    generated/
+      <workbook_filename>.xlsx    # optional: created/exported workbook returned to user
     sheets/
       <sheet_id>.parquet
       <sheet_id>_profile.json
@@ -900,6 +910,7 @@ Recommended first tool surface:
 - `sheets_preview`
 - `sheets_query`
 - `sheets_export`
+- `sheets_create_workbook`
 
 Recommended expanded financial-analysis surface after the core browse/query layer is stable:
 
@@ -991,17 +1002,40 @@ Typical outputs:
 - exported Parquet
 - compact markdown preview of the derived result
 
-### 9.6 Future Edit/Create Surface
+### 9.6 `sheets_create_workbook`
+
+Purpose:
+
+- create a brand-new workbook bundle from structured rows/sheets already present in the conversation or specialist context
+- emit a downloadable `.xlsx` file under the standard produced-artifact contract
+- make the new workbook immediately usable by the tabular specialist without requiring the user to re-upload it
+- surface the created workbook bundle back into the active working set so follow-up `sheets_*` turns can keep operating on it
+
+Typical outputs:
+
+- `bundle_id`
+- workbook summary in the same compact shape used by `tabular.parse_bundle`
+- one downloadable output artifact (`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`)
+- one or more created sheets persisted as `sheets/<sheet_id>.parquet` plus catalog/profile/preview sidecars
+
+Architectural rules:
+
+- the user-facing `.xlsx` file is a produced output artifact, not the source of truth for queries
+- the source of truth remains the parsed workbook bundle (`bundle.duckdb`, `sheet_catalog.json`, `preview.md`, per-sheet parquet/profile/preview)
+- workbook creation should not bypass the canonical bundle structure just because the workbook originated from conversation data instead of an uploaded file
+
+### 9.7 Future Edit/Create Surface
 
 After the browse/query foundation is stable, the spreadsheet specialist should expose explicit write-oriented intents such as:
 
+- `sheets_create_workbook`
 - `sheets_edit`
 - `sheets_create_sheet`
 - `sheets_create_derived_table`
 
 These should operate through durable artifacts and execution receipts, not through opaque chat-only edits.
 
-### 9.7 Financial Analyst Surface
+### 9.8 Financial Analyst Surface
 
 To behave like a proper internal financial analyst, the tabular specialist should eventually support:
 
@@ -1014,7 +1048,7 @@ To behave like a proper internal financial analyst, the tabular specialist shoul
 
 These should still return compact artifacts and summaries back to Opus, not giant workbook dumps.
 
-### 9.8 Future External Data Integrations
+### 9.9 Future External Data Integrations
 
 Later, the tabular specialist may connect to external research/data providers such as:
 

@@ -1452,10 +1452,10 @@ class GatewayRuntime:
             metadata: dict[str, Any] | None,
             channel: str,
             route: str,
-        ) -> None:
+        ) -> str | None:
             assistant_metadata = dict(metadata or {})
             assistant_metadata.setdefault("request_id", request_id)
-            self._append_session_message(
+            return self._append_session_message(
                 session_id,
                 role="assistant",
                 content=content,
@@ -2262,10 +2262,10 @@ class GatewayRuntime:
         awaiting_reply: bool = False,
         channel: str | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> str | None:
         if not content:
-            return
-        self.session_store.append_message(
+            return None
+        return self.session_store.append_message(
             session_id,
             role=role,
             content=content,
@@ -2995,6 +2995,25 @@ class GatewayRuntime:
             if isinstance(assistant_message, dict) and isinstance(assistant_message.get("metadata"), dict)
             else {}
         )
+        produced_artifacts = self._normalize_produced_artifact_list(
+            assistant_metadata.get("produced_artifacts")
+        )
+        if produced_artifacts:
+            for artifact in produced_artifacts:
+                if not isinstance(artifact, dict):
+                    continue
+                artifact_ref = self._safe_text(artifact.get("artifact_id")) or self._safe_text(artifact.get("path"))
+                if artifact_ref:
+                    artifact_refs.append(artifact_ref)
+                label = self._safe_text(artifact.get("filename")) or self._safe_text(artifact.get("artifact_id"))
+                if label or artifact_ref:
+                    touched_entities.append(
+                        {
+                            "type": "artifact_output",
+                            "id": artifact_ref or label,
+                            "label": label or artifact_ref,
+                        }
+                    )
         research_provenance = self._normalize_research_provenance(
             event.get("research_provenance")
             if isinstance(event.get("research_provenance"), dict)
@@ -3056,6 +3075,7 @@ class GatewayRuntime:
                 "awaiting_reply": awaiting_reply,
                 "decision_source": (request_record or {}).get("routing_decision_source"),
                 "input_artifacts": artifacts,
+                "produced_artifacts": produced_artifacts,
                 "research_provenance": research_provenance,
                 "sources": sources,
                 "specialist_receipts": specialist_receipts,
@@ -3314,6 +3334,32 @@ class GatewayRuntime:
                         "request_id": self._safe_text(artifact.get("request_id")),
                     }
                 )
+
+        for receipt in recent_specialist_receipts:
+            if not isinstance(receipt, dict):
+                continue
+            if self._safe_text(receipt.get("intent")) != "tabular.create_workbook":
+                continue
+            artifact_id = self._safe_text(receipt.get("artifact_id"))
+            bundle_id = self._safe_text(receipt.get("bundle_id"))
+            if not artifact_id or not bundle_id:
+                continue
+            if any(
+                self._safe_text(item.get("artifact_id")) == artifact_id
+                and self._safe_text(item.get("parse_bundle_id")) == bundle_id
+                for item in parsed_spreadsheet_rows
+            ):
+                continue
+            parsed_spreadsheet_rows.append(
+                {
+                    "artifact_id": artifact_id,
+                    "filename": self._safe_text(receipt.get("filename")),
+                    "ingest_state": "parsed",
+                    "parse_bundle_id": bundle_id,
+                    "parse_status": self._safe_text(receipt.get("parse_status")) or "completed",
+                    "request_id": self._safe_text(receipt.get("request_id")),
+                }
+            )
 
         recent_document_artifacts = parsed_document_rows[:6]
         recent_spreadsheet_artifacts = parsed_spreadsheet_rows[:6]
@@ -4053,6 +4099,7 @@ class GatewayRuntime:
         self,
         session_id: str,
         *,
+        message_id: str | None = None,
         role: str,
         content: str,
         channel: str,
@@ -4061,6 +4108,7 @@ class GatewayRuntime:
         thinking_text: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
         input_artifacts: list[dict[str, Any]] | None = None,
+        produced_artifacts: list[dict[str, Any]] | None = None,
     ) -> None:
         """Push a cross-channel message to all connected desktop clients for this session.
 
@@ -4088,6 +4136,8 @@ class GatewayRuntime:
             "route": route,
             "timestamp": utcnow_iso(),
         }
+        if message_id:
+            event["message_id"] = message_id
         if sources:
             event["sources"] = sources
         if thinking_text:
@@ -4096,6 +4146,8 @@ class GatewayRuntime:
             event["attachments"] = attachments
         if input_artifacts:
             event["input_artifacts"] = input_artifacts
+        if produced_artifacts:
+            event["produced_artifacts"] = produced_artifacts
         await desktop_adapter.broadcast_to_session(session_id, event)
 
     def _track_background_task(self, coroutine: asyncio.Future[Any] | asyncio.Task[Any] | Any) -> None:
@@ -5831,6 +5883,41 @@ class GatewayRuntime:
             "filename": filename,
         }
 
+    def get_desktop_output_artifact_content(
+        self,
+        *,
+        message_id: str,
+        artifact_id: str,
+    ) -> dict[str, Any]:
+        normalized_message_id = self._safe_text(message_id)
+        normalized_artifact_id = self._safe_text(artifact_id)
+        if not normalized_message_id or not normalized_artifact_id:
+            raise ValueError("message_id and artifact_id are required.")
+
+        message = self.session_store.get_message(normalized_message_id)
+        if message is None:
+            raise FileNotFoundError("Assistant message not found.")
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        produced_artifacts = self._normalize_produced_artifact_list(metadata.get("produced_artifacts"))
+        target = next(
+            (
+                item
+                for item in produced_artifacts
+                if isinstance(item, dict) and self._safe_text(item.get("artifact_id")) == normalized_artifact_id
+            ),
+            None,
+        )
+        if target is None:
+            raise FileNotFoundError("Produced artifact not found on this message.")
+        artifact_path = self._resolve_logical_artifact_path(self._safe_text(target.get("path")))
+        if artifact_path is None or not artifact_path.exists() or not artifact_path.is_file():
+            raise FileNotFoundError("Produced artifact bytes are unavailable.")
+        return {
+            "content": artifact_path.read_bytes(),
+            "media_type": self._safe_text(target.get("mime_type")) or "application/octet-stream",
+            "filename": self._safe_text(target.get("filename")) or artifact_path.name,
+        }
+
     async def _ensure_request_documents_parsed(self, request_record: dict[str, Any], *, send=None) -> None:
         if self._redis is None:
             return
@@ -6560,6 +6647,7 @@ class GatewayRuntime:
                     "sheets_preview",
                     "sheets_query",
                     "sheets_export",
+                    "sheets_create_workbook",
                     "sheets_create_sheet",
                 ],
                 parse_error=None,
@@ -6661,7 +6749,8 @@ class GatewayRuntime:
                 event.get("research_provenance"),
                 fallback_sources=event.get("sources") if isinstance(event.get("sources"), list) else None,
             )
-            store_assistant_message(
+            produced_artifacts = self._normalize_produced_artifact_list(event.get("produced_artifacts"))
+            assistant_message_id = store_assistant_message(
                 str(event.get("content") or ""),
                 awaiting_reply=bool(event.get("awaiting_reply")),
                 metadata={
@@ -6678,21 +6767,26 @@ class GatewayRuntime:
                     "specialist_receipts": self._normalize_specialist_receipts(
                         event.get("specialist_receipts")
                     ),
+                    "produced_artifacts": produced_artifacts,
                 },
                 channel=event_channel,
                 route="opus",
             )
+            if assistant_message_id:
+                event["message_id"] = assistant_message_id
             # Cross-channel sync: push the assistant response to connected desktop clients
             if event_channel and not event_channel.startswith("desktop:") and session_id:
                 self._track_background_task(
                     self._broadcast_cross_channel_to_desktop(
                         session_id,
+                        message_id=assistant_message_id,
                         role="assistant",
                         content=str(event.get("content") or ""),
                         channel=event_channel,
                         route="opus",
                         sources=event.get("sources") if isinstance(event.get("sources"), list) else None,
                         thinking_text=self._safe_text(event.get("thinking_text")),
+                        produced_artifacts=produced_artifacts,
                     )
                 )
         elif event_type == "task.input_required":
@@ -6873,6 +6967,57 @@ class GatewayRuntime:
             provenance["source_sample"] = source_sample
         return provenance
 
+    def _normalize_produced_artifact_list(self, value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            artifact_id = self._safe_text(item.get("artifact_id")) or ""
+            logical_path = self._safe_text(item.get("path")) or ""
+            dedupe_key = (artifact_id, logical_path)
+            if not any(dedupe_key) or dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            resolved_path = self._resolve_logical_artifact_path(logical_path)
+            filename = (
+                self._safe_text(item.get("filename"))
+                or (resolved_path.name if resolved_path is not None else None)
+                or (Path(logical_path).name if logical_path else None)
+                or artifact_id
+            )
+            size_bytes: int | None = None
+            if resolved_path is not None and resolved_path.exists() and resolved_path.is_file():
+                try:
+                    size_bytes = int(resolved_path.stat().st_size)
+                except OSError:
+                    size_bytes = None
+            normalized.append(
+                {
+                    key: val
+                    for key, val in {
+                        "artifact_id": artifact_id,
+                        "task_id": self._safe_text(item.get("task_id")),
+                        "mime_type": self._safe_text(item.get("mime")) or self._safe_text(item.get("mime_type")),
+                        "filename": filename,
+                        "size_bytes": size_bytes,
+                        "kind": self._safe_text(item.get("kind")),
+                        "created_by_agent": self._safe_text(item.get("created_by_agent")),
+                        "created_at": self._safe_text(item.get("created_at")),
+                        "path": logical_path,
+                        "sha256": self._safe_text(item.get("sha256")),
+                        "source_url": self._safe_text(item.get("source_url")),
+                        "downloadable": bool(resolved_path is not None and resolved_path.exists() and resolved_path.is_file()),
+                    }.items()
+                    if val not in (None, "", [], {})
+                }
+            )
+            if len(normalized) >= 12:
+                break
+        return normalized
+
     @staticmethod
     def _research_path_label(path: str) -> str:
         labels = {
@@ -6934,12 +7079,19 @@ class GatewayRuntime:
                 text = self._safe_text(item.get(key))
                 if text:
                     receipt[key] = text
+            for key in ("bundle_id", "artifact_id", "filename", "parse_status"):
+                text = self._safe_text(item.get(key))
+                if text:
+                    receipt[key] = text
             source_count = self._coerce_int(item.get("source_count"))
             artifact_count = self._coerce_int(item.get("artifact_count"))
+            sheet_count = self._coerce_int(item.get("sheet_count"))
             if source_count:
                 receipt["source_count"] = source_count
             if artifact_count:
                 receipt["artifact_count"] = artifact_count
+            if sheet_count is not None:
+                receipt["sheet_count"] = sheet_count
             source_domains = self._normalize_string_list(item.get("source_domains"), limit=3)
             if source_domains:
                 receipt["source_domains"] = source_domains

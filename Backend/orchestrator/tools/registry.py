@@ -165,6 +165,11 @@ def _sheets_create_sheet_progress(tool_input: dict[str, Any]) -> str:
     return f"Creating sheet {sheet_id}..." if sheet_id else "Creating spreadsheet sheet..."
 
 
+def _sheets_create_workbook_progress(tool_input: dict[str, Any]) -> str:
+    filename = str(tool_input.get("filename") or "").strip()
+    return f"Creating workbook {filename}..." if filename else "Creating spreadsheet workbook..."
+
+
 def _docs_reinspect_asset_progress(tool_input: dict[str, Any]) -> str:
     asset_id = str(tool_input.get("asset_id") or "").strip()
     question = str(tool_input.get("question") or "").strip()
@@ -830,6 +835,65 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Persist a derived table from a SELECT query into spreadsheet artifacts.",
         progress_builder=_sheets_export_progress,
         handler_method="_sheets_export",
+        read_only=False,
+    ),
+    ToolSpec(
+        name="sheets_create_workbook",
+        api_definition={
+            "name": "sheets_create_workbook",
+            "description": (
+                "Create a brand-new workbook bundle from structured sheets/rows and return a downloadable .xlsx file. "
+                "Use this when the spreadsheet does not already exist as an uploaded bundle."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": "Optional output workbook filename; .xlsx is added automatically if missing.",
+                    },
+                    "bundle_label": {
+                        "type": "string",
+                        "description": "Optional human label for the created workbook bundle.",
+                    },
+                    "sheets": {
+                        "type": "array",
+                        "minItems": 1,
+                        "description": "One or more sheet definitions for the new workbook.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "sheet_id": {
+                                    "type": "string",
+                                    "description": "Optional stable id; if provided must match ^[A-Za-z0-9_]{1,80}$.",
+                                    "pattern": "^[A-Za-z0-9_]{1,80}$",
+                                },
+                                "display_name": {
+                                    "type": "string",
+                                    "description": "Human sheet name shown in Excel and the bundle catalog.",
+                                },
+                                "columns": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Optional explicit column order, especially useful for empty sheets.",
+                                },
+                                "rows": {
+                                    "type": "array",
+                                    "description": "Rows as objects or arrays. Empty rows are allowed when columns are provided.",
+                                    "items": {"anyOf": [{"type": "object"}, {"type": "array"}]},
+                                },
+                            },
+                            "required": ["rows"],
+                        },
+                    },
+                },
+                "required": ["sheets"],
+            },
+        },
+        group="spreadsheets",
+        prompt_summary="Create a new workbook bundle from structured data and return a downloadable .xlsx artifact.",
+        progress_builder=_sheets_create_workbook_progress,
+        handler_method="_sheets_create_workbook",
         read_only=False,
     ),
     ToolSpec(

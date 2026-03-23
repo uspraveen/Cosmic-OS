@@ -23,13 +23,17 @@ from .internal_llm import maybe_enrich_preview_summary
 from .internal_workflow import run_tabular_reason_workbook
 from .tabular_usage import log_tabular_specialist_operation, monotonic_ms_since
 from .workbook_bundle import (
+    build_created_workbook_outcome,
     append_created_sheet_to_bundle,
+    logical_artifact_path,
     logical_bundle_paths,
     parse_csv_tsv,
     parse_xlsb,
     parse_xlsx,
     persist_parse_outcome,
+    _duckdb_sql_string,
     utc_now_iso,
+    write_created_workbook_xlsx,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,6 +68,7 @@ class TabularAgent(AgentRuntime):
     QUERY = "tabular.query_workbook"
     EXPORT = "tabular.export_result"
     CREATE_SHEET = "tabular.create_sheet"
+    CREATE_WORKBOOK = "tabular.create_workbook"
     REASON_WORKBOOK = "tabular.reason_workbook"
 
     def __init__(
@@ -129,6 +134,8 @@ class TabularAgent(AgentRuntime):
                 result = await self._handle_export(task)
             elif task.intent == self.CREATE_SHEET:
                 result = await self._handle_create_sheet(task)
+            elif task.intent == self.CREATE_WORKBOOK:
+                result = await self._handle_create_workbook(task)
             elif task.intent == self.REASON_WORKBOOK:
                 result = await self._handle_reason_workbook(task)
             else:
@@ -183,6 +190,7 @@ class TabularAgent(AgentRuntime):
             self.QUERY: "tabular.query_workbook",
             self.EXPORT: "tabular.export_result",
             self.CREATE_SHEET: "tabular.create_sheet",
+            self.CREATE_WORKBOOK: "tabular.create_workbook",
             self.REASON_WORKBOOK: "tabular.reason_workbook",
         }.get(intent, intent)
 
@@ -200,6 +208,13 @@ class TabularAgent(AgentRuntime):
         elif intent == self.CREATE_SHEET:
             meta["sheet_id"] = out.get("sheet_id")
             meta["artifact_id"] = out.get("artifact_id")
+        elif intent == self.CREATE_WORKBOOK:
+            meta["workbook_count"] = out.get("workbook_count")
+            workbooks = out.get("workbooks")
+            if isinstance(workbooks, list) and workbooks:
+                first = workbooks[0] if isinstance(workbooks[0], dict) else {}
+                meta["artifact_id"] = first.get("artifact_id")
+                meta["sheet_count"] = first.get("sheet_count")
         elif intent == self.REASON_WORKBOOK:
             meta["artifact_id"] = out.get("artifact_id")
             steps = out.get("steps")
@@ -691,7 +706,8 @@ class TabularAgent(AgentRuntime):
         try:
             view = f"s_{sheet_id}"
             con.execute(f'DROP VIEW IF EXISTS "{view}"')
-            con.execute(f'CREATE VIEW "{view}" AS SELECT * FROM read_parquet(?)', [str(pq.resolve())])
+            parquet_path_sql = _duckdb_sql_string(str(pq.resolve()).replace("\\", "/"))
+            con.execute(f'CREATE VIEW "{view}" AS SELECT * FROM read_parquet({parquet_path_sql})')
         finally:
             con.close()
 
@@ -713,6 +729,110 @@ class TabularAgent(AgentRuntime):
             artifacts=[],
             error=None,
         )
+
+    async def _handle_create_workbook(self, task: TaskEnvelope) -> AgentResult:
+        workbook_filename = self._safe(task.input.get("filename")) or "workbook.xlsx"
+        if not workbook_filename.lower().endswith(".xlsx"):
+            workbook_filename = f"{workbook_filename}.xlsx"
+        sheets_input = task.input.get("sheets")
+        if not isinstance(sheets_input, list) or not sheets_input:
+            raise TabularAgentError(
+                code="INVALID_INPUT",
+                message="create_workbook requires a non-empty sheets array.",
+                retryable=False,
+                next_action="revise_input",
+            )
+
+        bundle_id = f"bundle_{uuid4().hex[:12]}"
+        artifact_id = f"wb_{uuid4().hex[:12]}"
+        bundle_root = self.artifacts_root / task.task_id / "parsed" / artifact_id
+
+        await self._emit_stage(task.task_id, "prepare", "Creating spreadsheet workbook.")
+        try:
+            outcome = await asyncio.to_thread(
+                build_created_workbook_outcome,
+                filename=workbook_filename,
+                sheets_input=sheets_input,
+                cfg=self.config,
+            )
+        except ValueError as exc:
+            raise TabularAgentError(
+                code="INVALID_INPUT",
+                message=str(exc),
+                retryable=False,
+                next_action="revise_input",
+            ) from exc
+
+        await asyncio.to_thread(
+            persist_parse_outcome,
+            bundle_root=bundle_root,
+            outcome=outcome,
+            cfg=self.config,
+        )
+        workbook_path = bundle_root / "generated" / workbook_filename
+        await asyncio.to_thread(
+            write_created_workbook_xlsx,
+            output_path=workbook_path,
+            outcome=outcome,
+        )
+
+        handles = logical_bundle_paths(bundle_root, self.artifacts_root)
+        handles["generated_workbook_xlsx"] = logical_artifact_path(workbook_path, self.artifacts_root)
+        manifest_payload = {
+            "version": 1,
+            "kind": "tabular_workbook_bundle",
+            "bundle_id": bundle_id,
+            "task_id": task.task_id,
+            "session_id": task.session_id,
+            "artifact_id": artifact_id,
+            "parse_status": outcome.parse_status,
+            "origin": "user_created",
+            "created_at": utc_now_iso(),
+            "handles": handles,
+            "warnings": outcome.warnings,
+        }
+        manifest_path = bundle_root / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        summary = {
+            "artifact_id": artifact_id,
+            "filename": workbook_filename,
+            "parse_status": outcome.parse_status,
+            "origin": "user_created",
+            "sheet_count": int(outcome.workbook_manifest.get("sheet_count") or len(outcome.sheets)),
+            "parsed_sheet_count": len(outcome.sheets),
+            "skipped_or_degraded_sheet_count": 0,
+            "notable_tabs": [sheet.display_name for sheet in outcome.sheets][:8],
+            "formula_heavy_tabs": [],
+            "warnings": outcome.warnings,
+            "handles": handles,
+            "preview_excerpt": (bundle_root / "preview.md").read_text(encoding="utf-8")[:4000],
+        }
+        output = {
+            "response": f"Created spreadsheet workbook {workbook_filename}.",
+            "bundle_id": bundle_id,
+            "bundle_label": self._safe(task.input.get("bundle_label")) or workbook_filename,
+            "workbook_count": 1,
+            "workbooks": [summary],
+            "created_workbook": {
+                "filename": workbook_filename,
+                "path": handles["generated_workbook_xlsx"],
+            },
+        }
+        self._record_run(task=task, bundle_id=bundle_id, summary=output)
+        await self._emit_stage(task.task_id, "ready", "Spreadsheet workbook created.")
+
+        xlsx_sha = hashlib.sha256(workbook_path.read_bytes()).hexdigest()
+        xlsx_artifact = ArtifactManifest(
+            artifact_id=f"out_{uuid4().hex[:12]}",
+            task_id=task.task_id,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            sha256=xlsx_sha,
+            path=handles["generated_workbook_xlsx"],
+            created_by_agent=self.agent_id,
+            kind="output",
+        )
+        return AgentResult(status="completed", output=output, artifacts=[xlsx_artifact], error=None)
 
     async def _handle_reason_workbook(self, task: TaskEnvelope) -> AgentResult | TaskInProgress:
         """Internal agentic path: plan → deterministic SQL or COSMIC sandbox → summarize."""

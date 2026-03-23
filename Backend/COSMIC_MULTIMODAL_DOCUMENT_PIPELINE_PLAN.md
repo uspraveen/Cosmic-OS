@@ -269,6 +269,20 @@ Opus should **not** be told:
 
 The docs pipeline emits task-scoped parsed outputs under a standard bundle shape.
 
+If a document workflow later produces a user-facing file such as:
+
+- an edited PDF
+- a generated PPTX
+- a cleaned markdown export
+- a citation bundle
+
+then it must also follow the general COSMIC produced-artifact delivery contract:
+
+- persist the file under the normal task-scoped artifact tree
+- return compact artifact descriptors on the parent result
+- let Gateway persist those under assistant-message metadata
+- let desktop render downloadable output-file cards rather than ad hoc agent-specific links
+
 ### Original Upload Staging
 
 To stay aligned with the current artifact-first architecture, the system should treat inbound uploads as an artifact-producing ingress scope.

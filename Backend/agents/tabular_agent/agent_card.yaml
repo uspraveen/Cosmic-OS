@@ -27,6 +27,9 @@ intents:
   - name: tabular.create_sheet
     description: Create an empty derived sheet (Parquet + DuckDB view) inside an existing bundle.
     timeout_sec: 60
+  - name: tabular.create_workbook
+    description: Create a brand-new workbook bundle from structured rows/sheets and emit a downloadable .xlsx.
+    timeout_sec: 120
   - name: tabular.reason_workbook
     description: >
       Internal agentic reasoning over a parsed workbook (inspect → MiMo plan → deterministic SELECT or
@@ -56,6 +59,7 @@ policies:
     tabular.query_workbook: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
     tabular.export_result: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
     tabular.create_sheet: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
+    tabular.create_workbook: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
     tabular.reason_workbook: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
 
 sla:

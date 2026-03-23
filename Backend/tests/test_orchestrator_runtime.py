@@ -158,6 +158,7 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
             "sheets_preview",
             "sheets_query",
             "sheets_export",
+            "sheets_create_workbook",
             "sheets_create_sheet",
             "cosmics_capability_wishlist_search",
             "cosmics_capability_wishlist_capture",
