@@ -2591,6 +2591,115 @@ def test_internal_session_routes_expose_state_turns_and_revisit(tmp_path) -> Non
         assert revisit_payload["raw_history"][-1]["content"] == "I will continue the migration and report back."
 
 
+def test_internal_session_artifact_routes_search_and_resolve(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="haiku")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+    from gateway.memory_routes import router as memory_router
+
+    app.include_router(memory_router)
+
+    with TestClient(app) as client:
+        session_id = runtime._current_session_id()
+        artifact_path = runtime.config.artifacts_root / "tsk_export" / "out" / "example.csv"
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_text("name,value\nAcme,1\n", encoding="utf-8")
+
+        user_message_id = runtime.session_store.append_message(
+            session_id,
+            role="user",
+            content="Make me a CSV file.",
+            channel="desktop:desk_a",
+            metadata={"platform": "desktop", "request_id": "req_artifact_1"},
+        )
+        assistant_message_id = runtime.session_store.append_message(
+            session_id,
+            role="assistant",
+            content="Here is the CSV.",
+            route="haiku",
+            channel="desktop:desk_a",
+            metadata={
+                "platform": "desktop",
+                "request_id": "req_artifact_1",
+                "produced_artifacts": [
+                    {
+                        "artifact_id": "out_csv_1",
+                        "task_id": "tsk_export",
+                        "mime": "text/csv",
+                        "path": "runs/artifacts/tsk_export/out/example.csv",
+                        "filename": "example.csv",
+                        "created_by_agent": "cosmic/tabular-agent:1.0.0",
+                        "audience": "deliverable",
+                    }
+                ],
+            },
+        )
+        runtime.session_store.upsert_turn_ledger_entry(
+            {
+                "turn_id": "turn_req_artifact_1",
+                "request_id": "req_artifact_1",
+                "session_id": session_id,
+                "task_id": "tsk_parent",
+                "channel": "desktop:desk_a",
+                "route": "haiku",
+                "started_at": utcnow_iso(),
+                "completed_at": utcnow_iso(),
+                "user_message_id": user_message_id,
+                "assistant_message_id": assistant_message_id,
+                "user_goal": "Create a CSV export",
+                "user_message_excerpt": "Make me a CSV file.",
+                "assistant_outcome": "Created example.csv",
+                "compact_line": "Created example.csv",
+                "task_refs": [],
+                "artifact_refs": ["out_csv_1"],
+                "metadata": {
+                    "produced_artifacts": [
+                        {
+                            "artifact_id": "out_csv_1",
+                            "task_id": "tsk_export",
+                            "mime": "text/csv",
+                            "path": "runs/artifacts/tsk_export/out/example.csv",
+                            "filename": "example.csv",
+                            "created_by_agent": "cosmic/tabular-agent:1.0.0",
+                            "audience": "deliverable",
+                        }
+                    ]
+                },
+            }
+        )
+
+        search_response = client.post(
+            "/internal/session/artifacts/search",
+            headers={"X-Internal-Token": "internal-token"},
+            json={"session_id": session_id, "query": "example", "limit": 5},
+        )
+        assert search_response.status_code == 200
+        search_payload = search_response.json()
+        assert search_payload["results"][0]["artifact_id"] == "out_csv_1"
+        assert search_payload["results"][0]["downloadable"] is True
+        assert search_payload["results"][0]["assistant_message_id"] == assistant_message_id
+
+        resolve_response = client.post(
+            "/internal/session/artifacts/resolve",
+            headers={"X-Internal-Token": "internal-token"},
+            json={"session_id": session_id, "artifact_ids": ["out_csv_1"]},
+        )
+        assert resolve_response.status_code == 200
+        resolve_payload = resolve_response.json()
+        assert resolve_payload["artifacts"][0]["artifact_id"] == "out_csv_1"
+        assert resolve_payload["artifacts"][0]["path"] == "runs/artifacts/tsk_export/out/example.csv"
+
+
 def test_desktop_websocket_supports_ping_query_and_resume(test_client: TestClient) -> None:
     with test_client.websocket_connect("/ws?token=test-token&device_id=desk_a1b2") as websocket:
         websocket.send_json({"type": "ping", "ts_unix_ms": 12345})

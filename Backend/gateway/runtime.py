@@ -1786,6 +1786,190 @@ class GatewayRuntime:
             "messages": messages,
         }
 
+    def search_session_produced_artifacts(
+        self,
+        session_id: str | None,
+        *,
+        query: str | None = None,
+        limit: int = 8,
+        all_sessions: bool = False,
+    ) -> dict[str, Any]:
+        normalized_session_id = self._safe_text(session_id)
+        normalized_query = self._safe_text(query)
+        normalized_limit = max(1, min(20, int(limit)))
+        if all_sessions:
+            sessions = [
+                self._safe_text(item.get("id"))
+                for item in self.session_store.list_sessions(limit=200)
+                if isinstance(item, dict) and self._safe_text(item.get("id"))
+            ]
+        elif normalized_session_id:
+            sessions = [normalized_session_id]
+        else:
+            return {
+                "session_id": None,
+                "query": normalized_query,
+                "all_sessions": all_sessions,
+                "results": [],
+                "count": 0,
+                "message": "session_id is required unless all_sessions=true.",
+            }
+
+        query_tokens = [
+            token
+            for token in (normalized_query or "").lower().replace("_", " ").split()
+            if token
+        ]
+        seen: set[tuple[str, str, str]] = set()
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for current_session_id in sessions:
+            for turn in self.session_store.list_all_turn_ledger(current_session_id):
+                if not isinstance(turn, dict):
+                    continue
+                metadata = turn.get("metadata") if isinstance(turn.get("metadata"), dict) else {}
+                produced_artifacts = self._normalize_produced_artifact_list(metadata.get("produced_artifacts"))
+                for artifact in produced_artifacts:
+                    if not isinstance(artifact, dict):
+                        continue
+                    artifact_id = self._safe_text(artifact.get("artifact_id")) or ""
+                    artifact_path = self._safe_text(artifact.get("path")) or ""
+                    dedupe_key = (current_session_id, artifact_id, artifact_path)
+                    if not any(dedupe_key[1:]) or dedupe_key in seen:
+                        continue
+                    seen.add(dedupe_key)
+                    record = self._build_recalled_artifact_record(
+                        session_id=current_session_id,
+                        turn_entry=turn,
+                        artifact=artifact,
+                    )
+                    score = self._score_recalled_artifact(record, query=normalized_query, query_tokens=query_tokens)
+                    if normalized_query and score <= 0:
+                        continue
+                    scored.append((score, record))
+
+        scored.sort(
+            key=lambda item: (
+                item[0],
+                str(item[1].get("created_at") or ""),
+                str(item[1].get("filename") or ""),
+            ),
+            reverse=True,
+        )
+        results = [record for _, record in scored[:normalized_limit]]
+        response = {
+            "session_id": normalized_session_id,
+            "query": normalized_query,
+            "all_sessions": all_sessions,
+            "results": results,
+            "count": len(results),
+        }
+        if not results:
+            response["message"] = "No matching produced artifacts found."
+        return response
+
+    def resolve_session_artifacts(
+        self,
+        *,
+        session_id: str | None,
+        artifact_ids: list[str] | None = None,
+        all_sessions: bool = False,
+    ) -> dict[str, Any]:
+        normalized_session_id = self._safe_text(session_id)
+        normalized_ids = [self._safe_text(item) for item in (artifact_ids or []) if self._safe_text(item)]
+        if not normalized_ids:
+            return {
+                "session_id": normalized_session_id,
+                "artifact_ids": [],
+                "all_sessions": all_sessions,
+                "artifacts": [],
+                "count": 0,
+                "message": "artifact_ids is required.",
+            }
+
+        if all_sessions:
+            sessions = [
+                self._safe_text(item.get("id"))
+                for item in self.session_store.list_sessions(limit=200)
+                if isinstance(item, dict) and self._safe_text(item.get("id"))
+            ]
+        elif normalized_session_id:
+            sessions = [normalized_session_id]
+        else:
+            return {
+                "session_id": None,
+                "artifact_ids": normalized_ids,
+                "all_sessions": all_sessions,
+                "artifacts": [],
+                "count": 0,
+                "message": "session_id is required unless all_sessions=true.",
+            }
+
+        targets = set(normalized_ids)
+        seen: set[str] = set()
+        resolved_artifacts: list[dict[str, Any]] = []
+        for current_session_id in sessions:
+            for turn in self.session_store.list_all_turn_ledger(current_session_id):
+                if not isinstance(turn, dict):
+                    continue
+                metadata = turn.get("metadata") if isinstance(turn.get("metadata"), dict) else {}
+                produced_artifacts = self._normalize_produced_artifact_list(metadata.get("produced_artifacts"))
+                for artifact in produced_artifacts:
+                    if not isinstance(artifact, dict):
+                        continue
+                    artifact_id = self._safe_text(artifact.get("artifact_id")) or ""
+                    if not artifact_id or artifact_id not in targets or artifact_id in seen:
+                        continue
+                    record = self._build_recalled_artifact_record(
+                        session_id=current_session_id,
+                        turn_entry=turn,
+                        artifact=artifact,
+                    )
+                    if not bool(record.get("downloadable")):
+                        continue
+                    resolved_artifacts.append(
+                        {
+                            key: value
+                            for key, value in {
+                                "artifact_id": record.get("artifact_id"),
+                                "task_id": record.get("task_id"),
+                                "mime": record.get("mime_type"),
+                                "mime_type": record.get("mime_type"),
+                                "sha256": record.get("sha256"),
+                                "path": record.get("path"),
+                                "source_url": record.get("source_url"),
+                                "created_by_agent": record.get("created_by_agent"),
+                                "created_at": record.get("created_at"),
+                                "kind": record.get("kind") or "output",
+                                "audience": "deliverable",
+                                "filename": record.get("filename"),
+                                "session_id": record.get("session_id"),
+                                "request_id": record.get("request_id"),
+                                "turn_id": record.get("turn_id"),
+                                "assistant_message_id": record.get("assistant_message_id"),
+                                "route": record.get("route"),
+                                "label": record.get("filename"),
+                                "summary": record.get("assistant_outcome"),
+                            }.items()
+                            if value not in (None, "", [], {})
+                        }
+                    )
+                    seen.add(artifact_id)
+                if len(seen) >= len(targets):
+                    break
+            if len(seen) >= len(targets):
+                break
+
+        response = {
+            "session_id": normalized_session_id,
+            "artifact_ids": normalized_ids,
+            "all_sessions": all_sessions,
+            "artifacts": resolved_artifacts,
+            "count": len(resolved_artifacts),
+        }
+        if not resolved_artifacts:
+            response["message"] = "Requested artifact could not be resolved."
+        return response
+
     def list_routing_audit(self, limit: int = 50) -> list[dict[str, Any]]:
         return self.routing_audit_store.list_entries(limit=limit)
 
@@ -3105,6 +3289,7 @@ class GatewayRuntime:
         notebook.setdefault("failures_to_avoid", [])
         notebook.setdefault("next_best_actions", [])
         notebook.setdefault("compact_history", [])
+        notebook.setdefault("activity_log", [])
         notebook.setdefault("created_at", utcnow_iso())
 
         event_type = self._safe_text(event.get("type")) or ""
@@ -3159,6 +3344,13 @@ class GatewayRuntime:
             notebook["status"] = "cancelled"
             notebook["current_state"] = state_message or "Task cancelled"
 
+        activity_entry = self._build_task_activity_entry(event)
+        if activity_entry:
+            notebook["activity_log"] = self._normalize_activity_log(
+                [*self._normalize_activity_log(notebook.get("activity_log")), activity_entry],
+                limit=16,
+            )
+
         if turn_entry is not None:
             notebook["artifact_refs"] = self._normalize_string_list(
                 [
@@ -3196,6 +3388,77 @@ class GatewayRuntime:
 
         notebook["updated_at"] = utcnow_iso()
         return notebook
+
+    def _build_task_activity_entry(self, event: dict[str, Any]) -> dict[str, Any] | None:
+        event_type = self._safe_text(event.get("type")) or ""
+        status = self._safe_text(event.get("status"))
+        message = self._safe_text(event.get("message"))
+        docs_progress = event.get("docs_progress") if isinstance(event.get("docs_progress"), dict) else None
+        tabular_progress = (
+            event.get("tabular_progress") if isinstance(event.get("tabular_progress"), dict) else None
+        )
+        progress_state = tabular_progress or docs_progress
+        label = (
+            self._safe_text(progress_state.get("label")) if isinstance(progress_state, dict) else None
+        ) or message or status
+        if not label:
+            return None
+        kind = (
+            self._safe_text(progress_state.get("kind")) if isinstance(progress_state, dict) else None
+        ) or (
+            "task_lifecycle"
+            if event_type in {"task.suspended", "task.resumed", "task.input_required"}
+            else "generic"
+        )
+        stage = self._safe_text(progress_state.get("stage")) if isinstance(progress_state, dict) else None
+        return {
+            "id": f"activity_{uuid4().hex}",
+            "label": label,
+            "detail": message,
+            "status": status,
+            "stage": stage,
+            "kind": kind,
+            "created_at": utcnow_iso(),
+        }
+
+    def _normalize_activity_log(
+        self,
+        entries: Any,
+        *,
+        limit: int = 16,
+    ) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        if not isinstance(entries, list):
+            return normalized
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            label = self._safe_text(entry.get("label"))
+            if not label:
+                continue
+            item = {
+                "id": self._safe_text(entry.get("id")) or f"activity_{uuid4().hex}",
+                "label": label,
+                "detail": self._safe_text(entry.get("detail")),
+                "status": self._safe_text(entry.get("status")),
+                "stage": self._safe_text(entry.get("stage")),
+                "kind": self._safe_text(entry.get("kind")) or "generic",
+                "created_at": self._safe_text(entry.get("created_at")) or utcnow_iso(),
+            }
+            last = normalized[-1] if normalized else None
+            if (
+                last
+                and last.get("label") == item["label"]
+                and (last.get("detail") or "") == (item["detail"] or "")
+                and (last.get("status") or "") == (item["status"] or "")
+                and (last.get("stage") or "") == (item["stage"] or "")
+                and (last.get("kind") or "") == (item["kind"] or "")
+            ):
+                continue
+            normalized.append(item)
+        if len(normalized) > limit:
+            normalized = normalized[-limit:]
+        return normalized
 
     def _refresh_active_working_set(self, session_id: str) -> dict[str, Any]:
         metadata = self.session_store.get_session_metadata(session_id)
@@ -4109,6 +4372,7 @@ class GatewayRuntime:
         attachments: list[dict[str, Any]] | None = None,
         input_artifacts: list[dict[str, Any]] | None = None,
         produced_artifacts: list[dict[str, Any]] | None = None,
+        activity_log: list[dict[str, Any]] | None = None,
     ) -> None:
         """Push a cross-channel message to all connected desktop clients for this session.
 
@@ -4148,6 +4412,8 @@ class GatewayRuntime:
             event["input_artifacts"] = input_artifacts
         if produced_artifacts:
             event["produced_artifacts"] = produced_artifacts
+        if activity_log:
+            event["activity_log"] = activity_log
         await desktop_adapter.broadcast_to_session(session_id, event)
 
     def _track_background_task(self, coroutine: asyncio.Future[Any] | asyncio.Task[Any] | Any) -> None:
@@ -6751,6 +7017,11 @@ class GatewayRuntime:
                 fallback_sources=event.get("sources") if isinstance(event.get("sources"), list) else None,
             )
             produced_artifacts = self._normalize_produced_artifact_list(event.get("produced_artifacts"))
+            task_notebook = self.session_store.get_task_notebook(task_id) if task_id else None
+            activity_log = self._normalize_activity_log(
+                task_notebook.get("activity_log") if isinstance(task_notebook, dict) else None,
+                limit=16,
+            )
             assistant_message_id = store_assistant_message(
                 str(event.get("content") or ""),
                 awaiting_reply=bool(event.get("awaiting_reply")),
@@ -6769,12 +7040,15 @@ class GatewayRuntime:
                         event.get("specialist_receipts")
                     ),
                     "produced_artifacts": produced_artifacts,
+                    "activity_log": activity_log,
                 },
                 channel=event_channel,
                 route="opus",
             )
             if assistant_message_id:
                 event["message_id"] = assistant_message_id
+            if activity_log:
+                event["activity_log"] = activity_log
             # Cross-channel sync: push the assistant response to connected desktop clients
             if event_channel and not event_channel.startswith("desktop:") and session_id:
                 self._track_background_task(
@@ -6788,6 +7062,7 @@ class GatewayRuntime:
                         sources=event.get("sources") if isinstance(event.get("sources"), list) else None,
                         thinking_text=self._safe_text(event.get("thinking_text")),
                         produced_artifacts=produced_artifacts,
+                        activity_log=activity_log,
                     )
                 )
         elif event_type == "task.input_required":
@@ -7018,6 +7293,66 @@ class GatewayRuntime:
             if len(normalized) >= 12:
                 break
         return normalized
+
+    def _build_recalled_artifact_record(
+        self,
+        *,
+        session_id: str,
+        turn_entry: dict[str, Any],
+        artifact: dict[str, Any],
+    ) -> dict[str, Any]:
+        record = dict(artifact)
+        record["session_id"] = session_id
+        record["turn_id"] = self._safe_text(turn_entry.get("turn_id"))
+        record["request_id"] = self._safe_text(turn_entry.get("request_id"))
+        record["assistant_message_id"] = self._safe_text(turn_entry.get("assistant_message_id"))
+        record["route"] = self._safe_text(turn_entry.get("route"))
+        record["user_goal"] = self._safe_text(turn_entry.get("user_goal"))
+        record["assistant_outcome"] = self._safe_text(turn_entry.get("assistant_outcome"))
+        return {key: value for key, value in record.items() if value not in (None, "", [], {})}
+
+    def _score_recalled_artifact(
+        self,
+        record: dict[str, Any],
+        *,
+        query: str | None,
+        query_tokens: list[str],
+    ) -> int:
+        if not query:
+            return 1
+        filename = (self._safe_text(record.get("filename")) or "").lower()
+        artifact_id = (self._safe_text(record.get("artifact_id")) or "").lower()
+        user_goal = (self._safe_text(record.get("user_goal")) or "").lower()
+        assistant_outcome = (self._safe_text(record.get("assistant_outcome")) or "").lower()
+        created_by_agent = (self._safe_text(record.get("created_by_agent")) or "").lower()
+        route = (self._safe_text(record.get("route")) or "").lower()
+        normalized_query = query.lower()
+        score = 0
+        if normalized_query in filename:
+            score += 20
+        if normalized_query in artifact_id:
+            score += 18
+        if normalized_query in user_goal:
+            score += 12
+        if normalized_query in assistant_outcome:
+            score += 10
+        search_blob = " ".join([filename, artifact_id, user_goal, assistant_outcome, created_by_agent, route])
+        for token in query_tokens:
+            if token in filename:
+                score += 6
+            if token in artifact_id:
+                score += 5
+            if token in user_goal:
+                score += 3
+            if token in assistant_outcome:
+                score += 2
+            if token in created_by_agent:
+                score += 2
+            if token in route:
+                score += 1
+        if query_tokens and not any(token in search_blob for token in query_tokens):
+            return 0
+        return score
 
     @staticmethod
     def _research_path_label(path: str) -> str:

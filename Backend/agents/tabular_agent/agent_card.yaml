@@ -1,9 +1,9 @@
 agent_id: cosmic/tabular-agent:1.0.0
 display_name: Tabular Spreadsheet Agent
 description: >
-  Specialist for XLSX, CSV, TSV, and XLSB. Produces deterministic Parquet + DuckDB bundles,
-  compact browse/schema/query surfaces, optional MiMo-backed internal summarization, and an
-  internal agentic reasoning path (plan → SQL or COSMIC sandbox → summarize) for orchestrator delegation.
+  Anything to do with spreadsheets, this is the specialist to use. It parses, queries, creates,
+  edits, exports, and converts XLSX, CSV, TSV, and XLSB files, and can handle deeper spreadsheet
+  analysis when needed.
 
 intents:
   - name: tabular.parse_bundle
@@ -12,32 +12,52 @@ intents:
   - name: tabular.browse_workbook
     description: List workbooks and handles for a tabular bundle.
     timeout_sec: 60
+    usage_hints:
+      - Start with bundle/workbook discovery when you need to orient on what sheets exist.
   - name: tabular.schema_sheet
     description: Return sheet schema entries from sheet_catalog.json.
     timeout_sec: 60
+    usage_hints:
+      - Check schema before making strong claims about headers, units, formulas, or column meaning.
+      - Treat catalog/schema output as the source of truth for structure; do not invent cell addresses.
   - name: tabular.preview_sheet
     description: Return bounded sheet preview markdown.
     timeout_sec: 60
+    usage_hints:
+      - Use preview when layout or header interpretation is still unclear after schema inspection.
   - name: tabular.query_workbook
     description: Run a read-only SELECT against the DuckDB bundle.
     timeout_sec: 120
+    usage_hints:
+      - Prefer deterministic query_workbook for filtering, grouping, joins, and exact numeric answers.
   - name: tabular.export_result
     description: Export a SELECT result to CSV or Parquet under the bundle exports folder.
     timeout_sec: 120
+    usage_hints:
+      - Use export_result for derived query outputs, not for exporting an existing sheet unchanged.
   - name: tabular.export_sheet
     description: Export one existing parsed sheet to CSV, XLSX, or Parquet without writing SQL.
     timeout_sec: 120
+    usage_hints:
+      - Use export_sheet when the user wants the same parsed sheet/workbook in another file format.
   - name: tabular.create_sheet
     description: Create an empty derived sheet (Parquet + DuckDB view) inside an existing bundle.
     timeout_sec: 60
+    usage_hints:
+      - Use create_sheet to add a new empty tab inside an existing parsed workbook bundle.
   - name: tabular.create_workbook
     description: Create a brand-new workbook bundle from structured rows/sheets and emit a downloadable .xlsx.
     timeout_sec: 120
+    usage_hints:
+      - Use create_workbook when the spreadsheet does not already exist as an uploaded or parsed bundle.
   - name: tabular.reason_workbook
     description: >
       Internal agentic reasoning over a parsed workbook (inspect → MiMo plan → deterministic SELECT or
       bounded Python under codes/ + executions/ → summarize). Does not replace granular browse/query tools.
     timeout_sec: 240
+    usage_hints:
+      - Use reason_workbook for one delegated spreadsheet goal when composing many granular steps yourself would be clumsy.
+      - Prefer schema, preview, query, and export tools directly when you already know the exact deterministic operation.
 
 artifact_types:
   - tabular_workbook_bundle

@@ -511,6 +511,11 @@ async def test_dispatch_agent_task_records_usage_and_refreshes_featured_speciali
         featured = runtime.registry_store.list_featured_specialists(limit=3)
     finally:
         await runtime.stop()
+    assert isinstance(result, AgentResult)
+    assert result.status == "completed"
+    assert len(featured) == 1
+    assert featured[0]["agent_id"] == "cosmic/research-agent:1.0.0"
+    assert featured[0]["usage_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -610,8 +615,67 @@ async def test_orchestrator_dispatch_tracks_suspended_and_resumed_until_complete
     finally:
         await runtime.stop()
 
-    assert isinstance(result, AgentResult)
-    assert result.status == "completed"
-    assert len(featured) == 1
-    assert featured[0]["agent_id"] == "cosmic/research-agent:1.0.0"
-    assert featured[0]["usage_count"] == 1
+
+@pytest.mark.asyncio
+async def test_orchestrator_dispatch_passes_input_artifacts_to_child_task(tmp_path) -> None:
+    fake_redis = FakeRedis()
+    config = OrchestratorConfig(
+        signing_secret="gateway-secret",
+        agent_signing_secrets={"cosmic/research-agent:1.0.0": "research-secret"},
+        anthropic_api_key="anthropic-key",
+        task_ledger_db_path=tmp_path / "task_ledger_artifacts.db",
+        agent_registry_db_path=tmp_path / "registry_artifacts.db",
+    )
+    await _register_agent(_agent_card(), fake_redis, config.agent_registry_db_path)
+    runtime = OrchestratorRuntime(
+        config,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200))),
+        redis_client=fake_redis,
+    )
+    await runtime.start()
+    try:
+        dispatch = asyncio.create_task(
+            runtime.dispatch_agent_task(
+                parent_task=_parent_task("gateway-secret"),
+                intent="research.topic",
+                input_payload={"query": "re-process this export"},
+                input_artifacts=[
+                    {
+                        "artifact_id": "out_prev_1",
+                        "task_id": "tsk_prev",
+                        "mime": "text/csv",
+                        "path": "runs/artifacts/tsk_prev/out/list.csv",
+                        "filename": "list.csv",
+                    }
+                ],
+                wait_timeout_sec=1.0,
+            )
+        )
+        fields = await _wait_for_stream(fake_redis, "streams:cosmic/research-agent:1.0.0:high")
+        child_task = parse_task_envelope(fields)
+        assert child_task.input_artifacts == [
+            {
+                "artifact_id": "out_prev_1",
+                "task_id": "tsk_prev",
+                "mime": "text/csv",
+                "path": "runs/artifacts/tsk_prev/out/list.csv",
+                "filename": "list.csv",
+            }
+        ]
+        await fake_redis.xadd(
+            "streams:events",
+            {
+                "event": EventEnvelope(
+                    task_id=child_task.task_id,
+                    agent_id="cosmic/research-agent:1.0.0",
+                    event_type="task.completed",
+                    seq=1,
+                    payload={"status": "completed", "output": {"ok": True}, "artifacts": []},
+                ).model_dump_json()
+            },
+        )
+        result = await dispatch
+        assert isinstance(result, AgentResult)
+        assert result.output["ok"] is True
+    finally:
+        await runtime.stop()

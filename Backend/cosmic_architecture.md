@@ -3171,6 +3171,7 @@ When a specialist creates a user-facing file:
 - the orchestrator should preserve a compact `produced_artifacts` list on the parent turn
 - Gateway should persist those compact artifact descriptors in assistant-message metadata
 - client surfaces may render those as downloadable output-file cards
+- later turns may look those deliverable artifacts up again and either re-surface them or re-bind them into future child tasks via `TaskEnvelope.input_artifacts`
 
 Supporting notes:
 
@@ -3740,7 +3741,7 @@ CREATE TABLE featured_specialists (
 );
 ```
 
-`agent_usage_daily` is the durable promotion/demotion input: every successful specialist dispatch increments the `(agent_id, intent, usage_date)` bucket and updates `last_used_at`. `featured_specialists` is the compact prompt-facing snapshot produced from those usage buckets by a periodic orchestrator refresh loop. The snapshot is intentionally small and partial; it does **not** replace live registry lookup.
+`agent_usage_daily` is the durable promotion/demotion input: every successful specialist dispatch increments the `(agent_id, intent, usage_date)` bucket and updates `last_used_at`. `featured_specialists` is the compact prompt-facing snapshot produced by a periodic orchestrator refresh loop from recent usage **plus** recently registered specialist cards. Newly registered specialists seed into the shortlist by default, and are only demoted after more than 15 days with no activity. The snapshot is intentionally small and partial; it does **not** replace live registry lookup.
 
 ### 11.2 Redis Live State (Updated by Heartbeats)
 
@@ -4064,6 +4065,8 @@ task = TaskEnvelope(
 ```
 
 **Why `input_artifacts` is not just a path string in `input: dict`:** Typed (agent knows mime type), verified (sha256 integrity check), traceable (links back to producing task), reusable (same artifact can be passed to multiple agents without copying), auditable (orchestrator knows exactly which files were passed to which agents).
+
+When a prior produced file is needed again, the orchestrator should first resolve it from session/turn artifact history and then attach the normalized artifact descriptor into `TaskEnvelope.input_artifacts`. The prompt/tool layer should never browse raw artifact directories directly.
 
 ### 12.6 Agent Task Handler
 
@@ -9571,7 +9574,7 @@ In the current runtime, the Gateway exposes these internal memory/session endpoi
 
 Agent authors should treat these as the canonical same-VM memory/session control surface. Shared memory search/write goes through `/internal/memory/*`; exact historical recovery and live continuity inspection go through `/internal/session/*`. When a prior search or control flow already identified an exact `memory_id`, use `/internal/memory/memories/{memory_id}` to retrieve the full canonical memory block instead of relying on a truncated search hit alone.
 
-**Current implementation note (thin orchestrator):** the current production orchestrator assembles its system prompt from read-only asset files under `orchestrator/prompts/`, generates its exposed tool catalog from the centralized runtime registry in `orchestrator/tools/registry.py`, and exposes both the registry snapshot and prompt-asset SHA-256 hashes on `/health` for drift inspection. The shipped local tool set currently includes `memory_search`, `memory_fetch`, `memory_write`, `session_state`, `session_turns`, `session_history`, `task_notebook`, `session_revisit`, reminder tools, and a compact specialist-agent surface (`agent_catalog_search`, `delegate_to_agent`) alongside server-side `web_search` / `web_fetch`. The prompt may also include a **Current Specialist Shortlist** derived from recent successful specialist usage in the registry, but that shortlist is explicitly documented as a small dynamic subset rather than the full live catalog. Specialist capabilities themselves remain registered in agent cards and the runtime registry rather than being flattened into the orchestrator tool list per agent.
+**Current implementation note (thin orchestrator):** the current production orchestrator assembles its system prompt from read-only asset files under `orchestrator/prompts/`, generates its exposed tool catalog from the centralized runtime registry in `orchestrator/tools/registry.py`, and exposes both the registry snapshot and prompt-asset SHA-256 hashes on `/health` for drift inspection. The shipped always-visible tool set currently includes `memory_search`, `memory_fetch`, `memory_write`, `session_state`, `session_turns`, `session_history`, `task_notebook`, `session_revisit`, reminder tools, and a compact specialist-agent surface (`agent_catalog_search`, `delegate_to_agent`) alongside server-side `web_search` / `web_fetch`. The prompt may also include a **Current Specialist Shortlist** derived from recent successful specialist usage and recently registered specialists in the registry; when a specialist is on that shortlist, its first-class wrapper tools may also be surfaced for convenience. Specialists seed into the shortlist by default when newly registered and only fall out after more than 15 days of inactivity. Otherwise, specialist discovery remains authoritative through `agent_catalog_search`. Specialist-specific hygiene and usage nuance should not live as always-on global prompt text; instead, lookup results may carry compact per-intent `usage_hints` sourced from agent cards.
 
 ### 32.7 How Universal Tools Appear to the LLM
 

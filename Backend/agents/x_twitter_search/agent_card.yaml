@@ -12,12 +12,17 @@ intents:
     input_schema: schemas/intents/x.search.input.json
     output_schema: schemas/intents/x.search.output.json
     timeout_sec: 120
+    usage_hints:
+      - Use exact date windows and handle filters when the request is about recent X reactions or specific accounts.
+      - Keep direct X evidence distinct from your own synthesis.
 
   - name: x.recall_session
     description: Recall prior X/Twitter search runs from the agent's private session ledger.
     input_schema: schemas/intents/x.recall_session.input.json
     output_schema: schemas/intents/x.recall_session.output.json
     timeout_sec: 30
+    usage_hints:
+      - Recall prior X runs when you need exact reuse of already-fetched X evidence instead of rerunning the search.
 
 artifact_types:
   - x_search_report
@@ -66,4 +71,3 @@ version_info:
   deprecated_at: null
   remove_after: null
   changelog: CHANGELOG.md
-

@@ -900,3 +900,152 @@ async def test_tool_executor_delegate_to_agent_handles_in_progress_result() -> N
         "message": "firecrawl.recall_session is still running in the specialist agent.",
         "delegation": {"intent": "firecrawl.recall_session", "agent_id": None},
     }
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_artifact_lookup_and_redeliver_use_gateway_routes() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url == httpx.URL("http://gateway/internal/session/artifacts/search"):
+            payload = json.loads(request.content.decode("utf-8"))
+            assert payload == {
+                "session_id": "sess_current",
+                "query": "yc spreadsheet",
+                "limit": 4,
+                "all_sessions": True,
+            }
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "artifact_id": "out_yc_1",
+                            "filename": "YC_Spring_2026_Companies.xlsx",
+                            "session_id": "sess_current",
+                            "downloadable": True,
+                        }
+                    ],
+                    "count": 1,
+                },
+            )
+        if request.url == httpx.URL("http://gateway/internal/session/artifacts/resolve"):
+            payload = json.loads(request.content.decode("utf-8"))
+            assert payload == {
+                "session_id": "sess_current",
+                "artifact_ids": ["out_yc_1"],
+                "all_sessions": False,
+            }
+            return httpx.Response(
+                200,
+                json={
+                    "artifacts": [
+                        {
+                            "artifact_id": "out_yc_1",
+                            "task_id": "tsk_export",
+                            "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            "path": "runs/artifacts/tsk_export/out/YC_Spring_2026_Companies.xlsx",
+                            "filename": "YC_Spring_2026_Companies.xlsx",
+                            "audience": "deliverable",
+                        }
+                    ],
+                    "count": 1,
+                },
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    executor = ToolExecutor(
+        gateway_url="http://gateway",
+        gateway_internal_token="internal-token",
+        client=client,
+    )
+    context = ToolExecutionContext(session_id="sess_current")
+    try:
+        lookup_raw = await executor.execute(
+            "artifact_lookup",
+            {"query": "yc spreadsheet", "limit": 4, "all_sessions": True},
+            context=context,
+        )
+        redeliver_raw = await executor.execute(
+            "artifact_redeliver",
+            {"artifact_id": "out_yc_1"},
+            context=context,
+        )
+    finally:
+        await client.aclose()
+
+    lookup_result = json.loads(lookup_raw)
+    redeliver_result = json.loads(redeliver_raw)
+    assert lookup_result["results"][0]["artifact_id"] == "out_yc_1"
+    assert redeliver_result["found"] is True
+    assert redeliver_result["artifacts"][0]["filename"] == "YC_Spring_2026_Companies.xlsx"
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_delegate_to_agent_resolves_artifact_ids_into_input_artifacts() -> None:
+    observed: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url == httpx.URL("http://gateway/internal/session/artifacts/resolve"):
+            payload = json.loads(request.content.decode("utf-8"))
+            assert payload == {
+                "session_id": "sess_parent",
+                "artifact_ids": ["out_prev_1"],
+                "all_sessions": False,
+            }
+            return httpx.Response(
+                200,
+                json={
+                    "artifacts": [
+                        {
+                            "artifact_id": "out_prev_1",
+                            "task_id": "tsk_prev_export",
+                            "mime": "text/csv",
+                            "path": "runs/artifacts/tsk_prev_export/out/list.csv",
+                            "filename": "list.csv",
+                            "sha256": "abc123",
+                            "audience": "deliverable",
+                        }
+                    ],
+                    "count": 1,
+                },
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    async def dispatcher(**kwargs):
+        observed.update(kwargs)
+        return AgentResult(status="completed", output={"message": "ok"}, artifacts=[])
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    executor = ToolExecutor(
+        gateway_url="http://gateway",
+        gateway_internal_token="internal-token",
+        agent_dispatcher=dispatcher,
+        client=client,
+    )
+    context = ToolExecutionContext(parent_task=_parent_task(), session_id="sess_parent")
+    try:
+        raw_result = await executor.execute(
+            "delegate_to_agent",
+            {
+                "intent": "docs.parse_bundle",
+                "input": {"bundle_label": "parse this prior file again"},
+                "artifact_ids": ["out_prev_1"],
+            },
+            context=context,
+        )
+    finally:
+        await client.aclose()
+
+    result = json.loads(raw_result)
+    assert observed["input_artifacts"] == [
+        {
+            "artifact_id": "out_prev_1",
+            "task_id": "tsk_prev_export",
+            "mime": "text/csv",
+            "path": "runs/artifacts/tsk_prev_export/out/list.csv",
+            "filename": "list.csv",
+            "sha256": "abc123",
+            "audience": "deliverable",
+        }
+    ]
+    assert result["message"] == "ok"

@@ -16,26 +16,37 @@ intents:
     input_schema: schemas/intents/docs.browse_bundle.input.json
     output_schema: schemas/intents/docs.browse_bundle.output.json
     timeout_sec: 60
+    usage_hints:
+      - Browse first when you need orientation on document structure, figures, or assets before broader reads.
   - name: docs.search_bundle
     description: Search parsed sections or chunks inside a previously created bundle and return the strongest matching excerpts.
     input_schema: schemas/intents/docs.search_bundle.input.json
     output_schema: schemas/intents/docs.search_bundle.output.json
     timeout_sec: 60
+    usage_hints:
+      - Use search before longer reads when you need targeted retrieval from a parsed document bundle.
   - name: docs.read_bundle
     description: Read a parsed bundle by document window, section, page range, slide range, chunk identifiers, or markdown anchor.
     input_schema: schemas/intents/docs.read_bundle.input.json
     output_schema: schemas/intents/docs.read_bundle.output.json
     timeout_sec: 60
+    usage_hints:
+      - Canonical parsed content lives on document.md; walk it in bounded reads instead of pretending the whole file is already in context.
+      - Identify doc_id first in multi-document bundles before broader reads.
   - name: docs.fetch_asset
     description: Fetch exact parsed sidecar asset metadata and lightweight text content for a figure, table, or generated page asset.
     input_schema: schemas/intents/docs.fetch_asset.input.json
     output_schema: schemas/intents/docs.fetch_asset.output.json
     timeout_sec: 60
+    usage_hints:
+      - Fetch asset metadata when you need the exact figure, table, or generated page reference from a parsed bundle.
   - name: docs.reinspect_asset
     description: Reinspect an exact parsed image asset such as a figure, chart, page image, or slide image using the hosted visual pipeline.
     input_schema: schemas/intents/docs.reinspect_asset.input.json
     output_schema: schemas/intents/docs.reinspect_asset.output.json
     timeout_sec: 90
+    usage_hints:
+      - Use reinspect_asset when visual certainty matters; do not claim visual inspection from fetch_asset alone.
 
 artifact_types:
   - parsed_document_bundle

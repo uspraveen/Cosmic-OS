@@ -7,6 +7,11 @@ from typing import Any, Callable
 
 ProgressBuilder = Callable[[dict[str, Any]], str]
 
+_DOCS_AGENT_ID = "cosmic/docs-parser-agent:1.0.0"
+_TABULAR_AGENT_ID = "cosmic/tabular-agent:1.0.0"
+_FIRECRAWL_AGENT_ID = "cosmic/firecrawl-web-scrape-agent:1.0.0"
+_X_SEARCH_AGENT_ID = "cosmic/x-twitter-search-agent:1.0.0"
+
 
 @dataclass(frozen=True, slots=True)
 class ToolSpec:
@@ -18,6 +23,7 @@ class ToolSpec:
     handler_method: str | None = None
     read_only: bool = False
     exposed_to_model: bool = True
+    specialist_agent_id: str | None = None
 
     @property
     def is_local(self) -> bool:
@@ -25,6 +31,11 @@ class ToolSpec:
 
     def to_definition(self) -> dict[str, Any]:
         return deepcopy(self.api_definition)
+
+    def is_visible_to_model(self, featured_agent_ids: set[str] | None = None) -> bool:
+        if self.specialist_agent_id:
+            return bool(featured_agent_ids and self.specialist_agent_id in featured_agent_ids)
+        return self.exposed_to_model
 
 
 def _preview_list(value: Any, *, limit: int = 2) -> str:
@@ -81,6 +92,16 @@ def _delegate_to_agent_progress(tool_input: dict[str, Any]) -> str:
     if session_id:
         return f"Delegating {intent_label} for {session_id}..."
     return f"Delegating to specialist intent: {intent_label}" if intent else "Delegating to a specialist agent..."
+
+
+def _artifact_lookup_progress(tool_input: dict[str, Any]) -> str:
+    query = str(tool_input.get("query") or "").strip()
+    return f"Looking for a previous file: {query}" if query else "Looking for a previous produced file..."
+
+
+def _artifact_redeliver_progress(tool_input: dict[str, Any]) -> str:
+    artifact_id = str(tool_input.get("artifact_id") or "").strip()
+    return f"Re-surfacing file {artifact_id}..." if artifact_id else "Re-surfacing a previous produced file..."
 
 
 def _wishlist_search_progress(tool_input: dict[str, Any]) -> str:
@@ -400,6 +421,27 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                         "type": "number",
                         "description": "Optional override for how long to wait before returning an in-progress result.",
                     },
+                    "artifact_ids": {
+                        "type": "array",
+                        "description": (
+                            "Optional previously produced artifact IDs to resolve and pass to the specialist via "
+                            "TaskEnvelope.input_artifacts."
+                        ),
+                        "items": {"type": "string"},
+                    },
+                    "input_artifacts": {
+                        "type": "array",
+                        "description": (
+                            "Optional explicit artifact descriptors to pass to the specialist via "
+                            "TaskEnvelope.input_artifacts. Prefer artifact_ids when reusing prior COSMIC-produced files."
+                        ),
+                        "items": {"type": "object"},
+                    },
+                    "all_sessions": {
+                        "type": "boolean",
+                        "description": "When true, resolve artifact_ids across all known sessions instead of only the current session.",
+                        "default": False,
+                    },
                 },
                 "required": ["intent", "input"],
             },
@@ -408,6 +450,76 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Delegate specialist work by exact intent after discovery. Prefer this over carrying agent-specific tools in your tool list.",
         progress_builder=_delegate_to_agent_progress,
         handler_method="_delegate_to_agent",
+    ),
+    ToolSpec(
+        name="artifact_lookup",
+        api_definition={
+            "name": "artifact_lookup",
+            "description": (
+                "Search previously produced COSMIC files by name or description so you can reuse or re-deliver them."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Filename or natural-language description of the file to find.",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional session to search. Defaults to the current session when available.",
+                    },
+                    "all_sessions": {
+                        "type": "boolean",
+                        "description": "When true, search across all known sessions instead of only the current session.",
+                        "default": False,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of matches to return. Default 5.",
+                        "default": 5,
+                    },
+                },
+            },
+        },
+        group="artifacts",
+        prompt_summary="Find prior produced files by filename or description before re-delivering them or passing them back into a specialist.",
+        progress_builder=_artifact_lookup_progress,
+        handler_method="_artifact_lookup",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="artifact_redeliver",
+        api_definition={
+            "name": "artifact_redeliver",
+            "description": (
+                "Re-surface a previously produced COSMIC file in the current response so the user can download it again."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "artifact_id": {
+                        "type": "string",
+                        "description": "Exact artifact_id of the previously produced file to re-surface.",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional session to resolve from. Defaults to the current session when available.",
+                    },
+                    "all_sessions": {
+                        "type": "boolean",
+                        "description": "When true, resolve across all known sessions instead of only the current session.",
+                        "default": False,
+                    },
+                },
+                "required": ["artifact_id"],
+            },
+        },
+        group="artifacts",
+        prompt_summary="Re-surface a previous deliverable file as a Produced Files card in the current response.",
+        progress_builder=_artifact_redeliver_progress,
+        handler_method="_artifact_redeliver",
+        read_only=True,
     ),
     ToolSpec(
         name="cosmics_capability_wishlist_search",
@@ -524,6 +636,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_docs_browse_progress,
         handler_method="_docs_browse",
         read_only=True,
+        specialist_agent_id=_DOCS_AGENT_ID,
     ),
     ToolSpec(
         name="docs_search",
@@ -570,6 +683,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_docs_search_progress,
         handler_method="_docs_search",
         read_only=True,
+        specialist_agent_id=_DOCS_AGENT_ID,
     ),
     ToolSpec(
         name="docs_read",
@@ -652,6 +766,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_docs_read_progress,
         handler_method="_docs_read",
         read_only=True,
+        specialist_agent_id=_DOCS_AGENT_ID,
     ),
     ToolSpec(
         name="docs_fetch_asset",
@@ -689,6 +804,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_docs_fetch_asset_progress,
         handler_method="_docs_fetch_asset",
         read_only=True,
+        specialist_agent_id=_DOCS_AGENT_ID,
     ),
     ToolSpec(
         name="docs_reinspect_asset",
@@ -726,6 +842,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_docs_reinspect_asset_progress,
         handler_method="_docs_reinspect_asset",
         read_only=True,
+        specialist_agent_id=_DOCS_AGENT_ID,
     ),
     ToolSpec(
         name="sheets_browse",
@@ -748,6 +865,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_sheets_browse_progress,
         handler_method="_sheets_browse",
         read_only=True,
+        specialist_agent_id=_TABULAR_AGENT_ID,
     ),
     ToolSpec(
         name="sheets_schema",
@@ -773,6 +891,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_sheets_schema_progress,
         handler_method="_sheets_schema",
         read_only=True,
+        specialist_agent_id=_TABULAR_AGENT_ID,
     ),
     ToolSpec(
         name="sheets_preview",
@@ -798,6 +917,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_sheets_preview_progress,
         handler_method="_sheets_preview",
         read_only=True,
+        specialist_agent_id=_TABULAR_AGENT_ID,
     ),
     ToolSpec(
         name="sheets_query",
@@ -822,6 +942,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_sheets_query_progress,
         handler_method="_sheets_query",
         read_only=True,
+        specialist_agent_id=_TABULAR_AGENT_ID,
     ),
     ToolSpec(
         name="sheets_export",
@@ -844,6 +965,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_sheets_export_progress,
         handler_method="_sheets_export",
         read_only=False,
+        specialist_agent_id=_TABULAR_AGENT_ID,
     ),
     ToolSpec(
         name="sheets_export_sheet",
@@ -874,6 +996,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_sheets_export_sheet_progress,
         handler_method="_sheets_export_sheet",
         read_only=False,
+        specialist_agent_id=_TABULAR_AGENT_ID,
     ),
     ToolSpec(
         name="sheets_create_workbook",
@@ -933,6 +1056,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_sheets_create_workbook_progress,
         handler_method="_sheets_create_workbook",
         read_only=False,
+        specialist_agent_id=_TABULAR_AGENT_ID,
     ),
     ToolSpec(
         name="sheets_create_sheet",
@@ -970,6 +1094,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_sheets_create_sheet_progress,
         handler_method="_sheets_create_sheet",
         read_only=False,
+        specialist_agent_id=_TABULAR_AGENT_ID,
     ),
     ToolSpec(
         name="sheets_reason",
@@ -1004,6 +1129,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_sheets_reason_progress,
         handler_method="_sheets_reason",
         read_only=False,
+        specialist_agent_id=_TABULAR_AGENT_ID,
     ),
     ToolSpec(
         name="firecrawl_scrape",
@@ -1071,6 +1197,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_firecrawl_scrape_progress,
         handler_method="_firecrawl_scrape",
         exposed_to_model=False,
+        specialist_agent_id=_FIRECRAWL_AGENT_ID,
     ),
     ToolSpec(
         name="firecrawl_extract",
@@ -1132,6 +1259,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_firecrawl_extract_progress,
         handler_method="_firecrawl_extract",
         exposed_to_model=False,
+        specialist_agent_id=_FIRECRAWL_AGENT_ID,
     ),
     ToolSpec(
         name="firecrawl_recall_session",
@@ -1162,6 +1290,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         handler_method="_firecrawl_recall_session",
         read_only=True,
         exposed_to_model=False,
+        specialist_agent_id=_FIRECRAWL_AGENT_ID,
     ),
     ToolSpec(
         name="x_search",
@@ -1225,6 +1354,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_x_search_progress,
         handler_method="_x_search",
         exposed_to_model=False,
+        specialist_agent_id=_X_SEARCH_AGENT_ID,
     ),
     ToolSpec(
         name="x_recall_session",
@@ -1255,6 +1385,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         handler_method="_x_recall_session",
         read_only=True,
         exposed_to_model=False,
+        specialist_agent_id=_X_SEARCH_AGENT_ID,
     ),
     ToolSpec(
         name="memory_search",
@@ -1702,12 +1833,16 @@ _GROUP_TITLES = {
 }
 
 
-def get_model_tool_definitions() -> list[dict[str, Any]]:
-    return [spec.to_definition() for spec in _MODEL_TOOL_SPECS if spec.exposed_to_model]
+def get_model_tool_definitions(featured_agent_ids: set[str] | None = None) -> list[dict[str, Any]]:
+    return [spec.to_definition() for spec in _MODEL_TOOL_SPECS if spec.is_visible_to_model(featured_agent_ids)]
 
 
-def get_local_tool_definitions() -> list[dict[str, Any]]:
-    return [spec.to_definition() for spec in _MODEL_TOOL_SPECS if spec.is_local and spec.exposed_to_model]
+def get_local_tool_definitions(featured_agent_ids: set[str] | None = None) -> list[dict[str, Any]]:
+    return [
+        spec.to_definition()
+        for spec in _MODEL_TOOL_SPECS
+        if spec.is_local and spec.is_visible_to_model(featured_agent_ids)
+    ]
 
 
 def get_tool_spec(name: str) -> ToolSpec | None:
@@ -1732,10 +1867,10 @@ def build_tool_progress_message(tool_name: str, tool_input: dict[str, Any]) -> s
     return spec.progress_builder(tool_input)
 
 
-def build_tool_prompt_catalog() -> str:
+def build_tool_prompt_catalog(featured_agent_ids: set[str] | None = None) -> str:
     grouped: dict[str, list[str]] = {}
     for spec in _MODEL_TOOL_SPECS:
-        if not spec.exposed_to_model or not spec.prompt_summary:
+        if not spec.is_visible_to_model(featured_agent_ids) or not spec.prompt_summary:
             continue
         grouped.setdefault(spec.group, []).append(f"- `{spec.name}`: {spec.prompt_summary}")
 
@@ -1750,14 +1885,22 @@ def build_tool_prompt_catalog() -> str:
     return "\n".join(lines).strip()
 
 
-def get_tool_registry_snapshot() -> dict[str, Any]:
+def get_tool_registry_snapshot(featured_agent_ids: set[str] | None = None) -> dict[str, Any]:
     return {
-        "model_tools": [spec.name for spec in _MODEL_TOOL_SPECS if spec.exposed_to_model],
-        "local_tools": [spec.name for spec in _MODEL_TOOL_SPECS if spec.is_local and spec.exposed_to_model],
-        "server_tools": [spec.name for spec in _MODEL_TOOL_SPECS if not spec.is_local and spec.exposed_to_model],
+        "model_tools": [spec.name for spec in _MODEL_TOOL_SPECS if spec.is_visible_to_model(featured_agent_ids)],
+        "local_tools": [
+            spec.name
+            for spec in _MODEL_TOOL_SPECS
+            if spec.is_local and spec.is_visible_to_model(featured_agent_ids)
+        ],
+        "server_tools": [
+            spec.name
+            for spec in _MODEL_TOOL_SPECS
+            if not spec.is_local and spec.is_visible_to_model(featured_agent_ids)
+        ],
         "read_only_local_tools": sorted(
             spec.name
             for spec in _MODEL_TOOL_SPECS
-            if spec.is_local and spec.read_only and spec.exposed_to_model
+            if spec.is_local and spec.read_only and spec.is_visible_to_model(featured_agent_ids)
         ),
     }

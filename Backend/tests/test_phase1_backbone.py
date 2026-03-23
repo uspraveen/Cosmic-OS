@@ -125,6 +125,21 @@ def _sample_card() -> dict[str, object]:
     }
 
 
+def _sample_card_with_id(agent_id: str, display_name: str, intent_name: str) -> dict[str, object]:
+    return {
+        "agent_id": agent_id,
+        "display_name": display_name,
+        "sla": {
+            "max_concurrency": 2,
+            "heartbeat_ttl_sec": 30,
+            "max_task_duration_sec": 180,
+        },
+        "intents": [
+            {"name": intent_name, "timeout_sec": 180},
+        ],
+    }
+
+
 @pytest.mark.asyncio
 async def test_shared_redis_bus_dispatch_and_parse_roundtrip() -> None:
     client = FakeRedis()
@@ -217,6 +232,39 @@ def test_registry_store_tracks_usage_and_refreshes_featured_specialists(tmp_path
     assert featured[0]["agent_id"] == "cosmic/research-agent:1.0.0"
     assert featured[0]["usage_count"] == 2
     assert featured[0]["common_intents"] == ["research.extract", "research.topic"] or featured[0]["common_intents"] == ["research.topic", "research.extract"]
+
+
+def test_registry_store_seeds_new_specialists_and_drops_only_after_15_days_inactive(tmp_path: Path) -> None:
+    store = RegistryStore(tmp_path / "registry.db")
+    store.initialize()
+    store.upsert_agent_card(_sample_card_with_id("cosmic/tabular-agent:1.0.0", "Tabular Agent", "tabular.query_workbook"))
+    store.upsert_agent_card(_sample_card_with_id("cosmic/stale-agent:1.0.0", "Stale Agent", "stale.intent"))
+
+    recent_now = utcnow()
+    stale_then = recent_now - timedelta(days=16)
+    with store._connect() as connection:
+        connection.execute(
+            """
+            UPDATE agents
+            SET registered_at = ?, updated_at = ?
+            WHERE agent_id = ?
+            """,
+            (
+                stale_then.isoformat().replace("+00:00", "Z"),
+                stale_then.isoformat().replace("+00:00", "Z"),
+                "cosmic/stale-agent:1.0.0",
+            ),
+        )
+        connection.commit()
+
+    featured = store.refresh_featured_specialists(limit=5, lookback_days=15, refreshed_at=recent_now)
+    featured_ids = [item["agent_id"] for item in featured]
+
+    assert "cosmic/tabular-agent:1.0.0" in featured_ids
+    assert "cosmic/stale-agent:1.0.0" not in featured_ids
+    seeded = next(item for item in featured if item["agent_id"] == "cosmic/tabular-agent:1.0.0")
+    assert seeded["usage_count"] == 0
+    assert seeded["common_intents"] == ["tabular.query_workbook"]
 
 
 @pytest.mark.asyncio

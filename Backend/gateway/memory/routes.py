@@ -338,3 +338,38 @@ async def session_revisit(
         turn_limit=max(1, min(200, turn_limit)),
         raw_history_limit=max(1, min(200, raw_history_limit)),
     )
+
+
+@router.post("/internal/session/artifacts/search")
+async def session_artifact_search(
+    payload: dict[str, Any],
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    session_id = str(payload.get("session_id") or "").strip() or None
+    query = str(payload.get("query") or "").strip() or None
+    limit = int(payload.get("limit") or 8)
+    all_sessions = bool(payload.get("all_sessions"))
+    return runtime.search_session_produced_artifacts(
+        session_id,
+        query=query,
+        limit=max(1, min(20, limit)),
+        all_sessions=all_sessions,
+    )
+
+
+@router.post("/internal/session/artifacts/resolve")
+async def session_artifact_resolve(
+    payload: dict[str, Any],
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    session_id = str(payload.get("session_id") or "").strip() or None
+    raw_artifact_ids = payload.get("artifact_ids")
+    artifact_ids = [str(item).strip() for item in raw_artifact_ids] if isinstance(raw_artifact_ids, list) else []
+    all_sessions = bool(payload.get("all_sessions"))
+    return runtime.resolve_session_artifacts(
+        session_id=session_id,
+        artifact_ids=artifact_ids,
+        all_sessions=all_sessions,
+    )

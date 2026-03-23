@@ -276,12 +276,16 @@ class ToolExecutor:
                 wait_timeout_sec = max(1.0, float(wait_timeout_value))
             except (TypeError, ValueError):
                 return {"error": True, "message": "wait_timeout_sec must be a number when provided"}
+        input_artifacts = await self._resolve_delegate_input_artifacts(tool_input, context=context)
+        if isinstance(input_artifacts, dict) and input_artifacts.get("error"):
+            return input_artifacts
         response = await self._dispatch_specialist_agent(
             intent=intent,
             payload=payload,
             context=context,
             agent_id=preferred_agent_id,
             wait_timeout_sec=wait_timeout_sec,
+            input_artifacts=input_artifacts,
         )
         if "delegation" not in response:
             response["delegation"] = {
@@ -309,6 +313,67 @@ class ToolExecutor:
         if payload is None:
             return {"error": True, "message": "Capability wishlist search did not return a payload."}
         return payload
+
+    async def _artifact_lookup(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        session_id = self._coerce_session_id(tool_input, context)
+        query = str(tool_input.get("query") or "").strip() or None
+        all_sessions = self._coerce_bool(tool_input.get("all_sessions"), default=False)
+        limit = min(max(1, self._coerce_int(tool_input.get("limit"), 5)), 12)
+        payload = await self._request_gateway_json(
+            "POST",
+            "/internal/session/artifacts/search",
+            json_body={
+                "session_id": session_id,
+                "query": query,
+                "limit": limit,
+                "all_sessions": all_sessions,
+            },
+        )
+        if payload is None:
+            return {"error": True, "message": "Artifact lookup did not return a payload."}
+        return payload
+
+    async def _artifact_redeliver(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        artifact_id = str(tool_input.get("artifact_id") or "").strip()
+        if not artifact_id:
+            return {"error": True, "message": "artifact_id is required"}
+        session_id = self._coerce_session_id(tool_input, context)
+        all_sessions = self._coerce_bool(tool_input.get("all_sessions"), default=False)
+        payload = await self._request_gateway_json(
+            "POST",
+            "/internal/session/artifacts/resolve",
+            json_body={
+                "session_id": session_id,
+                "artifact_ids": [artifact_id],
+                "all_sessions": all_sessions,
+            },
+        )
+        if payload is None:
+            return {"error": True, "message": "Artifact resolution did not return a payload."}
+        artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), list) else []
+        if not artifacts:
+            return {
+                "error": True,
+                "artifact_id": artifact_id,
+                "message": str(payload.get("message") or "Artifact could not be re-delivered."),
+            }
+        return {
+            "found": True,
+            "artifact_id": artifact_id,
+            "count": len(artifacts),
+            "message": "Previous produced file re-surfaced.",
+            "artifacts": artifacts,
+        }
 
     async def _cosmics_capability_wishlist_capture(
         self,
@@ -1342,6 +1407,7 @@ class ToolExecutor:
         context: ToolExecutionContext | None,
         agent_id: str | None,
         wait_timeout_sec: float | None,
+        input_artifacts: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if self._agent_dispatcher is None:
             return {"error": True, "message": f"{intent} is not configured in this orchestrator runtime."}
@@ -1352,6 +1418,7 @@ class ToolExecutor:
             parent_task=context.parent_task,
             intent=intent,
             input_payload=payload,
+            input_artifacts=input_artifacts,
             agent_id=agent_id,
             wait_timeout_sec=wait_timeout_sec,
         )
@@ -1383,6 +1450,51 @@ class ToolExecutor:
             response["artifacts"] = [artifact.model_dump(mode="json") for artifact in result.artifacts]
         response.setdefault("delegation", {"intent": intent, "agent_id": agent_id})
         return response
+
+    async def _resolve_delegate_input_artifacts(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        explicit = tool_input.get("input_artifacts")
+        explicit_artifacts = [item for item in explicit if isinstance(item, dict)] if isinstance(explicit, list) else []
+        artifact_ids = [
+            str(item).strip()
+            for item in (tool_input.get("artifact_ids") if isinstance(tool_input.get("artifact_ids"), list) else [])
+            if str(item).strip()
+        ]
+        if not artifact_ids:
+            return explicit_artifacts
+        session_id = self._coerce_session_id(tool_input, context)
+        payload = await self._request_gateway_json(
+            "POST",
+            "/internal/session/artifacts/resolve",
+            json_body={
+                "session_id": session_id,
+                "artifact_ids": artifact_ids,
+                "all_sessions": self._coerce_bool(tool_input.get("all_sessions"), default=False),
+            },
+        )
+        if payload is None:
+            return {"error": True, "message": "Artifact resolution did not return a payload."}
+        resolved_artifacts = [item for item in payload.get("artifacts") or [] if isinstance(item, dict)]
+        if len(resolved_artifacts) < len(artifact_ids):
+            return {
+                "error": True,
+                "message": str(payload.get("message") or "One or more requested artifacts could not be resolved."),
+            }
+        merged: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in [*explicit_artifacts, *resolved_artifacts]:
+            artifact_id = str(item.get("artifact_id") or "").strip()
+            path = str(item.get("path") or "").strip()
+            dedupe_key = (artifact_id, path)
+            if not any(dedupe_key) or dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            merged.append(item)
+        return merged
 
     async def _request_gateway_json(
         self,

@@ -225,6 +225,13 @@ class OrchestratorRuntime:
         self._featured_specialists_cache: list[dict[str, Any]] = []
         self._featured_specialists_refreshed_at: float = 0.0
 
+    def _featured_specialist_agent_ids(self) -> set[str]:
+        return {
+            str(item.get("agent_id") or "").strip()
+            for item in self._featured_specialists_cache
+            if isinstance(item, dict) and str(item.get("agent_id") or "").strip()
+        }
+
     async def start(self) -> None:
         self.task_ledger.initialize()
         self.registry_store.initialize()
@@ -350,7 +357,7 @@ class OrchestratorRuntime:
                 user_timezone=str(task.input.get("user_timezone") or "").strip() or None,
                 featured_specialists=self._featured_specialists_cache,
             )
-            tools = get_model_tool_definitions()
+            tools = get_model_tool_definitions(self._featured_specialist_agent_ids())
             max_iterations = self.config.max_tool_iterations
 
             iteration = 0
@@ -887,6 +894,11 @@ class OrchestratorRuntime:
                         "timeout_sec": raw_intent.get("timeout_sec"),
                         "input_schema_summary": raw_intent.get("input_schema_summary") or {},
                         "output_schema_summary": raw_intent.get("output_schema_summary") or {},
+                        "usage_hints": [
+                            str(item).strip()
+                            for item in (raw_intent.get("usage_hints") or [])
+                            if str(item).strip()
+                        ],
                         "_score": score,
                     }
                 )
@@ -975,6 +987,7 @@ class OrchestratorRuntime:
         parent_task: TaskEnvelope,
         intent: str,
         input_payload: dict[str, Any] | None = None,
+        input_artifacts: list[dict[str, Any]] | None = None,
         agent_id: str | None = None,
         priority: str | None = None,
         idempotency_key: str | None = None,
@@ -1016,7 +1029,7 @@ class OrchestratorRuntime:
             recipient=recipient,
             intent=resolved_intent,
             input=child_input,
-            input_artifacts=[],
+            input_artifacts=[item for item in (input_artifacts or []) if isinstance(item, dict)],
             idempotency_key=normalized_idempotency_key,
             deadline_ts=child_deadline,
             priority=child_priority if child_priority in {"high", "normal", "low"} else "normal",

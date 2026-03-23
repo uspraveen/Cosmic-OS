@@ -84,7 +84,7 @@ class OrchestratorConfig:
     agent_signing_secrets: dict[str, str] = field(default_factory=dict)
     featured_specialists_enabled: bool = True
     featured_specialists_count: int = 5
-    featured_specialists_lookback_days: int = 14
+    featured_specialists_lookback_days: int = 15
     featured_specialists_refresh_sec: int = 300
     task_input_requests_stream: str = "user_input:requests"
     task_input_replies_stream: str = "user_input:replies"
@@ -122,7 +122,7 @@ class OrchestratorConfig:
             agent_signing_secrets=_env_json_map("AGENT_SIGNING_SECRETS_JSON"),
             featured_specialists_enabled=_env_bool("ORCHESTRATOR_FEATURED_SPECIALISTS_ENABLED", True),
             featured_specialists_count=max(0, _env_int("ORCHESTRATOR_FEATURED_SPECIALISTS_COUNT", 5)),
-            featured_specialists_lookback_days=max(1, _env_int("ORCHESTRATOR_FEATURED_SPECIALISTS_LOOKBACK_DAYS", 14)),
+            featured_specialists_lookback_days=max(1, _env_int("ORCHESTRATOR_FEATURED_SPECIALISTS_LOOKBACK_DAYS", 15)),
             featured_specialists_refresh_sec=max(30, _env_int("ORCHESTRATOR_FEATURED_SPECIALISTS_REFRESH_SEC", 300)),
             task_input_requests_stream=os.getenv("TASK_INPUT_REQUESTS_STREAM", "user_input:requests").strip()
             or "user_input:requests",

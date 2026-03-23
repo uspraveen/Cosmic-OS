@@ -148,6 +148,17 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
             "web_fetch",
             "agent_catalog_search",
             "delegate_to_agent",
+            "cosmics_capability_wishlist_search",
+            "cosmics_capability_wishlist_capture",
+            "memory_search",
+            "memory_fetch",
+            "memory_write",
+            "memory_write_core_fact",
+            "session_revisit",
+            "session_history",
+            "task_notebook",
+        } <= tool_names
+        assert {
             "docs_browse",
             "docs_search",
             "docs_read",
@@ -160,20 +171,11 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
             "sheets_export",
             "sheets_create_workbook",
             "sheets_create_sheet",
-            "cosmics_capability_wishlist_search",
-            "cosmics_capability_wishlist_capture",
-            "memory_search",
-            "memory_fetch",
-            "memory_write",
-            "memory_write_core_fact",
-            "session_revisit",
-            "session_history",
-            "task_notebook",
-        } <= tool_names
-        assert {
             "firecrawl_scrape",
             "firecrawl_extract",
             "firecrawl_recall_session",
+            "x_search",
+            "x_recall_session",
         }.isdisjoint(tool_names)
         assert "session_revisit" in payload["system"]
         assert "session_history" in payload["system"]
@@ -181,11 +183,8 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
         assert "memory_write_core_fact" in payload["system"]
         assert "agent_catalog_search" in payload["system"]
         assert "delegate_to_agent" in payload["system"]
-        assert "docs_browse" in payload["system"]
-        assert "docs_search" in payload["system"]
-        assert "docs_read" in payload["system"]
-        assert "docs_fetch_asset" in payload["system"]
-        assert "docs_reinspect_asset" in payload["system"]
+        assert "docs_browse" not in payload["system"]
+        assert "sheets_browse" not in payload["system"]
         assert "cosmics_capability_wishlist_search" in payload["system"]
         assert "cosmics_capability_wishlist_capture" in payload["system"]
         assert "firecrawl_extract" not in payload["system"]
@@ -1359,6 +1358,52 @@ def test_build_agentic_system_prompt_includes_dynamic_specialist_shortlist() -> 
     assert "not the full registry" in prompt
     assert "Docs Parser Agent" in prompt
     assert "docs.parse_bundle" in prompt
+    assert "docs_browse" in prompt
+
+
+@pytest.mark.asyncio
+async def test_search_agent_catalog_returns_usage_hints(tmp_path) -> None:
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_usage_hints.db",
+        agent_registry_db_path=tmp_path / "registry.db",
+    )
+    runtime = OrchestratorRuntime(config, client=httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200))))
+    await runtime.start()
+    try:
+        runtime.registry_store.upsert_agent_card(
+            {
+                "agent_id": "cosmic/tabular-agent:1.0.0",
+                "display_name": "Tabular Spreadsheet Agent",
+                "description": "Specialist for spreadsheets.",
+                "intents": [
+                    {
+                        "name": "tabular.reason_workbook",
+                        "description": "Reason over a parsed workbook.",
+                        "timeout_sec": 240,
+                        "usage_hints": [
+                            "Use reason_workbook for one delegated spreadsheet goal.",
+                            "Prefer deterministic query tools when you already know the exact operation.",
+                        ],
+                    }
+                ],
+                "sla": {"max_concurrency": 1, "heartbeat_ttl_sec": 30, "max_task_duration_sec": 300},
+            }
+        )
+
+        result = await runtime.search_agent_catalog(query="spreadsheet reasoning", require_healthy=False)
+    finally:
+        await runtime.stop()
+
+    assert result["count"] == 1
+    assert result["matches"][0]["intent"] == "tabular.reason_workbook"
+    assert result["matches"][0]["usage_hints"] == [
+        "Use reason_workbook for one delegated spreadsheet goal.",
+        "Prefer deterministic query tools when you already know the exact operation.",
+    ]
 
 
 def test_orchestrator_build_messages_embeds_provider_fetchable_images(tmp_path) -> None:

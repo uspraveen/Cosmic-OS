@@ -315,7 +315,7 @@ class RegistryStore:
         self,
         *,
         limit: int = 5,
-        lookback_days: int = 14,
+        lookback_days: int = 15,
         refreshed_at: datetime | None = None,
     ) -> list[dict[str, Any]]:
         normalized_limit = max(0, int(limit))
@@ -334,13 +334,19 @@ class RegistryStore:
             for card in self.list_agent_cards(status="registered")
             if isinstance(card, dict) and str(card.get("agent_id") or "").strip()
         }
+        agent_rows = {
+            str(item.get("agent_id") or "").strip(): item
+            for item in self.list_agents(status="registered")
+            if isinstance(item, dict) and str(item.get("agent_id") or "").strip()
+        }
         if not cards:
             with self._lock, self._connect() as connection:
                 connection.execute("DELETE FROM featured_specialists")
                 connection.commit()
             return []
 
-        cutoff_date = (refresh_dt.date() - timedelta(days=normalized_lookback - 1)).isoformat()
+        cutoff_dt = refresh_dt - timedelta(days=normalized_lookback)
+        cutoff_date = cutoff_dt.date().isoformat()
         with self._lock, self._connect() as connection:
             rows = connection.execute(
                 """
@@ -380,12 +386,24 @@ class RegistryStore:
                 stats["intents"][intent_name] += usage_count
 
         ranked: list[dict[str, Any]] = []
-        for agent_id, stats in usage_by_agent.items():
+        for agent_id, card in cards.items():
+            stats = usage_by_agent.get(
+                agent_id,
+                {
+                    "usage_count": 0,
+                    "weighted_usage": 0.0,
+                    "last_used_at": None,
+                    "intents": defaultdict(int),
+                },
+            )
             usage_count = int(stats["usage_count"])
-            if usage_count <= 0:
-                continue
             last_used_at = stats["last_used_at"]
-            score = float(stats["weighted_usage"]) + _recency_bonus(last_used_at, refresh_dt)
+            agent_row = agent_rows.get(agent_id) or {}
+            registered_at = _parse_iso_datetime(agent_row.get("registered_at"))
+            last_activity_at = _max_datetime(last_used_at, registered_at)
+            if last_activity_at is None or last_activity_at < cutoff_dt:
+                continue
+            score = float(stats["weighted_usage"]) + _recency_bonus(last_activity_at, refresh_dt)
             top_intents = [
                 intent_name
                 for intent_name, _count in sorted(
@@ -393,7 +411,13 @@ class RegistryStore:
                     key=lambda item: (-item[1], item[0]),
                 )[:2]
             ]
-            card = cards[agent_id]
+            if not top_intents:
+                intents = card.get("intents") if isinstance(card.get("intents"), list) else []
+                top_intents = [
+                    str(item.get("name") or "").strip()
+                    for item in intents
+                    if isinstance(item, dict) and str(item.get("name") or "").strip()
+                ][:2]
             ranked.append(
                 {
                     "agent_id": agent_id,
@@ -402,7 +426,7 @@ class RegistryStore:
                     "common_intents": top_intents,
                     "score": round(score, 3),
                     "usage_count": usage_count,
-                    "last_used_at": _datetime_to_iso(last_used_at) if last_used_at else None,
+                    "last_used_at": _datetime_to_iso(last_activity_at) if last_activity_at else None,
                 }
             )
 
@@ -558,6 +582,13 @@ def _recency_bonus(last_used_at: datetime | None, refreshed_at: datetime) -> flo
     if age_hours <= 168:
         return 3.0
     return 1.0
+
+
+def _max_datetime(*values: datetime | None) -> datetime | None:
+    present = [value for value in values if value is not None]
+    if not present:
+        return None
+    return max(present)
 
 
 def _build_agent_summary(card: dict[str, Any], top_intents: list[str]) -> str:

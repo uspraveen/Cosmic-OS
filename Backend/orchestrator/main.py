@@ -86,7 +86,7 @@ async def health(request: Request) -> dict[str, object]:
         },
         "loop_diagnostics": runtime.get_loop_diagnostics_snapshot(),
         "agent_dispatch": agent_dispatch,
-        "tool_registry": get_tool_registry_snapshot(),
+        "tool_registry": get_tool_registry_snapshot(runtime._featured_specialist_agent_ids()),
         "prompt_assets": {"sha256": get_prompt_asset_hashes()},
     }
 

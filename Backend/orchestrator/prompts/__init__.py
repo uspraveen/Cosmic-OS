@@ -63,10 +63,15 @@ def build_agentic_system_prompt(
         except Exception:
             pass
 
+    featured_agent_ids = {
+        str(item.get("agent_id") or "").strip()
+        for item in (featured_specialists or [])
+        if isinstance(item, dict) and str(item.get("agent_id") or "").strip()
+    }
     sections = [
         AGENTIC_ORCHESTRATOR_SYSTEM_PROMPT,
         build_featured_specialists_prompt(featured_specialists),
-        build_tool_prompt_catalog(),
+        build_tool_prompt_catalog(featured_agent_ids),
         ORCHESTRATOR_POLICIES_PROMPT,
         date_line,
     ]
