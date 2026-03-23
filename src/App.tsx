@@ -2056,7 +2056,11 @@ export default function App() {
           : null
         const shouldRefreshFromHistory =
           eventType === 'task.completed' &&
-          (!boundMessage || !String(boundMessage.content || '').trim())
+          (
+            !boundMessage ||
+            !String(boundMessage.content || '').trim() ||
+            !Array.isArray(boundMessage.producedArtifacts)
+          )
         forgetAssistantMessageBindings(event)
         if (eventType === 'task.cancelled' && messageId && boundMessage && !String(boundMessage.content || '').trim() && !String(boundMessage.thinking || '').trim()) {
           setMessages((prev) => prev.filter((item) => item.id !== messageId))
