@@ -36,6 +36,7 @@ interface Message {
   sourceId?: string | null
   createdAt?: string | null
   progress?: DocsProgressState | TabularProgressState
+  backgroundState?: 'working' | 'ready' | 'failed'
 }
 
 interface PendingTaskInput {
@@ -441,6 +442,59 @@ const historyToMessages = (history: any[] = []): Message[] => {
       sourceId: typeof item?.metadata?.source_id === 'string' ? item.metadata.source_id : null,
       createdAt: typeof item?.created_at === 'string' ? item.created_at : null,
     }))
+}
+
+const mergeHydratedMessages = (current: Message[], hydrated: Message[]): Message[] => {
+  if (!Array.isArray(hydrated) || hydrated.length === 0) {
+    return hydrated
+  }
+
+  const currentById = new Map<string, Message>()
+  const currentByRoleAndRequest = new Map<string, Message>()
+  for (const message of current) {
+    if (typeof message.id === 'string' && message.id.trim()) {
+      currentById.set(message.id.trim(), message)
+    }
+    if (message.role && typeof message.requestId === 'string' && message.requestId.trim()) {
+      currentByRoleAndRequest.set(`${message.role}:${message.requestId.trim()}`, message)
+    }
+  }
+
+  return hydrated.map((message) => {
+    const existing =
+      (typeof message.id === 'string' && message.id.trim()
+        ? currentById.get(message.id.trim())
+        : undefined) ??
+      (message.role && typeof message.requestId === 'string' && message.requestId.trim()
+        ? currentByRoleAndRequest.get(`${message.role}:${message.requestId.trim()}`)
+        : undefined)
+
+    if (!existing) {
+      return message
+    }
+
+    return {
+      ...message,
+      content: String(message.content || '').trim() ? message.content : existing.content,
+      attachments: message.attachments ?? existing.attachments,
+      producedArtifacts: message.producedArtifacts ?? existing.producedArtifacts,
+      thinking: typeof message.thinking === 'string' && message.thinking.trim()
+        ? message.thinking
+        : existing.thinking,
+      activity: typeof message.activity === 'string' && message.activity.trim()
+        ? message.activity
+        : existing.activity,
+      activityLog: message.activityLog ?? existing.activityLog,
+      sources: message.sources ?? existing.sources,
+      requestId: message.requestId ?? existing.requestId,
+      source: message.source ?? existing.source,
+      sourceId: message.sourceId ?? existing.sourceId,
+      channel: message.channel ?? existing.channel,
+      stopped: message.stopped ?? existing.stopped,
+      progress: message.progress ?? existing.progress,
+      backgroundState: message.backgroundState ?? existing.backgroundState,
+    }
+  })
 }
 
 /** Extract a human-readable channel label from the raw channel string. */
@@ -896,6 +950,7 @@ export default function App() {
   const activeStreamingRequestIdRef = useRef<string | null>(null)
   const activeStreamingTaskIdRef = useRef<string | null>(null)
   const messagesRef = useRef<Message[]>([])
+  const backgroundTasksRef = useRef<BackgroundTask[]>([])
   const activeSessionIdRef = useRef<string | null>(null)
   const authStateRef = useRef<'loading' | 'unauthenticated' | 'authenticated'>('loading')
   const isStreamingRef = useRef(false)
@@ -1042,12 +1097,33 @@ export default function App() {
     ...overrides,
   })
 
-  const createUserMessage = (content: string, attachments?: MessageAttachment[]): Message => ({
+  const createUserMessage = (
+    content: string,
+    attachments?: MessageAttachment[],
+    overrides: Partial<Message> = {},
+  ): Message => ({
     id: `user_${crypto.randomUUID()}`,
     role: 'user',
     content,
     attachments,
+    ...overrides,
   })
+
+  const patchMessagesForRequest = (
+    requestId: string,
+    updater: (message: Message) => Message,
+  ) => {
+    const normalizedRequestId = String(requestId || '').trim()
+    if (!normalizedRequestId) {
+      return
+    }
+    setMessages((prev) => prev.map((message) => {
+      if (message.role !== 'user' || message.requestId !== normalizedRequestId) {
+        return message
+      }
+      return updater(message)
+    }))
+  }
 
   const buildCronResultNotificationKey = (value: {
     requestId?: string | null
@@ -1659,7 +1735,7 @@ export default function App() {
     try {
       const payload = await window.cosmic.getGatewaySessionHistory(targetSessionId)
       resetInFlightAssistantMaps()
-      setMessages(historyToMessages(payload?.messages))
+      setMessages((prev) => mergeHydratedMessages(prev, historyToMessages(payload?.messages)))
       setActiveSessionId(targetSessionId)
     } catch {
       return
@@ -1681,6 +1757,10 @@ export default function App() {
   useEffect(() => {
     messagesRef.current = messages
   }, [messages])
+
+  useEffect(() => {
+    backgroundTasksRef.current = backgroundTasks
+  }, [backgroundTasks])
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId
@@ -2097,8 +2177,28 @@ export default function App() {
       }
 
       if (eventType === 'task.backgrounded') {
+        const requestId = String(event?.request_id || '').trim()
+        const existingTask = requestId
+          ? backgroundTasksRef.current.find((item) => item.requestId === requestId)
+          : null
+        const existingUserMessage = requestId
+          ? messagesRef.current.find((message) => message.role === 'user' && message.requestId === requestId)
+          : null
         const backgroundTask = normalizeBackgroundTask({
           ...(event || {}),
+          user_query_excerpt:
+            typeof (event as any)?.user_query_excerpt === 'string' && String((event as any).user_query_excerpt).trim()
+              ? (event as any).user_query_excerpt
+              : existingTask?.userQueryExcerpt || existingUserMessage?.content || '',
+          partial_content: typeof (event as any)?.partial_content === 'string'
+            ? (event as any).partial_content
+            : existingTask?.partialContent || '',
+          partial_thinking: typeof (event as any)?.partial_thinking === 'string'
+            ? (event as any).partial_thinking
+            : existingTask?.partialThinking || '',
+          activity_log: (event as any)?.activity_log ?? existingTask?.activityLog,
+          produced_artifacts: (event as any)?.produced_artifacts ?? existingTask?.producedArtifacts,
+          sources: Array.isArray((event as any)?.sources) ? (event as any).sources : existingTask?.sources,
           completed: false,
         })
         if (!backgroundTask) {
@@ -2132,16 +2232,39 @@ export default function App() {
           })
           forgetAssistantMessageBindings(event)
         }
+        patchMessagesForRequest(backgroundTask.requestId, (message) => ({
+          ...message,
+          backgroundState: 'working',
+        }))
         return
       }
 
       if (eventType === 'task.foregrounded') {
+        const requestId = String(event?.request_id || '').trim()
+        const preservedTask = requestId
+          ? backgroundTasksRef.current.find((item) => item.requestId === requestId)
+          : null
         const foregroundTask = normalizeBackgroundTask({
           ...(event || {}),
-          user_query_excerpt: '',
-          completed: Boolean((event as any).completed),
+          user_query_excerpt:
+            typeof (event as any)?.user_query_excerpt === 'string' && String((event as any).user_query_excerpt).trim()
+              ? (event as any).user_query_excerpt
+              : preservedTask?.userQueryExcerpt || '',
+          partial_content: typeof (event as any)?.partial_content === 'string'
+            ? (event as any).partial_content
+            : preservedTask?.partialContent || '',
+          partial_thinking: typeof (event as any)?.partial_thinking === 'string'
+            ? (event as any).partial_thinking
+            : preservedTask?.partialThinking || '',
+          activity_log: (event as any)?.activity_log ?? preservedTask?.activityLog,
+          docs_progress: (event as any)?.docs_progress ?? (preservedTask?.progress?.kind === 'docs_parse' ? preservedTask.progress : undefined),
+          tabular_progress: (event as any)?.tabular_progress ?? (preservedTask?.progress?.kind === 'tabular_parse' ? preservedTask.progress : undefined),
+          produced_artifacts: (event as any)?.produced_artifacts ?? preservedTask?.producedArtifacts,
+          sources: Array.isArray((event as any)?.sources) ? (event as any).sources : preservedTask?.sources,
+          completed: Boolean((event as any).completed ?? preservedTask?.completed),
+          failed: Boolean((event as any).failed ?? preservedTask?.failed),
+          error: (event as any)?.error ?? preservedTask?.error,
         })
-        const requestId = String(event?.request_id || '').trim()
         if (requestId) {
           removeBackgroundTask(requestId)
           setForegroundingRequestId((current) => (current === requestId ? null : current))
@@ -2152,15 +2275,25 @@ export default function App() {
         }
         const messageId = createAssistantMessageId()
         bindAssistantMessageToEvent(event, messageId)
-        setMessages((prev) => [
-          ...prev,
-          createAssistantMessage({
-            id: messageId,
-            requestId,
-            content: foregroundTask?.partialContent || '',
-            thinking: foregroundTask?.partialThinking || '',
-          }),
-        ])
+        setMessages((prev) => {
+          const nextMessages = prev.filter((message) => (
+            message.role !== 'assistant' || message.requestId !== requestId
+          ))
+          return [
+            ...nextMessages,
+            createAssistantMessage({
+              id: messageId,
+              requestId,
+              content: foregroundTask?.partialContent || '',
+              thinking: foregroundTask?.partialThinking || '',
+              activity: foregroundTask?.activity,
+              activityLog: foregroundTask?.activityLog,
+              progress: foregroundTask?.progress,
+              producedArtifacts: foregroundTask?.producedArtifacts,
+              sources: foregroundTask?.sources,
+            }),
+          ]
+        })
         activeStreamingRequestIdRef.current = requestId
         if (foregroundTask?.taskId) {
           activeStreamingTaskIdRef.current = foregroundTask.taskId
@@ -2171,6 +2304,11 @@ export default function App() {
         if (modeRef.current !== 'chat') {
           showChatComposer()
         }
+        patchMessagesForRequest(requestId, (message) => {
+          const next = { ...message }
+          delete next.backgroundState
+          return next
+        })
         return
       }
 
@@ -2302,6 +2440,10 @@ export default function App() {
               artifacts: producedArtifacts,
             })
           }
+          patchMessagesForRequest(requestId, (message) => ({
+            ...message,
+            backgroundState: 'ready',
+          }))
           return
         }
 
@@ -2314,6 +2456,10 @@ export default function App() {
             error: String(event?.error?.message || event?.message || 'Background task failed.'),
             progress: undefined,
           }))
+          patchMessagesForRequest(requestId, (message) => ({
+            ...message,
+            backgroundState: 'failed',
+          }))
           return
         }
 
@@ -2325,6 +2471,13 @@ export default function App() {
             failed: backgroundEventType === 'task.cancelled' ? false : current.failed,
             progress: undefined,
           }))
+          if (backgroundEventType === 'task.cancelled') {
+            patchMessagesForRequest(requestId, (message) => {
+              const next = { ...message }
+              delete next.backgroundState
+              return next
+            })
+          }
           return
         }
       }
@@ -2483,7 +2636,7 @@ export default function App() {
               id: persistedMessageId || message.id,
               content: mergeCompletedStreamText(message.content, event.content),
               sources,
-              producedArtifacts,
+              producedArtifacts: producedArtifacts ?? message.producedArtifacts,
               activityLog: activityLog ?? message.activityLog,
               requestId: typeof event.request_id === 'string' ? event.request_id : message.requestId,
               source: typeof event.source === 'string' ? event.source : message.source,
@@ -2630,7 +2783,11 @@ export default function App() {
           : null
         const shouldRefreshFromHistory =
           eventType === 'task.completed' &&
-          (!boundMessage || !String(boundMessage.content || '').trim())
+          (
+            !boundMessage ||
+            !String(boundMessage.content || '').trim() ||
+            !Array.isArray(boundMessage.producedArtifacts)
+          )
         forgetAssistantMessageBindings(event)
         if (eventType === 'task.cancelled' && messageId && boundMessage && !String(boundMessage.content || '').trim() && !String(boundMessage.thinking || '').trim()) {
           setMessages((prev) => prev.filter((item) => item.id !== messageId))
@@ -2793,7 +2950,8 @@ export default function App() {
     const textToSend = query.trim()
     const messageAttachments = normalizeMessageAttachments(pendingAttachments)
     const displayText = textToSend || buildPendingAttachmentSummary(pendingAttachments)
-    const userMessage = createUserMessage(displayText, messageAttachments)
+    const requestId = `req_${crypto.randomUUID()}`
+    const userMessage = createUserMessage(displayText, messageAttachments, { requestId })
     setQuery('')
     if (inputRef.current) inputRef.current.style.height = '24px'
     shouldAutoScrollRef.current = true
@@ -2815,7 +2973,6 @@ export default function App() {
       return
     }
 
-    const requestId = `req_${crypto.randomUUID()}`
     const assistantMessageId = createAssistantMessageId()
     activeStreamingRequestIdRef.current = requestId
     activeStreamingTaskIdRef.current = null
@@ -3003,6 +3160,17 @@ export default function App() {
     if (!requestId && !taskId) {
       return
     }
+    const cancelPromise = window.cosmic?.cancelGatewayResponse?.({
+      requestId: requestId || undefined,
+      taskId: taskId || undefined,
+    })
+    cancelPromise?.catch(() => { })
+  }
+
+  const handleCancelBackgroundTask = (task: BackgroundTask) => {
+    const requestId = String(task.requestId || '').trim()
+    const taskId = String(task.taskId || '').trim()
+    if (!requestId && !taskId) return
     const cancelPromise = window.cosmic?.cancelGatewayResponse?.({
       requestId: requestId || undefined,
       taskId: taskId || undefined,
@@ -3763,6 +3931,17 @@ export default function App() {
                                   <div className="task-list-pane">
                                     <div className="task-list">
                                       {orderedBackgroundTasks.map((task) => (
+                                        (() => {
+                                          const taskPreview = String(
+                                            task.partialContent ||
+                                            task.partialThinking ||
+                                            task.activity ||
+                                            '',
+                                          ).trim()
+                                          const taskMeta = task.completed
+                                            ? (task.failed ? 'Needs attention' : 'Ready to reopen')
+                                            : (task.progress?.label || 'Streaming live in the background')
+                                          return (
                                         <button
                                           key={task.requestId}
                                           type="button"
@@ -3778,7 +3957,17 @@ export default function App() {
                                           <div className="task-list-item-question">
                                             {task.userQueryExcerpt || 'Background task'}
                                           </div>
+                                          <div className="task-list-item-meta">
+                                            {taskMeta}
+                                          </div>
+                                          {taskPreview && (
+                                            <div className="task-list-item-preview">
+                                              {taskPreview}
+                                            </div>
+                                          )}
                                         </button>
+                                          )
+                                        })()
                                       ))}
                                     </div>
                                   </div>
@@ -3864,29 +4053,44 @@ export default function App() {
                                             ) : task.failed ? (
                                               <span className="task-card-error">{task.error || 'Background task failed.'}</span>
                                             ) : task.completed ? (
-                                              <span className="task-card-hint">Completed background tasks stay in this task rail until the session view is refreshed.</span>
+                                              <span className="task-card-hint">Ready · Bring it back to chat to see the result in context.</span>
                                             ) : canBringBackgroundTaskToForeground ? (
-                                              <span className="task-card-hint">Bring this task back to the main response surface if you want to watch it live.</span>
+                                              <span className="task-card-hint">Streaming in the background — bring it back to watch live.</span>
                                             ) : (
                                               <span className="task-card-hint">Finish or background the current foreground stream before bringing another task back.</span>
                                             )}
                                           </div>
-                                          {!task.completed && (
-                                            <button
-                                              type="button"
-                                              className="task-submit-btn task-foreground-btn"
-                                              disabled={!canBringBackgroundTaskToForeground || foregroundingRequestId === task.requestId}
-                                              onClick={() => void handleBringTaskToForeground(task)}
-                                            >
-                                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                                                <path d="M5.75 18.25L12 12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                                                <path d="M18.25 18.25L12 12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                                                <path d="M5.75 18.25H10.25" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                                                <path d="M18.25 18.25H13.75" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                                              </svg>
-                                              <span>{foregroundingRequestId === task.requestId ? 'Bringing back...' : 'Bring to foreground'}</span>
-                                            </button>
-                                          )}
+                                          <div className="task-card-actions">
+                                            {!task.completed && (
+                                              <button
+                                                type="button"
+                                                className="task-action-btn task-cancel-btn"
+                                                onClick={() => handleCancelBackgroundTask(task)}
+                                                aria-label="Cancel background task"
+                                              >
+                                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                                  <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+                                                </svg>
+                                                <span>Cancel</span>
+                                              </button>
+                                            )}
+                                            {!task.failed && (
+                                              <button
+                                                type="button"
+                                                className="task-submit-btn task-foreground-btn"
+                                                disabled={!canBringBackgroundTaskToForeground || foregroundingRequestId === task.requestId}
+                                                onClick={() => void handleBringTaskToForeground(task)}
+                                              >
+                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                                  <path d="M5.75 18.25L12 12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                                                  <path d="M18.25 18.25L12 12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                                                  <path d="M5.75 18.25H10.25" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                                                  <path d="M18.25 18.25H13.75" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                                                </svg>
+                                                <span>{foregroundingRequestId === task.requestId ? 'Bringing back...' : 'Bring to foreground'}</span>
+                                              </button>
+                                            )}
+                                          </div>
                                         </div>
                                       </div>
                                     )
@@ -4143,6 +4347,15 @@ export default function App() {
                               )}
                             </button>
                           </div>
+                          {msg.backgroundState && (
+                            <div className={`query-background-status ${msg.backgroundState}`}>
+                              {msg.backgroundState === 'working'
+                                ? 'Working in background'
+                                : msg.backgroundState === 'ready'
+                                  ? 'Ready in Tasks'
+                                  : 'Background task failed'}
+                            </div>
+                          )}
                           <UserMessageAttachments attachments={msg.attachments} />
                         </>
                       ) : (
