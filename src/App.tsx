@@ -12,6 +12,8 @@ import LiquidGlassLoader from './LiquidGlassLoader'
 import MeetingMode from './MeetingMode'
 import SpacesControlCenter from './SpacesControlCenter'
 import cosmicGlassyThunderLogo from './assets/cosmic-glassy-thunder-logo.png'
+import moveToBackgroundIcon from './assets/move-to-background.png'
+import bringToForegroundIcon from './assets/bring-to-foreground.png'
 import './spotlight.css'
 
 export type SearchPosition = 'bottom' | 'middle'
@@ -1021,14 +1023,16 @@ export default function App() {
   const backgroundTaskCount = backgroundTasks.length
   const taskDashboardCount = pendingTaskCount + backgroundTaskCount
   const orderedPendingTaskInputs = useMemo(() => [...pendingTaskInputs].reverse(), [pendingTaskInputs])
-  const orderedBackgroundTasks = useMemo(() => [...backgroundTasks].sort((a, b) => {
-    const aCompleted = a.completed ? 1 : 0
-    const bCompleted = b.completed ? 1 : 0
-    if (aCompleted !== bCompleted) {
-      return aCompleted - bCompleted
-    }
-    return String(b.backgroundedAt || '').localeCompare(String(a.backgroundedAt || ''))
-  }), [backgroundTasks])
+  const orderedBackgroundTasks = useMemo(() => [...backgroundTasks]
+    .filter((task) => task.requestId !== foregroundingRequestId)
+    .sort((a, b) => {
+      const aCompleted = a.completed ? 1 : 0
+      const bCompleted = b.completed ? 1 : 0
+      if (aCompleted !== bCompleted) {
+        return aCompleted - bCompleted
+      }
+      return String(b.backgroundedAt || '').localeCompare(String(a.backgroundedAt || ''))
+    }), [backgroundTasks, foregroundingRequestId])
   const visibleTaskInterrupts = useMemo(
     () => orderedPendingTaskInputs.filter((item) => !dismissedTaskInterruptIds.includes(item.inputRequestId)),
     [dismissedTaskInterruptIds, orderedPendingTaskInputs],
@@ -2181,9 +2185,14 @@ export default function App() {
         const existingTask = requestId
           ? backgroundTasksRef.current.find((item) => item.requestId === requestId)
           : null
+        const existingAssistantMessage = requestId
+          ? messagesRef.current.find((message) => message.role === 'assistant' && message.requestId === requestId)
+          : null
         const existingUserMessage = requestId
           ? messagesRef.current.find((message) => message.role === 'user' && message.requestId === requestId)
           : null
+        const docsProgress = normalizeDocsProgress((event as any)?.docs_progress)
+        const tabularProgress = normalizeTabularProgress((event as any)?.tabular_progress)
         const backgroundTask = normalizeBackgroundTask({
           ...(event || {}),
           user_query_excerpt:
@@ -2192,13 +2201,18 @@ export default function App() {
               : existingTask?.userQueryExcerpt || existingUserMessage?.content || '',
           partial_content: typeof (event as any)?.partial_content === 'string'
             ? (event as any).partial_content
-            : existingTask?.partialContent || '',
+            : existingTask?.partialContent || existingAssistantMessage?.content || '',
           partial_thinking: typeof (event as any)?.partial_thinking === 'string'
             ? (event as any).partial_thinking
-            : existingTask?.partialThinking || '',
-          activity_log: (event as any)?.activity_log ?? existingTask?.activityLog,
-          produced_artifacts: (event as any)?.produced_artifacts ?? existingTask?.producedArtifacts,
-          sources: Array.isArray((event as any)?.sources) ? (event as any).sources : existingTask?.sources,
+            : existingTask?.partialThinking || existingAssistantMessage?.thinking || '',
+          activity: typeof (event as any)?.activity === 'string'
+            ? (event as any).activity
+            : existingTask?.activity || existingAssistantMessage?.activity || '',
+          activity_log: (event as any)?.activity_log ?? existingTask?.activityLog ?? existingAssistantMessage?.activityLog,
+          docs_progress: docsProgress ?? (existingTask?.progress?.kind === 'docs_parse' ? existingTask.progress : undefined) ?? (existingAssistantMessage?.progress?.kind === 'docs_parse' ? existingAssistantMessage.progress : undefined),
+          tabular_progress: tabularProgress ?? (existingTask?.progress?.kind === 'tabular_parse' ? existingTask.progress : undefined) ?? (existingAssistantMessage?.progress?.kind === 'tabular_parse' ? existingAssistantMessage.progress : undefined),
+          produced_artifacts: (event as any)?.produced_artifacts ?? existingTask?.producedArtifacts ?? existingAssistantMessage?.producedArtifacts,
+          sources: Array.isArray((event as any)?.sources) ? (event as any).sources : existingTask?.sources ?? existingAssistantMessage?.sources,
           completed: false,
         })
         if (!backgroundTask) {
@@ -2267,6 +2281,7 @@ export default function App() {
         })
         if (requestId) {
           removeBackgroundTask(requestId)
+          setSelectedBackgroundRequestId((current) => (current === requestId ? null : current))
           setForegroundingRequestId((current) => (current === requestId ? null : current))
           setBackgroundingRequestId((current) => (current === requestId ? null : current))
         }
@@ -2317,6 +2332,9 @@ export default function App() {
         const requestId = String(event?.request_id || '').trim()
         const taskId = typeof event?.task_id === 'string' ? event.task_id.trim() : ''
         if (!requestId && !taskId) {
+          return
+        }
+        if (requestId && activeStreamingRequestIdRef.current === requestId) {
           return
         }
 
@@ -3130,7 +3148,25 @@ export default function App() {
 
   const handleBringTaskToForeground = async (task: BackgroundTask) => {
     const requestId = String(task.requestId || '').trim()
-    if (!requestId || !window.cosmic?.foregroundGatewayRequest) {
+    if (!requestId) {
+      return
+    }
+    if (task.completed) {
+      removeBackgroundTask(requestId)
+      setSelectedBackgroundRequestId(null)
+      patchMessagesForRequest(requestId, (message) => {
+        const next = { ...message }
+        delete next.backgroundState
+        return next
+      })
+      shouldAutoScrollRef.current = true
+      showChatComposer()
+      window.setTimeout(() => {
+        responseEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+      }, 120)
+      return
+    }
+    if (!window.cosmic?.foregroundGatewayRequest) {
       return
     }
     setForegroundingRequestId(requestId)
@@ -3145,6 +3181,8 @@ export default function App() {
     try {
       await window.cosmic.foregroundGatewayRequest({ requestId })
       shouldAutoScrollRef.current = true
+      showChatComposer()
+      setSelectedBackgroundRequestId(null)
     } catch (error: any) {
       setForegroundingRequestId((current) => (current === requestId ? null : current))
       setBackgroundTaskErrors((prev) => ({
@@ -3906,8 +3944,8 @@ export default function App() {
                               : 'No task activity right now'}
                           </h2>
                           <div className="task-hub-subtitle">
-                            {backgroundTaskCount > 0
-                              ? `${backgroundTaskCount} background task${backgroundTaskCount === 1 ? '' : 's'} running or ready`
+                            {orderedBackgroundTasks.length > 0
+                              ? `${orderedBackgroundTasks.length} background task${orderedBackgroundTasks.length === 1 ? '' : 's'} running or ready`
                               : 'Background work you move out of chat will collect here.'}
                           </div>
                         </div>
@@ -3918,30 +3956,19 @@ export default function App() {
 
                       {taskDashboardCount > 0 ? (
                         <div className="task-hub-stack">
-                          {backgroundTaskCount > 0 && selectedBackgroundTask && (
+                          {orderedBackgroundTasks.length > 0 && selectedBackgroundTask && (
                             <div className={`task-hub-section ${orderedBackgroundTasks.length > 1 ? '' : 'single'}`}>
-                              <div className="task-hub-section-header">
-                                <div className="task-hub-section-kicker">Background tasks</div>
-                                <div className="task-hub-section-meta">
-                                  {backgroundTaskCount} running or completed
+                                <div className="task-hub-section-header">
+                                  <div className="task-hub-section-kicker">Background tasks</div>
+                                  <div className="task-hub-section-meta">
+                                  {orderedBackgroundTasks.length} running or completed
+                                  </div>
                                 </div>
-                              </div>
                               <div className={`task-hub-body ${orderedBackgroundTasks.length > 1 ? '' : 'single'}`}>
                                 {orderedBackgroundTasks.length > 1 && (
                                   <div className="task-list-pane">
                                     <div className="task-list">
                                       {orderedBackgroundTasks.map((task) => (
-                                        (() => {
-                                          const taskPreview = String(
-                                            task.partialContent ||
-                                            task.partialThinking ||
-                                            task.activity ||
-                                            '',
-                                          ).trim()
-                                          const taskMeta = task.completed
-                                            ? (task.failed ? 'Needs attention' : 'Ready to reopen')
-                                            : (task.progress?.label || 'Streaming live in the background')
-                                          return (
                                         <button
                                           key={task.requestId}
                                           type="button"
@@ -3949,7 +3976,7 @@ export default function App() {
                                           onClick={() => setSelectedBackgroundRequestId(task.requestId)}
                                         >
                                           <div className="task-list-item-label-row">
-                                            <span className="task-list-item-label">Background</span>
+                                            <span className="task-list-item-label">{task.route || 'Background'}</span>
                                             <span className="task-list-item-status">
                                               {task.completed ? (task.failed ? 'Failed' : 'Ready') : 'Streaming'}
                                             </span>
@@ -3958,16 +3985,11 @@ export default function App() {
                                             {task.userQueryExcerpt || 'Background task'}
                                           </div>
                                           <div className="task-list-item-meta">
-                                            {taskMeta}
+                                            {task.completed
+                                              ? (task.failed ? 'Needs attention' : 'Completed · ready to move to chat')
+                                              : (task.activity || task.progress?.label || 'Working in the background...')}
                                           </div>
-                                          {taskPreview && (
-                                            <div className="task-list-item-preview">
-                                              {taskPreview}
-                                            </div>
-                                          )}
                                         </button>
-                                          )
-                                        })()
                                       ))}
                                     </div>
                                   </div>
@@ -3985,10 +4007,38 @@ export default function App() {
                                     return (
                                       <div className="task-card task-detail-card">
                                         <div className="task-card-topline">
-                                          <span className="task-card-badge background">
-                                            {task.completed ? (task.failed ? 'Failed' : 'Ready') : 'Background'}
-                                          </span>
-                                          <span className="task-card-meta">{task.taskId || task.requestId}</span>
+                                          <div className="task-card-topline-meta">
+                                            <span className="task-card-badge background">
+                                              {task.completed ? (task.failed ? 'Failed' : 'Ready') : 'Background'}
+                                            </span>
+                                            <span className="task-card-meta">{task.taskId || task.requestId}</span>
+                                          </div>
+                                          <div className="task-card-top-actions">
+                                            {!task.completed && (
+                                              <button
+                                                type="button"
+                                                className="task-action-btn task-cancel-btn"
+                                                onClick={() => handleCancelBackgroundTask(task)}
+                                                aria-label="Cancel background task"
+                                              >
+                                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                                  <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+                                                </svg>
+                                                <span>Cancel</span>
+                                              </button>
+                                            )}
+                                            {!task.failed && (
+                                              <button
+                                                type="button"
+                                                className="task-submit-btn task-foreground-btn task-top-foreground-btn"
+                                                disabled={!task.completed && (!canBringBackgroundTaskToForeground || foregroundingRequestId === task.requestId)}
+                                                onClick={() => void handleBringTaskToForeground(task)}
+                                              >
+                                                <img src={bringToForegroundIcon} alt="" aria-hidden="true" className="task-icon-image invert" />
+                                                <span>{task.completed ? 'Move to chat' : foregroundingRequestId === task.requestId ? 'Bringing back...' : 'Bring to foreground'}</span>
+                                              </button>
+                                            )}
+                                          </div>
                                         </div>
                                         <div className="task-card-question task-detail-question">
                                           {task.userQueryExcerpt || 'Background task'}
@@ -4058,37 +4108,6 @@ export default function App() {
                                               <span className="task-card-hint">Streaming in the background — bring it back to watch live.</span>
                                             ) : (
                                               <span className="task-card-hint">Finish or background the current foreground stream before bringing another task back.</span>
-                                            )}
-                                          </div>
-                                          <div className="task-card-actions">
-                                            {!task.completed && (
-                                              <button
-                                                type="button"
-                                                className="task-action-btn task-cancel-btn"
-                                                onClick={() => handleCancelBackgroundTask(task)}
-                                                aria-label="Cancel background task"
-                                              >
-                                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                                                  <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
-                                                </svg>
-                                                <span>Cancel</span>
-                                              </button>
-                                            )}
-                                            {!task.failed && (
-                                              <button
-                                                type="button"
-                                                className="task-submit-btn task-foreground-btn"
-                                                disabled={!canBringBackgroundTaskToForeground || foregroundingRequestId === task.requestId}
-                                                onClick={() => void handleBringTaskToForeground(task)}
-                                              >
-                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                                                  <path d="M5.75 18.25L12 12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                                                  <path d="M18.25 18.25L12 12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                                                  <path d="M5.75 18.25H10.25" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                                                  <path d="M18.25 18.25H13.75" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                                                </svg>
-                                                <span>{foregroundingRequestId === task.requestId ? 'Bringing back...' : 'Bring to foreground'}</span>
-                                              </button>
                                             )}
                                           </div>
                                         </div>
@@ -4723,12 +4742,7 @@ export default function App() {
                         aria-label="Move to background"
                         disabled={backgroundingRequestId === activeStreamingRequestIdRef.current}
                       >
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                          <path d="M12 12L5.75 5.75" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                          <path d="M12 12L18.25 5.75" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                          <path d="M5.75 5.75H10.25" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                          <path d="M18.25 5.75H13.75" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                        </svg>
+                        <img src={moveToBackgroundIcon} alt="" aria-hidden="true" className="background-task-icon-image invert" />
                       </button>
                     )}
 

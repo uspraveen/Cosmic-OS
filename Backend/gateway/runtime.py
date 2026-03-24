@@ -1822,29 +1822,74 @@ class GatewayRuntime:
     async def foreground_background_request(self, *, channel: str, request_id: str) -> bool:
         """Move a background request back to foreground. Returns True on success."""
         state = self.active_requests.get(request_id)
-        if state is None or state.channel != channel:
+
+        # ---- Still-running background task (in active_requests) ----
+        if state is not None:
+            if state.channel != channel:
+                return False
+            if state.foreground:
+                return True  # already foreground
+            # Reject if another foreground stream is active on this channel
+            has_foreground = any(
+                s.foreground and not s.completed and s.channel == channel
+                for s in self.active_requests.values()
+            )
+            if has_foreground:
+                return False
+            state.foreground = True
+            state.backgrounded_at = None
+            # If the assistant message was already stored while backgrounded,
+            # clear the flag now so build_resume_payload won't reconstruct it.
+            self.session_store.clear_background_flag(state.session_id, request_id)
+            await self._deliver_or_queue_channel_event(
+                {
+                    "type": "task.foregrounded",
+                    "request_id": request_id,
+                    "session_id": state.session_id,
+                    "task_id": state.task_id,
+                    "channel": channel,
+                    "partial_content": state.partial_content,
+                    "partial_thinking": state.partial_thinking,
+                    "completed": state.completed,
+                },
+                channel=channel,
+            )
+            return True
+
+        # ---- Completed background task (already finalized) ----
+        # Reconstruct from session history so the desktop can show the result
+        # in the main chat surface and remove it from the background task list.
+        session_id = self._current_session_id()
+        history = self.session_store.get_history(session_id)
+        completed_msg: dict[str, Any] | None = None
+        for msg in history:
+            if msg.get("role") != "assistant":
+                continue
+            meta = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
+            if not meta.get("background"):
+                continue
+            reply_to = msg.get("in_reply_to_request_id") or meta.get("request_id")
+            if reply_to == request_id:
+                completed_msg = msg
+                break
+        if completed_msg is None:
             return False
-        if state.foreground:
-            return True  # already foreground
-        # Reject if another foreground stream is active on this channel
-        has_foreground = any(
-            s.foreground and not s.completed and s.channel == channel
-            for s in self.active_requests.values()
-        )
-        if has_foreground:
-            return False
-        state.foreground = True
-        state.backgrounded_at = None
+        meta = completed_msg.get("metadata") if isinstance(completed_msg.get("metadata"), dict) else {}
+        # Clear the background flag so build_resume_payload won't reconstruct it
+        self.session_store.clear_background_flag(session_id, request_id)
         await self._deliver_or_queue_channel_event(
             {
                 "type": "task.foregrounded",
                 "request_id": request_id,
-                "session_id": state.session_id,
-                "task_id": state.task_id,
+                "session_id": session_id,
+                "task_id": meta.get("task_id"),
                 "channel": channel,
-                "partial_content": state.partial_content,
-                "partial_thinking": state.partial_thinking,
-                "completed": state.completed,
+                "partial_content": completed_msg.get("content") or "",
+                "partial_thinking": meta.get("thinking_text") or "",
+                "activity_log": meta.get("activity_log"),
+                "sources": meta.get("sources"),
+                "produced_artifacts": meta.get("produced_artifacts"),
+                "completed": True,
             },
             channel=channel,
         )
@@ -4503,6 +4548,9 @@ class GatewayRuntime:
                 "user_query_excerpt": user_excerpt,
                 "partial_content": msg.get("content") or "",
                 "partial_thinking": meta.get("thinking_text") or "",
+                "activity_log": meta.get("activity_log"),
+                "sources": meta.get("sources"),
+                "produced_artifacts": meta.get("produced_artifacts"),
                 "backgrounded_at": None,
                 "completed": True,
             })

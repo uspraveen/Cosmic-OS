@@ -832,6 +832,41 @@ class SessionStore:
             "metadata": metadata,
         }
 
+    def clear_background_flag(self, session_id: str, request_id: str) -> None:
+        """Remove the ``background`` flag from assistant messages tied to a request.
+
+        Called when a background task is foregrounded so that
+        ``build_resume_payload`` no longer reconstructs it as a background task.
+        Matches by both ``in_reply_to_request_id`` and the ``request_id`` column
+        to cover all storage paths.
+        """
+        if not session_id or not request_id:
+            return
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT message_id, metadata_json
+                FROM messages
+                WHERE session_id = ?
+                  AND role = 'assistant'
+                  AND (in_reply_to_request_id = ? OR request_id = ?)
+                """,
+                (session_id, request_id, request_id),
+            ).fetchall()
+            updated = False
+            for row in rows:
+                metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+                if not isinstance(metadata, dict) or not metadata.get("background"):
+                    continue
+                metadata.pop("background", None)
+                connection.execute(
+                    "UPDATE messages SET metadata_json = ? WHERE message_id = ?",
+                    (json.dumps(metadata, default=str), row["message_id"]),
+                )
+                updated = True
+            if updated:
+                connection.commit()
+
     def list_turn_ledger(
         self,
         session_id: str,
