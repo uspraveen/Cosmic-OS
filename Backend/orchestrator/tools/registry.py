@@ -349,7 +349,8 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "name": "perplexity_research",
             "description": (
                 "Conduct deeper multi-source research using Perplexity. Use this when a quick web search is not enough "
-                "and you need synthesis, comparison, or a more thorough answer."
+                "and you need synthesis, comparison, or a more thorough answer. Do not use this for X/Twitter platform "
+                "search when the X specialist is available."
             ),
             "input_schema": {
                 "type": "object",
@@ -363,7 +364,10 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             },
         },
         group="research",
-        prompt_summary="Deep synthesized research across multiple sources when a quick web lookup is not enough.",
+        prompt_summary=(
+            "Deep synthesized research across multiple sources when a quick web lookup is not enough. "
+            "Not the preferred tool for X/Twitter platform search."
+        ),
         progress_builder=_perplexity_progress,
         handler_method="_perplexity_research",
         read_only=True,

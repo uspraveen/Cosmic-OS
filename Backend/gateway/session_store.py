@@ -173,10 +173,17 @@ class SessionStore:
                 """
             )
             self._ensure_column(connection, "messages", "request_id", "TEXT")
+            self._ensure_column(connection, "messages", "in_reply_to_request_id", "TEXT")
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_messages_session_request_role
                     ON messages(session_id, request_id, role, created_at)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_messages_in_reply_to
+                    ON messages(session_id, in_reply_to_request_id)
                 """
             )
             connection.commit()
@@ -212,6 +219,7 @@ class SessionStore:
         awaiting_reply: bool = False,
         channel: str | None = None,
         metadata: dict[str, Any] | None = None,
+        in_reply_to_request_id: str | None = None,
     ) -> str:
         if not content:
             raise ValueError("Message content cannot be empty")
@@ -239,9 +247,10 @@ class SessionStore:
                     awaiting_reply,
                     channel,
                     created_at,
-                    metadata_json
+                    metadata_json,
+                    in_reply_to_request_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message_id,
@@ -254,6 +263,7 @@ class SessionStore:
                     channel,
                     created_at,
                     metadata_json,
+                    in_reply_to_request_id,
                 ),
             )
             connection.execute(
@@ -273,6 +283,7 @@ class SessionStore:
                     content,
                     route,
                     request_id,
+                    in_reply_to_request_id,
                     awaiting_reply,
                     channel,
                     created_at,
@@ -295,6 +306,7 @@ class SessionStore:
                     "content": row["content"],
                     "route": row["route"],
                     "request_id": row["request_id"],
+                    "in_reply_to_request_id": row["in_reply_to_request_id"],
                     "awaiting_reply": bool(row["awaiting_reply"]),
                     "channel": row["channel"],
                     "created_at": row["created_at"],
@@ -313,6 +325,7 @@ class SessionStore:
                     content,
                     route,
                     request_id,
+                    in_reply_to_request_id,
                     awaiting_reply,
                     channel,
                     created_at,
@@ -334,6 +347,7 @@ class SessionStore:
                     "content": row["content"],
                     "route": row["route"],
                     "request_id": row["request_id"],
+                    "in_reply_to_request_id": row["in_reply_to_request_id"],
                     "awaiting_reply": bool(row["awaiting_reply"]),
                     "channel": row["channel"],
                     "created_at": row["created_at"],
@@ -372,6 +386,7 @@ class SessionStore:
                     content,
                     route,
                     request_id,
+                    in_reply_to_request_id,
                     awaiting_reply,
                     channel,
                     created_at,
@@ -394,6 +409,7 @@ class SessionStore:
                     "content": row["content"],
                     "route": row["route"],
                     "request_id": row["request_id"],
+                    "in_reply_to_request_id": row["in_reply_to_request_id"],
                     "awaiting_reply": bool(row["awaiting_reply"]),
                     "channel": row["channel"],
                     "created_at": row["created_at"],
@@ -784,6 +800,7 @@ class SessionStore:
                     content,
                     route,
                     request_id,
+                    in_reply_to_request_id,
                     awaiting_reply,
                     channel,
                     created_at,
@@ -808,6 +825,7 @@ class SessionStore:
             "content": row["content"],
             "route": row["route"],
             "request_id": row["request_id"],
+            "in_reply_to_request_id": row["in_reply_to_request_id"],
             "awaiting_reply": bool(row["awaiting_reply"]),
             "channel": row["channel"],
             "created_at": row["created_at"],

@@ -285,10 +285,14 @@ def build_messages(
         "- is_continuation=true for ambiguous follow-ups or conversation carry-ons such as 'go on', 'why?', 'ok', 'continue', progress checks, or replies that clearly depend on prior context.\n"
         "- needs_latest=true if the answer could change over time: current events, news, releases, prices, laws, schedules, product support, office holders, or anything 'latest/current/today/this week'.\n"
         "- needs_citations=true when the user likely expects source-grounded verification. Time-sensitive questions usually imply this.\n"
+        "- Add signal 'x_platform_search' when the user wants search, discussion, sentiment, or recent posts specifically from X/Twitter. X-platform search should go to opus so it can use the X specialist.\n"
+        "- Add signal 'file_artifact_work' when the request depends on uploaded files, parsed documents, spreadsheets, images, prior produced files, or other session artifacts. File- and artifact-centric work should go to opus.\n"
         "- If prior assistant messages are annotated with [assistant_route=...], use that as context when deciding whether the new input is a continuation.\n\n"
         "Hard routing rules (must follow):\n"
         "- If is_task is true, route MUST be opus.\n"
         "- Else if is_continuation is true, route MUST be opus.\n"
+        "- Else if signal 'x_platform_search' is present, route MUST be opus.\n"
+        "- Else if signal 'file_artifact_work' is present, route MUST be opus.\n"
         "- Else if needs_latest OR needs_citations is true, route MUST be perplexity.\n"
         f"- Else if confidence < {LOW_CONFIDENCE_THRESHOLD:.2f}, route MUST be opus.\n"
         "- Else route MUST be haiku.\n"
@@ -338,6 +342,10 @@ def enforce_rules(parsed: Dict[str, Any]) -> Dict[str, Any]:
     if out["is_task"]:
         out["route"] = "opus"
     elif out["is_continuation"]:
+        out["route"] = "opus"
+    elif "x_platform_search" in out["signals"]:
+        out["route"] = "opus"
+    elif "file_artifact_work" in out["signals"]:
         out["route"] = "opus"
     elif out["needs_latest"] or out["needs_citations"]:
         out["route"] = "perplexity"

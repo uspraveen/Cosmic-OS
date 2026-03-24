@@ -123,6 +123,17 @@ EPHEMERAL_CHANNEL_EVENT_TYPES = {
     "task.progress",
     "tool.call",
     "tool.result",
+    # Background-namespaced equivalents (streamed to task panel)
+    "task.background.route_result",
+    "task.background.response.chunk",
+    "task.background.response.thinking.chunk",
+    "task.background.task.created",
+    "task.background.task.progress",
+    "task.background.tool.call",
+    "task.background.tool.result",
+    # Transition events
+    "task.backgrounded",
+    "task.foregrounded",
 }
 
 
@@ -138,6 +149,9 @@ class ActiveRequest:
     partial_content: str = ""
     partial_thinking: str = ""
     completed: bool = False
+    foreground: bool = True
+    backgrounded_at: str | None = None
+    user_query_excerpt: str = ""
 
 
 @dataclass(slots=True)
@@ -1455,6 +1469,8 @@ class GatewayRuntime:
         ) -> str | None:
             assistant_metadata = dict(metadata or {})
             assistant_metadata.setdefault("request_id", request_id)
+            if active_request is not None and not active_request.foreground:
+                assistant_metadata["background"] = True
             return self._append_session_message(
                 session_id,
                 role="assistant",
@@ -1463,6 +1479,7 @@ class GatewayRuntime:
                 awaiting_reply=awaiting_reply,
                 channel=channel,
                 metadata=assistant_metadata,
+                in_reply_to_request_id=request_id,
             )
 
         try:
@@ -1689,11 +1706,24 @@ class GatewayRuntime:
         if not request_id or not session_id or not channel:
             raise ValueError("Request record is missing channel, request_id, or session_id")
 
+        # Reject if there is already a foreground stream on this channel
+        has_foreground = any(
+            s.foreground and not s.completed and s.channel == channel
+            for s in self.active_requests.values()
+        )
+        if has_foreground:
+            raise ValueError(
+                "A foreground task is already active on this channel. "
+                "Background it first or wait for it to complete."
+            )
+
+        query_text = self._safe_text(request_record.get("query")) or self._safe_text(request_record.get("content")) or ""
         state = ActiveRequest(
             request_id=request_id,
             session_id=session_id,
             channel=channel,
             route=route,
+            user_query_excerpt=query_text[:120].strip(),
         )
         self.active_requests[request_id] = state
         state.worker = asyncio.create_task(self._run_request_fulfillment(state, request_record))
@@ -1755,6 +1785,70 @@ class GatewayRuntime:
             worker.cancel()
             return True
         return False
+
+    async def background_active_request(self, *, channel: str, request_id: str) -> bool:
+        """Move a foreground request to background. Returns True on success."""
+        state = self.active_requests.get(request_id)
+        if state is None or state.channel != channel or state.completed:
+            return False
+        if not state.foreground:
+            return True  # already background
+
+        # Enforce per-session background task limit
+        bg_count = sum(
+            1 for s in self.active_requests.values()
+            if not s.foreground and not s.completed and s.session_id == state.session_id
+        )
+        if bg_count >= self.config.max_background_tasks_per_session:
+            return False
+
+        state.foreground = False
+        state.backgrounded_at = utcnow_iso()
+        await self._deliver_or_queue_channel_event(
+            {
+                "type": "task.backgrounded",
+                "request_id": request_id,
+                "session_id": state.session_id,
+                "task_id": state.task_id,
+                "channel": channel,
+                "route": state.route,
+                "user_query_excerpt": state.user_query_excerpt,
+                "partial_content": state.partial_content[:500] if state.partial_content else "",
+            },
+            channel=channel,
+        )
+        return True
+
+    async def foreground_background_request(self, *, channel: str, request_id: str) -> bool:
+        """Move a background request back to foreground. Returns True on success."""
+        state = self.active_requests.get(request_id)
+        if state is None or state.channel != channel:
+            return False
+        if state.foreground:
+            return True  # already foreground
+        # Reject if another foreground stream is active on this channel
+        has_foreground = any(
+            s.foreground and not s.completed and s.channel == channel
+            for s in self.active_requests.values()
+        )
+        if has_foreground:
+            return False
+        state.foreground = True
+        state.backgrounded_at = None
+        await self._deliver_or_queue_channel_event(
+            {
+                "type": "task.foregrounded",
+                "request_id": request_id,
+                "session_id": state.session_id,
+                "task_id": state.task_id,
+                "channel": channel,
+                "partial_content": state.partial_content,
+                "partial_thinking": state.partial_thinking,
+                "completed": state.completed,
+            },
+            channel=channel,
+        )
+        return True
 
     def list_sessions(self) -> list[dict[str, Any]]:
         return self.session_store.list_sessions()
@@ -2446,6 +2540,7 @@ class GatewayRuntime:
         awaiting_reply: bool = False,
         channel: str | None = None,
         metadata: dict[str, Any] | None = None,
+        in_reply_to_request_id: str | None = None,
     ) -> str | None:
         if not content:
             return None
@@ -2457,6 +2552,7 @@ class GatewayRuntime:
             awaiting_reply=awaiting_reply,
             channel=channel,
             metadata=metadata,
+            in_reply_to_request_id=in_reply_to_request_id,
         )
 
     def _ensure_session_state_seeded(self, session_id: str) -> dict[str, Any]:
@@ -3263,6 +3359,7 @@ class GatewayRuntime:
                 "research_provenance": research_provenance,
                 "sources": sources,
                 "specialist_receipts": specialist_receipts,
+                **({"background": True} if assistant_metadata.get("background") else {}),
             },
         }
 
@@ -3934,12 +4031,36 @@ class GatewayRuntime:
         )
 
     def _get_model_visible_history(self, session_id: str) -> list[dict[str, Any]]:
-        return self.session_store.get_pruned_history(
+        history = self.session_store.get_pruned_history(
             session_id,
             max_messages=None,
             max_chars=None,
             max_approx_tokens=self._conversation_context_budget_tokens(),
         )
+        return self._annotate_background_results(history)
+
+    def _annotate_background_results(self, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Prefix background-completed assistant messages with context so the model
+        knows which user query they answer."""
+        # Build lookup: request_id → user message content excerpt
+        user_excerpts: dict[str, str] = {}
+        for msg in history:
+            if msg.get("role") == "user" and msg.get("request_id"):
+                excerpt = (self._safe_text(msg.get("content")) or "")[:120].strip()
+                if excerpt:
+                    user_excerpts[msg["request_id"]] = excerpt
+
+        annotated: list[dict[str, Any]] = []
+        for msg in history:
+            metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
+            if msg.get("role") == "assistant" and metadata.get("background"):
+                reply_to = msg.get("in_reply_to_request_id") or metadata.get("request_id")
+                user_excerpt = user_excerpts.get(reply_to, "a prior request") if reply_to else "a prior request"
+                prefix = f'[Background task result — in reply to: "{user_excerpt}"]\n\n'
+                annotated.append({**msg, "content": prefix + (msg.get("content") or "")})
+            else:
+                annotated.append(msg)
+        return annotated
 
     def _estimate_history_tokens(self, history: list[dict[str, Any]]) -> int:
         total = 0
@@ -4051,11 +4172,17 @@ class GatewayRuntime:
             if sum(len(line) for line in older_lines) >= COMPACTION_RAW_MESSAGE_CHAR_LIMIT:
                 break
 
-        turn_lines = [
-            f"- {self._safe_text(item.get('compact_line'))}"
-            for item in compactable_turns
-            if self._safe_text(item.get("compact_line"))
-        ][:20]
+        turn_lines: list[str] = []
+        for item in compactable_turns:
+            line = self._safe_text(item.get("compact_line"))
+            if not line:
+                continue
+            turn_meta = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            if turn_meta.get("background"):
+                line = f"{line} (background task)"
+            turn_lines.append(f"- {line}")
+            if len(turn_lines) >= 20:
+                break
         active_working_set = session_state.get("active_working_set")
         session_metadata = session_state.get("metadata") if isinstance(session_state.get("metadata"), dict) else {}
         current_tasks = (
@@ -4334,6 +4461,51 @@ class GatewayRuntime:
         history = self.session_store.get_history(session_id)
         pending_inputs = self._pending_inputs_for_channel(channel, session_id=session_id)
         active_tasks = await self._active_task_summaries(session_id=session_id, channel=channel)
+        # Still-running background tasks from in-memory state
+        background_tasks = [
+            {
+                "request_id": state.request_id,
+                "task_id": state.task_id,
+                "session_id": state.session_id,
+                "route": state.route,
+                "user_query_excerpt": state.user_query_excerpt,
+                "partial_content": state.partial_content,
+                "partial_thinking": state.partial_thinking,
+                "backgrounded_at": state.backgrounded_at,
+                "completed": False,
+            }
+            for state in self.active_requests.values()
+            if not state.foreground and state.channel == channel
+        ]
+        # Completed background tasks reconstructed from session history
+        running_request_ids = {t["request_id"] for t in background_tasks}
+        for msg in history:
+            if msg.get("role") != "assistant":
+                continue
+            meta = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
+            if not meta.get("background"):
+                continue
+            reply_to = msg.get("in_reply_to_request_id") or meta.get("request_id")
+            if not reply_to or reply_to in running_request_ids:
+                continue
+            running_request_ids.add(reply_to)
+            # Find the matching user message excerpt
+            user_excerpt = ""
+            for umsg in history:
+                if umsg.get("role") == "user" and umsg.get("request_id") == reply_to:
+                    user_excerpt = (self._safe_text(umsg.get("content")) or "")[:120].strip()
+                    break
+            background_tasks.append({
+                "request_id": reply_to,
+                "task_id": meta.get("task_id"),
+                "session_id": session_id,
+                "route": msg.get("route"),
+                "user_query_excerpt": user_excerpt,
+                "partial_content": msg.get("content") or "",
+                "partial_thinking": meta.get("thinking_text") or "",
+                "backgrounded_at": None,
+                "completed": True,
+            })
         return {
             "type": "resume.ok",
             "request_id": request_id,
@@ -4343,6 +4515,7 @@ class GatewayRuntime:
             "history_tail": history,
             "active_tasks": active_tasks,
             "pending_inputs": pending_inputs,
+            "background_tasks": background_tasks,
         }
 
     def notify_channel_active(self, channel: str | None) -> None:
@@ -4807,6 +4980,19 @@ class GatewayRuntime:
         resolved_channel = self._safe_text(channel or event.get("channel"))
         if not resolved_channel:
             raise ValueError("Outbound event is missing channel")
+
+        # Re-namespace events for backgrounded requests so the desktop
+        # routes them to the task panel instead of the main response stream.
+        request_id = self._safe_text(event.get("request_id"))
+        bg_state = self.active_requests.get(request_id) if request_id else None
+        if (
+            bg_state is not None
+            and not bg_state.foreground
+            and not self._safe_text(event.get("type", "")).startswith("task.background.")
+            and self._safe_text(event.get("type")) not in {"task.backgrounded", "task.foregrounded"}
+        ):
+            event = {**event, "type": f"task.background.{event.get('type', 'unknown')}"}
+
         event_type = self._safe_text(event.get("type")) or "unknown"
         dedupe_key = self._delivery_dedupe_key(event, resolved_channel)
 
@@ -7534,16 +7720,21 @@ class GatewayRuntime:
             )
         finally:
             if state.cancel_requested and state.partial_content and not state.completed:
+                interrupted_metadata: dict[str, Any] = {
+                    "request_id": state.request_id,
+                    "thinking_text": state.partial_thinking or None,
+                    "interrupted": True,
+                }
+                if not state.foreground:
+                    interrupted_metadata["background"] = True
                 self._append_session_message(
                     state.session_id,
                     role="assistant",
                     content=state.partial_content,
                     route=state.route,
                     channel=state.channel,
-                    metadata={
-                        "thinking_text": state.partial_thinking or None,
-                        "interrupted": True,
-                    },
+                    metadata=interrupted_metadata,
+                    in_reply_to_request_id=state.request_id,
                 )
             self._finalize_active_request(state)
 
@@ -7563,6 +7754,7 @@ class GatewayRuntime:
         )
 
     def _finalize_active_request(self, state: ActiveRequest) -> None:
+        state.worker = None  # release the asyncio.Task reference
         current = self.active_requests.get(state.request_id)
         if current is state:
             self.active_requests.pop(state.request_id, None)

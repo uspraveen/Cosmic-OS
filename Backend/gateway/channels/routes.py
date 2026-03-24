@@ -316,6 +316,46 @@ async def _handle_desktop_websocket_message(
             )
         return
 
+    if message_type == "background":
+        target = str(payload.get("request_id") or "").strip()
+        if not target:
+            await adapter.send(
+                _error_payload(request_id, "INVALID_BACKGROUND", "request_id is required"),
+                channel=channel,
+            )
+            return
+        ok = await runtime.background_active_request(channel=channel, request_id=target)
+        if not ok:
+            await adapter.send(
+                _error_payload(
+                    request_id,
+                    "BACKGROUND_FAILED",
+                    "Cannot background this request. It may be completed, not found, or the background task limit has been reached.",
+                ),
+                channel=channel,
+            )
+        return
+
+    if message_type == "foreground":
+        target = str(payload.get("request_id") or "").strip()
+        if not target:
+            await adapter.send(
+                _error_payload(request_id, "INVALID_FOREGROUND", "request_id is required"),
+                channel=channel,
+            )
+            return
+        ok = await runtime.foreground_background_request(channel=channel, request_id=target)
+        if not ok:
+            await adapter.send(
+                _error_payload(
+                    request_id,
+                    "FOREGROUND_FAILED",
+                    "Cannot foreground this request. A foreground task may already be active, or the request was not found.",
+                ),
+                channel=channel,
+            )
+        return
+
     await adapter.send(
         _error_payload(request_id, "UNKNOWN_MESSAGE_TYPE", f"Unsupported WebSocket message type: {message_type or '<missing>'}"),
         channel=channel,

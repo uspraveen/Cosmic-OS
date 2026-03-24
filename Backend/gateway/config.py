@@ -133,6 +133,7 @@ class GatewayConfig:
     memory_write_max_per_hour: int = 50
     memory_write_dedup_ttl_sec: int = 86_400
     session_summary_max_output_tokens: int = 2500
+    max_background_tasks_per_session: int = 5
 
     @classmethod
     def from_env(cls) -> "GatewayConfig":
@@ -407,5 +408,9 @@ class GatewayConfig:
             session_summary_max_output_tokens=max(
                 512,
                 _env_int("GATEWAY_SESSION_SUMMARY_MAX_OUTPUT_TOKENS", 2500),
+            ),
+            max_background_tasks_per_session=max(
+                1,
+                _env_int("GATEWAY_MAX_BACKGROUND_TASKS_PER_SESSION", 5),
             ),
         )
