@@ -223,6 +223,14 @@ def _firecrawl_extract_progress(tool_input: dict[str, Any]) -> str:
     return "Extracting structured data via Firecrawl..."
 
 
+def _firecrawl_agent_progress(tool_input: dict[str, Any]) -> str:
+    prompt = str(tool_input.get("prompt") or "").strip()
+    if prompt:
+        short = prompt[:80] + ("..." if len(prompt) > 80 else "")
+        return f"Firecrawl autonomous agent: {short}"
+    return "Running Firecrawl autonomous agent..."
+
+
 def _firecrawl_recall_progress(tool_input: dict[str, Any]) -> str:
     session_id = str(tool_input.get("session_id") or "").strip()
     return f"Reviewing prior Firecrawl runs for {session_id}..." if session_id else "Reviewing prior Firecrawl runs..."
@@ -1258,6 +1266,46 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Structured extraction via the Firecrawl specialist agent for schema-shaped outputs, list building, and multi-page research tasks.",
         progress_builder=_firecrawl_extract_progress,
         handler_method="_firecrawl_extract",
+        exposed_to_model=False,
+        specialist_agent_id=_FIRECRAWL_AGENT_ID,
+    ),
+    ToolSpec(
+        name="firecrawl_agent",
+        api_definition={
+            "name": "firecrawl_agent",
+            "description": (
+                "Run the Firecrawl autonomous AI agent to search, navigate, and extract data from the web given a natural-language prompt. "
+                "Use this only when simpler firecrawl_scrape or firecrawl_extract have failed or are clearly insufficient — "
+                "for example when the right URLs are unknown, multi-page interaction is needed, or a complex extraction requires autonomous navigation. "
+                "Do not default to this mode; prefer firecrawl_scrape and firecrawl_extract first."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Natural-language description of the data to find and extract. Be specific and descriptive.",
+                    },
+                    "urls": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional seed URLs to focus the agent on. When omitted the agent discovers URLs autonomously.",
+                    },
+                    "schema": {
+                        "type": "object",
+                        "description": "Optional JSON schema describing the desired structured output shape.",
+                    },
+                },
+                "required": ["prompt"],
+            },
+        },
+        group="research",
+        prompt_summary=(
+            "Autonomous Firecrawl AI agent for complex extractions when scrape/extract are insufficient. "
+            "Searches, navigates, and extracts autonomously. Use only as a fallback."
+        ),
+        progress_builder=_firecrawl_agent_progress,
+        handler_method="_firecrawl_agent",
         exposed_to_model=False,
         specialist_agent_id=_FIRECRAWL_AGENT_ID,
     ),

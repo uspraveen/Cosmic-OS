@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "prompt": {
+      "type": "string",
+      "minLength": 10,
+      "description": "Natural-language description of the data to find and extract. The Firecrawl agent autonomously searches, navigates, and extracts."
+    },
+    "urls": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "format": "uri"
+      },
+      "maxItems": 10,
+      "uniqueItems": true,
+      "description": "Optional seed URLs to focus the agent on. When omitted the agent discovers URLs autonomously."
+    },
+    "schema": {
+      "type": "object",
+      "description": "Optional JSON schema describing the desired structured output shape."
+    }
+  },
+  "required": ["prompt"]
+}

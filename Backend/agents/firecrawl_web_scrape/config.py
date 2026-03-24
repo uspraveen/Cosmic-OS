@@ -33,6 +33,8 @@ class FirecrawlWebScrapeConfig:
     firecrawl_request_timeout_sec: float = 120.0
     firecrawl_extract_poll_interval_sec: float = 2.0
     firecrawl_extract_max_wait_sec: float = 120.0
+    firecrawl_agent_poll_interval_sec: float = 3.0
+    firecrawl_agent_max_wait_sec: float = 240.0
 
     @classmethod
     def from_env(cls) -> "FirecrawlWebScrapeConfig":
@@ -46,4 +48,6 @@ class FirecrawlWebScrapeConfig:
             firecrawl_request_timeout_sec=max(15.0, _env_float("FIRECRAWL_REQUEST_TIMEOUT_SEC", 120.0)),
             firecrawl_extract_poll_interval_sec=max(0.5, _env_float("FIRECRAWL_EXTRACT_POLL_INTERVAL_SEC", 2.0)),
             firecrawl_extract_max_wait_sec=max(15.0, _env_float("FIRECRAWL_EXTRACT_MAX_WAIT_SEC", 120.0)),
+            firecrawl_agent_poll_interval_sec=max(1.0, _env_float("FIRECRAWL_AGENT_POLL_INTERVAL_SEC", 3.0)),
+            firecrawl_agent_max_wait_sec=max(30.0, _env_float("FIRECRAWL_AGENT_MAX_WAIT_SEC", 240.0)),
         )

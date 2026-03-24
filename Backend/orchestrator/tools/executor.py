@@ -851,6 +851,29 @@ class ToolExecutor:
             wait_timeout_sec=185.0,
         )
 
+    async def _firecrawl_agent(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "prompt": str(tool_input.get("prompt") or "").strip(),
+        }
+        urls = self._normalize_string_list(tool_input.get("urls"))
+        if urls:
+            payload["urls"] = urls
+        schema = tool_input.get("schema")
+        if isinstance(schema, dict) and schema:
+            payload["schema"] = schema
+        return await self._dispatch_specialist_agent(
+            intent="firecrawl.agent",
+            payload=payload,
+            context=context,
+            agent_id="cosmic/firecrawl-web-scrape-agent:1.0.0",
+            wait_timeout_sec=295.0,
+        )
+
     async def _firecrawl_recall_session(
         self,
         tool_input: dict[str, Any],

@@ -62,6 +62,7 @@ class FirecrawlAgentError(RuntimeError):
 class FirecrawlWebScrapeAgent(AgentRuntime):
     SCRAPE_INTENT = "firecrawl.scrape"
     EXTRACT_INTENT = "firecrawl.extract"
+    AGENT_INTENT = "firecrawl.agent"
     RECALL_SESSION_INTENT = "firecrawl.recall_session"
     SCRAPE_FORMATS = frozenset({"markdown", "html", "rawHtml", "links", "images", "screenshot"})
     SCRAPE_PROXY_VALUES = frozenset({"auto", "basic", "enhanced"})
@@ -152,6 +153,8 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
                 return await self._handle_scrape(task)
             if task.intent == self.EXTRACT_INTENT:
                 return await self._handle_extract(task)
+            if task.intent == self.AGENT_INTENT:
+                return await self._handle_agent(task)
             if task.intent == self.RECALL_SESSION_INTENT:
                 return await self._handle_recall_session(task)
             return self._result_error(
@@ -442,6 +445,166 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
             },
             artifacts=[],
         )
+
+    async def _handle_agent(self, task: TaskEnvelope) -> AgentResult:
+        prompt_assets = self._load_prompt_assets()
+        prompt = str(task.input.get("prompt") or "").strip()
+        if len(prompt) < 10:
+            raise FirecrawlAgentError(
+                code="INVALID_INPUT",
+                message="prompt must be at least 10 characters for the Firecrawl agent.",
+                retryable=False,
+                next_action="revise_input",
+            )
+        urls = self._normalize_url_list(task.input.get("urls")) if isinstance(task.input.get("urls"), list) else []
+        schema = task.input.get("schema") if isinstance(task.input.get("schema"), dict) else None
+
+        payload: dict[str, Any] = {"prompt": prompt}
+        if urls:
+            payload["urls"] = urls
+        if schema:
+            payload["schema"] = schema
+
+        url_desc = f" focused on {len(urls)} seed URL{'s' if len(urls) != 1 else ''}" if urls else ""
+        await self._emit_progress(
+            task.task_id,
+            f"Submitting Firecrawl autonomous agent job{url_desc}.",
+        )
+        started = time.perf_counter()
+        submitted = await self._firecrawl_request("POST", "/v2/agent", json_body=payload)
+        job_id = str(submitted.get("id") or "").strip()
+        if not job_id:
+            raise FirecrawlAgentError(
+                code="INTERNAL_ERROR",
+                message="Firecrawl agent response did not include a job ID.",
+                retryable=False,
+                next_action="escalate",
+            )
+
+        deadline = time.monotonic() + max(self.config.firecrawl_agent_max_wait_sec, 30.0)
+        latest_payload = submitted
+        status = str(submitted.get("status") or "processing").strip().lower() or "processing"
+
+        while status not in {"completed", "failed", "cancelled", "canceled"}:
+            if time.monotonic() >= deadline:
+                raise FirecrawlAgentError(
+                    code="TIMEOUT",
+                    message=f"Firecrawl agent job {job_id} did not finish before the configured timeout.",
+                    retryable=True,
+                    next_action="retry",
+                )
+            await self._emit_progress(task.task_id, f"Waiting on Firecrawl agent job {job_id} ({status}).")
+            await asyncio.sleep(self.config.firecrawl_agent_poll_interval_sec)
+            latest_payload = await self._firecrawl_request("GET", f"/v2/agent/{job_id}")
+            status = str(latest_payload.get("status") or status).strip().lower() or status
+
+        elapsed_ms = max(1, int((time.perf_counter() - started) * 1000))
+        if status in {"failed", "cancelled", "canceled"}:
+            message = str(latest_payload.get("error") or latest_payload.get("message") or "").strip()
+            if not message:
+                message = f"Firecrawl agent job {job_id} ended with status={status}."
+            raise FirecrawlAgentError(
+                code="INTERNAL_ERROR" if status == "failed" else "TIMEOUT",
+                message=message,
+                retryable=(status != "failed"),
+                next_action="retry" if status != "failed" else "escalate",
+            )
+
+        agent_data = latest_payload.get("data")
+        sources = latest_payload.get("sources") if isinstance(latest_payload.get("sources"), list) else []
+        artifact_manifests, artifact_refs = await self._persist_agent_artifacts(
+            task=task,
+            source_urls=urls,
+            submitted_payload=submitted,
+            final_payload=latest_payload,
+            agent_data=agent_data,
+        )
+        normalized_data = self._normalize_extract_data(agent_data)
+        message = (
+            f"Firecrawl agent completed autonomous extraction{url_desc}."
+            if not urls else
+            f"Firecrawl agent extracted data from {len(urls)} seed page{'s' if len(urls) != 1 else ''}."
+        )
+        output = {
+            "response": message,
+            "message": message,
+            "job_id": job_id,
+            "status": status,
+            "prompt": prompt,
+            "urls": urls,
+            "data": normalized_data,
+            "sources": sources,
+            "artifacts": artifact_refs,
+        }
+        details = {
+            "job_id": job_id,
+            "status": status,
+            "elapsed_ms": elapsed_ms,
+            "prompt_assets_loaded": sorted(key for key, value in prompt_assets.items() if value),
+        }
+        self._record_session_run(
+            task=task,
+            intent=task.intent,
+            target_urls=urls or [],
+            summary=message,
+            artifact_refs=artifact_refs,
+            details=details,
+        )
+        logger.info(
+            "firecrawl_agent.agent_completed task_id=%s job_id=%s urls=%d elapsed_ms=%d",
+            task.task_id,
+            job_id,
+            len(urls),
+            elapsed_ms,
+        )
+        return AgentResult(status="completed", output=output, artifacts=artifact_manifests)
+
+    async def _persist_agent_artifacts(
+        self,
+        *,
+        task: TaskEnvelope,
+        source_urls: list[str],
+        submitted_payload: dict[str, Any],
+        final_payload: dict[str, Any],
+        agent_data: Any,
+    ) -> tuple[list[ArtifactManifest], list[dict[str, str]]]:
+        manifests: list[ArtifactManifest] = []
+        source_url = source_urls[0] if len(source_urls) == 1 else None
+        manifests.append(
+            self._write_json_artifact(
+                task=task,
+                filename="agent_submitted.json",
+                payload=submitted_payload,
+                source_url=source_url,
+            )
+        )
+        manifests.append(
+            self._write_json_artifact(
+                task=task,
+                filename="agent_result.json",
+                payload=final_payload,
+                source_url=source_url,
+            )
+        )
+        manifests.append(
+            self._write_json_artifact(
+                task=task,
+                filename="agent_data.json",
+                payload={"data": agent_data},
+                source_url=source_url,
+            )
+        )
+        sources = final_payload.get("sources")
+        if isinstance(sources, list) and sources:
+            manifests.append(
+                self._write_json_artifact(
+                    task=task,
+                    filename="agent_sources.json",
+                    payload={"sources": sources},
+                    source_url=source_url,
+                )
+            )
+        return manifests, [self._artifact_ref(item) for item in manifests]
 
     async def _emit_progress(self, task_id: str, message: str, **payload: Any) -> None:
         progress_payload = {"message": message}

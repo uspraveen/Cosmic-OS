@@ -104,6 +104,16 @@ interface ProducedArtifact {
   downloadable: boolean
 }
 
+const isStableAssistantMessageId = (value: unknown): value is string => {
+  const text = String(value || '').trim()
+  if (!text) return false
+  return !(
+    text.startsWith('pending_assistant_') ||
+    text.startsWith('artifact_ready_') ||
+    text.startsWith('xchan_')
+  )
+}
+
 interface ActivityLogEntry {
   id: string
   label: string
@@ -2666,10 +2676,41 @@ export default function App() {
       })
     } catch (err) {
       console.error('Failed to download produced artifact:', err)
-      return null
+      return {
+        cancelled: false,
+        error: err instanceof Error ? err.message : String(err || 'Download failed'),
+      }
     } finally {
       setDownloadingArtifactId((current) => (current === artifact.artifactId ? null : current))
     }
+  }
+
+  const resolveArtifactNotificationMessageId = (notification: ProducedArtifactNotification) => {
+    if (isStableAssistantMessageId(notification.messageId)) {
+      return notification.messageId
+    }
+    const artifactIds = new Set(
+      notification.artifacts
+        .map((item) => String(item?.artifactId || '').trim())
+        .filter(Boolean),
+    )
+    if (artifactIds.size <= 0) {
+      return notification.messageId
+    }
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]
+      if (message.role !== 'assistant' || !isStableAssistantMessageId(message.id)) {
+        continue
+      }
+      if (notification.requestId && message.requestId && notification.requestId !== message.requestId) {
+        continue
+      }
+      const producedArtifacts = Array.isArray(message.producedArtifacts) ? message.producedArtifacts : []
+      if (producedArtifacts.some((item) => artifactIds.has(String(item?.artifactId || '').trim()))) {
+        return message.id
+      }
+    }
+    return notification.messageId
   }
 
   const handleDownloadArtifactNotification = async (notification: ProducedArtifactNotification) => {
@@ -2677,9 +2718,18 @@ export default function App() {
     if (!primaryArtifact) {
       return
     }
-    const result = await handleDownloadProducedArtifact(notification.messageId, primaryArtifact)
+    const resolvedMessageId = resolveArtifactNotificationMessageId(notification)
+    if (!isStableAssistantMessageId(resolvedMessageId)) {
+      openChatFromArtifactNotification()
+      return
+    }
+    const result = await handleDownloadProducedArtifact(resolvedMessageId, primaryArtifact)
     if (result && !(result as any).cancelled) {
-      dismissArtifactReadyNotification(notification.id)
+      if (!(result as any).error) {
+        dismissArtifactReadyNotification(notification.id)
+        return
+      }
+      openChatFromArtifactNotification()
     }
   }
 
@@ -3027,7 +3077,6 @@ export default function App() {
                             {channelLabel(notification.channel)}
                           </div>
                         )}
-                        <div className="task-interrupt-chip artifact-ready-chip">Download</div>
                       </div>
                     </div>
                     <div className="task-interrupt-preview artifact-ready-preview">

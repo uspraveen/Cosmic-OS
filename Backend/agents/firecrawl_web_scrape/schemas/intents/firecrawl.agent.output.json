@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "response": { "type": "string" },
+    "message": { "type": "string" },
+    "job_id": { "type": ["string", "null"] },
+    "status": { "type": "string" },
+    "prompt": { "type": "string" },
+    "urls": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "data": {
+      "type": "object"
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "artifact_id": { "type": "string" },
+          "path": { "type": "string" },
+          "mime": { "type": "string" }
+        },
+        "required": ["artifact_id", "path", "mime"]
+      }
+    }
+  },
+  "required": ["response", "message", "status", "prompt", "data"]
+}

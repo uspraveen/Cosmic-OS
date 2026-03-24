@@ -18,6 +18,16 @@ intents:
     output_schema: schemas/intents/firecrawl.extract.output.json
     timeout_sec: 180
 
+  - name: firecrawl.agent
+    description: Run an autonomous Firecrawl AI agent that searches, navigates, and extracts data from the web given a natural-language prompt.
+    input_schema: schemas/intents/firecrawl.agent.input.json
+    output_schema: schemas/intents/firecrawl.agent.output.json
+    timeout_sec: 300
+    usage_hints:
+      - Use firecrawl.agent only when simpler firecrawl.scrape or firecrawl.extract have failed or are clearly insufficient for the task.
+      - Best for complex extractions that require autonomous multi-page navigation, site interaction, or when you do not have the right seed URLs.
+      - Do not default to this mode; prefer firecrawl.scrape for single-page reads and firecrawl.extract for known-URL structured extraction first.
+
   - name: firecrawl.recall_session
     description: Recall previous Firecrawl work stored in the agent session ledger.
     input_schema: schemas/intents/firecrawl.recall_session.input.json
@@ -41,13 +51,14 @@ policies:
   intent_authorization:
     firecrawl.scrape: [cosmic/orchestrator:1.0.0]
     firecrawl.extract: [cosmic/orchestrator:1.0.0]
+    firecrawl.agent: [cosmic/orchestrator:1.0.0]
     firecrawl.recall_session: [cosmic/orchestrator:1.0.0]
 
 sla:
   max_concurrency: 2
   heartbeat_interval_sec: 10
   heartbeat_ttl_sec: 30
-  max_task_duration_sec: 180
+  max_task_duration_sec: 300
   health_endpoint: /health
   retry_policy:
     max_attempts: 3
