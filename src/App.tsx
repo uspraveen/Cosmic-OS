@@ -50,6 +50,25 @@ interface PendingTaskInput {
   timestamp?: string | null
 }
 
+interface BackgroundTask {
+  requestId: string
+  taskId?: string | null
+  sessionId?: string | null
+  route?: string | null
+  userQueryExcerpt: string
+  partialContent: string
+  partialThinking: string
+  backgroundedAt?: string | null
+  completed: boolean
+  failed?: boolean
+  error?: string | null
+  activity?: string
+  activityLog?: ActivityLogEntry[]
+  progress?: DocsProgressState | TabularProgressState
+  producedArtifacts?: ProducedArtifact[]
+  sources?: Array<{ url: string; title?: string; domain?: string } | string>
+}
+
 interface CronResultNotification {
   id: string
   requestId?: string | null
@@ -531,6 +550,52 @@ const normalizeDocsProgress = (value: unknown): DocsProgressState | undefined =>
   }
 }
 
+const normalizeBackgroundTask = (value: unknown): BackgroundTask | null => {
+  if (!value || typeof value !== 'object') {
+    return null
+  }
+  const requestId = String((value as any).request_id || (value as any).requestId || '').trim()
+  if (!requestId) {
+    return null
+  }
+  return {
+    requestId,
+    taskId: typeof (value as any).task_id === 'string' && (value as any).task_id.trim()
+      ? (value as any).task_id.trim()
+      : typeof (value as any).taskId === 'string' && (value as any).taskId.trim()
+        ? (value as any).taskId.trim()
+        : null,
+    sessionId: typeof (value as any).session_id === 'string' && (value as any).session_id.trim()
+      ? (value as any).session_id.trim()
+      : typeof (value as any).sessionId === 'string' && (value as any).sessionId.trim()
+        ? (value as any).sessionId.trim()
+        : null,
+    route: typeof (value as any).route === 'string' && (value as any).route.trim()
+      ? (value as any).route.trim()
+      : null,
+    userQueryExcerpt: String((value as any).user_query_excerpt || (value as any).userQueryExcerpt || '').trim(),
+    partialContent: String((value as any).partial_content || (value as any).partialContent || ''),
+    partialThinking: String((value as any).partial_thinking || (value as any).partialThinking || ''),
+    backgroundedAt: typeof (value as any).backgrounded_at === 'string' && (value as any).backgrounded_at.trim()
+      ? (value as any).backgrounded_at.trim()
+      : typeof (value as any).backgroundedAt === 'string' && (value as any).backgroundedAt.trim()
+        ? (value as any).backgroundedAt.trim()
+        : null,
+    completed: Boolean((value as any).completed),
+    failed: Boolean((value as any).failed),
+    error: typeof (value as any).error === 'string' && (value as any).error.trim()
+      ? (value as any).error.trim()
+      : null,
+    activity: typeof (value as any).activity === 'string' && (value as any).activity.trim()
+      ? (value as any).activity.trim()
+      : undefined,
+    activityLog: normalizeActivityLog((value as any).activity_log ?? (value as any).activityLog),
+    progress: normalizeTabularProgress((value as any).tabular_progress) ?? normalizeDocsProgress((value as any).docs_progress),
+    producedArtifacts: normalizeProducedArtifacts((value as any).produced_artifacts ?? (value as any).producedArtifacts),
+    sources: Array.isArray((value as any).sources) ? (value as any).sources : undefined,
+  }
+}
+
 const TabularProgressCard = ({ progress }: { progress: TabularProgressState }) => {
   const percentLabel = `${Math.max(1, Math.round(progress.percent * 100))}%`
   const showCount = progress.total > 1
@@ -883,17 +948,32 @@ export default function App() {
   // --- HISTORY / DB STATE ---
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [pendingTaskInputs, setPendingTaskInputs] = useState<PendingTaskInput[]>([])
+  const [backgroundTasks, setBackgroundTasks] = useState<BackgroundTask[]>([])
   const [taskInputDrafts, setTaskInputDrafts] = useState<Record<string, string>>({})
   const [submittingTaskInputs, setSubmittingTaskInputs] = useState<Record<string, boolean>>({})
+  const [backgroundTaskErrors, setBackgroundTaskErrors] = useState<Record<string, string>>({})
+  const [backgroundingRequestId, setBackgroundingRequestId] = useState<string | null>(null)
+  const [foregroundingRequestId, setForegroundingRequestId] = useState<string | null>(null)
   const [taskInputErrors, setTaskInputErrors] = useState<Record<string, string>>({})
   const [dismissedTaskInterruptIds, setDismissedTaskInterruptIds] = useState<string[]>([])
   const [selectedTaskInputId, setSelectedTaskInputId] = useState<string | null>(null)
+  const [selectedBackgroundRequestId, setSelectedBackgroundRequestId] = useState<string | null>(null)
   const [taskInterruptIndex, setTaskInterruptIndex] = useState(0)
   const [cronResultNotifications, setCronResultNotifications] = useState<CronResultNotification[]>([])
   const [cronResultIndex, setCronResultIndex] = useState(0)
   const [artifactReadyNotifications, setArtifactReadyNotifications] = useState<ProducedArtifactNotification[]>([])
   const pendingTaskCount = pendingTaskInputs.length
+  const backgroundTaskCount = backgroundTasks.length
+  const taskDashboardCount = pendingTaskCount + backgroundTaskCount
   const orderedPendingTaskInputs = useMemo(() => [...pendingTaskInputs].reverse(), [pendingTaskInputs])
+  const orderedBackgroundTasks = useMemo(() => [...backgroundTasks].sort((a, b) => {
+    const aCompleted = a.completed ? 1 : 0
+    const bCompleted = b.completed ? 1 : 0
+    if (aCompleted !== bCompleted) {
+      return aCompleted - bCompleted
+    }
+    return String(b.backgroundedAt || '').localeCompare(String(a.backgroundedAt || ''))
+  }), [backgroundTasks])
   const visibleTaskInterrupts = useMemo(
     () => orderedPendingTaskInputs.filter((item) => !dismissedTaskInterruptIds.includes(item.inputRequestId)),
     [dismissedTaskInterruptIds, orderedPendingTaskInputs],
@@ -918,6 +998,19 @@ export default function App() {
     }
     return orderedPendingTaskInputs[0]
   }, [orderedPendingTaskInputs, selectedTaskInputId])
+  const selectedBackgroundTask = useMemo(() => {
+    if (orderedBackgroundTasks.length === 0) {
+      return null
+    }
+    if (selectedBackgroundRequestId) {
+      const matched = orderedBackgroundTasks.find((item) => item.requestId === selectedBackgroundRequestId)
+      if (matched) {
+        return matched
+      }
+    }
+    return orderedBackgroundTasks[0]
+  }, [orderedBackgroundTasks, selectedBackgroundRequestId])
+  const canBringBackgroundTaskToForeground = !isStreaming && !activeStreamingRequestIdRef.current && !activeStreamingTaskIdRef.current
 
   // Track key status for SetupModal
   const [keyStatus, setKeyStatus] = useState({
@@ -1094,6 +1187,62 @@ export default function App() {
 
   const clearArtifactReadyNotifications = () => {
     setArtifactReadyNotifications([])
+  }
+
+  const upsertBackgroundTask = (task: BackgroundTask) => {
+    setBackgroundTasks((prev) => {
+      const nextTask = {
+        ...task,
+        partialContent: String(task.partialContent || ''),
+        partialThinking: String(task.partialThinking || ''),
+        userQueryExcerpt: String(task.userQueryExcerpt || ''),
+      }
+      const existingIndex = prev.findIndex((item) => item.requestId === nextTask.requestId)
+      if (existingIndex < 0) {
+        return [...prev, nextTask]
+      }
+      return prev.map((item, index) => {
+        if (index !== existingIndex) {
+          return item
+        }
+        return {
+          ...item,
+          ...nextTask,
+          activityLog: nextTask.activityLog ?? item.activityLog,
+          producedArtifacts: nextTask.producedArtifacts ?? item.producedArtifacts,
+          sources: nextTask.sources ?? item.sources,
+        }
+      })
+    })
+  }
+
+  const patchBackgroundTask = (requestId: string, patch: (current: BackgroundTask) => BackgroundTask) => {
+    const normalizedRequestId = String(requestId || '').trim()
+    if (!normalizedRequestId) {
+      return
+    }
+    setBackgroundTasks((prev) => prev.map((item) => {
+      if (item.requestId !== normalizedRequestId) {
+        return item
+      }
+      return patch(item)
+    }))
+  }
+
+  const removeBackgroundTask = (requestId: string) => {
+    const normalizedRequestId = String(requestId || '').trim()
+    if (!normalizedRequestId) {
+      return
+    }
+    setBackgroundTasks((prev) => prev.filter((item) => item.requestId !== normalizedRequestId))
+    setBackgroundTaskErrors((prev) => {
+      if (!(normalizedRequestId in prev)) {
+        return prev
+      }
+      const next = { ...prev }
+      delete next[normalizedRequestId]
+      return next
+    })
   }
 
   const openChatFromCronNotification = () => {
@@ -1446,11 +1595,16 @@ export default function App() {
     setMessages([])
     setActiveSessionId(null)
     setPendingTaskInputs([])
+    setBackgroundTasks([])
     setTaskInputDrafts({})
     setSubmittingTaskInputs({})
+    setBackgroundTaskErrors({})
+    setBackgroundingRequestId(null)
+    setForegroundingRequestId(null)
     setTaskInputErrors({})
     setDismissedTaskInterruptIds([])
     setSelectedTaskInputId(null)
+    setSelectedBackgroundRequestId(null)
     clearCronResultNotifications()
     clearArtifactReadyNotifications()
     setIsStreaming(false)
@@ -1924,13 +2078,255 @@ export default function App() {
               : [],
           ),
         )
+        setBackgroundTasks(
+          Array.isArray((event as any).background_tasks)
+            ? (event as any).background_tasks.map(normalizeBackgroundTask).filter(Boolean) as BackgroundTask[]
+            : [],
+        )
         setTaskInputDrafts({})
         setSubmittingTaskInputs({})
+        setBackgroundTaskErrors({})
+        setBackgroundingRequestId(null)
+        setForegroundingRequestId(null)
         setTaskInputErrors({})
         setDismissedTaskInterruptIds([])
         setSelectedTaskInputId(null)
+        setSelectedBackgroundRequestId(null)
         setIsStreaming(false)
         return
+      }
+
+      if (eventType === 'task.backgrounded') {
+        const backgroundTask = normalizeBackgroundTask({
+          ...(event || {}),
+          completed: false,
+        })
+        if (!backgroundTask) {
+          return
+        }
+        upsertBackgroundTask(backgroundTask)
+        setBackgroundingRequestId((current) => (current === backgroundTask.requestId ? null : current))
+        setBackgroundTaskErrors((prev) => {
+          if (!(backgroundTask.requestId in prev)) {
+            return prev
+          }
+          const next = { ...prev }
+          delete next[backgroundTask.requestId]
+          return next
+        })
+        if (activeStreamingRequestIdRef.current === backgroundTask.requestId) {
+          setIsStreaming(false)
+          setStreamingProgress('')
+          clearActiveStreamingRefs()
+          setMessages((prev) => {
+            const requestId = backgroundTask.requestId
+            const taskId = backgroundTask.taskId
+            return prev.filter((message) => {
+              if (message.role !== 'assistant') {
+                return true
+              }
+              const matchesRequest = requestId && message.requestId === requestId
+              const matchesTask = taskId && message.sourceId === taskId
+              return !(matchesRequest || matchesTask)
+            })
+          })
+          forgetAssistantMessageBindings(event)
+        }
+        return
+      }
+
+      if (eventType === 'task.foregrounded') {
+        const foregroundTask = normalizeBackgroundTask({
+          ...(event || {}),
+          user_query_excerpt: '',
+          completed: Boolean((event as any).completed),
+        })
+        const requestId = String(event?.request_id || '').trim()
+        if (requestId) {
+          removeBackgroundTask(requestId)
+          setForegroundingRequestId((current) => (current === requestId ? null : current))
+          setBackgroundingRequestId((current) => (current === requestId ? null : current))
+        }
+        if (!requestId) {
+          return
+        }
+        const messageId = createAssistantMessageId()
+        bindAssistantMessageToEvent(event, messageId)
+        setMessages((prev) => [
+          ...prev,
+          createAssistantMessage({
+            id: messageId,
+            requestId,
+            content: foregroundTask?.partialContent || '',
+            thinking: foregroundTask?.partialThinking || '',
+          }),
+        ])
+        activeStreamingRequestIdRef.current = requestId
+        if (foregroundTask?.taskId) {
+          activeStreamingTaskIdRef.current = foregroundTask.taskId
+        }
+        setStreamingProgress('')
+        setIsStreaming(!Boolean((event as any).completed))
+        shouldAutoScrollRef.current = true
+        if (modeRef.current !== 'chat') {
+          showChatComposer()
+        }
+        return
+      }
+
+      if (eventType.startsWith('task.background.')) {
+        const backgroundEventType = eventType.slice('task.background.'.length)
+        const requestId = String(event?.request_id || '').trim()
+        const taskId = typeof event?.task_id === 'string' ? event.task_id.trim() : ''
+        if (!requestId && !taskId) {
+          return
+        }
+
+        if (backgroundEventType === 'task.created') {
+          upsertBackgroundTask({
+            requestId: requestId || `background_${crypto.randomUUID()}`,
+            taskId: taskId || null,
+            sessionId: typeof event.session_id === 'string' ? event.session_id : null,
+            route: typeof event.route === 'string' ? event.route : null,
+            userQueryExcerpt: '',
+            partialContent: '',
+            partialThinking: '',
+            backgroundedAt: null,
+            completed: false,
+          })
+          return
+        }
+
+        if (backgroundEventType === 'task.progress') {
+          const eventStatus = String(event.status || '').trim()
+          const statusMessage = String(event.message || '').trim()
+          const docsProgress = normalizeDocsProgress(event.docs_progress)
+          const tabularProgress = normalizeTabularProgress((event as any).tabular_progress)
+          const progressState = tabularProgress ?? docsProgress
+          const fallbackMessage = eventStatus ? `Task ${eventStatus}...` : 'Working in the background...'
+          const activityText = progressState?.label || statusMessage || fallbackMessage
+          upsertBackgroundTask({
+            requestId,
+            taskId: taskId || null,
+            sessionId: typeof event.session_id === 'string' ? event.session_id : null,
+            route: typeof event.route === 'string' ? event.route : null,
+            userQueryExcerpt: '',
+            partialContent: '',
+            partialThinking: '',
+            backgroundedAt: null,
+            completed: false,
+            activity: activityText,
+            activityLog: appendActivityLogEntry(undefined, {
+              label: activityText,
+              detail: statusMessage || undefined,
+              status: eventStatus || null,
+              stage: progressState?.stage || null,
+              kind: progressState?.kind || 'generic',
+            }),
+            progress: progressState,
+          })
+          patchBackgroundTask(requestId, (current) => ({
+            ...current,
+            taskId: taskId || current.taskId || null,
+            sessionId: typeof event.session_id === 'string' ? event.session_id : current.sessionId,
+            route: typeof event.route === 'string' ? event.route : current.route,
+            activity: activityText,
+            activityLog: appendActivityLogEntry(current.activityLog, {
+              label: activityText,
+              detail: statusMessage || undefined,
+              status: eventStatus || null,
+              stage: progressState?.stage || null,
+              kind: progressState?.kind || 'generic',
+            }),
+            progress: progressState,
+            completed: false,
+          }))
+          return
+        }
+
+        if (backgroundEventType === 'response.thinking.chunk') {
+          patchBackgroundTask(requestId, (current) => ({
+            ...current,
+            taskId: taskId || current.taskId || null,
+            partialThinking: appendStreamText(current.partialThinking, event.content),
+            progress: undefined,
+            completed: false,
+          }))
+          return
+        }
+
+        if (backgroundEventType === 'response.chunk') {
+          patchBackgroundTask(requestId, (current) => ({
+            ...current,
+            taskId: taskId || current.taskId || null,
+            partialContent: appendStreamText(current.partialContent, event.content),
+            progress: undefined,
+            completed: false,
+          }))
+          return
+        }
+
+        if (backgroundEventType === 'response.complete') {
+          const producedArtifacts = normalizeProducedArtifacts((event as any).produced_artifacts)
+          const activityLog = normalizeActivityLog((event as any).activity_log)
+          patchBackgroundTask(requestId, (current) => ({
+            ...current,
+            taskId: taskId || current.taskId || null,
+            sessionId: typeof event.session_id === 'string' ? event.session_id : current.sessionId,
+            route: typeof event.route === 'string' ? event.route : current.route,
+            partialContent: mergeCompletedStreamText(current.partialContent, event.content),
+            partialThinking: typeof event.thinking_text === 'string'
+              ? event.thinking_text
+              : current.partialThinking,
+            producedArtifacts: producedArtifacts ?? current.producedArtifacts,
+            activityLog: activityLog ?? current.activityLog,
+            sources: Array.isArray(event.sources) ? event.sources : current.sources,
+            progress: undefined,
+            completed: true,
+            failed: false,
+          }))
+          if (producedArtifacts && producedArtifacts.length > 0 && isProducedArtifactChatInactive()) {
+            const messageId = typeof (event as any).message_id === 'string' && (event as any).message_id.trim()
+              ? (event as any).message_id.trim()
+              : typeof event.request_id === 'string' && event.request_id.trim()
+                ? `pending_assistant_${event.request_id.trim()}`
+                : `artifact_ready_${crypto.randomUUID()}`
+            enqueueArtifactReadyNotification({
+              id: `artifact_ready_${messageId}`,
+              messageId,
+              requestId,
+              sourceId: typeof event.source_id === 'string' ? event.source_id : null,
+              sessionId: typeof event.session_id === 'string' ? event.session_id : null,
+              channel: typeof event.channel === 'string' ? event.channel : null,
+              createdAt: new Date().toISOString(),
+              artifacts: producedArtifacts,
+            })
+          }
+          return
+        }
+
+        if (backgroundEventType === 'task.failed') {
+          patchBackgroundTask(requestId, (current) => ({
+            ...current,
+            taskId: taskId || current.taskId || null,
+            completed: true,
+            failed: true,
+            error: String(event?.error?.message || event?.message || 'Background task failed.'),
+            progress: undefined,
+          }))
+          return
+        }
+
+        if (backgroundEventType === 'task.completed' || backgroundEventType === 'task.cancelled') {
+          patchBackgroundTask(requestId, (current) => ({
+            ...current,
+            taskId: taskId || current.taskId || null,
+            completed: true,
+            failed: backgroundEventType === 'task.cancelled' ? false : current.failed,
+            progress: undefined,
+          }))
+          return
+        }
       }
 
       if (eventType === 'route_result') {
@@ -2544,6 +2940,59 @@ export default function App() {
       setTaskInputErrors((prev) => ({
         ...prev,
         [taskInput.inputRequestId]: error?.message || 'Unable to send task reply.',
+      }))
+    }
+  }
+
+  const handleMoveActiveToBackground = async () => {
+    const requestId = String(activeStreamingRequestIdRef.current || '').trim()
+    if (!requestId || !window.cosmic?.backgroundGatewayRequest) {
+      return
+    }
+    setBackgroundingRequestId(requestId)
+    setBackgroundTaskErrors((prev) => {
+      if (!(requestId in prev)) {
+        return prev
+      }
+      const next = { ...prev }
+      delete next[requestId]
+      return next
+    })
+    try {
+      await window.cosmic.backgroundGatewayRequest({ requestId })
+      shouldAutoScrollRef.current = true
+      showChatComposer()
+    } catch (error: any) {
+      setBackgroundingRequestId((current) => (current === requestId ? null : current))
+      setBackgroundTaskErrors((prev) => ({
+        ...prev,
+        [requestId]: error?.message || 'Unable to move this response to the background.',
+      }))
+    }
+  }
+
+  const handleBringTaskToForeground = async (task: BackgroundTask) => {
+    const requestId = String(task.requestId || '').trim()
+    if (!requestId || !window.cosmic?.foregroundGatewayRequest) {
+      return
+    }
+    setForegroundingRequestId(requestId)
+    setBackgroundTaskErrors((prev) => {
+      if (!(requestId in prev)) {
+        return prev
+      }
+      const next = { ...prev }
+      delete next[requestId]
+      return next
+    })
+    try {
+      await window.cosmic.foregroundGatewayRequest({ requestId })
+      shouldAutoScrollRef.current = true
+    } catch (error: any) {
+      setForegroundingRequestId((current) => (current === requestId ? null : current))
+      setBackgroundTaskErrors((prev) => ({
+        ...prev,
+        [requestId]: error?.message || 'Unable to bring this task back to the foreground.',
       }))
     }
   }
@@ -3284,110 +3733,275 @@ export default function App() {
                         <div>
                           <div className="task-hub-kicker">Task Inbox</div>
                           <h2 className="task-hub-title">
-                            {pendingTaskCount > 0 ? `${pendingTaskCount} request${pendingTaskCount === 1 ? '' : 's'} waiting` : 'No task input needed right now'}
+                            {taskDashboardCount > 0
+                              ? `${taskDashboardCount} task item${taskDashboardCount === 1 ? '' : 's'} active`
+                              : 'No task activity right now'}
                           </h2>
+                          <div className="task-hub-subtitle">
+                            {backgroundTaskCount > 0
+                              ? `${backgroundTaskCount} background task${backgroundTaskCount === 1 ? '' : 's'} running or ready`
+                              : 'Background work you move out of chat will collect here.'}
+                          </div>
                         </div>
                         <button type="button" className="task-hub-chat-btn" onClick={showChatComposer}>
                           Return to chat
                         </button>
                       </div>
 
-                      {pendingTaskCount > 0 && selectedTaskInput ? (
-                        <div className={`task-hub-body ${hasMultiplePendingTaskInputs ? '' : 'single'}`}>
-                          {hasMultiplePendingTaskInputs && (
-                            <div className="task-list-pane">
-                              <div className="task-list">
-                                {orderedPendingTaskInputs.map((taskInput) => (
-                                  <button
-                                    key={taskInput.inputRequestId}
-                                    type="button"
-                                    className={`task-list-item ${selectedTaskInput.inputRequestId === taskInput.inputRequestId ? 'active' : ''}`}
-                                    onClick={() => setSelectedTaskInputId(taskInput.inputRequestId)}
-                                    >
-                                      <div className="task-list-item-label-row">
-                                        <span className="task-list-item-label">Task</span>
-                                        <span className="task-list-item-status">
-                                          {taskInput.options.length > 0
-                                            ? `${taskInput.options.length} choice${taskInput.options.length === 1 ? '' : 's'}`
-                                            : 'Reply needed'}
-                                        </span>
-                                      </div>
-                                      <div className="task-list-item-question">{taskInput.question}</div>
-                                    </button>
-                                  ))}
+                      {taskDashboardCount > 0 ? (
+                        <div className="task-hub-stack">
+                          {backgroundTaskCount > 0 && selectedBackgroundTask && (
+                            <div className={`task-hub-section ${orderedBackgroundTasks.length > 1 ? '' : 'single'}`}>
+                              <div className="task-hub-section-header">
+                                <div className="task-hub-section-kicker">Background tasks</div>
+                                <div className="task-hub-section-meta">
+                                  {backgroundTaskCount} running or completed
                                 </div>
                               </div>
-                          )}
-
-                          <div className="task-detail-pane">
-                            {(() => {
-                              const taskInput = selectedTaskInput
-                              const isSubmitting = Boolean(submittingTaskInputs[taskInput.inputRequestId])
-                              const draftValue = taskInputDrafts[taskInput.inputRequestId] || ''
-                              const errorText = taskInputErrors[taskInput.inputRequestId]
-
-                              return (
-                                <div className="task-card task-detail-card">
-                                  <div className="task-card-topline">
-                                    <span className="task-card-badge">Awaiting input</span>
-                                    <span className="task-card-meta">{taskInput.taskId}</span>
-                                  </div>
-                                  <div className="task-card-question task-detail-question">{taskInput.question}</div>
-                                  <div className="task-detail-copy">
-                                    Choose a quick option or send a custom reply to resume this task without disturbing your current conversation.
-                                  </div>
-                                  {taskInput.options.length > 0 && (
-                                    <div className="task-card-options">
-                                      {taskInput.options.map((option) => (
+                              <div className={`task-hub-body ${orderedBackgroundTasks.length > 1 ? '' : 'single'}`}>
+                                {orderedBackgroundTasks.length > 1 && (
+                                  <div className="task-list-pane">
+                                    <div className="task-list">
+                                      {orderedBackgroundTasks.map((task) => (
                                         <button
-                                          key={option}
+                                          key={task.requestId}
                                           type="button"
-                                          className="task-option-chip"
-                                          disabled={isSubmitting}
-                                          onClick={() => void submitTaskInputReply(taskInput, option)}
+                                          className={`task-list-item ${selectedBackgroundTask.requestId === task.requestId ? 'active' : ''}`}
+                                          onClick={() => setSelectedBackgroundRequestId(task.requestId)}
                                         >
-                                          {option}
+                                          <div className="task-list-item-label-row">
+                                            <span className="task-list-item-label">Background</span>
+                                            <span className="task-list-item-status">
+                                              {task.completed ? (task.failed ? 'Failed' : 'Ready') : 'Streaming'}
+                                            </span>
+                                          </div>
+                                          <div className="task-list-item-question">
+                                            {task.userQueryExcerpt || 'Background task'}
+                                          </div>
                                         </button>
                                       ))}
                                     </div>
-                                  )}
-                                  <textarea
-                                    className="task-reply-input"
-                                    value={draftValue}
-                                    placeholder="Add a reply for this task..."
-                                    disabled={isSubmitting}
-                                    onChange={(event) => handleTaskInputDraftChange(taskInput.inputRequestId, event.target.value)}
-                                  />
-                                  <div className="task-card-footer">
-                                    <div className="task-card-status">
-                                      {errorText ? (
-                                        <span className="task-card-error">{errorText}</span>
-                                      ) : isSubmitting ? (
-                                        <span className="task-card-waiting">Submitting...</span>
-                                      ) : (
-                                        <span className="task-card-hint">Reply keeps the task moving without interrupting your current chat.</span>
-                                      )}
-                                    </div>
-                                    <button
-                                      type="button"
-                                      className="task-submit-btn"
-                                      disabled={isSubmitting}
-                                      onClick={() => void submitTaskInputReply(taskInput)}
-                                    >
-                                      Send reply
-                                    </button>
                                   </div>
+                                )}
+                                <div className="task-detail-pane">
+                                  {(() => {
+                                    const task = selectedBackgroundTask
+                                    const errorText = backgroundTaskErrors[task.requestId]
+                                    const backgroundMessageId = messages.find((message) => (
+                                      message.role === 'assistant' &&
+                                      message.requestId === task.requestId &&
+                                      Array.isArray(message.producedArtifacts) &&
+                                      message.producedArtifacts.length > 0
+                                    ))?.id || ''
+                                    return (
+                                      <div className="task-card task-detail-card">
+                                        <div className="task-card-topline">
+                                          <span className="task-card-badge background">
+                                            {task.completed ? (task.failed ? 'Failed' : 'Ready') : 'Background'}
+                                          </span>
+                                          <span className="task-card-meta">{task.taskId || task.requestId}</span>
+                                        </div>
+                                        <div className="task-card-question task-detail-question">
+                                          {task.userQueryExcerpt || 'Background task'}
+                                        </div>
+                                        <div className="task-detail-copy">
+                                          {task.completed
+                                            ? 'This task finished outside the main chat surface. You can review it here or bring future background work back to the foreground.'
+                                            : 'Streaming continues here while you work on something else in chat.'}
+                                        </div>
+                                        {task.progress?.kind === 'docs_parse' && !String(task.partialContent || '').trim() && (
+                                          <DocsProgressCard progress={task.progress} />
+                                        )}
+                                        {task.progress?.kind === 'tabular_parse' && !String(task.partialContent || '').trim() && (
+                                          <TabularProgressCard progress={task.progress} />
+                                        )}
+                                        {task.activity && task.progress?.kind !== 'docs_parse' && task.progress?.kind !== 'tabular_parse' && (
+                                          <div className="assistant-activity task-background-activity">{task.activity}</div>
+                                        )}
+                                        {task.partialThinking && (
+                                          <div className="thinking-block task-thinking-block">
+                                            <div className="thinking-label">Thinking</div>
+                                            <div className="thinking-text">{task.partialThinking}</div>
+                                          </div>
+                                        )}
+                                        <AssistantFlowTimeline entries={task.activityLog} />
+                                        {String(task.partialContent || '').trim() ? (
+                                          <div className="task-background-preview">
+                                            <ReactMarkdown
+                                              remarkPlugins={[remarkGfm, remarkMath]}
+                                              rehypePlugins={[rehypeKatex]}
+                                              components={{
+                                                table: ({ node, ...props }) => <div className="table-wrapper"><table {...props} /></div>,
+                                                code: ({ node, inline, className, children, ...props }: any) => {
+                                                  if (inline) return <code className="inline-code" {...props}>{children}</code>
+                                                  return <div className="code-block"><code {...props}>{children}</code></div>
+                                                },
+                                                a: ({ node, ...props }) => <a target="_blank" rel="noopener noreferrer" {...props} />,
+                                              }}
+                                            >
+                                              {task.partialContent}
+                                            </ReactMarkdown>
+                                          </div>
+                                        ) : (
+                                          <div className="task-background-placeholder">
+                                            {task.failed
+                                              ? (task.error || 'This background task failed.')
+                                              : 'Streaming will appear here as this background task progresses.'}
+                                          </div>
+                                        )}
+                                        {backgroundMessageId && (
+                                          <AssistantProducedArtifacts
+                                            messageId={backgroundMessageId}
+                                            artifacts={task.producedArtifacts}
+                                            downloadingArtifactId={downloadingArtifactId}
+                                            onDownload={handleDownloadProducedArtifact}
+                                          />
+                                        )}
+                                        <div className="task-card-footer">
+                                          <div className="task-card-status">
+                                            {errorText ? (
+                                              <span className="task-card-error">{errorText}</span>
+                                            ) : task.failed ? (
+                                              <span className="task-card-error">{task.error || 'Background task failed.'}</span>
+                                            ) : task.completed ? (
+                                              <span className="task-card-hint">Completed background tasks stay in this task rail until the session view is refreshed.</span>
+                                            ) : canBringBackgroundTaskToForeground ? (
+                                              <span className="task-card-hint">Bring this task back to the main response surface if you want to watch it live.</span>
+                                            ) : (
+                                              <span className="task-card-hint">Finish or background the current foreground stream before bringing another task back.</span>
+                                            )}
+                                          </div>
+                                          {!task.completed && (
+                                            <button
+                                              type="button"
+                                              className="task-submit-btn task-foreground-btn"
+                                              disabled={!canBringBackgroundTaskToForeground || foregroundingRequestId === task.requestId}
+                                              onClick={() => void handleBringTaskToForeground(task)}
+                                            >
+                                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                                <path d="M5.75 18.25L12 12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                                                <path d="M18.25 18.25L12 12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                                                <path d="M5.75 18.25H10.25" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                                                <path d="M18.25 18.25H13.75" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                                              </svg>
+                                              <span>{foregroundingRequestId === task.requestId ? 'Bringing back...' : 'Bring to foreground'}</span>
+                                            </button>
+                                          )}
+                                        </div>
+                                      </div>
+                                    )
+                                  })()}
                                 </div>
-                              )
-                            })()}
-                          </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {pendingTaskCount > 0 && selectedTaskInput && (
+                            <div className={`task-hub-section ${hasMultiplePendingTaskInputs ? '' : 'single'}`}>
+                              <div className="task-hub-section-header">
+                                <div className="task-hub-section-kicker">Needs your input</div>
+                                <div className="task-hub-section-meta">
+                                  {pendingTaskCount} waiting
+                                </div>
+                              </div>
+                              <div className={`task-hub-body ${hasMultiplePendingTaskInputs ? '' : 'single'}`}>
+                                {hasMultiplePendingTaskInputs && (
+                                  <div className="task-list-pane">
+                                    <div className="task-list">
+                                      {orderedPendingTaskInputs.map((taskInput) => (
+                                        <button
+                                          key={taskInput.inputRequestId}
+                                          type="button"
+                                          className={`task-list-item ${selectedTaskInput.inputRequestId === taskInput.inputRequestId ? 'active' : ''}`}
+                                          onClick={() => setSelectedTaskInputId(taskInput.inputRequestId)}
+                                        >
+                                          <div className="task-list-item-label-row">
+                                            <span className="task-list-item-label">Task</span>
+                                            <span className="task-list-item-status">
+                                              {taskInput.options.length > 0
+                                                ? `${taskInput.options.length} choice${taskInput.options.length === 1 ? '' : 's'}`
+                                                : 'Reply needed'}
+                                            </span>
+                                          </div>
+                                          <div className="task-list-item-question">{taskInput.question}</div>
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+
+                                <div className="task-detail-pane">
+                                  {(() => {
+                                    const taskInput = selectedTaskInput
+                                    const isSubmitting = Boolean(submittingTaskInputs[taskInput.inputRequestId])
+                                    const draftValue = taskInputDrafts[taskInput.inputRequestId] || ''
+                                    const errorText = taskInputErrors[taskInput.inputRequestId]
+
+                                    return (
+                                      <div className="task-card task-detail-card">
+                                        <div className="task-card-topline">
+                                          <span className="task-card-badge">Awaiting input</span>
+                                          <span className="task-card-meta">{taskInput.taskId}</span>
+                                        </div>
+                                        <div className="task-card-question task-detail-question">{taskInput.question}</div>
+                                        <div className="task-detail-copy">
+                                          Choose a quick option or send a custom reply to resume this task without disturbing your current conversation.
+                                        </div>
+                                        {taskInput.options.length > 0 && (
+                                          <div className="task-card-options">
+                                            {taskInput.options.map((option) => (
+                                              <button
+                                                key={option}
+                                                type="button"
+                                                className="task-option-chip"
+                                                disabled={isSubmitting}
+                                                onClick={() => void submitTaskInputReply(taskInput, option)}
+                                              >
+                                                {option}
+                                              </button>
+                                            ))}
+                                          </div>
+                                        )}
+                                        <textarea
+                                          className="task-reply-input"
+                                          value={draftValue}
+                                          placeholder="Add a reply for this task..."
+                                          disabled={isSubmitting}
+                                          onChange={(event) => handleTaskInputDraftChange(taskInput.inputRequestId, event.target.value)}
+                                        />
+                                        <div className="task-card-footer">
+                                          <div className="task-card-status">
+                                            {errorText ? (
+                                              <span className="task-card-error">{errorText}</span>
+                                            ) : isSubmitting ? (
+                                              <span className="task-card-waiting">Submitting...</span>
+                                            ) : (
+                                              <span className="task-card-hint">Reply keeps the task moving without interrupting your current chat.</span>
+                                            )}
+                                          </div>
+                                          <button
+                                            type="button"
+                                            className="task-submit-btn"
+                                            disabled={isSubmitting}
+                                            onClick={() => void submitTaskInputReply(taskInput)}
+                                          >
+                                            Send reply
+                                          </button>
+                                        </div>
+                                      </div>
+                                    )
+                                  })()}
+                                </div>
+                              </div>
+                            </div>
+                          )}
                         </div>
                       ) : (
                         <div className="task-empty-state">
                           <div className="task-empty-icon">◌</div>
                           <div className="task-empty-title">Tasks will collect here when they need you.</div>
                           <div className="task-empty-copy">
-                            Long-running Opus work can pause for clarification without interrupting your active chat screen.
+                            Long-running Opus work can pause for clarification or keep streaming in the background without interrupting your active chat screen.
                           </div>
                         </div>
                       )}
@@ -3696,8 +4310,8 @@ export default function App() {
                       disabled={tile.locked}
                       aria-label={tile.locked ? `${tile.label} locked` : tile.label}
                     >
-                      {tile.id === 'task' && pendingTaskCount > 0 && (
-                        <span className="launchpad-badge">{pendingTaskCount}</span>
+                      {tile.id === 'task' && taskDashboardCount > 0 && (
+                        <span className="launchpad-badge">{taskDashboardCount}</span>
                       )}
                       <div className="launchpad-icon-shell">
                         <LaunchpadIcon tile={tile.id} />
@@ -3727,7 +4341,9 @@ export default function App() {
                     <div className="task-toolbar-copy">
                       <div className="task-toolbar-title">Task Inbox</div>
                       <div className="task-toolbar-subtitle">
-                        {pendingTaskCount > 0 ? `${pendingTaskCount} waiting for your input` : 'No task is waiting right now'}
+                        {taskDashboardCount > 0
+                          ? `${backgroundTaskCount} background · ${pendingTaskCount} waiting for input`
+                          : 'No task is waiting right now'}
                       </div>
                     </div>
                     <div className="task-mode-pill" aria-label="Task mode uses Opus">
@@ -3783,7 +4399,7 @@ export default function App() {
                       style={{ marginRight: 8 }}
                       type="button"
                     >
-                      {pendingTaskCount > 0 && <span className="back-btn-badge">{pendingTaskCount}</span>}
+                      {taskDashboardCount > 0 && <span className="back-btn-badge">{taskDashboardCount}</span>}
                       <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
                         <path d="M14.71 6.71a1 1 0 0 1 0 1.41L10.83 12l3.88 3.88a1 1 0 0 1-1.41 1.41l-4.59-4.59a1 1 0 0 1 0-1.41l4.59-4.59a1 1 0 0 1 1.41 0z" />
                       </svg>
@@ -3881,6 +4497,27 @@ export default function App() {
                         </div>
                       </div>
                     </div>
+
+                    {isStreaming && activeStreamingRequestIdRef.current && (
+                      <button
+                        className={`background-task-btn ${backgroundingRequestId === activeStreamingRequestIdRef.current ? 'busy' : ''}`}
+                        onClick={() => void handleMoveActiveToBackground()}
+                        onMouseEnter={(event) => showHoverTooltipForElement('Move to background', event.currentTarget, 'control')}
+                        onMouseLeave={hideHoverTooltip}
+                        onFocus={(event) => showHoverTooltipForElement('Move to background', event.currentTarget, 'control')}
+                        onBlur={hideHoverTooltip}
+                        type="button"
+                        aria-label="Move to background"
+                        disabled={backgroundingRequestId === activeStreamingRequestIdRef.current}
+                      >
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                          <path d="M12 12L5.75 5.75" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                          <path d="M12 12L18.25 5.75" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                          <path d="M5.75 5.75H10.25" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                          <path d="M18.25 5.75H13.75" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                        </svg>
+                      </button>
+                    )}
 
                     {isStreaming ? (
                       <button

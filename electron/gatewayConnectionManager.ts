@@ -320,6 +320,30 @@ export class GatewayConnectionManager {
     return { ok: true }
   }
 
+  backgroundRequest(requestId: string) {
+    const normalizedRequestId = String(requestId || '').trim()
+    if (!normalizedRequestId) {
+      throw new Error('A requestId is required to move a response to the background.')
+    }
+    this.sendJson({
+      type: 'background',
+      request_id: normalizedRequestId,
+    })
+    return { ok: true, requestId: normalizedRequestId }
+  }
+
+  foregroundRequest(requestId: string) {
+    const normalizedRequestId = String(requestId || '').trim()
+    if (!normalizedRequestId) {
+      throw new Error('A requestId is required to bring a background response to the foreground.')
+    }
+    this.sendJson({
+      type: 'foreground',
+      request_id: normalizedRequestId,
+    })
+    return { ok: true, requestId: normalizedRequestId }
+  }
+
   getState() {
     return {
       status: this.status,

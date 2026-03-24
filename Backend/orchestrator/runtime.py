@@ -468,7 +468,14 @@ class OrchestratorRuntime:
                         blocks[idx] = block
                         # Emit progress for server-side tool calls
                         if btype == "server_tool_use":
-                            progress_msg = "Searching the web..." if block.tool_name == "web_search" else "Fetching web page..."
+                            if block.tool_name == "web_search":
+                                progress_msg = "Searching the web..."
+                            elif block.tool_name == "web_fetch":
+                                progress_msg = "Fetching web page..."
+                            elif block.tool_name == "code_execution":
+                                progress_msg = "Running server-side code execution..."
+                            else:
+                                progress_msg = f"Using server-side tool: {block.tool_name}..."
                             yield {**ev, "type": "task.progress", "status": "tool_call", "iteration": iteration, "tool_name": block.tool_name, "message": progress_msg}
                         continue
 
@@ -567,13 +574,19 @@ class OrchestratorRuntime:
                 # ── Server-side tool continuation (pause_turn) ────
                 if turn_stop_reason == "pause_turn":
                     saw_tool_loop = True
-                    assistant_content = [blocks[idx].to_api_dict() for idx in sorted(blocks)]
+                    assistant_content, dropped_server_blocks = self._sanitize_server_tool_replay_blocks(blocks)
                     messages.append({"role": "assistant", "content": assistant_content})
+                    loop_message = self._build_server_tool_loop_message(turn_server_blocks)
+                    if dropped_server_blocks:
+                        loop_message = loop_message.rstrip()
+                        if loop_message and loop_message[-1] not in ".!?":
+                            loop_message += "."
+                        loop_message += " Some incomplete server-side tool blocks were skipped to keep the continuation valid."
                     yield {
                         **ev, "type": "task.progress",
                         "status": "tool_loop",
                         "iteration": iteration,
-                        "message": self._build_server_tool_loop_message(turn_server_blocks),
+                        "message": loop_message,
                     }
                     continue
 
@@ -1843,6 +1856,68 @@ class OrchestratorRuntime:
         except (TypeError, ValueError):
             messages_json = repr(messages)
         return len(system_prompt) + len(messages_json)
+
+    @staticmethod
+    def _expected_server_tool_result_type(tool_name: str) -> str | None:
+        normalized = str(tool_name or "").strip()
+        if not normalized:
+            return None
+        return f"{normalized}_tool_result"
+
+    def _sanitize_server_tool_replay_blocks(
+        self,
+        blocks: dict[int, ContentBlock],
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """
+        Build replay-safe assistant content for Anthropic pause_turn continuation.
+
+        Anthropic expects each server_tool_use block to be paired with the
+        corresponding *_tool_result block on the next request. If the streamed
+        turn is ever incomplete or malformed, replaying an unmatched server tool
+        block causes the next request to fail hard. We therefore only echo back
+        fully paired server-side tool blocks and preserve all non-server blocks.
+        """
+        server_use_by_id: dict[str, tuple[int, ContentBlock]] = {}
+        server_result_by_tool_use_id: dict[str, tuple[int, ContentBlock]] = {}
+        for idx, block in blocks.items():
+            if block.block_type == "server_tool_use" and block.tool_id:
+                server_use_by_id[block.tool_id] = (idx, block)
+                continue
+            if ContentBlock._is_server_tool_result_block(block.block_type) and isinstance(block.raw_block, dict):
+                tool_use_id = str(block.raw_block.get("tool_use_id") or "").strip()
+                if tool_use_id:
+                    server_result_by_tool_use_id[tool_use_id] = (idx, block)
+
+        sanitized: list[dict[str, Any]] = []
+        dropped_any = False
+
+        for idx in sorted(blocks):
+            block = blocks[idx]
+            if block.block_type == "server_tool_use":
+                match = server_result_by_tool_use_id.get(block.tool_id)
+                expected_type = self._expected_server_tool_result_type(block.tool_name)
+                if not match or (expected_type and match[1].block_type != expected_type):
+                    dropped_any = True
+                    continue
+                sanitized.append(block.to_api_dict())
+                continue
+
+            if ContentBlock._is_server_tool_result_block(block.block_type):
+                if not isinstance(block.raw_block, dict):
+                    dropped_any = True
+                    continue
+                tool_use_id = str(block.raw_block.get("tool_use_id") or "").strip()
+                matched_use = server_use_by_id.get(tool_use_id)
+                expected_type = self._expected_server_tool_result_type(matched_use[1].tool_name) if matched_use else None
+                if not matched_use or (expected_type and block.block_type != expected_type):
+                    dropped_any = True
+                    continue
+                sanitized.append(block.to_api_dict())
+                continue
+
+            sanitized.append(block.to_api_dict())
+
+        return sanitized, dropped_any
 
     def _record_anthropic_loop_stats(
         self,

@@ -942,6 +942,166 @@ async def test_orchestrator_runtime_replays_bash_code_execution_result_blocks(tm
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_runtime_replays_code_execution_result_blocks(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_code_exec_pause.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    task = _signed_task("signing-secret")
+    stream_call_count = 0
+
+    async def scripted_stream(
+        *,
+        system_prompt: str,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]] | None = None,
+        container_id: str | None = None,
+    ):
+        del system_prompt, tools, container_id
+        nonlocal stream_call_count
+        stream_call_count += 1
+        if stream_call_count == 1:
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 9}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "server_tool_use", "id": "srv_code_1", "name": "code_execution"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"code\":\"print(1)\"}"}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                (
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": 1,
+                        "content_block": {
+                            "type": "code_execution_tool_result",
+                            "tool_use_id": "srv_code_1",
+                            "content": [{"type": "code_execution_result", "stdout": "1\n"}],
+                        },
+                    },
+                ),
+                ("content_block_stop", {"type": "content_block_stop", "index": 1}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "pause_turn"}, "usage": {"output_tokens": 4}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        else:
+            assistant_message = messages[-1]
+            assert assistant_message == {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "server_tool_use",
+                        "id": "srv_code_1",
+                        "name": "code_execution",
+                        "input": {"code": "print(1)"},
+                    },
+                    {
+                        "type": "code_execution_tool_result",
+                        "tool_use_id": "srv_code_1",
+                        "content": [{"type": "code_execution_result", "stdout": "1\n"}],
+                    },
+                ],
+            }
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 11}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Finished."}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 6}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        for event_name, payload in events:
+            yield type("SSE", (), {"event": event_name, "data": json.dumps(payload)})()
+
+    runtime._stream_anthropic_events = scripted_stream  # type: ignore[method-assign]
+
+    await runtime.start()
+    try:
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+
+    complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert complete_event["content"] == "Finished."
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_runtime_skips_unmatched_server_tool_use_blocks_on_pause_turn(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_code_exec_unmatched.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    task = _signed_task("signing-secret")
+    stream_call_count = 0
+
+    async def scripted_stream(
+        *,
+        system_prompt: str,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]] | None = None,
+        container_id: str | None = None,
+    ):
+        del system_prompt, tools, container_id
+        nonlocal stream_call_count
+        stream_call_count += 1
+        if stream_call_count == 1:
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 9}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Working..."}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("content_block_start", {"type": "content_block_start", "index": 1, "content_block": {"type": "server_tool_use", "id": "srv_code_2", "name": "code_execution"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"code\":\"print(2)\"}"}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 1}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "pause_turn"}, "usage": {"output_tokens": 4}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        else:
+            assistant_message = messages[-1]
+            assert assistant_message == {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Working..."},
+                ],
+            }
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 11}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Recovered."}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 6}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        for event_name, payload in events:
+            yield type("SSE", (), {"event": event_name, "data": json.dumps(payload)})()
+
+    runtime._stream_anthropic_events = scripted_stream  # type: ignore[method-assign]
+
+    await runtime.start()
+    try:
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+
+    progress_event = next(
+        event
+        for event in streamed_events
+        if event["type"] == "task.progress" and event["status"] == "tool_loop"
+    )
+    assert "skipped" in progress_event["message"].lower()
+    complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert complete_event["content"] == "Recovered."
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_runtime_emits_local_research_provenance_for_perplexity_and_firecrawl(tmp_path) -> None:
     client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
     config = OrchestratorConfig(

@@ -1459,6 +1459,24 @@ app.whenReady().then(() => {
     )
   })
 
+  ipcMain.handle('gateway:background-request', async (_, payload: { requestId?: string }) => {
+    if (!gatewayConnectionManager) {
+      throw new Error('Gateway connection manager is unavailable.')
+    }
+    return gatewayConnectionManager.backgroundRequest(
+      String(payload?.requestId || ''),
+    )
+  })
+
+  ipcMain.handle('gateway:foreground-request', async (_, payload: { requestId?: string }) => {
+    if (!gatewayConnectionManager) {
+      throw new Error('Gateway connection manager is unavailable.')
+    }
+    return gatewayConnectionManager.foregroundRequest(
+      String(payload?.requestId || ''),
+    )
+  })
+
   ipcMain.handle('gateway:request-resume', () => {
     gatewayConnectionManager?.requestResume()
     return { ok: true }

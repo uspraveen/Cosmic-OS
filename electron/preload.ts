@@ -102,6 +102,8 @@ contextBridge.exposeInMainWorld('cosmic', {
   sendGatewayQuery: (payload: { content: string; conversationContext?: any[]; requestId?: string; routeOverride?: string; attachments?: any[] }) => ipcRenderer.invoke('gateway:send-query', payload),
   submitGatewayTaskInputReply: (payload: { inputRequestId: string; taskId: string; content: string }) => ipcRenderer.invoke('gateway:submit-task-input-reply', payload),
   cancelGatewayResponse: (payload: { requestId?: string; taskId?: string }) => ipcRenderer.invoke('gateway:cancel-response', payload),
+  backgroundGatewayRequest: (payload: { requestId: string }) => ipcRenderer.invoke('gateway:background-request', payload),
+  foregroundGatewayRequest: (payload: { requestId: string }) => ipcRenderer.invoke('gateway:foreground-request', payload),
   listGatewaySessions: () => ipcRenderer.invoke('gateway:list-sessions'),
   getGatewaySessionHistory: (sessionId: string) => ipcRenderer.invoke('gateway:get-session-history', sessionId),
   onGatewayEvent: (cb: (data: any) => void) => {
