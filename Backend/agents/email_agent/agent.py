@@ -491,14 +491,14 @@ class EmailAgent(AgentRuntime):
         if not text:
             return {}
         lowered = text.casefold()
-        to_recipients: list[dict[str, Any]] = []
+        email_mentions: list[dict[str, Any]] = []
         seen_emails: set[str] = set()
         for match in re.finditer(r"([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})", text):
             email = self._safe_text(match.group(1)).casefold()
             if not email or email in seen_emails:
                 continue
             seen_emails.add(email)
-            to_recipients.append({"email": email, "name": None})
+            email_mentions.append({"email": email, "name": None})
 
         subject = ""
         body = ""
@@ -518,19 +518,55 @@ class EmailAgent(AgentRuntime):
             "send an email",
             "send email",
             "write an email",
+            "write email",
             "compose an email",
+            "compose email",
             "draft an email",
+            "draft email",
             "send a test email",
-            "email ",
+            "email this",
+            "email them",
+            "email him",
+            "email her",
+            "email the",
+            "email to",
         )
-        is_compose = any(marker in lowered for marker in compose_markers) and bool(to_recipients)
+        read_markers = (
+            "check the inbox",
+            "check inbox",
+            "read the inbox",
+            "read inbox",
+            "search inbox",
+            "search my inbox",
+            "look in the inbox",
+            "look in my inbox",
+            "most recent emails",
+            "most recent email",
+            "latest emails",
+            "latest email",
+            "show me what messages",
+            "show me my emails",
+            "read and display",
+            "reply from",
+            "detect repl",
+            "tell me what",
+            "read the reply",
+        )
+        read_verbs = ("check ", "read ", "search ", "find ", "look for", "show me", "tell me")
+        is_read_like = (
+            any(marker in lowered for marker in read_markers)
+            or " inbox" in lowered
+            or lowered.startswith(read_verbs)
+        )
+        is_explicit_compose = any(marker in lowered for marker in compose_markers)
+        is_compose = is_explicit_compose and not is_read_like and bool(email_mentions)
         inferred: dict[str, Any] = {
-            "to_recipients": to_recipients,
             "subject": subject,
             "body": body,
             "query": text,
         }
         if is_compose:
+            inferred["to_recipients"] = email_mentions
             inferred["mode"] = "compose"
             inferred["send"] = "send" in lowered and "draft" not in lowered
         return inferred

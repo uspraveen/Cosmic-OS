@@ -260,6 +260,62 @@ async def test_email_agent_reason_infers_send_from_plain_goal(tmp_path: Path, mo
 
 
 @pytest.mark.asyncio
+async def test_email_agent_reason_read_goal_with_email_address_uses_search_not_compose(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+            enable_internal_llm=True,
+        ),
+    )
+
+    async def fake_search_email(**kwargs):
+        assert "uspraveenraj@gmail.com" in kwargs["goal"]
+        return [
+            {
+                "kind": "message",
+                "id": "msg_reply_1",
+                "thread_id": "thr_reply_1",
+                "subject": "Re: Hey from COSMIC 👋",
+                "snippet": "This is my reply.",
+            }
+        ]
+
+    async def fake_summarize_search_results(**kwargs):
+        assert kwargs["search_results"][0]["id"] == "msg_reply_1"
+        return "Found the latest reply from uspraveenraj@gmail.com."
+
+    async def fail_compose(*args, **kwargs):
+        raise AssertionError("compose path should not be used for inbox-read goals")
+
+    monkeypatch.setattr(agent, "_search_email", fake_search_email)
+    monkeypatch.setattr(agent, "_summarize_search_results", fake_summarize_search_results)
+    monkeypatch.setattr(agent, "_compose_new_email", fail_compose)
+
+    task = _make_task(
+        intent="email.reason",
+        task_id="tsk_reason_read_goal",
+        input_payload={
+            "goal": "Check the inbox for a reply from uspraveenraj@gmail.com to the test email I sent with subject 'Hey from COSMIC 👋'. Read the reply and tell me what Praveen said.",
+            "request_id": "req_read_goal",
+        },
+    )
+
+    result = await agent.execute(task)
+
+    assert result.status == "completed"
+    assert result.output["action"] == "search_email"
+    assert result.output["sent"] is False
+    assert result.output["draft_id"] is None
+    assert result.output["response"] == "Found the latest reply from uspraveenraj@gmail.com."
+
+
+@pytest.mark.asyncio
 async def test_email_agent_explicit_disconnect_blocks_env_fallback(tmp_path: Path) -> None:
     integration_db_path = tmp_path / "gateway" / "agent_email_integrations.db"
     AgentEmailIntegrationStore(integration_db_path).clear_primary()
