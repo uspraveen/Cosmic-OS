@@ -503,16 +503,25 @@ class EmailAgent(AgentRuntime):
         subject = ""
         body = ""
         subject_match = re.search(
-            r"subject\s*:\s*['\"“”]?(.+?)['\"“”]?(?=\s*(?:[—\-–]\s*)?body\s*:|$)",
+            r"(?:with\s+)?(?:the\s+)?subject\s*(?::|\bis\b)?\s*['\"“”]?(.+?)['\"“”]?(?=\s*(?:,|\.|;|and\s+(?:the\s+)?following\s+content\s*:|and\s+.+?message|[—\-–]\s*body\s*:|$))",
             text,
             re.IGNORECASE | re.DOTALL,
         )
         if subject_match:
             subject = self._safe_text(subject_match.group(1)).strip(" \t\r\n'\"“”")
 
-        body_match = re.search(r"body\s*:\s*(.+)$", text, re.IGNORECASE | re.DOTALL)
-        if body_match:
-            body = self._safe_text(body_match.group(1)).strip(" \t\r\n'\"“”")
+        body_patterns = (
+            r"body\s*:\s*(.+)$",
+            r"(?:the\s+)?following\s+content\s*:\s*(.+)$",
+            r"something\s+like\s*:\s*(.+)$",
+            r"(?:a\s+)?short\s+friendly\s+hello\s+message.+?(?:something\s+like\s*:)\s*(.+)$",
+        )
+        for pattern in body_patterns:
+            body_match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+            if body_match:
+                body = self._safe_text(body_match.group(1)).strip(" \t\r\n'\"“”")
+                if body:
+                    break
 
         compose_markers = (
             "send an email",
@@ -943,7 +952,40 @@ class EmailAgent(AgentRuntime):
             operation="email.internal_llm.compose_new",
         ) or {}
         resolved_subject = self._safe_text(payload.get("subject")) or subject or "COSMIC update"
-        resolved_body = self._safe_text(payload.get("body")) or draft_seed or goal
+        resolved_body = self._safe_text(payload.get("body")) or draft_seed
+        if not resolved_body:
+            raw_body = await invoke_email_mimo(
+                cfg=self.config,
+                http_client=self._http_client,
+                system_content=self._build_system_prompt(),
+                user_message=(
+                    "Write only the final email body text for this request.\n"
+                    "Do not include a subject line.\n"
+                    "Do not describe what you are doing.\n"
+                    "Return only the body that should be sent.\n\n"
+                    f"Goal: {goal}\n"
+                    f"Tone hint: {tone_hint or '(none)'}\n"
+                    f"Context brief: {context_brief or '(none)'}\n"
+                    f"Requested subject: {subject or '(none)'}"
+                ),
+                task_id=task.task_id,
+                session_id=task.session_id,
+                request_id=self._optional_text(task.input, "request_id"),
+                source=task.source,
+                source_id=task.source_id,
+                channel=task.channel,
+                operation="email.internal_llm.compose_new_body",
+                max_output_chars=12_000,
+                temperature=0.2,
+            )
+            resolved_body = self._safe_text(raw_body)
+        if not resolved_body:
+            raise EmailAgentError(
+                code="EMAIL_DRAFT_FAILED",
+                message="Failed to draft a usable email body.",
+                retryable=True,
+                next_action="retry",
+            )
         resolved_summary = self._safe_text(payload.get("summary")) or "Prepared an outbound email draft."
         return {
             "subject": resolved_subject,

@@ -260,6 +260,119 @@ async def test_email_agent_reason_infers_send_from_plain_goal(tmp_path: Path, mo
 
 
 @pytest.mark.asyncio
+async def test_email_agent_reason_infers_following_content_body_from_plain_goal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+            enable_internal_llm=True,
+        ),
+    )
+
+    async def fake_compose_new_email(**kwargs):
+        assert kwargs["recipients"] == [{"email": "uspraveenraj@gmail.com", "name": None}]
+        assert kwargs["subject"] == "Meta HyperAgents — What You Need to Know"
+        assert kwargs["draft_seed"] == "Hey Praveen,\n\nYou asked about Meta's HyperAgents — here's the full breakdown:"
+        return {
+            "subject": kwargs["subject"],
+            "body": kwargs["draft_seed"],
+            "summary": "Prepared an outbound email draft.",
+        }
+
+    async def fake_create_outbound_draft(**kwargs):
+        assert kwargs["text_body"] == "Hey Praveen,\n\nYou asked about Meta's HyperAgents — here's the full breakdown:"
+        return {"id": "draft_following_content"}
+
+    async def fake_upload_input_artifacts_to_draft(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(agent, "_compose_new_email", fake_compose_new_email)
+    monkeypatch.setattr(agent, "_create_outbound_draft", fake_create_outbound_draft)
+    monkeypatch.setattr(agent, "_upload_input_artifacts_to_draft", fake_upload_input_artifacts_to_draft)
+
+    class FakeMailClient:
+        async def send_draft(self, draft_id):
+            assert draft_id == "draft_following_content"
+            return {"id": "msg_following_content", "thread_id": "thr_following_content"}
+
+    agent.mail_client = FakeMailClient()  # type: ignore[assignment]
+
+    task = _make_task(
+        intent="email.reason",
+        task_id="tsk_reason_following_content",
+        input_payload={
+            "goal": (
+                "Send an email to uspraveenraj@gmail.com with the subject "
+                "'Meta HyperAgents — What You Need to Know' and the following content:\n\n"
+                "Hey Praveen,\n\nYou asked about Meta's HyperAgents — here's the full breakdown:"
+            ),
+            "request_id": "req_following_content",
+        },
+    )
+
+    result = await agent.execute(task)
+
+    assert result.status == "completed"
+    assert result.output["action"] == "compose_email"
+    assert result.output["sent"] is True
+
+
+@pytest.mark.asyncio
+async def test_email_agent_compose_new_email_never_uses_raw_goal_as_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+            enable_internal_llm=True,
+        ),
+    )
+
+    import agents.email_agent.agent as email_agent_module
+
+    async def fake_invoke_email_mimo_json(**kwargs):
+        return {}
+
+    async def fake_invoke_email_mimo(**kwargs):
+        return "Hey Praveen!\n\nJust your AI system COSMIC dropping in to say hello.\n\n— COSMIC"
+
+    monkeypatch.setattr(email_agent_module, "invoke_email_mimo_json", fake_invoke_email_mimo_json)
+    monkeypatch.setattr(email_agent_module, "invoke_email_mimo", fake_invoke_email_mimo)
+
+    drafted = await agent._compose_new_email(
+        task=_make_task(
+            intent="email.reason",
+            task_id="tsk_reason_compose_fallback",
+            input_payload={
+                "goal": (
+                    "Send an email to uspraveenraj@gmail.com with subject 'Hello from COSMIC' "
+                    "and a short friendly hello message from COSMIC."
+                ),
+            },
+        ),
+        goal="Send an email to uspraveenraj@gmail.com with subject 'Hello from COSMIC' and a short friendly hello message from COSMIC.",
+        context_brief=None,
+        draft_seed=None,
+        tone_hint=None,
+        recipients=[{"email": "uspraveenraj@gmail.com", "name": None}],
+        subject="Hello from COSMIC",
+    )
+
+    assert drafted["subject"] == "Hello from COSMIC"
+    assert drafted["body"] == "Hey Praveen!\n\nJust your AI system COSMIC dropping in to say hello.\n\n— COSMIC"
+    assert "Send an email to uspraveenraj@gmail.com" not in drafted["body"]
+
+
+@pytest.mark.asyncio
 async def test_email_agent_reason_read_goal_with_email_address_uses_search_not_compose(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
