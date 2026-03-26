@@ -1175,8 +1175,6 @@ class EmailAgent(AgentRuntime):
                 if token and token in haystack:
                     score += 8
             recency = self._safe_text(item.get("last_message_at") or item.get("updated_at"))
-            if recency:
-                score += 1
             if score <= 0 and not wants_reply and not tokens and not email_mentions:
                 continue
             scored.append(
@@ -1217,6 +1215,12 @@ class EmailAgent(AgentRuntime):
     async def _summarize_search_results(self, *, task: TaskEnvelope, goal: str, search_results: list[dict[str, Any]]) -> str:
         if not search_results:
             return "No matching email threads or messages were found."
+        if self._is_read_like_goal(goal):
+            top_result = search_results[0] if search_results else {}
+            if isinstance(top_result, dict):
+                snippet = self._clean_reply_snippet(self._safe_text(top_result.get("snippet")))
+                if snippet:
+                    return f"The latest reply says: {snippet}"
         summary = await invoke_email_mimo(
             cfg=self.config,
             http_client=self._http_client,
@@ -1237,6 +1241,18 @@ class EmailAgent(AgentRuntime):
             temperature=0.2,
         )
         return summary or f"Found {len(search_results)} matching email search results."
+
+    def _clean_reply_snippet(self, snippet: str) -> str:
+        text = self._safe_text(snippet)
+        if not text:
+            return ""
+        text = re.sub(r"\s+", " ", text).strip()
+        text = re.split(r"\bOn\s+[A-Z][a-z]{2},.+?\bwrote:\s*", text, maxsplit=1)[0].strip()
+        text = re.split(r"\bFrom:\s*", text, maxsplit=1)[0].strip()
+        text = re.split(r"\s+>+\s*", text, maxsplit=1)[0].strip()
+        if len(text) > 320:
+            text = text[:317].rstrip() + "..."
+        return text
 
     async def _resolve_mailbox(
         self,
