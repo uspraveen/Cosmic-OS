@@ -1017,7 +1017,7 @@ class EmailAgent(AgentRuntime):
         mailbox = await self._resolve_mailbox(
             mailbox_address=mailbox_address,
             mailbox_id=self._optional_text(task.input, "mailbox_id"),
-            required=False,
+            required=True,
         )
         mailbox_id = self._safe_text(mailbox.get("id")) if isinstance(mailbox, dict) else None
         threads: list[dict[str, Any]] = []
