@@ -329,6 +329,18 @@ class EmailAgent(AgentRuntime):
         context_brief = self._optional_text(task.input, "context_brief")
         draft_seed = self._optional_text(task.input, "draft_seed")
         recipients = self._normalize_recipient_list(task.input.get("to_recipients"))
+        inferred = self._infer_reason_goal_hints(goal)
+        if not recipients:
+            recipients = inferred.get("to_recipients") or []
+        if not subject:
+            subject = self._safe_text(inferred.get("subject"))
+        if not draft_seed:
+            draft_seed = self._safe_text(inferred.get("body"))
+        if not query:
+            query = self._safe_text(inferred.get("query"))
+        if not send:
+            send = bool(inferred.get("send"))
+        mode_hint = self._safe_text(inferred.get("mode")).lower()
         artifacts: list[ArtifactManifest] = []
 
         if thread_id:
@@ -397,7 +409,7 @@ class EmailAgent(AgentRuntime):
                     "summary": summary,
                     "search_results": [],
                 }
-        elif recipients or send or subject:
+        elif recipients or send or subject or mode_hint == "compose":
             drafted = await self._compose_new_email(
                 task=task,
                 goal=goal,
@@ -473,6 +485,55 @@ class EmailAgent(AgentRuntime):
             summary=output,
         )
         return AgentResult(status="completed", output=output, artifacts=artifacts, error=None)
+
+    def _infer_reason_goal_hints(self, goal: str) -> dict[str, Any]:
+        text = self._safe_text(goal)
+        if not text:
+            return {}
+        lowered = text.casefold()
+        to_recipients: list[dict[str, Any]] = []
+        seen_emails: set[str] = set()
+        for match in re.finditer(r"([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})", text):
+            email = self._safe_text(match.group(1)).casefold()
+            if not email or email in seen_emails:
+                continue
+            seen_emails.add(email)
+            to_recipients.append({"email": email, "name": None})
+
+        subject = ""
+        body = ""
+        subject_match = re.search(
+            r"subject\s*:\s*['\"“”]?(.+?)['\"“”]?(?=\s*(?:[—\-–]\s*)?body\s*:|$)",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if subject_match:
+            subject = self._safe_text(subject_match.group(1)).strip(" \t\r\n'\"“”")
+
+        body_match = re.search(r"body\s*:\s*(.+)$", text, re.IGNORECASE | re.DOTALL)
+        if body_match:
+            body = self._safe_text(body_match.group(1)).strip(" \t\r\n'\"“”")
+
+        compose_markers = (
+            "send an email",
+            "send email",
+            "write an email",
+            "compose an email",
+            "draft an email",
+            "send a test email",
+            "email ",
+        )
+        is_compose = any(marker in lowered for marker in compose_markers) and bool(to_recipients)
+        inferred: dict[str, Any] = {
+            "to_recipients": to_recipients,
+            "subject": subject,
+            "body": body,
+            "query": text,
+        }
+        if is_compose:
+            inferred["mode"] = "compose"
+            inferred["send"] = "send" in lowered and "draft" not in lowered
+        return inferred
 
     async def _handle_manage_instruction(self, task: TaskEnvelope) -> AgentResult:
         action = self._required_text(task.input, "action").lower()

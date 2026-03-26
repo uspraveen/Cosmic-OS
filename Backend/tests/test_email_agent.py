@@ -200,6 +200,66 @@ async def test_email_agent_reason_compose_draft_uses_compact_brief_and_uploads_i
 
 
 @pytest.mark.asyncio
+async def test_email_agent_reason_infers_send_from_plain_goal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+            enable_internal_llm=True,
+        ),
+    )
+
+    async def fake_compose_new_email(**kwargs):
+        assert kwargs["recipients"] == [{"email": "uspraveenraj@gmail.com", "name": None}]
+        assert kwargs["subject"] == "Hey from COSMIC 👋"
+        assert kwargs["draft_seed"] == "Hello from COSMIC."
+        return {
+            "subject": "Hey from COSMIC 👋",
+            "body": "Hello from COSMIC.",
+            "summary": "Prepared an outbound email draft.",
+        }
+
+    async def fake_create_outbound_draft(**kwargs):
+        assert kwargs["recipients"] == [{"email": "uspraveenraj@gmail.com", "name": None}]
+        assert kwargs["subject"] == "Hey from COSMIC 👋"
+        assert kwargs["text_body"] == "Hello from COSMIC."
+        return {"id": "draft_456"}
+
+    async def fake_upload_input_artifacts_to_draft(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(agent, "_compose_new_email", fake_compose_new_email)
+    monkeypatch.setattr(agent, "_create_outbound_draft", fake_create_outbound_draft)
+    monkeypatch.setattr(agent, "_upload_input_artifacts_to_draft", fake_upload_input_artifacts_to_draft)
+
+    class FakeMailClient:
+        async def send_draft(self, draft_id):
+            assert draft_id == "draft_456"
+            return {"id": "msg_123", "thread_id": "thr_123"}
+
+    agent.mail_client = FakeMailClient()  # type: ignore[assignment]
+
+    task = _make_task(
+        intent="email.reason",
+        task_id="tsk_reason_plain_goal",
+        input_payload={
+            "goal": "Send a test email to uspraveenraj@gmail.com. Subject: 'Hey from COSMIC 👋' — Body: 'Hello from COSMIC.'",
+            "request_id": "req_plain_goal",
+        },
+    )
+
+    result = await agent.execute(task)
+
+    assert result.status == "completed"
+    assert result.output["action"] == "compose_email"
+    assert result.output["sent"] is True
+    assert result.output["draft_id"] == "draft_456"
+    assert result.output["message_id"] == "msg_123"
+
+
+@pytest.mark.asyncio
 async def test_email_agent_explicit_disconnect_blocks_env_fallback(tmp_path: Path) -> None:
     integration_db_path = tmp_path / "gateway" / "agent_email_integrations.db"
     AgentEmailIntegrationStore(integration_db_path).clear_primary()
