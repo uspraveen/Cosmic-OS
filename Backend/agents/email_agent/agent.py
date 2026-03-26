@@ -1007,11 +1007,42 @@ class EmailAgent(AgentRuntime):
                 retryable=False,
                 next_action="escalate",
             )
+        if not normalized_id and not normalized_address:
+            try:
+                mailboxes = await self.mail_client.list_mailboxes()
+            except CosmicMailClientError as exc:
+                raise EmailAgentError(
+                    code="NETWORK_ERROR" if exc.status_code is None or exc.status_code >= 500 else "AUTH_ERROR",
+                    message=exc.message,
+                    retryable=exc.status_code is None or exc.status_code >= 500,
+                    next_action="retry" if exc.status_code is None or exc.status_code >= 500 else "escalate",
+                ) from exc
+            active_mailboxes = [
+                mailbox
+                for mailbox in mailboxes
+                if self._safe_text(mailbox.get("status")).lower() == "active"
+            ]
+            fallback_mailbox = (active_mailboxes or mailboxes)[0] if (active_mailboxes or mailboxes) else None
+            normalized_address = self._safe_text(fallback_mailbox.get("address")) if isinstance(fallback_mailbox, dict) else ""
+            if not normalized_address:
+                raise EmailAgentError(
+                    code="INVALID_INPUT",
+                    message="No mailbox_id or mailbox_address was provided, and no default Agent Email mailbox is available.",
+                    retryable=False,
+                    next_action="configure_mailbox",
+                )
         try:
             return await self.mail_client.resolve_mailbox(
                 mailbox_id=normalized_id or None,
                 mailbox_address=normalized_address or None,
             )
+        except ValueError as exc:
+            raise EmailAgentError(
+                code="INVALID_INPUT",
+                message=str(exc),
+                retryable=False,
+                next_action="configure_mailbox",
+            ) from exc
         except CosmicMailClientError as exc:
             raise EmailAgentError(
                 code="INVALID_INPUT" if exc.status_code == 404 else "NETWORK_ERROR",

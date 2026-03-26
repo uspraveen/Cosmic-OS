@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
@@ -225,3 +226,40 @@ async def test_email_agent_explicit_disconnect_blocks_env_fallback(tmp_path: Pat
         await agent._ensure_mail_client_ready()
 
     assert exc_info.value.code == "AUTH_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_email_agent_resolve_mailbox_falls_back_to_first_active_mailbox() -> None:
+    tmpdir = Path.cwd() / f"tmp_email_agent_mailbox_fallback_{uuid4().hex}"
+    tmpdir.mkdir(parents=True, exist_ok=True)
+    agent = _build_agent(
+        tmpdir,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+            enable_internal_llm=False,
+        ),
+    )
+
+    class FakeMailClient:
+        base_url = "http://cosmic-mail.local"
+        api_token = "mail-token"
+        timeout_sec = 20.0
+
+        async def list_mailboxes(self):
+            return [
+                {"id": "mbx_idle", "address": "idle@example.com", "status": "paused"},
+                {"id": "mbx_primary", "address": "assistant@example.com", "status": "active"},
+            ]
+
+        async def resolve_mailbox(self, *, mailbox_id=None, mailbox_address=None):
+            assert mailbox_id is None
+            assert mailbox_address == "assistant@example.com"
+            return {"id": "mbx_primary", "address": "assistant@example.com"}
+
+    agent.mail_client = FakeMailClient()  # type: ignore[assignment]
+
+    mailbox = await agent._resolve_mailbox(mailbox_address=None, mailbox_id=None)
+
+    assert mailbox["id"] == "mbx_primary"

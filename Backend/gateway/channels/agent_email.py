@@ -52,6 +52,12 @@ def _normalize_contact_list(value: Any) -> list[dict[str, Any]]:
     return contacts
 
 
+def _pick_default_mailbox(mailboxes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    active = [mailbox for mailbox in mailboxes if _safe_text(mailbox.get("status")).lower() == "active"]
+    pool = active or mailboxes
+    return pool[0] if pool else None
+
+
 class AgentEmailAdapter(ChannelAdapter):
     platform = "agent-email"
 
@@ -183,7 +189,13 @@ class AgentEmailAdapter(ChannelAdapter):
 
     async def send(self, message: dict[str, Any], channel: str | None = None) -> None:
         target_channel = _safe_text(channel) or _safe_text(message.get("channel"))
-        mailbox_address = self._extract_mailbox_address(target_channel)
+        try:
+            mailbox_address = self._extract_mailbox_address(target_channel)
+        except ChannelUnavailableError:
+            fallback_mailbox = _pick_default_mailbox(await self.client.list_mailboxes())
+            if not fallback_mailbox:
+                raise
+            mailbox_address = _safe_text(fallback_mailbox.get("address"))
         mailbox = await self.client.resolve_mailbox(mailbox_address=mailbox_address)
         recipients = self._normalize_recipients(message, mailbox_address=mailbox_address)
         subject = self._build_subject(message)
@@ -211,10 +223,12 @@ class AgentEmailAdapter(ChannelAdapter):
                 primary_mailbox = await self.client.resolve_mailbox(mailbox_address=self.primary_mailbox_address)
             except CosmicMailClientError:
                 primary_mailbox = None
+        if primary_mailbox is None:
+            primary_mailbox = _pick_default_mailbox(mailboxes)
         return {
             "connected": True,
             "base_url": self.client.base_url,
-            "primary_mailbox_address": self.primary_mailbox_address or None,
+            "primary_mailbox_address": self.primary_mailbox_address or _safe_text(primary_mailbox.get("address")) or None,
             "primary_mailbox": primary_mailbox,
             "mailbox_count": len(mailboxes),
             "auth_context": auth_context,

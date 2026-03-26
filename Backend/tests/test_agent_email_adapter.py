@@ -104,3 +104,33 @@ async def test_agent_email_adapter_send_uses_cosmic_mail_draft_send_flow() -> No
     assert fake_client.created_payload["subject"] == "Morning update"
     assert fake_client.created_payload["to_recipients"] == [{"email": "owner@example.com", "name": "Owner"}]
     assert fake_client.sent_draft_id == "draft_123"
+
+
+@pytest.mark.asyncio
+async def test_agent_email_adapter_get_status_falls_back_to_first_active_mailbox() -> None:
+    adapter = AgentEmailAdapter(
+        cosmic_mail_base_url="http://cosmic-mail.local",
+        cosmic_mail_api_token="token",
+    )
+
+    class FakeClient:
+        base_url = "http://cosmic-mail.local"
+
+        async def get_auth_context(self):
+            return {"is_admin": True}
+
+        async def list_mailboxes(self):
+            return [
+                {"id": "mbx_idle", "address": "idle@example.com", "status": "paused"},
+                {"id": "mbx_primary", "address": "assistant@example.com", "status": "active"},
+            ]
+
+        async def resolve_mailbox(self, *, mailbox_id=None, mailbox_address=None):
+            raise AssertionError("resolve_mailbox should not be called when no primary mailbox is configured")
+
+    adapter.client = FakeClient()  # type: ignore[assignment]
+
+    status = await adapter.get_status()
+
+    assert status["primary_mailbox_address"] == "assistant@example.com"
+    assert status["primary_mailbox"]["id"] == "mbx_primary"
