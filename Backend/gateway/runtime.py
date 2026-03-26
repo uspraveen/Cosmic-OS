@@ -25,6 +25,7 @@ from .adapters import HaikuAdapter, PerplexityAdapter
 from .adapters.response_processor import DirectRouteHandoff
 from .artifacts.store import ArtifactStore
 from .channels.base import ChannelUnavailableError, PermanentDeliveryError, RetryableDeliveryError
+from .channels.agent_email import AgentEmailAdapter
 from .channels.desktop import DesktopAdapter
 from .channels.registry import ChannelAdapterRegistry
 from .channels.telegram import TelegramAdapter, TelegramConfig
@@ -504,6 +505,11 @@ class GatewayRuntime:
             "primary desktop": "desktop",
             "whatsapp": "whatsapp",
             "telegram": "telegram",
+            "email": "agent-email",
+            "agent_email": "agent-email",
+            "agent-email": "agent-email",
+            "primary_email": "agent-email",
+            "primary email": "agent-email",
         }
         return alias_map.get(alias, text)
 
@@ -518,6 +524,10 @@ class GatewayRuntime:
             return normalized_current
         if platform == "desktop":
             return "desktop"
+        if platform == "agent-email":
+            mailbox_address = self._safe_text(self.config.cosmic_mail_primary_mailbox_address)
+            if mailbox_address:
+                return f"agent-email:{mailbox_address}"
 
         links = self.session_store.list_channel_links(platform=platform, limit=20)
         if platform == "whatsapp":
@@ -533,6 +543,105 @@ class GatewayRuntime:
             if channel:
                 return channel
         return None
+
+    def _is_email_thread_session(self, session_id: str | None) -> bool:
+        normalized = self._safe_text(session_id)
+        return normalized.startswith("email-thread:")
+
+    def _email_thread_session_patch(self, metadata: dict[str, Any], *, channel: str) -> dict[str, Any]:
+        patch: dict[str, Any] = {
+            "session_scope": "email_thread",
+            "rollover_exempt": True,
+        }
+        mailbox_address = self._safe_text(metadata.get("mailbox_address"))
+        mailbox_id = self._safe_text(metadata.get("mailbox_id"))
+        thread_id = self._safe_text(metadata.get("thread_id"))
+        subject = self._safe_text(metadata.get("subject"))
+        if mailbox_address:
+            patch["mailbox_address"] = mailbox_address
+        if mailbox_id:
+            patch["mailbox_id"] = mailbox_id
+        if thread_id:
+            patch["thread_id"] = thread_id
+        if subject:
+            patch["thread_subject"] = subject
+        patch["channel"] = channel
+        return patch
+
+    def _should_preprocess_email_inbound(self, request_record: dict[str, Any]) -> bool:
+        if self._redis is None or not self.config.enable_agent_email:
+            return False
+        if self._safe_text(request_record.get("route")) != "opus":
+            return False
+        channel = self._safe_text(request_record.get("channel")) or ""
+        if self._channel_platform(channel) != "agent-email":
+            return False
+        message = request_record.get("message")
+        if not isinstance(message, dict):
+            return False
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        return bool(
+            self._safe_text(metadata.get("thread_id"))
+            and self._safe_text(metadata.get("message_id"))
+        )
+
+    def _build_email_inbound_orchestrator_query(
+        self,
+        *,
+        original_content: str,
+        process_output: dict[str, Any],
+    ) -> str:
+        summary = self._safe_text(process_output.get("summary")) or self._safe_text(process_output.get("response"))
+        if not summary:
+            return original_content
+
+        matched_instruction = (
+            process_output.get("matched_instruction")
+            if isinstance(process_output.get("matched_instruction"), dict)
+            else None
+        )
+        auto_reply = process_output.get("auto_reply") if isinstance(process_output.get("auto_reply"), dict) else None
+        attachments = process_output.get("attachments") if isinstance(process_output.get("attachments"), list) else []
+        subject = self._safe_text(process_output.get("subject")) or None
+
+        lines = [
+            "The email specialist already processed this inbound email thread.",
+        ]
+        if subject:
+            lines.append(f"Subject: {subject}")
+        lines.extend(
+            [
+                "",
+                "Email specialist summary:",
+                summary,
+            ]
+        )
+        if matched_instruction:
+            label = self._safe_text(matched_instruction.get("label")) or "matched standing instruction"
+            lines.extend(
+                [
+                    "",
+                    f"Standing instruction matched: {label}.",
+                ]
+            )
+        if auto_reply:
+            sent = bool(auto_reply.get("sent"))
+            lines.append(
+                "An automatic reply was already sent by the email specialist."
+                if sent
+                else "The email specialist evaluated an auto-reply path but did not send anything."
+            )
+        if attachments:
+            lines.append(
+                f"{len(attachments)} attachment(s) were downloaded into the email specialist workflow and are kept private unless explicitly needed later."
+            )
+        lines.extend(
+            [
+                "",
+                "Use this specialist-generated brief as the primary context for your response to the email thread.",
+            ]
+        )
+        return "\n".join(lines).strip()
 
     def resolve_channel_target(
         self,
@@ -1210,6 +1319,26 @@ class GatewayRuntime:
             except Exception as exc:  # pragma: no cover - startup health is environment-dependent
                 self.adapter_errors[adapter.platform] = str(exc)
 
+        if self.config.enable_agent_email and "agent-email" not in self.registry.adapters:
+            if not self.config.cosmic_mail_base_url or not self.config.cosmic_mail_api_token:
+                self.adapter_errors["agent-email"] = "Cosmic Mail base URL or API token is not configured."
+            else:
+                adapter = AgentEmailAdapter(
+                    cosmic_mail_base_url=self.config.cosmic_mail_base_url,
+                    cosmic_mail_api_token=self.config.cosmic_mail_api_token,
+                    timeout_sec=self.config.cosmic_mail_timeout_sec,
+                    primary_mailbox_address=self.config.cosmic_mail_primary_mailbox_address,
+                    webhook_secret=self.config.cosmic_mail_webhook_secret,
+                    webhook_signature_header=self.config.cosmic_mail_webhook_signature_header,
+                )
+                await adapter.on_message(self._handle_normalized_incoming_message)
+                self.registry.register(adapter)
+                try:
+                    await adapter.start()
+                    self.adapter_errors.pop(adapter.platform, None)
+                except Exception as exc:  # pragma: no cover - startup health is environment-dependent
+                    self.adapter_errors[adapter.platform] = str(exc)
+
         if self.config.enable_telegram and "telegram" not in self.registry.adapters:
             adapter = TelegramAdapter(
                 TelegramConfig.from_env(gateway_public_host=self.config.public_host)
@@ -1244,7 +1373,9 @@ class GatewayRuntime:
         requested_session_id = self._safe_text(message.get("session_id"))
         session_id = self._resolve_session_id(requested_session_id)
         source_id = (
-            self._safe_text(metadata.get("sender_jid"))
+            self._safe_text(metadata.get("message_id"))
+            or self._safe_text(metadata.get("internet_message_id"))
+            or self._safe_text(metadata.get("sender_jid"))
             or self._safe_text(metadata.get("chat_jid"))
             or channel
         )
@@ -1257,7 +1388,14 @@ class GatewayRuntime:
             "channel": channel,
             "conversation_context": conversation_context,
         }
-        await self._finalize_rollover_sessions(current_session_id=session_id)
+        if self._channel_platform(channel) == "agent-email" or self._is_email_thread_session(session_id):
+            self.session_store.update_session_metadata(
+                session_id,
+                self._email_thread_session_patch(metadata, channel=channel),
+            )
+            await self._finalize_rollover_sessions(current_session_id=self._current_session_id())
+        else:
+            await self._finalize_rollover_sessions(current_session_id=session_id)
         session_metadata = self._ensure_session_state_seeded(session_id)
         auto_reply = await self._maybe_handle_pending_task_input_reply(
             content=content,
@@ -1654,6 +1792,7 @@ class GatewayRuntime:
         send,
         store_assistant_message,
     ) -> None:
+        await self._ensure_request_email_processed(request_record)
         await self._ensure_request_documents_parsed(request_record, send=send)
         task = self._build_orchestrator_task(
             request_record=request_record,
@@ -2529,7 +2668,17 @@ class GatewayRuntime:
     def _resolve_session_id(self, requested_session_id: Any) -> str:
         current_session_id = self._current_session_id()
         requested = self._safe_text(requested_session_id)
+        if not requested:
+            return current_session_id
         if requested == current_session_id:
+            return requested
+        if self._is_email_thread_session(requested):
+            return requested
+        metadata = self.session_store.get_session_metadata(requested)
+        if bool(metadata.get("rollover_exempt")):
+            return requested
+        session_scope = self._safe_text(metadata.get("session_scope"))
+        if session_scope and session_scope != "daily":
             return requested
         return current_session_id
 
@@ -5225,6 +5374,21 @@ class GatewayRuntime:
                 "connection": status,
             }
 
+        if platform == "agent-email":
+            try:
+                status = await adapter.get_status()  # type: ignore[attr-defined]
+                self.adapter_errors.pop(platform, None)
+            except Exception as exc:
+                self.adapter_errors[platform] = str(exc)
+                status = {"status": "error", "error": str(exc)}
+            return {
+                "platform": platform,
+                "configured": True,
+                "healthy": platform not in self.adapter_errors,
+                "last_error": self.adapter_errors.get(platform),
+                "mail": status,
+            }
+
         return {
             "platform": platform,
             "configured": True,
@@ -5827,6 +5991,11 @@ class GatewayRuntime:
         message = request_record.get("message")
         if not isinstance(message, dict):
             raise RuntimeError("Request record is missing the normalized message payload.")
+        orchestrator_query = (
+            self._safe_text(request_record.get("orchestrator_query_override"))
+            or self._safe_text(message.get("content"))
+            or "[empty message]"
+        )
 
         prepared_input_artifacts = self._prepare_input_artifacts_for_model(
             request_record.get("input_artifacts") if isinstance(request_record.get("input_artifacts"), list) else []
@@ -5840,7 +6009,7 @@ class GatewayRuntime:
             recipient="cosmic/orchestrator:1.0.0",
             intent="orchestrator.process",
             input={
-                "query": self._safe_text(message.get("content")) or "[empty message]",
+                "query": orchestrator_query,
                 "request_id": request_id,
                 "conversation_context": request_record.get("assembled_conversation_context") or [],
                 "memory_context": self._safe_text(request_record.get("memory_context")),
@@ -5880,6 +6049,8 @@ class GatewayRuntime:
         channel: str,
         metadata: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        if self._channel_platform(channel) == "agent-email":
+            return []
         attachments = metadata.get("attachments")
         if not isinstance(attachments, list) or not attachments:
             return []
@@ -5906,6 +6077,102 @@ class GatewayRuntime:
                 len(attachments),
             )
             return []
+
+    async def _ensure_request_email_processed(self, request_record: dict[str, Any]) -> None:
+        if not self._should_preprocess_email_inbound(request_record):
+            return
+        if request_record.get("email_process_inbound_state") in {"completed", "failed"}:
+            return
+
+        try:
+            process_result = await self._dispatch_email_process_inbound(request_record=request_record)
+        except Exception:
+            logger.exception(
+                "gateway.email_process_inbound_failed request_id=%s",
+                self._safe_text(request_record.get("request_id")),
+            )
+            request_record["email_process_inbound_state"] = "failed"
+            return
+
+        status = self._safe_text(process_result.get("status")) or "failed"
+        if status != "completed":
+            logger.warning(
+                "gateway.email_process_inbound_non_terminal request_id=%s status=%s error=%s",
+                self._safe_text(request_record.get("request_id")),
+                status,
+                self._safe_text(process_result.get("error_message")),
+            )
+            request_record["email_process_inbound_state"] = "failed"
+            return
+
+        output = process_result.get("output") if isinstance(process_result.get("output"), dict) else {}
+        message = request_record.get("message")
+        if not isinstance(message, dict):
+            request_record["email_process_inbound_state"] = "failed"
+            return
+        original_content = self._safe_text(message.get("content")) or "[empty inbound email]"
+        request_record["orchestrator_query_override"] = self._build_email_inbound_orchestrator_query(
+            original_content=original_content,
+            process_output=output,
+        )
+        request_record["email_process_inbound_state"] = "completed"
+        request_record["email_process_inbound_task_id"] = self._safe_text(process_result.get("task_id"))
+        request_record["email_process_inbound_output"] = output
+        request_record["email_process_inbound_artifacts"] = (
+            process_result.get("artifacts") if isinstance(process_result.get("artifacts"), list) else []
+        )
+
+    async def _dispatch_email_process_inbound(
+        self,
+        *,
+        request_record: dict[str, Any],
+    ) -> dict[str, Any]:
+        session_id = self._safe_text(request_record.get("session_id"))
+        request_id = self._safe_text(request_record.get("request_id"))
+        channel = self._safe_text(request_record.get("channel"))
+        source = self._safe_text(request_record.get("source")) or "user"
+        source_id = self._safe_text(request_record.get("source_id"))
+        message = request_record.get("message")
+        metadata = message.get("metadata") if isinstance(message, dict) and isinstance(message.get("metadata"), dict) else {}
+        thread_id = self._safe_text(metadata.get("thread_id"))
+        message_id = self._safe_text(metadata.get("message_id"))
+        if not session_id or not request_id or not thread_id or not message_id:
+            return {
+                "status": "failed",
+                "error_message": "Missing session_id, request_id, thread_id, or message_id for email inbound processing.",
+            }
+
+        child_input = {
+            "thread_id": thread_id,
+            "message_id": message_id,
+            "mailbox_address": self._safe_text(metadata.get("mailbox_address")),
+            "mailbox_id": self._safe_text(metadata.get("mailbox_id")),
+            "request_id": request_id,
+        }
+        task = TaskEnvelope(
+            task_id=generate_task_id(),
+            task_list_id=session_id,
+            session_id=session_id,
+            sender="cosmic/gateway:1.0.0",
+            recipient=self.config.email_agent_id,
+            intent="email.process_inbound",
+            input=child_input,
+            input_artifacts=[],
+            idempotency_key=f"email-process-inbound:{request_id}:{thread_id}:{message_id}",
+            priority=SOURCE_PRIORITY_MAP.get(source, "normal"),
+            signature="",
+            created_at=utcnow(),
+            source=source,
+            source_id=source_id or request_id,
+            channel=channel or None,
+        )
+        task = task.model_copy(update={"signature": sign_task_envelope(task, self.config.signing_secret)})
+        await dispatch_task(task, self._redis)
+        return await self._wait_for_agent_terminal_result(
+            task.task_id,
+            timeout_sec=self.config.email_process_inbound_timeout_sec,
+            poll_interval_sec=self.config.email_process_inbound_poll_interval_sec,
+        )
 
     async def stage_desktop_uploads(
         self,

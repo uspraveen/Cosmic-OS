@@ -491,6 +491,37 @@ class FakeTelegramChannelAdapter:
         return (b"telegram-media", "image/jpeg")
 
 
+class FakeAgentEmailChannelAdapter:
+    platform = "agent-email"
+
+    def __init__(self) -> None:
+        self.sent_events: list[dict[str, object]] = []
+        self.primary_mailbox_address = "assistant@example.com"
+
+    async def start(self) -> None:
+        return
+
+    async def stop(self) -> None:
+        return
+
+    async def on_message(self, callback) -> None:
+        self._callback = callback
+
+    async def send(self, message: dict[str, object], channel: str | None = None) -> None:
+        self.sent_events.append(
+            {
+                **message,
+                "channel": channel or message.get("channel"),
+            }
+        )
+
+    async def get_status(self) -> dict[str, object]:
+        return {
+            "connected": True,
+            "primary_mailbox_address": self.primary_mailbox_address,
+        }
+
+
 class FlakyWhatsAppChannelAdapter(FakeWhatsAppChannelAdapter):
     def __init__(self) -> None:
         super().__init__()
@@ -1261,6 +1292,109 @@ async def test_docs_autoparse_enriches_request_record_with_bundle_metadata(tmp_p
         stored = runtime.artifact_store.list_for_request("req_docs_parse")[0]
         assert stored["ingest_state"] == "parsed"
         assert stored["parse_bundle_id"] == "bundle_docs_001"
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_email_inbound_preprocess_rewrites_effective_orchestrator_query(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    runtime._redis = FakeRedis()
+    await runtime.start()
+    try:
+        request_record = await runtime.process_incoming_user_message(
+            {
+                "content": "Email subject: Need help\n\nCan you help me with the latest invoice?",
+                "channel": "agent-email:support@example.com",
+                "metadata": {
+                    "platform": "agent-email",
+                    "message_id": "msg_email_1",
+                    "thread_id": "thr_email_1",
+                    "mailbox_address": "support@example.com",
+                    "session_scope": "email_thread",
+                    "rollover_exempt": True,
+                },
+            }
+        )
+
+        async def _fake_dispatch(*, request_record: dict[str, Any]) -> dict[str, Any]:
+            assert request_record["session_id"].startswith("email-thread:")
+            return {
+                "status": "completed",
+                "task_id": "tsk_email_process_1",
+                "output": {
+                    "summary": "Customer is asking for the latest invoice and wants quick confirmation.",
+                    "subject": "Need help",
+                    "attachments": [{"id": "att_1"}, {"id": "att_2"}],
+                    "matched_instruction": {"label": "Auto reply invoices"},
+                    "auto_reply": {"sent": True, "message_id": "msg_auto_1"},
+                },
+                "artifacts": [{"artifact_id": "art_email_process_1"}],
+            }
+
+        runtime._dispatch_email_process_inbound = _fake_dispatch  # type: ignore[method-assign]
+
+        await runtime._ensure_request_email_processed(request_record)  # noqa: SLF001 - intentional unit seam
+
+        assert request_record["email_process_inbound_state"] == "completed"
+        assert request_record["message"]["content"].startswith("Email subject: Need help")
+        assert "Customer is asking for the latest invoice" in request_record["orchestrator_query_override"]
+        assert "Auto reply invoices" in request_record["orchestrator_query_override"]
+        assert "2 attachment(s) were downloaded into the email specialist workflow" in request_record["orchestrator_query_override"]
+
+        task = runtime._build_orchestrator_task(  # noqa: SLF001 - intentional unit seam
+            request_record=request_record,
+            session_id=request_record["session_id"],
+            request_id=request_record["request_id"],
+            channel=request_record["channel"],
+        )
+        assert task.input["query"] == request_record["orchestrator_query_override"]
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_email_inbound_preprocess_falls_back_to_raw_summary_when_specialist_fails(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    runtime._redis = FakeRedis()
+    await runtime.start()
+    try:
+        request_record = await runtime.process_incoming_user_message(
+            {
+                "content": "Email subject: Need help\n\nCan you help me with the latest invoice?",
+                "channel": "agent-email:support@example.com",
+                "metadata": {
+                    "platform": "agent-email",
+                    "message_id": "msg_email_2",
+                    "thread_id": "thr_email_2",
+                    "mailbox_address": "support@example.com",
+                    "session_scope": "email_thread",
+                    "rollover_exempt": True,
+                },
+            }
+        )
+
+        async def _fake_dispatch(*, request_record: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "status": "failed",
+                "task_id": "tsk_email_process_2",
+                "error_message": "email.process_inbound failed",
+            }
+
+        runtime._dispatch_email_process_inbound = _fake_dispatch  # type: ignore[method-assign]
+
+        await runtime._ensure_request_email_processed(request_record)  # noqa: SLF001 - intentional unit seam
+
+        assert request_record["email_process_inbound_state"] == "failed"
+        assert "orchestrator_query_override" not in request_record
+
+        task = runtime._build_orchestrator_task(  # noqa: SLF001 - intentional unit seam
+            request_record=request_record,
+            session_id=request_record["session_id"],
+            request_id=request_record["request_id"],
+            channel=request_record["channel"],
+        )
+        assert task.input["query"] == "Email subject: Need help\n\nCan you help me with the latest invoice?"
     finally:
         await runtime.stop()
 
@@ -3098,6 +3232,58 @@ def test_internal_channel_resolve_defaults_to_current_and_can_pick_linked_whatsa
             "resolved_channel": "whatsapp:+12153079021",
             "platform": "whatsapp",
             "matched_by": "linked_channel",
+        }
+
+
+def test_internal_channel_resolve_supports_agent_email_aliases_and_explicit_channel(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+    runtime.config.enable_agent_email = True
+    runtime.config.cosmic_mail_primary_mailbox_address = "assistant@example.com"
+    runtime.registry.register(FakeAgentEmailChannelAdapter())
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+
+    with TestClient(app) as client:
+        alias_response = client.post(
+            "/internal/channels/resolve",
+            headers={"X-Internal-Token": "internal-token"},
+            json={
+                "delivery_target": "email",
+                "current_channel": "desktop:desk_sched",
+            },
+        )
+        assert alias_response.status_code == 200
+        assert alias_response.json() == {
+            "delivery_target": "agent-email",
+            "resolved_channel": "agent-email:assistant@example.com",
+            "platform": "agent-email",
+            "matched_by": "linked_channel",
+        }
+
+        explicit_response = client.post(
+            "/internal/channels/resolve",
+            headers={"X-Internal-Token": "internal-token"},
+            json={
+                "delivery_target": "agent-email:ops@example.com",
+                "current_channel": "desktop:desk_sched",
+            },
+        )
+        assert explicit_response.status_code == 200
+        assert explicit_response.json() == {
+            "delivery_target": "agent-email:ops@example.com",
+            "resolved_channel": "agent-email:ops@example.com",
+            "platform": "agent-email",
+            "matched_by": "explicit_channel",
         }
 
 

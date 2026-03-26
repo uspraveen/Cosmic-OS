@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import re
 import time
@@ -502,6 +503,68 @@ async def whatsapp_incoming(
             (time.perf_counter() - started_at) * 1000.0,
         )
     return processed
+
+
+@router.post("/internal/channels/agent-email/incoming")
+async def agent_email_incoming(
+    request: Request,
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    adapter = runtime.registry.adapters.get("agent-email")
+    if adapter is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent Email adapter is not registered")
+
+    try:
+        raw_body = await request.body()
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unable to read webhook body") from exc
+
+    try:
+        adapter.verify_webhook_signature(request.headers, raw_body)  # type: ignore[attr-defined]
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid Agent Email JSON payload") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Agent Email webhook payload must be a JSON object")
+
+    try:
+        normalized = adapter.normalize_message(payload)  # type: ignore[attr-defined]
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+    request_id = str(normalized.get("request_id") or "").strip() or uuid4().hex
+    normalized["request_id"] = request_id
+    processed = await runtime.process_incoming_user_message(normalized)
+    runtime.notify_channel_active(processed["channel"])
+    if processed.get("dispatch_target") == "redis":
+        return {
+            "status": "accepted",
+            "request_id": processed["request_id"],
+            "session_id": processed["session_id"],
+            "channel": processed["channel"],
+        }
+
+    try:
+        runtime.start_request_fulfillment(processed)
+    except Exception as exc:
+        logger.exception(
+            "agent_email.webhook fulfillment_start_failed request_id=%s",
+            processed.get("request_id"),
+        )
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    return {
+        "status": "accepted",
+        "request_id": processed["request_id"],
+        "session_id": processed["session_id"],
+        "channel": processed["channel"],
+        "route": processed["route"],
+    }
 
 
 @router.post("/channels/telegram/webhook")

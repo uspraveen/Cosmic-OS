@@ -1,0 +1,95 @@
+agent_id: cosmic/email-agent:1.0.0
+display_name: Agent Email
+description: >
+  Specialist agent for anything involving email threads, drafting, replying,
+  searching, and sending through Cosmic Mail. Use it when the request is about
+  reading or composing email, and pass a compact context brief or draft seed
+  rather than a raw long transcript.
+
+intents:
+  - name: email.process_inbound
+    description: Process an inbound email thread, summarize it, fetch attachment metadata/files into the agent artifact area, and apply standing instructions when configured.
+    input_schema: schemas/intents/email.process_inbound.input.json
+    output_schema: schemas/intents/email.process_inbound.output.json
+    timeout_sec: 180
+    usage_hints:
+      - Use this when a real inbound email arrives and the system needs email-native understanding, not just transport delivery.
+      - Keep attachments inside the email agent workflow unless another specialist explicitly needs them later.
+
+  - name: email.reason
+    description: High-level email reasoning entrypoint for searching, summarizing, drafting, replying to, or sending email from a compact brief.
+    input_schema: schemas/intents/email.reason.input.json
+    output_schema: schemas/intents/email.reason.output.json
+    timeout_sec: 240
+    usage_hints:
+      - Use this specialist for almost anything involving reading, understanding, drafting, replying to, or sending email.
+      - Pass a compact context_brief and optional draft_seed; do not pass a long raw conversation transcript.
+      - Do not use this specialist for simple already-final cron or heartbeat delivery to an email channel.
+
+  - name: email.manage_instruction
+    description: Create, list, enable, disable, or remove standing email instructions that the email specialist may use on inbound mail.
+    input_schema: schemas/intents/email.manage_instruction.input.json
+    output_schema: schemas/intents/email.manage_instruction.output.json
+    timeout_sec: 45
+    usage_hints:
+      - Use this to manage standing email rules and auto-reply policies, not to send a one-off message.
+
+  - name: email.recall_session
+    description: Recall prior email-agent runs from the private session ledger.
+    input_schema: schemas/intents/email.recall_session.input.json
+    output_schema: schemas/intents/email.recall_session.output.json
+    timeout_sec: 30
+    usage_hints:
+      - Recall prior email runs when you need exact reuse of earlier email-agent work instead of recomputing it.
+
+artifact_types:
+  - email_thread_snapshot
+  - email_attachment
+  - email_draft
+  - email_send_result
+  - email_summary
+
+policies:
+  network_access: true
+  writable_paths:
+    - runs/artifacts
+    - agents/email_agent/store
+    - agents/email_agent/runtime
+  tool_access: []
+  allowed_senders:
+    - cosmic/orchestrator:1.0.0
+  intent_authorization:
+    email.process_inbound: [cosmic/orchestrator:1.0.0]
+    email.reason: [cosmic/orchestrator:1.0.0]
+    email.manage_instruction: [cosmic/orchestrator:1.0.0]
+    email.recall_session: [cosmic/orchestrator:1.0.0]
+
+sla:
+  max_concurrency: 2
+  heartbeat_interval_sec: 10
+  heartbeat_ttl_sec: 30
+  max_task_duration_sec: 300
+  health_endpoint: /health
+  retry_policy:
+    max_attempts: 3
+    backoff: exponential
+    backoff_base_sec: 2
+    backoff_max_sec: 60
+    retryable_codes:
+      - TIMEOUT
+      - NETWORK_ERROR
+      - RATE_LIMITED
+    non_retryable_codes:
+      - INVALID_INPUT
+      - AUTH_ERROR
+      - SCHEMA_VIOLATION
+      - INTERNAL_ERROR
+
+stream_key: streams:cosmic/email-agent:1.0.0
+
+version_info:
+  semver: 1.0.0
+  released_at: 2026-03-25
+  deprecated_at: null
+  remove_after: null
+  changelog: CHANGELOG.md

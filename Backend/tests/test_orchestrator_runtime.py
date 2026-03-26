@@ -1102,6 +1102,82 @@ async def test_orchestrator_runtime_skips_unmatched_server_tool_use_blocks_on_pa
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_runtime_sanitizes_prior_assistant_server_tool_blocks_before_request(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_prior_replay_sanitized.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    base_task = _signed_task("signing-secret")
+    task = base_task.model_copy(
+        update={
+            "input": {
+                **dict(base_task.input),
+                "conversation_context": [
+                    {"role": "user", "content": "Earlier question"},
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "Working..."},
+                            {
+                                "type": "server_tool_use",
+                                "id": "srv_code_prior",
+                                "name": "code_execution",
+                                "input": {"code": "print(9)"},
+                            },
+                        ],
+                    },
+                ],
+            }
+        }
+    )
+
+    async def scripted_stream(
+        *,
+        system_prompt: str,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]] | None = None,
+        container_id: str | None = None,
+    ):
+        del system_prompt, tools, container_id
+        assert messages == [
+            {"role": "user", "content": "Earlier question"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Working..."},
+                ],
+            },
+            {"role": "user", "content": "Why is the sky blue?"},
+        ]
+        events = [
+            ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 7}}}),
+            ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+            ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Recovered cleanly."}}),
+            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 3}}),
+            ("message_stop", {"type": "message_stop"}),
+        ]
+        for event_name, payload in events:
+            yield type("SSE", (), {"event": event_name, "data": json.dumps(payload)})()
+
+    runtime._stream_anthropic_events = scripted_stream  # type: ignore[method-assign]
+
+    await runtime.start()
+    try:
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+
+    complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert complete_event["content"] == "Recovered cleanly."
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_runtime_emits_local_research_provenance_for_perplexity_and_firecrawl(tmp_path) -> None:
     client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
     config = OrchestratorConfig(

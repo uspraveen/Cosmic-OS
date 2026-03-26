@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["set", "list", "remove", "enable", "disable"]
+    },
+    "instruction_id": { "type": "string", "minLength": 1 },
+    "mailbox_address": { "type": "string", "minLength": 1 },
+    "label": { "type": "string", "minLength": 1 },
+    "match": {
+      "type": "object",
+      "properties": {
+        "from_address": { "type": "string" },
+        "subject_contains": { "type": "string" },
+        "body_contains": { "type": "string" }
+      }
+    },
+    "behavior": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["notify_only", "auto_reply"]
+        },
+        "reply_template": { "type": "string" }
+      }
+    }
+  },
+  "required": ["action"]
+}

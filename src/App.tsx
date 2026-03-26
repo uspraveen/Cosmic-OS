@@ -930,6 +930,43 @@ const mergePendingTaskInputs = (existing: PendingTaskInput[], incoming: PendingT
   return sortPendingTaskInputs(Array.from(byId.values()))
 }
 
+// --- Foregrounded-task persistence helpers ---
+// Tracks request IDs that have been moved to chat so the resume handler can
+// filter them out even if the backend hasn't cleared the background flag yet.
+const FOREGROUNDED_STORAGE_KEY = 'cosmic_foregrounded_ids'
+
+function markRequestForegrounded(requestId: string) {
+  try {
+    const ids: string[] = JSON.parse(localStorage.getItem(FOREGROUNDED_STORAGE_KEY) || '[]')
+    if (!ids.includes(requestId)) {
+      ids.push(requestId)
+      localStorage.setItem(FOREGROUNDED_STORAGE_KEY, JSON.stringify(ids))
+    }
+  } catch { /* best-effort */ }
+}
+
+function getForegroundedRequestIds(): Set<string> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(FOREGROUNDED_STORAGE_KEY) || '[]')
+    if (!Array.isArray(raw)) {
+      return new Set<string>()
+    }
+    return new Set<string>(raw.map((value) => String(value)))
+  } catch {
+    return new Set<string>()
+  }
+}
+
+function pruneStaleforegroundedIds(stillBackgroundIds: Set<string>) {
+  try {
+    const ids: string[] = JSON.parse(localStorage.getItem(FOREGROUNDED_STORAGE_KEY) || '[]')
+    const kept = ids.filter((id) => stillBackgroundIds.has(id))
+    if (kept.length !== ids.length) {
+      localStorage.setItem(FOREGROUNDED_STORAGE_KEY, JSON.stringify(kept))
+    }
+  } catch { /* best-effort */ }
+}
+
 export default function App() {
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const modelDialRef = useRef<HTMLDivElement>(null)
@@ -1015,6 +1052,8 @@ export default function App() {
   const [dismissedTaskInterruptIds, setDismissedTaskInterruptIds] = useState<string[]>([])
   const [selectedTaskInputId, setSelectedTaskInputId] = useState<string | null>(null)
   const [selectedBackgroundRequestId, setSelectedBackgroundRequestId] = useState<string | null>(null)
+  const [backgroundTaskListRetracted, setBackgroundTaskListRetracted] = useState(false)
+  const [pendingTaskListRetracted, setPendingTaskListRetracted] = useState(false)
   const [taskInterruptIndex, setTaskInterruptIndex] = useState(0)
   const [cronResultNotifications, setCronResultNotifications] = useState<CronResultNotification[]>([])
   const [cronResultIndex, setCronResultIndex] = useState(0)
@@ -1023,16 +1062,33 @@ export default function App() {
   const backgroundTaskCount = backgroundTasks.length
   const taskDashboardCount = pendingTaskCount + backgroundTaskCount
   const orderedPendingTaskInputs = useMemo(() => [...pendingTaskInputs].reverse(), [pendingTaskInputs])
-  const orderedBackgroundTasks = useMemo(() => [...backgroundTasks]
-    .filter((task) => task.requestId !== foregroundingRequestId)
+  const orderedBackgroundTasks = useMemo(() => backgroundTasks
+    .map((task, index) => ({ task, index }))
+    .filter(({ task }) => task.requestId !== foregroundingRequestId)
     .sort((a, b) => {
-      const aCompleted = a.completed ? 1 : 0
-      const bCompleted = b.completed ? 1 : 0
+      const aCompleted = a.task.completed ? 1 : 0
+      const bCompleted = b.task.completed ? 1 : 0
       if (aCompleted !== bCompleted) {
         return aCompleted - bCompleted
       }
-      return String(b.backgroundedAt || '').localeCompare(String(a.backgroundedAt || ''))
-    }), [backgroundTasks, foregroundingRequestId])
+      const tsA = String(a.task.backgroundedAt || '').trim()
+      const tsB = String(b.task.backgroundedAt || '').trim()
+      if (tsA && tsB) {
+        const cmp = tsB.localeCompare(tsA)
+        if (cmp !== 0) {
+          return cmp
+        }
+        return b.index - a.index
+      }
+      if (tsA && !tsB) {
+        return 1
+      }
+      if (!tsA && tsB) {
+        return -1
+      }
+      return b.index - a.index
+    })
+    .map(({ task }) => task), [backgroundTasks, foregroundingRequestId])
   const visibleTaskInterrupts = useMemo(
     () => orderedPendingTaskInputs.filter((item) => !dismissedTaskInterruptIds.includes(item.inputRequestId)),
     [dismissedTaskInterruptIds, orderedPendingTaskInputs],
@@ -1803,6 +1859,18 @@ export default function App() {
   }, [orderedPendingTaskInputs, selectedTaskInputId])
 
   useEffect(() => {
+    if (orderedBackgroundTasks.length <= 1) {
+      setBackgroundTaskListRetracted(false)
+    }
+  }, [orderedBackgroundTasks.length])
+
+  useEffect(() => {
+    if (orderedPendingTaskInputs.length <= 1) {
+      setPendingTaskListRetracted(false)
+    }
+  }, [orderedPendingTaskInputs.length])
+
+  useEffect(() => {
     if (dismissedTaskInterruptIds.length === 0) {
       return
     }
@@ -1923,15 +1991,12 @@ export default function App() {
     window.cosmic.requestGatewayResume().catch(() => { })
   }
 
-  const showTaskSurface = (options: { focusComposer?: boolean; forceOpus?: boolean; focusInputRequestId?: string | null } = {}) => {
-    const { focusComposer = false, forceOpus = true, focusInputRequestId = null } = options
+  const showTaskSurface = (options: { focusComposer?: boolean; focusInputRequestId?: string | null } = {}) => {
+    const { focusComposer = false, focusInputRequestId = null } = options
     hideHoverTooltip()
     setDismissedTaskInterruptIds([])
     if (focusInputRequestId) {
       setSelectedTaskInputId(focusInputRequestId)
-    }
-    if (forceOpus) {
-      commitSelectedModel('opus', true, true)
     }
     setSearchState('visible')
     setMode('task')
@@ -2092,11 +2157,16 @@ export default function App() {
       } else if (modeRef.current === 'meeting') {
         showMeetingSurface()
       } else if (modeRef.current === 'task') {
-        showTaskSurface({ focusComposer: false, forceOpus: false })
+        showTaskSurface({ focusComposer: false })
       } else {
         showChatComposer()
       }
       maybeRequestGatewayResumeOnShow()
+      // Scroll to bottom (or streaming point) on every reopen
+      shouldAutoScrollRef.current = true
+      window.setTimeout(() => {
+        responseEndRef.current?.scrollIntoView({ behavior: 'instant' })
+      }, 80)
     }
     const off1 = window.cosmic?.onShown(handleShown)
     const off2 = window.cosmic?.onHiding(performHide)
@@ -2126,6 +2196,16 @@ export default function App() {
       }
     }
   }, [])
+
+  useEffect(() => {
+    if (mode !== 'chat') {
+      return
+    }
+    const id = requestAnimationFrame(() => {
+      scrollModelDialTo(selectedModelRef.current, 'auto')
+    })
+    return () => cancelAnimationFrame(id)
+  }, [mode, selectedModel])
 
   // --- DATA LISTENERS ---
   useEffect(() => {
@@ -2162,11 +2242,20 @@ export default function App() {
               : [],
           ),
         )
-        setBackgroundTasks(
-          Array.isArray((event as any).background_tasks)
-            ? (event as any).background_tasks.map(normalizeBackgroundTask).filter(Boolean) as BackgroundTask[]
-            : [],
+        const foregroundedIds = getForegroundedRequestIds()
+        const resumedBackgroundTasks = Array.isArray((event as any).background_tasks)
+          ? (event as any).background_tasks
+              .map(normalizeBackgroundTask)
+              .filter((t: BackgroundTask | null) => t && !foregroundedIds.has(t.requestId)) as BackgroundTask[]
+          : []
+        setBackgroundTasks(resumedBackgroundTasks)
+        // Prune localStorage entries the backend no longer considers background
+        const rawBackgroundIds = new Set<string>(
+          (Array.isArray((event as any).background_tasks) ? (event as any).background_tasks : [])
+            .map((t: any) => String(t?.request_id || '').trim())
+            .filter((value: string): value is string => Boolean(value)),
         )
+        pruneStaleforegroundedIds(rawBackgroundIds)
         setTaskInputDrafts({})
         setSubmittingTaskInputs({})
         setBackgroundTaskErrors({})
@@ -2280,6 +2369,7 @@ export default function App() {
           error: (event as any)?.error ?? preservedTask?.error,
         })
         if (requestId) {
+          markRequestForegrounded(requestId)
           removeBackgroundTask(requestId)
           setSelectedBackgroundRequestId((current) => (current === requestId ? null : current))
           setForegroundingRequestId((current) => (current === requestId ? null : current))
@@ -3152,6 +3242,29 @@ export default function App() {
       return
     }
     if (task.completed) {
+      markRequestForegrounded(requestId)
+      // Create the assistant message from the background task's stored content
+      // (the original assistant message was removed when the task was backgrounded)
+      const messageId = createAssistantMessageId()
+      setMessages((prev) => {
+        const nextMessages = prev.filter((message) => (
+          message.role !== 'assistant' || message.requestId !== requestId
+        ))
+        return [
+          ...nextMessages,
+          createAssistantMessage({
+            id: messageId,
+            requestId,
+            content: task.partialContent || '',
+            thinking: task.partialThinking || '',
+            activity: task.activity,
+            activityLog: task.activityLog,
+            progress: task.progress,
+            producedArtifacts: task.producedArtifacts,
+            sources: task.sources,
+          }),
+        ]
+      })
       removeBackgroundTask(requestId)
       setSelectedBackgroundRequestId(null)
       patchMessagesForRequest(requestId, (message) => {
@@ -3161,6 +3274,8 @@ export default function App() {
       })
       shouldAutoScrollRef.current = true
       showChatComposer()
+      // Fire-and-forget: tell backend to clear the background flag for persistence
+      window.cosmic?.foregroundGatewayRequest?.({ requestId })?.catch?.(() => {})
       window.setTimeout(() => {
         responseEndRef.current?.scrollIntoView({ behavior: 'smooth' })
       }, 120)
@@ -3241,7 +3356,7 @@ export default function App() {
       return
     }
     if (tile === 'task') {
-      showTaskSurface({ focusComposer: pendingTaskInputs.length === 0, forceOpus: true })
+      showTaskSurface({ focusComposer: pendingTaskInputs.length === 0 })
       return
     }
     showChatComposer()
@@ -3402,7 +3517,7 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (shouldAutoScrollRef.current || isStreaming) {
+    if (shouldAutoScrollRef.current) {
       responseEndRef.current?.scrollIntoView({ behavior: 'smooth' })
     }
   }, [messages, isStreaming])
@@ -3884,7 +3999,6 @@ export default function App() {
                           setDismissedTaskInterruptIds([])
                           showTaskSurface({
                             focusComposer: false,
-                            forceOpus: true,
                             focusInputRequestId: taskInput.inputRequestId,
                           })
                         }}
@@ -3964,7 +4078,11 @@ export default function App() {
                                   {orderedBackgroundTasks.length} running or completed
                                   </div>
                                 </div>
-                              <div className={`task-hub-body ${orderedBackgroundTasks.length > 1 ? '' : 'single'}`}>
+                              <div
+                                className={`task-hub-body ${orderedBackgroundTasks.length > 1 ? '' : 'single'} ${
+                                  orderedBackgroundTasks.length > 1 && backgroundTaskListRetracted ? 'task-list-retracted' : ''
+                                }`}
+                              >
                                 {orderedBackgroundTasks.length > 1 && (
                                   <div className="task-list-pane">
                                     <div className="task-list">
@@ -3995,6 +4113,23 @@ export default function App() {
                                   </div>
                                 )}
                                 <div className="task-detail-pane">
+                                  {orderedBackgroundTasks.length > 1 && (
+                                    <button
+                                      type="button"
+                                      className={`task-inbox-list-toggle ${backgroundTaskListRetracted ? 'is-retracted' : ''}`}
+                                      onClick={() => setBackgroundTaskListRetracted((v) => !v)}
+                                      aria-expanded={!backgroundTaskListRetracted}
+                                      aria-label={backgroundTaskListRetracted ? 'Show background task list' : 'Hide background task list'}
+                                    >
+                                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                        {backgroundTaskListRetracted ? (
+                                          <path d="M9 18l6-6-6-6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                                        ) : (
+                                          <path d="M15 18l-6-6 6-6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                                        )}
+                                      </svg>
+                                    </button>
+                                  )}
                                   {(() => {
                                     const task = selectedBackgroundTask
                                     const errorText = backgroundTaskErrors[task.requestId]
@@ -4127,7 +4262,11 @@ export default function App() {
                                   {pendingTaskCount} waiting
                                 </div>
                               </div>
-                              <div className={`task-hub-body ${hasMultiplePendingTaskInputs ? '' : 'single'}`}>
+                              <div
+                                className={`task-hub-body ${hasMultiplePendingTaskInputs ? '' : 'single'} ${
+                                  hasMultiplePendingTaskInputs && pendingTaskListRetracted ? 'task-list-retracted' : ''
+                                }`}
+                              >
                                 {hasMultiplePendingTaskInputs && (
                                   <div className="task-list-pane">
                                     <div className="task-list">
@@ -4154,6 +4293,23 @@ export default function App() {
                                 )}
 
                                 <div className="task-detail-pane">
+                                  {hasMultiplePendingTaskInputs && (
+                                    <button
+                                      type="button"
+                                      className={`task-inbox-list-toggle ${pendingTaskListRetracted ? 'is-retracted' : ''}`}
+                                      onClick={() => setPendingTaskListRetracted((v) => !v)}
+                                      aria-expanded={!pendingTaskListRetracted}
+                                      aria-label={pendingTaskListRetracted ? 'Show task input list' : 'Hide task input list'}
+                                    >
+                                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                        {pendingTaskListRetracted ? (
+                                          <path d="M9 18l6-6-6-6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                                        ) : (
+                                          <path d="M15 18l-6-6 6-6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                                        )}
+                                      </svg>
+                                    </button>
+                                  )}
                                   {(() => {
                                     const taskInput = selectedTaskInput
                                     const isSubmitting = Boolean(submittingTaskInputs[taskInput.inputRequestId])

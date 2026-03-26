@@ -261,6 +261,38 @@ def test_normalize_bootstrap_env_payload_accepts_firecrawl_agent_env() -> None:
     assert normalized[bootstrap.FIRECRAWL_AGENT_ENV_NAME]["FIRECRAWL_API_KEY"] == "fc-live"
 
 
+def test_normalize_bootstrap_env_payload_accepts_email_agent_env() -> None:
+    normalized = bootstrap.normalize_bootstrap_env_payload(
+        {
+            "success": True,
+            "vm": {
+                "gateway_url": "http://127.0.0.1:8080",
+                "vm_dns": "localhost",
+            },
+            "gateway_env": {
+                "GATEWAY_LOCAL_API_TOKEN": "pg_live_token",
+                "ANTHROPIC_API_KEY": "anthropic-live",
+                "PERPLEXITY_API_KEY": "perplexity-live",
+                "HAIKU_MODEL": "claude-haiku-4-5",
+            },
+            "orchestrator_env": {
+                "ANTHROPIC_API_KEY": "anthropic-live",
+                "OPUS_MODEL": "claude-opus-4-6",
+            },
+            "meeting_env": {
+                "GROQ_API_KEY": "groq-live",
+            },
+            "email_agent_env": {
+                "COSMIC_MAIL_BASE_URL": "https://mail.example.com",
+                "COSMIC_MAIL_API_TOKEN": "mail-token",
+            },
+        }
+    )
+
+    assert normalized[bootstrap.EMAIL_AGENT_ENV_NAME]["COSMIC_MAIL_BASE_URL"] == "https://mail.example.com"
+    assert normalized[bootstrap.EMAIL_AGENT_ENV_NAME]["COSMIC_MAIL_API_TOKEN"] == "mail-token"
+
+
 def test_normalize_bootstrap_env_payload_accepts_memory_env() -> None:
     normalized = bootstrap.normalize_bootstrap_env_payload(
         {
@@ -295,9 +327,11 @@ def test_materialize_bootstrap_env_files_updates_repo_envs(monkeypatch, tmp_path
     backend_root = tmp_path / "Backend"
     bridge_dir = backend_root / "bridges" / "whatsapp_bridge"
     firecrawl_dir = backend_root / "agents" / "firecrawl_web_scrape"
+    email_dir = backend_root / "agents" / "email_agent"
     system_env_dir = tmp_path / "etc" / "cosmic"
     bridge_dir.mkdir(parents=True)
     firecrawl_dir.mkdir(parents=True)
+    email_dir.mkdir(parents=True)
     system_env_dir.mkdir(parents=True)
 
     (backend_root / "gateway.env.example").write_text(
@@ -336,6 +370,20 @@ def test_materialize_bootstrap_env_files_updates_repo_envs(monkeypatch, tmp_path
         "AGENT_SECRET=<agent-shared-secret>\n"
         "INSTANCE_ID=firecrawl-web-scrape-agent-1\n"
         "FIRECRAWL_API_KEY=<firecrawl-api-key>\n",
+        encoding="utf-8",
+    )
+    (email_dir / "agent.env.example").write_text(
+        "REDIS_URL=redis://127.0.0.1:6379/0\n"
+        "GATEWAY_URL=http://127.0.0.1:8080\n"
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "AGENT_SECRET=<agent-shared-secret>\n"
+        "INSTANCE_ID=email-agent-1\n"
+        "COSMIC_MAIL_BASE_URL=\n"
+        "COSMIC_MAIL_API_TOKEN=\n"
+        "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS=\n"
+        "EMAIL_AGENT_MIMO_API_KEY=\n"
+        "EMAIL_AGENT_MIMO_BASE_URL=\n"
+        "EMAIL_AGENT_MIMO_MODEL=mimo-v2-pro\n",
         encoding="utf-8",
     )
 
@@ -403,9 +451,11 @@ def test_install_service_env_files_installs_firecrawl_agent_env(monkeypatch, tmp
     backend_root = tmp_path / "Backend"
     bridge_dir = backend_root / "bridges" / "whatsapp_bridge"
     firecrawl_dir = backend_root / "agents" / "firecrawl_web_scrape"
+    email_dir = backend_root / "agents" / "email_agent"
     system_env_dir = tmp_path / "etc" / "cosmic"
     bridge_dir.mkdir(parents=True)
     firecrawl_dir.mkdir(parents=True)
+    email_dir.mkdir(parents=True)
     system_env_dir.mkdir(parents=True)
 
     (backend_root / "gateway.env.example").write_text(
@@ -435,6 +485,20 @@ def test_install_service_env_files_installs_firecrawl_agent_env(monkeypatch, tmp
         "AGENT_SECRET=<agent-shared-secret>\n"
         "INSTANCE_ID=firecrawl-web-scrape-agent-1\n"
         "FIRECRAWL_API_KEY=<firecrawl-api-key>\n",
+        encoding="utf-8",
+    )
+    (email_dir / "agent.env.example").write_text(
+        "REDIS_URL=redis://127.0.0.1:6379/0\n"
+        "GATEWAY_URL=http://127.0.0.1:8080\n"
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "AGENT_SECRET=<agent-shared-secret>\n"
+        "INSTANCE_ID=email-agent-1\n"
+        "COSMIC_MAIL_BASE_URL=\n"
+        "COSMIC_MAIL_API_TOKEN=\n"
+        "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS=\n"
+        "EMAIL_AGENT_MIMO_API_KEY=\n"
+        "EMAIL_AGENT_MIMO_BASE_URL=\n"
+        "EMAIL_AGENT_MIMO_MODEL=mimo-v2-pro\n",
         encoding="utf-8",
     )
 
@@ -468,13 +532,58 @@ def test_install_service_env_files_installs_firecrawl_agent_env(monkeypatch, tmp
     assert "FIRECRAWL_API_KEY=<firecrawl-api-key>" in firecrawl_rendered
 
 
+def test_build_email_agent_env_rendered_prefers_external_values(tmp_path, monkeypatch) -> None:
+    backend_root = tmp_path / "Backend"
+    email_dir = backend_root / "agents" / "email_agent"
+    email_dir.mkdir(parents=True)
+    (email_dir / "agent.env.example").write_text(
+        "REDIS_URL=redis://127.0.0.1:6379/0\n"
+        "GATEWAY_URL=http://127.0.0.1:8080\n"
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "AGENT_SECRET=<agent-shared-secret>\n"
+        "INSTANCE_ID=email-agent-1\n"
+        "COSMIC_MAIL_BASE_URL=\n"
+        "COSMIC_MAIL_API_TOKEN=\n"
+        "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS=\n"
+        "EMAIL_AGENT_MIMO_API_KEY=\n"
+        "EMAIL_AGENT_MIMO_BASE_URL=\n"
+        "EMAIL_AGENT_MIMO_MODEL=mimo-v2-pro\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bootstrap, "BACKEND_ROOT", backend_root)
+
+    dest_path, rendered, parsed = bootstrap.build_email_agent_env_rendered(
+        signing_secret="signing-secret",
+        shared_internal_token="internal-token",
+        external_env_by_name={
+            bootstrap.EMAIL_AGENT_ENV_NAME: {
+                "COSMIC_MAIL_BASE_URL": "https://mail.example.com",
+                "COSMIC_MAIL_API_TOKEN": "mail-token",
+                "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS": "assistant@example.com",
+                "EMAIL_AGENT_MIMO_API_KEY": "mimo-key",
+                "EMAIL_AGENT_MIMO_BASE_URL": "https://mimo.example.com/v1",
+            }
+        },
+    )
+
+    assert dest_path.name == bootstrap.EMAIL_AGENT_ENV_NAME
+    assert "COSMIC_MAIL_BASE_URL=https://mail.example.com" in rendered
+    assert parsed["COSMIC_MAIL_API_TOKEN"] == "mail-token"
+    assert parsed["COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS"] == "assistant@example.com"
+    assert parsed["EMAIL_AGENT_MIMO_API_KEY"] == "mimo-key"
+    assert parsed["AGENT_SECRET"] == "signing-secret"
+    assert parsed["GATEWAY_INTERNAL_TOKEN"] == "internal-token"
+
+
 def test_materialize_bootstrap_env_files_can_render_memory_env(monkeypatch, tmp_path) -> None:
     backend_root = tmp_path / "Backend"
     bridge_dir = backend_root / "bridges" / "whatsapp_bridge"
     firecrawl_dir = backend_root / "agents" / "firecrawl_web_scrape"
+    email_dir = backend_root / "agents" / "email_agent"
     system_env_dir = tmp_path / "etc" / "cosmic"
     bridge_dir.mkdir(parents=True)
     firecrawl_dir.mkdir(parents=True)
+    email_dir.mkdir(parents=True)
     system_env_dir.mkdir(parents=True)
 
     (backend_root / "gateway.env.example").write_text(
@@ -514,6 +623,20 @@ def test_materialize_bootstrap_env_files_can_render_memory_env(monkeypatch, tmp_
         "AGENT_SECRET=<agent-shared-secret>\n"
         "INSTANCE_ID=firecrawl-web-scrape-agent-1\n"
         "FIRECRAWL_API_KEY=<firecrawl-api-key>\n",
+        encoding="utf-8",
+    )
+    (email_dir / "agent.env.example").write_text(
+        "REDIS_URL=redis://127.0.0.1:6379/0\n"
+        "GATEWAY_URL=http://127.0.0.1:8080\n"
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "AGENT_SECRET=<agent-shared-secret>\n"
+        "INSTANCE_ID=email-agent-1\n"
+        "COSMIC_MAIL_BASE_URL=\n"
+        "COSMIC_MAIL_API_TOKEN=\n"
+        "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS=\n"
+        "EMAIL_AGENT_MIMO_API_KEY=\n"
+        "EMAIL_AGENT_MIMO_BASE_URL=\n"
+        "EMAIL_AGENT_MIMO_MODEL=mimo-v2-pro\n",
         encoding="utf-8",
     )
 
@@ -1052,6 +1175,7 @@ def test_wait_for_health_endpoint_polls_until_ready(monkeypatch) -> None:
 def test_run_post_provision_health_checks_uses_core_service_order(monkeypatch) -> None:
     systemd_checks: list[str] = []
     health_checks: list[tuple[str, str]] = []
+    agent_checks: list[str] = []
 
     monkeypatch.setattr(bootstrap, "is_linux", lambda: True)
     monkeypatch.setattr(bootstrap.shutil, "which", lambda name: "/usr/bin/systemctl" if name == "systemctl" else None)
@@ -1065,6 +1189,11 @@ def test_run_post_provision_health_checks_uses_core_service_order(monkeypatch) -
         "wait_for_health_endpoint",
         lambda url, *, check_name, **kwargs: health_checks.append((check_name, url)) or {"status": "ok"},
     )
+    monkeypatch.setattr(
+        bootstrap,
+        "wait_for_orchestrator_agent_ready",
+        lambda agent_id, **kwargs: agent_checks.append(agent_id) or {"status": "ok"},
+    )
 
     bootstrap.run_post_provision_health_checks(include_memory=True, timeout_sec=1.0, poll_interval_sec=0.01)
 
@@ -1072,9 +1201,13 @@ def test_run_post_provision_health_checks_uses_core_service_order(monkeypatch) -
         "cosmic-model-router.service",
         "cosmic-orchestrator.service",
         "cosmic-gateway.service",
+        "cosmic-docs-parser-agent.service",
+        "cosmic-tabular-agent.service",
         "cosmic-whatsapp-bridge.service",
         "cosmic-memory.service",
+        bootstrap.TABULAR_AGENT_SERVICE_NAME,
     ]
+    assert agent_checks == [bootstrap.TABULAR_AGENT_ID]
     assert health_checks == [
         ("orchestrator", "http://127.0.0.1:8743/health"),
         ("memory", "http://127.0.0.1:8090/health"),
@@ -1116,10 +1249,13 @@ def test_run_post_provision_health_checks_waits_for_firecrawl_agent(monkeypatch)
         "cosmic-model-router.service",
         "cosmic-orchestrator.service",
         "cosmic-gateway.service",
+        "cosmic-docs-parser-agent.service",
+        "cosmic-tabular-agent.service",
         "cosmic-whatsapp-bridge.service",
         bootstrap.FIRECRAWL_AGENT_SERVICE_NAME,
+        bootstrap.TABULAR_AGENT_SERVICE_NAME,
     ]
-    assert agent_checks == [bootstrap.FIRECRAWL_AGENT_ID]
+    assert agent_checks == [bootstrap.FIRECRAWL_AGENT_ID, bootstrap.TABULAR_AGENT_ID]
     assert health_checks == [
         ("orchestrator", "http://127.0.0.1:8743/health"),
         ("gateway", "http://127.0.0.1:8080/health/ready"),

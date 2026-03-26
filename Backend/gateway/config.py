@@ -67,6 +67,7 @@ class GatewayConfig:
     task_input_gateway_group: str = "gateway"
     enable_whatsapp: bool = True
     enable_telegram: bool = False
+    enable_agent_email: bool = False
     sessions_db_path: Path = BACKEND_ROOT / "gateway" / "sessions.db"
     usage_db_path: Path = BACKEND_ROOT / "gateway" / "usage.db"
     routing_audit_db_path: Path = BACKEND_ROOT / "gateway" / "routing_audit.db"
@@ -80,6 +81,12 @@ class GatewayConfig:
     capability_wishlist_export_dir: Path = BACKEND_ROOT / "logs" / "cosmics_capability_wishlist"
     session_reset_hour: int = 4
     user_timezone_fallback: str = "America/Chicago"
+    cosmic_mail_base_url: str = ""
+    cosmic_mail_api_token: str = ""
+    cosmic_mail_timeout_sec: float = 20.0
+    cosmic_mail_primary_mailbox_address: str = ""
+    cosmic_mail_webhook_secret: str = ""
+    cosmic_mail_webhook_signature_header: str = "X-Cosmic-Mail-Signature"
     scheduler_poll_interval_sec: float = 30.0
     delivery_retry_base_sec: float = 1.0
     delivery_retry_max_sec: float = 120.0
@@ -104,6 +111,9 @@ class GatewayConfig:
     tabular_parse_timeout_sec: float = 300.0
     tabular_parse_reconcile_timeout_sec: float = 900.0
     tabular_parse_poll_interval_sec: float = 0.25
+    email_agent_id: str = "cosmic/email-agent:1.0.0"
+    email_process_inbound_timeout_sec: float = 180.0
+    email_process_inbound_poll_interval_sec: float = 0.25
     haiku_api_key: str = ""
     haiku_model: str = "claude-haiku-4-5"
     anthropic_version: str = "2023-06-01"
@@ -168,6 +178,7 @@ class GatewayConfig:
             task_input_gateway_group=os.getenv("TASK_INPUT_GATEWAY_GROUP", "gateway").strip() or "gateway",
             enable_whatsapp=_env_bool("WHATSAPP_ENABLED", True),
             enable_telegram=_env_bool("TELEGRAM_ENABLED", False),
+            enable_agent_email=_env_bool("AGENT_EMAIL_ENABLED", False),
             sessions_db_path=Path(
                 os.getenv("GATEWAY_SESSIONS_DB_PATH", str(BACKEND_ROOT / "gateway" / "sessions.db"))
             ).expanduser(),
@@ -236,6 +247,18 @@ class GatewayConfig:
                 max(0, _env_int("SESSION_RESET_HOUR", 4)),
             ),
             user_timezone_fallback=os.getenv("USER_TIMEZONE_FALLBACK", "America/Chicago").strip() or "America/Chicago",
+            cosmic_mail_base_url=os.getenv("COSMIC_MAIL_BASE_URL", "").strip().rstrip("/"),
+            cosmic_mail_api_token=os.getenv("COSMIC_MAIL_API_TOKEN", "").strip(),
+            cosmic_mail_timeout_sec=max(
+                5.0,
+                _env_float("COSMIC_MAIL_TIMEOUT_SEC", 20.0),
+            ),
+            cosmic_mail_primary_mailbox_address=os.getenv("COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS", "").strip(),
+            cosmic_mail_webhook_secret=os.getenv("COSMIC_MAIL_WEBHOOK_SECRET", "").strip(),
+            cosmic_mail_webhook_signature_header=(
+                os.getenv("COSMIC_MAIL_WEBHOOK_SIGNATURE_HEADER", "X-Cosmic-Mail-Signature").strip()
+                or "X-Cosmic-Mail-Signature"
+            ),
             scheduler_poll_interval_sec=max(
                 5.0,
                 _env_float("GATEWAY_SCHEDULER_POLL_INTERVAL_SEC", 30.0),
@@ -325,6 +348,18 @@ class GatewayConfig:
             tabular_parse_poll_interval_sec=max(
                 0.05,
                 _env_float("GATEWAY_TABULAR_PARSE_POLL_INTERVAL_SEC", 0.25),
+            ),
+            email_agent_id=(
+                os.getenv("GATEWAY_EMAIL_AGENT_ID", "cosmic/email-agent:1.0.0").strip()
+                or "cosmic/email-agent:1.0.0"
+            ),
+            email_process_inbound_timeout_sec=max(
+                5.0,
+                _env_float("GATEWAY_EMAIL_PROCESS_INBOUND_TIMEOUT_SEC", 180.0),
+            ),
+            email_process_inbound_poll_interval_sec=max(
+                0.05,
+                _env_float("GATEWAY_EMAIL_PROCESS_INBOUND_POLL_INTERVAL_SEC", 0.25),
             ),
             haiku_api_key=(
                 os.getenv("HAIKU_API_KEY")

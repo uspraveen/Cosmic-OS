@@ -380,6 +380,7 @@ class OrchestratorRuntime:
                 anthropic_requests += 1
                 if container_id:
                     container_reuse_turns += 1
+                messages = self._prepare_messages_for_anthropic(messages)
                 max_request_context_chars = max(
                     max_request_context_chars,
                     self._estimate_request_context_chars(system_prompt, messages),
@@ -1813,6 +1814,37 @@ class OrchestratorRuntime:
 
         return messages
 
+    def _prepare_messages_for_anthropic(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Build a replay-safe, canonicalized Anthropic messages list.
+
+        This runs before every Anthropic request, not just the immediate pause_turn
+        continuation path. It protects against malformed prior assistant block lists
+        and collapses consecutive same-role messages that can accumulate across
+        repeated internal tool loops.
+        """
+        prepared: list[dict[str, Any]] = []
+        for item in messages:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").strip()
+            if role not in {"user", "assistant"}:
+                continue
+            raw_content = item.get("content")
+            if role == "assistant" and isinstance(raw_content, list):
+                content, _ = self._sanitize_server_tool_replay_content_blocks(raw_content)
+            else:
+                content = self._normalize_message_content(raw_content)
+            if self._message_content_is_empty(content):
+                continue
+            if prepared and prepared[-1]["role"] == role:
+                prepared[-1]["content"] = self._merge_message_content(prepared[-1]["content"], content)
+                continue
+            prepared.append({"role": role, "content": content})
+
+        while prepared and prepared[0]["role"] != "user":
+            prepared.pop(0)
+        return prepared
+
     def _normalize_message_content(self, value: Any) -> str | list[dict[str, Any]]:
         if isinstance(value, list):
             blocks = [item for item in value if isinstance(item, dict)]
@@ -1864,9 +1896,9 @@ class OrchestratorRuntime:
             return None
         return f"{normalized}_tool_result"
 
-    def _sanitize_server_tool_replay_blocks(
+    def _sanitize_server_tool_replay_content_blocks(
         self,
-        blocks: dict[int, ContentBlock],
+        content_blocks: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], bool]:
         """
         Build replay-safe assistant content for Anthropic pause_turn continuation.
@@ -1877,47 +1909,59 @@ class OrchestratorRuntime:
         block causes the next request to fail hard. We therefore only echo back
         fully paired server-side tool blocks and preserve all non-server blocks.
         """
-        server_use_by_id: dict[str, tuple[int, ContentBlock]] = {}
-        server_result_by_tool_use_id: dict[str, tuple[int, ContentBlock]] = {}
-        for idx, block in blocks.items():
-            if block.block_type == "server_tool_use" and block.tool_id:
-                server_use_by_id[block.tool_id] = (idx, block)
+        server_use_by_id: dict[str, dict[str, Any]] = {}
+        server_result_by_tool_use_id: dict[str, dict[str, Any]] = {}
+        normalized_blocks = [block for block in content_blocks if isinstance(block, dict)]
+        for block in normalized_blocks:
+            block_type = str(block.get("type") or "").strip()
+            if block_type == "server_tool_use":
+                tool_id = str(block.get("id") or "").strip()
+                if tool_id:
+                    server_use_by_id[tool_id] = block
                 continue
-            if ContentBlock._is_server_tool_result_block(block.block_type) and isinstance(block.raw_block, dict):
-                tool_use_id = str(block.raw_block.get("tool_use_id") or "").strip()
+            if ContentBlock._is_server_tool_result_block(block_type):
+                tool_use_id = str(block.get("tool_use_id") or "").strip()
                 if tool_use_id:
-                    server_result_by_tool_use_id[tool_use_id] = (idx, block)
+                    server_result_by_tool_use_id[tool_use_id] = block
 
         sanitized: list[dict[str, Any]] = []
         dropped_any = False
 
-        for idx in sorted(blocks):
-            block = blocks[idx]
-            if block.block_type == "server_tool_use":
-                match = server_result_by_tool_use_id.get(block.tool_id)
-                expected_type = self._expected_server_tool_result_type(block.tool_name)
-                if not match or (expected_type and match[1].block_type != expected_type):
+        for block in normalized_blocks:
+            block_type = str(block.get("type") or "").strip()
+            if block_type == "server_tool_use":
+                tool_id = str(block.get("id") or "").strip()
+                tool_name = str(block.get("name") or "").strip()
+                match = server_result_by_tool_use_id.get(tool_id)
+                expected_type = self._expected_server_tool_result_type(tool_name)
+                if not match or (expected_type and str(match.get("type") or "").strip() != expected_type):
                     dropped_any = True
                     continue
-                sanitized.append(block.to_api_dict())
+                sanitized.append(dict(block))
                 continue
 
-            if ContentBlock._is_server_tool_result_block(block.block_type):
-                if not isinstance(block.raw_block, dict):
-                    dropped_any = True
-                    continue
-                tool_use_id = str(block.raw_block.get("tool_use_id") or "").strip()
+            if ContentBlock._is_server_tool_result_block(block_type):
+                tool_use_id = str(block.get("tool_use_id") or "").strip()
                 matched_use = server_use_by_id.get(tool_use_id)
-                expected_type = self._expected_server_tool_result_type(matched_use[1].tool_name) if matched_use else None
-                if not matched_use or (expected_type and block.block_type != expected_type):
+                expected_type = self._expected_server_tool_result_type(
+                    str(matched_use.get("name") or "").strip()
+                ) if matched_use else None
+                if not matched_use or (expected_type and block_type != expected_type):
                     dropped_any = True
                     continue
-                sanitized.append(block.to_api_dict())
+                sanitized.append(dict(block))
                 continue
 
-            sanitized.append(block.to_api_dict())
+            sanitized.append(dict(block))
 
         return sanitized, dropped_any
+
+    def _sanitize_server_tool_replay_blocks(
+        self,
+        blocks: dict[int, ContentBlock],
+    ) -> tuple[list[dict[str, Any]], bool]:
+        content_blocks = [blocks[idx].to_api_dict() for idx in sorted(blocks)]
+        return self._sanitize_server_tool_replay_content_blocks(content_blocks)
 
     def _record_anthropic_loop_stats(
         self,

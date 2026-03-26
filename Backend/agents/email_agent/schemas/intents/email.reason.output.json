@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "response": { "type": "string" },
+    "action": { "type": "string" },
+    "sent": { "type": "boolean" },
+    "thread_id": { "type": ["string", "null"] },
+    "message_id": { "type": ["string", "null"] },
+    "draft_id": { "type": ["string", "null"] },
+    "summary": { "type": ["string", "null"] },
+    "search_results": { "type": "array", "items": { "type": "object" } }
+  },
+  "required": ["response", "action"]
+}

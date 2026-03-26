@@ -76,6 +76,11 @@ from .image_artifacts import (
     infer_image_mime_from_extension,
     is_supported_image_artifact,
 )
+from .cosmic_mail_client import (
+    CosmicMailClient,
+    CosmicMailClientError,
+    normalize_cosmic_mail_base_url,
+)
 
 __all__ = [
     "ACCEPTED_READ_VERSIONS",
@@ -127,6 +132,8 @@ __all__ = [
     "validate_outbound_version",
     "verify_task_envelope",
     "create_redis_client",
+    "CosmicMailClient",
+    "CosmicMailClientError",
     "ensure_stream_group",
     "dispatch_task",
     "emit_event",
@@ -139,6 +146,7 @@ __all__ = [
     "prepare_for_redispatch",
     "extract_provider_cost_usd",
     "normalize_usage",
+    "normalize_cosmic_mail_base_url",
     "post_usage_event",
     "serialize_usage_metadata",
     "connect_sync",

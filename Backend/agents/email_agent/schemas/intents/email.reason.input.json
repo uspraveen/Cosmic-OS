@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "goal": { "type": "string", "minLength": 3 },
+    "query": { "type": "string" },
+    "context_brief": { "type": "string" },
+    "draft_seed": { "type": "string" },
+    "thread_id": { "type": "string", "minLength": 1 },
+    "message_id": { "type": "string", "minLength": 1 },
+    "mailbox_address": { "type": "string", "minLength": 1 },
+    "mailbox_id": { "type": "string", "minLength": 1 },
+    "subject": { "type": "string" },
+    "tone_hint": { "type": "string" },
+    "send": { "type": "boolean" },
+    "to_recipients": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "email": { "type": "string", "minLength": 3 },
+          "name": { "type": ["string", "null"] }
+        },
+        "required": ["email"]
+      }
+    },
+    "request_id": { "type": "string", "minLength": 1 }
+  },
+  "required": ["goal"]
+}

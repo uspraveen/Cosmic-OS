@@ -1422,10 +1422,62 @@ kbd {
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.05),
     0 18px 44px rgba(0, 0, 0, 0.3);
+  position: relative;
 }
 
 .task-hub-body.single {
   grid-template-columns: 1fr;
+}
+
+.task-hub-body:not(.single).task-list-retracted {
+  grid-template-columns: 0 minmax(0, 1fr);
+}
+
+.task-hub-body:not(.single).task-list-retracted .task-list-pane {
+  min-width: 0;
+  width: 0;
+  overflow: visible;
+  border-right: none;
+  background: transparent;
+}
+
+.task-hub-body:not(.single).task-list-retracted .task-list {
+  display: none;
+}
+
+.task-inbox-list-toggle {
+  position: absolute;
+  z-index: 6;
+  top: 8px;
+  left: 10px;
+  width: 28px;
+  height: 28px;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(18, 18, 20, 0.92);
+  color: rgba(255, 255, 255, 0.88);
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.12s ease;
+}
+
+.task-inbox-list-toggle:hover {
+  background: rgba(36, 36, 40, 0.96);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.task-inbox-list-toggle:active {
+  transform: scale(0.96);
+}
+
+.task-inbox-list-toggle:focus-visible {
+  outline: 2px solid rgba(255, 211, 130, 0.55);
+  outline-offset: 2px;
 }
 
 .task-hub-header {
@@ -1539,11 +1591,14 @@ kbd {
 
 .task-list-item {
   width: calc(100% - 12px);
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   margin: 0 6px 4px;
   text-align: left;
   border: 1px solid transparent;
   border-radius: 10px;
-  padding: 10px 12px 11px;
+  padding: 8px 10px 9px;
   background: transparent;
   cursor: pointer;
   color: inherit;
@@ -1566,6 +1621,28 @@ kbd {
   color: #fff;
 }
 
+/* Same gray glass as main chat user query (.message-row.user .query-pill) */
+.task-list-item-question,
+.task-detail-card .task-card-question.task-detail-question {
+  background: rgba(70, 75, 85, 0.5);
+  background-image: linear-gradient(180deg,
+      rgba(255, 255, 255, 0.2) 0%,
+      rgba(255, 255, 255, 0) 50%,
+      rgba(0, 0, 0, 0.2) 100%);
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.4),
+    inset 0 -2px 5px rgba(0, 0, 0, 0.4),
+    0 8px 20px rgba(0, 0, 0, 0.3);
+  border-top: 1px solid rgba(255, 255, 255, 0.3);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.3);
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  border-right: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(16px);
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  border-radius: 8px;
+}
+
 .task-list-item-topline {
   display: flex;
   align-items: center;
@@ -1579,28 +1656,38 @@ kbd {
   align-items: center;
   justify-content: space-between;
   gap: 6px;
+  min-width: 0;
 }
 
 .task-list-item-label {
+  flex: 1 1 auto;
+  min-width: 0;
   color: rgba(255, 255, 255, 0.36);
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .task-list-item-status {
   display: inline-flex;
   align-items: center;
-  padding: 2px 8px;
+  flex: 0 1 auto;
+  max-width: min(52%, 9.5rem);
+  padding: 2px 6px;
   border-radius: 999px;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 650;
   letter-spacing: 0.02em;
   color: rgba(255, 255, 255, 0.45);
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.06);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .task-list-item-foreground-btn {
@@ -1629,31 +1716,37 @@ kbd {
 }
 
 .task-list-item-question {
-  color: rgba(255, 255, 255, 0.78);
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: -0.025em;
-  line-height: 1.3;
-  margin: 6px 0 0;
+  max-width: 100%;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  line-height: 1.35;
+  margin: 5px 0 0;
+  padding: 6px 10px;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
   text-overflow: ellipsis;
+  word-break: break-word;
 }
 
 .task-list-item-meta {
+  max-width: 100%;
+  min-width: 0;
   color: rgba(255, 255, 255, 0.36);
-  font-size: 12px;
+  font-size: 10px;
   font-weight: 450;
-  line-height: 1.45;
-  margin-top: 5px;
+  line-height: 1.4;
+  margin-top: 4px;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  word-break: break-word;
 }
 
 .task-list-item-preview {
@@ -1667,6 +1760,11 @@ kbd {
   overflow: hidden;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.015), transparent 35%);
   height: 100%;
+  position: relative;
+}
+
+.task-hub-body:not(.single) .task-detail-pane {
+  padding-top: 40px;
 }
 
 .task-card {
@@ -1694,9 +1792,13 @@ kbd {
   padding: 22px 24px 20px;
 }
 
-.task-detail-question {
-  font-size: 16px;
-  margin-bottom: 10px;
+.task-detail-card .task-card-question.task-detail-question {
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  line-height: 1.55;
+  margin-bottom: 14px;
+  padding: 10px 14px;
 }
 
 .task-detail-copy {
@@ -1777,13 +1879,6 @@ kbd {
   font-size: 11px;
   color: rgba(255, 255, 255, 0.5);
   letter-spacing: 0.03em;
-}
-
-.task-card-question {
-  color: rgba(255, 255, 255, 0.94);
-  font-size: 15px;
-  line-height: 1.55;
-  margin-bottom: 14px;
 }
 
 .task-card-options {
@@ -1990,6 +2085,14 @@ kbd {
     grid-template-columns: 1fr;
     height: auto;
     max-height: clamp(320px, calc(100vh - 380px), 600px);
+  }
+
+  .task-hub-body:not(.single).task-list-retracted {
+    grid-template-columns: 1fr;
+  }
+
+  .task-hub-body:not(.single).task-list-retracted .task-list-pane {
+    display: none;
   }
 }
 

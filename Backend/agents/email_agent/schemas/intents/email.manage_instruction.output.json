@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "response": { "type": "string" },
+    "instructions": { "type": "array", "items": { "type": "object" } },
+    "instruction": { "type": ["object", "null"] }
+  },
+  "required": ["response", "instructions"]
+}

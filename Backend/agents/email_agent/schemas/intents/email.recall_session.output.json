@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "response": { "type": "string" },
+    "runs": { "type": "array", "items": { "type": "object" } }
+  },
+  "required": ["response", "runs"]
+}

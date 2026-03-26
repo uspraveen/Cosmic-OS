@@ -1590,6 +1590,11 @@ class SessionStore:
             metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
             if not isinstance(metadata, dict):
                 metadata = {}
+            if bool(metadata.get("rollover_exempt")):
+                continue
+            session_scope = str(metadata.get("session_scope") or "").strip()
+            if session_scope and session_scope != "daily":
+                continue
             summary_status = str(metadata.get("summary_status") or "").strip()
             if metadata.get("rollover_finalized_at") and summary_status not in {
                 "summary_failed",
