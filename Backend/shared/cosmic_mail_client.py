@@ -41,7 +41,7 @@ class CosmicMailClient:
         return await self._request_json("GET", "/v1/system/auth-context")
 
     async def list_mailboxes(self, *, page: int = 1, per_page: int = 200) -> list[dict[str, Any]]:
-        payload = await self._request_json(
+        payload = await self._request_payload(
             "GET",
             "/v1/mailboxes",
             params={"page": max(1, int(page)), "per_page": max(1, min(int(per_page), 200))},
@@ -79,7 +79,7 @@ class CosmicMailClient:
         normalized = str(thread_id or "").strip()
         if not normalized:
             raise ValueError("thread_id is required")
-        payload = await self._request_json("GET", f"/v1/threads/{normalized}/messages")
+        payload = await self._request_payload("GET", f"/v1/threads/{normalized}/messages")
         return self._extract_items(payload)
 
     async def search_threads(
@@ -103,7 +103,7 @@ class CosmicMailClient:
             params["date_from"] = str(date_from).strip()
         if date_to:
             params["date_to"] = str(date_to).strip()
-        payload = await self._request_json("GET", "/v1/search/threads", params=params)
+        payload = await self._request_payload("GET", "/v1/search/threads", params=params)
         return self._extract_items(payload)
 
     async def search_messages(
@@ -130,7 +130,7 @@ class CosmicMailClient:
             params["date_from"] = str(date_from).strip()
         if date_to:
             params["date_to"] = str(date_to).strip()
-        payload = await self._request_json("GET", "/v1/search/messages", params=params)
+        payload = await self._request_payload("GET", "/v1/search/messages", params=params)
         return self._extract_items(payload)
 
     async def create_draft(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -185,7 +185,7 @@ class CosmicMailClient:
         normalized = str(message_id or "").strip()
         if not normalized:
             raise ValueError("message_id is required")
-        payload = await self._request_json("GET", f"/v1/messages/{normalized}/attachments")
+        payload = await self._request_payload("GET", f"/v1/messages/{normalized}/attachments")
         return self._extract_items(payload)
 
     async def download_attachment(self, attachment_id: str) -> tuple[bytes, str | None, str | None]:
@@ -203,8 +203,28 @@ class CosmicMailClient:
         return await self._request_json("POST", "/v1/webhooks", json_body=payload)
 
     async def list_webhooks(self) -> list[dict[str, Any]]:
-        payload = await self._request_json("GET", "/v1/webhooks")
+        payload = await self._request_payload("GET", "/v1/webhooks")
         return self._extract_items(payload)
+
+    async def _request_payload(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
+        content_type: str | None = "application/json",
+    ) -> Any:
+        response = await self._request(
+            method,
+            path,
+            json_body=json_body,
+            params=params,
+            files=files,
+            content_type=content_type,
+        )
+        return response.json()
 
     async def _request_json(
         self,
@@ -273,12 +293,14 @@ class CosmicMailClient:
             headers["Content-Type"] = content_type
         return headers
 
-    def _extract_items(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    def _extract_items(self, payload: Any) -> list[dict[str, Any]]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
         for key in ("items", "results", "mailboxes", "threads", "messages", "attachments", "webhooks"):
-            value = payload.get(key)
+            value = payload.get(key) if isinstance(payload, dict) else None
             if isinstance(value, list):
                 return [item for item in value if isinstance(item, dict)]
-        if isinstance(payload.get("data"), list):
+        if isinstance(payload, dict) and isinstance(payload.get("data"), list):
             return [item for item in payload["data"] if isinstance(item, dict)]
         if isinstance(payload, dict) and all(isinstance(item, dict) for item in payload.values()):
             return list(payload.values())
