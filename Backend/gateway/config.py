@@ -68,6 +68,7 @@ class GatewayConfig:
     enable_whatsapp: bool = True
     enable_telegram: bool = False
     enable_agent_email: bool = False
+    agent_email_integrations_db_path: Path = BACKEND_ROOT / "gateway" / "agent_email_integrations.db"
     sessions_db_path: Path = BACKEND_ROOT / "gateway" / "sessions.db"
     usage_db_path: Path = BACKEND_ROOT / "gateway" / "usage.db"
     routing_audit_db_path: Path = BACKEND_ROOT / "gateway" / "routing_audit.db"
@@ -179,6 +180,12 @@ class GatewayConfig:
             enable_whatsapp=_env_bool("WHATSAPP_ENABLED", True),
             enable_telegram=_env_bool("TELEGRAM_ENABLED", False),
             enable_agent_email=_env_bool("AGENT_EMAIL_ENABLED", False),
+            agent_email_integrations_db_path=Path(
+                os.getenv(
+                    "GATEWAY_AGENT_EMAIL_INTEGRATIONS_DB_PATH",
+                    str(BACKEND_ROOT / "gateway" / "agent_email_integrations.db"),
+                )
+            ).expanduser(),
             sessions_db_path=Path(
                 os.getenv("GATEWAY_SESSIONS_DB_PATH", str(BACKEND_ROOT / "gateway" / "sessions.db"))
             ).expanduser(),

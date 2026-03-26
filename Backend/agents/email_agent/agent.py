@@ -10,7 +10,13 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from shared import CosmicMailClient, CosmicMailClientError
+from shared import (
+    AgentEmailIntegrationStore,
+    CosmicMailClient,
+    CosmicMailClientError,
+    agent_email_integration_is_disabled,
+    agent_email_integration_is_configured,
+)
 from shared.agent_runtime import AgentRuntime
 from shared.contracts import AgentError, AgentResult, ArtifactManifest, TaskEnvelope
 from shared.sqlite_client import connect_sync
@@ -92,6 +98,10 @@ class EmailAgent(AgentRuntime):
         self.artifacts_root = (
             Path(artifacts_root).expanduser() if artifacts_root else BACKEND_ROOT / "runs" / "artifacts"
         ).resolve()
+        self.integration_store = AgentEmailIntegrationStore(self.config.agent_email_integrations_db_path)
+        self._env_cosmic_mail_base_url = str(self.config.cosmic_mail_base_url or "").strip()
+        self._env_cosmic_mail_api_token = str(self.config.cosmic_mail_api_token or "").strip()
+        self._env_primary_mailbox_address = str(self.config.primary_mailbox_address or "").strip()
 
         super().__init__(
             agent_card_path=self.agent_root / "agent_card.yaml",
@@ -114,7 +124,9 @@ class EmailAgent(AgentRuntime):
         self.data_root.mkdir(parents=True, exist_ok=True)
         self.runtime_root.mkdir(parents=True, exist_ok=True)
         self.artifacts_root.mkdir(parents=True, exist_ok=True)
+        self.integration_store.initialize()
         self._init_db()
+        await self._refresh_mail_client_from_store()
         if self.config.cosmic_mail_base_url and self.config.cosmic_mail_api_token:
             await self.mail_client.get_auth_context()
 
@@ -225,6 +237,7 @@ class EmailAgent(AgentRuntime):
         )
 
     async def _handle_process_inbound(self, task: TaskEnvelope) -> AgentResult:
+        await self._ensure_mail_client_ready()
         thread_id = self._required_text(task.input, "thread_id")
         message_id = self._required_text(task.input, "message_id")
         mailbox_address = self._optional_text(task.input, "mailbox_address")
@@ -304,6 +317,7 @@ class EmailAgent(AgentRuntime):
         return AgentResult(status="completed", output=output, artifacts=artifacts, error=None)
 
     async def _handle_reason(self, task: TaskEnvelope) -> AgentResult:
+        await self._ensure_mail_client_ready()
         goal = self._required_text(task.input, "goal")
         thread_id = self._optional_text(task.input, "thread_id")
         message_id = self._optional_text(task.input, "message_id")
@@ -981,6 +995,7 @@ class EmailAgent(AgentRuntime):
         mailbox_id: str | None,
         required: bool = True,
     ) -> dict[str, Any]:
+        await self._refresh_mail_client_from_store()
         normalized_id = self._safe_text(mailbox_id)
         normalized_address = self._safe_text(mailbox_address) or self.config.primary_mailbox_address
         if not normalized_id and not normalized_address and not required:
@@ -1004,6 +1019,49 @@ class EmailAgent(AgentRuntime):
                 retryable=exc.status_code is None or exc.status_code >= 500,
                 next_action="retry" if exc.status_code is None or exc.status_code >= 500 else "escalate",
             ) from exc
+
+    async def _ensure_mail_client_ready(self) -> None:
+        await self._refresh_mail_client_from_store()
+        if not self.config.cosmic_mail_base_url or not self.config.cosmic_mail_api_token:
+            raise EmailAgentError(
+                code="AUTH_ERROR",
+                message="Cosmic Mail credentials are not configured for the email agent.",
+                retryable=False,
+                next_action="configure_auth",
+            )
+
+    async def _refresh_mail_client_from_store(self) -> None:
+        stored = self.integration_store.get_primary()
+        if agent_email_integration_is_disabled(stored):
+            next_base_url = ""
+            next_api_token = ""
+            next_mailbox = ""
+        elif agent_email_integration_is_configured(stored):
+            next_base_url = str(stored.base_url or "").strip()
+            next_api_token = str(stored.api_token or "").strip()
+            next_mailbox = str(stored.primary_mailbox_address or "").strip()
+        else:
+            next_base_url = self._env_cosmic_mail_base_url
+            next_api_token = self._env_cosmic_mail_api_token
+            next_mailbox = self._env_primary_mailbox_address
+
+        current_base_url = str(self.mail_client.base_url or "").strip()
+        current_api_token = str(getattr(self.mail_client, "api_token", "") or "").strip()
+        self.config.primary_mailbox_address = next_mailbox
+        if current_base_url == next_base_url and current_api_token == next_api_token:
+            self.config.cosmic_mail_base_url = next_base_url
+            self.config.cosmic_mail_api_token = next_api_token
+            return
+
+        await self.mail_client.aclose()
+        self.config.cosmic_mail_base_url = next_base_url
+        self.config.cosmic_mail_api_token = next_api_token
+        self.mail_client = CosmicMailClient(
+            base_url=self.config.cosmic_mail_base_url,
+            api_token=self.config.cosmic_mail_api_token,
+            timeout_sec=self.config.cosmic_mail_timeout_sec,
+            client=self._http_client,
+        )
 
     def _record_session_run(
         self,

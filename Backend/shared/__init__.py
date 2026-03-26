@@ -81,6 +81,13 @@ from .cosmic_mail_client import (
     CosmicMailClientError,
     normalize_cosmic_mail_base_url,
 )
+from .agent_email_integration_store import (
+    AgentEmailIntegrationRecord,
+    AgentEmailIntegrationStore,
+    agent_email_integration_is_disabled,
+    agent_email_integration_is_configured,
+    agent_email_integration_to_dict,
+)
 
 __all__ = [
     "ACCEPTED_READ_VERSIONS",
@@ -132,8 +139,13 @@ __all__ = [
     "validate_outbound_version",
     "verify_task_envelope",
     "create_redis_client",
+    "AgentEmailIntegrationRecord",
+    "AgentEmailIntegrationStore",
     "CosmicMailClient",
     "CosmicMailClientError",
+    "agent_email_integration_is_disabled",
+    "agent_email_integration_is_configured",
+    "agent_email_integration_to_dict",
     "ensure_stream_group",
     "dispatch_task",
     "emit_event",

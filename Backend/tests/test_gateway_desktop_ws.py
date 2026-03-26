@@ -22,6 +22,7 @@ from gateway.memory_client import MemoryClientHTTPError, MemoryPromptContext
 from gateway.scheduler import CronExpressionError, compute_next_fire_at
 from gateway.runtime import SYSTEM_CRON_DAILY_ROLLOVER, GatewayRuntime
 from gateway.session_store import utcnow_iso
+from shared import AgentEmailIntegrationStore
 
 
 class FakeDirectAdapter:
@@ -3285,6 +3286,25 @@ def test_internal_channel_resolve_supports_agent_email_aliases_and_explicit_chan
             "platform": "agent-email",
             "matched_by": "explicit_channel",
         }
+
+
+@pytest.mark.asyncio
+async def test_agent_email_status_respects_explicit_disconnect_over_env(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+    runtime.config.enable_agent_email = True
+    runtime.config.cosmic_mail_base_url = "https://env-mail.example.com"
+    runtime.config.cosmic_mail_api_token = "env-token"
+    runtime.config.cosmic_mail_primary_mailbox_address = "assistant@example.com"
+    runtime.agent_email_integration_store = AgentEmailIntegrationStore(tmp_path / "agent_email_integrations.db")
+    runtime.agent_email_integration_store.clear_primary()
+
+    status = await runtime.get_agent_email_connection_status()
+
+    assert status["configured"] is False
+    assert status["explicitly_disconnected"] is True
+    assert status["config_source"] == "integration_store_disabled"
+    assert status["base_url"] == ""
+    assert status["api_token"] == ""
 
 
 @pytest.mark.asyncio

@@ -50,6 +50,12 @@ class TelegramSendRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=8000)
 
 
+class AgentEmailConfigRequest(BaseModel):
+    base_url: str = Field(..., min_length=1, max_length=500)
+    api_token: str = Field(..., min_length=1, max_length=1000)
+    primary_mailbox_address: str | None = Field(default=None, max_length=320)
+
+
 class TaskInputReplyRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=8000)
 
@@ -1209,6 +1215,40 @@ async def send_telegram_message(
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
     return payload
+
+
+@router.get("/channels/agent-email/status")
+async def get_agent_email_status(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.get_agent_email_connection_status()
+
+
+@router.post("/channels/agent-email/config")
+async def save_agent_email_config(
+    body: AgentEmailConfigRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return await runtime.save_agent_email_connection(
+            base_url=body.base_url,
+            api_token=body.api_token,
+            primary_mailbox_address=body.primary_mailbox_address,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+@router.delete("/channels/agent-email/config")
+async def clear_agent_email_config(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.clear_agent_email_connection()
 
 
 @router.get("/channels/{platform}/status")

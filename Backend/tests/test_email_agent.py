@@ -5,9 +5,10 @@ from typing import Any
 
 import pytest
 
-from agents.email_agent.agent import EmailAgent
+from agents.email_agent.agent import EmailAgent, EmailAgentError
 from agents.email_agent.config import EmailAgentConfig
 from shared.contracts import TaskEnvelope
+from shared import AgentEmailIntegrationStore
 
 
 class _FakeRedis:
@@ -195,3 +196,32 @@ async def test_email_agent_reason_compose_draft_uses_compact_brief_and_uploads_i
     assert uploaded[0][1] == "yc.csv"
     assert result.artifacts
     assert result.artifacts[0].path.startswith("runs/artifacts/")
+
+
+@pytest.mark.asyncio
+async def test_email_agent_explicit_disconnect_blocks_env_fallback(tmp_path: Path) -> None:
+    integration_db_path = tmp_path / "gateway" / "agent_email_integrations.db"
+    AgentEmailIntegrationStore(integration_db_path).clear_primary()
+
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://env-mail.local",
+            cosmic_mail_api_token="env-token",
+            primary_mailbox_address="assistant@example.com",
+            gateway_internal_token="",
+            enable_internal_llm=False,
+            agent_email_integrations_db_path=integration_db_path,
+        ),
+    )
+
+    await agent._refresh_mail_client_from_store()
+
+    assert agent.config.cosmic_mail_base_url == ""
+    assert agent.config.cosmic_mail_api_token == ""
+    assert agent.config.primary_mailbox_address == ""
+
+    with pytest.raises(EmailAgentError) as exc_info:
+        await agent._ensure_mail_client_ready()
+
+    assert exc_info.value.code == "AUTH_ERROR"

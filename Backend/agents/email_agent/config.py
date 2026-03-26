@@ -69,6 +69,7 @@ class EmailAgentConfig:
     mimo_model: str = "mimo-v2-pro"
     mimo_timeout_sec: float = 120.0
     enable_internal_llm: bool = True
+    agent_email_integrations_db_path: Path = BACKEND_ROOT / "gateway" / "agent_email_integrations.db"
 
     @classmethod
     def from_env(cls) -> "EmailAgentConfig":
@@ -94,4 +95,10 @@ class EmailAgentConfig:
             mimo_timeout_sec=_env_float("EMAIL_AGENT_MIMO_TIMEOUT_SEC", 120.0),
             enable_internal_llm=os.getenv("EMAIL_AGENT_ENABLE_INTERNAL_LLM", "true").strip().lower()
             not in {"0", "false", "no", "off"},
+            agent_email_integrations_db_path=Path(
+                os.getenv(
+                    "GATEWAY_AGENT_EMAIL_INTEGRATIONS_DB_PATH",
+                    str(BACKEND_ROOT / "gateway" / "agent_email_integrations.db"),
+                )
+            ).expanduser(),
         )

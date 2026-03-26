@@ -78,6 +78,13 @@ interface Window {
     syncTelegramWebhook: (payload: GatewayConnectionPayload) => Promise<any>
     clearTelegramWebhook: (payload: GatewayConnectionPayload & { dropPendingUpdates?: boolean }) => Promise<any>
     sendTelegramTest: (payload: GatewayConnectionPayload & { chatId: number; message: string }) => Promise<any>
+    getGatewayAgentEmailStatus: () => Promise<any>
+    saveGatewayAgentEmailConfig: (payload: {
+      baseUrl: string
+      apiToken: string
+      primaryMailboxAddress?: string | null
+    }) => Promise<any>
+    clearGatewayAgentEmailConfig: () => Promise<any>
     cosmicMailRequest: (payload: GatewayConnectionPayload & {
       path: string
       method?: string

@@ -193,6 +193,19 @@ interface GatewaySessionHistoryMessage {
   metadata: Record<string, unknown> | null
 }
 
+interface GatewayAgentEmailStatus {
+  configured: boolean
+  connected: boolean
+  adapter_registered: boolean
+  healthy: boolean
+  last_error: string | null
+  base_url: string
+  api_token: string
+  primary_mailbox_address: string | null
+  config_source: string | null
+  mail?: Record<string, unknown> | null
+}
+
 function gatewaySessionRecencyMs(session: Pick<GatewaySessionRow, 'updated_at' | 'created_at'>): number {
   const raw = session.updated_at || session.created_at
   if (!raw) return 0
@@ -730,6 +743,25 @@ function normalizeGatewaySessionHistoryPayload(raw: unknown): { sessionId: strin
     })
   }
   return { sessionId, messages }
+}
+
+function normalizeGatewayAgentEmailStatus(raw: unknown): GatewayAgentEmailStatus {
+  const source = toRecord(raw)
+  return {
+    configured: Boolean(source?.configured),
+    connected: Boolean(source?.connected),
+    adapter_registered: Boolean(source?.adapter_registered),
+    healthy: Boolean(source?.healthy),
+    last_error: typeof source?.last_error === 'string' && source.last_error.trim() ? source.last_error.trim() : null,
+    base_url: typeof source?.base_url === 'string' ? source.base_url.trim() : '',
+    api_token: typeof source?.api_token === 'string' ? source.api_token.trim() : '',
+    primary_mailbox_address:
+      typeof source?.primary_mailbox_address === 'string' && source.primary_mailbox_address.trim()
+        ? source.primary_mailbox_address.trim()
+        : null,
+    config_source: typeof source?.config_source === 'string' && source.config_source.trim() ? source.config_source.trim() : null,
+    mail: toRecord(source?.mail),
+  }
 }
 
 function formatSessionDayLabel(value: string | null): string {
@@ -2451,6 +2483,8 @@ export default function SpacesControlCenter({
   const [agentEmailBaseUrl, setAgentEmailBaseUrl] = useState('')
   const [agentEmailApiToken, setAgentEmailApiToken] = useState('')
   const [agentEmailSettingsLoaded, setAgentEmailSettingsLoaded] = useState(false)
+  const [agentEmailBackendStatus, setAgentEmailBackendStatus] = useState<GatewayAgentEmailStatus | null>(null)
+  const [agentEmailBackendLoading, setAgentEmailBackendLoading] = useState(false)
   const [agentEmailLoading, setAgentEmailLoading] = useState(false)
   const [agentEmailConfigSaving, setAgentEmailConfigSaving] = useState(false)
   const [agentEmailSyncingInbox, setAgentEmailSyncingInbox] = useState(false)
@@ -2485,7 +2519,9 @@ export default function SpacesControlCenter({
   const [agentEmailAttachmentActionId, setAgentEmailAttachmentActionId] = useState<string | null>(null)
   const agentEmailReplyAttachInputRef = useRef<HTMLInputElement>(null)
   const agentEmailMessagesEndRef = useRef<HTMLDivElement>(null)
-  const agentEmailConfigReady = agentEmailBaseUrl.trim().length > 0 && agentEmailApiToken.trim().length > 0
+  const agentEmailLocalConfigReady = agentEmailBaseUrl.trim().length > 0 && agentEmailApiToken.trim().length > 0
+  const agentEmailBackendConfigured = Boolean(agentEmailBackendStatus?.configured)
+  const agentEmailConfigReady = agentEmailLocalConfigReady && agentEmailBackendConfigured
 
   const callAgentEmailApi = useCallback(async (
     path: string,
@@ -2514,6 +2550,39 @@ export default function SpacesControlCenter({
       timeoutMs: init.timeoutMs,
     })
   }, [agentEmailApiToken, agentEmailBaseUrl])
+
+  const requestAgentEmailBackendStatus = useCallback(async (
+    applyFields = true,
+    showSpinner = false,
+  ) => {
+    if (!window.cosmic?.getGatewayAgentEmailStatus) {
+      return null
+    }
+    if (showSpinner) {
+      setAgentEmailBackendLoading(true)
+    }
+    try {
+      const raw = await window.cosmic.getGatewayAgentEmailStatus()
+      const status = normalizeGatewayAgentEmailStatus(raw)
+      setAgentEmailBackendStatus(status)
+      if (applyFields) {
+        const nextBaseUrl = status.base_url || ''
+        const nextApiToken = status.api_token || ''
+        setAgentEmailBaseUrl(nextBaseUrl)
+        setAgentEmailApiToken(nextApiToken)
+        window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.baseUrl, nextBaseUrl)
+        window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.apiToken, nextApiToken)
+      }
+      return status
+    } catch (error: unknown) {
+      setAgentEmailBackendStatus(null)
+      throw error
+    } finally {
+      if (showSpinner) {
+        setAgentEmailBackendLoading(false)
+      }
+    }
+  }, [])
 
   const loadAgentEmailThreads = useCallback(async (
     mailboxId: string,
@@ -2813,20 +2882,16 @@ export default function SpacesControlCenter({
   }, [])
 
   useEffect(() => {
-    if (!active || !agentEmailSettingsLoaded) {
+    if (!active || page !== 'agent-email' || !agentEmailSettingsLoaded || !gatewayConnected) {
       return
     }
-    if (!agentEmailConfigReady) {
-      return
-    }
-    void requestAgentEmailSnapshot(false)
-  }, [active, agentEmailSettingsLoaded, agentEmailConfigReady, requestAgentEmailSnapshot])
+    void requestAgentEmailBackendStatus(true, true).catch((error: unknown) => {
+      setAgentEmailBanner({ tone: 'error', message: toErrorMessage(error) })
+    })
+  }, [active, page, gatewayConnected, agentEmailSettingsLoaded, requestAgentEmailBackendStatus])
 
   useEffect(() => {
-    if (!active || page !== 'agent-email' || !agentEmailSettingsLoaded) {
-      return
-    }
-    if (!agentEmailConfigReady) {
+    if (!active || page !== 'agent-email' || !agentEmailSettingsLoaded || !agentEmailConfigReady) {
       return
     }
     void requestAgentEmailSnapshot(true)
@@ -2957,15 +3022,19 @@ export default function SpacesControlCenter({
     agentEmailDomains.length > 0 ||
     agentEmailApprovals.length > 0 ||
     agentEmailThreads.length > 0
-  const agentEmailConnectionStatus = !agentEmailConfigReady
-    ? { tone: 'rose' as const, label: 'Not connected' }
-    : agentEmailLoading
+  const agentEmailConnectionStatus = !gatewayConnected
+    ? { tone: 'rose' as const, label: 'VM offline' }
+    : agentEmailConfigSaving || agentEmailBackendLoading
       ? { tone: 'azure' as const, label: 'Syncing' }
-      : agentEmailError && !agentEmailHasData
-        ? { tone: 'gold' as const, label: 'Needs attention' }
-        : agentEmailOrg
-          ? { tone: 'mint' as const, label: `${agentEmailOrg.name} live` }
-          : { tone: 'azure' as const, label: 'Connected' }
+      : !agentEmailBackendConfigured
+        ? { tone: 'rose' as const, label: 'Not connected' }
+        : agentEmailError && !agentEmailHasData
+          ? { tone: 'gold' as const, label: 'Needs attention' }
+          : agentEmailOrg && agentEmailBackendStatus?.connected
+            ? { tone: 'mint' as const, label: `${agentEmailOrg.name} live` }
+            : agentEmailBackendStatus?.healthy
+              ? { tone: 'azure' as const, label: 'Connected' }
+              : { tone: 'gold' as const, label: 'Needs attention' }
 
   const handleAgentEmailSaveConfig = useCallback(async () => {
     const nextBaseUrl = agentEmailBaseUrl.trim()
@@ -2976,16 +3045,58 @@ export default function SpacesControlCenter({
     }
     try {
       setAgentEmailConfigSaving(true)
-      window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.baseUrl, nextBaseUrl)
-      window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.apiToken, nextApiToken)
+      if (!window.cosmic?.saveGatewayAgentEmailConfig) {
+        throw new Error('Gateway Agent Email bridge is unavailable.')
+      }
+      const rawStatus = await window.cosmic.saveGatewayAgentEmailConfig({
+        baseUrl: nextBaseUrl,
+        apiToken: nextApiToken,
+      })
+      const status = normalizeGatewayAgentEmailStatus(rawStatus)
+      setAgentEmailBackendStatus(status)
+      const syncedBaseUrl = status.base_url || nextBaseUrl
+      const syncedApiToken = status.api_token || nextApiToken
+      setAgentEmailBaseUrl(syncedBaseUrl)
+      setAgentEmailApiToken(syncedApiToken)
+      window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.baseUrl, syncedBaseUrl)
+      window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.apiToken, syncedApiToken)
       await requestAgentEmailSnapshot(true)
-      setAgentEmailBanner({ tone: 'success', message: 'Cosmic Mail connection saved.' })
+      setAgentEmailBanner({ tone: 'success', message: 'Cosmic Mail connection synced to the VM.' })
     } catch (error: unknown) {
       setAgentEmailBanner({ tone: 'error', message: toErrorMessage(error) })
     } finally {
       setAgentEmailConfigSaving(false)
     }
   }, [agentEmailApiToken, agentEmailBaseUrl, requestAgentEmailSnapshot])
+
+  const handleAgentEmailDisconnect = useCallback(async () => {
+    try {
+      setAgentEmailConfigSaving(true)
+      if (!window.cosmic?.clearGatewayAgentEmailConfig) {
+        throw new Error('Gateway Agent Email bridge is unavailable.')
+      }
+      const rawStatus = await window.cosmic.clearGatewayAgentEmailConfig()
+      const status = normalizeGatewayAgentEmailStatus(rawStatus)
+      setAgentEmailBackendStatus(status)
+      setAgentEmailBaseUrl('')
+      setAgentEmailApiToken('')
+      window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.baseUrl, '')
+      window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.apiToken, '')
+      setAgentEmailOrg(null)
+      setAgentEmailChecklist([])
+      setAgentEmailAgents([])
+      setAgentEmailInboxes([])
+      setAgentEmailThreads([])
+      setAgentEmailDomains([])
+      setAgentEmailApprovals([])
+      setAgentEmailError(null)
+      setAgentEmailBanner({ tone: 'success', message: 'Cosmic Mail disconnected from the VM.' })
+    } catch (error: unknown) {
+      setAgentEmailBanner({ tone: 'error', message: toErrorMessage(error) })
+    } finally {
+      setAgentEmailConfigSaving(false)
+    }
+  }, [])
 
   const handleAgentEmailSyncInbox = useCallback(async () => {
     if (!agentEmailSelectedInbox) return
@@ -4273,10 +4384,18 @@ export default function SpacesControlCenter({
             <button
               type="button"
               className="agent-email-console-secondary"
-              onClick={() => void requestAgentEmailSnapshot(true)}
-              disabled={!agentEmailConfigReady || agentEmailLoading}
+              onClick={() => void requestAgentEmailBackendStatus(true, true)}
+              disabled={!gatewayConnected || agentEmailLoading || agentEmailBackendLoading}
             >
-              {agentEmailLoading ? 'Refreshing…' : 'Refresh'}
+              {agentEmailLoading || agentEmailBackendLoading ? 'Refreshing…' : 'Refresh'}
+            </button>
+            <button
+              type="button"
+              className="agent-email-console-secondary"
+              onClick={() => void handleAgentEmailDisconnect()}
+              disabled={!agentEmailBackendConfigured || agentEmailConfigSaving}
+            >
+              Disconnect
             </button>
           </div>
         </div>
@@ -4317,7 +4436,7 @@ export default function SpacesControlCenter({
                 type="button"
                 className="agent-email-console-primary"
                 onClick={() => void handleAgentEmailSaveConfig()}
-                disabled={agentEmailConfigSaving}
+                disabled={agentEmailConfigSaving || !gatewayConnected}
               >
                 {agentEmailConfigSaving ? 'Saving…' : 'Save connection'}
               </button>

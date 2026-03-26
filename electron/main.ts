@@ -1711,6 +1711,45 @@ app.whenReady().then(() => {
     })
   })
 
+  ipcMain.handle('gateway:get-agent-email-status', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/channels/agent-email/status', { timeoutMs: 20000 })
+  })
+
+  ipcMain.handle('gateway:save-agent-email-config', async (_, payload: {
+    baseUrl?: string
+    apiToken?: string
+    primaryMailboxAddress?: string | null
+  }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/channels/agent-email/config', {
+      method: 'POST',
+      body: {
+        base_url: String(payload?.baseUrl || '').trim(),
+        api_token: String(payload?.apiToken || '').trim(),
+        primary_mailbox_address: payload?.primaryMailboxAddress ?? null,
+      },
+      timeoutMs: 30000,
+    })
+  })
+
+  ipcMain.handle('gateway:clear-agent-email-config', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/channels/agent-email/config', {
+      method: 'DELETE',
+      timeoutMs: 20000,
+    })
+  })
+
   ipcMain.handle('cosmic-mail:request', async (_, payload: GatewayConnectionConfig & {
     path: string
     method?: string

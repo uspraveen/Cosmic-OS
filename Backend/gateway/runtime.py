@@ -54,11 +54,14 @@ except Exception:  # pragma: no cover - optional import guard for environments m
     UnidentifiedImageError = Exception
 
 from shared import (
+    AgentEmailIntegrationStore,
     MeteredCall,
     ModelSpec,
     SOURCE_PRIORITY_MAP,
     TaskEnvelope,
     UsageEvent,
+    agent_email_integration_is_disabled,
+    agent_email_integration_is_configured,
     begin_metered_call,
     build_model_key,
     build_usage_event,
@@ -74,6 +77,7 @@ from shared import (
     is_supported_image_artifact,
     is_supported_tabular_artifact,
     lookup_model_spec,
+    normalize_cosmic_mail_base_url,
     parse_event_envelope,
     parse_stream_payload,
     sign_task_envelope,
@@ -224,6 +228,7 @@ class GatewayRuntime:
         self.artifact_store = ArtifactStore(config.artifacts_db_path)
         self.delivery_queue_store = DeliveryQueueStore(config.delivery_queue_db_path)
         self.scheduler_store = SchedulerStore(config.scheduler_db_path)
+        self.agent_email_integration_store = AgentEmailIntegrationStore(config.agent_email_integrations_db_path)
         self.memory_client = CosmicMemoryClient(
             base_url=config.cosmic_memory_url,
             timeout_sec=config.cosmic_memory_timeout_sec,
@@ -304,6 +309,7 @@ class GatewayRuntime:
         self.artifact_store.initialize()
         self.delivery_queue_store.initialize()
         self.scheduler_store.initialize(default_timezone=self.config.user_timezone_fallback)
+        self.agent_email_integration_store.initialize()
         await self.capability_wishlist_service.initialize()
         self._usage_event_queue = asyncio.Queue(maxsize=self.config.usage_queue_max_size)
         self._sync_system_crons()
@@ -525,7 +531,7 @@ class GatewayRuntime:
         if platform == "desktop":
             return "desktop"
         if platform == "agent-email":
-            mailbox_address = self._safe_text(self.config.cosmic_mail_primary_mailbox_address)
+            mailbox_address = self._safe_text(self._effective_agent_email_settings().get("primary_mailbox_address"))
             if mailbox_address:
                 return f"agent-email:{mailbox_address}"
 
@@ -543,6 +549,173 @@ class GatewayRuntime:
             if channel:
                 return channel
         return None
+
+    def _effective_agent_email_settings(self) -> dict[str, str]:
+        stored = self.agent_email_integration_store.get_primary()
+        if agent_email_integration_is_disabled(stored):
+            return {
+                "base_url": "",
+                "api_token": "",
+                "primary_mailbox_address": "",
+                "webhook_secret": "",
+                "webhook_signature_header": "X-Cosmic-Mail-Signature",
+                "source": "integration_store_disabled",
+            }
+        if agent_email_integration_is_configured(stored):
+            return {
+                "base_url": str(stored.base_url).strip(),
+                "api_token": str(stored.api_token).strip(),
+                "primary_mailbox_address": str(stored.primary_mailbox_address or "").strip(),
+                "webhook_secret": str(stored.webhook_secret or "").strip(),
+                "webhook_signature_header": str(stored.webhook_signature_header or "").strip() or "X-Cosmic-Mail-Signature",
+                "source": "integration_store",
+            }
+        return {
+            "base_url": str(self.config.cosmic_mail_base_url or "").strip(),
+            "api_token": str(self.config.cosmic_mail_api_token or "").strip(),
+            "primary_mailbox_address": str(self.config.cosmic_mail_primary_mailbox_address or "").strip(),
+            "webhook_secret": str(self.config.cosmic_mail_webhook_secret or "").strip(),
+            "webhook_signature_header": str(self.config.cosmic_mail_webhook_signature_header or "").strip()
+            or "X-Cosmic-Mail-Signature",
+            "source": "env",
+        }
+
+    def _agent_email_effectively_enabled(self) -> bool:
+        settings = self._effective_agent_email_settings()
+        if settings.get("source") == "integration_store_disabled":
+            return False
+        return self.config.enable_agent_email or bool(settings.get("base_url") and settings.get("api_token"))
+
+    async def _unregister_adapter(self, platform: str) -> None:
+        adapter = self.registry.adapters.pop(platform, None)
+        if adapter is None:
+            return
+        try:
+            await adapter.stop()
+        finally:
+            self.adapter_errors.pop(platform, None)
+
+    async def reconcile_agent_email_adapter(self) -> None:
+        settings = self._effective_agent_email_settings()
+        existing = self.registry.adapters.get("agent-email")
+        if not self._agent_email_effectively_enabled():
+            await self._unregister_adapter("agent-email")
+            self.adapter_errors.pop("agent-email", None)
+            return
+        if not settings.get("base_url") or not settings.get("api_token"):
+            await self._unregister_adapter("agent-email")
+            self.adapter_errors["agent-email"] = "Cosmic Mail base URL or API token is not configured."
+            return
+
+        current_key = None
+        if isinstance(existing, AgentEmailAdapter):
+            current_key = (
+                self._safe_text(existing.client.base_url),
+                self._safe_text(getattr(existing.client, "api_token", "")),
+                self._safe_text(existing.primary_mailbox_address),
+                self._safe_text(existing.webhook_secret),
+                self._safe_text(existing.webhook_signature_header),
+            )
+        next_key = (
+            self._safe_text(settings.get("base_url")),
+            self._safe_text(settings.get("api_token")),
+            self._safe_text(settings.get("primary_mailbox_address")),
+            self._safe_text(settings.get("webhook_secret")),
+            self._safe_text(settings.get("webhook_signature_header")),
+        )
+        if current_key == next_key and existing is not None:
+            return
+
+        if existing is not None:
+            await self._unregister_adapter("agent-email")
+
+        adapter = AgentEmailAdapter(
+            cosmic_mail_base_url=settings["base_url"],
+            cosmic_mail_api_token=settings["api_token"],
+            timeout_sec=self.config.cosmic_mail_timeout_sec,
+            primary_mailbox_address=settings.get("primary_mailbox_address", ""),
+            webhook_secret=settings.get("webhook_secret", ""),
+            webhook_signature_header=settings.get("webhook_signature_header", "X-Cosmic-Mail-Signature"),
+        )
+        await adapter.on_message(self._handle_normalized_incoming_message)
+        self.registry.register(adapter)
+        try:
+            await adapter.start()
+            self.adapter_errors.pop("agent-email", None)
+        except Exception as exc:  # pragma: no cover - startup health is environment-dependent
+            self.adapter_errors["agent-email"] = str(exc)
+
+    async def get_agent_email_connection_status(self) -> dict[str, Any]:
+        settings = self._effective_agent_email_settings()
+        configured = bool(settings.get("base_url") and settings.get("api_token"))
+        adapter = self.registry.adapters.get("agent-email")
+        mail_status: dict[str, Any] | None = None
+        if isinstance(adapter, AgentEmailAdapter):
+            try:
+                mail_status = await adapter.get_status()
+                self.adapter_errors.pop("agent-email", None)
+            except Exception as exc:
+                self.adapter_errors["agent-email"] = str(exc)
+                mail_status = {"status": "error", "error": str(exc)}
+        return {
+            "configured": configured,
+            "explicitly_disconnected": settings.get("source") == "integration_store_disabled",
+            "connected": bool(mail_status and mail_status.get("connected")),
+            "adapter_registered": adapter is not None,
+            "healthy": adapter is not None and "agent-email" not in self.adapter_errors,
+            "last_error": self.adapter_errors.get("agent-email"),
+            "base_url": settings.get("base_url") or "",
+            "api_token": settings.get("api_token") or "",
+            "primary_mailbox_address": settings.get("primary_mailbox_address") or "",
+            "config_source": settings.get("source") or "env",
+            "mail": mail_status,
+        }
+
+    async def save_agent_email_connection(
+        self,
+        *,
+        base_url: str,
+        api_token: str,
+        primary_mailbox_address: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_base_url = normalize_cosmic_mail_base_url(base_url)
+        normalized_api_token = self._safe_text(api_token)
+        normalized_mailbox = self._safe_text(primary_mailbox_address)
+        if not normalized_base_url or not normalized_api_token:
+            raise ValueError("base_url and api_token are required")
+
+        client = AgentEmailAdapter(
+            cosmic_mail_base_url=normalized_base_url,
+            cosmic_mail_api_token=normalized_api_token,
+            timeout_sec=self.config.cosmic_mail_timeout_sec,
+            primary_mailbox_address=normalized_mailbox,
+            webhook_secret=self.config.cosmic_mail_webhook_secret,
+            webhook_signature_header=self.config.cosmic_mail_webhook_signature_header,
+        )
+        try:
+            await client.start()
+            if not normalized_mailbox:
+                mail_status = await client.get_status()
+                primary_mailbox = mail_status.get("primary_mailbox") if isinstance(mail_status, dict) else None
+                if isinstance(primary_mailbox, dict):
+                    normalized_mailbox = self._safe_text(primary_mailbox.get("address"))
+            self.agent_email_integration_store.save_primary(
+                base_url=normalized_base_url,
+                api_token=normalized_api_token,
+                primary_mailbox_address=normalized_mailbox,
+                webhook_secret=self.config.cosmic_mail_webhook_secret,
+                webhook_signature_header=self.config.cosmic_mail_webhook_signature_header,
+                updated_at=utcnow_iso(),
+            )
+        finally:
+            await client.stop()
+        await self.reconcile_agent_email_adapter()
+        return await self.get_agent_email_connection_status()
+
+    async def clear_agent_email_connection(self) -> dict[str, Any]:
+        self.agent_email_integration_store.clear_primary()
+        await self._unregister_adapter("agent-email")
+        return await self.get_agent_email_connection_status()
 
     def _is_email_thread_session(self, session_id: str | None) -> bool:
         normalized = self._safe_text(session_id)
@@ -1319,25 +1492,7 @@ class GatewayRuntime:
             except Exception as exc:  # pragma: no cover - startup health is environment-dependent
                 self.adapter_errors[adapter.platform] = str(exc)
 
-        if self.config.enable_agent_email and "agent-email" not in self.registry.adapters:
-            if not self.config.cosmic_mail_base_url or not self.config.cosmic_mail_api_token:
-                self.adapter_errors["agent-email"] = "Cosmic Mail base URL or API token is not configured."
-            else:
-                adapter = AgentEmailAdapter(
-                    cosmic_mail_base_url=self.config.cosmic_mail_base_url,
-                    cosmic_mail_api_token=self.config.cosmic_mail_api_token,
-                    timeout_sec=self.config.cosmic_mail_timeout_sec,
-                    primary_mailbox_address=self.config.cosmic_mail_primary_mailbox_address,
-                    webhook_secret=self.config.cosmic_mail_webhook_secret,
-                    webhook_signature_header=self.config.cosmic_mail_webhook_signature_header,
-                )
-                await adapter.on_message(self._handle_normalized_incoming_message)
-                self.registry.register(adapter)
-                try:
-                    await adapter.start()
-                    self.adapter_errors.pop(adapter.platform, None)
-                except Exception as exc:  # pragma: no cover - startup health is environment-dependent
-                    self.adapter_errors[adapter.platform] = str(exc)
+        await self.reconcile_agent_email_adapter()
 
         if self.config.enable_telegram and "telegram" not in self.registry.adapters:
             adapter = TelegramAdapter(
@@ -5323,10 +5478,31 @@ class GatewayRuntime:
                     "last_error": self.adapter_errors.get(platform),
                 }
             )
+        if "agent-email" not in self.registry.adapters and self._agent_email_effectively_enabled():
+            channels.append(
+                {
+                    "platform": "agent-email",
+                    "configured": True,
+                    "healthy": False,
+                    "last_error": self.adapter_errors.get("agent-email"),
+                }
+            )
         return channels
 
     async def get_channel_status(self, platform: str) -> dict[str, Any]:
         adapter = self.registry.adapters.get(platform)
+        if platform == "agent-email" and adapter is None:
+            status = await self.get_agent_email_connection_status()
+            return {
+                "platform": platform,
+                "configured": bool(status.get("configured")),
+                "healthy": bool(status.get("healthy")),
+                "last_error": status.get("last_error"),
+                "mail": status.get("mail"),
+                "adapter_registered": status.get("adapter_registered"),
+                "connected": status.get("connected"),
+                "config_source": status.get("config_source"),
+            }
         if adapter is None:
             raise KeyError(platform)
 

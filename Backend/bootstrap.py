@@ -33,6 +33,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from shared import (
+    AgentEmailIntegrationStore,
+    agent_email_integration_is_configured,
+    agent_email_integration_is_disabled,
+)
+
 
 MIN_PYTHON = (3, 10)
 BACKEND_ROOT = Path(__file__).resolve().parent
@@ -1047,6 +1053,43 @@ def resolve_email_agent_env_source() -> Path:
     return email_agent_repo_env_example_path()
 
 
+def agent_email_integrations_db_path() -> Path:
+    return BACKEND_ROOT / "gateway" / "agent_email_integrations.db"
+
+
+def read_agent_email_integration_state() -> Tuple[str, Dict[str, str]]:
+    try:
+        store = AgentEmailIntegrationStore(agent_email_integrations_db_path())
+        record = store.get_primary()
+    except Exception:
+        return "absent", {}
+    if record is None:
+        return "absent", {}
+    if agent_email_integration_is_disabled(record):
+        return "disabled", {}
+    if not agent_email_integration_is_configured(record):
+        return "absent", {}
+    return "configured", {
+        "COSMIC_MAIL_BASE_URL": str(record.base_url or "").strip(),
+        "COSMIC_MAIL_API_TOKEN": str(record.api_token or "").strip(),
+        "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS": str(record.primary_mailbox_address or "").strip(),
+    }
+
+
+def read_agent_email_integration_record() -> Dict[str, str]:
+    _, payload = read_agent_email_integration_state()
+    return payload
+
+
+def email_agent_enabled_via_env_or_integration(email_env: Dict[str, str]) -> bool:
+    integration_state, _ = read_agent_email_integration_state()
+    if integration_state == "configured":
+        return True
+    if integration_state == "disabled":
+        return False
+    return email_agent_is_configured(email_env)
+
+
 def build_email_agent_env_rendered(
     *,
     signing_secret: str,
@@ -1060,6 +1103,7 @@ def build_email_agent_env_rendered(
     source_data = parse_env_text(source_raw)
     existing_env = (existing_env_by_name or {}).get(EMAIL_AGENT_ENV_NAME, {})
     external_env = (external_env_by_name or {}).get(EMAIL_AGENT_ENV_NAME, {})
+    integration_state, integration_store_env = read_agent_email_integration_state()
 
     redis_url = first_meaningful_value(
         external_env.get("REDIS_URL"),
@@ -1073,21 +1117,38 @@ def build_email_agent_env_rendered(
         source_data.get("GATEWAY_URL"),
         "http://127.0.0.1:8080",
     )
-    cosmic_mail_base_url = first_meaningful_value(
-        external_env.get("COSMIC_MAIL_BASE_URL"),
-        existing_env.get("COSMIC_MAIL_BASE_URL"),
-        source_data.get("COSMIC_MAIL_BASE_URL"),
-    )
-    cosmic_mail_api_token = first_meaningful_value(
-        external_env.get("COSMIC_MAIL_API_TOKEN"),
-        existing_env.get("COSMIC_MAIL_API_TOKEN"),
-        source_data.get("COSMIC_MAIL_API_TOKEN"),
-    )
-    primary_mailbox_address = first_meaningful_value(
-        external_env.get("COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS"),
-        existing_env.get("COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS"),
-        source_data.get("COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS"),
-    )
+    if integration_state == "disabled":
+        cosmic_mail_base_url = first_meaningful_value(
+            external_env.get("COSMIC_MAIL_BASE_URL"),
+            "",
+        )
+        cosmic_mail_api_token = first_meaningful_value(
+            external_env.get("COSMIC_MAIL_API_TOKEN"),
+            "",
+        )
+        primary_mailbox_address = first_meaningful_value(
+            external_env.get("COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS"),
+            "",
+        )
+    else:
+        cosmic_mail_base_url = first_meaningful_value(
+            external_env.get("COSMIC_MAIL_BASE_URL"),
+            integration_store_env.get("COSMIC_MAIL_BASE_URL"),
+            existing_env.get("COSMIC_MAIL_BASE_URL"),
+            source_data.get("COSMIC_MAIL_BASE_URL"),
+        )
+        cosmic_mail_api_token = first_meaningful_value(
+            external_env.get("COSMIC_MAIL_API_TOKEN"),
+            integration_store_env.get("COSMIC_MAIL_API_TOKEN"),
+            existing_env.get("COSMIC_MAIL_API_TOKEN"),
+            source_data.get("COSMIC_MAIL_API_TOKEN"),
+        )
+        primary_mailbox_address = first_meaningful_value(
+            external_env.get("COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS"),
+            integration_store_env.get("COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS"),
+            existing_env.get("COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS"),
+            source_data.get("COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS"),
+        )
     mimo_api_key = first_meaningful_value(
         external_env.get("EMAIL_AGENT_MIMO_API_KEY"),
         external_env.get("MIMO_API_KEY"),
@@ -2541,7 +2602,7 @@ def doctor(
     x_twitter_enabled = x_twitter_search_agent_is_configured(
         x_twitter_system_data if x_twitter_system_data else x_twitter_source_data
     )
-    email_enabled = email_agent_is_configured(
+    email_enabled = email_agent_enabled_via_env_or_integration(
         email_system_data if email_system_data else email_source_data
     )
     print("  firecrawl enabled  : {0}".format("yes" if firecrawl_enabled else "no"))
@@ -3496,12 +3557,15 @@ def provision_vm(
     else:
         log("Tabular agent env does not include MiMo credentials; bootstrap will still enable and start the tabular agent service for deterministic spreadsheet work.")
     email_env = read_email_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
-    enable_email_agent = email_agent_is_configured(email_env)
+    enable_email_agent = email_agent_enabled_via_env_or_integration(email_env)
     if enable_email_agent:
         if meaningful_env_value(email_env.get("EMAIL_AGENT_MIMO_API_KEY")) is not None:
             log("Email agent env is configured with Cosmic Mail + MiMo credentials; bootstrap will enable and start the email agent service.")
         else:
-            log("Email agent env is configured with Cosmic Mail credentials but no MiMo key; bootstrap will still enable and start the email agent service.")
+            if email_agent_is_configured(email_env):
+                log("Email agent env is configured with Cosmic Mail credentials but no MiMo key; bootstrap will still enable and start the email agent service.")
+            else:
+                log("Agent Email is configured through the shared backend integration store; bootstrap will enable and start the email agent service.")
     else:
         log("Email agent env is not configured; bootstrap will install the unit but skip enabling the email agent service.")
     installed = install_systemd_units(
@@ -3775,7 +3839,7 @@ def main() -> int:
             enable_x_twitter_search_agent = x_twitter_search_agent_is_configured(x_twitter_env)
             enable_tabular_agent = True
             email_env = read_email_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
-            enable_email_agent = email_agent_is_configured(email_env)
+            enable_email_agent = email_agent_enabled_via_env_or_integration(email_env)
             installed = install_systemd_units(
                 systemd_template_dir,
                 enable_units=bool(getattr(args, "enable", False)),

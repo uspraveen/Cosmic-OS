@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from urllib.error import HTTPError, URLError
 
 import bootstrap
+from shared import AgentEmailIntegrationStore
 
 
 def test_sync_repo_env_files_appends_missing_keys_without_overwriting_values(tmp_path) -> None:
@@ -573,6 +574,47 @@ def test_build_email_agent_env_rendered_prefers_external_values(tmp_path, monkey
     assert parsed["EMAIL_AGENT_MIMO_API_KEY"] == "mimo-key"
     assert parsed["AGENT_SECRET"] == "signing-secret"
     assert parsed["GATEWAY_INTERNAL_TOKEN"] == "internal-token"
+
+
+def test_build_email_agent_env_rendered_respects_explicit_disconnect(tmp_path, monkeypatch) -> None:
+    backend_root = tmp_path / "Backend"
+    email_dir = backend_root / "agents" / "email_agent"
+    email_dir.mkdir(parents=True)
+    (email_dir / "agent.env.example").write_text(
+        "REDIS_URL=redis://127.0.0.1:6379/0\n"
+        "GATEWAY_URL=http://127.0.0.1:8080\n"
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "AGENT_SECRET=<agent-shared-secret>\n"
+        "INSTANCE_ID=email-agent-1\n"
+        "COSMIC_MAIL_BASE_URL=\n"
+        "COSMIC_MAIL_API_TOKEN=\n"
+        "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS=\n"
+        "EMAIL_AGENT_MIMO_API_KEY=\n"
+        "EMAIL_AGENT_MIMO_BASE_URL=\n"
+        "EMAIL_AGENT_MIMO_MODEL=mimo-v2-pro\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bootstrap, "BACKEND_ROOT", backend_root)
+
+    store = AgentEmailIntegrationStore(backend_root / "gateway" / "agent_email_integrations.db")
+    store.clear_primary()
+
+    _, rendered, parsed = bootstrap.build_email_agent_env_rendered(
+        signing_secret="signing-secret",
+        shared_internal_token="internal-token",
+        existing_env_by_name={
+            bootstrap.EMAIL_AGENT_ENV_NAME: {
+                "COSMIC_MAIL_BASE_URL": "https://stale-mail.example.com",
+                "COSMIC_MAIL_API_TOKEN": "stale-token",
+                "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS": "stale@example.com",
+            }
+        },
+    )
+
+    assert "COSMIC_MAIL_BASE_URL=https://stale-mail.example.com" not in rendered
+    assert parsed["COSMIC_MAIL_BASE_URL"] == ""
+    assert parsed["COSMIC_MAIL_API_TOKEN"] == ""
+    assert parsed["COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS"] == ""
 
 
 def test_materialize_bootstrap_env_files_can_render_memory_env(monkeypatch, tmp_path) -> None:
