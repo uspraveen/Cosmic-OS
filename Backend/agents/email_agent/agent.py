@@ -1020,30 +1020,49 @@ class EmailAgent(AgentRuntime):
             required=False,
         )
         mailbox_id = self._safe_text(mailbox.get("id")) if isinstance(mailbox, dict) else None
+        threads: list[dict[str, Any]] = []
+        messages: list[dict[str, Any]] = []
+        search_threads_error: CosmicMailClientError | None = None
+        search_messages_error: CosmicMailClientError | None = None
         try:
             threads = await self.mail_client.search_threads(
                 query=search_query,
                 mailbox_id=mailbox_id,
                 per_page=self.config.max_search_results,
             )
+        except CosmicMailClientError as exc:
+            search_threads_error = exc
+        try:
             messages = await self.mail_client.search_messages(
                 query=search_query,
                 mailbox_id=mailbox_id,
                 per_page=self.config.max_search_results,
             )
         except CosmicMailClientError as exc:
+            search_messages_error = exc
+            logger.warning(
+                "email_agent.search_messages_failed task_id=%s mailbox_id=%s status=%s error=%s",
+                task.task_id,
+                mailbox_id,
+                exc.status_code,
+                exc.message,
+            )
+
+        if search_threads_error is not None and search_messages_error is not None:
+            primary = search_messages_error if (search_messages_error.status_code or 0) >= 500 else search_threads_error
             raise EmailAgentError(
-                code="NETWORK_ERROR" if exc.status_code is None or exc.status_code >= 500 else "AUTH_ERROR",
-                message=exc.message,
-                retryable=exc.status_code is None or exc.status_code >= 500,
-                next_action="retry" if exc.status_code is None or exc.status_code >= 500 else "escalate",
-            ) from exc
+                code="NETWORK_ERROR" if primary.status_code is None or primary.status_code >= 500 else "AUTH_ERROR",
+                message=primary.message,
+                retryable=primary.status_code is None or primary.status_code >= 500,
+                next_action="retry" if primary.status_code is None or primary.status_code >= 500 else "escalate",
+            ) from primary
         thread_results = [
             {
                 "kind": "thread",
                 "id": self._safe_text(item.get("id")),
                 "subject": self._safe_text(item.get("subject")),
                 "snippet": self._safe_text(item.get("snippet") or item.get("body_preview")),
+                "last_message_at": self._safe_text(item.get("last_message_at") or item.get("updated_at")),
             }
             for item in threads[: self.config.max_search_results]
             if isinstance(item, dict)
@@ -1059,7 +1078,141 @@ class EmailAgent(AgentRuntime):
             for item in messages[: self.config.max_search_results]
             if isinstance(item, dict)
         ]
+        if self._is_read_like_goal(goal) and (not thread_results or search_messages_error is not None):
+            fallback_threads = await self._fallback_recent_thread_results(
+                goal=goal,
+                mailbox_id=mailbox_id,
+                limit=self.config.max_search_results,
+            )
+            if fallback_threads:
+                seen_ids = {self._safe_text(item.get("id")) for item in thread_results}
+                for item in fallback_threads:
+                    item_id = self._safe_text(item.get("id"))
+                    if item_id and item_id in seen_ids:
+                        continue
+                    thread_results.append(item)
+                    if item_id:
+                        seen_ids.add(item_id)
+                thread_results = thread_results[: self.config.max_search_results]
         return thread_results + message_results
+
+    def _is_read_like_goal(self, goal: str) -> bool:
+        lowered = self._safe_text(goal).casefold()
+        if not lowered:
+            return False
+        read_markers = (
+            "check the inbox",
+            "check inbox",
+            "read the inbox",
+            "read inbox",
+            "search inbox",
+            "search my inbox",
+            "look in the inbox",
+            "look in my inbox",
+            "most recent emails",
+            "most recent email",
+            "latest emails",
+            "latest email",
+            "show me what messages",
+            "show me my emails",
+            "read and display",
+            "reply from",
+            "read the reply",
+            "check my reply",
+            "i replied",
+            "my reply",
+            "tell me what",
+        )
+        read_verbs = ("check ", "read ", "search ", "find ", "look for", "show me", "tell me")
+        return any(marker in lowered for marker in read_markers) or " inbox" in lowered or lowered.startswith(read_verbs)
+
+    async def _fallback_recent_thread_results(
+        self,
+        *,
+        goal: str,
+        mailbox_id: str | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        try:
+            recent_threads = await self.mail_client.list_threads(
+                mailbox_id=mailbox_id,
+                per_page=max(limit * 3, 10),
+            )
+        except CosmicMailClientError as exc:
+            logger.warning(
+                "email_agent.list_threads_fallback_failed mailbox_id=%s status=%s error=%s",
+                mailbox_id,
+                exc.status_code,
+                exc.message,
+            )
+            return []
+
+        email_mentions = {
+            self._safe_text(match.group(1)).casefold()
+            for match in re.finditer(r"([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})", goal)
+        }
+        tokens = [
+            token
+            for token in re.findall(r"[A-Za-z0-9@._+\-]{3,}", self._safe_text(goal).casefold())
+            if token not in {"the", "and", "that", "reply", "email", "inbox", "from", "check", "read", "what", "said"}
+        ]
+        wants_reply = "reply" in self._safe_text(goal).casefold() or "replied" in self._safe_text(goal).casefold()
+
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for item in recent_threads:
+            if not isinstance(item, dict):
+                continue
+            subject = self._safe_text(item.get("subject"))
+            snippet = self._safe_text(item.get("snippet") or item.get("body_preview"))
+            haystack = f"{subject}\n{snippet}".casefold()
+            score = 0
+            if wants_reply and subject.casefold().startswith("re:"):
+                score += 40
+            for email in email_mentions:
+                if email and email in haystack:
+                    score += 60
+            for token in tokens:
+                if token and token in haystack:
+                    score += 8
+            recency = self._safe_text(item.get("last_message_at") or item.get("updated_at"))
+            if recency:
+                score += 1
+            if score <= 0 and not wants_reply and not tokens and not email_mentions:
+                continue
+            scored.append(
+                (
+                    score,
+                    {
+                        "kind": "thread",
+                        "id": self._safe_text(item.get("id")),
+                        "subject": subject,
+                        "snippet": snippet,
+                        "last_message_at": recency,
+                    },
+                )
+            )
+
+        scored.sort(key=lambda pair: (pair[0], self._safe_text(pair[1].get("last_message_at"))), reverse=True)
+        results = [item for _, item in scored[:limit]]
+        if results:
+            return results
+
+        if wants_reply:
+            fallback_results: list[dict[str, Any]] = []
+            for item in recent_threads[:limit]:
+                if not isinstance(item, dict):
+                    continue
+                fallback_results.append(
+                    {
+                        "kind": "thread",
+                        "id": self._safe_text(item.get("id")),
+                        "subject": self._safe_text(item.get("subject")),
+                        "snippet": self._safe_text(item.get("snippet") or item.get("body_preview")),
+                        "last_message_at": self._safe_text(item.get("last_message_at") or item.get("updated_at")),
+                    }
+                )
+            return fallback_results
+        return []
 
     async def _summarize_search_results(self, *, task: TaskEnvelope, goal: str, search_results: list[dict[str, Any]]) -> str:
         if not search_results:

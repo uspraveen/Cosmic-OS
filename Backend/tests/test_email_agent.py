@@ -316,6 +316,75 @@ async def test_email_agent_reason_read_goal_with_email_address_uses_search_not_c
 
 
 @pytest.mark.asyncio
+async def test_email_agent_reason_read_goal_falls_back_to_recent_threads_when_message_search_500(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+            enable_internal_llm=True,
+        ),
+    )
+
+    class FakeMailClient:
+        async def search_threads(self, *, query, mailbox_id=None, per_page=25):
+            assert "replied" in query.casefold()
+            return []
+
+        async def search_messages(self, *, query, mailbox_id=None, per_page=25):
+            raise CosmicMailClientError(status_code=500, message="Internal Server Error")
+
+        async def list_threads(self, *, mailbox_id=None, page=1, per_page=25):
+            return [
+                {
+                    "id": "thr_recent_reply",
+                    "subject": "Re: Hey from COSMIC 👋",
+                    "snippet": "Hey Cosmic, Yep, reading it loud and clear! Thanks, Praveen",
+                    "last_message_at": "2026-03-26T16:30:03.501313Z",
+                },
+                {
+                    "id": "thr_older",
+                    "subject": "Weekly update",
+                    "snippet": "Old thread",
+                    "last_message_at": "2026-03-20T10:00:00.000000Z",
+                },
+            ]
+
+    async def fake_resolve_mailbox(*, mailbox_address=None, mailbox_id=None, required=False):
+        return {"id": "mbx_primary"}
+
+    async def fake_summarize_search_results(**kwargs):
+        results = kwargs["search_results"]
+        assert results[0]["id"] == "thr_recent_reply"
+        return "Found your latest reply in the recent thread list."
+
+    agent.mail_client = FakeMailClient()  # type: ignore[assignment]
+    monkeypatch.setattr(agent, "_resolve_mailbox", fake_resolve_mailbox)
+    monkeypatch.setattr(agent, "_summarize_search_results", fake_summarize_search_results)
+
+    task = _make_task(
+        intent="email.reason",
+        task_id="tsk_reason_recent_fallback",
+        input_payload={
+            "goal": "I replied to yours. Check the inbox and tell me what I said.",
+            "request_id": "req_reason_recent_fallback",
+        },
+    )
+
+    result = await agent.execute(task)
+
+    assert result.status == "completed"
+    assert result.output["action"] == "search_email"
+    assert result.output["sent"] is False
+    assert result.output["response"] == "Found your latest reply in the recent thread list."
+    assert result.output["search_results"][0]["id"] == "thr_recent_reply"
+
+
+@pytest.mark.asyncio
 async def test_email_agent_explicit_disconnect_blocks_env_fallback(tmp_path: Path) -> None:
     integration_db_path = tmp_path / "gateway" / "agent_email_integrations.db"
     AgentEmailIntegrationStore(integration_db_path).clear_primary()

@@ -82,6 +82,22 @@ class CosmicMailClient:
         payload = await self._request_payload("GET", f"/v1/threads/{normalized}/messages")
         return self._extract_items(payload)
 
+    async def list_threads(
+        self,
+        *,
+        mailbox_id: str | None = None,
+        page: int = 1,
+        per_page: int = 25,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {
+            "page": max(1, int(page)),
+            "per_page": max(1, min(int(per_page), 200)),
+        }
+        if mailbox_id:
+            params["mailbox_id"] = str(mailbox_id).strip()
+        payload = await self._request_payload("GET", "/v1/threads", params=params)
+        return self._extract_items(payload)
+
     async def search_threads(
         self,
         *,
