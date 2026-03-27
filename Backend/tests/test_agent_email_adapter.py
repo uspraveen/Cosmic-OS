@@ -107,6 +107,95 @@ async def test_agent_email_adapter_send_uses_cosmic_mail_draft_send_flow() -> No
 
 
 @pytest.mark.asyncio
+async def test_agent_email_adapter_send_replies_in_thread_for_trusted_sender_response() -> None:
+    adapter = AgentEmailAdapter(
+        cosmic_mail_base_url="http://cosmic-mail.local",
+        cosmic_mail_api_token="token",
+        primary_mailbox_address="assistant@example.com",
+    )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.replied_thread_id: str | None = None
+            self.reply_payload: dict[str, object] | None = None
+
+        async def resolve_mailbox(self, *, mailbox_id=None, mailbox_address=None):
+            assert mailbox_id == "mbx_support"
+            assert mailbox_address == "assistant@example.com"
+            return {"id": "mbx_support"}
+
+        async def reply_to_thread(self, thread_id: str, payload):
+            self.replied_thread_id = thread_id
+            self.reply_payload = payload
+            return {"id": "msg_reply_1"}
+
+        async def create_draft(self, payload):
+            raise AssertionError("create_draft should not be used for trusted thread replies")
+
+        async def send_draft(self, draft_id: str):
+            raise AssertionError("send_draft should not be used for trusted thread replies")
+
+    fake_client = FakeClient()
+    adapter.client = fake_client  # type: ignore[assignment]
+
+    await adapter.send(
+        {
+            "type": "response.complete",
+            "thread_id": "thr_123",
+            "mailbox_id": "mbx_support",
+            "mailbox_address": "assistant@example.com",
+            "content": "I got your reply.",
+            "trusted_sender": True,
+            "email_thread_reply_eligible": True,
+            "to_recipients": [{"email": "owner@example.com", "name": "Owner"}],
+        },
+        channel="agent-email:assistant@example.com",
+    )
+
+    assert fake_client.replied_thread_id == "thr_123"
+    assert fake_client.reply_payload == {
+        "mailbox_id": "mbx_support",
+        "text_body": "I got your reply.",
+        "to_recipients": [{"email": "owner@example.com", "name": "Owner"}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_agent_email_adapter_send_skips_untrusted_thread_responses() -> None:
+    adapter = AgentEmailAdapter(
+        cosmic_mail_base_url="http://cosmic-mail.local",
+        cosmic_mail_api_token="token",
+        primary_mailbox_address="assistant@example.com",
+    )
+
+    class FakeClient:
+        async def resolve_mailbox(self, *, mailbox_id=None, mailbox_address=None):
+            raise AssertionError("resolve_mailbox should not be called when thread delivery is not eligible")
+
+        async def reply_to_thread(self, thread_id: str, payload):
+            raise AssertionError("reply_to_thread should not be used when trusted sender policy is not satisfied")
+
+        async def create_draft(self, payload):
+            raise AssertionError("create_draft should not be used for inbound thread follow-ups")
+
+        async def send_draft(self, draft_id: str):
+            raise AssertionError("send_draft should not be used for inbound thread follow-ups")
+
+    adapter.client = FakeClient()  # type: ignore[assignment]
+
+    await adapter.send(
+        {
+            "type": "response.complete",
+            "thread_id": "thr_999",
+            "mailbox_address": "assistant@example.com",
+            "content": "This should stay internal until external sender policy exists.",
+            "trusted_sender": False,
+        },
+        channel="agent-email:assistant@example.com",
+    )
+
+
+@pytest.mark.asyncio
 async def test_agent_email_adapter_get_status_falls_back_to_first_active_mailbox() -> None:
     adapter = AgentEmailAdapter(
         cosmic_mail_base_url="http://cosmic-mail.local",

@@ -581,6 +581,10 @@ function parseAgentEmailTrustedSendersSetting(raw: unknown): string[] {
   return out
 }
 
+function trustedSenderListSignature(value: unknown): string {
+  return JSON.stringify(parseAgentEmailTrustedSendersSetting(value))
+}
+
 function isPlausibleTrustedSenderEmail(value: string): boolean {
   const t = value.trim()
   if (t.length < 5 || /\s/.test(t)) return false
@@ -2571,9 +2575,25 @@ export default function SpacesControlCenter({
   const [agentEmailAttachmentActionId, setAgentEmailAttachmentActionId] = useState<string | null>(null)
   const agentEmailReplyAttachInputRef = useRef<HTMLInputElement>(null)
   const agentEmailMessagesEndRef = useRef<HTMLDivElement>(null)
+  const agentEmailBaseUrlRef = useRef('')
+  const agentEmailApiTokenRef = useRef('')
+  const agentEmailTrustedSendersRef = useRef<string[]>([])
+  const agentEmailBackendBootstrapDoneRef = useRef(false)
   const agentEmailLocalConfigReady = agentEmailBaseUrl.trim().length > 0 && agentEmailApiToken.trim().length > 0
   const agentEmailBackendConfigured = Boolean(agentEmailBackendStatus?.configured)
   const agentEmailConfigReady = agentEmailLocalConfigReady && agentEmailBackendConfigured
+
+  useEffect(() => {
+    agentEmailBaseUrlRef.current = agentEmailBaseUrl
+  }, [agentEmailBaseUrl])
+
+  useEffect(() => {
+    agentEmailApiTokenRef.current = agentEmailApiToken
+  }, [agentEmailApiToken])
+
+  useEffect(() => {
+    agentEmailTrustedSendersRef.current = agentEmailTrustedSenders
+  }, [agentEmailTrustedSenders])
 
   const callAgentEmailApi = useCallback(async (
     path: string,
@@ -2618,7 +2638,10 @@ export default function SpacesControlCenter({
       const raw = await window.cosmic.getGatewayAgentEmailStatus()
       const status = normalizeGatewayAgentEmailStatus(raw)
       setAgentEmailBackendStatus(status)
-      if (status.trusted_senders.length) {
+      if (
+        status.trusted_senders.length
+        && trustedSenderListSignature(status.trusted_senders) !== trustedSenderListSignature(agentEmailTrustedSendersRef.current)
+      ) {
         setAgentEmailTrustedSenders(status.trusted_senders)
         window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.trustedSenders, JSON.stringify(status.trusted_senders))
       }
@@ -2630,10 +2653,14 @@ export default function SpacesControlCenter({
         if (shouldApplyBackendFields) {
           const nextBaseUrl = status.base_url || ''
           const nextApiToken = status.api_token || ''
-          setAgentEmailBaseUrl(nextBaseUrl)
-          setAgentEmailApiToken(nextApiToken)
-          window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.baseUrl, nextBaseUrl)
-          window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.apiToken, nextApiToken)
+          if (agentEmailBaseUrlRef.current !== nextBaseUrl) {
+            setAgentEmailBaseUrl(nextBaseUrl)
+            window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.baseUrl, nextBaseUrl)
+          }
+          if (agentEmailApiTokenRef.current !== nextApiToken) {
+            setAgentEmailApiToken(nextApiToken)
+            window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.apiToken, nextApiToken)
+          }
         }
       }
       return status
@@ -2649,8 +2676,10 @@ export default function SpacesControlCenter({
 
   const syncAgentEmailTrustedSenders = useCallback(async (nextTrustedSenders: string[]) => {
     const normalized = parseAgentEmailTrustedSendersSetting(nextTrustedSenders)
-    setAgentEmailTrustedSenders(normalized)
-    window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.trustedSenders, JSON.stringify(normalized))
+    if (trustedSenderListSignature(normalized) !== trustedSenderListSignature(agentEmailTrustedSendersRef.current)) {
+      setAgentEmailTrustedSenders(normalized)
+      window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.trustedSenders, JSON.stringify(normalized))
+    }
     if (!gatewayConnected || !window.cosmic?.saveGatewayAgentEmailTrustedSenders) {
       return null
     }
@@ -2660,8 +2689,10 @@ export default function SpacesControlCenter({
       })
       const status = normalizeGatewayAgentEmailStatus(rawStatus)
       setAgentEmailBackendStatus(status)
-      setAgentEmailTrustedSenders(status.trusted_senders)
-      window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.trustedSenders, JSON.stringify(status.trusted_senders))
+      if (trustedSenderListSignature(status.trusted_senders) !== trustedSenderListSignature(agentEmailTrustedSendersRef.current)) {
+        setAgentEmailTrustedSenders(status.trusted_senders)
+        window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.trustedSenders, JSON.stringify(status.trusted_senders))
+      }
       return status
     } catch (error: unknown) {
       setAgentEmailBanner({
@@ -2677,9 +2708,9 @@ export default function SpacesControlCenter({
     if (!status) {
       return null
     }
-    const localTrustedSenders = parseAgentEmailTrustedSendersSetting(agentEmailTrustedSenders)
+    const localTrustedSenders = parseAgentEmailTrustedSendersSetting(agentEmailTrustedSendersRef.current)
     if (status.trusted_senders.length) {
-      if (JSON.stringify(status.trusted_senders) !== JSON.stringify(localTrustedSenders)) {
+      if (trustedSenderListSignature(status.trusted_senders) !== trustedSenderListSignature(localTrustedSenders)) {
         setAgentEmailTrustedSenders(status.trusted_senders)
         window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.trustedSenders, JSON.stringify(status.trusted_senders))
       }
@@ -2689,13 +2720,17 @@ export default function SpacesControlCenter({
         status = syncedStatus
       }
     }
-    const nextBaseUrl = agentEmailBaseUrl.trim()
-    const nextApiToken = agentEmailApiToken.trim()
+    const nextBaseUrl = agentEmailBaseUrlRef.current.trim()
+    const nextApiToken = agentEmailApiTokenRef.current.trim()
     if (status.explicitly_disconnected) {
-      setAgentEmailBaseUrl('')
-      setAgentEmailApiToken('')
-      window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.baseUrl, '')
-      window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.apiToken, '')
+      if (agentEmailBaseUrlRef.current) {
+        setAgentEmailBaseUrl('')
+        window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.baseUrl, '')
+      }
+      if (agentEmailApiTokenRef.current) {
+        setAgentEmailApiToken('')
+        window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.apiToken, '')
+      }
       return status
     }
     if (status.configured || !nextBaseUrl || !nextApiToken) {
@@ -2719,9 +2754,6 @@ export default function SpacesControlCenter({
     setAgentEmailBanner({ tone: 'success', message: 'Cosmic Mail connection synced to the VM.' })
     return syncedStatus
   }, [
-    agentEmailApiToken,
-    agentEmailBaseUrl,
-    agentEmailTrustedSenders,
     requestAgentEmailBackendStatus,
     syncAgentEmailTrustedSenders,
   ])
@@ -3026,9 +3058,15 @@ export default function SpacesControlCenter({
 
   useEffect(() => {
     if (!active || page !== 'agent-email' || !agentEmailSettingsLoaded || !gatewayConnected) {
+      agentEmailBackendBootstrapDoneRef.current = false
       return
     }
+    if (agentEmailBackendBootstrapDoneRef.current) {
+      return
+    }
+    agentEmailBackendBootstrapDoneRef.current = true
     void ensureAgentEmailBackendConnection(true).catch((error: unknown) => {
+      agentEmailBackendBootstrapDoneRef.current = false
       setAgentEmailBanner({ tone: 'error', message: toErrorMessage(error) })
     })
   }, [active, page, gatewayConnected, agentEmailSettingsLoaded, ensureAgentEmailBackendConnection])

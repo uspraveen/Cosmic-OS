@@ -739,6 +739,8 @@ class GatewayRuntime:
         mailbox_id = self._safe_text(metadata.get("mailbox_id"))
         thread_id = self._safe_text(metadata.get("thread_id"))
         subject = self._safe_text(metadata.get("subject"))
+        from_address = self._safe_text(metadata.get("from_address"))
+        from_name = self._safe_text(metadata.get("from_name"))
         if mailbox_address:
             patch["mailbox_address"] = mailbox_address
         if mailbox_id:
@@ -747,8 +749,125 @@ class GatewayRuntime:
             patch["thread_id"] = thread_id
         if subject:
             patch["thread_subject"] = subject
+        if from_address:
+            patch["from_address"] = from_address
+        if from_name:
+            patch["from_name"] = from_name
         patch["channel"] = channel
         return patch
+
+    def _prepare_channel_event_for_delivery(
+        self,
+        event: dict[str, Any],
+        *,
+        request_record: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        prepared = dict(event)
+        channel = self._safe_text(prepared.get("channel"))
+        if self._channel_platform(channel or "") != "agent-email":
+            return prepared
+        if self._safe_text(prepared.get("type")) != "response.complete":
+            return prepared
+
+        request = request_record if isinstance(request_record, dict) else {}
+        message = request.get("message") if isinstance(request.get("message"), dict) else {}
+        message_meta = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        process_output = (
+            request.get("email_process_inbound_output")
+            if isinstance(request.get("email_process_inbound_output"), dict)
+            else {}
+        )
+        session_id = self._safe_text(prepared.get("session_id")) or self._safe_text(request.get("session_id"))
+        request_id = self._safe_text(prepared.get("request_id")) or self._safe_text(request.get("request_id"))
+        session_meta = self.session_store.get_session_metadata(session_id) if session_id else {}
+        user_message = (
+            self.session_store.find_message_by_request_id(
+                session_id,
+                request_id=request_id,
+                role="user",
+            )
+            if session_id and request_id
+            else None
+        )
+        user_meta = user_message.get("metadata") if isinstance(user_message, dict) and isinstance(user_message.get("metadata"), dict) else {}
+
+        def first_text(*values: Any) -> str | None:
+            for value in values:
+                text = self._safe_text(value)
+                if text:
+                    return text
+            return None
+
+        thread_id = first_text(
+            prepared.get("thread_id"),
+            message_meta.get("thread_id"),
+            user_meta.get("thread_id"),
+            session_meta.get("thread_id"),
+        )
+        if not thread_id:
+            return prepared
+
+        mailbox_address = first_text(
+            prepared.get("mailbox_address"),
+            message_meta.get("mailbox_address"),
+            user_meta.get("mailbox_address"),
+            session_meta.get("mailbox_address"),
+        )
+        mailbox_id = first_text(
+            prepared.get("mailbox_id"),
+            message_meta.get("mailbox_id"),
+            user_meta.get("mailbox_id"),
+            session_meta.get("mailbox_id"),
+        )
+        from_address = first_text(
+            prepared.get("from_address"),
+            process_output.get("from_address"),
+            message_meta.get("from_address"),
+            user_meta.get("from_address"),
+            session_meta.get("from_address"),
+        )
+        from_name = first_text(
+            prepared.get("from_name"),
+            message_meta.get("from_name"),
+            user_meta.get("from_name"),
+            session_meta.get("from_name"),
+        )
+        thread_subject = first_text(
+            prepared.get("thread_subject"),
+            prepared.get("subject"),
+            process_output.get("subject"),
+            message_meta.get("subject"),
+            user_meta.get("subject"),
+            session_meta.get("thread_subject"),
+        )
+
+        trusted_sender = bool(process_output.get("trusted_sender"))
+        auto_reply = process_output.get("auto_reply") if isinstance(process_output.get("auto_reply"), dict) else {}
+        auto_reply_sent = bool(auto_reply.get("sent"))
+        sender_role = first_text(process_output.get("sender_role"), "owner" if trusted_sender else "external")
+
+        prepared.setdefault("session_scope", "email_thread")
+        prepared["thread_id"] = thread_id
+        if mailbox_address:
+            prepared["mailbox_address"] = mailbox_address
+        if mailbox_id:
+            prepared["mailbox_id"] = mailbox_id
+        if from_address:
+            prepared["from_address"] = from_address
+        if from_name:
+            prepared["from_name"] = from_name
+        if thread_subject:
+            prepared["thread_subject"] = thread_subject
+            prepared.setdefault("subject", thread_subject)
+        prepared["trusted_sender"] = trusted_sender
+        if sender_role:
+            prepared["sender_role"] = sender_role
+        prepared["email_auto_reply_sent"] = auto_reply_sent
+        prepared["email_thread_reply"] = True
+        prepared["email_thread_reply_eligible"] = bool(trusted_sender and not auto_reply_sent)
+        if from_address and not prepared.get("to_recipients") and not prepared.get("to"):
+            prepared["to_recipients"] = [{"email": from_address, "name": from_name}]
+        return prepared
 
     def _should_preprocess_email_inbound(self, request_record: dict[str, Any]) -> bool:
         if self._redis is None or not self.config.enable_agent_email:
@@ -1624,18 +1743,35 @@ class GatewayRuntime:
             metadata=metadata,
         )
 
+        user_message_metadata = {
+            "request_id": request_id,
+            "platform": metadata.get("platform"),
+            "message_type": metadata.get("message_type"),
+            "attachments": metadata.get("attachments"),
+            "input_artifacts": input_artifacts,
+        }
+        if self._channel_platform(channel) == "agent-email":
+            for key in (
+                "thread_id",
+                "message_id",
+                "mailbox_address",
+                "mailbox_id",
+                "subject",
+                "from_address",
+                "from_name",
+                "session_scope",
+                "rollover_exempt",
+            ):
+                value = metadata.get(key)
+                if value is not None:
+                    user_message_metadata[key] = value
+
         self._append_session_message(
             session_id,
             role="user",
             content=content or "[non-text inbound message]",
             channel=channel,
-            metadata={
-                "request_id": request_id,
-                "platform": metadata.get("platform"),
-                "message_type": metadata.get("message_type"),
-                "attachments": metadata.get("attachments"),
-                "input_artifacts": input_artifacts,
-            },
+            metadata=user_message_metadata,
         )
 
         # Cross-channel sync: push the user message to connected desktop clients
@@ -1742,32 +1878,27 @@ class GatewayRuntime:
         async def send(event: dict[str, Any]) -> None:
             if active_request is not None:
                 self._track_partial_stream(active_request, event)
-            delivery_status = await self._deliver_or_queue_channel_event(
+            delivery_event = self._prepare_channel_event_for_delivery(
                 {
                     **event,
                     "channel": channel,
                 },
+                request_record=request_record,
+            )
+            delivery_status = await self._deliver_or_queue_channel_event(
+                delivery_event,
                 channel=channel,
             )
             await self._maybe_schedule_delivered_memory_ingest(
-                {
-                    **event,
-                    "channel": channel,
-                },
+                delivery_event,
                 delivery_status=delivery_status,
             )
             await self._maybe_schedule_delivered_task_summary_write(
-                {
-                    **event,
-                    "channel": channel,
-                },
+                delivery_event,
                 delivery_status=delivery_status,
             )
             await self._maybe_schedule_delivered_turn_finalization(
-                {
-                    **event,
-                    "channel": channel,
-                },
+                delivery_event,
                 delivery_status=delivery_status,
             )
 

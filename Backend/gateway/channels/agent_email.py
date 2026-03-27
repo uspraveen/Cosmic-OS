@@ -189,6 +189,28 @@ class AgentEmailAdapter(ChannelAdapter):
 
     async def send(self, message: dict[str, Any], channel: str | None = None) -> None:
         target_channel = _safe_text(channel) or _safe_text(message.get("channel"))
+        text_body = self._build_text_body(message)
+        reply_context = self._thread_reply_context(message)
+        if reply_context is not None:
+            if not reply_context["eligible"]:
+                return
+            mailbox = await self.client.resolve_mailbox(
+                mailbox_id=reply_context["mailbox_id"],
+                mailbox_address=reply_context["mailbox_address"],
+            )
+            reply_payload: dict[str, Any] = {
+                "mailbox_id": mailbox["id"],
+                "text_body": text_body,
+            }
+            to_recipients = self._normalize_recipients(message, mailbox_address=reply_context["mailbox_address"] or "")
+            if to_recipients:
+                reply_payload["to_recipients"] = to_recipients
+            cc_recipients = self._normalize_contact_field(message, "cc_recipients", "cc")
+            if cc_recipients:
+                reply_payload["cc_recipients"] = cc_recipients
+            await self.client.reply_to_thread(reply_context["thread_id"], reply_payload)
+            return
+
         try:
             mailbox_address = self._extract_mailbox_address(target_channel)
         except ChannelUnavailableError:
@@ -199,7 +221,6 @@ class AgentEmailAdapter(ChannelAdapter):
         mailbox = await self.client.resolve_mailbox(mailbox_address=mailbox_address)
         recipients = self._normalize_recipients(message, mailbox_address=mailbox_address)
         subject = self._build_subject(message)
-        text_body = self._build_text_body(message)
         draft = await self.client.create_draft(
             {
                 "mailbox_id": mailbox["id"],
@@ -248,6 +269,45 @@ class AgentEmailAdapter(ChannelAdapter):
             return self.primary_mailbox_address
         raise ChannelUnavailableError("Agent Email channel is missing a mailbox address.")
 
+    def _thread_reply_context(self, message: dict[str, Any]) -> dict[str, Any] | None:
+        thread_id = _safe_text(message.get("thread_id"))
+        if not thread_id:
+            metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+            thread_id = _safe_text(metadata.get("thread_id"))
+        if not thread_id:
+            return None
+
+        event_type = _safe_text(message.get("type"))
+        trusted_sender = bool(message.get("trusted_sender"))
+        auto_reply_sent = bool(message.get("email_auto_reply_sent"))
+        explicit_eligible = message.get("email_thread_reply_eligible")
+        mailbox_id = _safe_text(message.get("mailbox_id"))
+        mailbox_address = _safe_text(message.get("mailbox_address"))
+        if not mailbox_address:
+            metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+            mailbox_address = _safe_text(metadata.get("mailbox_address"))
+        if not mailbox_id:
+            metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+            mailbox_id = _safe_text(metadata.get("mailbox_id"))
+
+        return {
+            "thread_id": thread_id,
+            "mailbox_id": mailbox_id or None,
+            "mailbox_address": mailbox_address or None,
+            "eligible": (
+                bool(explicit_eligible)
+                if explicit_eligible is not None
+                else event_type == "response.complete" and trusted_sender and not auto_reply_sent
+            ),
+        }
+
+    def _normalize_contact_field(self, message: dict[str, Any], *keys: str) -> list[dict[str, Any]]:
+        for key in keys:
+            recipients = _normalize_contact_list(message.get(key))
+            if recipients:
+                return recipients
+        return []
+
     def _normalize_recipients(self, message: dict[str, Any], *, mailbox_address: str) -> list[dict[str, Any]]:
         for key in ("to_recipients", "to"):
             recipients = _normalize_contact_list(message.get(key))
@@ -257,7 +317,10 @@ class AgentEmailAdapter(ChannelAdapter):
             candidate = _safe_text(message.get(key))
             if candidate:
                 return [{"email": candidate, "name": None}]
-        return [{"email": mailbox_address, "name": None}]
+        fallback = _safe_text(mailbox_address)
+        if fallback:
+            return [{"email": fallback, "name": None}]
+        return []
 
     def _build_subject(self, message: dict[str, Any]) -> str:
         explicit = _safe_text(message.get("subject"))

@@ -1405,6 +1405,61 @@ async def test_email_inbound_preprocess_falls_back_to_raw_summary_when_specialis
 
 
 @pytest.mark.asyncio
+async def test_email_thread_response_delivery_is_enriched_for_trusted_sender_reply(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    runtime._redis = FakeRedis()
+    await runtime.start()
+    try:
+        request_record = await runtime.process_incoming_user_message(
+            {
+                "content": "Email subject: Need help\n\nI replied to your email.",
+                "channel": "agent-email:support@example.com",
+                "metadata": {
+                    "platform": "agent-email",
+                    "message_id": "msg_email_trusted",
+                    "thread_id": "thr_email_trusted",
+                    "mailbox_id": "mbx_support",
+                    "mailbox_address": "support@example.com",
+                    "subject": "Need help",
+                    "from_address": "owner@example.com",
+                    "from_name": "Owner",
+                    "session_scope": "email_thread",
+                    "rollover_exempt": True,
+                },
+            }
+        )
+        request_record["email_process_inbound_output"] = {
+            "subject": "Need help",
+            "from_address": "owner@example.com",
+            "trusted_sender": True,
+            "sender_role": "owner",
+            "auto_reply": {"sent": False},
+        }
+
+        prepared = runtime._prepare_channel_event_for_delivery(  # noqa: SLF001 - intentional unit seam
+            {
+                "type": "response.complete",
+                "request_id": request_record["request_id"],
+                "session_id": request_record["session_id"],
+                "channel": request_record["channel"],
+                "content": "I saw your reply.",
+            },
+            request_record=request_record,
+        )
+
+        assert prepared["thread_id"] == "thr_email_trusted"
+        assert prepared["mailbox_id"] == "mbx_support"
+        assert prepared["mailbox_address"] == "support@example.com"
+        assert prepared["from_address"] == "owner@example.com"
+        assert prepared["trusted_sender"] is True
+        assert prepared["email_thread_reply"] is True
+        assert prepared["email_thread_reply_eligible"] is True
+        assert prepared["to_recipients"] == [{"email": "owner@example.com", "name": "Owner"}]
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
 async def test_docs_autoparse_emits_progress_for_desktop_documents(tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="opus")
     await runtime.start()
