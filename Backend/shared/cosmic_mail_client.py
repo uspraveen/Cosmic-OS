@@ -222,6 +222,18 @@ class CosmicMailClient:
         payload = await self._request_payload("GET", "/v1/webhooks")
         return self._extract_items(payload)
 
+    async def update_webhook(self, webhook_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = str(webhook_id or "").strip()
+        if not normalized:
+            raise ValueError("webhook_id is required")
+        return await self._request_json("PATCH", f"/v1/webhooks/{normalized}", json_body=payload)
+
+    async def delete_webhook(self, webhook_id: str) -> None:
+        normalized = str(webhook_id or "").strip()
+        if not normalized:
+            raise ValueError("webhook_id is required")
+        await self._request("DELETE", f"/v1/webhooks/{normalized}", content_type=None)
+
     async def _request_payload(
         self,
         method: str,

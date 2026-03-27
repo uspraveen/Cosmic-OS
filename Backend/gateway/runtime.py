@@ -55,6 +55,7 @@ except Exception:  # pragma: no cover - optional import guard for environments m
 
 from shared import (
     AgentEmailIntegrationStore,
+    CosmicMailClient,
     MeteredCall,
     ModelSpec,
     SOURCE_PRIORITY_MAP,
@@ -329,6 +330,11 @@ class GatewayRuntime:
                 name="gateway-memory-health",
             )
         await self._register_adapters()
+        if self._agent_email_effectively_enabled():
+            try:
+                await self.sync_agent_email_webhook()
+            except Exception:
+                logger.exception("gateway.agent_email_webhook_sync_failed")
         self._usage_worker = asyncio.create_task(
             self._usage_worker_loop(),
             name="gateway-usage-worker",
@@ -712,12 +718,18 @@ class GatewayRuntime:
         finally:
             await client.stop()
         await self.reconcile_agent_email_adapter()
-        return await self.get_agent_email_connection_status()
+        webhook = await self.sync_agent_email_webhook()
+        status = await self.get_agent_email_connection_status()
+        status["webhook"] = webhook
+        return status
 
     async def clear_agent_email_connection(self) -> dict[str, Any]:
+        webhook = await self.clear_agent_email_webhook()
         self.agent_email_integration_store.clear_primary()
         await self._unregister_adapter("agent-email")
-        return await self.get_agent_email_connection_status()
+        status = await self.get_agent_email_connection_status()
+        status["webhook"] = webhook
+        return status
 
     async def save_agent_email_trusted_senders(self, trusted_senders: list[str]) -> dict[str, Any]:
         self.agent_email_integration_store.save_trusted_senders(
@@ -6889,6 +6901,157 @@ class GatewayRuntime:
         if public_host.startswith(("http://", "https://")):
             return public_host.rstrip("/")
         return f"https://{public_host.rstrip('/')}"
+
+    def _agent_email_webhook_url(self) -> str | None:
+        base_url = self._public_gateway_base_url()
+        if not base_url:
+            return None
+        return f"{base_url}/internal/channels/agent-email/incoming"
+
+    async def _resolve_agent_email_webhook_mailbox(
+        self,
+        client: CosmicMailClient,
+        *,
+        mailbox_address: str | None,
+    ) -> dict[str, Any] | None:
+        normalized_address = self._safe_text(mailbox_address)
+        if normalized_address:
+            try:
+                return await client.resolve_mailbox(mailbox_address=normalized_address)
+            except Exception:
+                logger.warning(
+                    "gateway.agent_email_webhook_mailbox_resolution_failed mailbox_address=%s",
+                    normalized_address,
+                )
+        try:
+            mailboxes = await client.list_mailboxes()
+        except Exception:
+            return None
+        active_mailboxes = [
+            mailbox
+            for mailbox in mailboxes
+            if self._safe_text(mailbox.get("status")).lower() == "active"
+        ]
+        pool = active_mailboxes or mailboxes
+        return pool[0] if pool else None
+
+    def _is_managed_agent_email_webhook(
+        self,
+        webhook: dict[str, Any],
+        *,
+        webhook_url: str,
+    ) -> bool:
+        url = self._safe_text(webhook.get("url")) or ""
+        return url == webhook_url or url.endswith("/internal/channels/agent-email/incoming")
+
+    async def sync_agent_email_webhook(self) -> dict[str, Any]:
+        settings = self._effective_agent_email_settings()
+        if not settings.get("base_url") or not settings.get("api_token"):
+            return {"status": "skipped", "reason": "agent_email_not_configured"}
+        webhook_url = self._agent_email_webhook_url()
+        if not webhook_url:
+            return {"status": "skipped", "reason": "gateway_public_url_missing"}
+
+        client = CosmicMailClient(
+            base_url=settings["base_url"],
+            api_token=settings["api_token"],
+            timeout_sec=self.config.cosmic_mail_timeout_sec,
+        )
+        try:
+            mailbox = await self._resolve_agent_email_webhook_mailbox(
+                client,
+                mailbox_address=settings.get("primary_mailbox_address"),
+            )
+            mailbox_id = self._safe_text(mailbox.get("id")) if isinstance(mailbox, dict) else None
+            webhook_secret = self._safe_text(settings.get("webhook_secret")) or None
+            webhooks = await client.list_webhooks()
+            managed = [
+                webhook
+                for webhook in webhooks
+                if isinstance(webhook, dict) and self._is_managed_agent_email_webhook(webhook, webhook_url=webhook_url)
+            ]
+            desired_event_type = "message.received"
+            desired_payload = {
+                "mailbox_id": mailbox_id,
+                "event_type": desired_event_type,
+                "url": webhook_url,
+                "secret": webhook_secret,
+            }
+
+            primary = managed[0] if managed else None
+            action = "created"
+            result_webhook: dict[str, Any]
+            if primary is None:
+                result_webhook = await client.create_webhook(desired_payload)
+            else:
+                webhook_id = self._safe_text(primary.get("id"))
+                patch_needed = (
+                    self._safe_text(primary.get("url")) != webhook_url
+                    or self._safe_text(primary.get("mailbox_id")) != mailbox_id
+                    or self._safe_text(primary.get("event_type")) != desired_event_type
+                    or not bool(primary.get("is_active"))
+                )
+                if patch_needed and webhook_id:
+                    result_webhook = await client.update_webhook(
+                        webhook_id,
+                        {
+                            "mailbox_id": mailbox_id,
+                            "event_type": desired_event_type,
+                            "url": webhook_url,
+                            "secret": webhook_secret,
+                            "is_active": True,
+                        },
+                    )
+                    action = "updated"
+                else:
+                    result_webhook = primary
+                    action = "unchanged"
+
+                primary_id = self._safe_text(result_webhook.get("id")) or webhook_id
+                for duplicate in managed[1:]:
+                    duplicate_id = self._safe_text(duplicate.get("id"))
+                    if duplicate_id and duplicate_id != primary_id:
+                        await client.delete_webhook(duplicate_id)
+
+            return {
+                "status": action,
+                "url": webhook_url,
+                "mailbox_id": mailbox_id,
+                "webhook_id": self._safe_text(result_webhook.get("id")),
+            }
+        finally:
+            await client.aclose()
+
+    async def clear_agent_email_webhook(self) -> dict[str, Any]:
+        settings = self._effective_agent_email_settings()
+        if not settings.get("base_url") or not settings.get("api_token"):
+            return {"status": "skipped", "reason": "agent_email_not_configured"}
+        webhook_url = self._agent_email_webhook_url()
+        if not webhook_url:
+            return {"status": "skipped", "reason": "gateway_public_url_missing"}
+
+        client = CosmicMailClient(
+            base_url=settings["base_url"],
+            api_token=settings["api_token"],
+            timeout_sec=self.config.cosmic_mail_timeout_sec,
+        )
+        try:
+            deleted = 0
+            for webhook in await client.list_webhooks():
+                if not isinstance(webhook, dict) or not self._is_managed_agent_email_webhook(webhook, webhook_url=webhook_url):
+                    continue
+                webhook_id = self._safe_text(webhook.get("id"))
+                if not webhook_id:
+                    continue
+                await client.delete_webhook(webhook_id)
+                deleted += 1
+            return {
+                "status": "deleted" if deleted else "unchanged",
+                "url": webhook_url,
+                "deleted_count": deleted,
+            }
+        finally:
+            await client.aclose()
 
     def _build_artifact_access_signature(
         self,

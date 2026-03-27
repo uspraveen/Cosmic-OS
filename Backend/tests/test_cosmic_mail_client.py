@@ -45,3 +45,51 @@ async def test_cosmic_mail_client_get_auth_context_still_requires_object() -> No
         payload = await cosmic.get_auth_context()
 
     assert payload["is_admin"] is True
+
+
+@pytest.mark.asyncio
+async def test_cosmic_mail_client_updates_and_deletes_webhooks() -> None:
+    seen: list[tuple[str, str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode("utf-8") if request.content else None
+        seen.append((request.method, request.url.path, body))
+        if request.method == "PATCH":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "wh_123",
+                    "url": "https://gateway.example.com/internal/channels/agent-email/incoming",
+                    "event_type": "message.received",
+                    "is_active": True,
+                },
+            )
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        raise AssertionError(f"Unexpected request: {request.method} {request.url.path}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        cosmic = CosmicMailClient(
+            base_url="https://console.thelearnchain.com",
+            api_token="token",
+            client=client,
+        )
+        payload = await cosmic.update_webhook(
+            "wh_123",
+            {
+                "url": "https://gateway.example.com/internal/channels/agent-email/incoming",
+                "event_type": "message.received",
+                "is_active": True,
+            },
+        )
+        await cosmic.delete_webhook("wh_123")
+
+    assert payload["id"] == "wh_123"
+    assert seen == [
+        (
+            "PATCH",
+            "/v1/webhooks/wh_123",
+            '{"url":"https://gateway.example.com/internal/channels/agent-email/incoming","event_type":"message.received","is_active":true}',
+        ),
+        ("DELETE", "/v1/webhooks/wh_123", None),
+    ]
