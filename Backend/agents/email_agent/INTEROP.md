@@ -33,7 +33,12 @@ Opus should typically delegate with:
 - optional `context_brief`
 - optional `draft_seed`
 - optional `thread_id`
-- optional recipients / subject / send flag
+- optional `to_recipients` / `cc_recipients` / `bcc_recipients`
+- optional `subject` / `send` flag
 
 Avoid passing long raw session transcripts.
 Use `context_brief` and `draft_seed` instead when the user has been discussing something for a long time and then asks to send an email.
+
+Reply-note:
+- new outbound drafts support To / CC / BCC
+- reply-to-thread supports explicit To / CC overrides, but not BCC

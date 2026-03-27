@@ -149,6 +149,13 @@ async def test_email_agent_reason_compose_draft_uses_compact_brief_and_uploads_i
     uploaded: list[tuple[str, str, bytes, str | None]] = []
 
     class FakeMailClient:
+        base_url = "http://cosmic-mail.local"
+        api_token = "mail-token"
+        timeout_sec = 20.0
+
+        async def aclose(self):
+            return None
+
         async def resolve_mailbox(self, *, mailbox_id=None, mailbox_address=None):
             assert mailbox_id is None
             assert mailbox_address == "assistant@example.com"
@@ -157,6 +164,9 @@ async def test_email_agent_reason_compose_draft_uses_compact_brief_and_uploads_i
         async def create_draft(self, payload):
             assert payload["mailbox_id"] == "mbx_primary"
             assert payload["subject"] == "YC company sheet"
+            assert payload["to_recipients"] == [{"email": "arun@example.com", "name": "Arun"}]
+            assert payload["cc_recipients"] == [{"email": "finance@example.com", "name": "Finance"}]
+            assert payload["bcc_recipients"] == [{"email": "audit@example.com", "name": None}]
             return {"id": "draft_123"}
 
         async def upload_draft_attachment(self, draft_id, *, filename, content, mime_type=None):
@@ -174,6 +184,8 @@ async def test_email_agent_reason_compose_draft_uses_compact_brief_and_uploads_i
             "goal": "Email the latest YC sheet to Arun.",
             "mailbox_address": "assistant@example.com",
             "to_recipients": [{"email": "arun@example.com", "name": "Arun"}],
+            "cc_recipients": [{"email": "finance@example.com", "name": "Finance"}],
+            "bcc_recipients": [{"email": "audit@example.com"}],
             "context_brief": "User wants to send the latest YC company list.",
         },
         input_artifacts=[
@@ -235,6 +247,13 @@ async def test_email_agent_reason_infers_send_from_plain_goal(tmp_path: Path, mo
     monkeypatch.setattr(agent, "_upload_input_artifacts_to_draft", fake_upload_input_artifacts_to_draft)
 
     class FakeMailClient:
+        base_url = "http://cosmic-mail.local"
+        api_token = "mail-token"
+        timeout_sec = 20.0
+
+        async def aclose(self):
+            return None
+
         async def send_draft(self, draft_id):
             assert draft_id == "draft_456"
             return {"id": "msg_123", "thread_id": "thr_123"}
@@ -296,6 +315,13 @@ async def test_email_agent_reason_infers_following_content_body_from_plain_goal(
     monkeypatch.setattr(agent, "_upload_input_artifacts_to_draft", fake_upload_input_artifacts_to_draft)
 
     class FakeMailClient:
+        base_url = "http://cosmic-mail.local"
+        api_token = "mail-token"
+        timeout_sec = 20.0
+
+        async def aclose(self):
+            return None
+
         async def send_draft(self, draft_id):
             assert draft_id == "draft_following_content"
             return {"id": "msg_following_content", "thread_id": "thr_following_content"}
@@ -364,12 +390,117 @@ async def test_email_agent_compose_new_email_never_uses_raw_goal_as_body(
         draft_seed=None,
         tone_hint=None,
         recipients=[{"email": "uspraveenraj@gmail.com", "name": None}],
+        cc_recipients=[],
+        bcc_recipients=[],
         subject="Hello from COSMIC",
     )
 
     assert drafted["subject"] == "Hello from COSMIC"
     assert drafted["body"] == "Hey Praveen!\n\nJust your AI system COSMIC dropping in to say hello.\n\n— COSMIC"
     assert "Send an email to uspraveenraj@gmail.com" not in drafted["body"]
+
+
+@pytest.mark.asyncio
+async def test_email_agent_reason_reply_thread_sends_mailbox_and_cc_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+            enable_internal_llm=True,
+        ),
+    )
+
+    async def fake_fetch_thread_context(*, thread_id, message_id=None):
+        assert thread_id == "thr_123"
+        return {
+            "thread": {"id": "thr_123", "subject": "Re: Budget", "mailbox_id": "mbx_primary"},
+            "subject": "Re: Budget",
+            "latest_body": "Can you send the updated numbers?",
+            "latest_message": {"id": "msg_latest"},
+        }
+
+    async def fake_compose_reply(**kwargs):
+        assert kwargs["to_recipients"] == [{"email": "owner@example.com", "name": None}]
+        assert kwargs["cc_recipients"] == [{"email": "finance@example.com", "name": None}]
+        return {
+            "body": "Here are the updated numbers.",
+            "summary": "Prepared a reply draft for the existing email thread.",
+        }
+
+    monkeypatch.setattr(agent, "_fetch_thread_context", fake_fetch_thread_context)
+    monkeypatch.setattr(agent, "_compose_reply", fake_compose_reply)
+
+    class FakeMailClient:
+        base_url = "http://cosmic-mail.local"
+        api_token = "mail-token"
+        timeout_sec = 20.0
+
+        async def aclose(self):
+            return None
+
+        async def reply_to_thread(self, thread_id, payload):
+            assert thread_id == "thr_123"
+            assert payload == {
+                "mailbox_id": "mbx_primary",
+                "text_body": "Here are the updated numbers.",
+                "to_recipients": [{"email": "owner@example.com", "name": None}],
+                "cc_recipients": [{"email": "finance@example.com", "name": None}],
+            }
+            return {"id": "msg_reply_123"}
+
+    agent.mail_client = FakeMailClient()  # type: ignore[assignment]
+
+    task = _make_task(
+        intent="email.reason",
+        task_id="tsk_reason_reply_cc",
+        input_payload={
+            "goal": "Reply to the thread with the updated numbers.",
+            "thread_id": "thr_123",
+            "send": True,
+            "to_recipients": [{"email": "owner@example.com"}],
+            "cc_recipients": [{"email": "finance@example.com"}],
+        },
+    )
+
+    result = await agent.execute(task)
+
+    assert result.status == "completed"
+    assert result.output["action"] == "reply_thread"
+    assert result.output["sent"] is True
+    assert result.output["message_id"] == "msg_reply_123"
+    assert result.output["cc_recipients"] == [{"email": "finance@example.com", "name": None}]
+    assert result.output["bcc_recipients"] == []
+
+
+def test_email_agent_infers_cc_and_bcc_from_plain_goal(tmp_path: Path) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            gateway_internal_token="",
+            enable_internal_llm=False,
+        ),
+    )
+
+    inferred = agent._infer_reason_goal_hints(
+        "Send an email to owner@example.com cc finance@example.com and ops@example.com "
+        "bcc audit@example.com with subject 'Budget update' and the following content:\n\n"
+        "Here is the latest budget update."
+    )
+
+    assert inferred["mode"] == "compose"
+    assert inferred["send"] is True
+    assert inferred["to_recipients"] == [{"email": "owner@example.com", "name": None}]
+    assert inferred["cc_recipients"] == [
+        {"email": "finance@example.com", "name": None},
+        {"email": "ops@example.com", "name": None},
+    ]
+    assert inferred["bcc_recipients"] == [{"email": "audit@example.com", "name": None}]
+    assert inferred["subject"] == "Budget update"
 
 
 @pytest.mark.asyncio
@@ -444,6 +575,13 @@ async def test_email_agent_reason_read_goal_falls_back_to_recent_threads_when_me
     )
 
     class FakeMailClient:
+        base_url = "http://cosmic-mail.local"
+        api_token = "mail-token"
+        timeout_sec = 20.0
+
+        async def aclose(self):
+            return None
+
         async def search_threads(self, *, query, mailbox_id=None, per_page=25):
             assert "replied" in query.casefold()
             return []
@@ -544,6 +682,9 @@ async def test_email_agent_resolve_mailbox_falls_back_to_first_active_mailbox() 
         base_url = "http://cosmic-mail.local"
         api_token = "mail-token"
         timeout_sec = 20.0
+
+        async def aclose(self):
+            return None
 
         async def list_mailboxes(self):
             return [

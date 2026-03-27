@@ -329,9 +329,20 @@ class EmailAgent(AgentRuntime):
         context_brief = self._optional_text(task.input, "context_brief")
         draft_seed = self._optional_text(task.input, "draft_seed")
         recipients = self._normalize_recipient_list(task.input.get("to_recipients"))
+        cc_recipients = self._normalize_recipient_list(task.input.get("cc_recipients"))
+        bcc_recipients = self._normalize_recipient_list(task.input.get("bcc_recipients"))
         inferred = self._infer_reason_goal_hints(goal)
         if not recipients:
             recipients = inferred.get("to_recipients") or []
+        if not cc_recipients:
+            cc_recipients = inferred.get("cc_recipients") or []
+        if not bcc_recipients:
+            bcc_recipients = inferred.get("bcc_recipients") or []
+        recipients, cc_recipients, bcc_recipients = self._dedupe_recipient_groups(
+            recipients,
+            cc_recipients,
+            bcc_recipients,
+        )
         if not subject:
             subject = self._safe_text(inferred.get("subject"))
         if not draft_seed:
@@ -346,6 +357,13 @@ class EmailAgent(AgentRuntime):
         if thread_id:
             context = await self._fetch_thread_context(thread_id=thread_id, message_id=message_id)
             if send or draft_seed or self._looks_like_reply(goal):
+                if bcc_recipients:
+                    raise EmailAgentError(
+                        code="INVALID_INPUT",
+                        message="BCC is not currently supported when replying to an existing email thread. Create a new email draft if BCC recipients are required.",
+                        retryable=False,
+                        next_action="escalate",
+                    )
                 drafted = await self._compose_reply(
                     task=task,
                     context=context,
@@ -353,12 +371,27 @@ class EmailAgent(AgentRuntime):
                     context_brief=context_brief,
                     draft_seed=draft_seed,
                     tone_hint=tone_hint,
+                    to_recipients=recipients,
+                    cc_recipients=cc_recipients,
                 )
                 sent_payload = None
                 if send:
+                    mailbox = await self._resolve_mailbox(
+                        mailbox_address=mailbox_address,
+                        mailbox_id=self._optional_text(task.input, "mailbox_id")
+                        or self._safe_text(context.get("thread", {}).get("mailbox_id")),
+                    )
+                    reply_payload: dict[str, Any] = {
+                        "mailbox_id": mailbox["id"],
+                        "text_body": drafted["body"],
+                    }
+                    if recipients:
+                        reply_payload["to_recipients"] = recipients
+                    if cc_recipients:
+                        reply_payload["cc_recipients"] = cc_recipients
                     sent_payload = await self.mail_client.reply_to_thread(
                         thread_id,
-                        {"text_body": drafted["body"]},
+                        reply_payload,
                     )
                     artifacts.append(
                         self._write_json_artifact(
@@ -379,6 +412,9 @@ class EmailAgent(AgentRuntime):
                     "message_id": self._safe_text(sent_payload.get("id")) if isinstance(sent_payload, dict) else None,
                     "draft_id": None,
                     "summary": response,
+                    "to_recipients": recipients,
+                    "cc_recipients": cc_recipients,
+                    "bcc_recipients": [],
                     "search_results": [],
                 }
                 artifacts.append(
@@ -407,9 +443,12 @@ class EmailAgent(AgentRuntime):
                     "message_id": message_id,
                     "draft_id": None,
                     "summary": summary,
+                    "to_recipients": recipients,
+                    "cc_recipients": cc_recipients,
+                    "bcc_recipients": bcc_recipients,
                     "search_results": [],
                 }
-        elif recipients or send or subject or mode_hint == "compose":
+        elif recipients or cc_recipients or bcc_recipients or send or subject or mode_hint == "compose":
             drafted = await self._compose_new_email(
                 task=task,
                 goal=goal,
@@ -417,11 +456,15 @@ class EmailAgent(AgentRuntime):
                 draft_seed=draft_seed,
                 tone_hint=tone_hint,
                 recipients=recipients,
+                cc_recipients=cc_recipients,
+                bcc_recipients=bcc_recipients,
                 subject=subject,
             )
             draft_payload = await self._create_outbound_draft(
                 task=task,
                 recipients=recipients,
+                cc_recipients=cc_recipients,
+                bcc_recipients=bcc_recipients,
                 subject=drafted["subject"],
                 text_body=drafted["body"],
             )
@@ -460,6 +503,9 @@ class EmailAgent(AgentRuntime):
                 "message_id": self._safe_text(sent_payload.get("id")) if isinstance(sent_payload, dict) else None,
                 "draft_id": draft_id or None,
                 "summary": drafted["summary"],
+                "to_recipients": recipients,
+                "cc_recipients": cc_recipients,
+                "bcc_recipients": bcc_recipients,
                 "search_results": [],
             }
         else:
@@ -473,6 +519,9 @@ class EmailAgent(AgentRuntime):
                 "message_id": None,
                 "draft_id": None,
                 "summary": summary,
+                "to_recipients": recipients,
+                "cc_recipients": cc_recipients,
+                "bcc_recipients": bcc_recipients,
                 "search_results": search_results,
             }
 
@@ -491,14 +540,8 @@ class EmailAgent(AgentRuntime):
         if not text:
             return {}
         lowered = text.casefold()
-        email_mentions: list[dict[str, Any]] = []
-        seen_emails: set[str] = set()
-        for match in re.finditer(r"([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})", text):
-            email = self._safe_text(match.group(1)).casefold()
-            if not email or email in seen_emails:
-                continue
-            seen_emails.add(email)
-            email_mentions.append({"email": email, "name": None})
+        recipient_hints = self._infer_recipient_hints(text)
+        email_mentions = recipient_hints["all"]
 
         subject = ""
         body = ""
@@ -575,7 +618,9 @@ class EmailAgent(AgentRuntime):
             "query": text,
         }
         if is_compose:
-            inferred["to_recipients"] = email_mentions
+            inferred["to_recipients"] = recipient_hints["to"] or email_mentions
+            inferred["cc_recipients"] = recipient_hints["cc"]
+            inferred["bcc_recipients"] = recipient_hints["bcc"]
             inferred["mode"] = "compose"
             inferred["send"] = "send" in lowered and "draft" not in lowered
         return inferred
@@ -859,8 +904,19 @@ class EmailAgent(AgentRuntime):
             temperature=0.2,
         )
         body = generated or reply_template
+        mailbox = await self._resolve_mailbox(
+            mailbox_address=self._optional_text(task.input, "mailbox_address"),
+            mailbox_id=self._optional_text(task.input, "mailbox_id")
+            or self._safe_text(context.get("thread", {}).get("mailbox_id")),
+        )
         try:
-            payload = await self.mail_client.reply_to_thread(thread_id, {"text_body": body})
+            payload = await self.mail_client.reply_to_thread(
+                thread_id,
+                {
+                    "mailbox_id": mailbox["id"],
+                    "text_body": body,
+                },
+            )
         except CosmicMailClientError as exc:
             raise EmailAgentError(
                 code="NETWORK_ERROR" if exc.status_code is None or exc.status_code >= 500 else "AUTH_ERROR",
@@ -884,6 +940,8 @@ class EmailAgent(AgentRuntime):
         context_brief: str | None,
         draft_seed: str | None,
         tone_hint: str | None,
+        to_recipients: list[dict[str, Any]],
+        cc_recipients: list[dict[str, Any]],
     ) -> dict[str, Any]:
         latest_body = self._safe_text(context.get("latest_body"))
         user_message = (
@@ -893,6 +951,8 @@ class EmailAgent(AgentRuntime):
             f"Tone hint: {tone_hint or 'follow the thread tone'}\n"
             f"Context brief: {context_brief or '(none)'}\n"
             f"Draft seed: {draft_seed or '(none)'}\n"
+            f"Explicit reply-to recipients: {self._format_recipients_for_prompt(to_recipients) or '(default thread targets)'}\n"
+            f"Explicit CC recipients: {self._format_recipients_for_prompt(cc_recipients) or '(none)'}\n"
             f"Thread subject: {self._safe_text(context.get('subject'))}\n\n"
             f"Latest inbound message:\n{latest_body[:6000]}"
         )
@@ -926,6 +986,8 @@ class EmailAgent(AgentRuntime):
         draft_seed: str | None,
         tone_hint: str | None,
         recipients: list[dict[str, Any]],
+        cc_recipients: list[dict[str, Any]],
+        bcc_recipients: list[dict[str, Any]],
         subject: str | None,
     ) -> dict[str, Any]:
         payload = await invoke_email_mimo_json(
@@ -940,7 +1002,9 @@ class EmailAgent(AgentRuntime):
                 f"Tone hint: {tone_hint or '(none)'}\n"
                 f"Context brief: {context_brief or '(none)'}\n"
                 f"Draft seed: {draft_seed or '(none)'}\n"
-                f"Recipient count: {len(recipients)}\n"
+                f"To recipients: {self._format_recipients_for_prompt(recipients) or '(none)'}\n"
+                f"CC recipients: {self._format_recipients_for_prompt(cc_recipients) or '(none)'}\n"
+                f"BCC recipients: {self._format_recipients_for_prompt(bcc_recipients) or '(none)'}\n"
                 f"Requested subject: {subject or '(none)'}"
             ),
             task_id=task.task_id,
@@ -998,6 +1062,8 @@ class EmailAgent(AgentRuntime):
         *,
         task: TaskEnvelope,
         recipients: list[dict[str, Any]],
+        cc_recipients: list[dict[str, Any]],
+        bcc_recipients: list[dict[str, Any]],
         subject: str,
         text_body: str,
     ) -> dict[str, Any]:
@@ -1011,6 +1077,8 @@ class EmailAgent(AgentRuntime):
                     "mailbox_id": mailbox["id"],
                     "subject": subject,
                     "to_recipients": recipients,
+                    "cc_recipients": cc_recipients,
+                    "bcc_recipients": bcc_recipients,
                     "text_body": text_body,
                 }
             )
@@ -1714,6 +1782,138 @@ class EmailAgent(AgentRuntime):
                 continue
             recipients.append({"email": email, "name": self._safe_text(item.get("name")) or None})
         return recipients
+
+    def _dedupe_recipient_groups(
+        self,
+        to_recipients: list[dict[str, Any]],
+        cc_recipients: list[dict[str, Any]],
+        bcc_recipients: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        seen: set[str] = set()
+
+        def _dedupe(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            normalized_items: list[dict[str, Any]] = []
+            for item in items:
+                email = self._safe_text(item.get("email")).casefold()
+                if not email or email in seen:
+                    continue
+                seen.add(email)
+                normalized_items.append(
+                    {
+                        "email": self._safe_text(item.get("email")),
+                        "name": self._safe_text(item.get("name")) or None,
+                    }
+                )
+            return normalized_items
+
+        return (
+            _dedupe(to_recipients),
+            _dedupe(cc_recipients),
+            _dedupe(bcc_recipients),
+        )
+
+    def _infer_recipient_hints(self, text: str) -> dict[str, list[dict[str, Any]]]:
+        normalized = self._safe_text(text)
+        if not normalized:
+            return {"to": [], "cc": [], "bcc": [], "all": []}
+
+        email_pattern = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.IGNORECASE)
+        to_recipients: list[dict[str, Any]] = []
+        cc_recipients: list[dict[str, Any]] = []
+        bcc_recipients: list[dict[str, Any]] = []
+        all_recipients: list[dict[str, Any]] = []
+
+        def _recipients_from_segment(segment: str) -> list[dict[str, Any]]:
+            items: list[dict[str, Any]] = []
+            for segment_match in email_pattern.finditer(segment):
+                email = self._safe_text(segment_match.group(0))
+                if email:
+                    items.append({"email": email, "name": None})
+            return items
+
+        def _last_keyword_position(prefix: str, patterns: tuple[str, ...]) -> int:
+            last = -1
+            for pattern in patterns:
+                for match in re.finditer(pattern, prefix, re.IGNORECASE):
+                    last = max(last, match.start())
+            return last
+
+        stop_markers = r"(?=(?:\bbcc\b|\bcc\b|\bwith\s+subject\b|\bsubject\b|\bbody\b|\bthe\s+following\s+content\b|\bsomething\s+like\b|$))"
+        segment_patterns = (
+            ("bcc", rf"\bbcc\b\s*:?\s*(?P<segment>.+?){stop_markers}"),
+            ("cc", rf"\bcc\b\s*:?\s*(?P<segment>.+?){stop_markers}"),
+            (
+                "to",
+                rf"(?:\bsend(?:\s+an?\s+email)?\s+to\b|\bemail\s+to\b|\bwrite(?:\s+an?\s+email)?\s+to\b|\bto\b)\s*(?P<segment>.+?){stop_markers}",
+            ),
+        )
+        classified_emails: set[str] = set()
+        for label, pattern in segment_patterns:
+            for segment_match in re.finditer(pattern, normalized, re.IGNORECASE | re.DOTALL):
+                recipients = _recipients_from_segment(self._safe_text(segment_match.group("segment")))
+                for recipient in recipients:
+                    email_key = self._safe_text(recipient.get("email")).casefold()
+                    if not email_key or email_key in classified_emails:
+                        continue
+                    classified_emails.add(email_key)
+                    if label == "bcc":
+                        bcc_recipients.append(recipient)
+                    elif label == "cc":
+                        cc_recipients.append(recipient)
+                    else:
+                        to_recipients.append(recipient)
+
+        for match in email_pattern.finditer(normalized):
+            email = self._safe_text(match.group(0))
+            if not email:
+                continue
+            recipient = {"email": email, "name": None}
+            all_recipients.append(recipient)
+            email_key = email.casefold()
+            if email_key in classified_emails:
+                continue
+            prefix = normalized[max(0, match.start() - 96) : match.start()]
+            clause = re.split(r"[\n.;]", prefix)[-1]
+            bcc_pos = _last_keyword_position(clause, (r"\bbcc\b", r"\bblind carbon copy\b"))
+            cc_pos = _last_keyword_position(clause, (r"\bcc\b", r"\bcarbon copy\b"))
+            to_pos = _last_keyword_position(
+                clause,
+                (
+                    r"\bsend(?:\s+an?\s+email)?\s+to\b",
+                    r"\bemail\s+to\b",
+                    r"\bwrite(?:\s+an?\s+email)?\s+to\b",
+                    r"\bto\b",
+                ),
+            )
+            if bcc_pos >= cc_pos and bcc_pos >= to_pos and bcc_pos >= 0:
+                bcc_recipients.append(recipient)
+            elif cc_pos >= bcc_pos and cc_pos >= to_pos and cc_pos >= 0:
+                cc_recipients.append(recipient)
+            else:
+                to_recipients.append(recipient)
+
+        to_recipients, cc_recipients, bcc_recipients = self._dedupe_recipient_groups(
+            to_recipients,
+            cc_recipients,
+            bcc_recipients,
+        )
+        all_recipients, _, _ = self._dedupe_recipient_groups(all_recipients, [], [])
+        return {
+            "to": to_recipients,
+            "cc": cc_recipients,
+            "bcc": bcc_recipients,
+            "all": all_recipients,
+        }
+
+    def _format_recipients_for_prompt(self, recipients: list[dict[str, Any]]) -> str:
+        parts: list[str] = []
+        for item in recipients:
+            email = self._safe_text(item.get("email"))
+            if not email:
+                continue
+            name = self._safe_text(item.get("name"))
+            parts.append(f"{name} <{email}>" if name else email)
+        return ", ".join(parts)
 
     def _looks_like_reply(self, goal: str) -> bool:
         lowered = (goal or "").strip().casefold()

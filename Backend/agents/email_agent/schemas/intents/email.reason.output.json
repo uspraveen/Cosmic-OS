@@ -9,6 +9,9 @@
     "message_id": { "type": ["string", "null"] },
     "draft_id": { "type": ["string", "null"] },
     "summary": { "type": ["string", "null"] },
+    "to_recipients": { "type": "array", "items": { "type": "object" } },
+    "cc_recipients": { "type": "array", "items": { "type": "object" } },
+    "bcc_recipients": { "type": "array", "items": { "type": "object" } },
     "search_results": { "type": "array", "items": { "type": "object" } }
   },
   "required": ["response", "action"]

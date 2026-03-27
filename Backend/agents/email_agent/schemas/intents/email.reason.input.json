@@ -24,6 +24,28 @@
         "required": ["email"]
       }
     },
+    "cc_recipients": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "email": { "type": "string", "minLength": 3 },
+          "name": { "type": ["string", "null"] }
+        },
+        "required": ["email"]
+      }
+    },
+    "bcc_recipients": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "email": { "type": "string", "minLength": 3 },
+          "name": { "type": ["string", "null"] }
+        },
+        "required": ["email"]
+      }
+    },
     "request_id": { "type": "string", "minLength": 1 }
   },
   "required": ["goal"]
