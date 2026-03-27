@@ -93,3 +93,47 @@ async def test_cosmic_mail_client_updates_and_deletes_webhooks() -> None:
         ),
         ("DELETE", "/v1/webhooks/wh_123", None),
     ]
+
+
+@pytest.mark.asyncio
+async def test_cosmic_mail_client_creates_organization_api_key() -> None:
+    seen: list[tuple[str, str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode("utf-8") if request.content else None
+        seen.append((request.method, request.url.path, body))
+        return httpx.Response(
+            201,
+            json={
+                "api_key": {
+                    "id": "key_123",
+                    "organization_id": "org_123",
+                    "name": "COSMIC Gateway Agent Email",
+                    "key_prefix": "cm_org_123",
+                    "last_used_at": None,
+                    "created_at": "2026-03-27T00:00:00Z",
+                    "revoked_at": None,
+                },
+                "plaintext_key": "cm_org_secret",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        cosmic = CosmicMailClient(
+            base_url="https://console.thelearnchain.com",
+            api_token="token",
+            client=client,
+        )
+        payload = await cosmic.create_organization_api_key(
+            "org_123",
+            name="COSMIC Gateway Agent Email",
+        )
+
+    assert payload["plaintext_key"] == "cm_org_secret"
+    assert seen == [
+        (
+            "POST",
+            "/v1/organizations/org_123/api-keys",
+            '{"name":"COSMIC Gateway Agent Email"}',
+        )
+    ]

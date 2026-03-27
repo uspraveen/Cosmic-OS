@@ -40,6 +40,24 @@ class CosmicMailClient:
     async def get_auth_context(self) -> dict[str, Any]:
         return await self._request_json("GET", "/v1/system/auth-context")
 
+    async def create_organization_api_key(
+        self,
+        organization_id: str,
+        *,
+        name: str,
+    ) -> dict[str, Any]:
+        normalized = str(organization_id or "").strip()
+        key_name = str(name or "").strip()
+        if not normalized:
+            raise ValueError("organization_id is required")
+        if not key_name:
+            raise ValueError("name is required")
+        return await self._request_json(
+            "POST",
+            f"/v1/organizations/{normalized}/api-keys",
+            json_body={"name": key_name},
+        )
+
     async def list_mailboxes(self, *, page: int = 1, per_page: int = 200) -> list[dict[str, Any]]:
         payload = await self._request_payload(
             "GET",

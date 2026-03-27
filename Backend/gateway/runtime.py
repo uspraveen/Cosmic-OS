@@ -86,6 +86,7 @@ from shared import (
 )
 
 logger = logging.getLogger(__name__)
+_AGENT_EMAIL_ORG_API_KEY_NAME = "COSMIC Gateway Agent Email"
 
 CHANNEL_WELCOME_MESSAGES = {
     "whatsapp": "COSMIC is connected on WhatsApp. You can message me here anytime.",
@@ -692,35 +693,24 @@ class GatewayRuntime:
         if not normalized_base_url or not normalized_api_token:
             raise ValueError("base_url and api_token are required")
 
-        client = AgentEmailAdapter(
-            cosmic_mail_base_url=normalized_base_url,
-            cosmic_mail_api_token=normalized_api_token,
-            timeout_sec=self.config.cosmic_mail_timeout_sec,
+        effective = await self._prepare_agent_email_connection_settings(
+            base_url=normalized_base_url,
+            api_token=normalized_api_token,
             primary_mailbox_address=normalized_mailbox,
+        )
+        self.agent_email_integration_store.save_primary(
+            base_url=effective["base_url"],
+            api_token=effective["api_token"],
+            primary_mailbox_address=effective["primary_mailbox_address"],
             webhook_secret=self.config.cosmic_mail_webhook_secret,
             webhook_signature_header=self.config.cosmic_mail_webhook_signature_header,
+            updated_at=utcnow_iso(),
         )
-        try:
-            await client.start()
-            if not normalized_mailbox:
-                mail_status = await client.get_status()
-                primary_mailbox = mail_status.get("primary_mailbox") if isinstance(mail_status, dict) else None
-                if isinstance(primary_mailbox, dict):
-                    normalized_mailbox = self._safe_text(primary_mailbox.get("address"))
-            self.agent_email_integration_store.save_primary(
-                base_url=normalized_base_url,
-                api_token=normalized_api_token,
-                primary_mailbox_address=normalized_mailbox,
-                webhook_secret=self.config.cosmic_mail_webhook_secret,
-                webhook_signature_header=self.config.cosmic_mail_webhook_signature_header,
-                updated_at=utcnow_iso(),
-            )
-        finally:
-            await client.stop()
         await self.reconcile_agent_email_adapter()
         webhook = await self.sync_agent_email_webhook()
         status = await self.get_agent_email_connection_status()
         status["webhook"] = webhook
+        status["token_scope"] = effective.get("token_scope")
         return status
 
     async def clear_agent_email_connection(self) -> dict[str, Any]:
@@ -6935,6 +6925,70 @@ class GatewayRuntime:
         pool = active_mailboxes or mailboxes
         return pool[0] if pool else None
 
+    async def _prepare_agent_email_connection_settings(
+        self,
+        *,
+        base_url: str,
+        api_token: str,
+        primary_mailbox_address: str | None,
+    ) -> dict[str, Any]:
+        normalized_base_url = normalize_cosmic_mail_base_url(base_url)
+        normalized_api_token = self._safe_text(api_token)
+        normalized_mailbox = self._safe_text(primary_mailbox_address)
+        if not normalized_base_url or not normalized_api_token:
+            raise ValueError("base_url and api_token are required")
+
+        client = CosmicMailClient(
+            base_url=normalized_base_url,
+            api_token=normalized_api_token,
+            timeout_sec=self.config.cosmic_mail_timeout_sec,
+        )
+        try:
+            auth_context = await client.get_auth_context()
+            mailbox = await self._resolve_agent_email_webhook_mailbox(
+                client,
+                mailbox_address=normalized_mailbox,
+            )
+            if not isinstance(mailbox, dict):
+                raise ValueError("No active Cosmic Mail mailbox is available for Agent Email.")
+            mailbox_address = self._safe_text(mailbox.get("address"))
+            if mailbox_address:
+                normalized_mailbox = mailbox_address
+            organization_id = (
+                self._safe_text(auth_context.get("organization_id"))
+                or self._safe_text(mailbox.get("organization_id"))
+            )
+            effective_api_token = normalized_api_token
+            token_scope = (
+                "organization"
+                if self._safe_text(auth_context.get("organization_id"))
+                else "admin"
+                if bool(auth_context.get("is_admin"))
+                else "unknown"
+            )
+            if token_scope == "admin":
+                if not organization_id:
+                    raise ValueError("Could not resolve the mailbox organization for Agent Email.")
+                minted = await client.create_organization_api_key(
+                    organization_id,
+                    name=_AGENT_EMAIL_ORG_API_KEY_NAME,
+                )
+                minted_token = self._safe_text(minted.get("plaintext_key"))
+                if not minted_token:
+                    raise ValueError("Cosmic Mail did not return a plaintext org API key.")
+                effective_api_token = minted_token
+                token_scope = "organization_minted"
+            return {
+                "base_url": normalized_base_url,
+                "api_token": effective_api_token,
+                "primary_mailbox_address": normalized_mailbox,
+                "mailbox_id": self._safe_text(mailbox.get("id")),
+                "organization_id": organization_id,
+                "token_scope": token_scope,
+            }
+        finally:
+            await client.aclose()
+
     def _is_managed_agent_email_webhook(
         self,
         webhook: dict[str, Any],
@@ -6951,6 +7005,40 @@ class GatewayRuntime:
         webhook_url = self._agent_email_webhook_url()
         if not webhook_url:
             return {"status": "skipped", "reason": "gateway_public_url_missing"}
+
+        effective = await self._prepare_agent_email_connection_settings(
+            base_url=str(settings["base_url"]),
+            api_token=str(settings["api_token"]),
+            primary_mailbox_address=settings.get("primary_mailbox_address"),
+        )
+        if (
+            str(effective["api_token"]) != str(settings["api_token"])
+            or str(effective["primary_mailbox_address"] or "")
+            != str(settings.get("primary_mailbox_address") or "")
+        ) and settings.get("source") == "integration_store":
+            self.agent_email_integration_store.save_primary(
+                base_url=str(effective["base_url"]),
+                api_token=str(effective["api_token"]),
+                primary_mailbox_address=effective.get("primary_mailbox_address"),
+                webhook_secret=self.config.cosmic_mail_webhook_secret,
+                webhook_signature_header=self.config.cosmic_mail_webhook_signature_header,
+                updated_at=utcnow_iso(),
+            )
+            settings = {
+                **settings,
+                "api_token": str(effective["api_token"]),
+                "primary_mailbox_address": str(
+                    effective.get("primary_mailbox_address") or ""
+                ),
+            }
+        else:
+            settings = {
+                **settings,
+                "api_token": str(effective["api_token"]),
+                "primary_mailbox_address": str(
+                    effective.get("primary_mailbox_address") or ""
+                ),
+            }
 
         client = CosmicMailClient(
             base_url=settings["base_url"],
