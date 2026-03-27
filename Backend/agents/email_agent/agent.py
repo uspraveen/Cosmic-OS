@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -16,9 +17,14 @@ from shared import (
     CosmicMailClientError,
     agent_email_integration_is_disabled,
     agent_email_integration_is_configured,
+    dispatch_task,
+    generate_task_id,
+    is_supported_document_artifact,
+    parse_event_envelope,
+    sign_task_envelope,
 )
 from shared.agent_runtime import AgentRuntime
-from shared.contracts import AgentError, AgentResult, ArtifactManifest, TaskEnvelope
+from shared.contracts import AgentError, AgentResult, ArtifactManifest, TaskEnvelope, utcnow
 from shared.sqlite_client import connect_sync
 
 from .config import AGENT_ROOT, BACKEND_ROOT, EmailAgentConfig
@@ -57,6 +63,51 @@ CREATE TABLE IF NOT EXISTS email_instructions (
 );
 CREATE INDEX IF NOT EXISTS idx_email_instructions_mailbox
 ON email_instructions (mailbox_address, enabled);
+
+CREATE TABLE IF NOT EXISTS email_attachment_records (
+    record_id TEXT PRIMARY KEY,
+    mailbox_address TEXT,
+    thread_id TEXT,
+    message_id TEXT NOT NULL,
+    attachment_id TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    mime_type TEXT,
+    size_bytes INTEGER,
+    sha256 TEXT,
+    artifact_id TEXT,
+    local_path TEXT,
+    download_status TEXT NOT NULL DEFAULT 'unknown',
+    parse_status TEXT NOT NULL DEFAULT 'not_applicable',
+    parse_task_id TEXT,
+    parsed_bundle_id TEXT,
+    parsed_summary_json TEXT,
+    parse_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(message_id, attachment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_email_attachment_records_thread_message
+ON email_attachment_records (thread_id, message_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_email_attachment_records_sha256
+ON email_attachment_records (sha256, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_email_attachment_records_parse_status
+ON email_attachment_records (parse_status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS email_attachment_parse_runs (
+    parse_run_id TEXT PRIMARY KEY,
+    record_id TEXT NOT NULL,
+    parse_task_id TEXT,
+    status TEXT NOT NULL,
+    parsed_bundle_id TEXT,
+    parsed_summary_json TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_email_attachment_parse_runs_record_created
+ON email_attachment_parse_runs (record_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_email_attachment_parse_runs_task
+ON email_attachment_parse_runs (parse_task_id, updated_at DESC);
 """
 
 
@@ -113,6 +164,7 @@ class EmailAgent(AgentRuntime):
             gateway_internal_token=self.config.gateway_internal_token,
             http_client=http_client,
         )
+        self._background_jobs: set[asyncio.Task[Any]] = set()
         self.mail_client = CosmicMailClient(
             base_url=self.config.cosmic_mail_base_url,
             api_token=self.config.cosmic_mail_api_token,
@@ -129,6 +181,14 @@ class EmailAgent(AgentRuntime):
         await self._refresh_mail_client_from_store()
         if self.config.cosmic_mail_base_url and self.config.cosmic_mail_api_token:
             await self.mail_client.get_auth_context()
+
+    async def stop(self) -> None:
+        for job in list(self._background_jobs):
+            job.cancel()
+        if self._background_jobs:
+            await asyncio.gather(*self._background_jobs, return_exceptions=True)
+        self._background_jobs.clear()
+        await super().stop()
 
     def _init_db(self) -> None:
         with connect_sync(self.session_db_path) as conn:
@@ -243,7 +303,14 @@ class EmailAgent(AgentRuntime):
         mailbox_address = self._optional_text(task.input, "mailbox_address")
 
         context = await self._fetch_thread_context(thread_id=thread_id, message_id=message_id)
-        attachments = await self._download_message_attachments(task, message_id=message_id)
+        attachments, attachment_artifacts = await self._download_message_attachments(task, message_id=message_id)
+        attachments = await self._reconcile_inbound_attachments(
+            task,
+            mailbox_address=mailbox_address,
+            thread_id=thread_id,
+            message_id=message_id,
+            attachments=attachments,
+        )
         matched_instruction = self._match_instruction(
             mailbox_address=mailbox_address,
             from_address=self._thread_sender(context),
@@ -256,6 +323,7 @@ class EmailAgent(AgentRuntime):
             matched_instruction=matched_instruction,
             operation="email.internal_llm.process_inbound",
         )
+        summary = self._augment_thread_summary_with_attachments(summary=summary, attachments=attachments)
         auto_reply = None
         if matched_instruction and self._instruction_mode(matched_instruction) == "auto_reply":
             auto_reply = await self._apply_auto_reply(task, context=context, instruction=matched_instruction)
@@ -270,11 +338,22 @@ class EmailAgent(AgentRuntime):
                 audience="supporting",
             )
         ]
+        artifacts.extend(attachment_artifacts)
         if attachments:
             artifacts.append(
                 self._write_json_artifact(
                     task_id=task.task_id,
                     name="downloaded_attachments.json",
+                    payload={"attachments": attachments},
+                    mime="application/json",
+                    kind="intermediate",
+                    audience="supporting",
+                )
+            )
+            artifacts.append(
+                self._write_json_artifact(
+                    task_id=task.task_id,
+                    name="attachment_parse_results.json",
                     payload={"attachments": attachments},
                     mime="application/json",
                     kind="intermediate",
@@ -328,6 +407,8 @@ class EmailAgent(AgentRuntime):
         tone_hint = self._optional_text(task.input, "tone_hint")
         context_brief = self._optional_text(task.input, "context_brief")
         draft_seed = self._optional_text(task.input, "draft_seed")
+        attachment_id = self._optional_text(task.input, "attachment_id")
+        attachment_name = self._optional_text(task.input, "attachment_name")
         recipients = self._normalize_recipient_list(task.input.get("to_recipients"))
         cc_recipients = self._normalize_recipient_list(task.input.get("cc_recipients"))
         bcc_recipients = self._normalize_recipient_list(task.input.get("bcc_recipients"))
@@ -353,6 +434,54 @@ class EmailAgent(AgentRuntime):
             send = bool(inferred.get("send"))
         mode_hint = self._safe_text(inferred.get("mode")).lower()
         artifacts: list[ArtifactManifest] = []
+        default_docs_tools: list[str] = []
+
+        if (thread_id or message_id) and self._looks_like_attachment_goal(goal, attachment_name=attachment_name):
+            resolution = await self._resolve_attachment_for_reason(
+                task=task,
+                goal=goal,
+                thread_id=thread_id,
+                message_id=message_id,
+                mailbox_address=mailbox_address,
+                attachment_id=attachment_id,
+                attachment_name=attachment_name,
+            )
+            artifacts.append(
+                self._write_json_artifact(
+                    task_id=task.task_id,
+                    name="attachment_resolution.json",
+                    payload=resolution,
+                    mime="application/json",
+                    kind="intermediate",
+                    audience="supporting",
+                )
+            )
+            output = {
+                "response": self._format_attachment_resolution_response(resolution),
+                "action": "resolve_attachment",
+                "sent": False,
+                "thread_id": self._safe_text(resolution.get("thread_id")) or thread_id,
+                "message_id": self._safe_text(resolution.get("message_id")) or message_id,
+                "draft_id": None,
+                "summary": self._format_attachment_resolution_response(resolution),
+                "to_recipients": recipients,
+                "cc_recipients": cc_recipients,
+                "bcc_recipients": bcc_recipients,
+                "search_results": [],
+                "bundle_id": self._safe_text(resolution.get("bundle_id")) or None,
+                "docs_tools": resolution.get("docs_tools") if isinstance(resolution.get("docs_tools"), list) else [],
+                "resolved_attachment": resolution,
+                "attachment_resolution_status": self._safe_text(resolution.get("attachment_resolution_status")) or None,
+            }
+            self._record_session_run(
+                task=task,
+                intent=self.REASON,
+                mailbox_address=mailbox_address,
+                thread_id=self._safe_text(output.get("thread_id")) or thread_id,
+                message_id=self._safe_text(output.get("message_id")) or message_id,
+                summary=output,
+            )
+            return AgentResult(status="completed", output=output, artifacts=artifacts, error=None)
 
         if thread_id:
             context = await self._fetch_thread_context(thread_id=thread_id, message_id=message_id)
@@ -416,6 +545,10 @@ class EmailAgent(AgentRuntime):
                     "cc_recipients": cc_recipients,
                     "bcc_recipients": [],
                     "search_results": [],
+                    "bundle_id": None,
+                    "docs_tools": default_docs_tools,
+                    "resolved_attachment": None,
+                    "attachment_resolution_status": None,
                 }
                 artifacts.append(
                     self._write_json_artifact(
@@ -447,6 +580,10 @@ class EmailAgent(AgentRuntime):
                     "cc_recipients": cc_recipients,
                     "bcc_recipients": bcc_recipients,
                     "search_results": [],
+                    "bundle_id": None,
+                    "docs_tools": default_docs_tools,
+                    "resolved_attachment": None,
+                    "attachment_resolution_status": None,
                 }
         elif recipients or cc_recipients or bcc_recipients or send or subject or mode_hint == "compose":
             drafted = await self._compose_new_email(
@@ -507,6 +644,10 @@ class EmailAgent(AgentRuntime):
                 "cc_recipients": cc_recipients,
                 "bcc_recipients": bcc_recipients,
                 "search_results": [],
+                "bundle_id": None,
+                "docs_tools": default_docs_tools,
+                "resolved_attachment": None,
+                "attachment_resolution_status": None,
             }
         else:
             search_results = await self._search_email(task=task, goal=goal, query=query, mailbox_address=mailbox_address)
@@ -523,6 +664,10 @@ class EmailAgent(AgentRuntime):
                 "cc_recipients": cc_recipients,
                 "bcc_recipients": bcc_recipients,
                 "search_results": search_results,
+                "bundle_id": None,
+                "docs_tools": default_docs_tools,
+                "resolved_attachment": None,
+                "attachment_resolution_status": None,
             }
 
         self._record_session_run(
@@ -759,13 +904,19 @@ class EmailAgent(AgentRuntime):
             "latest_body": latest_body,
         }
 
-    async def _download_message_attachments(self, task: TaskEnvelope, *, message_id: str) -> list[dict[str, Any]]:
+    async def _download_message_attachments(
+        self,
+        task: TaskEnvelope,
+        *,
+        message_id: str,
+    ) -> tuple[list[dict[str, Any]], list[ArtifactManifest]]:
         try:
             attachments = await self.mail_client.list_message_attachments(message_id)
         except CosmicMailClientError as exc:
             logger.warning("email_agent.list_attachments_failed message_id=%s error=%s", message_id, exc)
-            return []
+            return [], []
         downloaded: list[dict[str, Any]] = []
+        manifests: list[ArtifactManifest] = []
         for item in attachments[: self.config.max_attachment_downloads]:
             attachment_id = self._safe_text(item.get("id"))
             if not attachment_id:
@@ -780,6 +931,7 @@ class EmailAgent(AgentRuntime):
                         "size_bytes": size_bytes,
                         "downloaded": False,
                         "reason": "too_large",
+                        "parse_status": "skipped_too_large",
                     }
                 )
                 continue
@@ -794,12 +946,14 @@ class EmailAgent(AgentRuntime):
                         "size_bytes": size_bytes,
                         "downloaded": False,
                         "reason": exc.message,
+                        "parse_status": "download_failed",
                     }
                 )
                 continue
-            target_dir = self._task_artifact_dir(task.task_id) / "attachments"
+            target_dir = self._task_artifact_dir(task.task_id) / "attachments" / self._safe_filename(message_id)
             target_dir.mkdir(parents=True, exist_ok=True)
-            safe_name = self._safe_filename(filename or item.get("filename") or f"{attachment_id}.bin")
+            original_name = self._safe_filename(filename or item.get("filename") or f"{attachment_id}.bin")
+            safe_name = f"{self._safe_filename(attachment_id)}__{original_name}"
             target_path = target_dir / safe_name
             target_path.write_bytes(content)
             manifest = self._artifact_manifest(
@@ -809,18 +963,1206 @@ class EmailAgent(AgentRuntime):
                 kind="input",
                 audience="supporting",
             )
+            manifests.append(manifest)
             downloaded.append(
                 {
                     "id": attachment_id,
-                    "filename": safe_name,
+                    "filename": original_name,
+                    "stored_filename": safe_name,
                     "mime_type": manifest.mime,
                     "size_bytes": len(content),
                     "downloaded": True,
                     "artifact_id": manifest.artifact_id,
                     "path": manifest.path,
+                    "sha256": manifest.sha256,
+                    "parse_status": "queued",
                 }
             )
-        return downloaded
+        return downloaded, manifests
+
+    async def _reconcile_inbound_attachments(
+        self,
+        task: TaskEnvelope,
+        *,
+        mailbox_address: str | None,
+        thread_id: str,
+        message_id: str,
+        attachments: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        parseable: list[dict[str, Any]] = []
+        docs_tools = ["docs_browse", "docs_search", "docs_read", "docs_fetch_asset", "docs_reinspect_asset"]
+
+        for raw_attachment in attachments:
+            if not isinstance(raw_attachment, dict):
+                continue
+            attachment = dict(raw_attachment)
+            attachment_id = self._safe_text(attachment.get("id"))
+            if not attachment_id:
+                continue
+            attachment["thread_id"] = thread_id
+            attachment["message_id"] = message_id
+            attachment["mailbox_address"] = mailbox_address
+            attachment["parse_cached"] = False
+            record_id = self._attachment_record_id(message_id=message_id, attachment_id=attachment_id)
+            attachment["attachment_record_id"] = record_id
+
+            if not attachment.get("downloaded"):
+                parse_status = self._safe_text(attachment.get("parse_status")) or "not_downloaded"
+                attachment["parse_status"] = parse_status
+                self._upsert_attachment_record(
+                    record_id=record_id,
+                    mailbox_address=mailbox_address,
+                    thread_id=thread_id,
+                    message_id=message_id,
+                    attachment=attachment,
+                    download_status=parse_status,
+                    parse_status=parse_status,
+                )
+                normalized.append(attachment)
+                continue
+
+            if not is_supported_document_artifact(attachment):
+                attachment["parse_status"] = "skipped_unsupported"
+                self._upsert_attachment_record(
+                    record_id=record_id,
+                    mailbox_address=mailbox_address,
+                    thread_id=thread_id,
+                    message_id=message_id,
+                    attachment=attachment,
+                    download_status="downloaded",
+                    parse_status="skipped_unsupported",
+                )
+                normalized.append(attachment)
+                continue
+
+            cached = self._find_cached_attachment_parse(attachment=attachment)
+            if cached:
+                parsed_summary = cached.get("parsed_summary") if isinstance(cached.get("parsed_summary"), dict) else None
+                attachment["parse_status"] = "parsed"
+                attachment["parse_cached"] = True
+                attachment["parse_task_id"] = cached.get("parse_task_id")
+                attachment["parsed_bundle_id"] = cached.get("parsed_bundle_id")
+                attachment["parsed_summary"] = parsed_summary
+                attachment["docs_tools"] = docs_tools
+                self._upsert_attachment_record(
+                    record_id=record_id,
+                    mailbox_address=mailbox_address,
+                    thread_id=thread_id,
+                    message_id=message_id,
+                    attachment=attachment,
+                    download_status="downloaded",
+                    parse_status="parsed",
+                    parse_task_id=self._safe_text(cached.get("parse_task_id")) or None,
+                    parsed_bundle_id=self._safe_text(cached.get("parsed_bundle_id")) or None,
+                    parsed_summary=parsed_summary,
+                    parse_error=None,
+                )
+                self._record_attachment_parse_run(
+                    record_id=record_id,
+                    parse_task_id=self._safe_text(cached.get("parse_task_id")) or None,
+                    status="cached",
+                    parsed_bundle_id=self._safe_text(cached.get("parsed_bundle_id")) or None,
+                    parsed_summary=parsed_summary,
+                    error_message=None,
+                )
+                normalized.append(attachment)
+                continue
+
+            attachment["parse_status"] = "queued"
+            self._upsert_attachment_record(
+                record_id=record_id,
+                mailbox_address=mailbox_address,
+                thread_id=thread_id,
+                message_id=message_id,
+                attachment=attachment,
+                download_status="downloaded",
+                parse_status="queued",
+            )
+            parseable.append(attachment)
+            normalized.append(attachment)
+
+        if not parseable or not self.config.attachment_docs_auto_parse_enabled:
+            if parseable and not self.config.attachment_docs_auto_parse_enabled:
+                for attachment in parseable:
+                    attachment["parse_status"] = "parse_disabled"
+                    self._upsert_attachment_record(
+                        record_id=self._safe_text(attachment.get("attachment_record_id")),
+                        mailbox_address=mailbox_address,
+                        thread_id=thread_id,
+                        message_id=message_id,
+                        attachment=attachment,
+                        download_status="downloaded",
+                        parse_status="parse_disabled",
+                    )
+            return normalized
+
+        parse_result = await self._dispatch_docs_parse_bundle(
+            task=task,
+            thread_id=thread_id,
+            message_id=message_id,
+            input_artifacts=[
+                {
+                    "artifact_id": self._safe_text(item.get("artifact_id")),
+                    "path": self._safe_text(item.get("path")),
+                    "mime": self._safe_text(item.get("mime_type")),
+                    "filename": self._safe_text(item.get("filename")),
+                    "sha256": self._safe_text(item.get("sha256")),
+                }
+                for item in parseable
+            ],
+        )
+        status = self._safe_text(parse_result.get("status")) or "failed"
+        parse_task_id = self._safe_text(parse_result.get("task_id")) or None
+        if status == "completed":
+            output = parse_result.get("output") if isinstance(parse_result.get("output"), dict) else {}
+            parsed_bundle_id = self._safe_text(output.get("bundle_id")) or None
+            docs_by_artifact_id: dict[str, dict[str, Any]] = {}
+            for item in output.get("documents", []) if isinstance(output.get("documents"), list) else []:
+                if not isinstance(item, dict):
+                    continue
+                artifact_id = self._safe_text(item.get("artifact_id"))
+                if artifact_id:
+                    docs_by_artifact_id[artifact_id] = item
+            for attachment in parseable:
+                artifact_id = self._safe_text(attachment.get("artifact_id"))
+                doc_summary = docs_by_artifact_id.get(artifact_id)
+                if doc_summary is None:
+                    attachment["parse_status"] = "parse_failed"
+                    attachment["parse_error"] = "docs.parse_bundle completed without a document summary for this attachment."
+                    self._upsert_attachment_record(
+                        record_id=self._safe_text(attachment.get("attachment_record_id")),
+                        mailbox_address=mailbox_address,
+                        thread_id=thread_id,
+                        message_id=message_id,
+                        attachment=attachment,
+                        download_status="downloaded",
+                        parse_status="parse_failed",
+                        parse_task_id=parse_task_id,
+                        parse_error=self._safe_text(attachment.get("parse_error")) or None,
+                    )
+                    self._record_attachment_parse_run(
+                        record_id=self._safe_text(attachment.get("attachment_record_id")),
+                        parse_task_id=parse_task_id,
+                        status="failed",
+                        parsed_bundle_id=None,
+                        parsed_summary=None,
+                        error_message=self._safe_text(attachment.get("parse_error")) or None,
+                    )
+                    continue
+                attachment["parse_status"] = "parsed"
+                attachment["parse_task_id"] = parse_task_id
+                attachment["parsed_bundle_id"] = parsed_bundle_id
+                attachment["parsed_summary"] = doc_summary
+                attachment["docs_tools"] = docs_tools
+                self._upsert_attachment_record(
+                    record_id=self._safe_text(attachment.get("attachment_record_id")),
+                    mailbox_address=mailbox_address,
+                    thread_id=thread_id,
+                    message_id=message_id,
+                    attachment=attachment,
+                    download_status="downloaded",
+                    parse_status="parsed",
+                    parse_task_id=parse_task_id,
+                    parsed_bundle_id=parsed_bundle_id,
+                    parsed_summary=doc_summary,
+                    parse_error=None,
+                )
+                self._record_attachment_parse_run(
+                    record_id=self._safe_text(attachment.get("attachment_record_id")),
+                    parse_task_id=parse_task_id,
+                    status="completed",
+                    parsed_bundle_id=parsed_bundle_id,
+                    parsed_summary=doc_summary,
+                    error_message=None,
+                )
+            return normalized
+
+        error_text = self._safe_text(parse_result.get("error_message")) or "docs.parse_bundle failed"
+        failed_status = "parse_pending" if status == "pending" else "parse_failed"
+        for attachment in parseable:
+            attachment["parse_status"] = failed_status
+            attachment["parse_task_id"] = parse_task_id
+            attachment["parse_error"] = error_text
+            self._upsert_attachment_record(
+                record_id=self._safe_text(attachment.get("attachment_record_id")),
+                mailbox_address=mailbox_address,
+                thread_id=thread_id,
+                message_id=message_id,
+                attachment=attachment,
+                download_status="downloaded",
+                parse_status=failed_status,
+                parse_task_id=parse_task_id,
+                parse_error=error_text,
+            )
+            self._record_attachment_parse_run(
+                record_id=self._safe_text(attachment.get("attachment_record_id")),
+                parse_task_id=parse_task_id,
+                status=status,
+                parsed_bundle_id=None,
+                parsed_summary=None,
+                error_message=error_text,
+            )
+        if status == "pending" and parse_task_id:
+            self._track_background_job(
+                self._reconcile_attachment_parse_bundle(
+                    parse_task_id=parse_task_id,
+                    mailbox_address=mailbox_address,
+                    thread_id=thread_id,
+                    message_id=message_id,
+                    attachments=[
+                        {
+                            "attachment_record_id": self._safe_text(item.get("attachment_record_id")),
+                            "artifact_id": self._safe_text(item.get("artifact_id")),
+                        }
+                        for item in parseable
+                    ],
+                )
+            )
+        return normalized
+
+    def _attachment_record_id(self, *, message_id: str, attachment_id: str) -> str:
+        digest = hashlib.sha256(f"{message_id}:{attachment_id}".encode("utf-8")).hexdigest()[:16]
+        return f"ear_{digest}"
+
+    def _upsert_attachment_record(
+        self,
+        *,
+        record_id: str,
+        mailbox_address: str | None,
+        thread_id: str,
+        message_id: str,
+        attachment: dict[str, Any],
+        download_status: str,
+        parse_status: str,
+        parse_task_id: str | None = None,
+        parsed_bundle_id: str | None = None,
+        parsed_summary: dict[str, Any] | None = None,
+        parse_error: str | None = None,
+    ) -> None:
+        attachment_id = self._safe_text(attachment.get("id"))
+        existing_row: tuple[Any, ...] | None = None
+        if record_id and not attachment_id:
+            with connect_sync(self.session_db_path) as conn:
+                existing_row = conn.execute(
+                    """
+                    SELECT attachment_id, filename, mime_type, size_bytes, sha256, artifact_id, local_path
+                    FROM email_attachment_records
+                    WHERE record_id = ?
+                    """,
+                    (record_id,),
+                ).fetchone()
+            if existing_row is not None:
+                attachment_id = self._safe_text(existing_row[0])
+                attachment = {
+                    "id": attachment_id,
+                    "filename": self._safe_text(attachment.get("filename")) or self._safe_text(existing_row[1]),
+                    "mime_type": self._safe_text(attachment.get("mime_type")) or self._safe_text(existing_row[2]),
+                    "size_bytes": self._safe_int(attachment.get("size_bytes")) or self._safe_int(existing_row[3]),
+                    "sha256": self._safe_text(attachment.get("sha256")) or self._safe_text(existing_row[4]),
+                    "artifact_id": self._safe_text(attachment.get("artifact_id")) or self._safe_text(existing_row[5]),
+                    "path": self._safe_text(attachment.get("path")) or self._safe_text(existing_row[6]),
+                }
+        if not record_id or not attachment_id:
+            return
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        with connect_sync(self.session_db_path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO email_attachment_records (
+                    record_id,
+                    mailbox_address,
+                    thread_id,
+                    message_id,
+                    attachment_id,
+                    filename,
+                    mime_type,
+                    size_bytes,
+                    sha256,
+                    artifact_id,
+                    local_path,
+                    download_status,
+                    parse_status,
+                    parse_task_id,
+                    parsed_bundle_id,
+                    parsed_summary_json,
+                    parse_error,
+                    created_at,
+                    updated_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    COALESCE((SELECT created_at FROM email_attachment_records WHERE record_id = ?), ?),
+                    ?
+                )
+                """,
+                (
+                    record_id,
+                    mailbox_address,
+                    thread_id,
+                    message_id,
+                    attachment_id,
+                    self._safe_text(attachment.get("filename")) or f"{attachment_id}.bin",
+                    self._safe_text(attachment.get("mime_type")) or None,
+                    self._safe_int(attachment.get("size_bytes")),
+                    self._safe_text(attachment.get("sha256")) or None,
+                    self._safe_text(attachment.get("artifact_id")) or None,
+                    self._safe_text(attachment.get("path")) or None,
+                    download_status,
+                    parse_status,
+                    parse_task_id,
+                    parsed_bundle_id,
+                    json.dumps(parsed_summary, ensure_ascii=False) if isinstance(parsed_summary, dict) else None,
+                    parse_error,
+                    record_id,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+
+    def _find_cached_attachment_parse(self, *, attachment: dict[str, Any]) -> dict[str, Any] | None:
+        sha256 = self._safe_text(attachment.get("sha256"))
+        attachment_id = self._safe_text(attachment.get("id"))
+        message_id = self._safe_text(attachment.get("message_id"))
+        if not attachment_id:
+            return None
+        row: tuple[Any, ...] | None = None
+        with connect_sync(self.session_db_path) as conn:
+            if sha256:
+                row = conn.execute(
+                    """
+                    SELECT parse_task_id, parsed_bundle_id, parsed_summary_json, parse_status
+                    FROM email_attachment_records
+                    WHERE sha256 = ? AND parse_status = 'parsed' AND parsed_bundle_id IS NOT NULL
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    (sha256,),
+                ).fetchone()
+            if row is None and message_id:
+                row = conn.execute(
+                    """
+                    SELECT parse_task_id, parsed_bundle_id, parsed_summary_json, parse_status
+                    FROM email_attachment_records
+                    WHERE message_id = ? AND attachment_id = ? AND parse_status = 'parsed' AND parsed_bundle_id IS NOT NULL
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    (message_id, attachment_id),
+                ).fetchone()
+        if row is None:
+            return None
+        try:
+            parsed_summary = json.loads(row[2]) if row[2] else None
+        except Exception:
+            parsed_summary = None
+        return {
+            "parse_task_id": row[0],
+            "parsed_bundle_id": row[1],
+            "parsed_summary": parsed_summary if isinstance(parsed_summary, dict) else None,
+            "parse_status": row[3],
+        }
+
+    def _record_attachment_parse_run(
+        self,
+        *,
+        record_id: str | None,
+        parse_task_id: str | None,
+        status: str,
+        parsed_bundle_id: str | None,
+        parsed_summary: dict[str, Any] | None,
+        error_message: str | None,
+    ) -> None:
+        if not record_id:
+            return
+        parse_run_id = f"epr_{uuid4().hex[:12]}"
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        with connect_sync(self.session_db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO email_attachment_parse_runs (
+                    parse_run_id,
+                    record_id,
+                    parse_task_id,
+                    status,
+                    parsed_bundle_id,
+                    parsed_summary_json,
+                    error_message,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    parse_run_id,
+                    record_id,
+                    parse_task_id,
+                    status,
+                    parsed_bundle_id,
+                    json.dumps(parsed_summary, ensure_ascii=False) if isinstance(parsed_summary, dict) else None,
+                    error_message,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+
+    def _track_background_job(self, coro) -> None:
+        job = asyncio.create_task(coro)
+        self._background_jobs.add(job)
+        job.add_done_callback(lambda finished: self._background_jobs.discard(finished))
+
+    async def _reconcile_attachment_parse_bundle(
+        self,
+        *,
+        parse_task_id: str,
+        mailbox_address: str | None,
+        thread_id: str,
+        message_id: str,
+        attachments: list[dict[str, Any]],
+    ) -> None:
+        try:
+            parse_result = await self._wait_for_agent_terminal_result(
+                parse_task_id,
+                timeout_sec=self.config.attachment_docs_parse_reconcile_timeout_sec,
+                poll_interval_sec=self.config.attachment_docs_parse_poll_interval_sec,
+            )
+        except Exception:
+            logger.exception(
+                "email_agent.attachment_parse_reconcile_failed task_id=%s thread_id=%s message_id=%s",
+                parse_task_id,
+                thread_id,
+                message_id,
+            )
+            return
+        status = self._safe_text(parse_result.get("status")) or "failed"
+        if status == "pending":
+            logger.warning(
+                "email_agent.attachment_parse_reconcile_still_pending task_id=%s thread_id=%s message_id=%s",
+                parse_task_id,
+                thread_id,
+                message_id,
+            )
+            return
+        docs_tools = ["docs_browse", "docs_search", "docs_read", "docs_fetch_asset", "docs_reinspect_asset"]
+        output = parse_result.get("output") if isinstance(parse_result.get("output"), dict) else {}
+        parsed_bundle_id = self._safe_text(output.get("bundle_id")) or None
+        docs_by_artifact_id: dict[str, dict[str, Any]] = {}
+        for item in output.get("documents", []) if isinstance(output.get("documents"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            artifact_id = self._safe_text(item.get("artifact_id"))
+            if artifact_id:
+                docs_by_artifact_id[artifact_id] = item
+        error_text = self._safe_text(parse_result.get("error_message")) or "docs.parse_bundle failed"
+        for attachment in attachments:
+            record_id = self._safe_text(attachment.get("attachment_record_id"))
+            artifact_id = self._safe_text(attachment.get("artifact_id"))
+            if not record_id:
+                continue
+            if status == "completed" and artifact_id and artifact_id in docs_by_artifact_id:
+                doc_summary = docs_by_artifact_id[artifact_id]
+                attachment_payload = {
+                    "id": "",
+                    "filename": self._safe_text(doc_summary.get("filename")),
+                    "artifact_id": artifact_id,
+                }
+                self._upsert_attachment_record(
+                    record_id=record_id,
+                    mailbox_address=mailbox_address,
+                    thread_id=thread_id,
+                    message_id=message_id,
+                    attachment=attachment_payload,
+                    download_status="downloaded",
+                    parse_status="parsed",
+                    parse_task_id=parse_task_id,
+                    parsed_bundle_id=parsed_bundle_id,
+                    parsed_summary=doc_summary,
+                    parse_error=None,
+                )
+                self._record_attachment_parse_run(
+                    record_id=record_id,
+                    parse_task_id=parse_task_id,
+                    status="completed",
+                    parsed_bundle_id=parsed_bundle_id,
+                    parsed_summary=doc_summary,
+                    error_message=None,
+                )
+                continue
+            self._upsert_attachment_record(
+                record_id=record_id,
+                mailbox_address=mailbox_address,
+                thread_id=thread_id,
+                message_id=message_id,
+                attachment={"id": "", "artifact_id": artifact_id},
+                download_status="downloaded",
+                parse_status="parse_failed",
+                parse_task_id=parse_task_id,
+                parse_error=error_text,
+            )
+            self._record_attachment_parse_run(
+                record_id=record_id,
+                parse_task_id=parse_task_id,
+                status="failed",
+                parsed_bundle_id=None,
+                parsed_summary=None,
+                error_message=error_text,
+            )
+
+    async def _dispatch_docs_parse_bundle(
+        self,
+        *,
+        task: TaskEnvelope,
+        thread_id: str,
+        message_id: str,
+        input_artifacts: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not input_artifacts:
+            return {"status": "failed", "error_message": "No input artifacts were provided for docs parsing."}
+        if self.redis is None:
+            return {"status": "failed", "error_message": "Redis is not available for docs parsing dispatch."}
+
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                [
+                    {
+                        "artifact_id": self._safe_text(item.get("artifact_id")),
+                        "path": self._safe_text(item.get("path")),
+                        "sha256": self._safe_text(item.get("sha256")),
+                    }
+                    for item in input_artifacts
+                ],
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        request_id = self._optional_text(task.input, "request_id")
+        child_task = TaskEnvelope(
+            task_id=generate_task_id(),
+            task_list_id=task.task_list_id,
+            parent_task_id=task.task_id,
+            session_id=task.session_id,
+            sender=self.agent_id,
+            recipient=self.config.docs_parser_agent_id,
+            intent="docs.parse_bundle",
+            input={
+                "bundle_label": f"email:{thread_id}:{message_id}",
+                "ocr_mode": "auto",
+                "generate_page_images": False,
+                "generate_picture_images": False,
+                "request_id": request_id or task.task_id,
+            },
+            input_artifacts=input_artifacts,
+            idempotency_key=f"email-docs-parse:{message_id}:{fingerprint}",
+            priority=task.priority,
+            signature="",
+            created_at=utcnow(),
+            source=task.source,
+            source_id=task.source_id,
+            channel=task.channel,
+        )
+        child_task = child_task.model_copy(update={"signature": sign_task_envelope(child_task, self.agent_secret)})
+        await dispatch_task(child_task, self.redis)
+        return await self._wait_for_agent_terminal_result(
+            child_task.task_id,
+            timeout_sec=self.config.attachment_docs_parse_timeout_sec,
+            poll_interval_sec=self.config.attachment_docs_parse_poll_interval_sec,
+        )
+
+    async def _wait_for_agent_terminal_result(
+        self,
+        task_id: str,
+        *,
+        timeout_sec: float,
+        poll_interval_sec: float,
+    ) -> dict[str, Any]:
+        if self.redis is None:
+            return {"status": "failed", "error_message": "Redis is not available for agent result tracking."}
+        event_ids_key = f"task_events:{task_id}"
+        seen_message_ids: set[str] = set()
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            message_ids = await self.redis.lrange(event_ids_key, 0, -1)
+            for message_id in message_ids:
+                if message_id in seen_message_ids:
+                    continue
+                seen_message_ids.add(message_id)
+                stream_entries = await self.redis.xrange("streams:events", min=message_id, max=message_id)
+                for _, fields in stream_entries:
+                    event = parse_event_envelope(fields)
+                    if event.task_id != task_id:
+                        continue
+                    if event.event_type == "task.completed":
+                        return {
+                            "status": "completed",
+                            "task_id": task_id,
+                            "output": event.payload.get("output") if isinstance(event.payload, dict) else {},
+                            "artifacts": event.payload.get("artifacts") if isinstance(event.payload, dict) else [],
+                        }
+                    if event.event_type == "task.failed":
+                        error = event.payload.get("error") if isinstance(event.payload, dict) else {}
+                        return {
+                            "status": "failed",
+                            "task_id": task_id,
+                            "error_message": self._safe_text(error.get("message")) or "Agent task failed.",
+                            "error": error,
+                        }
+                    if event.event_type == "task.rejected":
+                        return {
+                            "status": "failed",
+                            "task_id": task_id,
+                            "error_message": self._safe_text(event.payload.get("reason")) or "Agent task was rejected.",
+                        }
+            await asyncio.sleep(poll_interval_sec)
+        return {
+            "status": "pending",
+            "task_id": task_id,
+            "error_message": f"Timed out waiting for {task_id}.",
+        }
+
+    def _augment_thread_summary_with_attachments(self, *, summary: str, attachments: list[dict[str, Any]]) -> str:
+        attachment_brief = self._build_attachment_brief_for_opus(attachments=attachments)
+        if not attachment_brief:
+            return summary
+        base = self._safe_text(summary).strip()
+        if not base:
+            return attachment_brief
+        return f"{base}\n\n{attachment_brief}"
+
+    def _build_attachment_brief_for_opus(self, *, attachments: list[dict[str, Any]]) -> str:
+        if not attachments:
+            return ""
+        parsed = [
+            item for item in attachments
+            if isinstance(item, dict) and self._safe_text(item.get("parse_status")) == "parsed"
+        ]
+        pending = [
+            item for item in attachments
+            if isinstance(item, dict) and self._safe_text(item.get("parse_status")) == "parse_pending"
+        ]
+        raw_only = [
+            item for item in attachments
+            if isinstance(item, dict)
+            and self._safe_text(item.get("parse_status")) in {"skipped_unsupported", "skipped_too_large", "parse_disabled"}
+        ]
+        failed = [
+            item for item in attachments
+            if isinstance(item, dict) and self._safe_text(item.get("parse_status")) == "parse_failed"
+        ]
+        parts: list[str] = []
+        if parsed:
+            names = ", ".join(self._safe_text(item.get("filename")) for item in parsed[:3] if self._safe_text(item.get("filename")))
+            detail = f" Parsed document attachments: {names}." if names else ""
+            parts.append(
+                f"{len(parsed)} attachment(s) were parsed into canonical docs bundles for later read/search.{detail}"
+            )
+        if pending:
+            parts.append(f"{len(pending)} attachment(s) are still waiting on docs parsing.")
+        if raw_only:
+            parts.append(f"{len(raw_only)} attachment(s) were kept as raw email artifacts only.")
+        if failed:
+            parts.append(f"{len(failed)} attachment(s) failed document parsing but remain available as raw artifacts.")
+        return "Attachments: " + " ".join(parts) if parts else ""
+
+    def _looks_like_attachment_goal(self, goal: str, *, attachment_name: str | None = None) -> bool:
+        if attachment_name:
+            return True
+        lowered = self._safe_text(goal).casefold()
+        if not lowered:
+            return False
+        attachment_tokens = (
+            "attachment",
+            "attached",
+            "pdf",
+            "docx",
+            "ppt",
+            "pptx",
+            "presentation",
+            "deck",
+            "slides",
+            "slide ",
+            "document",
+            "file",
+        )
+        read_tokens = (
+            "read ",
+            "open ",
+            "search ",
+            "summarize ",
+            "what does",
+            "what is in",
+            "show me",
+            "look at",
+            "inspect ",
+            "analyze ",
+            "page ",
+            "chunk ",
+            "section ",
+            "slide ",
+        )
+        return any(token in lowered for token in attachment_tokens) and any(token in lowered for token in read_tokens)
+
+    async def _resolve_attachment_for_reason(
+        self,
+        *,
+        task: TaskEnvelope,
+        goal: str,
+        thread_id: str | None,
+        message_id: str | None,
+        mailbox_address: str | None,
+        attachment_id: str | None,
+        attachment_name: str | None,
+    ) -> dict[str, Any]:
+        if not thread_id and not message_id:
+            raise EmailAgentError(
+                code="INVALID_INPUT",
+                message="Attachment resolution requires thread_id or message_id context.",
+                retryable=False,
+                next_action="escalate",
+            )
+        records = self._list_attachment_records_for_resolution(
+            thread_id=thread_id,
+            message_id=message_id,
+            mailbox_address=mailbox_address,
+        )
+        if not records:
+            raise EmailAgentError(
+                code="INVALID_INPUT",
+                message="No attachment records were found for this email thread or message.",
+                retryable=False,
+                next_action="escalate",
+            )
+
+        attachment_name_hint = attachment_name or self._extract_attachment_name_hint(goal)
+        type_hint = self._infer_attachment_type_hint(goal)
+        ordinal_hint = self._extract_attachment_ordinal_hint(goal)
+        chosen = self._select_attachment_record(
+            records=records,
+            attachment_id=attachment_id,
+            attachment_name_hint=attachment_name_hint,
+            type_hint=type_hint,
+            ordinal_hint=ordinal_hint,
+        )
+        resolved = await self._ensure_attachment_bundle_for_resolution(
+            task=task,
+            record=chosen,
+            mailbox_address=mailbox_address,
+        )
+        docs_tools = (
+            ["docs_browse", "docs_search", "docs_read", "docs_fetch_asset", "docs_reinspect_asset"]
+            if self._safe_text(resolved.get("parse_status")) == "parsed" and self._safe_text(resolved.get("parsed_bundle_id"))
+            else []
+        )
+        return {
+            "attachment_record_id": self._safe_text(resolved.get("record_id")) or None,
+            "attachment_id": self._safe_text(resolved.get("attachment_id")) or None,
+            "filename": self._safe_text(resolved.get("filename")) or None,
+            "mime_type": self._safe_text(resolved.get("mime_type")) or None,
+            "size_bytes": self._safe_int(resolved.get("size_bytes")),
+            "thread_id": self._safe_text(resolved.get("thread_id")) or thread_id,
+            "message_id": self._safe_text(resolved.get("message_id")) or message_id,
+            "mailbox_address": self._safe_text(resolved.get("mailbox_address")) or mailbox_address,
+            "download_status": self._safe_text(resolved.get("download_status")) or None,
+            "parse_status": self._safe_text(resolved.get("parse_status")) or None,
+            "parse_task_id": self._safe_text(resolved.get("parse_task_id")) or None,
+            "parse_error": self._safe_text(resolved.get("parse_error")) or None,
+            "bundle_id": self._safe_text(resolved.get("parsed_bundle_id")) or None,
+            "parsed_summary": resolved.get("parsed_summary") if isinstance(resolved.get("parsed_summary"), dict) else None,
+            "docs_tools": docs_tools,
+            "path": self._safe_text(resolved.get("local_path")) or None,
+            "attachment_resolution_status": self._resolution_status_from_record(resolved),
+        }
+
+    def _list_attachment_records_for_resolution(
+        self,
+        *,
+        thread_id: str | None,
+        message_id: str | None,
+        mailbox_address: str | None,
+    ) -> list[dict[str, Any]]:
+        clauses = ["1=1"]
+        params: list[Any] = []
+        if message_id:
+            clauses.append("message_id = ?")
+            params.append(message_id)
+        elif thread_id:
+            clauses.append("thread_id = ?")
+            params.append(thread_id)
+        if mailbox_address:
+            clauses.append("(mailbox_address = ? OR mailbox_address IS NULL)")
+            params.append(mailbox_address)
+        with connect_sync(self.session_db_path) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    record_id,
+                    mailbox_address,
+                    thread_id,
+                    message_id,
+                    attachment_id,
+                    filename,
+                    mime_type,
+                    size_bytes,
+                    sha256,
+                    artifact_id,
+                    local_path,
+                    download_status,
+                    parse_status,
+                    parse_task_id,
+                    parsed_bundle_id,
+                    parsed_summary_json,
+                    parse_error,
+                    created_at,
+                    updated_at
+                FROM email_attachment_records
+                WHERE {' AND '.join(clauses)}
+                ORDER BY updated_at DESC, created_at DESC, attachment_id ASC
+                """,
+                tuple(params),
+            ).fetchall()
+        return [self._attachment_record_row_to_dict(row) for row in rows]
+
+    def _attachment_record_row_to_dict(self, row: tuple[Any, ...]) -> dict[str, Any]:
+        try:
+            parsed_summary = json.loads(row[15]) if row[15] else None
+        except Exception:
+            parsed_summary = None
+        return {
+            "record_id": row[0],
+            "mailbox_address": row[1],
+            "thread_id": row[2],
+            "message_id": row[3],
+            "attachment_id": row[4],
+            "filename": row[5],
+            "mime_type": row[6],
+            "size_bytes": row[7],
+            "sha256": row[8],
+            "artifact_id": row[9],
+            "local_path": row[10],
+            "download_status": row[11],
+            "parse_status": row[12],
+            "parse_task_id": row[13],
+            "parsed_bundle_id": row[14],
+            "parsed_summary": parsed_summary if isinstance(parsed_summary, dict) else None,
+            "parse_error": row[16],
+            "created_at": row[17],
+            "updated_at": row[18],
+        }
+
+    def _select_attachment_record(
+        self,
+        *,
+        records: list[dict[str, Any]],
+        attachment_id: str | None,
+        attachment_name_hint: str | None,
+        type_hint: str | None,
+        ordinal_hint: int | None,
+    ) -> dict[str, Any]:
+        if len(records) == 1:
+            return dict(records[0])
+        has_specific_hint = bool(attachment_id or attachment_name_hint or type_hint or ordinal_hint is not None)
+        if not has_specific_hint:
+            raise EmailAgentError(
+                code="INVALID_INPUT",
+                message="Multiple attachments exist in this thread. Specify the attachment name or file type more clearly.",
+                retryable=False,
+                next_action="revise_input",
+            )
+        scored: list[tuple[int, int, dict[str, Any]]] = []
+        for index, record in enumerate(records, start=1):
+            score = self._score_attachment_record(
+                record,
+                attachment_id=attachment_id,
+                attachment_name_hint=attachment_name_hint,
+                type_hint=type_hint,
+                ordinal_hint=ordinal_hint,
+                index=index,
+            )
+            scored.append((score, -index, record))
+        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        if not scored:
+            raise EmailAgentError(
+                code="INVALID_INPUT",
+                message="No attachment records were available to resolve.",
+                retryable=False,
+                next_action="escalate",
+            )
+        if len(scored) > 1:
+            top_score = scored[0][0]
+            second_score = scored[1][0]
+            if top_score <= 0 or (has_specific_hint and top_score == second_score):
+                raise EmailAgentError(
+                    code="INVALID_INPUT",
+                    message="Multiple attachment candidates matched this request. Specify the attachment name or file type more clearly.",
+                    retryable=False,
+                    next_action="revise_input",
+                )
+        return dict(scored[0][2])
+
+    def _score_attachment_record(
+        self,
+        record: dict[str, Any],
+        *,
+        attachment_id: str | None,
+        attachment_name_hint: str | None,
+        type_hint: str | None,
+        ordinal_hint: int | None,
+        index: int,
+    ) -> int:
+        score = 0
+        record_attachment_id = self._safe_text(record.get("attachment_id"))
+        filename = self._safe_text(record.get("filename")).casefold()
+        if attachment_id and record_attachment_id == attachment_id:
+            score += 1000
+        if attachment_name_hint:
+            hint = attachment_name_hint.casefold()
+            if filename == hint:
+                score += 600
+            elif hint in filename:
+                score += 420
+            elif filename and filename in hint:
+                score += 240
+        if type_hint and self._attachment_matches_type_hint(record=record, type_hint=type_hint):
+            score += 140
+        if ordinal_hint is not None:
+            if ordinal_hint == -1 and index == 1:
+                score += 180
+            elif ordinal_hint > 0 and index == ordinal_hint:
+                score += 180
+            elif ordinal_hint > 0:
+                score -= 20
+        if self._safe_text(record.get("parse_status")) == "parsed":
+            score += 25
+        if index == 1:
+            score += 12
+        return score
+
+    def _attachment_matches_type_hint(self, *, record: dict[str, Any], type_hint: str) -> bool:
+        filename = self._safe_text(record.get("filename")).casefold()
+        mime = self._safe_text(record.get("mime_type")).casefold()
+        if type_hint == "pdf":
+            return filename.endswith(".pdf") or mime == "application/pdf"
+        if type_hint == "pptx":
+            return filename.endswith(".pptx") or mime == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        if type_hint == "docx":
+            return filename.endswith(".docx") or mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        return False
+
+    def _extract_attachment_name_hint(self, goal: str) -> str | None:
+        match = re.search(r"([A-Za-z0-9._-]+\.(?:pdf|docx|pptx))", self._safe_text(goal), re.IGNORECASE)
+        if not match:
+            return None
+        return self._safe_text(match.group(1)) or None
+
+    def _infer_attachment_type_hint(self, goal: str) -> str | None:
+        lowered = self._safe_text(goal).casefold()
+        if "pdf" in lowered:
+            return "pdf"
+        if any(token in lowered for token in ("pptx", "presentation", "deck", "slides", "slide ")):
+            return "pptx"
+        if any(token in lowered for token in ("docx", "word doc", "word file")):
+            return "docx"
+        return None
+
+    def _extract_attachment_ordinal_hint(self, goal: str) -> int | None:
+        lowered = self._safe_text(goal).casefold()
+        if any(token in lowered for token in ("latest", "last", "most recent")):
+            return -1
+        mapping = {
+            "first": 1,
+            "1st": 1,
+            "second": 2,
+            "2nd": 2,
+            "third": 3,
+            "3rd": 3,
+        }
+        for token, ordinal in mapping.items():
+            if token in lowered:
+                return ordinal
+        return None
+
+    async def _ensure_attachment_bundle_for_resolution(
+        self,
+        *,
+        task: TaskEnvelope,
+        record: dict[str, Any],
+        mailbox_address: str | None,
+    ) -> dict[str, Any]:
+        if self._safe_text(record.get("parse_status")) == "parsed" and self._safe_text(record.get("parsed_bundle_id")):
+            return record
+        candidate_artifact = self._artifact_input_from_attachment_record(record)
+        if candidate_artifact is None:
+            return record
+        if not is_supported_document_artifact(candidate_artifact):
+            return record
+        parse_result = await self._dispatch_docs_parse_bundle(
+            task=task,
+            thread_id=self._safe_text(record.get("thread_id")),
+            message_id=self._safe_text(record.get("message_id")),
+            input_artifacts=[candidate_artifact],
+        )
+        return self._apply_attachment_parse_result(
+            mailbox_address=mailbox_address,
+            record=record,
+            parse_result=parse_result,
+        )
+
+    def _artifact_input_from_attachment_record(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        artifact_id = self._safe_text(record.get("artifact_id"))
+        path = self._safe_text(record.get("local_path"))
+        if not artifact_id or not path:
+            return None
+        return {
+            "artifact_id": artifact_id,
+            "path": path,
+            "mime": self._safe_text(record.get("mime_type")),
+            "filename": self._safe_text(record.get("filename")),
+            "sha256": self._safe_text(record.get("sha256")),
+        }
+
+    def _apply_attachment_parse_result(
+        self,
+        *,
+        mailbox_address: str | None,
+        record: dict[str, Any],
+        parse_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        status = self._safe_text(parse_result.get("status")) or "failed"
+        parse_task_id = self._safe_text(parse_result.get("task_id")) or None
+        updated = dict(record)
+        if status == "completed":
+            output = parse_result.get("output") if isinstance(parse_result.get("output"), dict) else {}
+            parsed_bundle_id = self._safe_text(output.get("bundle_id")) or None
+            docs_by_artifact_id: dict[str, dict[str, Any]] = {}
+            for item in output.get("documents", []) if isinstance(output.get("documents"), list) else []:
+                if not isinstance(item, dict):
+                    continue
+                artifact_id = self._safe_text(item.get("artifact_id"))
+                if artifact_id:
+                    docs_by_artifact_id[artifact_id] = item
+            doc_summary = docs_by_artifact_id.get(self._safe_text(record.get("artifact_id")))
+            if doc_summary is not None:
+                updated["parse_status"] = "parsed"
+                updated["parse_task_id"] = parse_task_id
+                updated["parsed_bundle_id"] = parsed_bundle_id
+                updated["parsed_summary"] = doc_summary
+                updated["parse_error"] = None
+                self._upsert_attachment_record(
+                    record_id=self._safe_text(record.get("record_id")),
+                    mailbox_address=mailbox_address,
+                    thread_id=self._safe_text(record.get("thread_id")),
+                    message_id=self._safe_text(record.get("message_id")),
+                    attachment={
+                        "id": self._safe_text(record.get("attachment_id")),
+                        "filename": self._safe_text(record.get("filename")),
+                        "mime_type": self._safe_text(record.get("mime_type")),
+                        "size_bytes": self._safe_int(record.get("size_bytes")),
+                        "sha256": self._safe_text(record.get("sha256")),
+                        "artifact_id": self._safe_text(record.get("artifact_id")),
+                        "path": self._safe_text(record.get("local_path")),
+                    },
+                    download_status=self._safe_text(record.get("download_status")) or "downloaded",
+                    parse_status="parsed",
+                    parse_task_id=parse_task_id,
+                    parsed_bundle_id=parsed_bundle_id,
+                    parsed_summary=doc_summary,
+                    parse_error=None,
+                )
+                self._record_attachment_parse_run(
+                    record_id=self._safe_text(record.get("record_id")),
+                    parse_task_id=parse_task_id,
+                    status="completed",
+                    parsed_bundle_id=parsed_bundle_id,
+                    parsed_summary=doc_summary,
+                    error_message=None,
+                )
+                return updated
+        error_text = self._safe_text(parse_result.get("error_message")) or "docs.parse_bundle failed"
+        failed_status = "parse_pending" if status == "pending" else "parse_failed"
+        updated["parse_status"] = failed_status
+        updated["parse_task_id"] = parse_task_id
+        updated["parse_error"] = error_text
+        self._upsert_attachment_record(
+            record_id=self._safe_text(record.get("record_id")),
+            mailbox_address=mailbox_address,
+            thread_id=self._safe_text(record.get("thread_id")),
+            message_id=self._safe_text(record.get("message_id")),
+            attachment={
+                "id": self._safe_text(record.get("attachment_id")),
+                "filename": self._safe_text(record.get("filename")),
+                "mime_type": self._safe_text(record.get("mime_type")),
+                "size_bytes": self._safe_int(record.get("size_bytes")),
+                "sha256": self._safe_text(record.get("sha256")),
+                "artifact_id": self._safe_text(record.get("artifact_id")),
+                "path": self._safe_text(record.get("local_path")),
+            },
+            download_status=self._safe_text(record.get("download_status")) or "downloaded",
+            parse_status=failed_status,
+            parse_task_id=parse_task_id,
+            parse_error=error_text,
+        )
+        self._record_attachment_parse_run(
+            record_id=self._safe_text(record.get("record_id")),
+            parse_task_id=parse_task_id,
+            status=status,
+            parsed_bundle_id=None,
+            parsed_summary=None,
+            error_message=error_text,
+        )
+        if status == "pending" and parse_task_id:
+            self._track_background_job(
+                self._reconcile_attachment_parse_bundle(
+                    parse_task_id=parse_task_id,
+                    mailbox_address=mailbox_address,
+                    thread_id=self._safe_text(record.get("thread_id")),
+                    message_id=self._safe_text(record.get("message_id")),
+                    attachments=[
+                        {
+                            "attachment_record_id": self._safe_text(record.get("record_id")),
+                            "artifact_id": self._safe_text(record.get("artifact_id")),
+                        }
+                    ],
+                )
+            )
+        return updated
+
+    def _resolution_status_from_record(self, record: dict[str, Any]) -> str:
+        parse_status = self._safe_text(record.get("parse_status"))
+        if parse_status == "parsed" and self._safe_text(record.get("parsed_bundle_id")):
+            return "parsed"
+        if parse_status == "parse_pending":
+            return "parse_pending"
+        if parse_status in {"skipped_unsupported", "skipped_too_large", "parse_disabled"}:
+            return "raw_only"
+        if parse_status == "parse_failed":
+            return "parse_failed"
+        return parse_status or "resolved"
+
+    def _format_attachment_resolution_response(self, resolution: dict[str, Any]) -> str:
+        filename = self._safe_text(resolution.get("filename")) or "the attachment"
+        status = self._safe_text(resolution.get("attachment_resolution_status"))
+        bundle_id = self._safe_text(resolution.get("bundle_id"))
+        if status == "parsed" and bundle_id:
+            return (
+                f"Resolved attachment `{filename}` from the email thread. "
+                f"It is already parsed and ready for the docs tools under bundle `{bundle_id}`."
+            )
+        if status == "parse_pending":
+            return (
+                f"Resolved attachment `{filename}` from the email thread. "
+                "It is still being parsed, so the docs bundle is not ready yet."
+            )
+        if status == "raw_only":
+            return (
+                f"Resolved attachment `{filename}` from the email thread. "
+                "It is available as a raw email artifact, but it is not in the docs parsing path."
+            )
+        if status == "parse_failed":
+            return (
+                f"Resolved attachment `{filename}` from the email thread, but docs parsing failed. "
+                "The raw attachment is still available."
+            )
+        return f"Resolved attachment `{filename}` from the email thread."
 
     async def _summarize_thread(
         self,

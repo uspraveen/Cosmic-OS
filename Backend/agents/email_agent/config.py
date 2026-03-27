@@ -38,6 +38,13 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
 def normalize_mimo_openai_base_url(raw: str) -> str:
     s = str(raw or "").strip().rstrip("/")
     if not s:
@@ -64,6 +71,11 @@ class EmailAgentConfig:
     max_thread_messages: int = 50
     max_attachment_downloads: int = 8
     max_attachment_bytes: int = 15 * 1024 * 1024
+    attachment_docs_auto_parse_enabled: bool = True
+    docs_parser_agent_id: str = "cosmic/docs-parser-agent:1.0.0"
+    attachment_docs_parse_timeout_sec: float = 240.0
+    attachment_docs_parse_reconcile_timeout_sec: float = 900.0
+    attachment_docs_parse_poll_interval_sec: float = 0.25
     mimo_api_key: str = ""
     mimo_base_url: str = ""
     mimo_model: str = "mimo-v2-pro"
@@ -87,14 +99,30 @@ class EmailAgentConfig:
             max_thread_messages=max(1, _env_int("EMAIL_AGENT_MAX_THREAD_MESSAGES", 50)),
             max_attachment_downloads=max(0, _env_int("EMAIL_AGENT_MAX_ATTACHMENT_DOWNLOADS", 8)),
             max_attachment_bytes=max(0, _env_int("EMAIL_AGENT_MAX_ATTACHMENT_BYTES", 15 * 1024 * 1024)),
+            attachment_docs_auto_parse_enabled=_env_bool("EMAIL_AGENT_ATTACHMENT_DOCS_AUTO_PARSE_ENABLED", True),
+            docs_parser_agent_id=(
+                os.getenv("EMAIL_AGENT_DOCS_PARSER_AGENT_ID", "cosmic/docs-parser-agent:1.0.0").strip()
+                or "cosmic/docs-parser-agent:1.0.0"
+            ),
+            attachment_docs_parse_timeout_sec=max(
+                5.0,
+                _env_float("EMAIL_AGENT_ATTACHMENT_DOCS_PARSE_TIMEOUT_SEC", 240.0),
+            ),
+            attachment_docs_parse_reconcile_timeout_sec=max(
+                10.0,
+                _env_float("EMAIL_AGENT_ATTACHMENT_DOCS_PARSE_RECONCILE_TIMEOUT_SEC", 900.0),
+            ),
+            attachment_docs_parse_poll_interval_sec=max(
+                0.1,
+                _env_float("EMAIL_AGENT_ATTACHMENT_DOCS_PARSE_POLL_INTERVAL_SEC", 0.25),
+            ),
             mimo_api_key=(os.getenv("EMAIL_AGENT_MIMO_API_KEY") or os.getenv("MIMO_API_KEY") or "").strip(),
             mimo_base_url=normalize_mimo_openai_base_url(
                 (os.getenv("EMAIL_AGENT_MIMO_BASE_URL") or os.getenv("MIMO_OPENAI_BASE_URL") or "").strip()
             ),
             mimo_model=os.getenv("EMAIL_AGENT_MIMO_MODEL", "mimo-v2-pro").strip() or "mimo-v2-pro",
             mimo_timeout_sec=_env_float("EMAIL_AGENT_MIMO_TIMEOUT_SEC", 120.0),
-            enable_internal_llm=os.getenv("EMAIL_AGENT_ENABLE_INTERNAL_LLM", "true").strip().lower()
-            not in {"0", "false", "no", "off"},
+            enable_internal_llm=_env_bool("EMAIL_AGENT_ENABLE_INTERNAL_LLM", True),
             agent_email_integrations_db_path=Path(
                 os.getenv(
                     "GATEWAY_AGENT_EMAIL_INTEGRATIONS_DB_PATH",

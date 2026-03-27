@@ -67,8 +67,9 @@ policies:
   allowed_senders:
     - cosmic/orchestrator:1.0.0
     - cosmic/gateway:1.0.0
+    - cosmic/email-agent:1.0.0
   intent_authorization:
-    docs.parse_bundle: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
+    docs.parse_bundle: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0, cosmic/email-agent:1.0.0]
     docs.browse_bundle: [cosmic/orchestrator:1.0.0]
     docs.search_bundle: [cosmic/orchestrator:1.0.0]
     docs.read_bundle: [cosmic/orchestrator:1.0.0]

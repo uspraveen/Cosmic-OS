@@ -368,3 +368,345 @@ The final COSMIC email shape is:
 - **attachments kept inside the email agent unless explicitly rebound later**
 
 That is the architecture this implementation should follow.
+
+## 15. Planned Attachment Parsing Extension
+
+This section defines the next attachment architecture that should be added on top of the current v1 download-only behavior.
+
+### 15.1 Goal
+
+Inbound email attachments should support:
+- automatic intake into the email agent
+- correct durable mapping to:
+  - `mailbox_address`
+  - `thread_id`
+  - `message_id`
+  - `attachment_id`
+- best-effort automatic parsing for supported document attachments
+- later granular reads using the **existing docs specialist surface**
+  - chunk-level reads
+  - full-document reads
+  - exact asset fetch/reinspection
+
+This must reuse existing COSMIC specialists and artifact contracts.
+It must not introduce a second custom document-reading system inside the email agent.
+
+### 15.2 Ownership split
+
+The ownership model remains strict:
+
+1. **Gateway email adapter**
+- receives webhook payloads
+- normalizes attachment metadata only
+- does not download bytes
+- does not parse with Docling
+- does not decide cross-specialist attachment policy
+
+2. **Email specialist**
+- owns raw attachment intake
+- owns attachment-to-thread/message/mailbox mapping
+- decides which attachments are parse candidates
+- owns the compact user-facing attachment summary returned to Opus
+
+3. **Docs parser specialist**
+- remains the only canonical Docling-based parse surface
+- owns:
+  - `docs.parse_bundle`
+  - `docs.browse_bundle`
+  - `docs.search_bundle`
+  - `docs.read_bundle`
+  - `docs.fetch_asset`
+  - `docs.reinspect_asset`
+
+This means:
+- **email agent owns attachment intake**
+- **docs parser owns parsed-document structure**
+
+### 15.3 End-to-end inbound flow
+
+The intended inbound attachment flow is:
+
+1. Cosmic Mail webhook reaches Gateway.
+2. Gateway email adapter normalizes:
+- `message_id`
+- `thread_id`
+- `mailbox_id`
+- `mailbox_address`
+- attachment metadata list
+
+3. Gateway dispatches `email.process_inbound`.
+
+4. `email.process_inbound`:
+- fetches the latest thread/message context
+- downloads raw attachment bytes into the email-agent artifact area
+- emits `ArtifactManifest` records for those raw attachment files
+- writes durable attachment ledger rows
+- classifies each attachment into one of:
+  - `docs_parse_candidate`
+  - `tabular_candidate`
+  - `image_or_binary_only`
+  - `unsupported_or_skip`
+
+5. For supported document attachments, the system should run a best-effort follow-on `docs.parse_bundle` child task using normal `TaskEnvelope.input_artifacts`.
+
+6. Docs parser emits canonical parsed bundle outputs under its own artifact area and returns:
+- `bundle_id`
+- parsed-document artifacts
+- indexes/assets for later retrieval
+
+7. The email attachment ledger is updated with:
+- `parse_status`
+- `parser_agent_id`
+- `parser_task_id`
+- `bundle_id`
+- parse error info when parsing fails
+
+8. Gateway then sends Opus a compact inbound brief that includes:
+- email-thread summary
+- attachment list
+- parse status
+- any parsed `bundle_id` values
+- short extracted summaries where available
+
+9. Later user questions about the attachment use the cached `bundle_id` and the existing docs specialist tools for precise reads.
+
+### 15.4 Automatic parse policy
+
+The automatic parse policy should be conservative.
+
+Auto-parse by default:
+- `application/pdf`
+- `application/vnd.openxmlformats-officedocument.wordprocessingml.document`
+- `application/vnd.openxmlformats-officedocument.presentationml.presentation`
+
+Do not auto-parse through docs parser:
+- spreadsheets
+  - `csv`
+  - `tsv`
+  - `xlsx`
+  - `xlsb`
+- standalone images
+- audio/video
+- arbitrary binaries
+
+Reason:
+- document attachments should reuse Docling/docs-parser
+- spreadsheet attachments belong to the tabular path later
+- images should not be forced through document parsing unless explicitly needed
+
+### 15.5 File structure
+
+Raw attachment files should remain in the email agent artifact area.
+
+Recommended raw attachment layout:
+
+```text
+runs/artifacts/<email_task_id>/email_agent/
+├── inbound_email.json
+├── downloaded_attachments.json
+├── attachment_index.json
+└── attachments/
+    └── <message_id>/
+        ├── <attachment_id>__<safe_filename>
+        ├── <attachment_id_2>__<safe_filename>
+        └── ...
+```
+
+Rules:
+- raw attachment bytes stay under the email agent’s own task artifacts
+- the path must be deterministic enough to map back to:
+  - `message_id`
+  - `attachment_id`
+- filenames must be sanitized but still human-readable
+
+Parsed document outputs should **not** be copied into the email agent directory.
+They should remain where the docs parser already owns them:
+
+```text
+runs/artifacts/<docs_task_id>/docs_parser/<source_artifact_id>/
+├── document.md
+├── manifest.json
+├── chunk_index.json
+├── tables.json
+├── figures.json
+└── assets/
+    ├── tables/
+    ├── figures/
+    └── ...
+```
+
+This keeps each specialist responsible for its own artifact tree.
+
+### 15.6 Durable attachment mapping
+
+The email agent should maintain durable attachment records in its private store DB.
+
+Recommended new tables:
+
+1. `email_attachment_records`
+- `attachment_record_id`
+- `mailbox_address`
+- `thread_id`
+- `message_id`
+- `attachment_id`
+- `filename`
+- `mime_type`
+- `size_bytes`
+- `sha256`
+- `raw_artifact_id`
+- `raw_artifact_path`
+- `source_task_id`
+- `created_at`
+- `updated_at`
+
+2. `email_attachment_parse_runs`
+- `attachment_record_id`
+- `parse_kind`
+  - `docs`
+  - later `tabular`
+- `parse_status`
+  - `pending`
+  - `parsed`
+  - `failed`
+  - `skipped`
+- `parser_agent_id`
+- `parser_task_id`
+- `bundle_id`
+- `error_code`
+- `error_message`
+- `created_at`
+- `updated_at`
+
+Required indexes:
+- `(thread_id, created_at DESC)`
+- `(message_id, created_at DESC)`
+- `(attachment_id)`
+- `(sha256)`
+
+This gives the system:
+- exact attachment recall by email thread/message
+- dedupe by `attachment_id` or `sha256`
+- stable rebinding into future specialist tasks
+
+### 15.7 Artifact contract
+
+Attachment parsing must use the normal COSMIC artifact contract:
+- raw attachment files are emitted as `ArtifactManifest`
+- parseable attachments are passed to docs parser via `TaskEnvelope.input_artifacts`
+- later reads or downstream work reuse those normalized artifact descriptors
+
+No component should browse raw artifact directories directly from prompts.
+All attachment reuse must go through:
+- attachment ledger lookup
+- normalized artifact descriptors
+- standard child-task handoff
+
+This follows:
+- `ArtifactManifest`
+- `TaskEnvelope.input_artifacts`
+- later artifact recall / rebinding
+from [cosmic_architecture.md](./cosmic_architecture.md)
+
+### 15.8 Opus-facing behavior
+
+Opus should **not** automatically receive raw attachment bytes or full parsed bundles on every inbound email turn.
+
+Instead, the inbound brief should include compact attachment metadata such as:
+- filename
+- mime type
+- size
+- whether it was downloaded
+- whether it was parsed
+- `bundle_id` if parsed
+- short extracted summary if available
+
+Example shape:
+
+```json
+{
+  "attachments": [
+    {
+      "attachment_id": "att_123",
+      "message_id": "msg_456",
+      "thread_id": "thr_789",
+      "filename": "Quarterly_Update.pdf",
+      "mime_type": "application/pdf",
+      "downloaded": true,
+      "raw_artifact_id": "art_raw_123",
+      "parse_status": "parsed",
+      "parse_kind": "docs",
+      "bundle_id": "bundle_abcd1234",
+      "summary": "Quarterly update deck covering revenue, hiring, and risks."
+    }
+  ]
+}
+```
+
+This keeps Opus lean while still making the attachment actionable.
+
+### 15.9 How later reads should work
+
+Once an attachment has a parsed `bundle_id`, later user questions should use the normal docs specialist flow.
+
+Examples:
+- “Read the attached PDF”
+  - use `docs.read_bundle`
+- “Search the deck for hiring plans”
+  - use `docs.search_bundle`
+- “What does page 7 say?”
+  - use `docs.read_bundle`
+- “Open the table from the attached report”
+  - use `docs.fetch_asset`
+- “Reinspect the chart image from the attachment”
+  - use `docs.reinspect_asset`
+
+Important rule:
+- do **not** invent a parallel email-only chunk-read API if a parsed `bundle_id` already exists
+- the existing docs specialist remains the structured read surface
+
+### 15.10 Tool surface
+
+No large new always-visible orchestrator tool set is required for this.
+
+The tool behavior should be:
+- inbound automatic parsing happens behind `email.process_inbound`
+- deeper document interaction uses existing docs tools
+- later spreadsheet-specific attachment handling can use the tabular specialist
+
+So the orchestrator model remains:
+- email specialist for email cognition and attachment ownership
+- docs specialist for parsed document navigation
+- tabular specialist later for spreadsheet attachments
+
+### 15.11 Audience and UI rules
+
+By default:
+- raw email attachments
+- downloaded attachment metadata
+- parse support artifacts
+- docs-parser intermediate outputs
+should remain `supporting`, not user-deliverable download cards
+
+Only explicit user-requested outputs should become deliverable.
+
+This prevents inbound attachment plumbing from flooding the desktop UI with internal artifacts.
+
+### 15.12 Non-goals
+
+This extension should **not** do any of the following:
+- make all inbound email attachments globally visible to Opus by default
+- move Docling logic into Gateway
+- duplicate Docling logic inside email agent
+- create a second email-only document-reading stack
+- force spreadsheets through docs parser
+- silently reparse the same attachment on every revisit when a cached parsed result already exists
+
+### 15.13 Final rule
+
+The correct final shape is:
+- **raw attachment ownership stays in email agent**
+- **parsed document ownership stays in docs parser**
+- **Opus sees compact attachment summaries, not raw bytes by default**
+- **granular and full-document reads reuse the existing docs specialist surface**
+
+That is the attachment architecture this system should implement.

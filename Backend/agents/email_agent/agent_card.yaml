@@ -8,10 +8,10 @@ description: >
 
 intents:
   - name: email.process_inbound
-    description: Process an inbound email thread, summarize it, fetch attachment metadata/files into the agent artifact area, and apply standing instructions when configured.
+    description: Process an inbound email thread, summarize it, fetch attachment metadata/files into the agent artifact area, auto-parse supported document attachments through the docs specialist when possible, and apply standing instructions when configured.
     input_schema: schemas/intents/email.process_inbound.input.json
     output_schema: schemas/intents/email.process_inbound.output.json
-    timeout_sec: 180
+    timeout_sec: 300
     usage_hints:
       - Use this when a real inbound email arrives and the system needs email-native understanding, not just transport delivery.
       - Keep attachments inside the email agent workflow unless another specialist explicitly needs them later.
@@ -24,6 +24,7 @@ intents:
     usage_hints:
       - Use this specialist for almost anything involving reading, understanding, drafting, replying to, or sending email.
       - Pass a compact context_brief and optional draft_seed; do not pass a long raw conversation transcript.
+      - For attachment-specific requests in an email thread, use this to resolve the correct attachment and cached docs bundle first; then continue with the normal docs tools for actual document reading.
       - Do not use this specialist for simple already-final cron or heartbeat delivery to an email channel.
 
   - name: email.manage_instruction

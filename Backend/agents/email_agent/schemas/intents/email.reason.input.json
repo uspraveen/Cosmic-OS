@@ -8,6 +8,8 @@
     "draft_seed": { "type": "string" },
     "thread_id": { "type": "string", "minLength": 1 },
     "message_id": { "type": "string", "minLength": 1 },
+    "attachment_id": { "type": "string", "minLength": 1 },
+    "attachment_name": { "type": "string", "minLength": 1 },
     "mailbox_address": { "type": "string", "minLength": 1 },
     "mailbox_id": { "type": "string", "minLength": 1 },
     "subject": { "type": "string" },

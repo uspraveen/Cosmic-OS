@@ -10,6 +10,7 @@ from agents.email_agent.agent import EmailAgent, EmailAgentError
 from agents.email_agent.config import EmailAgentConfig
 from shared.contracts import TaskEnvelope
 from shared import AgentEmailIntegrationStore
+from shared.sqlite_client import connect_sync
 
 
 class _FakeRedis:
@@ -702,3 +703,469 @@ async def test_email_agent_resolve_mailbox_falls_back_to_first_active_mailbox() 
     mailbox = await agent._resolve_mailbox(mailbox_address=None, mailbox_id=None)
 
     assert mailbox["id"] == "mbx_primary"
+
+
+@pytest.mark.asyncio
+async def test_email_agent_process_inbound_auto_parses_supported_document_attachments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+            enable_internal_llm=False,
+            attachment_docs_auto_parse_enabled=True,
+        ),
+    )
+
+    async def fake_fetch_thread_context(*, thread_id, message_id=None):
+        assert thread_id == "thr_email_1"
+        assert message_id == "msg_email_1"
+        return {
+            "thread": {"id": "thr_email_1", "subject": "Quarterly update"},
+            "messages": [],
+            "subject": "Quarterly update",
+            "latest_message": {"id": "msg_email_1", "from_address": "sender@example.com"},
+            "latest_body": "Please review the attached deck.",
+        }
+
+    async def fake_summarize_thread(**kwargs):
+        return "Inbound summary."
+
+    dispatched_artifacts: list[dict[str, Any]] = []
+
+    async def fake_dispatch_docs_parse_bundle(*, task, thread_id, message_id, input_artifacts):
+        assert task.task_id == "tsk_process_inbound_parse"
+        assert thread_id == "thr_email_1"
+        assert message_id == "msg_email_1"
+        assert len(input_artifacts) == 1
+        dispatched_artifacts.extend(input_artifacts)
+        return {
+            "status": "completed",
+            "task_id": "tsk_docs_parse_child",
+            "output": {
+                "bundle_id": "bundle_email_1",
+                "documents": [
+                    {
+                        "artifact_id": input_artifacts[0]["artifact_id"],
+                        "doc_id": "doc_email_1",
+                        "title": "Quarterly Deck",
+                        "chunk_count": 8,
+                        "paths": {"document_md": "runs/artifacts/tsk_docs_parse_child/docs_parser/a1/document.md"},
+                    }
+                ],
+            },
+        }
+
+    class FakeMailClient:
+        base_url = "http://cosmic-mail.local"
+        api_token = "mail-token"
+        timeout_sec = 20.0
+
+        async def aclose(self):
+            return None
+
+        async def list_message_attachments(self, message_id):
+            assert message_id == "msg_email_1"
+            return [
+                {
+                    "id": "att_pdf_1",
+                    "filename": "quarterly-deck.pdf",
+                    "content_type": "application/pdf",
+                    "size_bytes": 17,
+                },
+                {
+                    "id": "att_png_1",
+                    "filename": "logo.png",
+                    "content_type": "image/png",
+                    "size_bytes": 8,
+                },
+            ]
+
+        async def download_attachment(self, attachment_id):
+            if attachment_id == "att_pdf_1":
+                return (b"%PDF-email-deck%", "application/pdf", "quarterly-deck.pdf")
+            if attachment_id == "att_png_1":
+                return (b"\x89PNGmail", "image/png", "logo.png")
+            raise AssertionError(f"Unexpected attachment id: {attachment_id}")
+
+    agent.mail_client = FakeMailClient()  # type: ignore[assignment]
+    monkeypatch.setattr(agent, "_fetch_thread_context", fake_fetch_thread_context)
+    monkeypatch.setattr(agent, "_summarize_thread", fake_summarize_thread)
+    monkeypatch.setattr(agent, "_dispatch_docs_parse_bundle", fake_dispatch_docs_parse_bundle)
+
+    task = _make_task(
+        intent="email.process_inbound",
+        task_id="tsk_process_inbound_parse",
+        input_payload={
+            "thread_id": "thr_email_1",
+            "message_id": "msg_email_1",
+            "mailbox_address": "assistant@example.com",
+            "request_id": "req_email_1",
+        },
+    )
+
+    result = await agent.execute(task)
+
+    assert result.status == "completed"
+    assert len(dispatched_artifacts) == 1
+    attachments = result.output["attachments"]
+    assert len(attachments) == 2
+    pdf_attachment = next(item for item in attachments if item["id"] == "att_pdf_1")
+    png_attachment = next(item for item in attachments if item["id"] == "att_png_1")
+    assert pdf_attachment["parse_status"] == "parsed"
+    assert pdf_attachment["parse_cached"] is False
+    assert pdf_attachment["parsed_bundle_id"] == "bundle_email_1"
+    assert pdf_attachment["parsed_summary"]["doc_id"] == "doc_email_1"
+    assert pdf_attachment["docs_tools"] == [
+        "docs_browse",
+        "docs_search",
+        "docs_read",
+        "docs_fetch_asset",
+        "docs_reinspect_asset",
+    ]
+    assert png_attachment["parse_status"] == "skipped_unsupported"
+    assert "Attachments: 1 attachment(s) were parsed" in result.output["summary"]
+
+    raw_attachment_artifacts = [
+        artifact for artifact in result.artifacts if "/email_agent/attachments/" in artifact.path.replace("\\", "/")
+    ]
+    assert len(raw_attachment_artifacts) == 2
+    assert any("/attachments/msg_email_1/att_pdf_1__quarterly-deck.pdf" in artifact.path for artifact in raw_attachment_artifacts)
+    assert any("/attachments/msg_email_1/att_png_1__logo.png" in artifact.path for artifact in raw_attachment_artifacts)
+
+    with connect_sync(agent.session_db_path) as conn:
+        attachment_rows = [
+            tuple(row)
+            for row in conn.execute(
+                "SELECT attachment_id, parse_status, parsed_bundle_id FROM email_attachment_records ORDER BY attachment_id"
+            ).fetchall()
+        ]
+        parse_rows = [
+            tuple(row)
+            for row in conn.execute(
+                "SELECT status, parsed_bundle_id FROM email_attachment_parse_runs ORDER BY created_at"
+            ).fetchall()
+        ]
+    assert attachment_rows == [
+        ("att_pdf_1", "parsed", "bundle_email_1"),
+        ("att_png_1", "skipped_unsupported", None),
+    ]
+    assert parse_rows == [("completed", "bundle_email_1")]
+
+
+@pytest.mark.asyncio
+async def test_email_agent_process_inbound_reuses_cached_attachment_parse_by_sha(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+            enable_internal_llm=False,
+            attachment_docs_auto_parse_enabled=True,
+        ),
+    )
+
+    async def fake_fetch_thread_context(*, thread_id, message_id=None):
+        return {
+            "thread": {"id": thread_id, "subject": "Attachment follow-up"},
+            "messages": [],
+            "subject": "Attachment follow-up",
+            "latest_message": {"id": message_id, "from_address": "sender@example.com"},
+            "latest_body": "See attachment.",
+        }
+
+    async def fake_summarize_thread(**kwargs):
+        return "Inbound summary."
+
+    dispatch_calls: list[list[dict[str, Any]]] = []
+
+    async def fake_dispatch_docs_parse_bundle(*, task, thread_id, message_id, input_artifacts):
+        dispatch_calls.append(input_artifacts)
+        return {
+            "status": "completed",
+            "task_id": "tsk_docs_parse_cached",
+            "output": {
+                "bundle_id": "bundle_cached_1",
+                "documents": [
+                    {
+                        "artifact_id": input_artifacts[0]["artifact_id"],
+                        "doc_id": "doc_cached_1",
+                        "title": "Invoice",
+                    }
+                ],
+            },
+        }
+
+    class FakeMailClient:
+        base_url = "http://cosmic-mail.local"
+        api_token = "mail-token"
+        timeout_sec = 20.0
+
+        async def aclose(self):
+            return None
+
+        async def list_message_attachments(self, message_id):
+            if message_id == "msg_email_1":
+                return [
+                    {
+                        "id": "att_pdf_1",
+                        "filename": "invoice.pdf",
+                        "content_type": "application/pdf",
+                        "size_bytes": 19,
+                    }
+                ]
+            if message_id == "msg_email_2":
+                return [
+                    {
+                        "id": "att_pdf_2",
+                        "filename": "invoice-copy.pdf",
+                        "content_type": "application/pdf",
+                        "size_bytes": 19,
+                    }
+                ]
+            raise AssertionError(f"Unexpected message id: {message_id}")
+
+        async def download_attachment(self, attachment_id):
+            if attachment_id in {"att_pdf_1", "att_pdf_2"}:
+                return (b"%PDF-same-bytes-mail%", "application/pdf", "invoice.pdf")
+            raise AssertionError(f"Unexpected attachment id: {attachment_id}")
+
+    agent.mail_client = FakeMailClient()  # type: ignore[assignment]
+    monkeypatch.setattr(agent, "_fetch_thread_context", fake_fetch_thread_context)
+    monkeypatch.setattr(agent, "_summarize_thread", fake_summarize_thread)
+    monkeypatch.setattr(agent, "_dispatch_docs_parse_bundle", fake_dispatch_docs_parse_bundle)
+
+    first_result = await agent.execute(
+        _make_task(
+            intent="email.process_inbound",
+            task_id="tsk_process_inbound_first",
+            input_payload={
+                "thread_id": "thr_email_cache",
+                "message_id": "msg_email_1",
+                "mailbox_address": "assistant@example.com",
+            },
+        )
+    )
+    second_result = await agent.execute(
+        _make_task(
+            intent="email.process_inbound",
+            task_id="tsk_process_inbound_second",
+            input_payload={
+                "thread_id": "thr_email_cache",
+                "message_id": "msg_email_2",
+                "mailbox_address": "assistant@example.com",
+            },
+        )
+    )
+
+    assert first_result.status == "completed"
+    assert second_result.status == "completed"
+    assert len(dispatch_calls) == 1
+    first_attachment = first_result.output["attachments"][0]
+    second_attachment = second_result.output["attachments"][0]
+    assert first_attachment["parse_status"] == "parsed"
+    assert first_attachment["parse_cached"] is False
+    assert second_attachment["parse_status"] == "parsed"
+    assert second_attachment["parse_cached"] is True
+    assert second_attachment["parsed_bundle_id"] == "bundle_cached_1"
+    assert second_attachment["parsed_summary"]["doc_id"] == "doc_cached_1"
+
+
+@pytest.mark.asyncio
+async def test_email_agent_reason_resolves_cached_attachment_bundle_for_thread_goal(tmp_path: Path) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+            enable_internal_llm=False,
+        ),
+    )
+
+    source_path = tmp_path / "runs" / "artifacts" / "tsk_prev" / "email_agent" / "attachments" / "msg_att_1" / "att_pdf_1__deck.pdf"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_bytes(b"%PDF-deck%")
+    manifest = agent._artifact_manifest(
+        task_id="tsk_prev",
+        path=source_path,
+        mime="application/pdf",
+        kind="input",
+        audience="supporting",
+    )
+    agent._upsert_attachment_record(
+        record_id=agent._attachment_record_id(message_id="msg_att_1", attachment_id="att_pdf_1"),
+        mailbox_address="assistant@example.com",
+        thread_id="thr_att_1",
+        message_id="msg_att_1",
+        attachment={
+            "id": "att_pdf_1",
+            "filename": "deck.pdf",
+            "mime_type": "application/pdf",
+            "size_bytes": source_path.stat().st_size,
+            "sha256": manifest.sha256,
+            "artifact_id": manifest.artifact_id,
+            "path": manifest.path,
+        },
+        download_status="downloaded",
+        parse_status="parsed",
+        parse_task_id="tsk_docs_bundle_1",
+        parsed_bundle_id="bundle_att_1",
+        parsed_summary={"doc_id": "doc_att_1", "title": "Deck", "chunk_count": 6},
+        parse_error=None,
+    )
+
+    task = _make_task(
+        intent="email.reason",
+        task_id="tsk_reason_resolve_cached",
+        input_payload={
+            "goal": "Read the attached PDF from this thread and tell me what it says.",
+            "thread_id": "thr_att_1",
+            "message_id": "msg_att_1",
+            "mailbox_address": "assistant@example.com",
+        },
+    )
+
+    result = await agent.execute(task)
+
+    assert result.status == "completed"
+    assert result.output["action"] == "resolve_attachment"
+    assert result.output["bundle_id"] == "bundle_att_1"
+    assert result.output["attachment_resolution_status"] == "parsed"
+    assert result.output["resolved_attachment"]["attachment_id"] == "att_pdf_1"
+    assert result.output["resolved_attachment"]["parsed_summary"]["doc_id"] == "doc_att_1"
+    assert result.output["docs_tools"] == [
+        "docs_browse",
+        "docs_search",
+        "docs_read",
+        "docs_fetch_asset",
+        "docs_reinspect_asset",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_email_agent_reason_resolves_attachment_by_type_and_parses_on_demand(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+            enable_internal_llm=False,
+        ),
+    )
+
+    pdf_path = tmp_path / "runs" / "artifacts" / "tsk_prev" / "email_agent" / "attachments" / "msg_att_2" / "att_pdf_2__deck.pdf"
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    pdf_path.write_bytes(b"%PDF-deck-2%")
+    pdf_manifest = agent._artifact_manifest(
+        task_id="tsk_prev",
+        path=pdf_path,
+        mime="application/pdf",
+        kind="input",
+        audience="supporting",
+    )
+    png_path = tmp_path / "runs" / "artifacts" / "tsk_prev" / "email_agent" / "attachments" / "msg_att_2" / "att_png_2__logo.png"
+    png_path.write_bytes(b"\x89PNGlogo")
+    png_manifest = agent._artifact_manifest(
+        task_id="tsk_prev",
+        path=png_path,
+        mime="image/png",
+        kind="input",
+        audience="supporting",
+    )
+    agent._upsert_attachment_record(
+        record_id=agent._attachment_record_id(message_id="msg_att_2", attachment_id="att_pdf_2"),
+        mailbox_address="assistant@example.com",
+        thread_id="thr_att_2",
+        message_id="msg_att_2",
+        attachment={
+            "id": "att_pdf_2",
+            "filename": "deck.pdf",
+            "mime_type": "application/pdf",
+            "size_bytes": pdf_path.stat().st_size,
+            "sha256": pdf_manifest.sha256,
+            "artifact_id": pdf_manifest.artifact_id,
+            "path": pdf_manifest.path,
+        },
+        download_status="downloaded",
+        parse_status="queued",
+    )
+    agent._upsert_attachment_record(
+        record_id=agent._attachment_record_id(message_id="msg_att_2", attachment_id="att_png_2"),
+        mailbox_address="assistant@example.com",
+        thread_id="thr_att_2",
+        message_id="msg_att_2",
+        attachment={
+            "id": "att_png_2",
+            "filename": "logo.png",
+            "mime_type": "image/png",
+            "size_bytes": png_path.stat().st_size,
+            "sha256": png_manifest.sha256,
+            "artifact_id": png_manifest.artifact_id,
+            "path": png_manifest.path,
+        },
+        download_status="downloaded",
+        parse_status="skipped_unsupported",
+    )
+
+    async def fake_dispatch_docs_parse_bundle(*, task, thread_id, message_id, input_artifacts):
+        assert task.task_id == "tsk_reason_resolve_ondemand"
+        assert thread_id == "thr_att_2"
+        assert message_id == "msg_att_2"
+        assert [item["artifact_id"] for item in input_artifacts] == [pdf_manifest.artifact_id]
+        return {
+            "status": "completed",
+            "task_id": "tsk_docs_parse_on_demand",
+            "output": {
+                "bundle_id": "bundle_att_2",
+                "documents": [
+                    {
+                        "artifact_id": pdf_manifest.artifact_id,
+                        "doc_id": "doc_att_2",
+                        "title": "Deck",
+                        "chunk_count": 9,
+                    }
+                ],
+            },
+        }
+
+    monkeypatch.setattr(agent, "_dispatch_docs_parse_bundle", fake_dispatch_docs_parse_bundle)
+
+    task = _make_task(
+        intent="email.reason",
+        task_id="tsk_reason_resolve_ondemand",
+        input_payload={
+            "goal": "Read the attached PDF from this email thread.",
+            "thread_id": "thr_att_2",
+            "message_id": "msg_att_2",
+            "mailbox_address": "assistant@example.com",
+        },
+    )
+
+    result = await agent.execute(task)
+
+    assert result.status == "completed"
+    assert result.output["action"] == "resolve_attachment"
+    assert result.output["bundle_id"] == "bundle_att_2"
+    assert result.output["attachment_resolution_status"] == "parsed"
+    assert result.output["resolved_attachment"]["attachment_id"] == "att_pdf_2"
+    assert result.output["resolved_attachment"]["parsed_summary"]["doc_id"] == "doc_att_2"
+
+    with connect_sync(agent.session_db_path) as conn:
+        row = conn.execute(
+            "SELECT parse_status, parsed_bundle_id FROM email_attachment_records WHERE attachment_id = ?",
+            ("att_pdf_2",),
+        ).fetchone()
+    assert tuple(row) == ("parsed", "bundle_att_2")

@@ -12,7 +12,11 @@
     "to_recipients": { "type": "array", "items": { "type": "object" } },
     "cc_recipients": { "type": "array", "items": { "type": "object" } },
     "bcc_recipients": { "type": "array", "items": { "type": "object" } },
-    "search_results": { "type": "array", "items": { "type": "object" } }
+    "search_results": { "type": "array", "items": { "type": "object" } },
+    "bundle_id": { "type": ["string", "null"] },
+    "docs_tools": { "type": "array", "items": { "type": "string" } },
+    "resolved_attachment": { "type": ["object", "null"] },
+    "attachment_resolution_status": { "type": ["string", "null"] }
   },
   "required": ["response", "action"]
 }
