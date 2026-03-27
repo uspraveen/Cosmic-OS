@@ -171,6 +171,7 @@ class EmailAgent(AgentRuntime):
             timeout_sec=self.config.cosmic_mail_timeout_sec,
             client=self._http_client,
         )
+        self._trusted_sender_set: set[str] = set()
 
     async def on_startup(self) -> None:
         self.data_root.mkdir(parents=True, exist_ok=True)
@@ -303,6 +304,9 @@ class EmailAgent(AgentRuntime):
         mailbox_address = self._optional_text(task.input, "mailbox_address")
 
         context = await self._fetch_thread_context(thread_id=thread_id, message_id=message_id)
+        from_address = self._thread_sender(context)
+        trusted_sender = self._is_trusted_sender(from_address)
+        sender_role = "owner" if trusted_sender else "external"
         attachments, attachment_artifacts = await self._download_message_attachments(task, message_id=message_id)
         attachments = await self._reconcile_inbound_attachments(
             task,
@@ -378,6 +382,9 @@ class EmailAgent(AgentRuntime):
             "thread_id": thread_id,
             "message_id": message_id,
             "mailbox_address": mailbox_address,
+            "from_address": from_address,
+            "trusted_sender": trusted_sender,
+            "sender_role": sender_role,
             "subject": context.get("subject"),
             "matched_instruction": matched_instruction,
             "auto_reply": auto_reply,
@@ -2785,18 +2792,22 @@ class EmailAgent(AgentRuntime):
             next_base_url = ""
             next_api_token = ""
             next_mailbox = ""
+            next_trusted_senders: tuple[str, ...] = ()
         elif agent_email_integration_is_configured(stored):
             next_base_url = str(stored.base_url or "").strip()
             next_api_token = str(stored.api_token or "").strip()
             next_mailbox = str(stored.primary_mailbox_address or "").strip()
+            next_trusted_senders = stored.trusted_senders
         else:
             next_base_url = self._env_cosmic_mail_base_url
             next_api_token = self._env_cosmic_mail_api_token
             next_mailbox = self._env_primary_mailbox_address
+            next_trusted_senders = stored.trusted_senders if stored is not None else ()
 
         current_base_url = str(self.mail_client.base_url or "").strip()
         current_api_token = str(getattr(self.mail_client, "api_token", "") or "").strip()
         self.config.primary_mailbox_address = next_mailbox
+        self._trusted_sender_set = {item.casefold() for item in next_trusted_senders if item}
         if current_base_url == next_base_url and current_api_token == next_api_token:
             self.config.cosmic_mail_base_url = next_base_url
             self.config.cosmic_mail_api_token = next_api_token
@@ -2811,6 +2822,12 @@ class EmailAgent(AgentRuntime):
             timeout_sec=self.config.cosmic_mail_timeout_sec,
             client=self._http_client,
         )
+
+    def _is_trusted_sender(self, from_address: str | None) -> bool:
+        sender = self._safe_text(from_address).casefold()
+        if not sender:
+            return False
+        return sender in self._trusted_sender_set
 
     def _record_session_run(
         self,

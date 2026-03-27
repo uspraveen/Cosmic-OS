@@ -56,6 +56,10 @@ class AgentEmailConfigRequest(BaseModel):
     primary_mailbox_address: str | None = Field(default=None, max_length=320)
 
 
+class AgentEmailTrustedSendersRequest(BaseModel):
+    trusted_senders: list[str] = Field(default_factory=list)
+
+
 class TaskInputReplyRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=8000)
 
@@ -1249,6 +1253,20 @@ async def clear_agent_email_config(
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
     return await runtime.clear_agent_email_connection()
+
+
+@router.post("/channels/agent-email/trusted-senders")
+async def save_agent_email_trusted_senders(
+    body: AgentEmailTrustedSendersRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return await runtime.save_agent_email_trusted_senders(body.trusted_senders)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
 
 @router.get("/channels/{platform}/status")

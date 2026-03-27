@@ -666,6 +666,73 @@ async def test_email_agent_explicit_disconnect_blocks_env_fallback(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_email_agent_process_inbound_marks_trusted_sender_from_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    integration_db_path = tmp_path / "gateway" / "agent_email_integrations.db"
+    AgentEmailIntegrationStore(integration_db_path).save_trusted_senders(
+        ["Owner@Example.com"],
+        updated_at="2026-03-27T00:00:00Z",
+    )
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+            enable_internal_llm=False,
+            attachment_docs_auto_parse_enabled=False,
+            agent_email_integrations_db_path=integration_db_path,
+        ),
+    )
+
+    async def fake_fetch_thread_context(*, thread_id, message_id=None):
+        return {
+            "thread": {"id": thread_id, "subject": "Owner follow-up"},
+            "messages": [],
+            "subject": "Owner follow-up",
+            "latest_message": {"id": message_id, "from_address": "Owner@Example.com"},
+            "latest_body": "Check this quickly.",
+        }
+
+    async def fake_summarize_thread(**kwargs):
+        return "Inbound owner note."
+
+    class FakeMailClient:
+        base_url = "http://cosmic-mail.local"
+        api_token = "mail-token"
+        timeout_sec = 20.0
+
+        async def aclose(self):
+            return None
+
+        async def list_message_attachments(self, message_id):
+            return []
+
+    agent.mail_client = FakeMailClient()  # type: ignore[assignment]
+    monkeypatch.setattr(agent, "_fetch_thread_context", fake_fetch_thread_context)
+    monkeypatch.setattr(agent, "_summarize_thread", fake_summarize_thread)
+
+    task = _make_task(
+        intent="email.process_inbound",
+        task_id="tsk_process_inbound_trusted_sender",
+        input_payload={
+            "thread_id": "thr_email_owner",
+            "message_id": "msg_email_owner",
+            "mailbox_address": "assistant@example.com",
+        },
+    )
+
+    result = await agent.execute(task)
+
+    assert result.status == "completed"
+    assert result.output["trusted_sender"] is True
+    assert result.output["sender_role"] == "owner"
+    assert result.output["from_address"] == "Owner@Example.com"
+
+
+@pytest.mark.asyncio
 async def test_email_agent_resolve_mailbox_falls_back_to_first_active_mailbox() -> None:
     tmpdir = Path.cwd() / f"tmp_email_agent_mailbox_fallback_{uuid4().hex}"
     tmpdir.mkdir(parents=True, exist_ok=True)

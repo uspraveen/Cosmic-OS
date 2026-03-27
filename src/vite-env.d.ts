@@ -85,6 +85,9 @@ interface Window {
       primaryMailboxAddress?: string | null
     }) => Promise<any>
     clearGatewayAgentEmailConfig: () => Promise<any>
+    saveGatewayAgentEmailTrustedSenders: (payload: {
+      trustedSenders: string[]
+    }) => Promise<any>
     cosmicMailRequest: (payload: GatewayConnectionPayload & {
       path: string
       method?: string
@@ -103,6 +106,7 @@ interface Window {
       timeoutMs?: number
     }) => Promise<{ cancelled: true } | { cancelled: false; path: string }>
     onCosmicMailInbound: (cb: (data: any) => void) => () => void
+    onCosmicMailApproval: (cb: (data: any) => void) => () => void
     onCalendarAgendaUpdate: (cb: (data: any) => void) => () => void
     onIntegrationsUpdate: (cb: (data: any) => void) => () => void
     onIntegrationEvent: (cb: (data: any) => void) => () => void

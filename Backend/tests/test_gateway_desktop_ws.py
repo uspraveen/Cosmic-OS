@@ -1326,6 +1326,9 @@ async def test_email_inbound_preprocess_rewrites_effective_orchestrator_query(tm
                 "output": {
                     "summary": "Customer is asking for the latest invoice and wants quick confirmation.",
                     "subject": "Need help",
+                    "from_address": "owner@example.com",
+                    "trusted_sender": True,
+                    "sender_role": "owner",
                     "attachments": [{"id": "att_1"}, {"id": "att_2"}],
                     "matched_instruction": {"label": "Auto reply invoices"},
                     "auto_reply": {"sent": True, "message_id": "msg_auto_1"},
@@ -1342,6 +1345,7 @@ async def test_email_inbound_preprocess_rewrites_effective_orchestrator_query(tm
         assert "Customer is asking for the latest invoice" in request_record["orchestrator_query_override"]
         assert "Auto reply invoices" in request_record["orchestrator_query_override"]
         assert "2 attachment(s) were downloaded into the email specialist workflow" in request_record["orchestrator_query_override"]
+        assert "Trusted sender: yes. Treat this as a direct owner query arriving over email." in request_record["orchestrator_query_override"]
 
         task = runtime._build_orchestrator_task(  # noqa: SLF001 - intentional unit seam
             request_record=request_record,
@@ -3305,6 +3309,21 @@ async def test_agent_email_status_respects_explicit_disconnect_over_env(tmp_path
     assert status["config_source"] == "integration_store_disabled"
     assert status["base_url"] == ""
     assert status["api_token"] == ""
+    assert status["trusted_senders"] == []
+
+
+@pytest.mark.asyncio
+async def test_agent_email_trusted_senders_sync_to_status_even_without_connection(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+    runtime.agent_email_integration_store = AgentEmailIntegrationStore(tmp_path / "agent_email_integrations.db")
+
+    status = await runtime.save_agent_email_trusted_senders(["Owner@Example.com", "ops@example.com", "owner@example.com"])
+
+    assert status["configured"] is False
+    assert status["trusted_senders"] == ["owner@example.com", "ops@example.com"]
+    persisted = runtime.agent_email_integration_store.get_primary()
+    assert persisted is not None
+    assert persisted.trusted_senders == ("owner@example.com", "ops@example.com")
 
 
 @pytest.mark.asyncio

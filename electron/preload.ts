@@ -212,6 +212,7 @@ contextBridge.exposeInMainWorld('cosmic', {
   getGatewayAgentEmailStatus: () => ipcRenderer.invoke('gateway:get-agent-email-status'),
   saveGatewayAgentEmailConfig: (payload: any) => ipcRenderer.invoke('gateway:save-agent-email-config', payload),
   clearGatewayAgentEmailConfig: () => ipcRenderer.invoke('gateway:clear-agent-email-config'),
+  saveGatewayAgentEmailTrustedSenders: (payload: any) => ipcRenderer.invoke('gateway:save-agent-email-trusted-senders', payload),
   cosmicMailRequest: (payload: any) => ipcRenderer.invoke('cosmic-mail:request', payload),
   cosmicMailUploadDraftAttachment: (payload: any) => ipcRenderer.invoke('cosmic-mail:upload-draft-attachment', payload),
   cosmicMailDownloadAttachment: (payload: any) => ipcRenderer.invoke('cosmic-mail:download-attachment', payload),
@@ -219,6 +220,11 @@ contextBridge.exposeInMainWorld('cosmic', {
     const listener = (_: any, data: any) => cb(data)
     ipcRenderer.on('cosmic-mail:new-inbound', listener)
     return () => ipcRenderer.removeListener('cosmic-mail:new-inbound', listener)
+  },
+  onCosmicMailApproval: (cb: (data: any) => void) => {
+    const listener = (_: any, data: any) => cb(data)
+    ipcRenderer.on('cosmic-mail:new-approval', listener)
+    return () => ipcRenderer.removeListener('cosmic-mail:new-approval', listener)
   },
   onCalendarAgendaUpdate: (cb: (data: any) => void) => {
     const listener = (_: any, data: any) => cb(data)

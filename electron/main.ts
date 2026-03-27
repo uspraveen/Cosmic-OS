@@ -790,6 +790,142 @@ function formatCosmicMailBatchFromSummary(
   return `${unique[0]} · +${items.length - 1} more`
 }
 
+const COSMIC_MAIL_APPROVAL_NOTIFY_STORE_KEY = 'cosmicMailApprovalNotifyV1'
+
+type CosmicMailStoredApprovalNotify = {
+  orgId: string
+  knownIds: string[]
+}
+
+function clipCosmicMailIslandText(value: string, max = 168) {
+  const normalized = String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!normalized) return ''
+  return normalized.length > max ? `${normalized.slice(0, max - 1).trimEnd()}\u2026` : normalized
+}
+
+function formatCosmicMailApprovalBatchAgentSummary(
+  items: { agentName: string }[],
+): string {
+  const labels = items
+    .map((item) => String(item.agentName || '').trim())
+    .filter(Boolean)
+  const unique = [...new Set(labels)]
+  if (unique.length === 0) return 'Agents'
+  if (unique.length === 1) return unique[0]
+  if (items.length <= 3) return unique.slice(0, 3).join(' · ')
+  return `${unique[0]} · +${items.length - 1} more`
+}
+
+async function notifyCosmicMailPendingApprovals(
+  cfg: GatewayConnectionConfig,
+  orgId: string,
+  targetWin: BrowserWindow,
+) {
+  if (!orgId || !targetWin || targetWin.isDestroyed()) return
+
+  let approvalsRaw: any[] = []
+  try {
+    approvalsRaw = normalizeCosmicMailListResponse(
+      await callCosmicMailJson(cfg, '/v1/approvals', { timeoutMs: 20_000 }),
+    )
+  } catch {
+    return
+  }
+
+  type PendingSnap = {
+    id: string
+    subject: string
+    agentName: string
+    mailboxAddress: string
+    recipients: string
+    snippet: string
+    createdAt: number
+  }
+
+  const pending: PendingSnap[] = []
+  for (const a of approvalsRaw) {
+    if (String(a?.organization_id || '') !== orgId) continue
+    if (String(a?.status || '').toLowerCase() !== 'pending') continue
+    const id = String(a?.id || '').trim()
+    if (!id) continue
+    const draft = a?.draft && typeof a.draft === 'object' ? a.draft : null
+    const subject = String(draft?.subject || '').trim() || '(No subject)'
+    const agentName = String(a?.agent_name || '').trim() || 'Agent'
+    const mailboxAddress = String(a?.mailbox_address || '').trim() || 'Inbox'
+    const createdMs = new Date(a?.created_at || 0).getTime()
+    const createdAt = Number.isFinite(createdMs) ? createdMs : Date.now()
+    let recipients = '—'
+    if (Array.isArray(draft?.to_recipients) && draft.to_recipients.length) {
+      const emails = draft.to_recipients
+        .map((r: any) => String(r?.email || '').trim())
+        .filter(Boolean)
+      if (emails.length) recipients = emails.join(', ')
+    }
+    const plain = String(draft?.text_body || '').trim()
+    const fromHtml = String(draft?.html_body || '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+    const snippet =
+      clipCosmicMailIslandText(plain || fromHtml, 200) || 'Awaiting your review'
+    pending.push({
+      id,
+      subject,
+      agentName,
+      mailboxAddress,
+      recipients,
+      snippet,
+      createdAt,
+    })
+  }
+
+  pending.sort((a, b) => b.createdAt - a.createdAt)
+
+  const prev = store.get(COSMIC_MAIL_APPROVAL_NOTIFY_STORE_KEY) as CosmicMailStoredApprovalNotify | undefined
+  let knownIds =
+    prev && prev.orgId === orgId && Array.isArray(prev.knownIds) ? [...prev.knownIds] : null
+
+  if (!knownIds) {
+    store.set(COSMIC_MAIL_APPROVAL_NOTIFY_STORE_KEY, {
+      orgId,
+      knownIds: pending.map((p) => p.id).slice(-400),
+    })
+    return
+  }
+
+  const newOnes = pending.filter((p) => !knownIds!.includes(p.id))
+  if (!newOnes.length) return
+
+  knownIds = [...new Set([...knownIds, ...newOnes.map((p) => p.id)])].slice(-400)
+  store.set(COSMIC_MAIL_APPROVAL_NOTIFY_STORE_KEY, { orgId, knownIds })
+
+  const payload =
+    newOnes.length === 1
+      ? {
+          kind: 'single' as const,
+          approvalId: newOnes[0].id,
+          subject: newOnes[0].subject,
+          agentName: newOnes[0].agentName,
+          mailboxAddress: newOnes[0].mailboxAddress,
+          recipients: newOnes[0].recipients,
+          snippet: newOnes[0].snippet,
+          createdAt: newOnes[0].createdAt,
+        }
+      : {
+          kind: 'batch' as const,
+          count: newOnes.length,
+          subject: newOnes[0].subject,
+          agentSummary: formatCosmicMailApprovalBatchAgentSummary(newOnes),
+          snippet: newOnes[0].snippet,
+          latestCreatedAt: newOnes[0].createdAt,
+          mailboxAddress: newOnes[0].mailboxAddress,
+        }
+
+  targetWin.webContents.send('cosmic-mail:new-approval', payload)
+}
+
 async function runCosmicMailPollTick() {
   if (cosmicMailPollBusy) return
   const w = win
@@ -822,12 +958,13 @@ async function runCosmicMailPollTick() {
       await callCosmicMailJson(cfg, '/v1/organizations', { timeoutMs: 15_000 }),
     )
     const preferred = pickPreferredCosmicMailOrganization(authContext, organizations)
-    if (!preferred?.id) return
+    const preferredOrgId = preferred?.id ? String(preferred.id) : ''
 
+    if (preferredOrgId) {
     const mailboxesRaw = normalizeCosmicMailListResponse(
       await callCosmicMailJson(cfg, '/v1/mailboxes', { timeoutMs: 20_000 }),
     )
-    const mailboxes = mailboxesRaw.filter((m: any) => m?.organization_id === preferred.id)
+    const mailboxes = mailboxesRaw.filter((m: any) => m?.organization_id === preferredOrgId)
 
     for (const mailbox of mailboxes) {
       const mailboxId = String(mailbox?.id || '').trim()
@@ -949,7 +1086,7 @@ async function runCosmicMailPollTick() {
       }
     }
 
-    if (!fresh.length || !win || win.isDestroyed()) return
+    if (fresh.length && win && !win.isDestroyed()) {
     fresh.sort((a, b) => b.receivedAt - a.receivedAt)
 
     const payload =
@@ -978,6 +1115,10 @@ async function runCosmicMailPollTick() {
           }
 
     win.webContents.send('cosmic-mail:new-inbound', payload)
+    }
+
+    await notifyCosmicMailPendingApprovals(cfg, preferredOrgId, w)
+    }
   } catch (err) {
     console.error('[cosmic-mail poll]', err)
   } finally {
@@ -1746,6 +1887,25 @@ app.whenReady().then(() => {
     }
     return callGatewayJson(config, '/channels/agent-email/config', {
       method: 'DELETE',
+      timeoutMs: 20000,
+    })
+  })
+
+  ipcMain.handle('gateway:save-agent-email-trusted-senders', async (_, payload: {
+    trustedSenders?: string[]
+  }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const trustedSenders = Array.isArray(payload?.trustedSenders)
+      ? payload.trustedSenders.map((item) => String(item || ''))
+      : []
+    return callGatewayJson(config, '/channels/agent-email/trusted-senders', {
+      method: 'POST',
+      body: {
+        trusted_senders: trustedSenders,
+      },
       timeoutMs: 20000,
     })
   })

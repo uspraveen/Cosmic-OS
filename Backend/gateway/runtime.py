@@ -647,6 +647,7 @@ class GatewayRuntime:
 
     async def get_agent_email_connection_status(self) -> dict[str, Any]:
         settings = self._effective_agent_email_settings()
+        stored = self.agent_email_integration_store.get_primary()
         configured = bool(settings.get("base_url") and settings.get("api_token"))
         adapter = self.registry.adapters.get("agent-email")
         mail_status: dict[str, Any] | None = None
@@ -667,6 +668,7 @@ class GatewayRuntime:
             "base_url": settings.get("base_url") or "",
             "api_token": settings.get("api_token") or "",
             "primary_mailbox_address": settings.get("primary_mailbox_address") or "",
+            "trusted_senders": list(stored.trusted_senders) if stored is not None else [],
             "config_source": settings.get("source") or "env",
             "mail": mail_status,
         }
@@ -715,6 +717,13 @@ class GatewayRuntime:
     async def clear_agent_email_connection(self) -> dict[str, Any]:
         self.agent_email_integration_store.clear_primary()
         await self._unregister_adapter("agent-email")
+        return await self.get_agent_email_connection_status()
+
+    async def save_agent_email_trusted_senders(self, trusted_senders: list[str]) -> dict[str, Any]:
+        self.agent_email_integration_store.save_trusted_senders(
+            trusted_senders,
+            updated_at=utcnow_iso(),
+        )
         return await self.get_agent_email_connection_status()
 
     def _is_email_thread_session(self, session_id: str | None) -> bool:
@@ -776,12 +785,22 @@ class GatewayRuntime:
         auto_reply = process_output.get("auto_reply") if isinstance(process_output.get("auto_reply"), dict) else None
         attachments = process_output.get("attachments") if isinstance(process_output.get("attachments"), list) else []
         subject = self._safe_text(process_output.get("subject")) or None
+        trusted_sender = bool(process_output.get("trusted_sender"))
+        sender_role = self._safe_text(process_output.get("sender_role")) or "external"
+        from_address = self._safe_text(process_output.get("from_address")) or None
 
         lines = [
             "The email specialist already processed this inbound email thread.",
         ]
         if subject:
             lines.append(f"Subject: {subject}")
+        if from_address:
+            lines.append(f"From: {from_address}")
+        lines.append(
+            "Trusted sender: yes. Treat this as a direct owner query arriving over email."
+            if trusted_sender
+            else f"Trusted sender: no. Sender role: {sender_role}."
+        )
         lines.extend(
             [
                 "",

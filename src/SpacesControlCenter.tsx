@@ -43,6 +43,9 @@ interface SpacesControlCenterProps {
   /** Increment (e.g. from Dynamic Island) to open Agent Email on the Inbox tab; optional mailbox id to select. */
   agentEmailNavigateInboxSignal?: number
   agentEmailNavigateInboxMailboxId?: string | null
+  /** Increment to open Agent Email on Approvals; optional approval id to select when the list loads. */
+  agentEmailNavigateApprovalsSignal?: number
+  agentEmailNavigateApprovalsId?: string | null
 }
 
 interface SpacePageDef {
@@ -202,6 +205,7 @@ interface GatewayAgentEmailStatus {
   base_url: string
   api_token: string
   primary_mailbox_address: string | null
+  trusted_senders: string[]
   config_source: string | null
   explicitly_disconnected: boolean
   mail?: Record<string, unknown> | null
@@ -543,7 +547,48 @@ interface CosmicMailMailboxSyncResult {
 const AGENT_EMAIL_SETTINGS_KEYS = {
   baseUrl: 'cosmicMailBaseUrl',
   apiToken: 'cosmicMailApiToken',
+  trustedSenders: 'cosmicMailTrustedSenders',
 } as const
+
+function parseAgentEmailTrustedSendersSetting(raw: unknown): string[] {
+  if (raw == null) return []
+  let list: unknown[] = []
+  if (typeof raw === 'string') {
+    const t = raw.trim()
+    if (!t) return []
+    try {
+      const parsed = JSON.parse(t) as unknown
+      if (!Array.isArray(parsed)) return []
+      list = parsed
+    } catch {
+      return []
+    }
+  } else if (Array.isArray(raw)) {
+    list = raw
+  } else {
+    return []
+  }
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const item of list) {
+    const s = String(item).trim()
+    if (!s) continue
+    const key = s.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(s)
+  }
+  return out
+}
+
+function isPlausibleTrustedSenderEmail(value: string): boolean {
+  const t = value.trim()
+  if (t.length < 5 || /\s/.test(t)) return false
+  const at = t.indexOf('@')
+  if (at < 1 || at === t.length - 1) return false
+  const host = t.slice(at + 1)
+  return host.includes('.')
+}
 
 const MANAGE_REFRESH_MS = 30_000
 const MANAGE_REFRESH_TIMEOUT_MS = 8_000
@@ -760,6 +805,7 @@ function normalizeGatewayAgentEmailStatus(raw: unknown): GatewayAgentEmailStatus
       typeof source?.primary_mailbox_address === 'string' && source.primary_mailbox_address.trim()
         ? source.primary_mailbox_address.trim()
         : null,
+    trusted_senders: parseAgentEmailTrustedSendersSetting(source?.trusted_senders),
     config_source: typeof source?.config_source === 'string' && source.config_source.trim() ? source.config_source.trim() : null,
     explicitly_disconnected: Boolean(source?.explicitly_disconnected),
     mail: toRecord(source?.mail),
@@ -1626,6 +1672,8 @@ export default function SpacesControlCenter({
   containerStyle,
   agentEmailNavigateInboxSignal = 0,
   agentEmailNavigateInboxMailboxId = null,
+  agentEmailNavigateApprovalsSignal = 0,
+  agentEmailNavigateApprovalsId = null,
 }: SpacesControlCenterProps) {
   const [page, setPage] = useState<SpacesPageId>('command')
   const [railCollapsed, setRailCollapsed] = useState(false)
@@ -1635,7 +1683,7 @@ export default function SpacesControlCenter({
   const [agentEmailSelectedDomainId, setAgentEmailSelectedDomainId] = useState('')
   const [agentEmailSelectedApprovalId, setAgentEmailSelectedApprovalId] = useState('')
   const [agentEmailSelectedThreadId, setAgentEmailSelectedThreadId] = useState('')
-  const [agentEmailSettingsSection, setAgentEmailSettingsSection] = useState<'connection' | 'domains' | 'inboxes' | 'agents'>('connection')
+  const [agentEmailSettingsSection, setAgentEmailSettingsSection] = useState<'connection' | 'trusted-senders' | 'domains' | 'inboxes' | 'agents'>('connection')
 
   /* ── Live calendar state ─────────────────────────────── */
   const [calendarData, setCalendarData] = useState<CalendarAgendaSnapshot>(EMPTY_CALENDAR_AGENDA)
@@ -2515,6 +2563,8 @@ export default function SpacesControlCenter({
   const [agentEmailNewAgentDomainIdDraft, setAgentEmailNewAgentDomainIdDraft] = useState('')
   const [agentEmailInboxSearchQuery, setAgentEmailInboxSearchQuery] = useState('')
   const [agentEmailInboxSearchApplied, setAgentEmailInboxSearchApplied] = useState('')
+  const [agentEmailTrustedSenders, setAgentEmailTrustedSenders] = useState<string[]>([])
+  const [agentEmailTrustedSenderDraft, setAgentEmailTrustedSenderDraft] = useState('')
   /** Inbox: reply composer expanded vs Gmail-style reply strip. */
   const [agentEmailComposerExpanded, setAgentEmailComposerExpanded] = useState(false)
   const [agentEmailReplyAttachmentFiles, setAgentEmailReplyAttachmentFiles] = useState<File[]>([])
@@ -2568,6 +2618,10 @@ export default function SpacesControlCenter({
       const raw = await window.cosmic.getGatewayAgentEmailStatus()
       const status = normalizeGatewayAgentEmailStatus(raw)
       setAgentEmailBackendStatus(status)
+      if (status.trusted_senders.length) {
+        setAgentEmailTrustedSenders(status.trusted_senders)
+        window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.trustedSenders, JSON.stringify(status.trusted_senders))
+      }
       if (applyFields) {
         const shouldApplyBackendFields =
           status.configured ||
@@ -2593,10 +2647,47 @@ export default function SpacesControlCenter({
     }
   }, [])
 
+  const syncAgentEmailTrustedSenders = useCallback(async (nextTrustedSenders: string[]) => {
+    const normalized = parseAgentEmailTrustedSendersSetting(nextTrustedSenders)
+    setAgentEmailTrustedSenders(normalized)
+    window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.trustedSenders, JSON.stringify(normalized))
+    if (!gatewayConnected || !window.cosmic?.saveGatewayAgentEmailTrustedSenders) {
+      return null
+    }
+    try {
+      const rawStatus = await window.cosmic.saveGatewayAgentEmailTrustedSenders({
+        trustedSenders: normalized,
+      })
+      const status = normalizeGatewayAgentEmailStatus(rawStatus)
+      setAgentEmailBackendStatus(status)
+      setAgentEmailTrustedSenders(status.trusted_senders)
+      window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.trustedSenders, JSON.stringify(status.trusted_senders))
+      return status
+    } catch (error: unknown) {
+      setAgentEmailBanner({
+        tone: 'error',
+        message: `Trusted sender sync failed. Saved locally only. ${toErrorMessage(error)}`,
+      })
+      return null
+    }
+  }, [gatewayConnected])
+
   const ensureAgentEmailBackendConnection = useCallback(async (showSpinner = false) => {
-    const status = await requestAgentEmailBackendStatus(true, showSpinner, true)
+    let status = await requestAgentEmailBackendStatus(true, showSpinner, true)
     if (!status) {
       return null
+    }
+    const localTrustedSenders = parseAgentEmailTrustedSendersSetting(agentEmailTrustedSenders)
+    if (status.trusted_senders.length) {
+      if (JSON.stringify(status.trusted_senders) !== JSON.stringify(localTrustedSenders)) {
+        setAgentEmailTrustedSenders(status.trusted_senders)
+        window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.trustedSenders, JSON.stringify(status.trusted_senders))
+      }
+    } else if (localTrustedSenders.length) {
+      const syncedStatus = await syncAgentEmailTrustedSenders(localTrustedSenders)
+      if (syncedStatus) {
+        status = syncedStatus
+      }
     }
     const nextBaseUrl = agentEmailBaseUrl.trim()
     const nextApiToken = agentEmailApiToken.trim()
@@ -2630,7 +2721,9 @@ export default function SpacesControlCenter({
   }, [
     agentEmailApiToken,
     agentEmailBaseUrl,
+    agentEmailTrustedSenders,
     requestAgentEmailBackendStatus,
+    syncAgentEmailTrustedSenders,
   ])
 
   const loadAgentEmailThreads = useCallback(async (
@@ -2924,6 +3017,7 @@ export default function SpacesControlCenter({
     const offSettings = window.cosmic?.onSettingsUpdate((settings) => {
       setAgentEmailBaseUrl(String(settings?.[AGENT_EMAIL_SETTINGS_KEYS.baseUrl] ?? ''))
       setAgentEmailApiToken(String(settings?.[AGENT_EMAIL_SETTINGS_KEYS.apiToken] ?? ''))
+      setAgentEmailTrustedSenders(parseAgentEmailTrustedSendersSetting(settings?.[AGENT_EMAIL_SETTINGS_KEYS.trustedSenders]))
       setAgentEmailSettingsLoaded(true)
     })
     window.cosmic?.getSettings()
@@ -2998,7 +3092,7 @@ export default function SpacesControlCenter({
   }, [agentEmailThreads.length])
 
   useEffect(() => {
-    if (!agentEmailConfigReady && agentEmailSettingsSection !== 'connection') {
+    if (!agentEmailConfigReady && agentEmailSettingsSection !== 'connection' && agentEmailSettingsSection !== 'trusted-senders') {
       setAgentEmailSettingsSection('connection')
     }
   }, [agentEmailConfigReady, agentEmailSettingsSection])
@@ -3044,6 +3138,30 @@ export default function SpacesControlCenter({
     }
     pendingAgentEmailInboxMailboxIdRef.current = null
   }, [active, agentEmailInboxes])
+
+  const lastAgentEmailNavigateApprovalsSignalRef = useRef(0)
+  const pendingAgentEmailApprovalsIdRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    const sig = agentEmailNavigateApprovalsSignal ?? 0
+    if (!sig || sig === lastAgentEmailNavigateApprovalsSignalRef.current) return
+    const aid = (agentEmailNavigateApprovalsId && String(agentEmailNavigateApprovalsId).trim()) || ''
+    pendingAgentEmailApprovalsIdRef.current = aid || null
+    if (!active) return
+    lastAgentEmailNavigateApprovalsSignalRef.current = sig
+    setPage('agent-email')
+    setAgentEmailView('approvals')
+  }, [active, agentEmailNavigateApprovalsSignal, agentEmailNavigateApprovalsId])
+
+  useEffect(() => {
+    if (!active) return
+    const want = pendingAgentEmailApprovalsIdRef.current
+    if (!want) return
+    if (agentEmailApprovals.some((approval) => approval.id === want)) {
+      setAgentEmailSelectedApprovalId(want)
+    }
+    pendingAgentEmailApprovalsIdRef.current = null
+  }, [active, agentEmailApprovals])
 
   const agentEmailSelectedAgent = agentEmailAgents.find((agent) => agent.id === agentEmailSelectedAgentId) || agentEmailAgents[0] || null
   const agentEmailSelectedInbox = agentEmailInboxes.find((inbox) => inbox.id === agentEmailSelectedInboxId) || agentEmailInboxes[0] || null
@@ -3341,6 +3459,28 @@ export default function SpacesControlCenter({
       setAgentEmailVerifyingDomain(false)
     }
   }, [agentEmailSelectedDomain, callAgentEmailApi, requestAgentEmailSnapshot])
+
+  const handleAgentEmailAddTrustedSender = useCallback(() => {
+    const raw = agentEmailTrustedSenderDraft.trim()
+    if (!raw) return
+    if (!isPlausibleTrustedSenderEmail(raw)) {
+      setAgentEmailBanner({ tone: 'error', message: 'Enter a valid email address.' })
+      return
+    }
+    const key = raw.toLowerCase()
+    if (agentEmailTrustedSenders.some((entry) => entry.toLowerCase() === key)) {
+      setAgentEmailTrustedSenderDraft('')
+      return
+    }
+    const next = [...agentEmailTrustedSenders, raw]
+    setAgentEmailTrustedSenderDraft('')
+    void syncAgentEmailTrustedSenders(next)
+  }, [agentEmailTrustedSenderDraft, agentEmailTrustedSenders, syncAgentEmailTrustedSenders])
+
+  const handleAgentEmailRemoveTrustedSender = useCallback((email: string) => {
+    const next = agentEmailTrustedSenders.filter((entry) => entry !== email)
+    void syncAgentEmailTrustedSenders(next)
+  }, [agentEmailTrustedSenders, syncAgentEmailTrustedSenders])
 
   useEffect(() => {
     if (agentEmailDomains.length && !agentEmailMailboxDomainIdDraft) {
@@ -4683,6 +4823,83 @@ export default function SpacesControlCenter({
       </div>
     )
 
+    const renderAgentEmailTrustedSendersSection = () => (
+      <div className="agent-email-settings-domains">
+        <section className="agent-email-settings-domain-add" aria-label="Add trusted sender">
+          <div className="agent-email-settings-domain-add-text">
+            <h4 className="agent-email-settings-section-title">Email identity / trusted senders</h4>
+            <p className="agent-email-settings-section-lead">
+              Addresses you trust for inbound identity. Synced to Gateway on the VM and used by inbound email processing.
+            </p>
+          </div>
+          <div className="agent-email-settings-domain-add-row">
+            <input
+              className="agent-email-form-input agent-email-settings-domain-add-input"
+              type="email"
+              value={agentEmailTrustedSenderDraft}
+              placeholder="name@company.com"
+              onChange={(event) => setAgentEmailTrustedSenderDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  handleAgentEmailAddTrustedSender()
+                }
+              }}
+              autoComplete="off"
+              spellCheck={false}
+              aria-label="Trusted sender email"
+            />
+            <button
+              type="button"
+              className="agent-email-console-primary agent-email-settings-domain-add-btn"
+              onClick={() => handleAgentEmailAddTrustedSender()}
+              disabled={!agentEmailTrustedSenderDraft.trim()}
+            >
+              Add
+            </button>
+          </div>
+        </section>
+
+        <div className="agent-email-settings-domain-split agent-email-settings-trusted-senders-split">
+          <div className="agent-email-settings-domain-list-panel agent-email-settings-trusted-senders-list">
+            <div className="agent-email-settings-panel-label">Trusted addresses</div>
+            {agentEmailTrustedSenders.length ? (
+              <div className="agent-email-console-table-wrap agent-email-settings-domain-table-wrap">
+                <table className="agent-email-console-table agent-email-settings-domain-table agent-email-settings-trusted-senders-table">
+                  <thead>
+                    <tr>
+                      <th>Email</th>
+                      <th className="agent-email-settings-trusted-senders-actions-col"> </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {agentEmailTrustedSenders.map((email) => (
+                      <tr key={email.toLowerCase()}>
+                        <td data-label="Email">
+                          <strong className="agent-email-console-mono">{email}</strong>
+                        </td>
+                        <td data-label="Actions" className="agent-email-settings-trusted-senders-actions-cell">
+                          <button
+                            type="button"
+                            className="agent-email-console-secondary agent-email-settings-trusted-remove"
+                            onClick={() => handleAgentEmailRemoveTrustedSender(email)}
+                          >
+                            Remove
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              renderAgentEmailEmptyState('No trusted senders yet', 'Add an email above. Duplicates are ignored.')
+            )}
+          </div>
+        </div>
+      </div>
+    )
+
     const renderAgentEmailAgentsProvisionSection = () => (
       <div className="agent-email-settings-domains">
         <section className="agent-email-settings-domain-add" aria-label="Add agent">
@@ -4768,6 +4985,18 @@ export default function SpacesControlCenter({
               <button
                 type="button"
                 role="tab"
+                aria-selected={agentEmailSettingsSection === 'trusted-senders'}
+                className={`agent-email-settings-subtab ${agentEmailSettingsSection === 'trusted-senders' ? 'active' : ''}`}
+                onClick={() => setAgentEmailSettingsSection('trusted-senders')}
+              >
+                Email identity
+                {agentEmailTrustedSenders.length > 0 ? (
+                  <span className="agent-email-settings-subtab-count">{agentEmailTrustedSenders.length}</span>
+                ) : null}
+              </button>
+              <button
+                type="button"
+                role="tab"
                 aria-selected={agentEmailSettingsSection === 'domains'}
                 className={`agent-email-settings-subtab ${agentEmailSettingsSection === 'domains' ? 'active' : ''}`}
                 disabled={!agentEmailConfigReady}
@@ -4818,6 +5047,7 @@ export default function SpacesControlCenter({
               </button>
             </div>
             {agentEmailSettingsSection === 'connection' ? renderAgentEmailConnectionPanel() : null}
+            {agentEmailSettingsSection === 'trusted-senders' ? renderAgentEmailTrustedSendersSection() : null}
             {agentEmailConfigReady && agentEmailSettingsSection === 'domains' ? renderAgentEmailDomainsSection() : null}
             {agentEmailConfigReady && agentEmailSettingsSection === 'inboxes' ? renderAgentEmailMailboxesSection() : null}
             {agentEmailConfigReady && agentEmailSettingsSection === 'agents' ? renderAgentEmailAgentsProvisionSection() : null}
