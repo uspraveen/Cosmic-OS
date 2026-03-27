@@ -20,22 +20,39 @@ from typing_extensions import TypedDict
 from shared.contracts import TaskEnvelope
 from shared.tabular_artifacts import validate_safe_sheet_id
 
-from .config import TabularAgentConfig
+from .config import AGENT_ROOT, TabularAgentConfig
 from .internal_llm import invoke_tabular_mimo
 from .internal_workflow import extract_json_object
 from .orchestrator_clarify import request_orchestrator_task_input
 from .prompt_assets import build_internal_context
-from .sandbox import persist_bundle_python_script, provision_venv, run_python_script, validate_pip_packages, write_execution_receipt
+from .sandbox import (
+    persist_bundle_python_script,
+    provision_venv,
+    run_python_script,
+    validate_pip_packages,
+    write_execution_receipt,
+)
 
 logger = logging.getLogger(__name__)
 
-_VALID_ACTIONS = frozenset({"browse", "schema", "preview", "sql", "python", "clarify", "done"})
+_VALID_ACTIONS = frozenset(
+    {
+        "browse",
+        "schema",
+        "preview",
+        "sql",
+        "python",
+        "clarify",
+        "done",
+        "activate_skill",
+    }
+)
 
 _MULTI_STEP_INSTRUCTION = """\
 You control internal tools over an already-parsed spreadsheet bundle. Reply with **one JSON object only** (no markdown).
 
 Keys:
-- "action": one of "browse", "schema", "preview", "sql", "python", "clarify", "done"
+- "action": one of "browse", "schema", "preview", "sql", "python", "clarify", "activate_skill", "done"
 - "sheet_id": string or null — required for "preview"; optional filter for "schema"
 - "sql": string or null — single read-only SELECT for "sql" (DuckDB views: s_<sheet_id>)
 - "python_code": string or null — for "python" only; duckdb/pandas; cwd is bundle root
@@ -43,6 +60,7 @@ Keys:
 - "question": string or null — for "clarify" only: concise user-facing question (blocking ambiguity)
 - "options": array of strings or null — for "clarify" only: short choices when applicable (max ~8)
 - "ambiguity": string or null — for "clarify" only: internal label (e.g. "multiple_sheets", "metric_definition")
+- "skill_name": string or null — for "activate_skill" only: name of skill to activate (e.g. "three-statement", "ratio-analysis", "revenue-analytics")
 - "answer": string or null — when action is "done", concise result for the orchestrator
 - "rationale": short string
 
@@ -50,6 +68,11 @@ Rules:
 - Prefer "sql" when the goal needs tabular aggregation/filtering.
 - Use "schema" / "preview" to disambiguate columns or sheet choice.
 - Use "browse" for a lightweight workbook list/handles reminder.
+- Use **"activate_skill"** when user's goal relates to financial analysis patterns: variance, ratios, margins, revenue, working capital, etc.
+  - Check the Available Skills list in context for matching triggers ("variance" → financial-variance, "MRR" → revenue-analytics, etc.)
+  - Activating a skill loads domain-specific formulas and SQL patterns
+  - After activation, re-decide with the new context to choose sql/python/done
+- Use "python" when need Python logic (Regressions, complex Pandas, visualization data prep)
 - Use **"clarify" at most once** when ambiguity blocks correct execution and cannot be resolved with internal tools
   (e.g. multiple plausible sheets, unclear metric, fiscal calendar, unit/currency). Requires an orchestrator parent task.
 - Set action to "done" when the goal is satisfied or you cannot proceed.
@@ -76,6 +99,9 @@ class TabularReasonState(TypedDict, total=False):
     resume_state: dict[str, Any]
     resumed: bool
     analysis_step_started: bool
+    # Skills system fields (progressive disclosure)
+    available_skills: list[dict[str, Any]]
+    active_skill_content: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +127,9 @@ def _build_resume_state(state: TabularReasonState) -> dict[str, Any]:
     }
 
 
-def _append_step(state: TabularReasonState, entry: dict[str, Any]) -> list[dict[str, Any]]:
+def _append_step(
+    state: TabularReasonState, entry: dict[str, Any]
+) -> list[dict[str, Any]]:
     log = list(state.get("steps_log") or [])
     log.append(entry)
     return log
@@ -124,7 +152,9 @@ async def _step_plan_create(ctx: _GraphCtx, state: TabularReasonState) -> None:
         logger.debug("tabular.graph.step_plan_create_failed", exc_info=True)
 
 
-async def _step_plan_update(ctx: _GraphCtx, step: int, status: str, note: str | None = None) -> None:
+async def _step_plan_update(
+    ctx: _GraphCtx, step: int, status: str, note: str | None = None
+) -> None:
     step_plan = getattr(ctx.agent, "step_plan", None)
     if step_plan is None:
         return
@@ -153,13 +183,21 @@ async def _run_tool(
         _provenance = {
             "child_task_id": task.task_id,
             "session_id": task.session_id,
-            "request_id": (agent._safe(task.input.get("request_id")) if isinstance(task.input, dict) else None),  # noqa: SLF001
+            "request_id": (
+                agent._safe(task.input.get("request_id"))
+                if isinstance(task.input, dict)
+                else None
+            ),  # noqa: SLF001
             "channel": task.channel,
             "source": task.source,
             "source_id": task.source_id,
         }
         if state.get("clarify_used"):
-            e: dict[str, Any] = {"error": "clarify_already_used", "kind": "clarify", "clarify_status": "clarify_already_used"}
+            e: dict[str, Any] = {
+                "error": "clarify_already_used",
+                "kind": "clarify",
+                "clarify_status": "clarify_already_used",
+            }
             return e, json.dumps(e, ensure_ascii=False)
         parent_task_id = str(getattr(task, "parent_task_id", None) or "").strip()
         if not parent_task_id:
@@ -172,7 +210,11 @@ async def _run_tool(
             return e, json.dumps(e, ensure_ascii=False)
         question = pending.get("question")
         if not isinstance(question, str) or not question.strip():
-            e = {"error": "clarify_requires_question", "kind": "clarify", "clarify_status": "missing_question"}
+            e = {
+                "error": "clarify_requires_question",
+                "kind": "clarify",
+                "clarify_status": "missing_question",
+            }
             return e, json.dumps(e, ensure_ascii=False)
         raw_opts = pending.get("options")
         options: list[str] = []
@@ -187,7 +229,9 @@ async def _run_tool(
                 options=options,
                 channel=task.channel,
                 wait_timeout_sec=0.0,
-                specialist_agent_id=str(getattr(agent, "agent_id", "") or "cosmic/tabular-agent:1.0.0"),
+                specialist_agent_id=str(
+                    getattr(agent, "agent_id", "") or "cosmic/tabular-agent:1.0.0"
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             e = {
@@ -199,7 +243,11 @@ async def _run_tool(
             return e, json.dumps(e, ensure_ascii=False)
         input_request_id = str(resp.get("input_request_id") or "").strip()
         if not input_request_id:
-            e = {"error": "missing_input_request_id", "kind": "clarify", "clarify_status": "relay_error"}
+            e = {
+                "error": "missing_input_request_id",
+                "kind": "clarify",
+                "clarify_status": "relay_error",
+            }
             return e, json.dumps(e, ensure_ascii=False)
 
         suspended_payload: dict[str, Any] = {
@@ -225,7 +273,15 @@ async def _run_tool(
     if action == "browse":
         data = agent._load_bundle(bundle_id)  # noqa: SLF001
         wbs = data.get("workbooks") if isinstance(data.get("workbooks"), list) else []
-        slim = [{"artifact_id": w.get("artifact_id"), "parse_status": w.get("parse_status"), "handles": w.get("handles")} for w in wbs if isinstance(w, dict)][:12]
+        slim = [
+            {
+                "artifact_id": w.get("artifact_id"),
+                "parse_status": w.get("parse_status"),
+                "handles": w.get("handles"),
+            }
+            for w in wbs
+            if isinstance(w, dict)
+        ][:12]
         out = {"kind": "browse", "workbooks": slim}
         return out, json.dumps(out, ensure_ascii=False)[:8000]
 
@@ -237,7 +293,11 @@ async def _run_tool(
         if isinstance(sid, str) and sid.strip():
             try:
                 vs = validate_safe_sheet_id(sid.strip())
-                sheets = [s for s in sheets if isinstance(s, dict) and str(s.get("sheet_id")) == vs]
+                sheets = [
+                    s
+                    for s in sheets
+                    if isinstance(s, dict) and str(s.get("sheet_id")) == vs
+                ]
             except ValueError as exc:
                 return {"error": str(exc)}, str(exc)
         out = {"kind": "schema", "sheets": sheets[:80]}
@@ -275,7 +335,9 @@ async def _run_tool(
             return {"error": "python disabled"}, "python disabled"
         py_code = pending.get("python_code")
         if not isinstance(py_code, str) or not py_code.strip():
-            return {"error": "python action requires python_code"}, "missing python_code"
+            return {
+                "error": "python action requires python_code"
+            }, "missing python_code"
         execution_id = f"exec_{uuid4().hex[:14]}"
         network_enabled = bool(getattr(cfg, "sandbox_allow_network", False))
         pip_enabled = bool(getattr(cfg, "sandbox_allow_pip", False))
@@ -296,15 +358,23 @@ async def _run_tool(
             if requested_packages and pip_enabled:
                 clean_pkgs = validate_pip_packages(requested_packages)
                 if clean_pkgs:
-                    cache_root_raw = str(getattr(cfg, "sandbox_venv_cache_root", "") or "").strip()
+                    cache_root_raw = str(
+                        getattr(cfg, "sandbox_venv_cache_root", "") or ""
+                    ).strip()
                     cache_root = Path(cache_root_raw) if cache_root_raw else None
                     python_exe, installed_packages, pip_log = provision_venv(
                         packages=clean_pkgs,
                         cache_root=cache_root,
-                        pip_timeout_sec=float(getattr(cfg, "sandbox_pip_timeout_sec", 120.0) or 120.0),
+                        pip_timeout_sec=float(
+                            getattr(cfg, "sandbox_pip_timeout_sec", 120.0) or 120.0
+                        ),
                     )
             elif requested_packages and not pip_enabled:
-                pip_log = {"skipped": True, "reason": "sandbox_allow_pip=false", "packages_requested": requested_packages}
+                pip_log = {
+                    "skipped": True,
+                    "reason": "sandbox_allow_pip=false",
+                    "packages_requested": requested_packages,
+                }
             run_out = run_python_script(
                 script_path=script_path,
                 cwd=root,
@@ -312,7 +382,9 @@ async def _run_tool(
                 bundle_root=root,
                 python_executable=python_exe,
             )
-            parent_tid = str(getattr(task, "parent_task_id", None) or "").strip() or None
+            parent_tid = (
+                str(getattr(task, "parent_task_id", None) or "").strip() or None
+            )
             write_execution_receipt(
                 bundle_root=root,
                 execution_id=execution_id,
@@ -331,7 +403,9 @@ async def _run_tool(
                     "stdout": run_out.get("stdout"),
                     "stderr": run_out.get("stderr"),
                     "duration_ms": run_out.get("duration_ms"),
-                    "script_relative": str(script_path.relative_to(root)).replace("\\", "/"),
+                    "script_relative": str(script_path.relative_to(root)).replace(
+                        "\\", "/"
+                    ),
                 },
             )
             out = {
@@ -349,46 +423,121 @@ async def _run_tool(
         except Exception as exc:  # noqa: BLE001
             logger.exception("tabular.graph.python_failed")
             e = {"error": str(exc)[:500]}
-            return e, json.dumps(e, ensure_ascii=False)
+            return e, json.dumps({"error": str(exc)[:500]}, ensure_ascii=False)
+
+    if action == "activate_skill":
+        skill_name = pending.get("skill_name")
+        if not skill_name:
+            return {
+                "error": "activate_skill requires skill_name"
+            }, "activate_skill requires skill_name"
+        available_skills = state.get("available_skills") or []
+        # Find matching skill
+        matched = None
+        for s in available_skills:
+            if s.get("name") == skill_name:
+                matched = s
+                break
+        if not matched:
+            return {
+                "error": f"unknown skill: {skill_name}"
+            }, f"unknown skill: {skill_name}"
+        try:
+            from .skills import load_skill_content
+
+            content = load_skill_content(matched.get("path", ""))
+            if content is None:
+                return {
+                    "error": f"failed to load skill: {skill_name}"
+                }, f"failed to load skill: {skill_name}"
+            out = {
+                "kind": "activate_skill",
+                "skill_name": skill_name,
+                "content": content[:16000],
+            }
+            return out, json.dumps(out, ensure_ascii=False)[:18000]
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc)[:500]}, str(exc)
 
     return {"error": f"unknown action: {action}"}, json.dumps({"error": action})
 
 
 def _build_graph(ctx: _GraphCtx) -> Any:
     async def bootstrap(state: TabularReasonState) -> dict[str, Any]:
-        await ctx.agent._emit_stage(ctx.task.task_id, "reason_inspect", "Loading bundle context (LangGraph).")  # noqa: SLF001
+        await ctx.agent._emit_stage(
+            ctx.task.task_id, "reason_inspect", "Loading bundle context (LangGraph)."
+        )  # noqa: SLF001
         await _step_plan_create(ctx, state)
         root = ctx.agent._bundle_disk_path(state["bundle_id"], state["artifact_id"])  # noqa: SLF001
         preview_path = root / "preview.md"
         cat_path = root / "sheet_catalog.json"
-        preview_excerpt = preview_path.read_text(encoding="utf-8")[:6000] if preview_path.is_file() else ""
-        catalog_excerpt = cat_path.read_text(encoding="utf-8")[:9000] if cat_path.is_file() else "{}"
+        preview_excerpt = (
+            preview_path.read_text(encoding="utf-8")[:6000]
+            if preview_path.is_file()
+            else ""
+        )
+        catalog_excerpt = (
+            cat_path.read_text(encoding="utf-8")[:9000] if cat_path.is_file() else "{}"
+        )
         initial = (
             f"## User goal\n{state['goal']}\n\n"
             f"## sheet_catalog.json (truncated)\n```\n{catalog_excerpt}\n```\n\n"
             f"## preview.md (truncated)\n```\n{preview_excerpt}\n```\n"
         )
         existing_transcript = str(state.get("transcript") or "").strip()
-        transcript = f"{existing_transcript}\n\n{initial}" if existing_transcript else initial
+        transcript = (
+            f"{existing_transcript}\n\n{initial}" if existing_transcript else initial
+        )
         await _step_plan_update(
             ctx,
             1,
             "completed",
-            note="Resumed from clarification." if state.get("resumed") else "Loaded workbook preview and sheet catalog.",
+            note="Resumed from clarification."
+            if state.get("resumed")
+            else "Loaded workbook preview and sheet catalog.",
         )
+        skills_dir = Path(
+            getattr(ctx.cfg, "skills_dir", "") or str(AGENT_ROOT / "skills")
+        )
+        available_skills: list[dict[str, Any]] = []
+        if getattr(ctx.cfg, "skills_enabled", True) and skills_dir.is_dir():
+            try:
+                from .skills import discover_skills
+
+                discovered = discover_skills(skills_dir)
+                available_skills = [
+                    {
+                        "name": s["name"],
+                        "description": s["description"],
+                        "tags": s.get("tags", []),
+                        "path": s["path"],
+                    }
+                    for s in discovered
+                ]
+                logger.debug(
+                    "tabular.graph.skills_discovered: %d", len(available_skills)
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("tabular.graph.skills_discover_failed: %s", e)
+
         return {
             "transcript": transcript,
             "bundle_root": str(root.resolve()),
             "tool_round": int(state.get("tool_round") or 0),
             "analysis_step_started": bool(state.get("analysis_step_started")),
+            "available_skills": available_skills,
             "steps_log": _append_step(state, {"step": "bootstrap", "ok": True}),
         }
 
     async def decide(state: TabularReasonState) -> dict[str, Any]:
-        await ctx.agent._emit_stage(ctx.task.task_id, "reason_plan", "Planning next internal tool step.")  # noqa: SLF001
+        await ctx.agent._emit_stage(
+            ctx.task.task_id, "reason_plan", "Planning next internal tool step."
+        )  # noqa: SLF001
         analysis_started = bool(state.get("analysis_step_started"))
         if not analysis_started:
-            await _step_plan_update(ctx, 2, "in_progress", note="Choosing the next tabular action.")
+            await _step_plan_update(
+                ctx, 2, "in_progress", note="Choosing the next tabular action."
+            )
         tr = state.get("transcript") or ""
         rounds = int(state.get("tool_round") or 0)
         max_r = int(state.get("max_tool_rounds") or 5)
@@ -397,13 +546,30 @@ def _build_graph(ctx: _GraphCtx) -> Any:
             f"tool_round so far: {rounds} (max tool executions: {max_r}).\n\n"
             f"## Transcript\n{tr[-24000:]}\n"
         )
-        system = "\n\n".join(
-            [
-                "You are the COSMIC tabular specialist internal planner.",
-                build_internal_context("plan", include_fpna=ctx.cfg.include_financial_fpna_prompt),
-            ]
-        )
-        rid = ctx.agent._safe(ctx.task.input.get("request_id")) if isinstance(ctx.task.input, dict) else None  # noqa: SLF001
+        # Build system prompt with skills context
+        system_parts = [
+            "You are the COSMIC tabular specialist internal planner.",
+            build_internal_context(
+                "plan", include_fpna=ctx.cfg.include_financial_fpna_prompt
+            ),
+        ]
+        # Add skills context if available
+        skills_list = state.get("available_skills") or []
+        if skills_list and getattr(ctx.cfg, "skills_enabled", True):
+            try:
+                from .prompt_assets import build_skills_context
+
+                skills_ctx = build_skills_context(skills_list)
+                if skills_ctx:
+                    system_parts.append(skills_ctx)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("tabular.graph.skills_context_failed: %s", e)
+        system = "\n\n".join(system_parts)
+        rid = (
+            ctx.agent._safe(ctx.task.input.get("request_id"))
+            if isinstance(ctx.task.input, dict)
+            else None
+        )  # noqa: SLF001
         raw = await invoke_tabular_mimo(
             cfg=ctx.cfg,
             http_client=ctx.http_client,
@@ -422,15 +588,23 @@ def _build_graph(ctx: _GraphCtx) -> Any:
         parsed = extract_json_object(raw or "") if raw else None
         if not parsed:
             return {
-                "pending": {"action": "done", "answer": "Planner did not return valid JSON.", "rationale": "parse_error"},
+                "pending": {
+                    "action": "done",
+                    "answer": "Planner did not return valid JSON.",
+                    "rationale": "parse_error",
+                },
                 "finish_reason": "llm_parse_error",
                 "analysis_step_started": True,
-                "steps_log": _append_step(state, {"step": "decide", "ok": False, "raw": (raw or "")[:500]}),
+                "steps_log": _append_step(
+                    state, {"step": "decide", "ok": False, "raw": (raw or "")[:500]}
+                ),
             }
         return {
             "pending": parsed,
             "analysis_step_started": True,
-            "steps_log": _append_step(state, {"step": "decide", "ok": True, "action": parsed.get("action")}),
+            "steps_log": _append_step(
+                state, {"step": "decide", "ok": True, "action": parsed.get("action")}
+            ),
         }
 
     def route_after_decide(state: TabularReasonState) -> str:
@@ -449,25 +623,69 @@ def _build_graph(ctx: _GraphCtx) -> Any:
         return "tool"
 
     async def tool_node(state: TabularReasonState) -> dict[str, Any]:
-        await ctx.agent._emit_stage(ctx.task.task_id, "reason_execute", "Running internal tabular tool.")  # noqa: SLF001
+        await ctx.agent._emit_stage(
+            ctx.task.task_id, "reason_execute", "Running internal tabular tool."
+        )  # noqa: SLF001
         pending = state.get("pending") or {}
         if str(pending.get("action") or "").strip().lower() == "clarify":
-            await ctx.agent._emit_stage(ctx.task.task_id, "reason_clarify", "Requesting user input via orchestrator task-input relay.")  # noqa: SLF001
+            await ctx.agent._emit_stage(
+                ctx.task.task_id,
+                "reason_clarify",
+                "Requesting user input via orchestrator task-input relay.",
+            )  # noqa: SLF001
         result, obs = await _run_tool(ctx=ctx, state=state, pending=pending)
-        tr = (state.get("transcript") or "") + f"\n\n--- tool_round {state.get('tool_round', 0) + 1} ---\n{obs}\n"
-        out: dict[str, Any] = {
-            "transcript": tr,
-            "tool_round": int(state.get("tool_round") or 0) + 1,
-            "last_tool_result": result,
-            "steps_log": _append_step(
-                state,
-                {"step": "tool", "ok": "error" not in result, "kind": pending.get("action")},
-            ),
-        }
+        current_action = str(pending.get("action") or "").strip().lower()
+        # activate_skill doesn't consume a tool round - it's a knowledge load
+        is_skill_activation = current_action == "activate_skill"
+        if is_skill_activation:
+            # For skill activation: append content as a new section, don't increment tool_round
+            skill_content = ""
+            if isinstance(result, dict):
+                skill_content = result.get("content") or ""
+            tr = (
+                (state.get("transcript") or "")
+                + f"\n\n--- skill activated: {pending.get('skill_name', 'unknown')} ---\n{skill_content}\n"
+            )
+            out: dict[str, Any] = {
+                "transcript": tr,
+                "last_tool_result": result,
+                "active_skill_content": skill_content,
+                "steps_log": _append_step(
+                    state,
+                    {
+                        "step": "tool",
+                        "ok": "error" not in result,
+                        "kind": "activate_skill",
+                        "skill_name": pending.get("skill_name"),
+                    },
+                ),
+            }
+        else:
+            tr = (
+                state.get("transcript") or ""
+            ) + f"\n\n--- tool_round {state.get('tool_round', 0) + 1} ---\n{obs}\n"
+            out: dict[str, Any] = {
+                "transcript": tr,
+                "tool_round": int(state.get("tool_round") or 0) + 1,
+                "last_tool_result": result,
+                "steps_log": _append_step(
+                    state,
+                    {
+                        "step": "tool",
+                        "ok": "error" not in result,
+                        "kind": pending.get("action"),
+                    },
+                ),
+            }
         if str(pending.get("action") or "").strip().lower() == "clarify":
             out["clarify_used"] = True
             if str(result.get("clarify_status") or "").strip().lower() == "suspended":
-                await _step_plan_update(ctx, 2, "in_progress", note="Waiting for user clarification via orchestrator.")
+                await _step_plan_update(
+                    ctx,
+                    2,
+                    "in_progress",
+                    note="Waiting for user clarification via orchestrator.",
+                )
                 out["finish_reason"] = "awaiting_clarification"
                 out["response"] = "Awaiting user clarification."
                 out["suspended"] = True
@@ -480,31 +698,52 @@ def _build_graph(ctx: _GraphCtx) -> Any:
 
     async def finalize(state: TabularReasonState) -> dict[str, Any]:
         if state.get("finish_reason") == "awaiting_clarification":
-            last = state.get("last_tool_result") if isinstance(state.get("last_tool_result"), dict) else {}
+            last = (
+                state.get("last_tool_result")
+                if isinstance(state.get("last_tool_result"), dict)
+                else {}
+            )
             return {
                 "response": "Awaiting user clarification.",
                 "finish_reason": "awaiting_clarification",
                 "suspended": True,
                 "input_request_id": last.get("input_request_id"),
                 "resume_state": _build_resume_state(state),
-                "steps_log": _append_step(state, {"step": "finalize", "ok": True, "suspended": True}),
+                "steps_log": _append_step(
+                    state, {"step": "finalize", "ok": True, "suspended": True}
+                ),
             }
-        last_tool = state.get("last_tool_result") if isinstance(state.get("last_tool_result"), dict) else {}
+        last_tool = (
+            state.get("last_tool_result")
+            if isinstance(state.get("last_tool_result"), dict)
+            else {}
+        )
         analysis_note = "Planner answered directly without running a tool."
         if state.get("tool_round"):
             tool_kind = str(last_tool.get("kind") or "").strip()
             analysis_note = f"Completed {tool_kind or 'internal'} analysis after {int(state.get('tool_round') or 0)} tool round(s)."
         elif state.get("finish_reason") == "llm_parse_error":
-            analysis_note = "Planner failed to return valid JSON; finalizing conservatively."
-        elif str((state.get("pending") or {}).get("action") or "").strip().lower() == "clarify" and state.get("clarify_used"):
-            analysis_note = "Second clarification was refused; finalizing with current evidence."
+            analysis_note = (
+                "Planner failed to return valid JSON; finalizing conservatively."
+            )
+        elif str(
+            (state.get("pending") or {}).get("action") or ""
+        ).strip().lower() == "clarify" and state.get("clarify_used"):
+            analysis_note = (
+                "Second clarification was refused; finalizing with current evidence."
+            )
         await _step_plan_update(ctx, 2, "completed", note=analysis_note)
         await _step_plan_update(ctx, 3, "in_progress")
-        await ctx.agent._emit_stage(ctx.task.task_id, "reason_summarize", "Summarizing LangGraph reasoning.")  # noqa: SLF001
+        await ctx.agent._emit_stage(
+            ctx.task.task_id, "reason_summarize", "Summarizing LangGraph reasoning."
+        )  # noqa: SLF001
         tr = state.get("transcript") or ""
         p = state.get("pending") or {}
         reason = state.get("finish_reason")
-        if int(state.get("tool_round") or 0) >= int(state.get("max_tool_rounds") or 5) and str(p.get("action") or "").lower() != "done":
+        if (
+            int(state.get("tool_round") or 0) >= int(state.get("max_tool_rounds") or 5)
+            and str(p.get("action") or "").lower() != "done"
+        ):
             reason = reason or "max_tool_rounds"
         pre_answer = ""
         if str(p.get("action") or "").lower() == "done":
@@ -513,7 +752,9 @@ def _build_graph(ctx: _GraphCtx) -> Any:
             [
                 "You are the COSMIC tabular specialist. Summarize the reasoning transcript for the orchestrator. "
                 "Be concise; cite only facts from the transcript or tool results.",
-                build_internal_context("summarize", include_fpna=ctx.cfg.include_financial_fpna_prompt),
+                build_internal_context(
+                    "summarize", include_fpna=ctx.cfg.include_financial_fpna_prompt
+                ),
             ]
         )
         extra = ""
@@ -521,14 +762,22 @@ def _build_graph(ctx: _GraphCtx) -> Any:
             extra = "\n(Stopped: max internal tool rounds reached.)\n"
         elif reason == "llm_parse_error":
             extra = "\n(Planner JSON parse failed.)\n"
-        elif str(p.get("action") or "").strip().lower() == "clarify" and state.get("clarify_used"):
+        elif str(p.get("action") or "").strip().lower() == "clarify" and state.get(
+            "clarify_used"
+        ):
             extra = "\n(Planner requested a second clarification; only one is allowed per run.)\n"
             reason = reason or "clarify_repeat"
-        summary_user = f"## Goal\n{state.get('goal')}\n{extra}\n## Transcript\n{tr[-28000:]}\n"
+        summary_user = (
+            f"## Goal\n{state.get('goal')}\n{extra}\n## Transcript\n{tr[-28000:]}\n"
+        )
         if pre_answer:
             summary_user += f"\n## Planner final answer hint\n{pre_answer[:8000]}\n"
 
-        rid = ctx.agent._safe(ctx.task.input.get("request_id")) if isinstance(ctx.task.input, dict) else None  # noqa: SLF001
+        rid = (
+            ctx.agent._safe(ctx.task.input.get("request_id"))
+            if isinstance(ctx.task.input, dict)
+            else None
+        )  # noqa: SLF001
         final_text = await invoke_tabular_mimo(
             cfg=ctx.cfg,
             http_client=ctx.http_client,
@@ -544,8 +793,12 @@ def _build_graph(ctx: _GraphCtx) -> Any:
             max_output_chars=8000,
             temperature=0.2,
         )
-        text = (final_text or pre_answer or "").strip() or "Tabular reasoning completed."
-        await _step_plan_update(ctx, 3, "completed", note="Produced compact summary for the orchestrator.")
+        text = (
+            final_text or pre_answer or ""
+        ).strip() or "Tabular reasoning completed."
+        await _step_plan_update(
+            ctx, 3, "completed", note="Produced compact summary for the orchestrator."
+        )
         return {
             "response": text,
             "finish_reason": reason or ("answered" if pre_answer else None),
@@ -559,8 +812,12 @@ def _build_graph(ctx: _GraphCtx) -> Any:
     g.add_node("finalize", finalize)
     g.add_edge(START, "bootstrap")
     g.add_edge("bootstrap", "decide")
-    g.add_conditional_edges("decide", route_after_decide, {"tool": "tool", "finalize": "finalize"})
-    g.add_conditional_edges("tool", route_after_tool, {"decide": "decide", "finalize": "finalize"})
+    g.add_conditional_edges(
+        "decide", route_after_decide, {"tool": "tool", "finalize": "finalize"}
+    )
+    g.add_conditional_edges(
+        "tool", route_after_tool, {"decide": "decide", "finalize": "finalize"}
+    )
     g.add_edge("finalize", END)
     return g.compile()
 
@@ -578,10 +835,22 @@ async def run_tabular_reason_langgraph(
 ) -> dict[str, Any]:
     ctx = _GraphCtx(agent=agent, cfg=cfg, http_client=http_client, task=task)
     app = _build_graph(ctx)
-    max_rounds = max(1, min(20, int(getattr(cfg, "tabular_reason_max_tool_rounds", 5) or 5)))
-    resume_block = task.input.get("_resume") if isinstance(task.input, dict) and isinstance(task.input.get("_resume"), dict) else {}
-    resume_state = resume_block.get("resume_state") if isinstance(resume_block.get("resume_state"), dict) else {}
-    resume_reply = resume_block.get("reply") if isinstance(resume_block.get("reply"), dict) else {}
+    max_rounds = max(
+        1, min(20, int(getattr(cfg, "tabular_reason_max_tool_rounds", 5) or 5))
+    )
+    resume_block = (
+        task.input.get("_resume")
+        if isinstance(task.input, dict) and isinstance(task.input.get("_resume"), dict)
+        else {}
+    )
+    resume_state = (
+        resume_block.get("resume_state")
+        if isinstance(resume_block.get("resume_state"), dict)
+        else {}
+    )
+    resume_reply = (
+        resume_block.get("reply") if isinstance(resume_block.get("reply"), dict) else {}
+    )
     initial: TabularReasonState = {
         "goal": goal,
         "bundle_id": bundle_id,
@@ -591,7 +860,14 @@ async def run_tabular_reason_langgraph(
         "resumed": bool(resume_block),
     }
     if resume_state:
-        for key in ("transcript", "tool_round", "clarify_used", "steps_log", "bundle_root", "analysis_step_started"):
+        for key in (
+            "transcript",
+            "tool_round",
+            "clarify_used",
+            "steps_log",
+            "bundle_root",
+            "analysis_step_started",
+        ):
             if key in resume_state:
                 initial[key] = resume_state[key]
         if isinstance(resume_state.get("max_tool_rounds"), int):
@@ -603,11 +879,18 @@ async def run_tabular_reason_langgraph(
             task.task_id,
             "task.resumed",
             {
-                "child_task_id": str(resume_block.get("resume_of_task_id") or task.task_id),
+                "child_task_id": str(
+                    resume_block.get("resume_of_task_id") or task.task_id
+                ),
                 "resumed_task_id": task.task_id,
-                "input_request_id": str(resume_block.get("input_request_id") or "").strip() or None,
+                "input_request_id": str(
+                    resume_block.get("input_request_id") or ""
+                ).strip()
+                or None,
                 "session_id": task.session_id,
-                "request_id": agent._safe(task.input.get("request_id")) if isinstance(task.input, dict) else None,  # noqa: SLF001
+                "request_id": agent._safe(task.input.get("request_id"))
+                if isinstance(task.input, dict)
+                else None,  # noqa: SLF001
                 "channel": task.channel,
                 "source": task.source,
                 "source_id": task.source_id,
@@ -617,7 +900,9 @@ async def run_tabular_reason_langgraph(
     reply_text = str(resume_reply.get("content") or "").strip()
     if reply_text:
         existing = str(initial.get("transcript") or "")
-        initial["transcript"] = f"{existing}\n\n--- user_clarification ---\n{reply_text}\n"
+        initial["transcript"] = (
+            f"{existing}\n\n--- user_clarification ---\n{reply_text}\n"
+        )
     out = await app.ainvoke(initial)
     steps = out.get("steps_log") or []
     return {

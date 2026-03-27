@@ -10,7 +10,10 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Literal, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .skills import SkillMetadata
 
 TabularInternalStage = Literal["summarize", "plan", "execute"]
 
@@ -37,7 +40,9 @@ def _load_staged_sections() -> dict[str, str]:
     return sections
 
 
-def build_internal_context(stage: TabularInternalStage | str, *, include_fpna: bool = False) -> str:
+def build_internal_context(
+    stage: TabularInternalStage | str, *, include_fpna: bool = False
+) -> str:
     """Compose minimal internal context for a tabular specialist stage.
 
     Stages are composition-only hooks (``summarize`` is used by MiMo today;
@@ -72,7 +77,29 @@ def build_internal_context(stage: TabularInternalStage | str, *, include_fpna: b
     return "\n\n".join(blocks)
 
 
+def build_skills_context(
+    skills: list["SkillMetadata"],
+    include_index: bool = True,
+) -> str:
+    """Build skills context block for system prompt injection.
+
+    Args:
+        skills: List of skill metadata from skills.discover_skills().
+        include_index: If True, includes compact skills index.
+
+    Returns:
+        Formatted skills context block, or empty string if no skills.
+    """
+    if not skills:
+        return ""
+
+    from .skills import build_skills_context as _build_skills
+
+    return _build_skills(skills, include_index=include_index)
+
+
 __all__ = [
     "TabularInternalStage",
     "build_internal_context",
+    "build_skills_context",
 ]

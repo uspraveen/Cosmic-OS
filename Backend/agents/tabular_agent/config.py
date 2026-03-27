@@ -10,7 +10,12 @@ from dotenv import load_dotenv
 AGENT_ROOT = Path(__file__).resolve().parent
 BACKEND_ROOT = AGENT_ROOT.parent.parent
 
-__all__ = ["TabularAgentConfig", "AGENT_ROOT", "BACKEND_ROOT", "normalize_mimo_openai_base_url"]
+__all__ = [
+    "TabularAgentConfig",
+    "AGENT_ROOT",
+    "BACKEND_ROOT",
+    "normalize_mimo_openai_base_url",
+]
 load_dotenv(AGENT_ROOT / "agent.env")
 load_dotenv(BACKEND_ROOT / ".env")
 
@@ -89,6 +94,9 @@ class TabularAgentConfig:
     tabular_reason_use_langgraph: bool = True
     # Blocking wait for ``user_input:replies`` (orchestrator request-input); cap for safety.
     tabular_reason_clarify_wait_sec: float = 600.0
+    # Skills system for progressive disclosure (financial analysis, planning, etc.)
+    skills_enabled: bool = True
+    skills_dir: str = ""
 
     @classmethod
     def from_env(cls) -> "TabularAgentConfig":
@@ -108,20 +116,34 @@ class TabularAgentConfig:
             ).strip(),
             max_input_artifacts=_env_int("TABULAR_AGENT_MAX_INPUT_ARTIFACTS", 8),
             max_parallel_files=_env_int("TABULAR_AGENT_MAX_PARALLEL_FILES", 3),
-            max_sheet_profile_parallelism=_env_int("TABULAR_AGENT_MAX_SHEET_PROFILE_PARALLELISM", 6),
-            max_input_file_bytes=_env_int("TABULAR_AGENT_MAX_INPUT_FILE_BYTES", 25 * 1024 * 1024),
+            max_sheet_profile_parallelism=_env_int(
+                "TABULAR_AGENT_MAX_SHEET_PROFILE_PARALLELISM", 6
+            ),
+            max_input_file_bytes=_env_int(
+                "TABULAR_AGENT_MAX_INPUT_FILE_BYTES", 25 * 1024 * 1024
+            ),
             max_sheets_per_workbook=_env_int("TABULAR_AGENT_MAX_SHEETS", 100),
             wide_column_warning_threshold=_env_int("TABULAR_AGENT_WIDE_COL_WARN", 200),
             max_preview_rows=_env_int("TABULAR_AGENT_MAX_PREVIEW_ROWS", 30),
             max_preview_columns=_env_int("TABULAR_AGENT_MAX_PREVIEW_COLS", 40),
             max_query_result_rows=_env_int("TABULAR_AGENT_MAX_QUERY_ROWS", 200),
             sandbox_timeout_sec=_env_float("TABULAR_AGENT_SANDBOX_TIMEOUT_SEC", 45.0),
-            sandbox_allow_network=os.getenv("TABULAR_AGENT_SANDBOX_ALLOW_NETWORK", "false").strip().lower()
+            sandbox_allow_network=os.getenv(
+                "TABULAR_AGENT_SANDBOX_ALLOW_NETWORK", "false"
+            )
+            .strip()
+            .lower()
             in {"1", "true", "yes", "on"},
-            sandbox_allow_pip=os.getenv("TABULAR_AGENT_SANDBOX_ALLOW_PIP", "false").strip().lower()
+            sandbox_allow_pip=os.getenv("TABULAR_AGENT_SANDBOX_ALLOW_PIP", "false")
+            .strip()
+            .lower()
             in {"1", "true", "yes", "on"},
-            sandbox_pip_timeout_sec=_env_float("TABULAR_AGENT_SANDBOX_PIP_TIMEOUT_SEC", 120.0),
-            sandbox_venv_cache_root=os.getenv("TABULAR_AGENT_SANDBOX_VENV_CACHE_ROOT", "").strip(),
+            sandbox_pip_timeout_sec=_env_float(
+                "TABULAR_AGENT_SANDBOX_PIP_TIMEOUT_SEC", 120.0
+            ),
+            sandbox_venv_cache_root=os.getenv(
+                "TABULAR_AGENT_SANDBOX_VENV_CACHE_ROOT", ""
+            ).strip(),
             mimo_api_key=(
                 os.getenv("TABULAR_AGENT_MIMO_API_KEY")
                 or os.getenv("MIMO_API_KEY")
@@ -134,14 +156,34 @@ class TabularAgentConfig:
                     or ""
                 ).strip()
             ),
-            mimo_model=os.getenv("TABULAR_AGENT_MIMO_MODEL", "mimo-v2-pro").strip() or "mimo-v2-pro",
+            mimo_model=os.getenv("TABULAR_AGENT_MIMO_MODEL", "mimo-v2-pro").strip()
+            or "mimo-v2-pro",
             mimo_timeout_sec=_env_float("TABULAR_AGENT_MIMO_TIMEOUT_SEC", 120.0),
-            enable_internal_llm=os.getenv("TABULAR_AGENT_ENABLE_INTERNAL_LLM", "true").strip().lower()
+            enable_internal_llm=os.getenv("TABULAR_AGENT_ENABLE_INTERNAL_LLM", "true")
+            .strip()
+            .lower()
             not in {"0", "false", "no", "off"},
-            include_financial_fpna_prompt=os.getenv("TABULAR_AGENT_INCLUDE_FPAN_PROMPT", "false").strip().lower()
+            include_financial_fpna_prompt=os.getenv(
+                "TABULAR_AGENT_INCLUDE_FPAN_PROMPT", "false"
+            )
+            .strip()
+            .lower()
             in {"1", "true", "yes", "on"},
-            tabular_reason_max_tool_rounds=_env_int("TABULAR_AGENT_REASON_MAX_TOOL_ROUNDS", 5),
-            tabular_reason_use_langgraph=os.getenv("TABULAR_AGENT_REASON_USE_LANGGRAPH", "true").strip().lower()
+            tabular_reason_max_tool_rounds=_env_int(
+                "TABULAR_AGENT_REASON_MAX_TOOL_ROUNDS", 5
+            ),
+            tabular_reason_use_langgraph=os.getenv(
+                "TABULAR_AGENT_REASON_USE_LANGGRAPH", "true"
+            )
+            .strip()
+            .lower()
             not in {"0", "false", "no", "off"},
-            tabular_reason_clarify_wait_sec=_env_float("TABULAR_AGENT_REASON_CLARIFY_WAIT_SEC", 600.0),
+            tabular_reason_clarify_wait_sec=_env_float(
+                "TABULAR_AGENT_REASON_CLARIFY_WAIT_SEC", 600.0
+            ),
+            skills_enabled=os.getenv("TABULAR_AGENT_SKILLS_ENABLED", "true")
+            .strip()
+            .lower()
+            not in {"0", "false", "no", "off"},
+            skills_dir=os.getenv("TABULAR_AGENT_SKILLS_DIR", "").strip(),
         )
