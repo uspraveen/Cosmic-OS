@@ -727,6 +727,122 @@ async def test_email_agent_reason_read_goal_falls_back_to_recent_threads_when_me
 
 
 @pytest.mark.asyncio
+async def test_email_agent_reason_read_goal_with_stray_recipients_stays_on_search_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+            enable_internal_llm=True,
+        ),
+    )
+
+    async def fake_search_email(**kwargs):
+        return [
+            {
+                "kind": "message",
+                "id": "msg_last_1",
+                "thread_id": "thr_last_1",
+                "subject": "Re: Morning check-in",
+                "snippet": "Latest message body.",
+            }
+        ]
+
+    async def fake_summarize_search_results(**kwargs):
+        assert kwargs["search_results"][0]["id"] == "msg_last_1"
+        return "The latest email says: Latest message body."
+
+    async def fail_compose(*args, **kwargs):
+        raise AssertionError("compose path should not be used for read-like goals even if recipient fields are present")
+
+    monkeypatch.setattr(agent, "_search_email", fake_search_email)
+    monkeypatch.setattr(agent, "_summarize_search_results", fake_summarize_search_results)
+    monkeypatch.setattr(agent, "_compose_new_email", fail_compose)
+
+    task = _make_task(
+        intent="email.reason",
+        task_id="tsk_reason_read_stray_recipients",
+        input_payload={
+            "goal": "What was last email you got from me?",
+            "to_recipients": [{"email": "uspraveenraj@gmail.com"}],
+            "subject": "Ignore this leaked subject",
+            "request_id": "req_reason_read_stray_recipients",
+        },
+    )
+
+    result = await agent.execute(task)
+
+    assert result.status == "completed"
+    assert result.output["action"] == "search_email"
+    assert result.output["sent"] is False
+    assert result.output["response"] == "The latest email says: Latest message body."
+
+
+@pytest.mark.asyncio
+async def test_email_agent_search_goal_from_me_expands_trusted_sender_query(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+            enable_internal_llm=False,
+        ),
+    )
+    agent._trusted_sender_set = {"uspraveenraj@gmail.com"}
+
+    captured_queries: list[str] = []
+
+    class FakeMailClient:
+        base_url = "http://cosmic-mail.local"
+        api_token = "mail-token"
+        timeout_sec = 20.0
+
+        async def aclose(self):
+            return None
+
+        async def search_threads(self, *, query, mailbox_id=None, per_page=25):
+            captured_queries.append(query)
+            return []
+
+        async def search_messages(self, *, query, mailbox_id=None, per_page=25):
+            captured_queries.append(query)
+            return []
+
+        async def list_threads(self, *, mailbox_id=None, page=1, per_page=25):
+            return []
+
+    async def fake_resolve_mailbox(*, mailbox_address=None, mailbox_id=None, required=False):
+        return {"id": "mbx_primary"}
+
+    agent.mail_client = FakeMailClient()  # type: ignore[assignment]
+    monkeypatch.setattr(agent, "_resolve_mailbox", fake_resolve_mailbox)
+
+    task = _make_task(
+        intent="email.reason",
+        task_id="tsk_reason_from_me_query",
+        input_payload={
+            "goal": "What was last email you got from me?",
+            "request_id": "req_reason_from_me_query",
+        },
+    )
+
+    result = await agent.execute(task)
+
+    assert result.status == "completed"
+    assert result.output["action"] == "search_email"
+    assert captured_queries
+    assert all("uspraveenraj@gmail.com" in query for query in captured_queries)
+
+
+@pytest.mark.asyncio
 async def test_email_agent_explicit_disconnect_blocks_env_fallback(tmp_path: Path) -> None:
     integration_db_path = tmp_path / "gateway" / "agent_email_integrations.db"
     AgentEmailIntegrationStore(integration_db_path).clear_primary()

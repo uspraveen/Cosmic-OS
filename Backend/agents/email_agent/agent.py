@@ -481,6 +481,7 @@ class EmailAgent(AgentRuntime):
         if not send:
             send = bool(inferred.get("send"))
         mode_hint = self._safe_text(inferred.get("mode")).lower()
+        read_like_goal = self._is_read_like_goal(goal) or self._is_read_like_goal(query or "")
         artifacts: list[ArtifactManifest] = []
         default_docs_tools: list[str] = []
 
@@ -533,7 +534,7 @@ class EmailAgent(AgentRuntime):
 
         if thread_id:
             context = await self._fetch_thread_context(thread_id=thread_id, message_id=message_id)
-            if send or draft_seed or self._looks_like_reply(goal):
+            if send or ((draft_seed or mode_hint == "compose") and not read_like_goal) or self._looks_like_reply(goal):
                 if bcc_recipients:
                     raise EmailAgentError(
                         code="INVALID_INPUT",
@@ -633,7 +634,7 @@ class EmailAgent(AgentRuntime):
                     "resolved_attachment": None,
                     "attachment_resolution_status": None,
                 }
-        elif recipients or cc_recipients or bcc_recipients or send or subject or mode_hint == "compose":
+        elif not read_like_goal and (recipients or cc_recipients or bcc_recipients or send or subject or mode_hint == "compose"):
             drafted = await self._compose_new_email(
                 task=task,
                 goal=goal,
@@ -791,33 +792,7 @@ class EmailAgent(AgentRuntime):
             "email the",
             "email to",
         )
-        read_markers = (
-            "check the inbox",
-            "check inbox",
-            "read the inbox",
-            "read inbox",
-            "search inbox",
-            "search my inbox",
-            "look in the inbox",
-            "look in my inbox",
-            "most recent emails",
-            "most recent email",
-            "latest emails",
-            "latest email",
-            "show me what messages",
-            "show me my emails",
-            "read and display",
-            "reply from",
-            "detect repl",
-            "tell me what",
-            "read the reply",
-        )
-        read_verbs = ("check ", "read ", "search ", "find ", "look for", "show me", "tell me")
-        is_read_like = (
-            any(marker in lowered for marker in read_markers)
-            or " inbox" in lowered
-            or lowered.startswith(read_verbs)
-        )
+        is_read_like = self._is_read_like_goal(text)
         is_explicit_compose = any(marker in lowered for marker in compose_markers)
         is_compose = is_explicit_compose and not is_read_like and bool(email_mentions)
         inferred: dict[str, Any] = {
@@ -2698,7 +2673,7 @@ class EmailAgent(AgentRuntime):
         query: str | None,
         mailbox_address: str | None,
     ) -> list[dict[str, Any]]:
-        search_query = query or goal
+        search_query = self._rewrite_search_query_for_sender_reference(query=query or goal, goal=goal)
         mailbox = await self._resolve_mailbox(
             mailbox_address=mailbox_address,
             mailbox_id=self._optional_text(task.input, "mailbox_id"),
@@ -2807,9 +2782,35 @@ class EmailAgent(AgentRuntime):
             "i replied",
             "my reply",
             "tell me what",
+            "last email",
+            "latest email",
+            "last message",
+            "latest message",
+            "what was last email",
+            "what was the last email",
+            "what was my last email",
+            "what was the latest email",
+            "what was the latest message",
+            "what did i send",
+            "did i email",
+            "did i send",
+            "you got from me",
+            "from me",
         )
         read_verbs = ("check ", "read ", "search ", "find ", "look for", "show me", "tell me")
         return any(marker in lowered for marker in read_markers) or " inbox" in lowered or lowered.startswith(read_verbs)
+
+    def _rewrite_search_query_for_sender_reference(self, *, query: str, goal: str) -> str:
+        base_query = self._safe_text(query) or self._safe_text(goal)
+        if not base_query:
+            return ""
+        lowered = self._safe_text(goal).casefold()
+        if any(marker in lowered for marker in ("from me", "my last email", "what did i send", "did i email", "did i send")):
+            trusted = sorted(self._trusted_sender_set)
+            if trusted:
+                if all(item.casefold() not in base_query.casefold() for item in trusted):
+                    return f"{base_query} {' '.join(trusted[:3])}".strip()
+        return base_query
 
     async def _fallback_recent_thread_results(
         self,
