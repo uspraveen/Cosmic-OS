@@ -654,8 +654,15 @@ class EmailAgent(AgentRuntime):
                 text_body=drafted["body"],
             )
             draft_id = self._safe_text(draft_payload.get("id"))
+            upload_summary: dict[str, Any] = {"attempted": 0, "uploaded": [], "failed": []}
             if draft_id:
-                await self._upload_input_artifacts_to_draft(task, draft_id=draft_id)
+                raw_upload_summary = await self._upload_input_artifacts_to_draft(task, draft_id=draft_id)
+                if isinstance(raw_upload_summary, dict):
+                    upload_summary = {
+                        "attempted": int(raw_upload_summary.get("attempted") or 0),
+                        "uploaded": raw_upload_summary.get("uploaded") if isinstance(raw_upload_summary.get("uploaded"), list) else [],
+                        "failed": raw_upload_summary.get("failed") if isinstance(raw_upload_summary.get("failed"), list) else [],
+                    }
             sent_payload = None
             if send and draft_id:
                 sent_payload = await self.mail_client.send_draft(draft_id)
@@ -680,14 +687,18 @@ class EmailAgent(AgentRuntime):
                         audience="supporting",
                     )
                 )
+            attachment_note = self._build_outbound_attachment_note(upload_summary)
+            response_text = drafted["summary"]
+            if attachment_note:
+                response_text = f"{response_text} {attachment_note}".strip()
             output = {
-                "response": drafted["summary"],
+                "response": response_text,
                 "action": "compose_email",
                 "sent": bool(sent_payload),
                 "thread_id": self._safe_text(sent_payload.get("thread_id")) if isinstance(sent_payload, dict) else None,
                 "message_id": self._safe_text(sent_payload.get("id")) if isinstance(sent_payload, dict) else None,
                 "draft_id": draft_id or None,
-                "summary": drafted["summary"],
+                "summary": response_text,
                 "to_recipients": recipients,
                 "cc_recipients": cc_recipients,
                 "bcc_recipients": bcc_recipients,
@@ -696,6 +707,10 @@ class EmailAgent(AgentRuntime):
                 "docs_tools": default_docs_tools,
                 "resolved_attachment": None,
                 "attachment_resolution_status": None,
+                "attached_input_artifact_count": len(upload_summary["uploaded"]),
+                "attached_input_artifacts": upload_summary["uploaded"],
+                "failed_input_artifact_count": len(upload_summary["failed"]),
+                "failed_input_artifacts": upload_summary["failed"],
             }
         else:
             search_results = await self._search_email(task=task, goal=goal, query=query, mailbox_address=mailbox_address)
@@ -2596,15 +2611,33 @@ class EmailAgent(AgentRuntime):
                 next_action="retry" if exc.status_code is None or exc.status_code >= 500 else "escalate",
             ) from exc
 
-    async def _upload_input_artifacts_to_draft(self, task: TaskEnvelope, *, draft_id: str) -> None:
+    async def _upload_input_artifacts_to_draft(self, task: TaskEnvelope, *, draft_id: str) -> dict[str, Any]:
+        uploaded: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
         for artifact in task.input_artifacts:
             if not isinstance(artifact, dict):
                 continue
+            artifact_id = self._safe_text(artifact.get("artifact_id")) or None
+            declared_filename = self._safe_text(artifact.get("filename")) or None
             artifact_path = self._resolve_artifact_path(artifact)
             if artifact_path is None or not artifact_path.exists() or not artifact_path.is_file():
+                failed.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "filename": declared_filename,
+                        "reason": "artifact_unavailable",
+                    }
+                )
                 continue
             content = artifact_path.read_bytes()
             if not content:
+                failed.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "filename": artifact_path.name,
+                        "reason": "artifact_empty",
+                    }
+                )
                 continue
             try:
                 await self.mail_client.upload_draft_attachment(
@@ -2613,6 +2646,13 @@ class EmailAgent(AgentRuntime):
                     content=content,
                     mime_type=self._safe_text(artifact.get("mime")) or None,
                 )
+                uploaded.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "filename": artifact_path.name,
+                        "mime": self._safe_text(artifact.get("mime")) or None,
+                    }
+                )
             except CosmicMailClientError as exc:
                 logger.warning(
                     "email_agent.upload_draft_attachment_failed draft_id=%s path=%s error=%s",
@@ -2620,6 +2660,35 @@ class EmailAgent(AgentRuntime):
                     artifact_path,
                     exc,
                 )
+                failed.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "filename": artifact_path.name,
+                        "reason": "upload_failed",
+                    }
+                )
+        return {
+            "attempted": len(uploaded) + len(failed),
+            "uploaded": uploaded,
+            "failed": failed,
+        }
+
+    def _build_outbound_attachment_note(self, upload_summary: dict[str, Any]) -> str | None:
+        uploaded = upload_summary.get("uploaded") if isinstance(upload_summary, dict) else None
+        failed = upload_summary.get("failed") if isinstance(upload_summary, dict) else None
+        uploaded_count = len(uploaded) if isinstance(uploaded, list) else 0
+        failed_count = len(failed) if isinstance(failed, list) else 0
+        if uploaded_count <= 0 and failed_count <= 0:
+            return None
+        if uploaded_count > 0 and failed_count <= 0:
+            noun = "file" if uploaded_count == 1 else "files"
+            return f"Attached {uploaded_count} {noun} to the draft."
+        if uploaded_count > 0 and failed_count > 0:
+            uploaded_noun = "file" if uploaded_count == 1 else "files"
+            failed_noun = "file" if failed_count == 1 else "files"
+            return f"Attached {uploaded_count} {uploaded_noun}; {failed_count} {failed_noun} failed to upload."
+        noun = "file" if failed_count == 1 else "files"
+        return f"{failed_count} {noun} failed to upload."
 
     async def _search_email(
         self,

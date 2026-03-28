@@ -16,7 +16,11 @@
     "bundle_id": { "type": ["string", "null"] },
     "docs_tools": { "type": "array", "items": { "type": "string" } },
     "resolved_attachment": { "type": ["object", "null"] },
-    "attachment_resolution_status": { "type": ["string", "null"] }
+    "attachment_resolution_status": { "type": ["string", "null"] },
+    "attached_input_artifact_count": { "type": ["integer", "null"] },
+    "attached_input_artifacts": { "type": ["array", "null"], "items": { "type": "object" } },
+    "failed_input_artifact_count": { "type": ["integer", "null"] },
+    "failed_input_artifacts": { "type": ["array", "null"], "items": { "type": "object" } }
   },
   "required": ["response", "action"]
 }

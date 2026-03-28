@@ -284,6 +284,16 @@ async def test_email_agent_reason_compose_draft_uses_compact_brief_and_uploads_i
     assert result.status == "completed"
     assert result.output["action"] == "compose_email"
     assert result.output["draft_id"] == "draft_123"
+    assert result.output["attached_input_artifact_count"] == 1
+    assert result.output["failed_input_artifact_count"] == 0
+    assert result.output["attached_input_artifacts"] == [
+        {
+            "artifact_id": "art_local",
+            "filename": "yc.csv",
+            "mime": "text/csv",
+        }
+    ]
+    assert "Attached 1 file to the draft." in result.output["response"]
     assert uploaded
     assert uploaded[0][0] == "draft_123"
     assert uploaded[0][1] == "yc.csv"
@@ -320,7 +330,7 @@ async def test_email_agent_reason_infers_send_from_plain_goal(tmp_path: Path, mo
         return {"id": "draft_456"}
 
     async def fake_upload_input_artifacts_to_draft(*args, **kwargs):
-        return None
+        return {"attempted": 0, "uploaded": [], "failed": []}
 
     monkeypatch.setattr(agent, "_compose_new_email", fake_compose_new_email)
     monkeypatch.setattr(agent, "_create_outbound_draft", fake_create_outbound_draft)
@@ -356,6 +366,7 @@ async def test_email_agent_reason_infers_send_from_plain_goal(tmp_path: Path, mo
     assert result.output["sent"] is True
     assert result.output["draft_id"] == "draft_456"
     assert result.output["message_id"] == "msg_123"
+    assert result.output["attached_input_artifact_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -388,7 +399,7 @@ async def test_email_agent_reason_infers_following_content_body_from_plain_goal(
         return {"id": "draft_following_content"}
 
     async def fake_upload_input_artifacts_to_draft(*args, **kwargs):
-        return None
+        return {"attempted": 0, "uploaded": [], "failed": []}
 
     monkeypatch.setattr(agent, "_compose_new_email", fake_compose_new_email)
     monkeypatch.setattr(agent, "_create_outbound_draft", fake_create_outbound_draft)

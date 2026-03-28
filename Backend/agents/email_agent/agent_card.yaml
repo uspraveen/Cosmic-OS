@@ -24,7 +24,9 @@ intents:
     usage_hints:
       - Use this specialist for almost anything involving reading, understanding, drafting, replying to, or sending email.
       - Pass a compact context_brief and optional draft_seed; do not pass a long raw conversation transcript.
+      - When sending a previously produced file, resolve it first and pass its artifact_id via delegate_to_agent artifact_ids so it arrives here as TaskEnvelope.input_artifacts.
       - For attachment-specific requests in an email thread, use this to resolve the correct attachment and cached docs bundle first; then continue with the normal docs tools for actual document reading.
+      - For new outbound drafts, attached_input_artifact_count is the attachment upload signal; resolved_attachment is only for resolving thread attachments.
       - Do not use this specialist for simple already-final cron or heartbeat delivery to an email channel.
 
   - name: email.manage_instruction

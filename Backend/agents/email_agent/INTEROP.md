@@ -35,9 +35,15 @@ Opus should typically delegate with:
 - optional `thread_id`
 - optional `to_recipients` / `cc_recipients` / `bcc_recipients`
 - optional `subject` / `send` flag
+- `artifact_ids` when reusing a previously produced COSMIC file as an attachment
 
 Avoid passing long raw session transcripts.
 Use `context_brief` and `draft_seed` instead when the user has been discussing something for a long time and then asks to send an email.
+
+Attachment-note:
+- for new outbound drafts, the specialist uploads any `TaskEnvelope.input_artifacts` to the draft automatically
+- use `attached_input_artifact_count` / `attached_input_artifacts` in the result to determine whether those uploads succeeded
+- `resolved_attachment` is for inbound email-thread attachment resolution, not for new outbound file uploads
 
 Reply-note:
 - new outbound drafts support To / CC / BCC
