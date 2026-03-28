@@ -503,6 +503,7 @@ const mergeHydratedMessages = (current: Message[], hydrated: Message[]): Message
 const channelLabel = (ch: string | null | undefined): string | null => {
   if (!ch) return null
   const lower = ch.toLowerCase()
+  if (lower.startsWith('mobile:')) return 'Mobile'
   if (lower.startsWith('whatsapp:')) return 'WhatsApp'
   if (lower.startsWith('telegram:')) return 'Telegram'
   return null
@@ -4443,8 +4444,18 @@ export default function App() {
                           >
                             <span style={{
                               padding: '2px 8px', borderRadius: 6, fontSize: 11, fontWeight: 600,
-                              background: extLabel === 'WhatsApp' ? 'rgba(37,211,102,0.15)' : 'rgba(0,136,204,0.15)',
-                              color: extLabel === 'WhatsApp' ? '#25d366' : '#0088cc',
+                              background:
+                                extLabel === 'WhatsApp'
+                                  ? 'rgba(37,211,102,0.15)'
+                                  : extLabel === 'Telegram'
+                                    ? 'rgba(0,136,204,0.15)'
+                                    : 'rgba(121,201,255,0.15)',
+                              color:
+                                extLabel === 'WhatsApp'
+                                  ? '#25d366'
+                                  : extLabel === 'Telegram'
+                                    ? '#0088cc'
+                                    : '#79c9ff',
                             }}>
                               {extLabel}
                             </span>
