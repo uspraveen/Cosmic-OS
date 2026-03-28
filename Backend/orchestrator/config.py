@@ -65,6 +65,7 @@ def _env_json_map(name: str) -> dict[str, str]:
 
 @dataclass(slots=True)
 class OrchestratorConfig:
+    artifacts_root: Path = BACKEND_ROOT / "runs" / "artifacts"
     host: str = "127.0.0.1"
     port: int = 8743
     internal_token: str = ""
@@ -72,6 +73,7 @@ class OrchestratorConfig:
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-opus-4-6"
     anthropic_version: str = "2023-06-01"
+    anthropic_files_api_beta: str = "files-api-2025-04-14"
     anthropic_prompt_cache_enabled: bool = False
     anthropic_max_input_images: int = 10
     max_tokens: int = 16000
@@ -100,6 +102,9 @@ class OrchestratorConfig:
     @classmethod
     def from_env(cls) -> "OrchestratorConfig":
         return cls(
+            artifacts_root=Path(
+                os.getenv("COSMIC_ARTIFACTS_ROOT", str(BACKEND_ROOT / "runs" / "artifacts"))
+            ).expanduser(),
             host=os.getenv("ORCHESTRATOR_HOST", "127.0.0.1").strip() or "127.0.0.1",
             port=_env_int("ORCHESTRATOR_PORT", 8743),
             internal_token=os.getenv("GATEWAY_INTERNAL_TOKEN", "").strip(),
@@ -107,6 +112,7 @@ class OrchestratorConfig:
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", "").strip(),
             anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-opus-4-6").strip(),
             anthropic_version=os.getenv("ANTHROPIC_VERSION", "2023-06-01").strip(),
+            anthropic_files_api_beta=os.getenv("ANTHROPIC_FILES_API_BETA", "files-api-2025-04-14").strip(),
             anthropic_prompt_cache_enabled=_env_bool("ANTHROPIC_PROMPT_CACHE_ENABLED", False),
             anthropic_max_input_images=max(1, _env_int("ANTHROPIC_MAX_INPUT_IMAGES", 10)),
             max_tokens=max(256, _env_int("OPUS_MAX_TOKENS", 16000)),

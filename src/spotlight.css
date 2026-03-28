@@ -1221,6 +1221,7 @@ kbd {
   width: 26px;
   height: 26px;
   object-fit: contain;
+  object-position: 58% 50%;
   filter: drop-shadow(0 4px 10px rgba(255, 255, 255, 0.12));
 }
 
@@ -1363,6 +1364,7 @@ kbd {
 .task-interrupt-shell.compact .task-interrupt-logo {
   width: 18px;
   height: 18px;
+  object-position: 58% 50%;
 }
 
 .task-interrupt-shell.compact .task-interrupt-kicker {

@@ -169,20 +169,10 @@ async def test_langgraph_finishes_on_done_action(monkeypatch, tmp_path: Path) ->
     out = await iw.run_tabular_reason_workbook(agent=agent, task=task, http_client=AsyncMock(), cfg=cfg)  # type: ignore[arg-type]
     assert out.get("workflow") == "langgraph"
     assert out.get("response")
-    assert agent.step_plan.created_steps == [[
-        "Inspect workbook context",
-        "Run internal spreadsheet analysis",
-        "Summarize the result for the orchestrator",
-    ]]
-    statuses = [(step, status) for step, status, _ in agent.step_plan.updates]
-    assert statuses == [
-        (1, "in_progress"),
-        (1, "completed"),
-        (2, "in_progress"),
-        (2, "completed"),
-        (3, "in_progress"),
-        (3, "completed"),
-    ]
+    # With dynamic planning, a simple "done" action skips plan creation entirely
+    # (per §32.4: skip planning for 1-2 obvious steps)
+    assert agent.step_plan.created_steps == []
+    assert agent.step_plan.updates == []
 
 
 @pytest.mark.asyncio
@@ -783,8 +773,6 @@ async def test_langgraph_resume_creates_fresh_step_plan(monkeypatch, tmp_path: P
 
     out = await iw.run_tabular_reason_workbook(agent=agent, task=task, http_client=AsyncMock(), cfg=cfg)  # type: ignore[arg-type]
     assert out.get("workflow") == "langgraph"
-    assert agent.step_plan.created_steps == [[
-        "Resume after user clarification",
-        "Run internal spreadsheet analysis",
-        "Summarize the result for the orchestrator",
-    ]]
+    # With dynamic planning, resume + immediate "done" skips plan creation
+    # (MiMo decides whether to plan; fake_invoke returns "done" directly)
+    assert agent.step_plan.created_steps == []

@@ -164,9 +164,17 @@ Expected behavior:
 - fetch thread from Cosmic Mail
 - download attachment files into the email-agent artifact area
 - summarize the thread
+- load the active standing instructions for the mailbox from the email-agent ledger
+- use the email-agent LLM to decide whether any standing instruction matches this inbound email
+- return matched-instruction context, sender role, and any recommended next action back to Gateway/Opus
 - apply matching standing instruction if configured
 
 Gateway uses this intent automatically for real inbound `agent-email` messages before dispatching the parent request to Opus.
+
+Important rule:
+- Opus should **not** receive the raw inbound email first and then ask the email agent whether any standing instruction applies.
+- Gateway should call `email.process_inbound` first.
+- The email specialist is responsible for checking its own standing-instruction ledger before Opus sees the inbound email.
 
 ### 5.2 `email.reason`
 
@@ -205,6 +213,122 @@ Use for:
 - set/list/enable/disable/remove standing email rules
 
 This is the email specialist’s private rule ledger, not a global Gateway feature.
+
+Standing instructions belong to the email specialist, not Opus.
+
+This means:
+- users may express these rules in plain language
+  - example: `Keep an eye out for emails from Arun and let me know.`
+  - example: `Watch for anything mentioning Q3 in email.`
+- Opus should delegate that request once to `email.manage_instruction`
+- the email specialist should persist it in its own ledger
+- future inbound email should consult that ledger inside `email.process_inbound`
+- Opus should not be the long-term memory holder for these rules
+
+### 5.3.1 Standing instruction source of truth
+
+The durable source of truth should be a private email-agent table, not a raw prompt-only todo file.
+
+Current v1 implementation uses:
+
+```sql
+CREATE TABLE IF NOT EXISTS email_instructions (
+    instruction_id TEXT PRIMARY KEY,
+    mailbox_address TEXT,
+    label TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    match_from_address TEXT,
+    match_subject_contains TEXT,
+    match_body_contains TEXT,
+    behavior_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_email_instructions_mailbox
+ON email_instructions (mailbox_address, enabled);
+```
+
+This table is the durable control plane for:
+- create/list/enable/disable/remove
+- mailbox scoping
+- auditability
+- future lifecycle fields
+
+Recommended evolution for the standing-instruction ledger:
+- keep the SQL table as the source of truth
+- allow natural-language rules to be stored as structured instruction records plus an LLM-facing summary
+- extend the table or a companion table with fields such as:
+  - `raw_user_instruction`
+  - `instruction_kind`
+  - `completion_mode`
+  - `last_triggered_at`
+  - `completed_at`
+  - `last_action_thread_id`
+  - `last_action_message_id`
+  - `matching_hints_json`
+
+The key design rule is:
+- persistence/state belongs in the DB
+- contextual matching belongs in the email-agent LLM
+
+### 5.3.2 Standing instruction matching model
+
+Standing-instruction matching should be specialist-owned and LLM-assisted.
+
+Recommended behavior:
+1. `email.process_inbound` loads **all active instructions** for the mailbox from the private ledger.
+2. It gives the inbound email snapshot plus those active instruction summaries to the email-agent LLM.
+3. The email-agent LLM decides:
+- matched instruction(s)
+- why they matched
+- whether the result is ambiguous
+- which behavior mode applies
+4. The structured result is returned to Gateway and then to Opus as part of the inbound brief.
+
+Important note:
+- the DB is the source of truth
+- the LLM is the matcher/reasoner
+- deterministic candidate filtering can exist later as a performance optimization
+- it is **not** required for the core architecture
+
+This allows user requests like:
+- `Keep an eye out for emails from Arun and let me know.`
+- `Watch for anything mentioning Q3.`
+- `Tell me if someone asks for the deck.`
+
+without forcing users to provide exact sender email addresses every time.
+
+### 5.3.3 End-to-end standing instruction lifecycle
+
+The intended end-to-end lifecycle is:
+
+1. User tells COSMIC a standing email rule.
+2. Opus delegates that request to `email.manage_instruction`.
+3. The email specialist stores it in the private ledger.
+4. A future inbound email reaches Gateway through the Agent Email webhook.
+5. Gateway calls `email.process_inbound` before Opus sees the message.
+6. `email.process_inbound`:
+- loads active instructions from the ledger
+- uses the email-agent LLM to determine matches
+- returns the matched instruction context in a structured inbound brief
+7. Gateway hands that enriched brief to Opus.
+8. Opus reasons about the user-facing response and may delegate additional email-native work back to the email specialist.
+9. If an outbound email is actually sent, the result should flow back to the email specialist so the instruction lifecycle can be updated.
+
+Instruction lifecycle ownership rules:
+- email-agent owns instruction status
+- Opus does not own completion state
+- successful outbound delivery, not just draft generation, is the authoritative signal for marking one-shot instructions complete
+- recurring/perpetual instructions should remain active and only update fields like `last_triggered_at`
+
+Recommended completion semantics:
+- one-shot / finite instruction:
+  - mark `completed`
+  - record when and on which thread/message it was satisfied
+- recurring / perpetual instruction:
+  - keep `enabled`
+  - update `last_triggered_at`
+  - optionally record the last matching thread/message
 
 ### 5.4 `email.recall_session`
 

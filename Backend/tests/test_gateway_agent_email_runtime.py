@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from contextlib import contextmanager
 from pathlib import Path
 from shutil import rmtree
@@ -294,3 +296,71 @@ def test_should_preprocess_agent_email_when_connected_even_if_flag_disabled() ->
         )
 
     assert should_preprocess is True
+
+
+def test_build_email_inbound_orchestrator_query_includes_matched_instruction_details() -> None:
+    with _runtime_root() as root:
+        runtime = _build_runtime(root)
+
+        query = runtime._build_email_inbound_orchestrator_query(
+            original_content="Email subject: Q3 question",
+            process_output={
+                "summary": "External sender asked about the Q3 deck.",
+                "subject": "Q3 question",
+                "from_address": "arun@example.com",
+                "trusted_sender": False,
+                "sender_role": "external",
+                "matched_instructions": [
+                    {
+                        "instruction_id": "eminst_q3",
+                        "label": "Watch for Q3 email",
+                        "raw_user_instruction": "Watch for anything mentioning Q3 in email.",
+                        "behavior": {
+                            "mode": "notify_only",
+                            "completion_mode": "perpetual",
+                        },
+                    }
+                ],
+                "instruction_match_reason": "The inbound subject explicitly mentions Q3.",
+                "attachments": [],
+            },
+        )
+
+    assert "Matched standing instruction(s):" in query
+    assert "User instruction: Watch for anything mentioning Q3 in email." in query
+    assert "Match reason: The inbound subject explicitly mentions Q3." in query
+
+
+@pytest.mark.asyncio
+async def test_maybe_schedule_delivered_email_instruction_update_dispatches_callback_for_sent_email() -> None:
+    calls: list[tuple[list[str], str | None, str | None]] = []
+    with _runtime_root() as root:
+        runtime = _build_runtime(root)
+        runtime._redis = object()
+
+        async def fake_record_email_instruction_delivery(*, event, instruction_ids):
+            calls.append(
+                (
+                    list(instruction_ids),
+                    event.get("thread_id"),
+                    event.get("message_id"),
+                )
+            )
+
+        runtime._record_email_instruction_delivery = fake_record_email_instruction_delivery  # type: ignore[method-assign]
+
+        await runtime._maybe_schedule_delivered_email_instruction_update(
+            {
+                "type": "response.complete",
+                "channel": "agent-email:cosmic@example.com",
+                "thread_id": "thr_123",
+                "message_id": "msg_123",
+                "matched_instruction_ids": ["eminst_1", "eminst_2"],
+                "email_auto_reply_sent": False,
+            },
+            delivery_status="sent",
+        )
+        if runtime._background_tasks:
+            await asyncio.gather(*list(runtime._background_tasks), return_exceptions=True)
+
+    assert calls == [(["eminst_1", "eminst_2"], "thr_123", "msg_123")]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import sqlite3
 
@@ -269,6 +270,109 @@ def test_collect_specialist_artifacts_only_keeps_deliverables(tmp_path) -> None:
             "filename": "output.csv",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_runtime_promotes_anthropic_generated_files_to_produced_artifacts(tmp_path) -> None:
+    first_turn_events = [
+        b'event: message_start\n'
+        b'data: {"type":"message_start","message":{"usage":{"input_tokens":42}}}\n\n',
+        b'event: content_block_start\n'
+        b'data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_123","name":"code_execution"}}\n\n',
+        b'event: content_block_stop\n'
+        b'data: {"type":"content_block_stop","index":0}\n\n',
+        b'event: content_block_start\n'
+        b'data: {"type":"content_block_start","index":1,"content_block":{"type":"bash_code_execution_tool_result","tool_use_id":"srvtoolu_123","content":{"type":"bash_code_execution_result","stdout":"","stderr":"","return_code":0,"content":[{"type":"file","file_id":"file_chart_png"}]}}}\n\n',
+        b'event: content_block_stop\n'
+        b'data: {"type":"content_block_stop","index":1}\n\n',
+        b'event: message_delta\n'
+        b'data: {"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"output_tokens":11}}\n\n',
+        b"event: message_stop\n"
+        b'data: {"type":"message_stop"}\n\n',
+    ]
+    second_turn_events = [
+        b'event: message_start\n'
+        b'data: {"type":"message_start","message":{"usage":{"input_tokens":7}}}\n\n',
+        b'event: content_block_start\n'
+        b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n\n',
+        b'event: content_block_delta\n'
+        b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Here is the chart."}}\n\n',
+        b'event: content_block_stop\n'
+        b'data: {"type":"content_block_stop","index":0}\n\n',
+        b'event: message_delta\n'
+        b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}\n\n',
+        b"event: message_stop\n"
+        b'data: {"type":"message_stop"}\n\n',
+    ]
+    message_requests = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal message_requests
+        if request.url == httpx.URL("https://api.anthropic.com/v1/messages"):
+            message_requests += 1
+            assert request.headers["anthropic-beta"] == "files-api-2025-04-14"
+            stream = first_turn_events if message_requests == 1 else second_turn_events
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=SSEByteStream(stream),
+            )
+        if request.url == httpx.URL("https://api.anthropic.com/v1/files/file_chart_png"):
+            assert request.headers["anthropic-beta"] == "files-api-2025-04-14"
+            return httpx.Response(
+                200,
+                json={
+                    "id": "file_chart_png",
+                    "filename": "YC_P26_Categories.png",
+                    "mime_type": "image/png",
+                    "created_at": "2026-03-28T02:00:00Z",
+                },
+            )
+        if request.url == httpx.URL("https://api.anthropic.com/v1/files/file_chart_png/content"):
+            assert request.headers["anthropic-beta"] == "files-api-2025-04-14"
+            return httpx.Response(
+                200,
+                headers={"content-type": "image/png"},
+                content=b"PNGDATA",
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    config = OrchestratorConfig(
+        artifacts_root=tmp_path / "artifacts",
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        anthropic_files_api_beta="files-api-2025-04-14",
+        task_ledger_db_path=tmp_path / "task_ledger.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    await runtime.start()
+    try:
+        task = _signed_task("signing-secret")
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+
+    complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert complete_event["content"] == "Here is the chart."
+    assert complete_event["produced_artifacts"] == [
+        {
+            "artifact_id": "anthropic_file_chart_png",
+            "task_id": "tsk_test123",
+            "mime": "image/png",
+            "path": "runs/artifacts/tsk_test123/orchestrator/anthropic_code_execution/file_chart_png__YC_P26_Categories.png",
+            "kind": "output",
+            "audience": "deliverable",
+            "filename": "YC_P26_Categories.png",
+            "created_by_agent": "cosmic/orchestrator:1.0.0",
+            "sha256": hashlib.sha256(b"PNGDATA").hexdigest(),
+            "created_at": "2026-03-28T02:00:00Z",
+        }
+    ]
+    persisted_path = tmp_path / "artifacts" / "tsk_test123" / "orchestrator" / "anthropic_code_execution" / "file_chart_png__YC_P26_Categories.png"
+    assert persisted_path.read_bytes() == b"PNGDATA"
     assert streamed_events[4]["type"] == "response.chunk"
     assert "Rayleigh scattering" in streamed_events[4]["content"]
     assert streamed_events[5]["type"] == "response.complete"

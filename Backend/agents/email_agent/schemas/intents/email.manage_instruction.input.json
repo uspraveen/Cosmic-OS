@@ -4,11 +4,19 @@
   "properties": {
     "action": {
       "type": "string",
-      "enum": ["set", "list", "remove", "enable", "disable"]
+      "enum": ["set", "list", "remove", "enable", "disable", "record_delivery"]
     },
     "instruction_id": { "type": "string", "minLength": 1 },
+    "instruction_ids": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
     "mailbox_address": { "type": "string", "minLength": 1 },
     "label": { "type": "string", "minLength": 1 },
+    "raw_user_instruction": { "type": "string", "minLength": 1 },
+    "instruction_text": { "type": "string", "minLength": 1 },
+    "thread_id": { "type": "string", "minLength": 1 },
+    "message_id": { "type": "string", "minLength": 1 },
     "match": {
       "type": "object",
       "properties": {
@@ -23,6 +31,10 @@
         "mode": {
           "type": "string",
           "enum": ["notify_only", "auto_reply"]
+        },
+        "completion_mode": {
+          "type": "string",
+          "enum": ["perpetual", "one_shot"]
         },
         "reply_template": { "type": "string" }
       }

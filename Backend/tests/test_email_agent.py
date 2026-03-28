@@ -124,6 +124,83 @@ async def test_email_agent_manage_instruction_roundtrip_and_recall(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_email_agent_manage_instruction_accepts_natural_language_rule(tmp_path: Path) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            gateway_internal_token="",
+            enable_internal_llm=False,
+        ),
+    )
+
+    task = _make_task(
+        intent="email.manage_instruction",
+        task_id="tsk_set_nl_1",
+        input_payload={
+            "action": "set",
+            "mailbox_address": "support@example.com",
+            "instruction_text": "Keep an eye out for emails from Arun and let me know.",
+        },
+    )
+
+    result = await agent.execute(task)
+
+    assert result.status == "completed"
+    instruction = result.output["instruction"]
+    assert instruction["raw_user_instruction"] == "Keep an eye out for emails from Arun and let me know."
+    assert instruction["label"]
+    assert instruction["behavior"]["mode"] == "notify_only"
+    assert instruction["behavior"]["completion_mode"] == "perpetual"
+
+
+@pytest.mark.asyncio
+async def test_email_agent_record_delivery_completes_one_shot_instruction(tmp_path: Path) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            gateway_internal_token="",
+            enable_internal_llm=False,
+        ),
+    )
+
+    set_task = _make_task(
+        intent="email.manage_instruction",
+        task_id="tsk_set_one_shot_1",
+        input_payload={
+            "action": "set",
+            "mailbox_address": "support@example.com",
+            "label": "Notify once for board email",
+            "match": {"subject_contains": "board"},
+            "behavior": {"mode": "notify_only", "completion_mode": "one_shot"},
+        },
+    )
+    set_result = await agent.execute(set_task)
+    instruction_id = set_result.output["instruction"]["instruction_id"]
+
+    record_task = _make_task(
+        intent="email.manage_instruction",
+        task_id="tsk_record_delivery_1",
+        input_payload={
+            "action": "record_delivery",
+            "instruction_id": instruction_id,
+            "mailbox_address": "support@example.com",
+            "thread_id": "thr_board_1",
+            "message_id": "msg_board_1",
+        },
+    )
+    record_result = await agent.execute(record_task)
+
+    assert record_result.status == "completed"
+    instruction = next(
+        item for item in record_result.output["instructions"] if item["instruction_id"] == instruction_id
+    )
+    assert instruction["enabled"] is False
+    assert instruction["completed_at"]
+    assert instruction["last_action_thread_id"] == "thr_board_1"
+    assert instruction["last_action_message_id"] == "msg_board_1"
+
+
+@pytest.mark.asyncio
 async def test_email_agent_reason_compose_draft_uses_compact_brief_and_uploads_input_artifacts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -689,7 +766,7 @@ async def test_email_agent_process_inbound_marks_trusted_sender_from_store(
         ),
     )
 
-    async def fake_fetch_thread_context(*, thread_id, message_id=None):
+    async def fake_fetch_thread_context(*, thread_id, message_id=None, **kwargs):
         return {
             "thread": {"id": thread_id, "subject": "Owner follow-up"},
             "messages": [],
@@ -732,6 +809,95 @@ async def test_email_agent_process_inbound_marks_trusted_sender_from_store(
     assert result.output["trusted_sender"] is True
     assert result.output["sender_role"] == "owner"
     assert result.output["from_address"] == "Owner@Example.com"
+
+
+@pytest.mark.asyncio
+async def test_email_agent_process_inbound_llm_matches_natural_language_instruction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+            enable_internal_llm=True,
+            attachment_docs_auto_parse_enabled=False,
+        ),
+    )
+
+    agent._upsert_instruction(
+        instruction_id="eminst_watch_arun",
+        mailbox_address="assistant@example.com",
+        label="Watch for Arun",
+        match={},
+        behavior={"mode": "notify_only", "completion_mode": "perpetual"},
+        raw_user_instruction="Keep an eye out for emails from Arun and let me know.",
+        enabled=True,
+    )
+
+    async def fake_fetch_thread_context(*, thread_id, message_id=None, **kwargs):
+        return {
+            "thread": {"id": thread_id, "subject": "Need your take"},
+            "messages": [
+                {
+                    "from_address": "unknown@example.com",
+                    "subject": "Need your take",
+                    "text_body": "Hey Cosmic, Arun here. Can you review the latest numbers?",
+                }
+            ],
+            "subject": "Need your take",
+            "latest_message": {"id": message_id, "from_address": "unknown@example.com"},
+            "latest_body": "Hey Cosmic, Arun here. Can you review the latest numbers?",
+        }
+
+    async def fake_summarize_thread(**kwargs):
+        return "Arun emailed asking for a review."
+
+    async def fake_invoke_email_mimo_json(**kwargs):
+        if kwargs.get("operation") == "email.internal_llm.match_instructions":
+            return {
+                "matched_instruction_ids": ["eminst_watch_arun"],
+                "rationale": "The inbound email explicitly identifies the sender as Arun in the body.",
+                "ambiguous": False,
+            }
+        return {}
+
+    class FakeMailClient:
+        base_url = "http://cosmic-mail.local"
+        api_token = "mail-token"
+        timeout_sec = 20.0
+
+        async def aclose(self):
+            return None
+
+        async def list_message_attachments(self, message_id):
+            return []
+
+    import agents.email_agent.agent as email_agent_module
+
+    agent.mail_client = FakeMailClient()  # type: ignore[assignment]
+    monkeypatch.setattr(agent, "_fetch_thread_context", fake_fetch_thread_context)
+    monkeypatch.setattr(agent, "_summarize_thread", fake_summarize_thread)
+    monkeypatch.setattr(email_agent_module, "invoke_email_mimo_json", fake_invoke_email_mimo_json)
+
+    task = _make_task(
+        intent="email.process_inbound",
+        task_id="tsk_process_inbound_llm_instruction",
+        input_payload={
+            "thread_id": "thr_watch_arun",
+            "message_id": "msg_watch_arun",
+            "mailbox_address": "assistant@example.com",
+        },
+    )
+
+    result = await agent.execute(task)
+
+    assert result.status == "completed"
+    assert result.output["matched_instruction"]["instruction_id"] == "eminst_watch_arun"
+    assert result.output["matched_instructions"][0]["instruction_id"] == "eminst_watch_arun"
+    assert result.output["instruction_match_reason"] == "The inbound email explicitly identifies the sender as Arun in the body."
 
 
 @pytest.mark.asyncio
@@ -808,9 +974,11 @@ def test_email_agent_card_allows_gateway_process_inbound() -> None:
     allowed_senders = policies.get("allowed_senders") or []
     intent_auth = policies.get("intent_authorization") or {}
     process_inbound_senders = intent_auth.get("email.process_inbound") or []
+    manage_instruction_senders = intent_auth.get("email.manage_instruction") or []
 
     assert "cosmic/gateway:1.0.0" in allowed_senders
     assert "cosmic/gateway:1.0.0" in process_inbound_senders
+    assert "cosmic/gateway:1.0.0" in manage_instruction_senders
 
 
 @pytest.mark.asyncio

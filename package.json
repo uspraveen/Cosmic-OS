@@ -16,6 +16,7 @@
     "katex": "^0.16.9",
     "liquid-glass-react": "^1.1.1",
     "lucide-react": "^0.562.0",
+    "pngjs": "^7.0.0",
     "qrcode": "^1.5.4",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
@@ -27,6 +28,7 @@
     "ws": "^8.19.0"
   },
   "devDependencies": {
+    "@types/pngjs": "^6.0.5",
     "@types/react": "^19.2.8",
     "@types/react-dom": "^19.2.3",
     "@types/ws": "^8.18.1",
@@ -55,5 +57,11 @@
   "bugs": {
     "url": "https://github.com/uspraveen/Cosmic-OS/issues"
   },
-  "homepage": "https://github.com/uspraveen/Cosmic-OS#readme"
+  "homepage": "https://github.com/uspraveen/Cosmic-OS#readme",
+  "build": {
+    "appId": "com.cosmic.spotlight",
+    "win": {
+      "icon": "public/cosmic-glassy-thunder-logo.png"
+    }
+  }
 }

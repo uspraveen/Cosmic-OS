@@ -4,7 +4,8 @@
   "properties": {
     "response": { "type": "string" },
     "instructions": { "type": "array", "items": { "type": "object" } },
-    "instruction": { "type": ["object", "null"] }
+    "instruction": { "type": ["object", "null"] },
+    "updated_instructions": { "type": "array", "items": { "type": "object" } }
   },
   "required": ["response", "instructions"]
 }

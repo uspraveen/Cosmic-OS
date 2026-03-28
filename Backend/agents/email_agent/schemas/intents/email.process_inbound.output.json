@@ -12,6 +12,8 @@
     "sender_role": { "type": "string" },
     "subject": { "type": "string" },
     "matched_instruction": { "type": ["object", "null"] },
+    "matched_instructions": { "type": "array", "items": { "type": "object" } },
+    "instruction_match_reason": { "type": ["string", "null"] },
     "auto_reply": { "type": ["object", "null"] },
     "attachments": { "type": "array", "items": { "type": "object" } }
   },

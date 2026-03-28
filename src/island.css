@@ -2341,7 +2341,7 @@
 
 .island.expanded.island-notification-slide .island-content {
   height: 100%;
-  padding: 6px 14px 5px;
+  padding: 20px 28px 12px;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
@@ -2369,6 +2369,51 @@
   min-height: 0;
   box-sizing: border-box;
   justify-content: flex-start;
+}
+
+/* Agent email / approval: reuse calendar slide layout (.cal-minimal, .cal-main, .cal-side, .cal-row) */
+.slide-calendar.slide-calendar--notify {
+  align-items: stretch;
+}
+
+.slide-calendar.slide-calendar--notify .cal-today--notify {
+  cursor: default;
+  pointer-events: none;
+}
+
+.slide-calendar.slide-calendar--notify .cal-today--notify:hover,
+.slide-calendar.slide-calendar--notify .cal-today--notify:active {
+  opacity: 1;
+}
+
+.slide-calendar.slide-calendar--notify .cal-main-kicker-row .cal-main-date {
+  flex: 1;
+  min-width: 0;
+}
+
+.slide-calendar.slide-calendar--notify .cal-body--notify-batch span {
+  font-size: 30px;
+  font-weight: 200;
+  letter-spacing: -0.03em;
+}
+
+.slide-calendar.slide-calendar--notify .cal-row--notify-muted:hover {
+  opacity: 0.82;
+}
+
+.slide-calendar.slide-calendar--notify .cal-row-accent--muted {
+  background: rgba(255, 255, 255, 0.22);
+  opacity: 0.45;
+}
+
+.slide-calendar.slide-calendar--notify .cal-row--notify-muted .cal-row-copy strong {
+  color: rgba(255, 255, 255, 0.42);
+  font-weight: 500;
+}
+
+.slide-calendar.slide-calendar--notify .cal-row--notify-muted .cal-row-time {
+  width: 10px;
+  min-width: 10px;
 }
 
 /* Inbox message card (.agent-email-inbox-msg-inner + inbound stripe) */

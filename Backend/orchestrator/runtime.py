@@ -17,10 +17,12 @@ import asyncio
 import hashlib
 import json
 import logging
+import mimetypes
 import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
@@ -566,6 +568,13 @@ class OrchestratorRuntime:
                             research_paths.add("native_web_fetch")
                         if b.block_type == "web_search_tool_result" and b.raw_block:
                             self._collect_native_search_sources(b.raw_block, collected_sources)
+
+                if turn_server_blocks:
+                    await self._collect_server_tool_artifacts(
+                        turn_server_blocks,
+                        task=task,
+                        produced_artifacts=produced_artifacts,
+                    )
 
                 turn_text = "".join(turn_text_parts)
                 turn_reasoning = "".join(turn_reasoning_parts)
@@ -1519,12 +1528,8 @@ class OrchestratorRuntime:
         if container_id:
             body["container"] = container_id
 
-        headers = {
-            "x-api-key": self.config.anthropic_api_key,
-            "anthropic-version": self.config.anthropic_version,
-            "content-type": "application/json",
-            "accept": "text/event-stream",
-        }
+        headers = self._anthropic_api_headers(accept="text/event-stream")
+        headers["content-type"] = "application/json"
 
         for attempt in range(3):
             yielded_any = False
@@ -2282,6 +2287,160 @@ class OrchestratorRuntime:
             )
             if len(produced_artifacts) >= 12:
                 break
+
+    async def _collect_server_tool_artifacts(
+        self,
+        blocks: list[ContentBlock],
+        *,
+        task: TaskEnvelope,
+        produced_artifacts: list[dict[str, Any]],
+    ) -> None:
+        existing_keys = {
+            (
+                str(item.get("artifact_id") or "").strip(),
+                str(item.get("path") or "").strip(),
+            )
+            for item in produced_artifacts
+            if isinstance(item, dict)
+        }
+        for block in blocks:
+            if not ContentBlock._is_server_tool_result_block(block.block_type):
+                continue
+            raw_block = block.raw_block if isinstance(block.raw_block, dict) else None
+            if not raw_block:
+                continue
+            for file_id in self._extract_server_tool_file_ids(raw_block):
+                artifact_id = f"anthropic_{file_id}"
+                if any(key[0] == artifact_id for key in existing_keys):
+                    continue
+                try:
+                    artifact = await self._download_anthropic_generated_file(
+                        file_id=file_id,
+                        task_id=task.task_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "orchestrator.anthropic_generated_file_capture_failed task_id=%s file_id=%s",
+                        task.task_id,
+                        file_id,
+                    )
+                    continue
+                if not artifact:
+                    continue
+                dedupe_key = (
+                    str(artifact.get("artifact_id") or "").strip(),
+                    str(artifact.get("path") or "").strip(),
+                )
+                if not any(dedupe_key) or dedupe_key in existing_keys:
+                    continue
+                existing_keys.add(dedupe_key)
+                produced_artifacts.append(artifact)
+                if len(produced_artifacts) >= 12:
+                    return
+
+    def _extract_server_tool_file_ids(self, raw_block: dict[str, Any]) -> list[str]:
+        discovered: list[str] = []
+        seen: set[str] = set()
+
+        def walk(value: Any) -> None:
+            if isinstance(value, dict):
+                raw_file_id = value.get("file_id")
+                if isinstance(raw_file_id, str):
+                    file_id = raw_file_id.strip()
+                    if file_id.startswith("file_") and file_id not in seen:
+                        seen.add(file_id)
+                        discovered.append(file_id)
+                for nested in value.values():
+                    walk(nested)
+                return
+            if isinstance(value, list):
+                for item in value:
+                    walk(item)
+
+        walk(raw_block)
+        return discovered
+
+    async def _download_anthropic_generated_file(
+        self,
+        *,
+        file_id: str,
+        task_id: str,
+    ) -> dict[str, Any] | None:
+        headers = self._anthropic_api_headers()
+        metadata_response = await self._client.get(
+            f"https://api.anthropic.com/v1/files/{file_id}",
+            headers=headers,
+        )
+        metadata_response.raise_for_status()
+        metadata = metadata_response.json()
+        if not isinstance(metadata, dict):
+            return None
+
+        content_response = await self._client.get(
+            f"https://api.anthropic.com/v1/files/{file_id}/content",
+            headers=self._anthropic_api_headers(accept="application/octet-stream"),
+        )
+        content_response.raise_for_status()
+        content = content_response.content
+        if not content:
+            return None
+
+        mime_type = (
+            str(metadata.get("mime_type") or "").strip()
+            or str(content_response.headers.get("content-type") or "").split(";", 1)[0].strip()
+            or "application/octet-stream"
+        )
+        default_filename = self._default_generated_filename(file_id=file_id, mime_type=mime_type)
+        filename = self._sanitize_generated_filename(
+            str(metadata.get("filename") or "").strip(),
+            fallback=default_filename,
+        )
+        task_dir = self.config.artifacts_root / task_id / "orchestrator" / "anthropic_code_execution"
+        task_dir.mkdir(parents=True, exist_ok=True)
+        destination = task_dir / f"{file_id}__{filename}"
+        destination.write_bytes(content)
+        sha256 = hashlib.sha256(content).hexdigest()
+        return {
+            "artifact_id": f"anthropic_{file_id}",
+            "task_id": task_id,
+            "mime": mime_type,
+            "path": self._logical_artifact_path(destination),
+            "kind": "output",
+            "audience": "deliverable",
+            "filename": filename,
+            "created_by_agent": self.config.orchestrator_agent_id,
+            "sha256": sha256,
+            "created_at": metadata.get("created_at"),
+        }
+
+    def _anthropic_api_headers(self, *, accept: str = "application/json") -> dict[str, str]:
+        headers = {
+            "x-api-key": self.config.anthropic_api_key,
+            "anthropic-version": self.config.anthropic_version,
+            "accept": accept,
+        }
+        beta = str(self.config.anthropic_files_api_beta or "").strip()
+        if beta:
+            headers["anthropic-beta"] = beta
+        return headers
+
+    def _default_generated_filename(self, *, file_id: str, mime_type: str) -> str:
+        extension = mimetypes.guess_extension(mime_type or "") or ""
+        safe_id = re.sub(r"[^A-Za-z0-9._-]+", "_", file_id).strip("._") or "generated"
+        return f"{safe_id}{extension}"
+
+    def _sanitize_generated_filename(self, filename: str, *, fallback: str) -> str:
+        candidate = Path(filename or "").name.strip()
+        if not candidate:
+            candidate = fallback
+        candidate = re.sub(r"[\x00-\x1f]+", "_", candidate)
+        candidate = re.sub(r"[^A-Za-z0-9._() \-]+", "_", candidate).strip(" ._")
+        return candidate or fallback
+
+    def _logical_artifact_path(self, path: Path) -> str:
+        resolved = path.resolve()
+        relative = resolved.relative_to(self.config.artifacts_root.resolve())
+        return (Path("runs") / "artifacts" / relative).as_posix()
 
     def _extract_specialist_sources(
         self,

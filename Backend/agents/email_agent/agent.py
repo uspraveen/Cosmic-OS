@@ -57,7 +57,12 @@ CREATE TABLE IF NOT EXISTS email_instructions (
     match_from_address TEXT,
     match_subject_contains TEXT,
     match_body_contains TEXT,
+    raw_user_instruction TEXT,
     behavior_json TEXT NOT NULL,
+    last_triggered_at TEXT,
+    completed_at TEXT,
+    last_action_thread_id TEXT,
+    last_action_message_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -194,7 +199,22 @@ class EmailAgent(AgentRuntime):
     def _init_db(self) -> None:
         with connect_sync(self.session_db_path) as conn:
             conn.executescript(_RUNS_SQL)
+            self._migrate_db(conn)
             conn.commit()
+
+    def _migrate_db(self, conn: Any) -> None:
+        self._ensure_table_column(conn, "email_instructions", "raw_user_instruction", "TEXT")
+        self._ensure_table_column(conn, "email_instructions", "last_triggered_at", "TEXT")
+        self._ensure_table_column(conn, "email_instructions", "completed_at", "TEXT")
+        self._ensure_table_column(conn, "email_instructions", "last_action_thread_id", "TEXT")
+        self._ensure_table_column(conn, "email_instructions", "last_action_message_id", "TEXT")
+
+    def _ensure_table_column(self, conn: Any, table: str, column: str, definition: str) -> None:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        existing = {self._safe_text(row[1]) for row in rows if len(row) > 1}
+        if column in existing:
+            return
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     async def execute(self, task: TaskEnvelope) -> AgentResult:
         started = time.perf_counter()
@@ -320,22 +340,36 @@ class EmailAgent(AgentRuntime):
             message_id=message_id,
             attachments=attachments,
         )
-        matched_instruction = self._match_instruction(
+        matched_instructions, instruction_match_reason = await self._resolve_matched_instructions(
+            task=task,
             mailbox_address=mailbox_address,
             from_address=self._thread_sender(context),
             subject=context.get("subject"),
             body=context.get("latest_body"),
+            context=context,
         )
+        matched_instruction = matched_instructions[0] if matched_instructions else None
+        if matched_instructions:
+            self._mark_instructions_triggered(
+                instruction_ids=[self._safe_text(item.get("instruction_id")) for item in matched_instructions],
+            )
         summary = await self._summarize_thread(
             task=task,
             context=context,
             matched_instruction=matched_instruction,
+            matched_instructions=matched_instructions,
             operation="email.internal_llm.process_inbound",
         )
         summary = self._augment_thread_summary_with_attachments(summary=summary, attachments=attachments)
         auto_reply = None
-        if matched_instruction and self._instruction_mode(matched_instruction) == "auto_reply":
+        if len(matched_instructions) == 1 and matched_instruction and self._instruction_mode(matched_instruction) == "auto_reply":
             auto_reply = await self._apply_auto_reply(task, context=context, instruction=matched_instruction)
+            if auto_reply and auto_reply.get("sent"):
+                self._record_instruction_delivery(
+                    instruction_ids=[self._safe_text(matched_instruction.get("instruction_id"))],
+                    thread_id=thread_id,
+                    message_id=message_id,
+                )
 
         artifacts = [
             self._write_json_artifact(
@@ -392,6 +426,8 @@ class EmailAgent(AgentRuntime):
             "sender_role": sender_role,
             "subject": context.get("subject"),
             "matched_instruction": matched_instruction,
+            "matched_instructions": matched_instructions,
+            "instruction_match_reason": instruction_match_reason,
             "auto_reply": auto_reply,
             "attachments": attachments,
             "action": "processed_inbound",
@@ -791,14 +827,40 @@ class EmailAgent(AgentRuntime):
             return AgentResult(status="completed", output=output, artifacts=[], error=None)
 
         instruction_id = self._optional_text(task.input, "instruction_id") or f"eminst_{uuid4().hex[:12]}"
+        updated_instruction_ids: list[str] = []
         if action == "set":
-            label = self._required_text(task.input, "label")
-            match = task.input.get("match") if isinstance(task.input.get("match"), dict) else {}
+            label = self._optional_text(task.input, "label")
+            raw_user_instruction = self._optional_text(task.input, "raw_user_instruction") or self._optional_text(task.input, "instruction_text")
+            match = self._coerce_instruction_match(task.input.get("match"))
             behavior = task.input.get("behavior") if isinstance(task.input.get("behavior"), dict) else {}
-            if not any(self._safe_text(match.get(key)) for key in ("from_address", "subject_contains", "body_contains")):
+            inferred: dict[str, Any] = {}
+            if raw_user_instruction:
+                inferred = await self._expand_instruction_from_text(
+                    task=task,
+                    raw_user_instruction=raw_user_instruction,
+                )
+            if not label:
+                label = self._safe_text(inferred.get("label")) or self._build_instruction_label(raw_user_instruction)
+            match = self._merge_instruction_match(
+                inferred.get("match") if isinstance(inferred.get("match"), dict) else {},
+                match,
+            )
+            behavior = self._merge_instruction_behavior(
+                inferred.get("behavior") if isinstance(inferred.get("behavior"), dict) else {},
+                behavior,
+            )
+            behavior = self._normalize_instruction_behavior(behavior)
+            if not label:
                 raise EmailAgentError(
                     code="INVALID_INPUT",
-                    message="email.manage_instruction set requires at least one match condition.",
+                    message="email.manage_instruction set requires a label or natural-language instruction text.",
+                    retryable=False,
+                    next_action="escalate",
+                )
+            if not raw_user_instruction and not any(self._safe_text(match.get(key)) for key in ("from_address", "subject_contains", "body_contains")):
+                raise EmailAgentError(
+                    code="INVALID_INPUT",
+                    message="email.manage_instruction set requires either a natural-language instruction text or at least one match condition.",
                     retryable=False,
                     next_action="escalate",
                 )
@@ -808,12 +870,35 @@ class EmailAgent(AgentRuntime):
                 label=label,
                 match=match,
                 behavior=behavior,
+                raw_user_instruction=raw_user_instruction,
                 enabled=True,
             )
+            updated_instruction_ids = [instruction_id]
+        elif action == "record_delivery":
+            updated_instruction_ids = self._normalize_text_list(task.input.get("instruction_ids"))
+            if not updated_instruction_ids:
+                single_instruction_id = self._optional_text(task.input, "instruction_id")
+                if single_instruction_id:
+                    updated_instruction_ids = [single_instruction_id]
+            if not updated_instruction_ids:
+                raise EmailAgentError(
+                    code="INVALID_INPUT",
+                    message="email.manage_instruction record_delivery requires instruction_ids or instruction_id.",
+                    retryable=False,
+                    next_action="escalate",
+                )
+            self._record_instruction_delivery(
+                instruction_ids=updated_instruction_ids,
+                thread_id=self._optional_text(task.input, "thread_id"),
+                message_id=self._optional_text(task.input, "message_id"),
+            )
+            instruction_id = updated_instruction_ids[0]
         elif action in {"enable", "disable"}:
             self._set_instruction_enabled(instruction_id=instruction_id, enabled=action == "enable")
+            updated_instruction_ids = [instruction_id]
         elif action == "remove":
             self._delete_instruction(instruction_id=instruction_id)
+            updated_instruction_ids = [instruction_id]
         else:
             raise EmailAgentError(
                 code="INVALID_INPUT",
@@ -828,6 +913,7 @@ class EmailAgent(AgentRuntime):
             "response": f"Email instruction action `{action}` applied.",
             "instructions": instructions,
             "instruction": current,
+            "updated_instructions": [item for item in instructions if item["instruction_id"] in updated_instruction_ids],
         }
         self._record_session_run(
             task=task,
@@ -2242,6 +2328,7 @@ class EmailAgent(AgentRuntime):
         task: TaskEnvelope,
         context: dict[str, Any],
         matched_instruction: dict[str, Any] | None,
+        matched_instructions: list[dict[str, Any]] | None = None,
         operation: str,
         goal: str | None = None,
     ) -> str:
@@ -2258,7 +2345,12 @@ class EmailAgent(AgentRuntime):
         )
         if goal:
             prompt += f"\nUser goal:\n{goal}\n"
-        if matched_instruction:
+        if matched_instructions:
+            prompt += (
+                "\nMatched standing instructions:\n"
+                f"{json.dumps(matched_instructions[:6], ensure_ascii=False)}\n"
+            )
+        elif matched_instruction:
             prompt += f"\nMatched standing instruction:\n{json.dumps(matched_instruction, ensure_ascii=False)}\n"
         prompt += f"\nThread subject: {self._safe_text(context.get('subject'))}\n\nThread:\n{transcript[:24000]}"
         summary = await invoke_email_mimo(
@@ -2933,7 +3025,9 @@ class EmailAgent(AgentRuntime):
                     """
                     SELECT instruction_id, mailbox_address, label, enabled,
                            match_from_address, match_subject_contains, match_body_contains,
-                           behavior_json, created_at, updated_at
+                           raw_user_instruction, behavior_json,
+                           last_triggered_at, completed_at, last_action_thread_id, last_action_message_id,
+                           created_at, updated_at
                     FROM email_instructions
                     WHERE mailbox_address = ? OR mailbox_address IS NULL
                     ORDER BY updated_at DESC
@@ -2945,36 +3039,77 @@ class EmailAgent(AgentRuntime):
                     """
                     SELECT instruction_id, mailbox_address, label, enabled,
                            match_from_address, match_subject_contains, match_body_contains,
-                           behavior_json, created_at, updated_at
+                           raw_user_instruction, behavior_json,
+                           last_triggered_at, completed_at, last_action_thread_id, last_action_message_id,
+                           created_at, updated_at
                     FROM email_instructions
                     ORDER BY updated_at DESC
                     """
                 ).fetchall()
         return [self._instruction_row_to_dict(row) for row in rows]
 
-    def _match_instruction(
+    async def _resolve_matched_instructions(
         self,
         *,
+        task: TaskEnvelope,
         mailbox_address: str | None,
         from_address: str | None,
         subject: str | None,
         body: str | None,
-    ) -> dict[str, Any] | None:
+        context: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        instructions = []
         for instruction in self._list_instructions(mailbox_address=mailbox_address):
             if not instruction.get("enabled"):
                 continue
             if instruction.get("mailbox_address") and mailbox_address and instruction["mailbox_address"] != mailbox_address:
                 continue
+            instructions.append(instruction)
+        if not instructions:
+            return [], None
+
+        llm_ids, llm_reason = await self._match_instructions_with_llm(
+            task=task,
+            instructions=instructions,
+            from_address=from_address,
+            subject=subject,
+            body=body,
+            context=context,
+        )
+        if llm_ids:
+            matched = [item for item in instructions if self._safe_text(item.get("instruction_id")) in llm_ids]
+            if matched:
+                return matched, llm_reason
+
+        fallback = self._match_instructions_deterministic(
+            instructions=instructions,
+            from_address=from_address,
+            subject=subject,
+            body=body,
+        )
+        return fallback, ("Matched using deterministic instruction fields." if fallback else llm_reason)
+
+    def _match_instructions_deterministic(
+        self,
+        *,
+        instructions: list[dict[str, Any]],
+        from_address: str | None,
+        subject: str | None,
+        body: str | None,
+    ) -> list[dict[str, Any]]:
+        matched: list[dict[str, Any]] = []
+        for instruction in instructions:
             match = instruction.get("match") if isinstance(instruction.get("match"), dict) else {}
-            if not self._instruction_matches(
+            if not any(self._safe_text(match.get(key)) for key in ("from_address", "subject_contains", "body_contains")):
+                continue
+            if self._instruction_matches(
                 match=match,
                 from_address=from_address,
                 subject=subject,
                 body=body,
             ):
-                continue
-            return instruction
-        return None
+                matched.append(instruction)
+        return matched
 
     def _instruction_matches(
         self,
@@ -2998,6 +3133,101 @@ class EmailAgent(AgentRuntime):
             return False
         return True
 
+    async def _match_instructions_with_llm(
+        self,
+        *,
+        task: TaskEnvelope,
+        instructions: list[dict[str, Any]],
+        from_address: str | None,
+        subject: str | None,
+        body: str | None,
+        context: dict[str, Any],
+    ) -> tuple[list[str], str | None]:
+        if not instructions:
+            return [], None
+        instruction_payload = [self._instruction_prompt_payload(item) for item in instructions[:48]]
+        thread_messages = context.get("messages") if isinstance(context.get("messages"), list) else []
+        recent_transcript = [
+            {
+                "from_address": self._safe_text(item.get("from_address")),
+                "subject": self._safe_text(item.get("subject")),
+                "text_body": self._safe_text(item.get("text_body"))[:1200],
+            }
+            for item in thread_messages[-4:]
+            if isinstance(item, dict)
+        ]
+        payload = await invoke_email_mimo_json(
+            cfg=self.config,
+            http_client=self._http_client,
+            system_content=self._build_system_prompt(),
+            user_message=(
+                "Match this inbound email against the provided standing instructions.\n"
+                "Return JSON with keys: matched_instruction_ids (array of ids), rationale (string), ambiguous (boolean).\n"
+                "Only use ids from the provided instruction list.\n"
+                "Prefer precision over recall.\n"
+                "If nothing matches, return an empty matched_instruction_ids array.\n\n"
+                f"Inbound from: {from_address or '(unknown)'}\n"
+                f"Subject: {subject or '(no subject)'}\n"
+                f"Latest body:\n{(body or '')[:6000]}\n\n"
+                f"Recent thread context:\n{json.dumps(recent_transcript, ensure_ascii=False)}\n\n"
+                f"Standing instructions:\n{json.dumps(instruction_payload, ensure_ascii=False)}"
+            ),
+            task_id=task.task_id,
+            session_id=task.session_id,
+            request_id=self._optional_text(task.input, "request_id"),
+            source=task.source,
+            source_id=task.source_id,
+            channel=task.channel,
+            operation="email.internal_llm.match_instructions",
+        ) or {}
+        matched_ids = self._normalize_text_list(payload.get("matched_instruction_ids"))
+        rationale = self._safe_text(payload.get("rationale")) or None
+        if not matched_ids:
+            return [], rationale
+        allowed = {self._safe_text(item.get("instruction_id")) for item in instructions}
+        normalized = [item for item in matched_ids if item in allowed]
+        return normalized, rationale
+
+    async def _expand_instruction_from_text(
+        self,
+        *,
+        task: TaskEnvelope,
+        raw_user_instruction: str,
+    ) -> dict[str, Any]:
+        if not raw_user_instruction:
+            return {}
+        payload = await invoke_email_mimo_json(
+            cfg=self.config,
+            http_client=self._http_client,
+            system_content=self._build_system_prompt(),
+            user_message=(
+                "Convert this standing email instruction into a compact JSON policy.\n"
+                "Return JSON with keys: label, match, behavior.\n"
+                "behavior must contain mode and completion_mode.\n"
+                "Allowed mode values: notify_only, auto_reply.\n"
+                "Allowed completion_mode values: perpetual, one_shot.\n"
+                "Only include reply_template when mode is auto_reply.\n"
+                "Use match fields only when they are explicit and helpful: from_address, subject_contains, body_contains.\n"
+                "Do not invent exact email addresses if the instruction only names a person informally.\n\n"
+                f"Instruction:\n{raw_user_instruction}"
+            ),
+            task_id=task.task_id,
+            session_id=task.session_id,
+            request_id=self._optional_text(task.input, "request_id"),
+            source=task.source,
+            source_id=task.source_id,
+            channel=task.channel,
+            operation="email.internal_llm.parse_instruction",
+        ) or {}
+        match = self._coerce_instruction_match(payload.get("match"))
+        behavior = self._normalize_instruction_behavior(payload.get("behavior") if isinstance(payload.get("behavior"), dict) else {})
+        label = self._safe_text(payload.get("label")) or self._build_instruction_label(raw_user_instruction)
+        return {
+            "label": label,
+            "match": match,
+            "behavior": behavior,
+        }
+
     def _upsert_instruction(
         self,
         *,
@@ -3006,23 +3236,34 @@ class EmailAgent(AgentRuntime):
         label: str,
         match: dict[str, Any],
         behavior: dict[str, Any],
+        raw_user_instruction: str | None,
         enabled: bool,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         with connect_sync(self.session_db_path) as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO email_instructions (
+                INSERT INTO email_instructions (
                     instruction_id, mailbox_address, label, enabled,
                     match_from_address, match_subject_contains, match_body_contains,
-                    behavior_json, created_at, updated_at
+                    raw_user_instruction, behavior_json,
+                    created_at, updated_at
                 ) VALUES (
                     ?, ?, ?, ?,
                     ?, ?, ?,
-                    ?,
-                    COALESCE((SELECT created_at FROM email_instructions WHERE instruction_id = ?), ?),
-                    ?
+                    ?, ?,
+                    ?, ?
                 )
+                ON CONFLICT(instruction_id) DO UPDATE SET
+                    mailbox_address = excluded.mailbox_address,
+                    label = excluded.label,
+                    enabled = excluded.enabled,
+                    match_from_address = excluded.match_from_address,
+                    match_subject_contains = excluded.match_subject_contains,
+                    match_body_contains = excluded.match_body_contains,
+                    raw_user_instruction = excluded.raw_user_instruction,
+                    behavior_json = excluded.behavior_json,
+                    updated_at = excluded.updated_at
                 """,
                 (
                     instruction_id,
@@ -3032,8 +3273,8 @@ class EmailAgent(AgentRuntime):
                     self._safe_text(match.get("from_address")) or None,
                     self._safe_text(match.get("subject_contains")) or None,
                     self._safe_text(match.get("body_contains")) or None,
+                    self._safe_text(raw_user_instruction) or None,
                     json.dumps(behavior, ensure_ascii=False, separators=(",", ":")),
-                    instruction_id,
                     now,
                     now,
                 ),
@@ -3041,11 +3282,13 @@ class EmailAgent(AgentRuntime):
             conn.commit()
 
     def _set_instruction_enabled(self, *, instruction_id: str, enabled: bool) -> None:
+        completed_at = None if enabled else None
         with connect_sync(self.session_db_path) as conn:
             cursor = conn.execute(
-                "UPDATE email_instructions SET enabled = ?, updated_at = ? WHERE instruction_id = ?",
+                "UPDATE email_instructions SET enabled = ?, completed_at = ?, updated_at = ? WHERE instruction_id = ?",
                 (
                     1 if enabled else 0,
+                    completed_at,
                     datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                     instruction_id,
                 ),
@@ -3076,7 +3319,7 @@ class EmailAgent(AgentRuntime):
 
     def _instruction_row_to_dict(self, row: tuple[Any, ...]) -> dict[str, Any]:
         try:
-            behavior = json.loads(row[7]) if row[7] else {}
+            behavior = json.loads(row[8]) if row[8] else {}
         except Exception:
             behavior = {}
         return {
@@ -3089,15 +3332,151 @@ class EmailAgent(AgentRuntime):
                 "subject_contains": row[5],
                 "body_contains": row[6],
             },
+            "raw_user_instruction": row[7],
             "behavior": behavior if isinstance(behavior, dict) else {},
-            "created_at": row[8],
-            "updated_at": row[9],
+            "last_triggered_at": row[9],
+            "completed_at": row[10],
+            "last_action_thread_id": row[11],
+            "last_action_message_id": row[12],
+            "created_at": row[13],
+            "updated_at": row[14],
         }
 
     def _instruction_mode(self, instruction: dict[str, Any]) -> str:
         behavior = instruction.get("behavior") if isinstance(instruction.get("behavior"), dict) else {}
         mode = self._safe_text(behavior.get("mode")).lower()
         return mode or "notify_only"
+
+    def _instruction_completion_mode(self, instruction: dict[str, Any]) -> str:
+        behavior = instruction.get("behavior") if isinstance(instruction.get("behavior"), dict) else {}
+        mode = self._safe_text(behavior.get("completion_mode")).lower()
+        if mode in {"one_shot", "perpetual"}:
+            return mode
+        return "perpetual"
+
+    def _coerce_instruction_match(self, raw: Any) -> dict[str, Any]:
+        match = raw if isinstance(raw, dict) else {}
+        return {
+            "from_address": self._safe_text(match.get("from_address")) or None,
+            "subject_contains": self._safe_text(match.get("subject_contains")) or None,
+            "body_contains": self._safe_text(match.get("body_contains")) or None,
+        }
+
+    def _normalize_instruction_behavior(self, behavior: dict[str, Any] | None) -> dict[str, Any]:
+        raw = behavior if isinstance(behavior, dict) else {}
+        mode = self._safe_text(raw.get("mode")).lower()
+        if mode not in {"notify_only", "auto_reply"}:
+            mode = "notify_only"
+        completion_mode = self._safe_text(raw.get("completion_mode")).lower()
+        if completion_mode not in {"perpetual", "one_shot"}:
+            completion_mode = "perpetual"
+        normalized = {
+            "mode": mode,
+            "completion_mode": completion_mode,
+        }
+        reply_template = self._safe_text(raw.get("reply_template")) or None
+        if reply_template:
+            normalized["reply_template"] = reply_template
+        return normalized
+
+    def _merge_instruction_match(self, inferred: dict[str, Any], explicit: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "from_address": self._safe_text(explicit.get("from_address")) or self._safe_text(inferred.get("from_address")) or None,
+            "subject_contains": self._safe_text(explicit.get("subject_contains")) or self._safe_text(inferred.get("subject_contains")) or None,
+            "body_contains": self._safe_text(explicit.get("body_contains")) or self._safe_text(inferred.get("body_contains")) or None,
+        }
+
+    def _merge_instruction_behavior(self, inferred: dict[str, Any], explicit: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(inferred or {})
+        for key, value in (explicit or {}).items():
+            if value not in (None, "", []):
+                merged[key] = value
+        return merged
+
+    def _build_instruction_label(self, raw_user_instruction: str | None) -> str | None:
+        text = self._safe_text(raw_user_instruction)
+        if not text:
+            return None
+        compact = re.sub(r"\s+", " ", text).strip()
+        return compact[:120]
+
+    def _instruction_prompt_payload(self, instruction: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "instruction_id": self._safe_text(instruction.get("instruction_id")),
+            "label": self._safe_text(instruction.get("label")),
+            "raw_user_instruction": self._safe_text(instruction.get("raw_user_instruction")) or None,
+            "match": instruction.get("match") if isinstance(instruction.get("match"), dict) else {},
+            "behavior": instruction.get("behavior") if isinstance(instruction.get("behavior"), dict) else {},
+        }
+
+    def _normalize_text_list(self, values: Any) -> list[str]:
+        if not isinstance(values, list):
+            return []
+        seen: set[str] = set()
+        items: list[str] = []
+        for value in values:
+            text = self._safe_text(value)
+            normalized = text.casefold()
+            if not text or normalized in seen:
+                continue
+            seen.add(normalized)
+            items.append(text)
+        return items
+
+    def _mark_instructions_triggered(self, *, instruction_ids: list[str]) -> None:
+        normalized_ids = self._normalize_text_list(instruction_ids)
+        if not normalized_ids:
+            return
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        with connect_sync(self.session_db_path) as conn:
+            conn.executemany(
+                "UPDATE email_instructions SET last_triggered_at = ?, updated_at = ? WHERE instruction_id = ?",
+                [(now, now, instruction_id) for instruction_id in normalized_ids],
+            )
+            conn.commit()
+
+    def _record_instruction_delivery(
+        self,
+        *,
+        instruction_ids: list[str],
+        thread_id: str | None,
+        message_id: str | None,
+    ) -> None:
+        normalized_ids = self._normalize_text_list(instruction_ids)
+        if not normalized_ids:
+            return
+        instructions = {item["instruction_id"]: item for item in self._list_instructions(mailbox_address=None)}
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        with connect_sync(self.session_db_path) as conn:
+            for instruction_id in normalized_ids:
+                instruction = instructions.get(instruction_id)
+                if not instruction:
+                    continue
+                completion_mode = self._instruction_completion_mode(instruction)
+                complete_now = completion_mode == "one_shot"
+                conn.execute(
+                    """
+                    UPDATE email_instructions
+                    SET last_triggered_at = ?,
+                        completed_at = CASE WHEN ? THEN ? ELSE completed_at END,
+                        enabled = CASE WHEN ? THEN 0 ELSE enabled END,
+                        last_action_thread_id = COALESCE(?, last_action_thread_id),
+                        last_action_message_id = COALESCE(?, last_action_message_id),
+                        updated_at = ?
+                    WHERE instruction_id = ?
+                    """,
+                    (
+                        now,
+                        1 if complete_now else 0,
+                        now,
+                        1 if complete_now else 0,
+                        thread_id,
+                        message_id,
+                        now,
+                        instruction_id,
+                    ),
+                )
+            conn.commit()
 
     def _normalize_message_record(self, message: dict[str, Any]) -> dict[str, Any]:
         from_contacts = message.get("from_recipients") if isinstance(message.get("from_recipients"), list) else []

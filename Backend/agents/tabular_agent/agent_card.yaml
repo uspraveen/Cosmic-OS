@@ -1,9 +1,16 @@
 agent_id: cosmic/tabular-agent:1.0.0
 display_name: Tabular Spreadsheet Agent
 description: >
-  Anything to do with spreadsheets, this is the specialist to use. It parses, queries, creates,
-  edits, exports, and converts XLSX, CSV, TSV, and XLSB files, and can handle deeper spreadsheet
-  analysis when needed.
+  Anything to do with spreadsheets, this is the specialist to use. Parses, queries, creates, edits,
+  exports, and converts XLSX, CSV, TSV, and XLSB files. Beyond general tabular operations, the agent
+  has deep financial analysis skills that it activates on demand: three-statement analysis (P&L, Balance
+  Sheet, Cash Flow), financial ratio analysis (liquidity, profitability, leverage, Altman Z-Score),
+  variance analysis (budget vs actual, flexible budget), revenue & SaaS analytics (MRR/ARR waterfall,
+  cohort retention, NRR/GRR, LTV/CAC), working capital (DSO/DPO/DIO, cash conversion cycle, AR/AP
+  aging), margin bridge & PVM decomposition, expense & OpEx analysis (run-rate, cost per head, vendor
+  concentration, SG&A leverage), financial consolidation (intercompany elimination, currency translation,
+  NCI), and FP&A planning (forecasting, scenario analysis). For complex goals, the agent plans multi-step
+  analyses and runs a verification pass on all computed results before reporting.
 
 intents:
   - name: tabular.parse_bundle
@@ -52,12 +59,22 @@ intents:
       - Use create_workbook when the spreadsheet does not already exist as an uploaded or parsed bundle.
   - name: tabular.reason_workbook
     description: >
-      Internal agentic reasoning over a parsed workbook (inspect → MiMo plan → deterministic SELECT or
-      bounded Python under codes/ + executions/ → summarize). Does not replace granular browse/query tools.
+      Agentic multi-step reasoning over a parsed workbook with financial analysis skills. The agent
+      plans its approach, activates domain-specific skills (formulas, SQL patterns, benchmarks), executes
+      queries, and verifies results before summarizing. Handles complex financial analysis that requires
+      multiple steps: ratio analysis, variance decomposition, margin bridges, working capital metrics,
+      revenue analytics, consolidation, and more.
     timeout_sec: 240
     usage_hints:
       - Use reason_workbook for one delegated spreadsheet goal when composing many granular steps yourself would be clumsy.
       - Prefer schema, preview, query, and export tools directly when you already know the exact deterministic operation.
+      - Use for financial analysis tasks — variance (budget vs actual), ratio analysis (liquidity, profitability, leverage, Altman Z-Score), three-statement linkage (P&L + BS + CF).
+      - Use for SaaS/revenue analytics — MRR/ARR waterfall, cohort retention, NRR/GRR, LTV/CAC, Rule of 40, churn decomposition.
+      - Use for working capital analysis — DSO, DPO, DIO, cash conversion cycle, AR/AP/inventory aging, FCF conversion.
+      - Use for margin and profitability — PVM (Price-Volume-Mix) decomposition, gross/operating margin bridges, segment profitability, contribution margin.
+      - Use for expense/OpEx analysis — run-rate calculation, cost per head, vendor concentration, fixed vs variable decomposition, SG&A leverage.
+      - Use for multi-entity consolidation — intercompany elimination, currency translation, CTA, NCI/minority interest, segment reporting.
+      - Use for FP&A — forecasting, scenario/sensitivity analysis, budget planning, what-if modeling.
 
 artifact_types:
   - tabular_workbook_bundle

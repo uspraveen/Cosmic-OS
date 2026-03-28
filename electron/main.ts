@@ -1,5 +1,6 @@
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, screen, shell } from 'electron'
-import { promises as fs } from 'node:fs'
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, nativeImage, screen, shell } from 'electron'
+import { existsSync, promises as fs, readFileSync } from 'node:fs'
+import { PNG } from 'pngjs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
@@ -20,6 +21,68 @@ export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist')
 process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL
   ? path.join(process.env.APP_ROOT, 'public')
   : RENDERER_DIST
+
+const APP_ICON_FILENAME = 'cosmic-glassy-thunder-logo.png'
+
+/** Resolves the window/taskbar icon for dev (public/), production build (dist/), or packaged app (same paths inside asar). */
+function resolveAppIconPath(): string | undefined {
+  const root = process.env.APP_ROOT || path.join(__dirname, '..')
+  const candidates = VITE_DEV_SERVER_URL
+    ? [path.join(root, 'public', APP_ICON_FILENAME)]
+    : [path.join(root, 'dist', APP_ICON_FILENAME), path.join(root, 'public', APP_ICON_FILENAME)]
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate
+    }
+  }
+  return undefined
+}
+
+/** Windows taskbar squares are tight; nudge raster artwork slightly right inside the canvas. */
+const WINDOWS_TASKBAR_ICON_NUDGE_PX = 3
+
+function shiftPngContentRight(pngBuffer: Buffer, dx: number): Buffer | null {
+  if (dx <= 0) return null
+  try {
+    const png = PNG.sync.read(pngBuffer)
+    const { width, height, data } = png
+    const out = new PNG({ width, height })
+    out.data.fill(0)
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const destIdx = (width * y + x) << 2
+        const sx = x - dx
+        if (sx >= 0) {
+          const srcIdx = (width * y + sx) << 2
+          out.data[destIdx] = data[srcIdx]
+          out.data[destIdx + 1] = data[srcIdx + 1]
+          out.data[destIdx + 2] = data[srcIdx + 2]
+          out.data[destIdx + 3] = data[srcIdx + 3]
+        }
+      }
+    }
+    return Buffer.from(PNG.sync.write(out))
+  } catch {
+    return null
+  }
+}
+
+function loadBrowserWindowIcon(iconPath: string): Electron.NativeImage | undefined {
+  if (process.platform === 'win32') {
+    try {
+      const raw = readFileSync(iconPath)
+      const shifted = shiftPngContentRight(raw, WINDOWS_TASKBAR_ICON_NUDGE_PX)
+      if (shifted) {
+        const image = nativeImage.createFromBuffer(shifted)
+        if (!image.isEmpty()) return image
+      }
+    } catch {
+      // fall through to path-based load
+    }
+  }
+  const fallback = nativeImage.createFromPath(iconPath)
+  return fallback.isEmpty() ? undefined : fallback
+}
 
 // Electron Store for persisting settings
 const store = new Store({
@@ -1332,15 +1395,19 @@ function invokeMeetingMode() {
 }
 
 function createWindow() {
+  const iconPath = resolveAppIconPath()
+  const browserIcon = iconPath ? loadBrowserWindowIcon(iconPath) : undefined
   win = new BrowserWindow({
     show: false,
     frame: false,
     transparent: true,
     backgroundColor: '#00000000',
     alwaysOnTop: true,
-    skipTaskbar: true,
+    skipTaskbar: false,
     hasShadow: false,
-    type: 'toolbar',
+    // Windows tool windows (`toolbar`) are excluded from the taskbar; keep that type only on macOS.
+    ...(process.platform === 'darwin' ? { type: 'toolbar' as const } : {}),
+    ...(browserIcon ? { icon: browserIcon } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.mjs'),
       contextIsolation: true,
@@ -1394,6 +1461,9 @@ app.on('before-quit', () => {
 })
 
 app.whenReady().then(() => {
+  if (process.platform === 'win32') {
+    app.setAppUserModelId('com.cosmic.spotlight')
+  }
   createWindow()
   if (win) {
     startMediaBridge(win)

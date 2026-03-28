@@ -45,6 +45,7 @@ _VALID_ACTIONS = frozenset(
         "clarify",
         "done",
         "activate_skill",
+        "create_plan",
     }
 )
 
@@ -52,7 +53,7 @@ _MULTI_STEP_INSTRUCTION = """\
 You control internal tools over an already-parsed spreadsheet bundle. Reply with **one JSON object only** (no markdown).
 
 Keys:
-- "action": one of "browse", "schema", "preview", "sql", "python", "clarify", "activate_skill", "done"
+- "action": one of "browse", "schema", "preview", "sql", "python", "clarify", "activate_skill", "create_plan", "done"
 - "sheet_id": string or null — required for "preview"; optional filter for "schema"
 - "sql": string or null — single read-only SELECT for "sql" (DuckDB views: s_<sheet_id>)
 - "python_code": string or null — for "python" only; duckdb/pandas; cwd is bundle root
@@ -61,10 +62,34 @@ Keys:
 - "options": array of strings or null — for "clarify" only: short choices when applicable (max ~8)
 - "ambiguity": string or null — for "clarify" only: internal label (e.g. "multiple_sheets", "metric_definition")
 - "skill_name": string or null — for "activate_skill" only: name of skill to activate (e.g. "three-statement", "ratio-analysis", "revenue-analytics")
+- "steps": array of strings — for "create_plan" only: ordered list of concrete step descriptions (3-8 steps)
+- "plan_step": integer or null — optional on any action: which plan step (1-based) the current action is working on
 - "answer": string or null — when action is "done", concise result for the orchestrator
 - "rationale": short string
 
-Rules:
+## Execution Planning
+
+Use **"create_plan"** as your FIRST action when the user's goal requires 3 or more logical steps.
+Plan when:
+- The goal involves multi-sheet or multi-metric analysis (DSO + DPO + DIO → CCC)
+- Financial analysis requiring skill activation then multiple queries (variance, PVM, consolidation)
+- Any goal that needs explore → compute → cross-check → summarize
+
+Skip planning when:
+- Single lookup or one SQL query answers the goal
+- Simple schema/preview inspection
+
+Planning rules:
+1. "create_plan" must be your FIRST action — plan before doing any work
+2. Steps must be concrete and completable: "Query revenue by segment from s_pnl" not "Analyze data"
+3. Always include a verification step near the end: "Cross-check totals / validate results sum correctly"
+4. Always end with a summary step: "Synthesize findings into final answer"
+5. After creating a plan, you will re-decide to start step 1
+6. Include "plan_step": N on subsequent actions to track which step you are executing
+7. You may work on multiple actions within one plan step — move to the next step when the logical unit is done
+
+## Tool Rules
+
 - Prefer "sql" when the goal needs tabular aggregation/filtering.
 - Use "schema" / "preview" to disambiguate columns or sheet choice.
 - Use "browse" for a lightweight workbook list/handles reminder.
@@ -75,7 +100,44 @@ Rules:
 - Use "python" when need Python logic (Regressions, complex Pandas, visualization data prep)
 - Use **"clarify" at most once** when ambiguity blocks correct execution and cannot be resolved with internal tools
   (e.g. multiple plausible sheets, unclear metric, fiscal calendar, unit/currency). Requires an orchestrator parent task.
-- Set action to "done" when the goal is satisfied or you cannot proceed.
+
+## Verification & Completion
+
+Before setting action to "done", run a **final verification pass**. This is mandatory — never skip it.
+
+### 1. Data Quality (run BEFORE computing anything)
+- Check for NULLs in key columns: `SELECT COUNT(*) FILTER (WHERE revenue IS NULL) FROM s_pnl`
+- Check for duplicates that would inflate sums: `SELECT period, COUNT(*) FROM s_pnl GROUP BY period HAVING COUNT(*) > 1`
+- Spot-check row counts — does the number of rows match the expected periods/entities/products?
+- Look for unexpected blanks, zeros where there should be values, or negative values in unsigned fields
+
+### 2. Sheet Structure & Column Alignment
+- Verify you are reading the correct columns — preview the sheet first if column names are ambiguous
+- Watch for off-by-one header issues (data starting on row 2 vs row 1, merged header rows)
+- If multiple sheets exist for the same entity, confirm you are using the right one (e.g. "PnL" vs "PnL_Draft")
+- Cross-check column names against the schema — don't assume "Amount" means revenue; it could be cost
+
+### 3. Arithmetic & Formula Integrity
+- Cross-check computed totals: Revenue - COGS should equal Gross Profit; Assets should equal Liabilities + Equity
+- For multi-step calculations, verify intermediate results before building on them
+- If a formula was used (DSO, NRR, Z-Score, PVM, etc.), verify the denominator is non-zero and the result is in a sensible range
+- Watch for sign conventions: are expenses positive or negative? Are credits stored as negative? Mixing conventions silently corrupts sums
+
+### 4. Cross-Sheet & Cross-Period Consistency
+- If data comes from multiple sheets, verify they align on the same periods, entities, and currency
+- Check that totals in summary sheets match detail sheets (e.g. segment totals should sum to consolidated)
+- For YoY or QoQ comparisons, verify both periods have complete data — partial periods produce misleading deltas
+
+### 5. Reasonableness & Ranges
+- Validate that key metrics fall within plausible ranges (e.g. DSO 15-120 days, gross margin 0-100%, NRR 70-200%)
+- Flag outliers — a sudden 10x revenue jump or negative headcount likely indicates a data issue, not a real change
+- For currency amounts, check the magnitude — a $50B revenue for a mid-market company means the column is probably in thousands or the entity is wrong
+
+### 6. Sanity-Check SQL
+- If any number looks off, run a quick targeted SQL to isolate the issue before reporting it as a finding
+- When aggregating, always verify: `SELECT SUM(amount) FROM ... WHERE ...` matches what you used in the larger query
+
+Set action to "done" only when the goal is fully satisfied AND the verification pass confirms results are trustworthy, or you cannot proceed.
 """
 
 
@@ -102,6 +164,9 @@ class TabularReasonState(TypedDict, total=False):
     # Skills system fields (progressive disclosure)
     available_skills: list[dict[str, Any]]
     active_skill_content: str
+    # Dynamic step plan fields (LLM-driven planning per §32.2)
+    plan_active: bool
+    plan_total_steps: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +189,8 @@ def _build_resume_state(state: TabularReasonState) -> dict[str, Any]:
         "clarify_used": bool(state.get("clarify_used", False)),
         "steps_log": list(state.get("steps_log") or []),
         "bundle_root": state.get("bundle_root"),
+        "plan_active": bool(state.get("plan_active")),
+        "plan_total_steps": int(state.get("plan_total_steps") or 0),
     }
 
 
@@ -133,23 +200,6 @@ def _append_step(
     log = list(state.get("steps_log") or [])
     log.append(entry)
     return log
-
-
-async def _step_plan_create(ctx: _GraphCtx, state: TabularReasonState) -> None:
-    step_plan = getattr(ctx.agent, "step_plan", None)
-    if step_plan is None:
-        return
-    resumed = bool(state.get("resumed"))
-    steps = [
-        "Resume after user clarification" if resumed else "Inspect workbook context",
-        "Run internal spreadsheet analysis",
-        "Summarize the result for the orchestrator",
-    ]
-    try:
-        await step_plan.create(steps)
-        await step_plan.update(1, "in_progress")
-    except Exception:  # noqa: BLE001
-        logger.debug("tabular.graph.step_plan_create_failed", exc_info=True)
 
 
 async def _step_plan_update(
@@ -425,6 +475,39 @@ async def _run_tool(
             e = {"error": str(exc)[:500]}
             return e, json.dumps({"error": str(exc)[:500]}, ensure_ascii=False)
 
+    if action == "create_plan":
+        raw_steps = pending.get("steps")
+        if not isinstance(raw_steps, list) or not raw_steps:
+            return {
+                "error": "create_plan requires a non-empty 'steps' array"
+            }, "create_plan requires a non-empty 'steps' array"
+        steps = [str(s).strip() for s in raw_steps if str(s).strip()][:8]
+        if not steps:
+            return {"error": "create_plan: all steps were empty"}, "empty steps"
+        step_plan = getattr(ctx.agent, "step_plan", None)
+        if step_plan is None:
+            # StepPlan not injected (e.g. testing) — return plan as observation only
+            out: dict[str, Any] = {
+                "kind": "create_plan",
+                "steps": steps,
+                "total_steps": len(steps),
+                "plan_active": True,
+            }
+            return out, json.dumps(out, ensure_ascii=False)
+        try:
+            plan_result = await step_plan.create(steps)
+            await step_plan.update(1, "in_progress")
+            out = {
+                "kind": "create_plan",
+                "steps": steps,
+                "total_steps": plan_result.get("total_steps", len(steps)),
+                "plan_active": True,
+            }
+            return out, json.dumps(out, ensure_ascii=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("tabular.graph.create_plan_failed: %s", exc)
+            return {"error": str(exc)[:500]}, str(exc)
+
     if action == "activate_skill":
         skill_name = pending.get("skill_name")
         if not skill_name:
@@ -467,7 +550,6 @@ def _build_graph(ctx: _GraphCtx) -> Any:
         await ctx.agent._emit_stage(
             ctx.task.task_id, "reason_inspect", "Loading bundle context (LangGraph)."
         )  # noqa: SLF001
-        await _step_plan_create(ctx, state)
         root = ctx.agent._bundle_disk_path(state["bundle_id"], state["artifact_id"])  # noqa: SLF001
         preview_path = root / "preview.md"
         cat_path = root / "sheet_catalog.json"
@@ -487,14 +569,6 @@ def _build_graph(ctx: _GraphCtx) -> Any:
         existing_transcript = str(state.get("transcript") or "").strip()
         transcript = (
             f"{existing_transcript}\n\n{initial}" if existing_transcript else initial
-        )
-        await _step_plan_update(
-            ctx,
-            1,
-            "completed",
-            note="Resumed from clarification."
-            if state.get("resumed")
-            else "Loaded workbook preview and sheet catalog.",
         )
         skills_dir = Path(
             getattr(ctx.cfg, "skills_dir", "") or str(AGENT_ROOT / "skills")
@@ -533,11 +607,6 @@ def _build_graph(ctx: _GraphCtx) -> Any:
         await ctx.agent._emit_stage(
             ctx.task.task_id, "reason_plan", "Planning next internal tool step."
         )  # noqa: SLF001
-        analysis_started = bool(state.get("analysis_step_started"))
-        if not analysis_started:
-            await _step_plan_update(
-                ctx, 2, "in_progress", note="Choosing the next tabular action."
-            )
         tr = state.get("transcript") or ""
         rounds = int(state.get("tool_round") or 0)
         max_r = int(state.get("max_tool_rounds") or 5)
@@ -627,18 +696,54 @@ def _build_graph(ctx: _GraphCtx) -> Any:
             ctx.task.task_id, "reason_execute", "Running internal tabular tool."
         )  # noqa: SLF001
         pending = state.get("pending") or {}
-        if str(pending.get("action") or "").strip().lower() == "clarify":
+        current_action = str(pending.get("action") or "").strip().lower()
+        if current_action == "clarify":
             await ctx.agent._emit_stage(
                 ctx.task.task_id,
                 "reason_clarify",
                 "Requesting user input via orchestrator task-input relay.",
             )  # noqa: SLF001
+
+        # --- plan_step: mark in_progress BEFORE executing the tool ---
+        plan_step_num = pending.get("plan_step")
+        if isinstance(plan_step_num, int) and plan_step_num >= 1 and state.get("plan_active"):
+            await _step_plan_update(
+                ctx, plan_step_num, "in_progress",
+                note=f"Executing {current_action}",
+            )
+
         result, obs = await _run_tool(ctx=ctx, state=state, pending=pending)
-        current_action = str(pending.get("action") or "").strip().lower()
-        # activate_skill doesn't consume a tool round - it's a knowledge load
-        is_skill_activation = current_action == "activate_skill"
-        if is_skill_activation:
-            # For skill activation: append content as a new section, don't increment tool_round
+        tool_ok = "error" not in result
+
+        # --- Branch: create_plan (lightweight, no tool_round) ---
+        if current_action == "create_plan":
+            plan_steps = result.get("steps") or []
+            plan_total = result.get("total_steps") or len(plan_steps)
+            tr = (
+                (state.get("transcript") or "")
+                + f"\n\n--- plan created ({plan_total} steps) ---\n"
+                + "\n".join(f"  {i+1}. {s}" for i, s in enumerate(plan_steps))
+                + "\n"
+            )
+            out: dict[str, Any] = {
+                "transcript": tr,
+                "last_tool_result": result,
+                "plan_active": tool_ok,
+                "plan_total_steps": plan_total if tool_ok else 0,
+                "steps_log": _append_step(
+                    state,
+                    {
+                        "step": "tool",
+                        "ok": tool_ok,
+                        "kind": "create_plan",
+                        "total_steps": plan_total,
+                    },
+                ),
+            }
+            return out
+
+        # --- Branch: activate_skill (lightweight, no tool_round) ---
+        if current_action == "activate_skill":
             skill_content = ""
             if isinstance(result, dict):
                 skill_content = result.get("content") or ""
@@ -646,7 +751,7 @@ def _build_graph(ctx: _GraphCtx) -> Any:
                 (state.get("transcript") or "")
                 + f"\n\n--- skill activated: {pending.get('skill_name', 'unknown')} ---\n{skill_content}\n"
             )
-            out: dict[str, Any] = {
+            out = {
                 "transcript": tr,
                 "last_tool_result": result,
                 "active_skill_content": skill_content,
@@ -654,38 +759,48 @@ def _build_graph(ctx: _GraphCtx) -> Any:
                     state,
                     {
                         "step": "tool",
-                        "ok": "error" not in result,
+                        "ok": tool_ok,
                         "kind": "activate_skill",
                         "skill_name": pending.get("skill_name"),
                     },
                 ),
             }
-        else:
-            tr = (
-                state.get("transcript") or ""
-            ) + f"\n\n--- tool_round {state.get('tool_round', 0) + 1} ---\n{obs}\n"
-            out: dict[str, Any] = {
-                "transcript": tr,
-                "tool_round": int(state.get("tool_round") or 0) + 1,
-                "last_tool_result": result,
-                "steps_log": _append_step(
-                    state,
-                    {
-                        "step": "tool",
-                        "ok": "error" not in result,
-                        "kind": pending.get("action"),
-                    },
-                ),
-            }
-        if str(pending.get("action") or "").strip().lower() == "clarify":
+            # plan_step tracking for skill activation
+            if isinstance(plan_step_num, int) and plan_step_num >= 1 and state.get("plan_active") and tool_ok:
+                await _step_plan_update(
+                    ctx, plan_step_num, "completed",
+                    note=f"Activated skill: {pending.get('skill_name', 'unknown')}",
+                )
+            return out
+
+        # --- Branch: regular tool action (consumes a tool_round) ---
+        tr = (
+            state.get("transcript") or ""
+        ) + f"\n\n--- tool_round {state.get('tool_round', 0) + 1} ---\n{obs}\n"
+        out = {
+            "transcript": tr,
+            "tool_round": int(state.get("tool_round") or 0) + 1,
+            "last_tool_result": result,
+            "steps_log": _append_step(
+                state,
+                {
+                    "step": "tool",
+                    "ok": tool_ok,
+                    "kind": pending.get("action"),
+                },
+            ),
+        }
+
+        # plan_step tracking for regular tools
+        if isinstance(plan_step_num, int) and plan_step_num >= 1 and state.get("plan_active") and tool_ok:
+            await _step_plan_update(
+                ctx, plan_step_num, "completed",
+                note=str(pending.get("rationale") or "")[:200] or None,
+            )
+
+        if current_action == "clarify":
             out["clarify_used"] = True
             if str(result.get("clarify_status") or "").strip().lower() == "suspended":
-                await _step_plan_update(
-                    ctx,
-                    2,
-                    "in_progress",
-                    note="Waiting for user clarification via orchestrator.",
-                )
                 out["finish_reason"] = "awaiting_clarification"
                 out["response"] = "Awaiting user clarification."
                 out["suspended"] = True
@@ -713,27 +828,19 @@ def _build_graph(ctx: _GraphCtx) -> Any:
                     state, {"step": "finalize", "ok": True, "suspended": True}
                 ),
             }
-        last_tool = (
-            state.get("last_tool_result")
-            if isinstance(state.get("last_tool_result"), dict)
-            else {}
-        )
-        analysis_note = "Planner answered directly without running a tool."
-        if state.get("tool_round"):
-            tool_kind = str(last_tool.get("kind") or "").strip()
-            analysis_note = f"Completed {tool_kind or 'internal'} analysis after {int(state.get('tool_round') or 0)} tool round(s)."
-        elif state.get("finish_reason") == "llm_parse_error":
-            analysis_note = (
-                "Planner failed to return valid JSON; finalizing conservatively."
-            )
-        elif str(
-            (state.get("pending") or {}).get("action") or ""
-        ).strip().lower() == "clarify" and state.get("clarify_used"):
-            analysis_note = (
-                "Second clarification was refused; finalizing with current evidence."
-            )
-        await _step_plan_update(ctx, 2, "completed", note=analysis_note)
-        await _step_plan_update(ctx, 3, "in_progress")
+        # --- Auto-complete remaining plan steps to prevent PLAN_INCOMPLETE ---
+        if state.get("plan_active"):
+            plan_total = int(state.get("plan_total_steps") or 0)
+            step_plan = getattr(ctx.agent, "step_plan", None)
+            if step_plan and plan_total > 0:
+                # Mark the last step as in_progress (summarization step)
+                await _step_plan_update(
+                    ctx, plan_total, "in_progress", note="Summarizing findings.",
+                )
+                # Complete all earlier steps that weren't explicitly completed
+                for i in range(1, plan_total):
+                    await _step_plan_update(ctx, i, "completed")
+
         await ctx.agent._emit_stage(
             ctx.task.task_id, "reason_summarize", "Summarizing LangGraph reasoning."
         )  # noqa: SLF001
@@ -796,9 +903,14 @@ def _build_graph(ctx: _GraphCtx) -> Any:
         text = (
             final_text or pre_answer or ""
         ).strip() or "Tabular reasoning completed."
-        await _step_plan_update(
-            ctx, 3, "completed", note="Produced compact summary for the orchestrator."
-        )
+        # Complete the final plan step (summary)
+        if state.get("plan_active"):
+            plan_total = int(state.get("plan_total_steps") or 0)
+            if plan_total > 0:
+                await _step_plan_update(
+                    ctx, plan_total, "completed",
+                    note="Produced compact summary for the orchestrator.",
+                )
         return {
             "response": text,
             "finish_reason": reason or ("answered" if pre_answer else None),
@@ -867,6 +979,8 @@ async def run_tabular_reason_langgraph(
             "steps_log",
             "bundle_root",
             "analysis_step_started",
+            "plan_active",
+            "plan_total_steps",
         ):
             if key in resume_state:
                 initial[key] = resume_state[key]

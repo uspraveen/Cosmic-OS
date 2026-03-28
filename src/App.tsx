@@ -1016,6 +1016,8 @@ export default function App() {
   /** Bumped with mailbox id so Spaces can open Agent Email → Inbox (e.g. Dynamic Island mail notify). */
   const [agentEmailInboxNavigateSignal, setAgentEmailInboxNavigateSignal] = useState(0)
   const [agentEmailInboxNavigateMailboxId, setAgentEmailInboxNavigateMailboxId] = useState<string | null>(null)
+  const [agentEmailApprovalsNavigateSignal, setAgentEmailApprovalsNavigateSignal] = useState(0)
+  const [agentEmailApprovalsNavigateId, setAgentEmailApprovalsNavigateId] = useState<string | null>(null)
   const [selectedModel, setSelectedModel] = useState<GatewayModelSelection>('cosmic')
   const [modelPulseModel, setModelPulseModel] = useState<GatewayModelSelection | null>(null)
   const [hoverTooltip, setHoverTooltip] = useState<HoverTooltipState | null>(null)
@@ -2037,6 +2039,12 @@ export default function App() {
     showSpacesSurface()
     setAgentEmailInboxNavigateMailboxId(String(mailboxId || '').trim() || null)
     setAgentEmailInboxNavigateSignal((n) => n + 1)
+  }
+
+  const openAgentEmailApprovalsFromIsland = (approvalId?: string | null) => {
+    showSpacesSurface()
+    setAgentEmailApprovalsNavigateId(approvalId ? String(approvalId).trim() || null : null)
+    setAgentEmailApprovalsNavigateSignal((n) => n + 1)
   }
 
   // --- INIT & MOUSE EVENTS ---
@@ -3704,6 +3712,7 @@ export default function App() {
         gatewayConnection={gatewayStatus}
         onLogout={handleVmLogout}
         onOpenAgentEmailInbox={openAgentEmailInboxFromIsland}
+        onOpenAgentEmailApprovals={openAgentEmailApprovalsFromIsland}
       />
 
       {authState === 'unauthenticated' && (
@@ -3935,6 +3944,8 @@ export default function App() {
           containerStyle={spacesLaunchStyle}
           agentEmailNavigateInboxSignal={agentEmailInboxNavigateSignal}
           agentEmailNavigateInboxMailboxId={agentEmailInboxNavigateMailboxId}
+          agentEmailNavigateApprovalsSignal={agentEmailApprovalsNavigateSignal}
+          agentEmailNavigateApprovalsId={agentEmailApprovalsNavigateId}
         />
 
         {shouldShowTaskInterrupt && visibleTaskInterrupts.length > 0 && (

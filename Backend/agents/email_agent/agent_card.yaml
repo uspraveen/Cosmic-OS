@@ -34,6 +34,7 @@ intents:
     timeout_sec: 45
     usage_hints:
       - Use this to manage standing email rules and auto-reply policies, not to send a one-off message.
+      - Natural-language rules like "watch for Arun" or "tell me if anything mentions Q3" belong here; the email specialist should own them durably instead of Opus trying to remember them.
 
   - name: email.recall_session
     description: Recall prior email-agent runs from the private session ledger.
@@ -63,7 +64,7 @@ policies:
   intent_authorization:
     email.process_inbound: [cosmic/gateway:1.0.0, cosmic/orchestrator:1.0.0]
     email.reason: [cosmic/orchestrator:1.0.0]
-    email.manage_instruction: [cosmic/orchestrator:1.0.0]
+    email.manage_instruction: [cosmic/gateway:1.0.0, cosmic/orchestrator:1.0.0]
     email.recall_session: [cosmic/orchestrator:1.0.0]
 
 sla:

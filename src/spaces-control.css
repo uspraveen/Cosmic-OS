@@ -5918,6 +5918,23 @@
   min-width: 0;
 }
 
+.agent-email-settings-trusted-senders-split {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.agent-email-settings-trusted-senders-table th.agent-email-settings-trusted-senders-actions-col,
+.agent-email-settings-trusted-senders-table td.agent-email-settings-trusted-senders-actions-cell {
+  width: 1%;
+  white-space: nowrap;
+  text-align: right;
+  vertical-align: middle;
+}
+
+.agent-email-settings-trusted-remove {
+  padding: 6px 12px;
+  font-size: 11px;
+}
+
 .agent-email-settings-panel-label {
   font-size: 10px;
   font-weight: 750;

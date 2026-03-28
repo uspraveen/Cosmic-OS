@@ -42,10 +42,31 @@ type CosmicMailIslandPayload =
       latestReceivedAt: number
     }
 
-/** Matches default expanded island width; slightly shorter than 160px for a tighter notification strip. */
+type CosmicMailApprovalIslandPayload =
+  | {
+      kind: 'single'
+      approvalId: string
+      subject: string
+      agentName: string
+      mailboxAddress: string
+      recipients: string
+      snippet: string
+      createdAt: number
+    }
+  | {
+      kind: 'batch'
+      count: number
+      subject: string
+      agentSummary: string
+      snippet: string
+      latestCreatedAt: number
+      mailboxAddress: string
+    }
+
+/** Same footprint as default calendar slide (.island.expanded height). */
 const ISLAND_NOTIFICATION_DIMENSIONS: CSSProperties = {
   width: '540px',
-  height: '148px',
+  height: '160px',
   borderRadius: '0 0 40px 40px',
 }
 
@@ -104,6 +125,8 @@ interface DynamicIslandProps {
   onLogout?: () => void
   /** Opens Spaces → Agent Email → Inbox; `mailboxId` selects that inbox when data is loaded. */
   onOpenAgentEmailInbox?: (mailboxId: string) => void
+  /** Opens Spaces → Agent Email → Approvals; optional approval id to select when the list loads. */
+  onOpenAgentEmailApprovals?: (approvalId?: string | null) => void
 }
 
 interface MediaState {
@@ -300,6 +323,7 @@ export default function DynamicIsland({
   gatewayConnection,
   onLogout,
   onOpenAgentEmailInbox,
+  onOpenAgentEmailApprovals,
 }: DynamicIslandProps) {
   const [activeSlide, setActiveSlide] = useState(0)
   const TOTAL_SLIDES = 6
@@ -320,6 +344,8 @@ export default function DynamicIsland({
   // New State for Notification
   const [notificationEvent, setNotificationEvent] = useState<CalendarAgendaEvent | null>(null)
   const [mailInboundNotification, setMailInboundNotification] = useState<CosmicMailIslandPayload | null>(null)
+  const [approvalRequestNotification, setApprovalRequestNotification] =
+    useState<CosmicMailApprovalIslandPayload | null>(null)
   // Track notified events to prevent double notification
   const notifiedEventsRef = useRef<Set<string>>(new Set())
   const hoverGateRef = useRef({ searchActive, hovered, internalHover })
@@ -371,6 +397,7 @@ export default function DynamicIsland({
     isAnchored ||
     !!notificationEvent ||
     !!mailInboundNotification ||
+    !!approvalRequestNotification ||
     !!integrationToast ||
     !!selectedCalendarEvent ||
     voiceActive
@@ -400,6 +427,7 @@ export default function DynamicIsland({
       setSelectedCalendarEvent(null)
       setNotificationEvent(null)
       setMailInboundNotification(null)
+      setApprovalRequestNotification(null)
       setIntegrationToast(null)
       if (integrationToastTimerRef.current) {
         clearTimeout(integrationToastTimerRef.current)
@@ -484,10 +512,10 @@ export default function DynamicIsland({
   }, [isMusicActive, activeSlide])
 
   const slideContentMap = useMemo(() => {
-    if (notificationEvent || mailInboundNotification) return ['notification'] as const
+    if (notificationEvent || mailInboundNotification || approvalRequestNotification) return ['notification'] as const
     if (isMusicActive) return ['music', 'home', 'weather', 'calendar', 'voice', 'utilities'] as const
     return ['home', 'music', 'weather', 'calendar', 'voice', 'utilities'] as const
-  }, [isMusicActive, notificationEvent, mailInboundNotification])
+  }, [isMusicActive, notificationEvent, mailInboundNotification, approvalRequestNotification])
 
   useEffect(() => {
     if (!window.cosmic?.onCosmicMailInbound) return
@@ -510,6 +538,28 @@ export default function DynamicIsland({
     }, 10_000)
     return () => clearTimeout(t)
   }, [mailInboundNotification])
+
+  useEffect(() => {
+    if (!window.cosmic?.onCosmicMailApproval) return
+    const unsub = window.cosmic.onCosmicMailApproval((payload: CosmicMailApprovalIslandPayload) => {
+      if (!payload || (payload.kind !== 'single' && payload.kind !== 'batch')) return
+      setApprovalRequestNotification(payload)
+      setExpanded(true)
+    })
+    return () => unsub?.()
+  }, [])
+
+  useEffect(() => {
+    if (!approvalRequestNotification) return
+    const t = setTimeout(() => {
+      setApprovalRequestNotification(null)
+      const g = hoverGateRef.current
+      if (!g.searchActive && !g.hovered && !g.internalHover) {
+        setExpanded(false)
+      }
+    }, 10_000)
+    return () => clearTimeout(t)
+  }, [approvalRequestNotification])
 
   useEffect(() => {
     if (!window.cosmic?.onWindowUpdate) return
@@ -840,6 +890,7 @@ export default function DynamicIsland({
       selectedCalendarEvent ||
       notificationEvent ||
       mailInboundNotification ||
+      approvalRequestNotification ||
       integrationToast
     ) {
       return
@@ -1116,63 +1167,207 @@ export default function DynamicIsland({
       ? p.fromSummary
       : [p.fromName, p.fromAddress].filter(Boolean).join(' · ') || p.fromAddress || 'Unknown sender'
     const avatarText = isBatch ? String(Math.min(p.count, 99)) : diNotifyInitials(p.fromName, p.fromAddress)
+    const mailboxShort =
+      p.mailboxAddress.length > 36 ? `${p.mailboxAddress.slice(0, 34)}\u2026` : p.mailboxAddress
+
+    const snippetClip = p.snippet?.trim()
+      ? p.snippet.trim().length > 96
+        ? `${p.snippet.trim().slice(0, 93).trimEnd()}\u2026`
+        : p.snippet.trim()
+      : ''
 
     return (
-      <div className="slide slide-di-notify slide-di-notify--mail">
-        <div className="di-notify-card di-notify-card--inbound">
-          <span className="di-notify-agent-inbox-label">Agent Inbox</span>
-          <div className="di-notify-strip">
-            <span className="di-notify-strip-label">Inbox</span>
-            <span className="di-notify-strip-mono" title={p.mailboxAddress}>
-              {p.mailboxAddress}
-            </span>
-            <div className="di-notify-strip-actions">
+      <div className="slide slide-calendar slide-calendar--notify slide-calendar--notify-mail">
+        <div className="cal-minimal">
+          <div className="cal-main">
+            <div className="cal-today cal-today--notify" aria-hidden>
+              <div className="cal-header">
+                <span>{isBatch ? 'NEW' : 'MAIL'}</span>
+              </div>
+              <div className={`cal-body${isBatch ? ' cal-body--notify-batch' : ''}`}>
+                <span>{avatarText}</span>
+              </div>
+              <span className="cal-day-label">{timeLabel}</span>
+            </div>
+
+            <div className="cal-main-copy">
+              <div className="cal-main-kicker-row">
+                <span className="cal-status tone-busy">Inbound</span>
+                <span className="cal-main-date" title={p.mailboxAddress}>
+                  {mailboxShort}
+                </span>
+              </div>
+
+              <div className="cal-main-focus">
+                <span className="cal-main-title">{subject}</span>
+              </div>
+
+              <div className="cal-main-meta">
+                <span>{fromLine}</span>
+                {snippetClip ? (
+                  <>
+                    <span>{'\u00B7'}</span>
+                    <span>{snippetClip}</span>
+                  </>
+                ) : null}
+                {isBatch ? (
+                  <>
+                    <span>{'\u00B7'}</span>
+                    <span>{p.count} new</span>
+                  </>
+                ) : null}
+              </div>
+            </div>
+          </div>
+
+          <div className="cal-side">
+            <div className="cal-side-head">
+              <span>Actions</span>
+            </div>
+            <div className="cal-list">
               {onOpenAgentEmailInbox && p.mailboxId ? (
                 <button
                   type="button"
-                  className="di-notify-strip-action di-notify-strip-action--primary"
-                  aria-label="Open inbox in Spaces"
+                  className="cal-row"
                   onClick={(e) => {
                     e.stopPropagation()
                     onOpenAgentEmailInbox(p.mailboxId)
                   }}
                 >
-                  Open
+                  <span className="cal-row-accent" style={{ backgroundColor: '#007AFF' }} />
+                  <span className="cal-row-time">{'\u2192'}</span>
+                  <div className="cal-row-copy">
+                    <strong>Open inbox</strong>
+                  </div>
                 </button>
               ) : null}
               <button
                 type="button"
-                className="di-notify-strip-action"
-                aria-label="Close notification"
+                className="cal-row cal-row--notify-muted"
                 onClick={(e) => {
                   e.stopPropagation()
                   setMailInboundNotification(null)
                 }}
               >
-                Close
+                <span className="cal-row-accent cal-row-accent--muted" />
+                <span className="cal-row-time"> </span>
+                <div className="cal-row-copy">
+                  <strong>Dismiss</strong>
+                </div>
               </button>
             </div>
           </div>
+        </div>
+      </div>
+    )
+  }
 
-          <div className="di-notify-thread-row">
-            <div
-              className={`di-notify-avatar${isBatch ? ' di-notify-avatar--batch' : ' di-notify-avatar--unread'}`}
-              aria-hidden
-            >
-              {avatarText}
+  const renderCosmicMailApprovalNotification = () => {
+    if (!approvalRequestNotification) return null
+    const p = approvalRequestNotification
+    const isBatch = p.kind === 'batch'
+    const subject = p.subject || '(No subject)'
+    const atMs = isBatch ? p.latestCreatedAt : p.createdAt
+    const timeLabel = formatIslandInboundRelativeTime(atMs)
+    const agentLine = isBatch ? p.agentSummary : p.agentName
+    const mailboxShort =
+      p.mailboxAddress.length > 36 ? `${p.mailboxAddress.slice(0, 34)}\u2026` : p.mailboxAddress
+    const openApprovalId = !isBatch ? p.approvalId : undefined
+
+    const approvalAvatar = isBatch ? String(Math.min(p.count, 99)) : diNotifyInitials(p.agentName, '')
+    const toSuffix =
+      !isBatch && p.recipients && p.recipients !== '—' ? ` · To ${p.recipients}` : ''
+
+    const snippetClipApproval = p.snippet?.trim()
+      ? p.snippet.trim().length > 96
+        ? `${p.snippet.trim().slice(0, 93).trimEnd()}\u2026`
+        : p.snippet.trim()
+      : ''
+
+    const metaPrimary = `${agentLine}${toSuffix}`
+
+    return (
+      <div className="slide slide-calendar slide-calendar--notify slide-calendar--notify-approval">
+        <div className="cal-minimal">
+          <div className="cal-main">
+            <div className="cal-today cal-today--notify" aria-hidden>
+              <div className="cal-header">
+                <span>{isBatch ? 'NEW' : 'OUT'}</span>
+              </div>
+              <div className={`cal-body${isBatch ? ' cal-body--notify-batch' : ''}`}>
+                <span>{approvalAvatar}</span>
+              </div>
+              <span className="cal-day-label">{timeLabel}</span>
             </div>
-            <div className="di-notify-thread-main">
-              <div className="di-notify-line1">
-                <h3 className="di-notify-subject di-notify-subject--emphasis">{subject}</h3>
-                <time className="di-notify-time" dateTime={new Date(receivedAtMs).toISOString()}>
-                  {timeLabel}
-                </time>
+
+            <div className="cal-main-copy">
+              <div className="cal-main-kicker-row">
+                <span className="cal-status tone-warning">Approval</span>
+                <span className="cal-main-date" title={p.mailboxAddress}>
+                  {mailboxShort}
+                </span>
               </div>
-              <div className="di-notify-from">{fromLine}</div>
-              {p.snippet?.trim() ? <p className="di-notify-snippet">{p.snippet}</p> : null}
-              <div className="di-notify-foot">
-                <span className="di-notify-pill">{isBatch ? `${p.count} new` : 'Inbound'}</span>
+
+              <div className="cal-main-focus">
+                <span className="cal-main-title">{subject}</span>
               </div>
+
+              <div className="cal-main-meta">
+                <span>{metaPrimary}</span>
+                {snippetClipApproval ? (
+                  <>
+                    <span>{'\u00B7'}</span>
+                    <span>{snippetClipApproval}</span>
+                  </>
+                ) : null}
+                {isBatch ? (
+                  <>
+                    <span>{'\u00B7'}</span>
+                    <span>{p.count} drafts</span>
+                  </>
+                ) : null}
+              </div>
+            </div>
+          </div>
+
+          <div className="cal-side">
+            <div className="cal-side-head">
+              <span>Actions</span>
+            </div>
+            <div className="cal-list">
+              {onOpenAgentEmailApprovals ? (
+                <button
+                  type="button"
+                  className="cal-row"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onOpenAgentEmailApprovals(openApprovalId ?? null)
+                  }}
+                >
+                  <span
+                    className="cal-row-accent"
+                    style={{ backgroundColor: 'rgba(255, 190, 100, 0.95)' }}
+                  />
+                  <span className="cal-row-time">{'\u2192'}</span>
+                  <div className="cal-row-copy">
+                    <strong>Review</strong>
+                  </div>
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="cal-row cal-row--notify-muted"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setApprovalRequestNotification(null)
+                }}
+              >
+                <span className="cal-row-accent cal-row-accent--muted" />
+                <span className="cal-row-time"> </span>
+                <div className="cal-row-copy">
+                  <strong>Dismiss</strong>
+                </div>
+              </button>
             </div>
           </div>
         </div>
@@ -1428,7 +1623,7 @@ export default function DynamicIsland({
   // Managed by App.tsx now
 
 
-  const notificationIslandActive = !!(notificationEvent || mailInboundNotification)
+  const notificationIslandActive = !!(notificationEvent || mailInboundNotification || approvalRequestNotification)
 
   // Override 'expanded' style if Month View or integration toast is open
   const islandStyle = selectedCalendarEvent
@@ -1717,6 +1912,7 @@ export default function DynamicIsland({
     if (notificationEvent) return renderNotification()
     if (selectedCalendarEvent) return renderCalendarDetail()
     if (mailInboundNotification) return renderCosmicMailNotification()
+    if (approvalRequestNotification) return renderCosmicMailApprovalNotification()
     const type = slideContentMap[activeSlide]
     if (type === 'home') return renderHome()
     if (type === 'music') return renderMusic()
@@ -1735,7 +1931,7 @@ export default function DynamicIsland({
         onWheel={onWheel}
         style={{
           ...dynamicBgStyle, // Apply background opacity here
-          ...(expanded && (showMonthView || selectedCalendarEvent || notificationEvent || mailInboundNotification || integrationToast)
+          ...(expanded && (showMonthView || selectedCalendarEvent || notificationEvent || mailInboundNotification || approvalRequestNotification || integrationToast)
             ? islandStyle
             : {}),
           pointerEvents: 'auto'
@@ -1745,7 +1941,7 @@ export default function DynamicIsland({
 
         {expanded && (
           <>
-            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !mailInboundNotification && !integrationToast && (
+            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !mailInboundNotification && !approvalRequestNotification && !integrationToast && (
               <>
                 <div style={{ position: 'absolute', top: 0, bottom: '50px', left: 0, width: '40px', zIndex: 50, cursor: activeSlide > 0 ? 'w-resize' : 'default' }} onMouseEnter={() => switchSlide('prev')} />
                 <div style={{ position: 'absolute', top: 0, bottom: '50px', right: 0, width: '40px', zIndex: 50, cursor: activeSlide < TOTAL_SLIDES - 1 ? 'e-resize' : 'default' }} onMouseEnter={() => switchSlide('next')} />
@@ -1765,7 +1961,7 @@ export default function DynamicIsland({
               </button>
             )}
 
-            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !mailInboundNotification && !integrationToast && (
+            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !mailInboundNotification && !approvalRequestNotification && !integrationToast && (
               <>
                 <div className="island-anchor-container">
                   <button className={`anchor-btn ${isAnchored ? 'active' : ''}`} onClick={(e) => { e.stopPropagation(); setIsAnchored(!isAnchored) }}>

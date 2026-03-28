@@ -919,6 +919,13 @@ class GatewayRuntime:
             user_meta.get("mailbox_id"),
             session_meta.get("mailbox_id"),
         )
+        message_id = first_text(
+            prepared.get("message_id"),
+            process_output.get("message_id"),
+            message_meta.get("message_id"),
+            user_meta.get("message_id"),
+            session_meta.get("message_id"),
+        )
         from_address = first_text(
             prepared.get("from_address"),
             process_output.get("from_address"),
@@ -945,6 +952,9 @@ class GatewayRuntime:
         auto_reply = process_output.get("auto_reply") if isinstance(process_output.get("auto_reply"), dict) else {}
         auto_reply_sent = bool(auto_reply.get("sent"))
         sender_role = first_text(process_output.get("sender_role"), "owner" if trusted_sender else "external")
+        matched_instructions = process_output.get("matched_instructions") if isinstance(process_output.get("matched_instructions"), list) else []
+        if not matched_instructions and isinstance(process_output.get("matched_instruction"), dict):
+            matched_instructions = [process_output.get("matched_instruction")]
 
         prepared.setdefault("session_scope", "email_thread")
         prepared["thread_id"] = thread_id
@@ -952,6 +962,8 @@ class GatewayRuntime:
             prepared["mailbox_address"] = mailbox_address
         if mailbox_id:
             prepared["mailbox_id"] = mailbox_id
+        if message_id:
+            prepared["message_id"] = message_id
         if from_address:
             prepared["from_address"] = from_address
         if from_name:
@@ -963,6 +975,15 @@ class GatewayRuntime:
         if sender_role:
             prepared["sender_role"] = sender_role
         prepared["email_auto_reply_sent"] = auto_reply_sent
+        if matched_instructions:
+            prepared["matched_instructions"] = matched_instructions
+            prepared["matched_instruction_ids"] = self._normalize_string_list(
+                [self._safe_text(item.get("instruction_id")) for item in matched_instructions],
+                limit=12,
+            )
+            match_reason = self._safe_text(process_output.get("instruction_match_reason"))
+            if match_reason:
+                prepared["instruction_match_reason"] = match_reason
         prepared["email_thread_reply"] = True
         prepared["email_thread_reply_eligible"] = bool(trusted_sender and not auto_reply_sent)
         if from_address and not prepared.get("to_recipients") and not prepared.get("to"):
@@ -1001,12 +1022,16 @@ class GatewayRuntime:
             if isinstance(process_output.get("matched_instruction"), dict)
             else None
         )
+        matched_instructions = process_output.get("matched_instructions") if isinstance(process_output.get("matched_instructions"), list) else []
+        if not matched_instructions and matched_instruction:
+            matched_instructions = [matched_instruction]
         auto_reply = process_output.get("auto_reply") if isinstance(process_output.get("auto_reply"), dict) else None
         attachments = process_output.get("attachments") if isinstance(process_output.get("attachments"), list) else []
         subject = self._safe_text(process_output.get("subject")) or None
         trusted_sender = bool(process_output.get("trusted_sender"))
         sender_role = self._safe_text(process_output.get("sender_role")) or "external"
         from_address = self._safe_text(process_output.get("from_address")) or None
+        instruction_match_reason = self._safe_text(process_output.get("instruction_match_reason")) or None
 
         lines = [
             "The email specialist already processed this inbound email thread.",
@@ -1027,14 +1052,29 @@ class GatewayRuntime:
                 summary,
             ]
         )
-        if matched_instruction:
-            label = self._safe_text(matched_instruction.get("label")) or "matched standing instruction"
+        if matched_instructions:
             lines.extend(
                 [
                     "",
-                    f"Standing instruction matched: {label}.",
+                    "Matched standing instruction(s):",
                 ]
             )
+            for item in matched_instructions[:4]:
+                label = self._safe_text(item.get("label")) or "standing instruction"
+                raw_instruction = self._safe_text(item.get("raw_user_instruction")) or None
+                behavior = item.get("behavior") if isinstance(item.get("behavior"), dict) else {}
+                mode = self._safe_text(behavior.get("mode")) or "notify_only"
+                completion_mode = self._safe_text(behavior.get("completion_mode")) or "perpetual"
+                lines.append(f"- {label} | mode={mode} | completion={completion_mode}")
+                if raw_instruction:
+                    lines.append(f"  User instruction: {raw_instruction}")
+            if instruction_match_reason:
+                lines.extend(
+                    [
+                        "",
+                        f"Match reason: {instruction_match_reason}",
+                    ]
+                )
         if auto_reply:
             sent = bool(auto_reply.get("sent"))
             lines.append(
@@ -1995,6 +2035,10 @@ class GatewayRuntime:
                 delivery_status=delivery_status,
             )
             await self._maybe_schedule_delivered_task_summary_write(
+                delivery_event,
+                delivery_status=delivery_status,
+            )
+            await self._maybe_schedule_delivered_email_instruction_update(
                 delivery_event,
                 delivery_status=delivery_status,
             )
@@ -3614,6 +3658,97 @@ class GatewayRuntime:
 
         memory_id = self._extract_memory_id(response)
         self.session_store.mark_task_summary_written(task_id, memory_id=memory_id)
+
+    async def _maybe_schedule_delivered_email_instruction_update(
+        self,
+        event: dict[str, Any],
+        *,
+        delivery_status: str,
+    ) -> None:
+        if delivery_status != "sent":
+            return
+        if self._safe_text(event.get("type")) != "response.complete":
+            return
+        channel = self._safe_text(event.get("channel"))
+        if self._channel_platform(channel) != "agent-email":
+            return
+        if bool(event.get("email_auto_reply_sent")):
+            return
+        instruction_ids = self._normalize_string_list(event.get("matched_instruction_ids"), limit=12)
+        if not instruction_ids:
+            return
+        if self._redis is None:
+            return
+        self._schedule_background_task(
+            self._record_email_instruction_delivery(event=event, instruction_ids=instruction_ids),
+            name="gateway-email-instruction-delivery",
+        )
+
+    async def _record_email_instruction_delivery(
+        self,
+        *,
+        event: dict[str, Any],
+        instruction_ids: list[str],
+    ) -> None:
+        session_id = self._safe_text(event.get("session_id"))
+        request_id = self._safe_text(event.get("request_id"))
+        channel = self._safe_text(event.get("channel"))
+        if not session_id or not request_id:
+            return
+        task = TaskEnvelope(
+            task_id=generate_task_id(),
+            task_list_id=session_id,
+            session_id=session_id,
+            sender="cosmic/gateway:1.0.0",
+            recipient=self.config.email_agent_id,
+            intent="email.manage_instruction",
+            input={
+                "action": "record_delivery",
+                "instruction_ids": instruction_ids,
+                "mailbox_address": self._safe_text(event.get("mailbox_address")) or None,
+                "thread_id": self._safe_text(event.get("thread_id")) or None,
+                "message_id": self._safe_text(event.get("message_id")) or None,
+                "request_id": request_id,
+            },
+            input_artifacts=[],
+            idempotency_key=(
+                f"email-instruction-delivery:{request_id}:"
+                f"{self._safe_text(event.get('thread_id'))}:{self._safe_text(event.get('message_id'))}:"
+                f"{','.join(instruction_ids)}"
+            ),
+            priority="normal",
+            signature="",
+            created_at=utcnow(),
+            source=self._safe_text(event.get("source")) or "user",
+            source_id=request_id,
+            channel=channel or None,
+        )
+        task = task.model_copy(update={"signature": sign_task_envelope(task, self.config.signing_secret)})
+        try:
+            await dispatch_task(task, self._redis)
+            result = await self._wait_for_agent_terminal_result(
+                task.task_id,
+                timeout_sec=20.0,
+                poll_interval_sec=1.0,
+            )
+        except Exception:
+            logger.exception(
+                "gateway.email_instruction_delivery_callback_failed request_id=%s session_id=%s instruction_ids=%s",
+                request_id,
+                session_id,
+                instruction_ids,
+            )
+            return
+        status = self._safe_text(result.get("status")) or "failed"
+        if status != "completed":
+            logger.warning(
+                "gateway.email_instruction_delivery_callback_non_terminal request_id=%s session_id=%s instruction_ids=%s status=%s error=%s",
+                request_id,
+                session_id,
+                instruction_ids,
+                status,
+                self._safe_text(result.get("error_message")),
+            )
 
     async def memory_search(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self.memory_client.passive_search(payload)
@@ -5568,6 +5703,7 @@ class GatewayRuntime:
         self.delivery_queue_store.mark_delivered(delivery_id)
         await self._maybe_schedule_delivered_memory_ingest(payload, delivery_status="sent")
         await self._maybe_schedule_delivered_task_summary_write(payload, delivery_status="sent")
+        await self._maybe_schedule_delivered_email_instruction_update(payload, delivery_status="sent")
         logger.info(
             "gateway.delivery delivered delivery_id=%s channel=%s event_type=%s",
             delivery_id,

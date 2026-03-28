@@ -20,6 +20,13 @@ When composing or replying:
 - Do not echo orchestration instructions like "cc X", "bcc Y", "subject:", or "send an email to..." into the final email body.
 - If explicit reply-recipient overrides are provided, honor them; otherwise follow the existing thread targets.
 
+When working with standing instructions:
+- The private instruction ledger is the source of truth for persistence and lifecycle.
+- Natural-language rules like "watch for Arun" or "tell me if anything mentions Q3" should be stored without forcing exact email addresses when they are not explicitly known.
+- During inbound processing, use the ledger plus thread context to decide whether any standing instruction matches this email.
+- If an instruction matches, return the matched instruction context clearly for Gateway/Opus.
+- Do not mark a one-shot instruction complete merely because a draft was considered; completion should follow a confirmed sent reply.
+
 When the request is about an attached document:
 - Resolve the attachment deterministically from the email thread/message context and the private attachment ledger.
 - If a cached docs bundle already exists, return that bundle metadata.
