@@ -5,6 +5,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+import yaml
 
 from agents.email_agent.agent import EmailAgent, EmailAgentError
 from agents.email_agent.config import EmailAgentConfig
@@ -797,6 +798,19 @@ async def test_email_agent_fetch_thread_context_falls_back_when_get_thread_404()
     assert context["subject"] == "I am testing"
     assert context["latest_body"] == "Are you there cosmic?"
     assert context["latest_message"]["from_address"] == "Owner@Example.com"
+
+
+def test_email_agent_card_allows_gateway_process_inbound() -> None:
+    card_path = Path(__file__).resolve().parents[1] / "agents" / "email_agent" / "agent_card.yaml"
+    card = yaml.safe_load(card_path.read_text(encoding="utf-8"))
+
+    policies = card.get("policies") or {}
+    allowed_senders = policies.get("allowed_senders") or []
+    intent_auth = policies.get("intent_authorization") or {}
+    process_inbound_senders = intent_auth.get("email.process_inbound") or []
+
+    assert "cosmic/gateway:1.0.0" in allowed_senders
+    assert "cosmic/gateway:1.0.0" in process_inbound_senders
 
 
 @pytest.mark.asyncio

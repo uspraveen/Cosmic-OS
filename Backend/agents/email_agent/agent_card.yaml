@@ -58,9 +58,10 @@ policies:
     - agents/email_agent/runtime
   tool_access: []
   allowed_senders:
+    - cosmic/gateway:1.0.0
     - cosmic/orchestrator:1.0.0
   intent_authorization:
-    email.process_inbound: [cosmic/orchestrator:1.0.0]
+    email.process_inbound: [cosmic/gateway:1.0.0, cosmic/orchestrator:1.0.0]
     email.reason: [cosmic/orchestrator:1.0.0]
     email.manage_instruction: [cosmic/orchestrator:1.0.0]
     email.recall_session: [cosmic/orchestrator:1.0.0]
