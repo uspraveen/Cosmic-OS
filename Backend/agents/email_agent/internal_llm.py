@@ -54,13 +54,16 @@ async def invoke_email_mimo(
             http2=False,
             follow_redirects=True,
         ) as mimo_http:
-            llm = ChatOpenAI(
-                model=cfg.mimo_model,
-                api_key=cfg.mimo_api_key,
-                base_url=cfg.mimo_base_url,
-                temperature=temperature,
-                http_async_client=mimo_http,
-            )
+            llm_kwargs: dict[str, Any] = {
+                "model": cfg.mimo_model,
+                "api_key": cfg.mimo_api_key,
+                "base_url": cfg.mimo_base_url,
+                "http_async_client": mimo_http,
+            }
+            # OpenAI GPT-5 chat-completions models reject temperature/top_p style sampling knobs.
+            if not _is_gpt5_chat_model(cfg.mimo_model):
+                llm_kwargs["temperature"] = temperature
+            llm = ChatOpenAI(**llm_kwargs)
             result = await llm.ainvoke(messages)
     except Exception as exc:
         await _post_usage(
@@ -167,6 +170,11 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ValueError("JSON payload is not an object")
     return parsed
+
+
+def _is_gpt5_chat_model(model: str | None) -> bool:
+    normalized = str(model or "").strip().casefold()
+    return normalized.startswith("gpt-5")
 
 
 async def _post_usage(
