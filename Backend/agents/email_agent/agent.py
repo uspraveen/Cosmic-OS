@@ -303,7 +303,12 @@ class EmailAgent(AgentRuntime):
         message_id = self._required_text(task.input, "message_id")
         mailbox_address = self._optional_text(task.input, "mailbox_address")
 
-        context = await self._fetch_thread_context(thread_id=thread_id, message_id=message_id)
+        context = await self._fetch_thread_context(
+            thread_id=thread_id,
+            message_id=message_id,
+            mailbox_address=mailbox_address,
+            mailbox_id=self._optional_text(task.input, "mailbox_id"),
+        )
         from_address = self._thread_sender(context)
         trusted_sender = self._is_trusted_sender(from_address)
         sender_role = "owner" if trusted_sender else "external"
@@ -881,9 +886,16 @@ class EmailAgent(AgentRuntime):
             error=None,
         )
 
-    async def _fetch_thread_context(self, *, thread_id: str, message_id: str | None) -> dict[str, Any]:
+    async def _fetch_thread_context(
+        self,
+        *,
+        thread_id: str,
+        message_id: str | None,
+        mailbox_address: str | None = None,
+        mailbox_id: str | None = None,
+    ) -> dict[str, Any]:
+        thread: dict[str, Any] | None = None
         try:
-            thread = await self.mail_client.get_thread(thread_id)
             messages = await self.mail_client.get_thread_messages(thread_id)
         except CosmicMailClientError as exc:
             raise EmailAgentError(
@@ -892,6 +904,16 @@ class EmailAgent(AgentRuntime):
                 retryable=exc.status_code is None or exc.status_code >= 500,
                 next_action="retry" if exc.status_code is None or exc.status_code >= 500 else "escalate",
             ) from exc
+        try:
+            thread = await self.mail_client.get_thread(thread_id)
+        except CosmicMailClientError as exc:
+            if exc.status_code is None or exc.status_code >= 500:
+                raise EmailAgentError(
+                    code="NETWORK_ERROR",
+                    message=exc.message,
+                    retryable=True,
+                    next_action="retry",
+                ) from exc
 
         normalized_messages = [self._normalize_message_record(item) for item in messages[: self.config.max_thread_messages]]
         target = None
@@ -902,6 +924,13 @@ class EmailAgent(AgentRuntime):
                     break
         if target is None and normalized_messages:
             target = normalized_messages[-1]
+        if thread is None:
+            thread = await self._fallback_thread_record(
+                thread_id=thread_id,
+                mailbox_address=mailbox_address,
+                mailbox_id=mailbox_id,
+                target_message=target,
+            )
         latest_body = target.get("text_body") if isinstance(target, dict) else ""
         return {
             "thread": thread,
@@ -909,6 +938,42 @@ class EmailAgent(AgentRuntime):
             "subject": self._safe_text(thread.get("subject")) or (target.get("subject") if isinstance(target, dict) else None),
             "latest_message": target,
             "latest_body": latest_body,
+        }
+
+    async def _fallback_thread_record(
+        self,
+        *,
+        thread_id: str,
+        mailbox_address: str | None,
+        mailbox_id: str | None,
+        target_message: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        resolved_mailbox_id = self._safe_text(mailbox_id)
+        if not resolved_mailbox_id and self._safe_text(mailbox_address):
+            try:
+                mailbox = await self._resolve_mailbox(
+                    mailbox_address=mailbox_address,
+                    mailbox_id=mailbox_id,
+                    required=False,
+                )
+            except EmailAgentError:
+                mailbox = {}
+            resolved_mailbox_id = self._safe_text(mailbox.get("id")) if isinstance(mailbox, dict) else ""
+
+        if resolved_mailbox_id:
+            try:
+                threads = await self.mail_client.list_threads(mailbox_id=resolved_mailbox_id, per_page=100)
+            except CosmicMailClientError:
+                threads = []
+            for item in threads:
+                if self._safe_text(item.get("id")) == thread_id:
+                    return item
+
+        return {
+            "id": thread_id,
+            "mailbox_id": resolved_mailbox_id or None,
+            "subject": self._safe_text(target_message.get("subject")) if isinstance(target_message, dict) else "",
+            "snippet": self._safe_text(target_message.get("preview_text")) if isinstance(target_message, dict) else "",
         }
 
     async def _download_message_attachments(
@@ -3036,7 +3101,7 @@ class EmailAgent(AgentRuntime):
 
     def _normalize_message_record(self, message: dict[str, Any]) -> dict[str, Any]:
         from_contacts = message.get("from_recipients") if isinstance(message.get("from_recipients"), list) else []
-        from_address = None
+        from_address = self._safe_text(message.get("from_address")) or None
         if from_contacts and isinstance(from_contacts[0], dict):
             from_address = self._safe_text(from_contacts[0].get("email") or from_contacts[0].get("address"))
         return {

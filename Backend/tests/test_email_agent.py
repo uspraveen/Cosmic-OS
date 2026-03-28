@@ -10,6 +10,7 @@ from agents.email_agent.agent import EmailAgent, EmailAgentError
 from agents.email_agent.config import EmailAgentConfig
 from shared.contracts import TaskEnvelope
 from shared import AgentEmailIntegrationStore
+from shared.cosmic_mail_client import CosmicMailClientError
 from shared.sqlite_client import connect_sync
 
 
@@ -730,6 +731,72 @@ async def test_email_agent_process_inbound_marks_trusted_sender_from_store(
     assert result.output["trusted_sender"] is True
     assert result.output["sender_role"] == "owner"
     assert result.output["from_address"] == "Owner@Example.com"
+
+
+@pytest.mark.asyncio
+async def test_email_agent_fetch_thread_context_falls_back_when_get_thread_404() -> None:
+    tmpdir = Path.cwd() / f"tmp_email_agent_thread_fallback_{uuid4().hex}"
+    tmpdir.mkdir(parents=True, exist_ok=True)
+    agent = _build_agent(
+        tmpdir,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+            enable_internal_llm=False,
+        ),
+    )
+
+    class FakeMailClient:
+        base_url = "http://cosmic-mail.local"
+        api_token = "mail-token"
+        timeout_sec = 20.0
+
+        async def aclose(self):
+            return None
+
+        async def get_thread(self, thread_id):
+            raise CosmicMailClientError(status_code=404, message="Not Found")
+
+        async def get_thread_messages(self, thread_id):
+            return [
+                {
+                    "id": "msg_email_owner",
+                    "thread_id": thread_id,
+                    "subject": "I am testing",
+                    "from_name": "Praveen Raj U S",
+                    "from_address": "Owner@Example.com",
+                    "text_body": "Are you there cosmic?",
+                    "preview_text": "Are you there cosmic?",
+                }
+            ]
+
+        async def list_threads(self, *, mailbox_id=None, page=1, per_page=25):
+            return [
+                {
+                    "id": "thr_email_owner",
+                    "mailbox_id": mailbox_id,
+                    "subject": "I am testing",
+                    "snippet": "Are you there cosmic?",
+                }
+            ]
+
+        async def resolve_mailbox(self, *, mailbox_id=None, mailbox_address=None):
+            return {"id": mailbox_id or "mbx_owner", "address": mailbox_address or "assistant@example.com", "status": "active"}
+
+    agent.mail_client = FakeMailClient()  # type: ignore[assignment]
+
+    context = await agent._fetch_thread_context(
+        thread_id="thr_email_owner",
+        message_id="msg_email_owner",
+        mailbox_address="assistant@example.com",
+        mailbox_id="mbx_owner",
+    )
+
+    assert context["thread"]["id"] == "thr_email_owner"
+    assert context["subject"] == "I am testing"
+    assert context["latest_body"] == "Are you there cosmic?"
+    assert context["latest_message"]["from_address"] == "Owner@Example.com"
 
 
 @pytest.mark.asyncio
