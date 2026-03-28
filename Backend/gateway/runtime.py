@@ -970,7 +970,7 @@ class GatewayRuntime:
         return prepared
 
     def _should_preprocess_email_inbound(self, request_record: dict[str, Any]) -> bool:
-        if self._redis is None or not self.config.enable_agent_email:
+        if self._redis is None or not self._agent_email_effectively_enabled():
             return False
         if self._safe_text(request_record.get("route")) != "opus":
             return False

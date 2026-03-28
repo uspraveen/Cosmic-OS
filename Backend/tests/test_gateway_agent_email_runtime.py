@@ -266,3 +266,31 @@ async def test_reserve_agent_email_inbound_ignores_duplicate_persisted_message()
     assert duplicate is not None
     assert duplicate["status"] == "duplicate"
     assert duplicate["request_id"] == "req_existing"
+
+
+def test_should_preprocess_agent_email_when_connected_even_if_flag_disabled() -> None:
+    with _runtime_root() as root:
+        runtime = _build_runtime(root)
+        runtime.agent_email_integration_store.initialize()
+        runtime.agent_email_integration_store.save_primary(
+            base_url="https://console.thelearnchain.com",
+            api_token="cm_org_token",
+            primary_mailbox_address="cosmic@example.com",
+            updated_at="2026-03-28T01:55:00Z",
+        )
+        runtime._redis = object()
+
+        should_preprocess = runtime._should_preprocess_email_inbound(
+            {
+                "route": "opus",
+                "channel": "agent-email:cosmic@example.com",
+                "message": {
+                    "metadata": {
+                        "thread_id": "thr_123",
+                        "message_id": "msg_123",
+                    }
+                },
+            }
+        )
+
+    assert should_preprocess is True
