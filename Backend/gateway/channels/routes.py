@@ -548,33 +548,46 @@ async def agent_email_incoming(
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
-    request_id = str(normalized.get("request_id") or "").strip() or uuid4().hex
-    normalized["request_id"] = request_id
-    processed = await runtime.process_incoming_user_message(normalized)
-    runtime.notify_channel_active(processed["channel"])
-    if processed.get("dispatch_target") == "redis":
+    reserved_keys, duplicate = runtime.reserve_agent_email_inbound(normalized)
+    if duplicate is not None:
+        return {
+            "status": duplicate.get("status") or "duplicate",
+            "request_id": duplicate.get("request_id"),
+            "session_id": duplicate.get("session_id") or normalized.get("session_id"),
+            "channel": duplicate.get("channel") or normalized.get("channel"),
+            "duplicate": True,
+        }
+
+    try:
+        request_id = str(normalized.get("request_id") or "").strip() or uuid4().hex
+        normalized["request_id"] = request_id
+        processed = await runtime.process_incoming_user_message(normalized)
+        runtime.notify_channel_active(processed["channel"])
+        if processed.get("dispatch_target") == "redis":
+            return {
+                "status": "accepted",
+                "request_id": processed["request_id"],
+                "session_id": processed["session_id"],
+                "channel": processed["channel"],
+            }
+
+        try:
+            runtime.start_request_fulfillment(processed)
+        except Exception as exc:
+            logger.exception(
+                "agent_email.webhook fulfillment_start_failed request_id=%s",
+                processed.get("request_id"),
+            )
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
         return {
             "status": "accepted",
             "request_id": processed["request_id"],
             "session_id": processed["session_id"],
             "channel": processed["channel"],
+            "route": processed["route"],
         }
-
-    try:
-        runtime.start_request_fulfillment(processed)
-    except Exception as exc:
-        logger.exception(
-            "agent_email.webhook fulfillment_start_failed request_id=%s",
-            processed.get("request_id"),
-        )
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    return {
-        "status": "accepted",
-        "request_id": processed["request_id"],
-        "session_id": processed["session_id"],
-        "channel": processed["channel"],
-        "route": processed["route"],
-    }
+    finally:
+        runtime.release_agent_email_inbound(reserved_keys)
 
 
 @router.post("/channels/telegram/webhook")

@@ -273,6 +273,7 @@ class GatewayRuntime:
         self.request_records: dict[str, dict[str, Any]] = {}
         self.active_requests: dict[str, ActiveRequest] = {}
         self.active_requests_by_task: dict[str, str] = {}
+        self._inflight_agent_email_messages: set[str] = set()
         self._memory_write_locks: dict[str, asyncio.Lock] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._usage_event_queue: asyncio.Queue[UsageEvent] | None = None
@@ -731,6 +732,103 @@ class GatewayRuntime:
     def _is_email_thread_session(self, session_id: str | None) -> bool:
         normalized = self._safe_text(session_id)
         return normalized.startswith("email-thread:")
+
+    def _agent_email_message_identifiers(self, metadata: dict[str, Any] | None) -> list[str]:
+        if not isinstance(metadata, dict):
+            return []
+        identifiers: list[str] = []
+        for raw in (metadata.get("message_id"), metadata.get("internet_message_id")):
+            value = self._safe_text(raw)
+            if value and value not in identifiers:
+                identifiers.append(value)
+        return identifiers
+
+    def _agent_email_inbound_dedupe_keys(self, *, session_id: str, metadata: dict[str, Any] | None) -> list[str]:
+        normalized_session_id = self._safe_text(session_id)
+        if not normalized_session_id:
+            return []
+        return [
+            f"{normalized_session_id}|{identifier}".casefold()
+            for identifier in self._agent_email_message_identifiers(metadata)
+        ]
+
+    def _find_duplicate_agent_email_request(self, message: dict[str, Any]) -> dict[str, Any] | None:
+        session_id = self._safe_text(message.get("session_id"))
+        channel = self._safe_text(message.get("channel"))
+        if self._channel_platform(channel) != "agent-email" and not self._is_email_thread_session(session_id):
+            return None
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        identifiers = set(self._agent_email_message_identifiers(metadata))
+        if not session_id or not identifiers:
+            return None
+
+        for request_record in reversed(list(self.request_records.values())):
+            if self._safe_text(request_record.get("session_id")) != session_id:
+                continue
+            existing_message = request_record.get("message") if isinstance(request_record.get("message"), dict) else {}
+            existing_metadata = (
+                existing_message.get("metadata")
+                if isinstance(existing_message.get("metadata"), dict)
+                else {}
+            )
+            if self._safe_text(existing_metadata.get("platform")) != "agent-email":
+                continue
+            existing_identifiers = set(self._agent_email_message_identifiers(existing_metadata))
+            if identifiers.isdisjoint(existing_identifiers):
+                continue
+            return {
+                "status": "duplicate",
+                "duplicate": True,
+                "request_id": self._safe_text(request_record.get("request_id")) or None,
+                "session_id": session_id,
+                "channel": self._safe_text(request_record.get("channel")) or channel,
+            }
+
+        for entry in reversed(self.session_store.get_history(session_id)):
+            if self._safe_text(entry.get("role")) != "user":
+                continue
+            existing_metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+            if self._safe_text(existing_metadata.get("platform")) != "agent-email":
+                continue
+            existing_identifiers = set(self._agent_email_message_identifiers(existing_metadata))
+            if identifiers.isdisjoint(existing_identifiers):
+                continue
+            return {
+                "status": "duplicate",
+                "duplicate": True,
+                "request_id": self._safe_text(entry.get("request_id")) or self._safe_text(existing_metadata.get("request_id")) or None,
+                "session_id": session_id,
+                "channel": self._safe_text(entry.get("channel")) or channel,
+            }
+        return None
+
+    def reserve_agent_email_inbound(self, message: dict[str, Any]) -> tuple[list[str], dict[str, Any] | None]:
+        session_id = self._safe_text(message.get("session_id"))
+        channel = self._safe_text(message.get("channel"))
+        if self._channel_platform(channel) != "agent-email" and not self._is_email_thread_session(session_id):
+            return ([], None)
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        dedupe_keys = self._agent_email_inbound_dedupe_keys(session_id=session_id, metadata=metadata)
+        duplicate = self._find_duplicate_agent_email_request(message)
+        if duplicate is not None:
+            return ([], duplicate)
+        if any(key in self._inflight_agent_email_messages for key in dedupe_keys):
+            return (
+                [],
+                {
+                    "status": "duplicate",
+                    "duplicate": True,
+                    "request_id": None,
+                    "session_id": session_id,
+                    "channel": channel,
+                },
+            )
+        self._inflight_agent_email_messages.update(dedupe_keys)
+        return (dedupe_keys, None)
+
+    def release_agent_email_inbound(self, dedupe_keys: list[str]) -> None:
+        for key in dedupe_keys:
+            self._inflight_agent_email_messages.discard(self._safe_text(key).casefold())
 
     def _email_thread_session_patch(self, metadata: dict[str, Any], *, channel: str) -> dict[str, Any]:
         patch: dict[str, Any] = {
@@ -1756,6 +1854,7 @@ class GatewayRuntime:
             for key in (
                 "thread_id",
                 "message_id",
+                "internet_message_id",
                 "mailbox_address",
                 "mailbox_id",
                 "subject",
@@ -2153,7 +2252,8 @@ class GatewayRuntime:
             raise ValueError("Request record is missing channel, request_id, or session_id")
 
         # Reject if there is already a foreground stream on this channel
-        has_foreground = any(
+        enforce_channel_guard = self._channel_platform(channel) != "agent-email" and not self._is_email_thread_session(session_id)
+        has_foreground = enforce_channel_guard and any(
             s.foreground and not s.completed and s.channel == channel
             for s in self.active_requests.values()
         )

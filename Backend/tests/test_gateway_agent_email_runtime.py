@@ -8,8 +8,9 @@ from uuid import uuid4
 import pytest
 
 import gateway.runtime as gateway_runtime_module
+from gateway.channels.agent_email import AgentEmailAdapter
 from gateway.config import GatewayConfig
-from gateway.runtime import GatewayRuntime
+from gateway.runtime import ActiveRequest, GatewayRuntime
 
 _LOCAL_TMP_ROOT = Path(r"C:\Users\Praveen Raj U S\.codex\memories\gateway-agent-email-tests")
 _LOCAL_TMP_ROOT.mkdir(parents=True, exist_ok=True)
@@ -170,3 +171,98 @@ async def test_sync_agent_email_webhook_mints_org_key_from_admin_connection(
     assert result["status"] == "created"
     assert result["mailbox_id"] == "mbx_123"
     assert result["webhook_id"] == "wh_123"
+
+
+@pytest.mark.asyncio
+async def test_start_request_fulfillment_allows_concurrent_agent_email_requests_on_same_mailbox() -> None:
+    with _runtime_root() as root:
+        runtime = _build_runtime(root)
+
+        async def fake_run_request_fulfillment(state, request_record) -> None:
+            return
+
+        runtime._run_request_fulfillment = fake_run_request_fulfillment  # type: ignore[method-assign]
+        runtime.active_requests["req_existing"] = ActiveRequest(
+            request_id="req_existing",
+            session_id="email-thread:cosmic@example.com:thr_existing",
+            channel="agent-email:cosmic@example.com",
+            route="opus",
+        )
+
+        runtime.start_request_fulfillment(
+            {
+                "request_id": "req_email_2",
+                "session_id": "email-thread:cosmic@example.com:thr_new",
+                "channel": "agent-email:cosmic@example.com",
+                "route": "opus",
+                "query": "Check the latest reply.",
+            }
+        )
+
+        created = runtime.active_requests["req_email_2"]
+        assert created.channel == "agent-email:cosmic@example.com"
+        assert created.session_id == "email-thread:cosmic@example.com:thr_new"
+        if created.worker is not None:
+            await created.worker
+
+        runtime.active_requests.clear()
+
+        runtime.active_requests["req_desktop_existing"] = ActiveRequest(
+            request_id="req_desktop_existing",
+            session_id="sess_20260327",
+            channel="desktop:test-device",
+            route="opus",
+        )
+        with pytest.raises(ValueError, match="foreground task is already active"):
+            runtime.start_request_fulfillment(
+                {
+                    "request_id": "req_desktop_2",
+                    "session_id": "sess_20260327",
+                    "channel": "desktop:test-device",
+                    "route": "opus",
+                    "query": "second desktop request",
+                }
+            )
+
+
+@pytest.mark.asyncio
+async def test_reserve_agent_email_inbound_ignores_duplicate_persisted_message() -> None:
+    session_id = AgentEmailAdapter.build_thread_session_id(
+        mailbox_address="cosmic@example.com",
+        thread_id="thr_123",
+    )
+    with _runtime_root() as root:
+        runtime = _build_runtime(root)
+        await runtime.start()
+        try:
+            runtime.session_store.append_message(
+                session_id,
+                role="user",
+                content="Email subject: Hello",
+                channel="agent-email:cosmic@example.com",
+                metadata={
+                    "platform": "agent-email",
+                    "request_id": "req_existing",
+                    "message_id": "msg_123",
+                    "internet_message_id": "<internet_msg_123@example.com>",
+                },
+            )
+
+            reserved_keys, duplicate = runtime.reserve_agent_email_inbound(
+                {
+                    "session_id": session_id,
+                    "channel": "agent-email:cosmic@example.com",
+                    "metadata": {
+                        "platform": "agent-email",
+                        "message_id": "msg_123",
+                        "internet_message_id": "<internet_msg_123@example.com>",
+                    },
+                }
+            )
+        finally:
+            await runtime.stop()
+
+    assert reserved_keys == []
+    assert duplicate is not None
+    assert duplicate["status"] == "duplicate"
+    assert duplicate["request_id"] == "req_existing"
