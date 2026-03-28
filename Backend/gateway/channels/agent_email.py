@@ -188,6 +188,8 @@ class AgentEmailAdapter(ChannelAdapter):
         return normalized
 
     async def send(self, message: dict[str, Any], channel: str | None = None) -> None:
+        if not self._is_sendable_event(message):
+            return
         target_channel = _safe_text(channel) or _safe_text(message.get("channel"))
         text_body = self._build_text_body(message)
         reply_context = self._thread_reply_context(message)
@@ -346,6 +348,17 @@ class AgentEmailAdapter(ChannelAdapter):
             f"Task: {_safe_text(message.get('task_id')) or 'n/a'}",
         ]
         return "\n".join(summary_parts)
+
+    def _is_sendable_event(self, message: dict[str, Any]) -> bool:
+        event_type = _safe_text(message.get("type"))
+        if not event_type:
+            return True
+        return event_type in {
+            "response.complete",
+            "task.failed",
+            "task.cancelled",
+            "error",
+        }
 
     def _build_html_body(self, text_body: str) -> str:
         escaped = html.escape(text_body or "").replace("\n", "<br/>")

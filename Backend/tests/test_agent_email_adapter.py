@@ -196,6 +196,41 @@ async def test_agent_email_adapter_send_skips_untrusted_thread_responses() -> No
 
 
 @pytest.mark.asyncio
+async def test_agent_email_adapter_send_ignores_internal_stream_events() -> None:
+    adapter = AgentEmailAdapter(
+        cosmic_mail_base_url="http://cosmic-mail.local",
+        cosmic_mail_api_token="token",
+        primary_mailbox_address="assistant@example.com",
+    )
+
+    class FakeClient:
+        async def resolve_mailbox(self, *, mailbox_id=None, mailbox_address=None):
+            raise AssertionError("resolve_mailbox should not be called for internal stream events")
+
+        async def create_draft(self, payload):
+            raise AssertionError("create_draft should not be called for internal stream events")
+
+        async def send_draft(self, draft_id: str):
+            raise AssertionError("send_draft should not be called for internal stream events")
+
+        async def reply_to_thread(self, thread_id: str, payload):
+            raise AssertionError("reply_to_thread should not be called for internal stream events")
+
+    adapter.client = FakeClient()  # type: ignore[assignment]
+
+    for event_type in ("route_result", "task.created", "tool.call", "response.chunk", "response.thinking.chunk"):
+        await adapter.send(
+            {
+                "type": event_type,
+                "request_id": "req_internal",
+                "task_id": "tsk_internal",
+                "channel": "agent-email:assistant@example.com",
+            },
+            channel="agent-email:assistant@example.com",
+        )
+
+
+@pytest.mark.asyncio
 async def test_agent_email_adapter_get_status_falls_back_to_first_active_mailbox() -> None:
     adapter = AgentEmailAdapter(
         cosmic_mail_base_url="http://cosmic-mail.local",
