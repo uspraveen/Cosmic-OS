@@ -103,6 +103,8 @@ async def test_agent_email_adapter_send_uses_cosmic_mail_draft_send_flow() -> No
     assert fake_client.created_payload["mailbox_id"] == "mbx_primary"
     assert fake_client.created_payload["subject"] == "Morning update"
     assert fake_client.created_payload["to_recipients"] == [{"email": "owner@example.com", "name": "Owner"}]
+    assert fake_client.created_payload["text_body"] == "Everything is green."
+    assert fake_client.created_payload["html_body"] == "<div><p>Everything is green.</p></div>"
     assert fake_client.sent_draft_id == "draft_123"
 
 
@@ -156,8 +158,76 @@ async def test_agent_email_adapter_send_replies_in_thread_for_trusted_sender_res
     assert fake_client.reply_payload == {
         "mailbox_id": "mbx_support",
         "text_body": "I got your reply.",
+        "html_body": "<div><p>I got your reply.</p></div>",
         "to_recipients": [{"email": "owner@example.com", "name": "Owner"}],
     }
+
+
+@pytest.mark.asyncio
+async def test_agent_email_adapter_renders_markdown_for_drafts_and_replies() -> None:
+    adapter = AgentEmailAdapter(
+        cosmic_mail_base_url="http://cosmic-mail.local",
+        cosmic_mail_api_token="token",
+        primary_mailbox_address="assistant@example.com",
+    )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.created_payload: dict[str, object] | None = None
+            self.reply_payload: dict[str, object] | None = None
+
+        async def resolve_mailbox(self, *, mailbox_id=None, mailbox_address=None):
+            return {"id": mailbox_id or "mbx_primary"}
+
+        async def create_draft(self, payload):
+            self.created_payload = payload
+            return {"id": "draft_markdown"}
+
+        async def send_draft(self, draft_id: str):
+            return {"id": draft_id}
+
+        async def reply_to_thread(self, thread_id: str, payload):
+            self.reply_payload = payload
+            return {"id": "msg_reply_markdown"}
+
+    fake_client = FakeClient()
+    adapter.client = fake_client  # type: ignore[assignment]
+
+    markdown = "## Daily Update\n\n**Status**\n- Green\n- Shipping\n\n[Docs](https://example.com/docs)"
+
+    await adapter.send(
+        {
+            "subject": "Daily update",
+            "content": markdown,
+            "to": [{"email": "owner@example.com", "name": "Owner"}],
+        },
+        channel="agent-email",
+    )
+
+    assert fake_client.created_payload is not None
+    assert fake_client.created_payload["text_body"] == "Daily Update\n\nStatus\n• Green\n• Shipping\n\nDocs: https://example.com/docs"
+    assert "<h2>Daily Update</h2>" in str(fake_client.created_payload["html_body"])
+    assert "<strong>Status</strong>" in str(fake_client.created_payload["html_body"])
+    assert "<li>Green</li>" in str(fake_client.created_payload["html_body"])
+    assert '<a href="https://example.com/docs">Docs</a>' in str(fake_client.created_payload["html_body"])
+
+    await adapter.send(
+        {
+            "type": "response.complete",
+            "thread_id": "thr_markdown",
+            "mailbox_id": "mbx_support",
+            "mailbox_address": "assistant@example.com",
+            "content": markdown,
+            "trusted_sender": True,
+            "email_thread_reply_eligible": True,
+            "to_recipients": [{"email": "owner@example.com", "name": "Owner"}],
+        },
+        channel="agent-email:assistant@example.com",
+    )
+
+    assert fake_client.reply_payload is not None
+    assert fake_client.reply_payload["text_body"] == "Daily Update\n\nStatus\n• Green\n• Shipping\n\nDocs: https://example.com/docs"
+    assert "<h2>Daily Update</h2>" in str(fake_client.reply_payload["html_body"])
 
 
 @pytest.mark.asyncio
