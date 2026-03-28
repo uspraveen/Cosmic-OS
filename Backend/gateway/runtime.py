@@ -27,6 +27,7 @@ from .artifacts.store import ArtifactStore
 from .channels.base import ChannelUnavailableError, PermanentDeliveryError, RetryableDeliveryError
 from .channels.agent_email import AgentEmailAdapter
 from .channels.desktop import DesktopAdapter
+from .channels.mobile import MobileAdapter
 from .channels.registry import ChannelAdapterRegistry
 from .channels.telegram import TelegramAdapter, TelegramConfig
 from .channels.whatsapp import WhatsAppAdapter, WhatsAppConfig
@@ -498,9 +499,12 @@ class GatewayRuntime:
         platform, separator, _ = normalized_channel.partition(":")
         if separator:
             return platform or None
-        if normalized_channel in self.registry.adapters or normalized_channel == "desktop":
+        if normalized_channel in self.registry.adapters or normalized_channel in {"desktop", "mobile"}:
             return normalized_channel
         return None
+
+    def _is_realtime_client_channel(self, channel: str | None) -> bool:
+        return self._channel_platform(channel) in {"desktop", "mobile"}
 
     def _normalize_delivery_target(self, value: Any) -> str | None:
         text = self._safe_text(value)
@@ -1759,6 +1763,12 @@ class GatewayRuntime:
             self.registry.register(desktop_adapter)
             await desktop_adapter.start()
 
+        if "mobile" not in self.registry.adapters:
+            mobile_adapter = MobileAdapter()
+            await mobile_adapter.on_message(self._handle_normalized_incoming_message)
+            self.registry.register(mobile_adapter)
+            await mobile_adapter.start()
+
         if self.config.enable_whatsapp and "whatsapp" not in self.registry.adapters:
             adapter = WhatsAppAdapter(WhatsAppConfig.from_env())
             await adapter.on_message(self._handle_normalized_incoming_message)
@@ -1915,10 +1925,10 @@ class GatewayRuntime:
             metadata=user_message_metadata,
         )
 
-        # Cross-channel sync: push the user message to connected desktop clients
-        if channel and not channel.startswith("desktop:"):
+        # Cross-channel sync: push the user message to connected realtime clients on other platforms.
+        if channel:
             self._track_background_task(
-                self._broadcast_cross_channel_to_desktop(
+                self._broadcast_cross_channel_to_realtime_clients(
                     session_id,
                     role="user",
                     content=content or "[non-text inbound message]",
@@ -2217,7 +2227,7 @@ class GatewayRuntime:
             error_text=None,
         )
 
-        if channel.startswith("desktop:"):
+        if self._is_realtime_client_channel(channel):
             await send(
                 {
                     "type": "task.progress",
@@ -5270,7 +5280,7 @@ class GatewayRuntime:
         if self._redis is not None:
             self._track_background_task(self._drain_pending_task_inputs(channel))
 
-    async def _broadcast_cross_channel_to_desktop(
+    async def _broadcast_cross_channel_to_realtime_clients(
         self,
         session_id: str,
         *,
@@ -5286,22 +5296,10 @@ class GatewayRuntime:
         produced_artifacts: list[dict[str, Any]] | None = None,
         activity_log: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Push a cross-channel message to all connected desktop clients for this session.
-
-        Called when a non-desktop channel (WhatsApp, Telegram) produces a user
-        message or receives an assistant response, so the desktop UI can
-        display the conversation in real-time.
-        """
-        if not session_id or not channel or channel.startswith("desktop:"):
+        """Push a cross-channel message to connected desktop/mobile clients on other platforms."""
+        if not session_id or not channel:
             return
-        from .channels.desktop import DesktopAdapter
-        desktop_adapter: DesktopAdapter | None = None
-        for adapter in self.registry.adapters.values():
-            if isinstance(adapter, DesktopAdapter):
-                desktop_adapter = adapter
-                break
-        if desktop_adapter is None:
-            return
+        origin_platform = self._channel_platform(channel)
 
         event: dict[str, Any] = {
             "type": "crosschannel.message",
@@ -5326,7 +5324,52 @@ class GatewayRuntime:
             event["produced_artifacts"] = produced_artifacts
         if activity_log:
             event["activity_log"] = activity_log
-        await desktop_adapter.broadcast_to_session(session_id, event)
+
+        for adapter in self.registry.adapters.values():
+            if not isinstance(adapter, (DesktopAdapter, MobileAdapter)):
+                continue
+            if adapter.platform == origin_platform:
+                continue
+            await adapter.broadcast_to_session(session_id, event)
+
+    async def _broadcast_cross_channel_to_desktop(
+        self,
+        session_id: str,
+        *,
+        message_id: str | None = None,
+        role: str,
+        content: str,
+        channel: str,
+        route: str | None = None,
+        sources: list[dict[str, str]] | None = None,
+        thinking_text: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
+        input_artifacts: list[dict[str, Any]] | None = None,
+        produced_artifacts: list[dict[str, Any]] | None = None,
+        activity_log: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Push a cross-channel message to all connected desktop clients for this session.
+
+        Called when a non-desktop channel (WhatsApp, Telegram) produces a user
+        message or receives an assistant response, so the desktop UI can
+        display the conversation in real-time.
+        """
+        if not session_id or not channel or channel.startswith("desktop:"):
+            return
+        await self._broadcast_cross_channel_to_realtime_clients(
+            session_id,
+            message_id=message_id,
+            role=role,
+            content=content,
+            channel=channel,
+            route=route,
+            sources=sources,
+            thinking_text=thinking_text,
+            attachments=attachments,
+            input_artifacts=input_artifacts,
+            produced_artifacts=produced_artifacts,
+            activity_log=activity_log,
+        )
 
     def _track_background_task(self, coroutine: asyncio.Future[Any] | asyncio.Task[Any] | Any) -> None:
         task = asyncio.create_task(coroutine)
@@ -5531,7 +5574,7 @@ class GatewayRuntime:
             return None
         if not content:
             return None
-        if channel.startswith("desktop:"):
+        if self._is_realtime_client_channel(channel):
             return None
         pending_inputs = self.session_store.list_pending_task_inputs(
             session_id=session_id,
@@ -5801,7 +5844,7 @@ class GatewayRuntime:
         session_id = self._safe_text(event.get("session_id"))
 
         if event_type == "response.complete":
-            if channel.startswith("desktop:") and (self._safe_text(event.get("source")) or "user") != "cron":
+            if self._is_realtime_client_channel(channel) and (self._safe_text(event.get("source")) or "user") != "cron":
                 return None
             if request_id:
                 return f"{channel}:{event_type}:{request_id}"
@@ -7552,7 +7595,7 @@ class GatewayRuntime:
             for artifact in document_artifacts
             if self._safe_text(artifact.get("artifact_id"))
         ]
-        if send is not None and channel.startswith("desktop:"):
+        if send is not None and self._is_realtime_client_channel(channel):
             await send(
                 self._build_docs_parse_progress_event(
                     request_record=request_record,
@@ -7593,7 +7636,7 @@ class GatewayRuntime:
                 parse_result=parse_result,
                 artifact_ids=artifact_ids,
             )
-            if send is not None and channel.startswith("desktop:"):
+            if send is not None and self._is_realtime_client_channel(channel):
                 await send(
                     self._build_docs_parse_progress_event(
                         request_record=request_record,
@@ -7653,7 +7696,7 @@ class GatewayRuntime:
             for artifact in tabular_artifacts
             if self._safe_text(artifact.get("artifact_id"))
         ]
-        if send is not None and channel.startswith("desktop:"):
+        if send is not None and self._is_realtime_client_channel(channel):
             await send(
                 self._build_tabular_parse_progress_event(
                     request_record=request_record,
@@ -7690,7 +7733,7 @@ class GatewayRuntime:
                 parse_result=parse_result,
                 artifact_ids=artifact_ids,
             )
-            if send is not None and channel.startswith("desktop:"):
+            if send is not None and self._is_realtime_client_channel(channel):
                 await send(
                     self._build_tabular_parse_progress_event(
                         request_record=request_record,
@@ -7936,7 +7979,7 @@ class GatewayRuntime:
                         ),
                     )
                 ))
-                if progress_callback is not None and channel.startswith("desktop:")
+                if progress_callback is not None and self._is_realtime_client_channel(channel)
                 else None
             ),
             poll_interval_sec=self.config.docs_parse_poll_interval_sec,
@@ -8012,7 +8055,7 @@ class GatewayRuntime:
                         ),
                     )
                 ))
-                if progress_callback is not None and channel.startswith("desktop:")
+                if progress_callback is not None and self._is_realtime_client_channel(channel)
                 else None
             ),
             poll_interval_sec=self.config.tabular_parse_poll_interval_sec,
@@ -8363,10 +8406,10 @@ class GatewayRuntime:
                 event["message_id"] = assistant_message_id
             if activity_log:
                 event["activity_log"] = activity_log
-            # Cross-channel sync: push the assistant response to connected desktop clients
-            if event_channel and not event_channel.startswith("desktop:") and session_id:
+            # Cross-channel sync: push the assistant response to connected realtime clients on other platforms.
+            if event_channel and session_id:
                 self._track_background_task(
-                    self._broadcast_cross_channel_to_desktop(
+                    self._broadcast_cross_channel_to_realtime_clients(
                         session_id,
                         message_id=assistant_message_id,
                         role="assistant",

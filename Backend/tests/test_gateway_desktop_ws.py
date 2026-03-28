@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from gateway.adapters.response_processor import DirectRouteHandoff
 from gateway.channels.base import ChannelUnavailableError, RetryableDeliveryError
 from gateway.channels.desktop import DesktopAdapter
+from gateway.channels.mobile import MobileAdapter
 from gateway.channels.routes import router as channel_router
 from gateway.config import GatewayConfig
 from gateway.memory_client import MemoryClientHTTPError, MemoryPromptContext
@@ -45,6 +46,7 @@ class FakeDirectAdapter:
         store_assistant_message,
         channel: str,
         memory_context: str | None = None,
+        usage_recorder=None,
     ) -> None:
         self.last_memory_context = memory_context
         assert history[-1]["role"] == "user"
@@ -109,6 +111,7 @@ class FakeHandoffDirectAdapter:
         store_assistant_message,
         channel: str,
         memory_context: str | None = None,
+        usage_recorder=None,
     ) -> None:
         self.last_memory_context = memory_context
         assert history[-1]["role"] == "user"
@@ -190,6 +193,15 @@ class FakeOrchestratorClient:
 
 
 class CapturingDesktopAdapter(DesktopAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[tuple[str, dict[str, Any]]] = []
+
+    async def broadcast_to_session(self, session_id: str, event: dict[str, Any]) -> None:
+        self.events.append((session_id, event))
+
+
+class CapturingMobileAdapter(MobileAdapter):
     def __init__(self) -> None:
         super().__init__()
         self.events: list[tuple[str, dict[str, Any]]] = []
@@ -288,6 +300,7 @@ class FakeCancellableDirectAdapter:
         store_assistant_message,
         channel: str,
         memory_context: str | None = None,
+        usage_recorder=None,
     ) -> None:
         self.last_memory_context = memory_context
         assert history[-1]["role"] == "user"
@@ -1052,6 +1065,31 @@ async def test_runtime_broadcasts_cross_channel_attachment_metadata_to_desktop(t
         assert session_id == "sess_test"
         assert event["attachments"] == attachments
         assert event["input_artifacts"] == input_artifacts
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_broadcasts_desktop_messages_to_mobile_clients(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+    await runtime.start()
+    try:
+        mobile_adapter = CapturingMobileAdapter()
+        runtime.registry.register(mobile_adapter)
+        await runtime._broadcast_cross_channel_to_realtime_clients(  # noqa: SLF001 - intentional unit seam
+            "sess_test",
+            role="assistant",
+            content="Desktop-originated assistant message",
+            channel="desktop:desk_a",
+            route="haiku",
+        )
+        assert len(mobile_adapter.events) == 1
+        session_id, event = mobile_adapter.events[0]
+        assert session_id == "sess_test"
+        assert event["type"] == "crosschannel.message"
+        assert event["channel"] == "desktop:desk_a"
+        assert event["content"] == "Desktop-originated assistant message"
+        assert event["route"] == "haiku"
     finally:
         await runtime.stop()
 
@@ -2946,6 +2984,59 @@ def test_desktop_websocket_supports_ping_query_and_resume(test_client: TestClien
         assert resume["session_id"] == route_result["session_id"]
         assert resume["channel"] == "desktop:desk_a1b2"
         assert resume["user_timezone"] == "America/Chicago"
+        assert resume["history_tail"][-1]["content"] == "Hello from fake adapter"
+
+
+def test_mobile_websocket_supports_ping_query_and_resume(test_client: TestClient) -> None:
+    with test_client.websocket_connect("/ws?token=test-token&device_id=mob_a1b2") as websocket:
+        websocket.send_json({"type": "ping", "ts_unix_ms": 54321})
+        pong = websocket.receive_json()
+        assert pong["type"] == "pong"
+        assert pong["ts_unix_ms"] == 54321
+
+        websocket.send_json(
+            {
+                "type": "query",
+                "request_id": "req_mobile_001",
+                "content": "Hello from mobile",
+                "conversation_context": [
+                    {"role": "user", "content": "Prior mobile context"},
+                ],
+            }
+        )
+        route_result = websocket.receive_json()
+        assert route_result["type"] == "route_result"
+        assert route_result["request_id"] == "req_mobile_001"
+        assert route_result["route"] == "haiku"
+        assert route_result["channel"] == "mobile:mob_a1b2"
+
+        chunk = websocket.receive_json()
+        assert chunk["type"] == "response.chunk"
+        assert chunk["request_id"] == "req_mobile_001"
+        assert chunk["session_id"] == route_result["session_id"]
+        assert chunk["channel"] == "mobile:mob_a1b2"
+
+        complete = websocket.receive_json()
+        assert complete["type"] == "response.complete"
+        assert complete["request_id"] == "req_mobile_001"
+        assert complete["session_id"] == route_result["session_id"]
+        assert complete["route"] == "haiku"
+        assert complete["content"] == "Hello from fake adapter"
+        assert complete["channel"] == "mobile:mob_a1b2"
+
+        websocket.send_json(
+            {
+                "type": "resume",
+                "request_id": "resume_mobile_001",
+                "session_id": route_result["session_id"],
+                "known_task_ids": [],
+            }
+        )
+        resume = websocket.receive_json()
+        assert resume["type"] == "resume.ok"
+        assert resume["request_id"] == "resume_mobile_001"
+        assert resume["session_id"] == route_result["session_id"]
+        assert resume["channel"] == "mobile:mob_a1b2"
         assert resume["history_tail"][-1]["content"] == "Hello from fake adapter"
 
 

@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from ..runtime import GatewayRuntime
 from .desktop import DesktopAdapter
+from .mobile import MobileAdapter
 from shared import is_supported_image_artifact
 
 router = APIRouter(tags=["channels"])
@@ -186,23 +187,34 @@ async def verify_websocket_auth(websocket: WebSocket, runtime: GatewayRuntime) -
         await websocket.close(code=4002, reason="Missing or invalid device_id")
         return False
 
+    requested_platform = (
+        websocket.headers.get("x-device-platform", "")
+        or websocket.query_params.get("platform", "")
+    ).strip().lower()
+    if requested_platform not in {"", "desktop", "mobile"}:
+        await websocket.close(code=4003, reason="Invalid platform")
+        return False
+    platform = requested_platform or ("mobile" if device_id.startswith("mob_") else "desktop")
+
     websocket.state.device_id = device_id
-    websocket.state.channel = f"desktop:{device_id}"
+    websocket.state.platform = platform
+    websocket.state.channel = f"{platform}:{device_id}"
     return True
 
 
-async def _handle_desktop_websocket_message(
+async def _handle_realtime_websocket_message(
     payload: dict[str, Any],
     *,
     runtime: GatewayRuntime,
-    adapter: DesktopAdapter,
+    adapter: DesktopAdapter | MobileAdapter,
     channel: str,
+    platform: str,
 ) -> None:
     message_type = str(payload.get("type") or "").strip()
     request_id = str(payload.get("request_id") or "").strip() or None
 
     if message_type == "ping":
-        await runtime.update_user_timezone(payload.get("timezone"), source="desktop")
+        await runtime.update_user_timezone(payload.get("timezone"), source=platform)
         await adapter.send(
             {
                 "type": "pong",
@@ -217,7 +229,7 @@ async def _handle_desktop_websocket_message(
         known_task_ids = payload.get("known_task_ids")
         if not isinstance(known_task_ids, list):
             known_task_ids = []
-        await runtime.update_user_timezone(payload.get("timezone"), source="desktop")
+        await runtime.update_user_timezone(payload.get("timezone"), source=platform)
         response = await runtime.build_resume_payload(
             channel=channel,
             request_id=request_id,
@@ -379,9 +391,16 @@ async def desktop_websocket(websocket: WebSocket) -> None:
     if not await verify_websocket_auth(websocket, runtime):
         return
 
-    adapter = runtime.registry.adapters.get("desktop")
-    if not isinstance(adapter, DesktopAdapter):
-        await websocket.close(code=1011, reason="Desktop adapter unavailable")
+    platform = str(getattr(websocket.state, "platform", "desktop") or "desktop")
+    adapter = runtime.registry.adapters.get(platform)
+    if platform == "desktop":
+        valid_adapter = isinstance(adapter, DesktopAdapter)
+    elif platform == "mobile":
+        valid_adapter = isinstance(adapter, MobileAdapter)
+    else:
+        valid_adapter = False
+    if not valid_adapter:
+        await websocket.close(code=1011, reason=f"{platform.title()} adapter unavailable")
         return
 
     await websocket.accept()
@@ -408,11 +427,12 @@ async def desktop_websocket(websocket: WebSocket) -> None:
                 )
                 continue
 
-            await _handle_desktop_websocket_message(
+            await _handle_realtime_websocket_message(
                 payload,
                 runtime=runtime,
                 adapter=adapter,
                 channel=channel,
+                platform=platform,
             )
     except WebSocketDisconnect:
         pass
