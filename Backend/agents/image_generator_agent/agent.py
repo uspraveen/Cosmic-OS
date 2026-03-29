@@ -458,11 +458,11 @@ class ImageGeneratorAgent(AgentRuntime):
                 image_bytes = base64.b64decode(raw_b64)
             except Exception as exc:
                 raise ImageGeneratorAgentError(code="INTERNAL_ERROR", message=f"{provider} returned an invalid image payload.", retryable=False, next_action="escalate") from exc
-            width, height = self._read_image_dimensions(image_bytes)
+            detected_mime, width, height = self._inspect_image_payload(image_bytes)
             images.append(
                 ProviderImage(
                     data=image_bytes,
-                    mime="image/png",
+                    mime=detected_mime,
                     revised_prompt=str(item.get("revised_prompt") or "").strip() or None,
                     width=width,
                     height=height,
@@ -688,7 +688,10 @@ class ImageGeneratorAgent(AgentRuntime):
         refs: list[dict[str, Any]] = []
         model_slug = self._sanitize_for_filename(generation.model)
         for index, item in enumerate(generation.images, start=1):
-            filename = f"{artifact_basename}__{model_slug}__{index:02d}.png"
+            extension = mimetypes.guess_extension(item.mime or "") or ".bin"
+            if extension == ".jpe":
+                extension = ".jpg"
+            filename = f"{artifact_basename}__{model_slug}__{index:02d}{extension}"
             path = self._task_artifact_dir(task.task_id) / filename
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(item.data)
@@ -870,12 +873,13 @@ class ImageGeneratorAgent(AgentRuntime):
             return str(error.get("message") or "").strip() or None
         return None
 
-    def _read_image_dimensions(self, data: bytes) -> tuple[int | None, int | None]:
+    def _inspect_image_payload(self, data: bytes) -> tuple[str, int | None, int | None]:
         try:
             with Image.open(BytesIO(data)) as image:
-                return int(image.width), int(image.height)
+                mime = Image.MIME.get(image.format or "", "") or "application/octet-stream"
+                return mime, int(image.width), int(image.height)
         except Exception:
-            return None, None
+            return "application/octet-stream", None, None
 
     def _request_id(self, task: TaskEnvelope) -> str | None:
         return str(task.input.get("request_id") or "").strip() or None if isinstance(task.input, dict) else None
