@@ -59,6 +59,56 @@ def _pick_default_mailbox(mailboxes: list[dict[str, Any]]) -> dict[str, Any] | N
     return pool[0] if pool else None
 
 
+def _delivery_message_id(payload: dict[str, Any]) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    for source in (
+        payload,
+        payload.get("message") if isinstance(payload.get("message"), dict) else None,
+        payload.get("draft") if isinstance(payload.get("draft"), dict) else None,
+    ):
+        if not isinstance(source, dict):
+            continue
+        for key in ("id", "message_id", "sent_message_id"):
+            value = _safe_text(source.get(key))
+            if value:
+                return value
+    return None
+
+
+def _normalize_email_delivery(
+    *,
+    payload: dict[str, Any] | None,
+    fallback_thread_id: str | None = None,
+    fallback_draft_id: str | None = None,
+) -> dict[str, Any]:
+    body = payload if isinstance(payload, dict) else {}
+    queued_for_approval = bool(body.get("queued_for_approval"))
+    approval_id = _safe_text(body.get("approval_id")) or None
+    status = "queued_for_approval" if queued_for_approval or approval_id else "sent"
+    thread = body.get("thread") if isinstance(body.get("thread"), dict) else {}
+    draft = body.get("draft") if isinstance(body.get("draft"), dict) else {}
+    message = body.get("message") if isinstance(body.get("message"), dict) else {}
+    thread_id = (
+        _safe_text(thread.get("id"))
+        or _safe_text(body.get("thread_id"))
+        or _safe_text(message.get("thread_id"))
+        or _safe_text(draft.get("thread_id"))
+        or _safe_text(fallback_thread_id)
+        or None
+    )
+    draft_id = _safe_text(draft.get("id")) or _safe_text(body.get("draft_id")) or _safe_text(fallback_draft_id) or None
+    message_id = _delivery_message_id(body)
+    return {
+        "status": status,
+        "queued_for_approval": queued_for_approval,
+        "approval_id": approval_id,
+        "thread_id": thread_id,
+        "draft_id": draft_id,
+        "message_id": message_id,
+    }
+
+
 class AgentEmailAdapter(ChannelAdapter):
     platform = "agent-email"
 
@@ -198,6 +248,12 @@ class AgentEmailAdapter(ChannelAdapter):
         reply_context = self._thread_reply_context(message)
         if reply_context is not None:
             if not reply_context["eligible"]:
+                message["email_delivery"] = {
+                    "status": "suppressed",
+                    "reason": "thread_reply_not_eligible",
+                    "thread_id": reply_context["thread_id"],
+                }
+                message["email_delivery_status"] = "suppressed"
                 return
             mailbox = await self.client.resolve_mailbox(
                 mailbox_id=reply_context["mailbox_id"],
@@ -214,7 +270,15 @@ class AgentEmailAdapter(ChannelAdapter):
             cc_recipients = self._normalize_contact_field(message, "cc_recipients", "cc")
             if cc_recipients:
                 reply_payload["cc_recipients"] = cc_recipients
-            await self.client.reply_to_thread(reply_context["thread_id"], reply_payload)
+            reply_result = await self.client.reply_to_thread(reply_context["thread_id"], reply_payload)
+            delivery = _normalize_email_delivery(payload=reply_result, fallback_thread_id=reply_context["thread_id"])
+            message["email_delivery"] = delivery
+            message["email_delivery_status"] = delivery["status"]
+            message["email_queued_for_approval"] = bool(delivery.get("queued_for_approval"))
+            if delivery.get("approval_id"):
+                message["email_approval_id"] = delivery["approval_id"]
+            if delivery.get("message_id"):
+                message["email_sent_message_id"] = delivery["message_id"]
             return
 
         try:
@@ -239,7 +303,15 @@ class AgentEmailAdapter(ChannelAdapter):
         draft_id = _safe_text(draft.get("id"))
         if not draft_id:
             raise PermanentDeliveryError("Cosmic Mail draft creation did not return an id.")
-        await self.client.send_draft(draft_id)
+        send_result = await self.client.send_draft(draft_id)
+        delivery = _normalize_email_delivery(payload=send_result, fallback_draft_id=draft_id)
+        message["email_delivery"] = delivery
+        message["email_delivery_status"] = delivery["status"]
+        message["email_queued_for_approval"] = bool(delivery.get("queued_for_approval"))
+        if delivery.get("approval_id"):
+            message["email_approval_id"] = delivery["approval_id"]
+        if delivery.get("message_id"):
+            message["email_sent_message_id"] = delivery["message_id"]
 
     async def get_status(self) -> dict[str, Any]:
         auth_context = await self.client.get_auth_context()

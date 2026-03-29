@@ -80,6 +80,13 @@ class ImageGeneratorAgentError(RuntimeError):
         self.status_code = status_code
 
 
+def _coerce_nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
 class ImageGeneratorAgent(AgentRuntime):
     GENERATE_INTENT = "image.generate"
     RECALL_SESSION_INTENT = "image.recall_session"
@@ -194,7 +201,44 @@ class ImageGeneratorAgent(AgentRuntime):
             else f"Generating {normalized_input['count']} image(s) via {route.model}"
         )
         await self._emit_progress(task.task_id, progress_message, provider=route.provider, model=route.model)
-        generation = await self._generate_with_provider(task=task, normalized_input=normalized_input, route=route, reference_images=reference_images)
+        fallback_from: dict[str, Any] | None = None
+        try:
+            generation = await self._generate_with_provider(
+                task=task,
+                normalized_input=normalized_input,
+                route=route,
+                reference_images=reference_images,
+            )
+        except ImageGeneratorAgentError as exc:
+            fallback_route = self._fallback_image_route(
+                route=route,
+                normalized_input=normalized_input,
+                reference_images=reference_images,
+                error=exc,
+            )
+            if fallback_route is None:
+                raise
+            fallback_from = {
+                "provider": route.provider,
+                "model": route.model,
+                "error_code": exc.code,
+                "error_message": exc.message,
+            }
+            await self._emit_progress(
+                task.task_id,
+                f"{route.model} hit a retryable failure. Retrying via {fallback_route.model}",
+                provider=fallback_route.provider,
+                model=fallback_route.model,
+                fallback_from=route.model,
+                error_code=exc.code,
+            )
+            route = fallback_route
+            generation = await self._generate_with_provider(
+                task=task,
+                normalized_input=normalized_input,
+                route=route,
+                reference_images=reference_images,
+            )
         await self._emit_progress(task.task_id, "Persisting generated image artifacts", model=route.model)
 
         image_artifacts, image_refs = self._persist_generated_images(task=task, generation=generation, artifact_basename=normalized_input["artifact_basename"])
@@ -218,6 +262,7 @@ class ImageGeneratorAgent(AgentRuntime):
                     "reason": route.reason,
                     "router_mode": route.router_mode,
                 },
+                "fallback_from": fallback_from,
                 "provider_request_id": generation.provider_request_id,
                 "provider_usage": serialize_usage_metadata(generation.raw_usage),
                 "response_payload": self._sanitize_provider_payload_for_artifact(generation.response_payload),
@@ -230,6 +275,8 @@ class ImageGeneratorAgent(AgentRuntime):
 
         verb = "Edited" if reference_images else "Generated"
         summary = f"{verb} {len(image_refs)} image{'s' if len(image_refs) != 1 else ''} via {generation.provider}:{generation.model}."
+        if fallback_from:
+            summary = f"{summary} Retried after {fallback_from['provider']}:{fallback_from['model']} returned a retryable error."
         output = {
             "response": summary,
             "message": summary,
@@ -242,6 +289,7 @@ class ImageGeneratorAgent(AgentRuntime):
                 "reason": route.reason,
                 "router_mode": route.router_mode,
             },
+            "fallback_from": fallback_from,
             "images": image_refs,
             "artifact_refs": image_refs,
             "reference_images": [item.artifact_ref for item in reference_images],
@@ -440,7 +488,12 @@ class ImageGeneratorAgent(AgentRuntime):
             await self._post_provider_usage(metered_call=metered_call, task=task, provider=provider, model=model, raw_usage=None, provider_request_id=None, success=False, error_code="NETWORK_ERROR", metadata={"provider": provider, "model": model, "router_mode": route.router_mode, "error": str(exc)[:200]})
             raise ImageGeneratorAgentError(code="NETWORK_ERROR", message=f"{provider} image generation failed before a valid response was received.", retryable=True, next_action="retry") from exc
 
-        raw_usage = response_json.get("usage")
+        raw_usage = self._augment_billing_usage_metadata(
+            response_json.get("usage"),
+            normalized_input=normalized_input,
+            reference_images=reference_images,
+            output_image_count=len(items) if isinstance(items, list) else 0,
+        )
         provider_request_id = str(response_json.get("id") or "").strip() or None
         await self._post_provider_usage(metered_call=metered_call, task=task, provider=provider, model=model, raw_usage=raw_usage, provider_request_id=provider_request_id, success=True, error_code=None, metadata={"provider": provider, "model": model, "router_mode": route.router_mode})
 
@@ -479,6 +532,34 @@ class ImageGeneratorAgent(AgentRuntime):
             provider_request_id=provider_request_id,
             images=images,
         )
+
+    def _augment_billing_usage_metadata(
+        self,
+        raw_usage: Any,
+        *,
+        normalized_input: dict[str, Any],
+        reference_images: list[ReferenceImage],
+        output_image_count: int,
+    ) -> dict[str, Any]:
+        base: dict[str, Any]
+        if isinstance(raw_usage, dict):
+            base = dict(raw_usage)
+        else:
+            base = {}
+        if output_image_count > 0 and not _coerce_nonnegative_int(base.get("output_images")):
+            base["output_images"] = output_image_count
+        if output_image_count > 0 and not _coerce_nonnegative_int(base.get("images")):
+            base["images"] = output_image_count
+        input_image_count = len(reference_images)
+        if input_image_count > 0 and not _coerce_nonnegative_int(base.get("input_images")):
+            base["input_images"] = input_image_count
+        generation_quality = str(normalized_input.get("quality") or "").strip()
+        if generation_quality and not str(base.get("generation_quality") or "").strip():
+            base["generation_quality"] = generation_quality
+        generation_size = str(normalized_input.get("size") or "").strip()
+        if generation_size and not str(base.get("generation_size") or "").strip():
+            base["generation_size"] = generation_size
+        return base
 
     async def _resolve_reference_images(self, input_artifacts: list[dict[str, Any]]) -> list[ReferenceImage]:
         if not input_artifacts:
@@ -566,6 +647,35 @@ class ImageGeneratorAgent(AgentRuntime):
                 router_mode="edit_fallback",
             )
         return route
+
+    def _fallback_image_route(
+        self,
+        *,
+        route: ImageRouteDecision,
+        normalized_input: dict[str, Any],
+        reference_images: list[ReferenceImage],
+        error: ImageGeneratorAgentError,
+    ) -> ImageRouteDecision | None:
+        if not error.retryable:
+            return None
+        prefer_model = str(normalized_input.get("prefer_model") or "").strip().lower()
+        if prefer_model not in {"", "auto"}:
+            return None
+        if route.provider == "xai" and self.config.openai_api_key:
+            return ImageRouteDecision(
+                provider="openai",
+                model=self.config.openai_image_model,
+                reason=f"Retried via GPT Image 1.5 after xAI returned a retryable {error.code.lower()} error.",
+                router_mode="provider_fallback",
+            )
+        if route.provider == "openai" and self.config.xai_api_key and len(reference_images) <= 3:
+            return ImageRouteDecision(
+                provider="xai",
+                model=self.config.xai_image_model,
+                reason=f"Retried via Grok Imagine Image Pro after OpenAI returned a retryable {error.code.lower()} error.",
+                router_mode="provider_fallback",
+            )
+        return None
 
     def _resolve_input_artifact_path(self, raw_path: str) -> Path | None:
         value = str(raw_path or "").strip()

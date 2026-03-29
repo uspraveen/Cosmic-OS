@@ -1688,6 +1688,62 @@ def test_orchestrator_build_messages_includes_attachment_manifest(tmp_path) -> N
     assert "Do not claim to have directly viewed" in messages[-1]["content"]
 
 
+@pytest.mark.asyncio
+async def test_collect_specialist_receipt_captures_provider_model_and_fallback(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_specialist_provider.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    try:
+        receipts: list[dict[str, object]] = []
+        runtime._collect_specialist_receipt(  # noqa: SLF001
+            "delegate_to_agent",
+            {
+                "intent": "image.generate",
+                "agent_id": "cosmic/image-generator-agent:1.0.0",
+            },
+            json.dumps(
+                {
+                    "message": "Generated 1 image via openai:gpt-image-1.5.",
+                    "provider": "openai",
+                    "model": "gpt-image-1.5",
+                    "fallback_from": {
+                        "provider": "xai",
+                        "model": "grok-imagine-image-pro",
+                    },
+                    "delegation": {
+                        "intent": "image.generate",
+                        "agent_id": "cosmic/image-generator-agent:1.0.0",
+                    },
+                }
+            ),
+            specialist_receipts=receipts,
+        )
+    finally:
+        await runtime.stop()
+
+    assert receipts == [
+        {
+            "tool_name": "delegate_to_agent",
+            "intent": "image.generate",
+            "agent_id": "cosmic/image-generator-agent:1.0.0",
+            "agent_label": "image generator agent",
+            "activity": "delegated image.generate to image generator agent and generated 1 image via openai:gpt-image-1.5",
+            "provider": "openai",
+            "model": "gpt-image-1.5",
+            "fallback_from": {
+                "provider": "xai",
+                "model": "grok-imagine-image-pro",
+            },
+        }
+    ]
+
+
 def test_build_agentic_system_prompt_includes_dynamic_specialist_shortlist() -> None:
     prompt = build_agentic_system_prompt(
         featured_specialists=[

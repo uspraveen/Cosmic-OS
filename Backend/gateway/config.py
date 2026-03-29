@@ -71,6 +71,7 @@ class GatewayConfig:
     agent_email_integrations_db_path: Path = BACKEND_ROOT / "gateway" / "agent_email_integrations.db"
     sessions_db_path: Path = BACKEND_ROOT / "gateway" / "sessions.db"
     usage_db_path: Path = BACKEND_ROOT / "gateway" / "usage.db"
+    request_trace_db_path: Path = BACKEND_ROOT / "gateway" / "request_traces.db"
     routing_audit_db_path: Path = BACKEND_ROOT / "gateway" / "routing_audit.db"
     memory_write_audit_db_path: Path = BACKEND_ROOT / "gateway" / "memory_write_audit.db"
     capability_wishlist_db_path: Path = BACKEND_ROOT / "gateway" / "cosmics_capability_wishlist.db"
@@ -193,6 +194,12 @@ class GatewayConfig:
                 os.getenv(
                     "GATEWAY_USAGE_DB_PATH",
                     str(BACKEND_ROOT / "gateway" / "usage.db"),
+                )
+            ).expanduser(),
+            request_trace_db_path=Path(
+                os.getenv(
+                    "GATEWAY_REQUEST_TRACE_DB_PATH",
+                    str(BACKEND_ROOT / "gateway" / "request_traces.db"),
                 )
             ).expanduser(),
             routing_audit_db_path=Path(

@@ -106,6 +106,51 @@ async def test_agent_email_adapter_send_uses_cosmic_mail_draft_send_flow() -> No
     assert fake_client.created_payload["text_body"] == "Everything is green."
     assert fake_client.created_payload["html_body"] == "<div><p>Everything is green.</p></div>"
     assert fake_client.sent_draft_id == "draft_123"
+    message = {
+        "subject": "Morning update",
+        "content": "Everything is green.",
+        "to": [{"email": "owner@example.com", "name": "Owner"}],
+    }
+
+    await adapter.send(message, channel="agent-email")
+
+    assert message["email_delivery_status"] == "sent"
+    assert message["email_delivery"]["draft_id"] == "draft_123"
+
+
+@pytest.mark.asyncio
+async def test_agent_email_adapter_send_marks_approval_queue_status() -> None:
+    adapter = AgentEmailAdapter(
+        cosmic_mail_base_url="http://cosmic-mail.local",
+        cosmic_mail_api_token="token",
+        primary_mailbox_address="assistant@example.com",
+    )
+
+    class FakeClient:
+        async def resolve_mailbox(self, *, mailbox_id=None, mailbox_address=None):
+            assert mailbox_address == "assistant@example.com"
+            return {"id": "mbx_primary"}
+
+        async def create_draft(self, payload):
+            return {"id": "draft_queued"}
+
+        async def send_draft(self, draft_id: str):
+            assert draft_id == "draft_queued"
+            return {"queued_for_approval": True, "approval_id": "apr_123", "draft": {"id": "draft_queued"}}
+
+    adapter.client = FakeClient()  # type: ignore[assignment]
+
+    message = {
+        "subject": "Pending approval",
+        "content": "Needs review.",
+        "to": [{"email": "owner@example.com", "name": "Owner"}],
+    }
+
+    await adapter.send(message, channel="agent-email")
+
+    assert message["email_delivery_status"] == "queued_for_approval"
+    assert message["email_queued_for_approval"] is True
+    assert message["email_approval_id"] == "apr_123"
 
 
 @pytest.mark.asyncio

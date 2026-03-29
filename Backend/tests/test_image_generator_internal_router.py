@@ -94,6 +94,29 @@ async def test_route_image_request_heuristic_defaults_to_xai_without_router_llm(
 
 
 @pytest.mark.asyncio
+async def test_route_image_request_keeps_generic_launch_poster_on_xai() -> None:
+    cfg = ImageGeneratorAgentConfig(
+        enable_internal_router_llm=False,
+        openai_api_key="openai-key",
+        xai_api_key="xai-key",
+    )
+    async with httpx.AsyncClient() as client:
+        decision = await route_image_request(
+            cfg=cfg,
+            http_client=client,
+            agent_id="cosmic/image-generator-agent:1.0.0",
+            task_id="tsk_2b",
+            parent_task_id=None,
+            session_id="sess_2b",
+            request_id="req_2b",
+            payload={"prompt": "An Apple-like launch poster with a centered sphere on a black background"},
+        )
+
+    assert decision.provider == "xai"
+    assert decision.model == "grok-imagine-image-pro"
+
+
+@pytest.mark.asyncio
 async def test_route_image_request_falls_back_when_default_provider_credentials_are_missing() -> None:
     cfg = ImageGeneratorAgentConfig(
         enable_internal_router_llm=False,

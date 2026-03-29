@@ -20,7 +20,10 @@
     "attached_input_artifact_count": { "type": ["integer", "null"] },
     "attached_input_artifacts": { "type": ["array", "null"], "items": { "type": "object" } },
     "failed_input_artifact_count": { "type": ["integer", "null"] },
-    "failed_input_artifacts": { "type": ["array", "null"], "items": { "type": "object" } }
+    "failed_input_artifacts": { "type": ["array", "null"], "items": { "type": "object" } },
+    "delivery_status": { "type": ["string", "null"] },
+    "queued_for_approval": { "type": ["boolean", "null"] },
+    "approval_id": { "type": ["string", "null"] }
   },
   "required": ["response", "action"]
 }

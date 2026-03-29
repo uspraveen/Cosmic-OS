@@ -151,9 +151,9 @@
       "max_output_tokens": null,
       "recommended_headroom_reserve_tokens": 0,
       "pricing": {
-        "input_per_1m_usd": null,
-        "cached_input_per_1m_usd": null,
-        "output_per_1m_usd": null
+        "input_per_1m_usd": 0.25,
+        "cached_input_per_1m_usd": 0.025,
+        "output_per_1m_usd": 2.0
       },
       "capabilities": {
         "supports_cached_input_tokens": true,
@@ -179,9 +179,26 @@
       "max_output_tokens": null,
       "recommended_headroom_reserve_tokens": 0,
       "pricing": {
-        "input_per_1m_usd": null,
-        "cached_input_per_1m_usd": null,
-        "output_per_1m_usd": null
+        "input_per_1m_usd": 8.0,
+        "cached_input_per_1m_usd": 2.0,
+        "output_per_1m_usd": 32.0,
+        "generation_per_image_usd": {
+          "low": {
+            "1024x1024": 0.009,
+            "1024x1536": 0.013,
+            "1536x1024": 0.013
+          },
+          "medium": {
+            "1024x1024": 0.034,
+            "1024x1536": 0.05,
+            "1536x1024": 0.05
+          },
+          "high": {
+            "1024x1024": 0.133,
+            "1024x1536": 0.2,
+            "1536x1024": 0.2
+          }
+        }
       },
       "capabilities": {
         "supports_cached_input_tokens": true,
@@ -265,7 +282,9 @@
       "pricing": {
         "input_per_1m_usd": null,
         "cached_input_per_1m_usd": null,
-        "output_per_1m_usd": null
+        "output_per_1m_usd": null,
+        "input_image_each_usd": 0.07,
+        "output_image_each_usd": 0.07
       },
       "capabilities": {
         "supports_cached_input_tokens": false,

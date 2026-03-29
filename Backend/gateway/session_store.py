@@ -920,6 +920,35 @@ class SessionStore:
             if updated:
                 connection.commit()
 
+    def merge_message_metadata(self, message_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
+        if not message_id:
+            return None
+        normalized_patch = dict(patch or {})
+        if not normalized_patch:
+            return self.get_message(message_id)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT metadata_json
+                FROM messages
+                WHERE message_id = ?
+                LIMIT 1
+                """,
+                (message_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata.update(normalized_patch)
+            connection.execute(
+                "UPDATE messages SET metadata_json = ? WHERE message_id = ?",
+                (json.dumps(metadata, default=str), message_id),
+            )
+            connection.commit()
+        return self.get_message(message_id)
+
     def list_turn_ledger(
         self,
         session_id: str,

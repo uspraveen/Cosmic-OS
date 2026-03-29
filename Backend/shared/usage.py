@@ -303,9 +303,26 @@ def estimate_usage_cost_usd(
     if spec is None or not isinstance(spec.pricing, dict):
         return None
 
-    input_rate = _coerce_optional_float(spec.pricing.get("input_per_1m_usd"))
-    cached_input_rate = _coerce_optional_float(spec.pricing.get("cached_input_per_1m_usd"))
-    output_rate = _coerce_optional_float(spec.pricing.get("output_per_1m_usd"))
+    token_cost = _estimate_token_usage_cost_usd(spec.pricing, usage)
+    image_cost = _estimate_image_usage_cost_usd(spec.pricing, raw_usage)
+    has_token_usage = any(
+        int(usage.get(key, 0) or 0) > 0
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "reasoning_tokens")
+    )
+
+    if token_cost is not None and has_token_usage:
+        return round(token_cost, 10)
+    if token_cost is None and image_cost is None:
+        return None
+    if image_cost is not None:
+        return round(image_cost, 10)
+    return round(float(token_cost or 0.0), 10)
+
+
+def _estimate_token_usage_cost_usd(pricing: dict[str, Any], usage: dict[str, int]) -> float | None:
+    input_rate = _coerce_optional_float(pricing.get("input_per_1m_usd"))
+    cached_input_rate = _coerce_optional_float(pricing.get("cached_input_per_1m_usd"))
+    output_rate = _coerce_optional_float(pricing.get("output_per_1m_usd"))
 
     if input_rate is None and output_rate is None:
         return None
@@ -324,6 +341,69 @@ def estimate_usage_cost_usd(
     if output_rate is not None:
         total_cost += (completion_tokens / 1_000_000.0) * output_rate
 
+    return round(total_cost, 10)
+
+
+def _estimate_image_usage_cost_usd(pricing: dict[str, Any], raw_usage: Any) -> float | None:
+    if not isinstance(pricing, dict):
+        return None
+
+    input_image_rate = _coerce_optional_float(pricing.get("input_image_each_usd"))
+    output_image_rate = _coerce_optional_float(pricing.get("output_image_each_usd"))
+
+    output_image_count = _read_first_int(
+        raw_usage,
+        ["output_images", "images", "image_count"],
+    )
+    input_image_count = _read_first_int(
+        raw_usage,
+        ["input_images", "reference_images", "input_image_count"],
+    )
+
+    generation_table = pricing.get("generation_per_image_usd")
+    generation_quality = _read_first_text(raw_usage, ["generation_quality", "quality"]).lower()
+    generation_size = _read_first_text(raw_usage, ["generation_size", "size"])
+    generation_count = output_image_count
+
+    generation_rate = _lookup_generation_image_rate(
+        generation_table,
+        quality=generation_quality,
+        size=generation_size,
+    )
+
+    used_any_image_metric = any(
+        _read_path(raw_usage, candidate) is not None
+        for candidate in (
+            "output_images",
+            "images",
+            "image_count",
+            "input_images",
+            "reference_images",
+            "input_image_count",
+            "generation_quality",
+            "quality",
+            "generation_size",
+            "size",
+        )
+    )
+    if not used_any_image_metric:
+        return None
+
+    total_cost = 0.0
+    has_cost_component = False
+    if generation_rate is not None and generation_count > 0:
+        total_cost += generation_rate * generation_count
+        has_cost_component = True
+    else:
+        if input_image_rate is not None and input_image_count > 0:
+            total_cost += input_image_rate * input_image_count
+            has_cost_component = True
+        if output_image_rate is not None and output_image_count > 0:
+            total_cost += output_image_rate * output_image_count
+            has_cost_component = True
+
+    if not has_cost_component:
+        return None
     return round(total_cost, 10)
 
 
@@ -380,6 +460,22 @@ def extract_provider_cost_usd(raw_usage: Any) -> float | None:
         except (TypeError, ValueError):
             continue
     return None
+
+
+def _lookup_generation_image_rate(
+    generation_table: Any,
+    *,
+    quality: str,
+    size: str,
+) -> float | None:
+    if not isinstance(generation_table, dict):
+        return None
+    if not quality or quality == "auto" or not size:
+        return None
+    quality_table = generation_table.get(quality)
+    if not isinstance(quality_table, dict):
+        return None
+    return _coerce_optional_float(quality_table.get(size))
 
 
 def _coerce_optional_float(value: Any) -> float | None:
@@ -440,6 +536,15 @@ def _read_first_int(raw_usage: Any, candidates: list[str]) -> int:
         except (TypeError, ValueError):
             continue
     return 0
+
+
+def _read_first_text(raw_usage: Any, candidates: list[str]) -> str:
+    for candidate in candidates:
+        value = _read_path(raw_usage, candidate)
+        normalized = str(value or "").strip()
+        if normalized:
+            return normalized
+    return ""
 
 
 def _read_path(value: Any, path: str) -> Any:

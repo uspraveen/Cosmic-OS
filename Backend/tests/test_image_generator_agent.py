@@ -7,6 +7,7 @@ import pytest
 
 from agents.image_generator_agent.agent import ImageGeneratorAgent, ProviderGenerationResult, ProviderImage, ReferenceImage
 from agents.image_generator_agent.config import ImageGeneratorAgentConfig
+from agents.image_generator_agent.internal_router import ImageRouteDecision
 from shared.contracts import TaskEnvelope, sign_task_envelope
 
 
@@ -115,6 +116,78 @@ async def test_image_generate_persists_artifacts_with_model_name(monkeypatch: py
     assert "grok-imagine-image-pro" in Path(deliverable.path).name
     assert result.output["images"][0]["filename"].endswith(".png")
     assert "grok-imagine-image-pro" in result.output["images"][0]["filename"]
+
+
+@pytest.mark.asyncio
+async def test_image_generate_retries_with_openai_after_retryable_xai_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import agents.image_generator_agent.agent as image_agent_module
+
+    cfg = ImageGeneratorAgentConfig(
+        gateway_internal_token="",
+        openai_api_key="openai-key",
+        xai_api_key="xai-key",
+        enable_internal_router_llm=False,
+    )
+    agent = ImageGeneratorAgent(
+        redis_client=_FakeRedis(),
+        config=cfg,
+        agent_secret="test-secret",
+        artifacts_root=tmp_path / "runs" / "artifacts",
+        store_root=tmp_path / "store",
+        runtime_root=tmp_path / "runtime",
+    )
+    await agent.on_startup()
+
+    async def fake_route_image_request(**kwargs):
+        del kwargs
+        return ImageRouteDecision(
+            provider="xai",
+            model="grok-imagine-image-pro",
+            reason="Default route.",
+            router_mode="heuristic",
+        )
+
+    calls: list[str] = []
+
+    async def fake_generate(*, task, normalized_input, route, reference_images):
+        del task, normalized_input, reference_images
+        calls.append(route.provider)
+        if route.provider == "xai":
+            raise image_agent_module.ImageGeneratorAgentError(
+                code="NETWORK_ERROR",
+                message="xai returned HTTP 503.",
+                retryable=True,
+                next_action="retry",
+                status_code=503,
+            )
+        return ProviderGenerationResult(
+            provider="openai",
+            model="gpt-image-1.5",
+            request_payload={"prompt": "Poster"},
+            response_payload={"id": "img_openai_1", "data": [{"b64_json": "<omitted>"}]},
+            raw_usage={"images": 1},
+            provider_request_id="img_openai_1",
+            images=[ProviderImage(data=_PNG_BYTES, mime="image/png", revised_prompt=None, width=1, height=1)],
+        )
+
+    monkeypatch.setattr(image_agent_module, "route_image_request", fake_route_image_request)
+    monkeypatch.setattr(agent, "_generate_with_provider", fake_generate)
+
+    result = await agent.execute(_task_for("image.generate", {"prompt": "Poster"}))
+
+    assert result.status == "completed"
+    assert calls == ["xai", "openai"]
+    assert result.output["provider"] == "openai"
+    assert result.output["model"] == "gpt-image-1.5"
+    assert result.output["fallback_from"] == {
+        "provider": "xai",
+        "model": "grok-imagine-image-pro",
+        "error_code": "NETWORK_ERROR",
+        "error_message": "xai returned HTTP 503.",
+    }
 
 
 @pytest.mark.asyncio
@@ -697,3 +770,35 @@ def base64_jpeg() -> str:
     import base64
 
     return base64.b64encode(_JPEG_BYTES).decode("ascii")
+
+
+def test_augment_billing_usage_metadata_adds_image_counts_and_request_shape(tmp_path: Path) -> None:
+    cfg = ImageGeneratorAgentConfig(
+        gateway_internal_token="",
+        openai_api_key="openai-key",
+        xai_api_key="xai-key",
+        enable_internal_router_llm=False,
+    )
+    agent = ImageGeneratorAgent(
+        redis_client=_FakeRedis(),
+        config=cfg,
+        agent_secret="test-secret",
+        artifacts_root=tmp_path / "runs" / "artifacts",
+        store_root=tmp_path / "store",
+        runtime_root=tmp_path / "runtime",
+    )
+
+    usage = agent._augment_billing_usage_metadata(
+        None,
+        normalized_input={"size": "1024x1536", "quality": "high"},
+        reference_images=[
+            ReferenceImage(artifact_ref={"artifact_id": "art_1"}, filename="ref.png", mime="image/png", data=_PNG_BYTES)
+        ],
+        output_image_count=2,
+    )
+
+    assert usage["images"] == 2
+    assert usage["output_images"] == 2
+    assert usage["input_images"] == 1
+    assert usage["generation_size"] == "1024x1536"
+    assert usage["generation_quality"] == "high"

@@ -432,6 +432,7 @@ class EmailAgent(AgentRuntime):
             "attachments": attachments,
             "action": "processed_inbound",
             "sent": bool(auto_reply and auto_reply.get("sent")),
+            "delivery_status": self._safe_text(auto_reply.get("delivery_status")) if isinstance(auto_reply, dict) else None,
         }
         self._record_session_run(
             task=task,
@@ -553,6 +554,7 @@ class EmailAgent(AgentRuntime):
                     cc_recipients=cc_recipients,
                 )
                 sent_payload = None
+                delivery = None
                 if send:
                     mailbox = await self._resolve_mailbox(
                         mailbox_address=mailbox_address,
@@ -571,6 +573,7 @@ class EmailAgent(AgentRuntime):
                         thread_id,
                         reply_payload,
                     )
+                    delivery = self._normalize_mail_delivery_result(sent_payload, thread_id=thread_id)
                     artifacts.append(
                         self._write_json_artifact(
                             task_id=task.task_id,
@@ -582,12 +585,15 @@ class EmailAgent(AgentRuntime):
                         )
                     )
                 response = drafted["summary"]
+                delivery_note = self._mail_delivery_note(delivery)
+                if send and delivery_note:
+                    response = f"{response} {delivery_note}".strip()
                 output = {
                     "response": response,
                     "action": "reply_thread",
-                    "sent": bool(sent_payload),
-                    "thread_id": thread_id,
-                    "message_id": self._safe_text(sent_payload.get("id")) if isinstance(sent_payload, dict) else None,
+                    "sent": bool(delivery and delivery.get("sent")),
+                    "thread_id": self._safe_text(delivery.get("thread_id")) if isinstance(delivery, dict) else thread_id,
+                    "message_id": self._safe_text(delivery.get("message_id")) if isinstance(delivery, dict) else None,
                     "draft_id": None,
                     "summary": response,
                     "to_recipients": recipients,
@@ -598,6 +604,9 @@ class EmailAgent(AgentRuntime):
                     "docs_tools": default_docs_tools,
                     "resolved_attachment": None,
                     "attachment_resolution_status": None,
+                    "delivery_status": self._safe_text(delivery.get("delivery_status")) if isinstance(delivery, dict) else None,
+                    "queued_for_approval": bool(delivery.get("queued_for_approval")) if isinstance(delivery, dict) else False,
+                    "approval_id": self._safe_text(delivery.get("approval_id")) if isinstance(delivery, dict) else None,
                 }
                 artifacts.append(
                     self._write_json_artifact(
@@ -665,8 +674,10 @@ class EmailAgent(AgentRuntime):
                         "failed": raw_upload_summary.get("failed") if isinstance(raw_upload_summary.get("failed"), list) else [],
                     }
             sent_payload = None
+            delivery = None
             if send and draft_id:
                 sent_payload = await self.mail_client.send_draft(draft_id)
+                delivery = self._normalize_mail_delivery_result(sent_payload, draft_id=draft_id)
             artifacts.append(
                 self._write_json_artifact(
                     task_id=task.task_id,
@@ -690,15 +701,18 @@ class EmailAgent(AgentRuntime):
                 )
             attachment_note = self._build_outbound_attachment_note(upload_summary)
             response_text = drafted["summary"]
+            delivery_note = self._mail_delivery_note(delivery)
             if attachment_note:
                 response_text = f"{response_text} {attachment_note}".strip()
+            if send and delivery_note:
+                response_text = f"{response_text} {delivery_note}".strip()
             output = {
                 "response": response_text,
                 "action": "compose_email",
-                "sent": bool(sent_payload),
-                "thread_id": self._safe_text(sent_payload.get("thread_id")) if isinstance(sent_payload, dict) else None,
-                "message_id": self._safe_text(sent_payload.get("id")) if isinstance(sent_payload, dict) else None,
-                "draft_id": draft_id or None,
+                "sent": bool(delivery and delivery.get("sent")),
+                "thread_id": self._safe_text(delivery.get("thread_id")) if isinstance(delivery, dict) else None,
+                "message_id": self._safe_text(delivery.get("message_id")) if isinstance(delivery, dict) else None,
+                "draft_id": self._safe_text(delivery.get("draft_id")) if isinstance(delivery, dict) else draft_id or None,
                 "summary": response_text,
                 "to_recipients": recipients,
                 "cc_recipients": cc_recipients,
@@ -712,6 +726,9 @@ class EmailAgent(AgentRuntime):
                 "attached_input_artifacts": upload_summary["uploaded"],
                 "failed_input_artifact_count": len(upload_summary["failed"]),
                 "failed_input_artifacts": upload_summary["failed"],
+                "delivery_status": self._safe_text(delivery.get("delivery_status")) if isinstance(delivery, dict) else None,
+                "queued_for_approval": bool(delivery.get("queued_for_approval")) if isinstance(delivery, dict) else False,
+                "approval_id": self._safe_text(delivery.get("approval_id")) if isinstance(delivery, dict) else None,
             }
         else:
             search_results = await self._search_email(task=task, goal=goal, query=query, mailbox_address=mailbox_address)
@@ -2420,10 +2437,14 @@ class EmailAgent(AgentRuntime):
                 retryable=exc.status_code is None or exc.status_code >= 500,
                 next_action="retry" if exc.status_code is None or exc.status_code >= 500 else "escalate",
             ) from exc
+        delivery = self._normalize_mail_delivery_result(payload, thread_id=thread_id)
         return {
-            "sent": True,
-            "thread_id": thread_id,
-            "message_id": self._safe_text(payload.get("id")) or None,
+            "sent": bool(delivery.get("sent")),
+            "delivery_status": self._safe_text(delivery.get("delivery_status")) or None,
+            "queued_for_approval": bool(delivery.get("queued_for_approval")),
+            "approval_id": self._safe_text(delivery.get("approval_id")) or None,
+            "thread_id": self._safe_text(delivery.get("thread_id")) or thread_id,
+            "message_id": self._safe_text(delivery.get("message_id")) or None,
             "body": body,
         }
 
@@ -3002,6 +3023,56 @@ class EmailAgent(AgentRuntime):
                 retryable=exc.status_code is None or exc.status_code >= 500,
                 next_action="retry" if exc.status_code is None or exc.status_code >= 500 else "escalate",
             ) from exc
+
+    def _normalize_mail_delivery_result(
+        self,
+        payload: dict[str, Any] | None,
+        *,
+        draft_id: str | None = None,
+        thread_id: str | None = None,
+    ) -> dict[str, Any]:
+        body = payload if isinstance(payload, dict) else {}
+        queued_for_approval = bool(body.get("queued_for_approval"))
+        approval_id = self._safe_text(body.get("approval_id")) or None
+        delivery_status = "queued_for_approval" if queued_for_approval or approval_id else "sent"
+        message_payload = body.get("message") if isinstance(body.get("message"), dict) else {}
+        draft_payload = body.get("draft") if isinstance(body.get("draft"), dict) else {}
+        thread_payload = body.get("thread") if isinstance(body.get("thread"), dict) else {}
+        resolved_message_id = (
+            self._safe_text(message_payload.get("id"))
+            or self._safe_text(body.get("message_id"))
+            or self._safe_text(body.get("sent_message_id"))
+            or None
+        )
+        resolved_thread_id = (
+            self._safe_text(thread_payload.get("id"))
+            or self._safe_text(body.get("thread_id"))
+            or self._safe_text(message_payload.get("thread_id"))
+            or self._safe_text(draft_payload.get("thread_id"))
+            or self._safe_text(thread_id)
+            or None
+        )
+        resolved_draft_id = self._safe_text(draft_payload.get("id")) or self._safe_text(body.get("draft_id")) or self._safe_text(draft_id) or None
+        return {
+            "delivery_status": delivery_status,
+            "queued_for_approval": queued_for_approval,
+            "approval_id": approval_id,
+            "sent": delivery_status == "sent",
+            "acted": delivery_status in {"sent", "queued_for_approval"},
+            "message_id": resolved_message_id,
+            "thread_id": resolved_thread_id,
+            "draft_id": resolved_draft_id,
+        }
+
+    def _mail_delivery_note(self, delivery: dict[str, Any] | None) -> str:
+        if not isinstance(delivery, dict):
+            return ""
+        status = self._safe_text(delivery.get("delivery_status"))
+        if status == "sent":
+            return "Email sent."
+        if status == "queued_for_approval":
+            return "Email queued for approval."
+        return ""
 
     async def _ensure_mail_client_ready(self) -> None:
         await self._refresh_mail_client_from_store()

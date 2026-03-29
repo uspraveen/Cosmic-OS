@@ -730,6 +730,19 @@ async def get_session_history(
     return {"session_id": session_id, "messages": runtime.get_session_history(session_id)}
 
 
+@router.get("/sessions/{session_id}/request-traces")
+async def get_session_request_traces(
+    session_id: str,
+    limit: int = 40,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return {
+        "session_id": session_id,
+        "request_traces": runtime.list_session_request_traces(session_id, limit=limit),
+    }
+
+
 @router.get("/artifacts/content/{artifact_id}")
 async def get_signed_artifact_content(
     artifact_id: str,

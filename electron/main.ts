@@ -1709,6 +1709,14 @@ app.whenReady().then(() => {
     return callGatewayJson(config, `/sessions/${encodeURIComponent(sessionId)}`)
   })
 
+  ipcMain.handle('gateway:get-request-traces', async (_, sessionId: string) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, `/sessions/${encodeURIComponent(sessionId)}/request-traces`)
+  })
+
   ipcMain.handle('gateway:get-system-metrics', async (_, forceRefresh?: boolean) => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {

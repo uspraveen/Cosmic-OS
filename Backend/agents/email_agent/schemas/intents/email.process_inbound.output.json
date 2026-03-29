@@ -15,7 +15,9 @@
     "matched_instructions": { "type": "array", "items": { "type": "object" } },
     "instruction_match_reason": { "type": ["string", "null"] },
     "auto_reply": { "type": ["object", "null"] },
-    "attachments": { "type": "array", "items": { "type": "object" } }
+    "attachments": { "type": "array", "items": { "type": "object" } },
+    "sent": { "type": ["boolean", "null"] },
+    "delivery_status": { "type": ["string", "null"] }
   },
   "required": ["response", "summary", "thread_id", "message_id", "attachments"]
 }

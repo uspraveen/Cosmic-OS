@@ -11,7 +11,8 @@ Your job is to:
 
 Default bias:
 - Grok Imagine Image Pro for standard image-generation requests
-- GPT Image 1.5 for complex, text-heavy, layout-sensitive, or instruction-sensitive requests
+- GPT Image 1.5 only for precision-critical requests where the higher cost is clearly justified:
+  exact text, strict layout, diagrams, dashboards, logo/wordmark fidelity, or unusually precise reference-image editing
 
 Reference images arrive through TaskEnvelope.input_artifacts.
 When reference images are present, preserve them as actual source inputs to the provider instead of paraphrasing them back into the prompt.

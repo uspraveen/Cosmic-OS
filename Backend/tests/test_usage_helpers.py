@@ -81,6 +81,39 @@ def test_build_usage_event_estimates_cost_from_model_specs_when_provider_cost_mi
     assert event.estimated_cost_usd == 0.00482
 
 
+def test_build_usage_event_estimates_flat_image_cost_from_model_specs() -> None:
+    event = build_usage_event(
+        metered_call=begin_metered_call(prefix="call"),
+        source_component="agent",
+        source_id="cosmic/image-generator-agent:1.0.0",
+        operation="agent.image.generate.provider",
+        model_key="xai:grok-imagine-image-pro",
+        raw_usage={
+            "images": 2,
+            "input_images": 1,
+        },
+    )
+
+    assert event.estimated_cost_usd == 0.21
+
+
+def test_build_usage_event_estimates_openai_image_generation_cost_from_pricing_table() -> None:
+    event = build_usage_event(
+        metered_call=begin_metered_call(prefix="call"),
+        source_component="agent",
+        source_id="cosmic/image-generator-agent:1.0.0",
+        operation="agent.image.generate.provider",
+        model_key="openai:gpt-image-1.5",
+        raw_usage={
+            "images": 1,
+            "generation_quality": "high",
+            "generation_size": "1024x1536",
+        },
+    )
+
+    assert event.estimated_cost_usd == 0.2
+
+
 def test_post_usage_event_accepts_202_response() -> None:
     class FakeResponse:
         status_code = 202

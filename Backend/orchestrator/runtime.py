@@ -2391,6 +2391,25 @@ class OrchestratorRuntime:
             "agent_label": self._activity_agent_label(agent_id),
             "activity": activity,
         }
+        provider = self._activity_excerpt(data.get("provider"), limit=48)
+        model = self._activity_excerpt(data.get("model"), limit=96)
+        if provider:
+            receipt["provider"] = provider
+        if model:
+            receipt["model"] = model
+        fallback_from = data.get("fallback_from") if isinstance(data.get("fallback_from"), dict) else {}
+        if fallback_from:
+            fallback_provider = self._activity_excerpt(fallback_from.get("provider"), limit=48)
+            fallback_model = self._activity_excerpt(fallback_from.get("model"), limit=96)
+            if fallback_provider or fallback_model:
+                receipt["fallback_from"] = {
+                    key: value
+                    for key, value in {
+                        "provider": fallback_provider,
+                        "model": fallback_model,
+                    }.items()
+                    if value
+                }
         if intent_name == "tabular.create_workbook":
             bundle_id = self._activity_excerpt(data.get("bundle_id"), limit=96)
             workbooks = data.get("workbooks") if isinstance(data.get("workbooks"), list) else []

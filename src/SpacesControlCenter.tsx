@@ -196,6 +196,36 @@ interface GatewaySessionHistoryMessage {
   metadata: Record<string, unknown> | null
 }
 
+interface GatewayRequestTraceEvent {
+  at: string | null
+  event_type: string
+  stage: string
+  status: string
+  title: string
+  detail: string | null
+  metadata: Record<string, unknown> | null
+}
+
+interface GatewayRequestTrace {
+  request_id: string
+  session_id: string
+  channel: string
+  route: string
+  source: string | null
+  source_id: string | null
+  task_id: string | null
+  user_query_excerpt: string | null
+  status: string
+  final_event_type: string | null
+  final_message: string | null
+  specialist_receipts: Array<Record<string, unknown>>
+  delivery: Record<string, unknown> | null
+  events: GatewayRequestTraceEvent[]
+  created_at: string | null
+  updated_at: string | null
+  completed_at: string | null
+}
+
 interface GatewayAgentEmailStatus {
   configured: boolean
   connected: boolean
@@ -793,6 +823,54 @@ function normalizeGatewaySessionHistoryPayload(raw: unknown): { sessionId: strin
     })
   }
   return { sessionId, messages }
+}
+
+function normalizeGatewayRequestTracePayload(raw: unknown): { sessionId: string | null; requestTraces: GatewayRequestTrace[] } {
+  const source = toRecord(raw)
+  const sessionId = typeof source?.session_id === 'string' && source.session_id.trim() ? source.session_id.trim() : null
+  const tracesRaw = toArray(source?.request_traces)
+  const requestTraces: GatewayRequestTrace[] = []
+  for (const item of tracesRaw) {
+    const row = toRecord(item)
+    if (!row) continue
+    const requestId = String(row.request_id || '').trim()
+    if (!requestId) continue
+    const eventsRaw = toArray(row.events)
+    const events: GatewayRequestTraceEvent[] = []
+    for (const eventItem of eventsRaw) {
+      const event = toRecord(eventItem)
+      if (!event) continue
+      events.push({
+        at: typeof event.at === 'string' && event.at.trim() ? event.at.trim() : null,
+        event_type: String(event.event_type || '').trim() || 'event',
+        stage: String(event.stage || '').trim() || 'event',
+        status: String(event.status || '').trim() || 'unknown',
+        title: String(event.title || event.event_type || '').trim() || 'Event',
+        detail: typeof event.detail === 'string' && event.detail.trim() ? event.detail.trim() : null,
+        metadata: toRecord(event.metadata),
+      })
+    }
+    requestTraces.push({
+      request_id: requestId,
+      session_id: typeof row.session_id === 'string' && row.session_id.trim() ? row.session_id.trim() : sessionId || '',
+      channel: String(row.channel || '').trim() || 'unknown',
+      route: String(row.route || '').trim() || 'opus',
+      source: typeof row.source === 'string' && row.source.trim() ? row.source.trim() : null,
+      source_id: typeof row.source_id === 'string' && row.source_id.trim() ? row.source_id.trim() : null,
+      task_id: typeof row.task_id === 'string' && row.task_id.trim() ? row.task_id.trim() : null,
+      user_query_excerpt: typeof row.user_query_excerpt === 'string' && row.user_query_excerpt.trim() ? row.user_query_excerpt.trim() : null,
+      status: String(row.status || '').trim() || 'unknown',
+      final_event_type: typeof row.final_event_type === 'string' && row.final_event_type.trim() ? row.final_event_type.trim() : null,
+      final_message: typeof row.final_message === 'string' && row.final_message.trim() ? row.final_message.trim() : null,
+      specialist_receipts: toArray(row.specialist_receipts).map((receipt) => toRecord(receipt)).filter(Boolean) as Array<Record<string, unknown>>,
+      delivery: toRecord(row.delivery),
+      events,
+      created_at: typeof row.created_at === 'string' && row.created_at.trim() ? row.created_at.trim() : null,
+      updated_at: typeof row.updated_at === 'string' && row.updated_at.trim() ? row.updated_at.trim() : null,
+      completed_at: typeof row.completed_at === 'string' && row.completed_at.trim() ? row.completed_at.trim() : null,
+    })
+  }
+  return { sessionId, requestTraces }
 }
 
 function normalizeGatewayAgentEmailStatus(raw: unknown): GatewayAgentEmailStatus {
@@ -1719,9 +1797,11 @@ export default function SpacesControlCenter({
   const [sessionsFetchedAt, setSessionsFetchedAt] = useState<number | null>(null)
   const [selectedSessionId, setSelectedSessionId] = useState('')
   const [selectedSessionMessages, setSelectedSessionMessages] = useState<GatewaySessionHistoryMessage[]>([])
+  const [selectedSessionRequestTraces, setSelectedSessionRequestTraces] = useState<GatewayRequestTrace[]>([])
   const [selectedSessionLoading, setSelectedSessionLoading] = useState(false)
   const [selectedSessionError, setSelectedSessionError] = useState<string | null>(null)
   const [selectedSessionFetchedAt, setSelectedSessionFetchedAt] = useState<number | null>(null)
+  const [selectedSessionTraceError, setSelectedSessionTraceError] = useState<string | null>(null)
   const [sessionsListCollapsed, setSessionsListCollapsed] = useState(false)
   const [sessionsJumpToBottomVisible, setSessionsJumpToBottomVisible] = useState(false)
   const sessionsDetailScrollRef = useRef<HTMLDivElement>(null)
@@ -2062,6 +2142,33 @@ export default function SpacesControlCenter({
     }
   }, [gatewayConnected, gatewayDetail])
 
+  const requestSelectedSessionRequestTraces = useCallback(async (sessionId: string) => {
+    const targetId = String(sessionId || '').trim()
+    if (!targetId) {
+      setSelectedSessionRequestTraces([])
+      setSelectedSessionTraceError(null)
+      return
+    }
+    if (!gatewayConnected) {
+      setSelectedSessionRequestTraces([])
+      setSelectedSessionTraceError(String(gatewayDetail || 'The desktop app is not connected to your VM yet.'))
+      return
+    }
+    if (!window.cosmic?.getGatewayRequestTraces) {
+      setSelectedSessionTraceError('Gateway request trace bridge is unavailable.')
+      return
+    }
+    try {
+      const raw = await window.cosmic.getGatewayRequestTraces(targetId)
+      const normalized = normalizeGatewayRequestTracePayload(raw)
+      setSelectedSessionRequestTraces(normalized.requestTraces)
+      setSelectedSessionTraceError(null)
+    } catch (error: unknown) {
+      setSelectedSessionRequestTraces([])
+      setSelectedSessionTraceError(toErrorMessage(error, 'Unable to load request traces for this session.'))
+    }
+  }, [gatewayConnected, gatewayDetail])
+
   useEffect(() => {
     if (!active || page !== 'sessions') {
       return
@@ -2106,12 +2213,15 @@ export default function SpacesControlCenter({
     }
     if (!selectedSessionId) {
       setSelectedSessionMessages([])
+      setSelectedSessionRequestTraces([])
       setSelectedSessionFetchedAt(null)
       setSelectedSessionError(null)
+      setSelectedSessionTraceError(null)
       return
     }
     requestSelectedSessionHistory(selectedSessionId, true)
-  }, [active, page, selectedSessionId, requestSelectedSessionHistory])
+    requestSelectedSessionRequestTraces(selectedSessionId)
+  }, [active, page, selectedSessionId, requestSelectedSessionHistory, requestSelectedSessionRequestTraces])
 
   const gatewayStatus = useMemo(() => normalizeGatewayState(gatewayState), [gatewayState])
   const today = useMemo(() => new Date(), [])
@@ -6032,6 +6142,7 @@ export default function SpacesControlCenter({
       ? new Date(sessionsFetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
       : '—'
     const selectedMessageCount = selectedSessionMessages.length
+    const selectedTraceCount = selectedSessionRequestTraces.length
     const selectedLastUpdatedLabel = selectedSessionFetchedAt
       ? new Date(selectedSessionFetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
       : '—'
@@ -6039,6 +6150,7 @@ export default function SpacesControlCenter({
       `Started ${formatSessionMetaStamp(selectedSession?.created_at ?? null)}`,
       `Active ${formatSessionMetaStamp(selectedSession?.updated_at ?? null)}`,
       `${selectedMessageCount} ${selectedMessageCount === 1 ? 'message' : 'messages'}`,
+      `${selectedTraceCount} ${selectedTraceCount === 1 ? 'trace' : 'traces'}`,
       selectedSessionCompactedSummary ? 'Summary on file' : 'No summary',
       `History ${selectedLastUpdatedLabel}`,
     ].join(' · ')
@@ -6249,6 +6361,85 @@ export default function SpacesControlCenter({
                               <p>This session exists, but there is no readable message history to show yet.</p>
                             </div>
                           )}
+                        </section>
+                      ) : null}
+
+                      {!selectedSessionLoading ? (
+                        <section className="agent-email-console-card spaces-sessions-traces-card">
+                          <div className="agent-email-console-card-head">
+                            <h4>Request traces</h4>
+                            <span className="agent-email-console-muted">
+                              Last {selectedSessionRequestTraces.length} requests
+                            </span>
+                          </div>
+                          {selectedSessionTraceError ? <div className="spaces-agents-error">{selectedSessionTraceError}</div> : null}
+                          {!selectedSessionTraceError && selectedSessionRequestTraces.length > 0 ? (
+                            <div className="spaces-session-trace-list">
+                              {selectedSessionRequestTraces.map((trace) => {
+                                const deliveryStatus = typeof trace.delivery?.status === 'string' ? trace.delivery.status : ''
+                                return (
+                                  <article key={trace.request_id} className="spaces-session-trace-card">
+                                    <header className="spaces-session-trace-head">
+                                      <div>
+                                        <div className="spaces-session-trace-kicker">Request</div>
+                                        <h5 title={trace.request_id}>{trace.user_query_excerpt || trace.request_id}</h5>
+                                      </div>
+                                      <div className="spaces-session-trace-badges">
+                                        <span className={`spaces-session-trace-pill is-${trace.status}`}>{trace.status}</span>
+                                        {deliveryStatus ? (
+                                          <span className="spaces-session-trace-pill is-delivery">{deliveryStatus}</span>
+                                        ) : null}
+                                      </div>
+                                    </header>
+                                    <div className="spaces-session-trace-meta">
+                                      <span title={trace.request_id}>{trace.request_id}</span>
+                                      <span>{trace.route}</span>
+                                      <span>{trace.channel}</span>
+                                      {trace.task_id ? <span title={trace.task_id}>task {trace.task_id}</span> : null}
+                                      {trace.updated_at ? <span>{formatSessionAbsolute(trace.updated_at)}</span> : null}
+                                    </div>
+                                    {trace.specialist_receipts.length > 0 ? (
+                                      <div className="spaces-session-trace-specialists">
+                                        {trace.specialist_receipts.map((receipt, index) => {
+                                          const label = String(receipt.agent_label || receipt.intent || receipt.agent_id || `specialist-${index + 1}`)
+                                          const provider = typeof receipt.provider === 'string' ? receipt.provider : ''
+                                          const model = typeof receipt.model === 'string' ? receipt.model : ''
+                                          const suffix = [provider, model].filter(Boolean).join(':')
+                                          return (
+                                            <span key={`${trace.request_id}-receipt-${index}`} className="spaces-session-trace-specialist-pill">
+                                              {suffix ? `${label} · ${suffix}` : label}
+                                            </span>
+                                          )
+                                        })}
+                                      </div>
+                                    ) : null}
+                                    {trace.events.length > 0 ? (
+                                      <div className="spaces-session-trace-timeline">
+                                        {trace.events.map((event, index) => (
+                                          <div key={`${trace.request_id}-event-${index}`} className="spaces-session-trace-event">
+                                            <div className="spaces-session-trace-event-head">
+                                              <span className="spaces-session-trace-event-title">{event.title}</span>
+                                              <span className={`spaces-session-trace-event-pill is-${event.status}`}>{event.status}</span>
+                                            </div>
+                                            <div className="spaces-session-trace-event-meta">
+                                              <span>{event.stage}</span>
+                                              {event.at ? <span>{formatSessionAbsolute(event.at)}</span> : null}
+                                            </div>
+                                            {event.detail ? <p className="spaces-session-trace-event-detail">{event.detail}</p> : null}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    ) : null}
+                                  </article>
+                                )
+                              })}
+                            </div>
+                          ) : !selectedSessionTraceError ? (
+                            <div className="spaces-sessions-detail-placeholder">
+                              <strong>No request traces yet</strong>
+                              <p>Gateway has not recorded request-level execution detail for this session yet.</p>
+                            </div>
+                          ) : null}
                         </section>
                       ) : null}
                       <div ref={sessionsDetailAnchorRef} className="spaces-sessions-scroll-anchor" aria-hidden />

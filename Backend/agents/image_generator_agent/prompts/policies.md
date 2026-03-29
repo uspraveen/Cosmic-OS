@@ -7,6 +7,9 @@
 - Include the generation model name in image artifact filenames.
 - If both providers are unavailable, fail clearly with an auth/configuration error.
 - When the request is ambiguous, prefer the default provider rather than inventing a new routing policy.
+- Treat GPT Image 1.5 as a last-resort precision path because it is materially more expensive than Grok Imagine Image Pro.
+- Do not route to GPT Image 1.5 for generic “make it better”, “make it cinematic”, or broadly creative requests.
+- Reserve GPT Image 1.5 for strict text rendering, layout-sensitive compositions, diagrams, UI/dashboard mockups, logo/wordmark fidelity, or high-control reference-image edits.
 - Do not push long transcripts into provider prompts; keep prompts compact and task-native.
 - When reference images are provided, treat the request as an edit/reference-image workflow rather than plain text-to-image.
 - Do not silently drop reference images. If the artifacts cannot be loaded, fail clearly.

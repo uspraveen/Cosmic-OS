@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -332,6 +333,7 @@ async def test_email_agent_reason_infers_send_from_plain_goal(tmp_path: Path, mo
     async def fake_upload_input_artifacts_to_draft(*args, **kwargs):
         return {"attempted": 0, "uploaded": [], "failed": []}
 
+    monkeypatch.setattr(agent, "_ensure_mail_client_ready", AsyncMock(return_value=None))
     monkeypatch.setattr(agent, "_compose_new_email", fake_compose_new_email)
     monkeypatch.setattr(agent, "_create_outbound_draft", fake_create_outbound_draft)
     monkeypatch.setattr(agent, "_upload_input_artifacts_to_draft", fake_upload_input_artifacts_to_draft)
@@ -367,6 +369,75 @@ async def test_email_agent_reason_infers_send_from_plain_goal(tmp_path: Path, mo
     assert result.output["draft_id"] == "draft_456"
     assert result.output["message_id"] == "msg_123"
     assert result.output["attached_input_artifact_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_email_agent_reason_compose_reports_approval_queue_truthfully(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+            enable_internal_llm=True,
+        ),
+    )
+
+    async def fake_compose_new_email(**kwargs):
+        return {
+            "subject": "Queued update",
+            "body": "Please review this before sending.",
+            "summary": "Prepared an outbound email draft.",
+        }
+
+    async def fake_create_outbound_draft(**kwargs):
+        return {"id": "draft_queued"}
+
+    async def fake_upload_input_artifacts_to_draft(*args, **kwargs):
+        return {"attempted": 0, "uploaded": [], "failed": []}
+
+    monkeypatch.setattr(agent, "_compose_new_email", fake_compose_new_email)
+    monkeypatch.setattr(agent, "_ensure_mail_client_ready", AsyncMock(return_value=None))
+    monkeypatch.setattr(agent, "_create_outbound_draft", fake_create_outbound_draft)
+    monkeypatch.setattr(agent, "_upload_input_artifacts_to_draft", fake_upload_input_artifacts_to_draft)
+
+    class FakeMailClient:
+        base_url = "http://cosmic-mail.local"
+        api_token = "mail-token"
+        timeout_sec = 20.0
+
+        async def aclose(self):
+            return None
+
+        async def send_draft(self, draft_id):
+            assert draft_id == "draft_queued"
+            return {
+                "queued_for_approval": True,
+                "approval_id": "apr_123",
+                "draft": {"id": "draft_queued"},
+            }
+
+    agent.mail_client = FakeMailClient()  # type: ignore[assignment]
+
+    task = _make_task(
+        intent="email.reason",
+        task_id="tsk_reason_queue_truth",
+        input_payload={
+            "goal": "Send an email to uspraveenraj@gmail.com saying this needs approval.",
+            "request_id": "req_queue_truth",
+        },
+    )
+
+    result = await agent.execute(task)
+
+    assert result.status == "completed"
+    assert result.output["action"] == "compose_email"
+    assert result.output["sent"] is False
+    assert result.output["delivery_status"] == "queued_for_approval"
+    assert result.output["queued_for_approval"] is True
+    assert result.output["approval_id"] == "apr_123"
+    assert result.output["draft_id"] == "draft_queued"
+    assert "queued for approval" in result.output["response"].lower()
 
 
 @pytest.mark.asyncio
@@ -566,6 +637,67 @@ async def test_email_agent_reason_reply_thread_sends_mailbox_and_cc_overrides(
     assert result.output["message_id"] == "msg_reply_123"
     assert result.output["cc_recipients"] == [{"email": "finance@example.com", "name": None}]
     assert result.output["bcc_recipients"] == []
+
+
+@pytest.mark.asyncio
+async def test_email_agent_process_inbound_auto_reply_queued_does_not_claim_sent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+            enable_internal_llm=True,
+        ),
+    )
+
+    monkeypatch.setattr(agent, "_ensure_mail_client_ready", AsyncMock(return_value=None))
+    monkeypatch.setattr(agent, "_fetch_thread_context", AsyncMock(return_value={
+        "thread": {"id": "thr_queued", "subject": "Need approval", "mailbox_id": "mbx_primary"},
+        "subject": "Need approval",
+        "latest_body": "Please confirm.",
+        "latest_message": {"id": "msg_latest"},
+    }))
+    monkeypatch.setattr(agent, "_download_message_attachments", AsyncMock(return_value=([], [])))
+    monkeypatch.setattr(agent, "_reconcile_inbound_attachments", AsyncMock(return_value=[]))
+    monkeypatch.setattr(agent, "_resolve_matched_instructions", AsyncMock(return_value=(
+        [{
+            "instruction_id": "instr_queued",
+            "label": "Auto reply",
+            "behavior": {"mode": "auto_reply", "completion_mode": "one_shot", "reply_template": "Approved."},
+        }],
+        "Matched by auto-reply rule.",
+    )))
+    monkeypatch.setattr(agent, "_summarize_thread", AsyncMock(return_value="Summary"))
+    monkeypatch.setattr(agent, "_apply_auto_reply", AsyncMock(return_value={
+        "sent": False,
+        "delivery_status": "queued_for_approval",
+        "queued_for_approval": True,
+        "approval_id": "apr_auto",
+        "thread_id": "thr_queued",
+        "message_id": None,
+        "body": "Approved.",
+    }))
+
+    task = _make_task(
+        intent="email.process_inbound",
+        task_id="tsk_process_inbound_queue_truth",
+        input_payload={
+            "thread_id": "thr_queued",
+            "message_id": "msg_queued",
+            "mailbox_address": "assistant@example.com",
+            "from_address": "sender@example.com",
+            "trusted_sender": False,
+            "sender_role": "external",
+        },
+    )
+
+    result = await agent.execute(task)
+
+    assert result.status == "completed"
+    assert result.output["sent"] is False
+    assert result.output["delivery_status"] == "queued_for_approval"
+    assert result.output["auto_reply"]["approval_id"] == "apr_auto"
 
 
 def test_email_agent_infers_cc_and_bcc_from_plain_goal(tmp_path: Path) -> None:

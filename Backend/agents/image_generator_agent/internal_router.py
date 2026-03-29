@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,33 +13,33 @@ from .config import ImageGeneratorAgentConfig
 
 logger = logging.getLogger(__name__)
 
-_COMPLEX_HINTS = {
-    "diagram",
-    "infographic",
-    "poster",
-    "storyboard",
-    "comic",
-    "panel",
-    "blueprint",
-    "technical illustration",
-    "technical drawing",
-    "ui",
-    "interface",
-    "dashboard",
-    "wireframe",
-    "logo",
-    "wordmark",
-    "typography",
+_PRECISION_OPENAI_HINTS = {
     "exact text",
+    "wordmark",
+    "logo",
+    "typography",
     "spelled",
     "caption",
     "headline",
     "label",
+    "diagram",
     "chart",
     "map",
-    "layout",
+    "ui",
+    "interface",
+    "dashboard",
+    "wireframe",
+    "blueprint",
+    "technical illustration",
+    "technical drawing",
+}
+
+_MULTIPANEL_HINTS = {
     "multi-panel",
     "multiple panels",
+    "storyboard",
+    "comic",
+    "panel",
 }
 
 
@@ -105,9 +104,11 @@ async def _route_with_llm(
 
     system_content = (
         "You are routing COSMIC image generation requests between two backends.\n"
-        "Choose xai for most normal text-to-image prompts.\n"
-        "Choose openai when the request is complex, text-heavy, layout-sensitive, diagram-like, multi-panel, "
-        "logo/wordmark focused, UI/dashboard oriented, needs stronger instruction following, or uses many reference images.\n"
+        "Choose xai for almost all normal text-to-image and stylistic generation prompts.\n"
+        "OpenAI GPT Image 1.5 is substantially more expensive and should be treated as an emergency precision path.\n"
+        "Choose openai only when the request truly requires exact text rendering, strict layout control, diagram/chart/dashboard fidelity, "
+        "logo or wordmark accuracy, multi-panel composition, or unusually precise reference-image editing.\n"
+        "Do not choose openai just because a prompt is long, artistic, polished, or generally complex.\n"
         "Return JSON only: {\"provider\":\"xai|openai\",\"reason\":\"short reason\"}."
     )
     user_content = json.dumps(
@@ -288,31 +289,27 @@ def _heuristic_route(payload: dict[str, Any], cfg: ImageGeneratorAgentConfig) ->
             ],
         )
     ).lower()
-    score = 0
-    if str(payload.get("complexity_hint") or "").strip().lower() == "complex":
-        score += 3
     reference_image_count = int(payload.get("reference_image_count") or 0)
-    if reference_image_count >= 1:
-        score += 1
-    if reference_image_count >= 2:
-        score += 2
-    if len(prompt) >= 450:
-        score += 2
-    if re.search(r"\b(exact text|wordmark|logo|headline|caption|label|diagram|chart|dashboard|infographic|wireframe|ui|poster|storyboard|comic|multi-panel|panel)\b", prompt):
-        score += 3
-    for hint in _COMPLEX_HINTS:
-        if hint in prompt:
-            score += 1
-    if prompt.count('"') >= 2:
-        score += 2
-    if int(payload.get("count") or 1) >= 3:
-        score += 1
+    complexity_hint = str(payload.get("complexity_hint") or "").strip().lower()
+    quoted_text = prompt.count('"') >= 2
+    has_precision_hint = any(hint in prompt for hint in _PRECISION_OPENAI_HINTS)
+    has_multipanel_hint = any(hint in prompt for hint in _MULTIPANEL_HINTS)
+    has_reference_pressure = reference_image_count >= 2
+    has_complexity_pressure = complexity_hint == "complex" and (quoted_text or len(prompt) >= 220)
 
-    if score >= 3:
+    should_use_openai = (
+        has_precision_hint
+        or (has_multipanel_hint and (complexity_hint == "complex" or quoted_text or int(payload.get("count") or 1) >= 3))
+        or (reference_image_count >= 1 and has_precision_hint)
+        or has_reference_pressure
+        or has_complexity_pressure
+    )
+
+    if should_use_openai:
         return ImageRouteDecision(
             provider="openai",
             model=cfg.openai_image_model,
-            reason="Prompt looks layout-sensitive or unusually complex, so GPT Image 1.5 is safer.",
+            reason="Request needs unusually precise text, layout, or reference-image control, so GPT Image 1.5 is justified despite cost.",
             router_mode="heuristic",
         )
     provider = cfg.default_provider if cfg.default_provider in {"xai", "openai"} else "xai"

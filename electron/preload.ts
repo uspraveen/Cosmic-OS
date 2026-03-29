@@ -106,6 +106,7 @@ contextBridge.exposeInMainWorld('cosmic', {
   foregroundGatewayRequest: (payload: { requestId: string }) => ipcRenderer.invoke('gateway:foreground-request', payload),
   listGatewaySessions: () => ipcRenderer.invoke('gateway:list-sessions'),
   getGatewaySessionHistory: (sessionId: string) => ipcRenderer.invoke('gateway:get-session-history', sessionId),
+  getGatewayRequestTraces: (sessionId: string) => ipcRenderer.invoke('gateway:get-request-traces', sessionId),
   onGatewayEvent: (cb: (data: any) => void) => {
     const listener = (_: any, data: any) => cb(data)
     ipcRenderer.on('gateway:event', listener)

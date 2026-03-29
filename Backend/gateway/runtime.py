@@ -36,6 +36,7 @@ from .delivery.queue_store import DeliveryQueueStore, utcnow_iso
 from .memory import MemoryWriteAuditStore
 from .memory.client import CosmicMemoryClient, MemoryClientHTTPError, MemoryPromptContext
 from .orchestrator_client import OrchestratorClient
+from .request_trace_store import RequestTraceStore
 from .routing.router_client import ModelRouterClient
 from .routing.audit_store import RoutingAuditStore
 from .scheduler import CronExpressionError, SchedulerStore, compute_next_fire_at, normalize_timezone_name, render_local_fire_time
@@ -226,6 +227,7 @@ class GatewayRuntime:
         )
         self.session_store = SessionStore(config.sessions_db_path)
         self.usage_store = UsageStore(config.usage_db_path)
+        self.request_trace_store = RequestTraceStore(config.request_trace_db_path)
         self.routing_audit_store = RoutingAuditStore(config.routing_audit_db_path)
         self.memory_write_audit_store = MemoryWriteAuditStore(config.memory_write_audit_db_path)
         self.capability_wishlist_store = CapabilityWishlistStore(config.capability_wishlist_db_path)
@@ -309,6 +311,7 @@ class GatewayRuntime:
     async def start(self) -> None:
         self.session_store.initialize()
         self.usage_store.initialize()
+        self.request_trace_store.initialize()
         self.routing_audit_store.initialize()
         self.memory_write_audit_store.initialize()
         self.artifact_store.initialize()
@@ -955,7 +958,9 @@ class GatewayRuntime:
 
         trusted_sender = bool(process_output.get("trusted_sender"))
         auto_reply = process_output.get("auto_reply") if isinstance(process_output.get("auto_reply"), dict) else {}
-        auto_reply_sent = bool(auto_reply.get("sent"))
+        auto_reply_status = self._safe_text(auto_reply.get("delivery_status")) or ("sent" if bool(auto_reply.get("sent")) else "")
+        auto_reply_acted = auto_reply_status in {"sent", "queued_for_approval"}
+        auto_reply_sent = auto_reply_status == "sent"
         sender_role = first_text(process_output.get("sender_role"), "owner" if trusted_sender else "external")
         matched_instructions = process_output.get("matched_instructions") if isinstance(process_output.get("matched_instructions"), list) else []
         if not matched_instructions and isinstance(process_output.get("matched_instruction"), dict):
@@ -980,6 +985,8 @@ class GatewayRuntime:
         if sender_role:
             prepared["sender_role"] = sender_role
         prepared["email_auto_reply_sent"] = auto_reply_sent
+        if auto_reply_status:
+            prepared["email_auto_reply_status"] = auto_reply_status
         if matched_instructions:
             prepared["matched_instructions"] = matched_instructions
             prepared["matched_instruction_ids"] = self._normalize_string_list(
@@ -990,7 +997,7 @@ class GatewayRuntime:
             if match_reason:
                 prepared["instruction_match_reason"] = match_reason
         prepared["email_thread_reply"] = True
-        prepared["email_thread_reply_eligible"] = bool(trusted_sender and not auto_reply_sent)
+        prepared["email_thread_reply_eligible"] = bool(trusted_sender and not auto_reply_acted)
         if from_address and not prepared.get("to_recipients") and not prepared.get("to"):
             prepared["to_recipients"] = [{"email": from_address, "name": from_name}]
         return prepared
@@ -1081,10 +1088,12 @@ class GatewayRuntime:
                     ]
                 )
         if auto_reply:
-            sent = bool(auto_reply.get("sent"))
+            auto_reply_status = self._safe_text(auto_reply.get("delivery_status")) or ("sent" if bool(auto_reply.get("sent")) else "")
             lines.append(
                 "An automatic reply was already sent by the email specialist."
-                if sent
+                if auto_reply_status == "sent"
+                else "An automatic reply draft was queued for approval by the email specialist."
+                if auto_reply_status == "queued_for_approval"
                 else "The email specialist evaluated an auto-reply path but did not send anything."
             )
         if attachments:
@@ -2041,6 +2050,39 @@ class GatewayRuntime:
                 delivery_event,
                 channel=channel,
             )
+            if self._safe_text(delivery_event.get("type")) == "response.complete":
+                self._persist_email_delivery_metadata(delivery_event)
+            trace_status = delivery_status
+            if self._channel_platform(channel) == "agent-email":
+                email_delivery = self._effective_email_delivery(delivery_event)
+                email_delivery_status = self._safe_text(email_delivery.get("status"))
+                if email_delivery_status:
+                    trace_status = email_delivery_status
+            else:
+                email_delivery = None
+            self._trace_request_event(
+                request_id=self._safe_text(delivery_event.get("request_id")) or request_id,
+                session_id=self._safe_text(delivery_event.get("session_id")) or session_id,
+                channel=self._safe_text(delivery_event.get("channel")) or channel,
+                route=self._safe_text(delivery_event.get("route")) or route,
+                event_type=f"delivery.{self._safe_text(delivery_event.get('type')) or 'event'}",
+                stage="delivery",
+                status=trace_status or "delivered",
+                title="Channel delivery completed" if delivery_status == "sent" else "Channel delivery deferred",
+                detail=(
+                    f"Gateway delivery={delivery_status}"
+                    + (
+                        f"; email delivery={self._safe_text(email_delivery.get('status'))}"
+                        if isinstance(email_delivery, dict) and self._safe_text(email_delivery.get("status"))
+                        else ""
+                    )
+                ),
+                task_id=self._safe_text(delivery_event.get("task_id")) or None,
+                specialist_receipts=delivery_event.get("specialist_receipts") if isinstance(delivery_event.get("specialist_receipts"), list) else None,
+                delivery=email_delivery if isinstance(email_delivery, dict) else None,
+                metadata={"gateway_delivery_status": delivery_status},
+                completed=self._safe_text(delivery_event.get("type")) in {"response.complete", "task.failed", "task.cancelled", "error"},
+            )
             await self._maybe_schedule_delivered_memory_ingest(
                 delivery_event,
                 delivery_status=delivery_status,
@@ -2191,6 +2233,19 @@ class GatewayRuntime:
         request_record["direct_model_handoff_count"] = handoff_count + 1
         request_record["direct_model_handoff_from"] = normalized_prior_route
         self.request_records[request_id] = request_record
+        self._trace_request_event(
+            request_id=request_id,
+            session_id=session_id,
+            channel=channel,
+            route="opus",
+            event_type="request.direct_model_handoff",
+            stage="routing",
+            status="active",
+            title="Direct model handed off to Opus",
+            detail=f"{normalized_prior_route} -> opus",
+            task_id=active_request.task_id if active_request is not None else None,
+            metadata={"from_route": normalized_prior_route, "to_route": "opus"},
+        )
 
         if active_request is not None:
             active_request.route = "opus"
@@ -2327,6 +2382,20 @@ class GatewayRuntime:
             user_query_excerpt=query_text[:120].strip(),
         )
         self.active_requests[request_id] = state
+        self._trace_request_event(
+            request_id=request_id,
+            session_id=session_id,
+            channel=channel,
+            route=route,
+            event_type="request.accepted",
+            stage="accepted",
+            status="active",
+            title="Request accepted",
+            detail=query_text[:240].strip() or None,
+            source=self._safe_text(request_record.get("source")) or None,
+            source_id=self._safe_text(request_record.get("source_id")) or None,
+            user_query_excerpt=query_text[:240].strip() or None,
+        )
         state.worker = asyncio.create_task(self._run_request_fulfillment(state, request_record))
 
     async def cancel_active_fulfillment(
@@ -2502,6 +2571,9 @@ class GatewayRuntime:
     def get_session_history(self, session_id: str) -> list[dict[str, Any]]:
         history = self.session_store.get_history(session_id)
         return [self._hydrate_history_message_for_client(item) for item in history]
+
+    def list_session_request_traces(self, session_id: str, *, limit: int = 40) -> list[dict[str, Any]]:
+        return self.request_trace_store.list_session_traces(session_id, limit=limit)
 
     def get_session_history_page(
         self,
@@ -3683,6 +3755,8 @@ class GatewayRuntime:
             return
         channel = self._safe_text(event.get("channel"))
         if self._channel_platform(channel) != "agent-email":
+            return
+        if not self._email_delivery_counts_as_sent(event):
             return
         if bool(event.get("email_auto_reply_sent")):
             return
@@ -5902,6 +5976,113 @@ class GatewayRuntime:
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
         return f"{channel}:fingerprint:{digest}"
 
+    def _effective_email_delivery(self, event: dict[str, Any]) -> dict[str, Any]:
+        delivery = event.get("email_delivery")
+        if not isinstance(delivery, dict):
+            delivery = {}
+        status = self._safe_text(delivery.get("status")) or self._safe_text(event.get("email_delivery_status"))
+        queued_for_approval = bool(
+            delivery.get("queued_for_approval")
+            if "queued_for_approval" in delivery
+            else event.get("email_queued_for_approval")
+        )
+        approval_id = self._safe_text(delivery.get("approval_id")) or self._safe_text(event.get("email_approval_id"))
+        if not status:
+            if queued_for_approval or approval_id:
+                status = "queued_for_approval"
+            elif self._channel_platform(self._safe_text(event.get("channel"))) == "agent-email":
+                status = "sent"
+        resolved = dict(delivery)
+        if status:
+            resolved["status"] = status
+        if queued_for_approval:
+            resolved["queued_for_approval"] = True
+        if approval_id:
+            resolved["approval_id"] = approval_id
+        return resolved
+
+    def _email_delivery_counts_as_sent(self, event: dict[str, Any]) -> bool:
+        return self._safe_text(self._effective_email_delivery(event).get("status")) == "sent"
+
+    def _email_delivery_counts_as_acted(self, event: dict[str, Any]) -> bool:
+        return self._safe_text(self._effective_email_delivery(event).get("status")) in {"sent", "queued_for_approval"}
+
+    def _trace_request_event(
+        self,
+        *,
+        request_id: str | None,
+        session_id: str | None,
+        channel: str | None,
+        route: str | None,
+        event_type: str,
+        stage: str,
+        status: str,
+        title: str,
+        detail: str | None = None,
+        task_id: str | None = None,
+        source: str | None = None,
+        source_id: str | None = None,
+        user_query_excerpt: str | None = None,
+        final_message: str | None = None,
+        specialist_receipts: list[dict[str, Any]] | None = None,
+        delivery: dict[str, Any] | None = None,
+        completed: bool = False,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        normalized_request_id = self._safe_text(request_id)
+        normalized_session_id = self._safe_text(session_id)
+        normalized_channel = self._safe_text(channel)
+        if not normalized_request_id or not normalized_session_id or not normalized_channel:
+            return
+        try:
+            self.request_trace_store.record_event(
+                request_id=normalized_request_id,
+                session_id=normalized_session_id,
+                channel=normalized_channel,
+                route=self._safe_text(route) or "opus",
+                event_type=event_type,
+                stage=stage,
+                status=status,
+                title=title,
+                detail=detail,
+                task_id=self._safe_text(task_id) or None,
+                source=self._safe_text(source) or None,
+                source_id=self._safe_text(source_id) or None,
+                user_query_excerpt=user_query_excerpt,
+                final_message=final_message,
+                specialist_receipts=specialist_receipts,
+                delivery=delivery,
+                completed_at=utcnow_iso() if completed else None,
+                metadata=metadata,
+            )
+        except Exception:
+            logger.exception(
+                "gateway.request_trace_record_failed request_id=%s event_type=%s stage=%s",
+                normalized_request_id,
+                event_type,
+                stage,
+            )
+
+    def _persist_email_delivery_metadata(self, event: dict[str, Any]) -> None:
+        if self._channel_platform(self._safe_text(event.get("channel"))) != "agent-email":
+            return
+        message_id = self._safe_text(event.get("message_id"))
+        if not message_id:
+            return
+        delivery = self._effective_email_delivery(event)
+        status = self._safe_text(delivery.get("status"))
+        if not status:
+            return
+        self.session_store.merge_message_metadata(
+            message_id,
+            {
+                "email_delivery": delivery,
+                "email_delivery_status": status,
+                "email_queued_for_approval": bool(delivery.get("queued_for_approval")),
+                "email_approval_id": self._safe_text(delivery.get("approval_id")) or None,
+            },
+        )
+
     def _delivery_available_at(self, attempts: int) -> str:
         backoff = min(
             self.config.delivery_retry_max_sec,
@@ -6703,6 +6884,21 @@ class GatewayRuntime:
             return
         if request_record.get("email_process_inbound_state") in {"completed", "failed"}:
             return
+        request_id = self._safe_text(request_record.get("request_id"))
+        session_id = self._safe_text(request_record.get("session_id"))
+        channel = self._safe_text(request_record.get("channel"))
+        route = self._safe_text(request_record.get("route")) or "opus"
+        self._trace_request_event(
+            request_id=request_id,
+            session_id=session_id,
+            channel=channel,
+            route=route,
+            event_type="email.process_inbound.started",
+            stage="email_preprocess",
+            status="active",
+            title="Email preprocess started",
+            task_id=self._safe_text(request_record.get("email_process_inbound_task_id")) or None,
+        )
 
         try:
             process_result = await self._dispatch_email_process_inbound(request_record=request_record)
@@ -6712,6 +6908,17 @@ class GatewayRuntime:
                 self._safe_text(request_record.get("request_id")),
             )
             request_record["email_process_inbound_state"] = "failed"
+            self._trace_request_event(
+                request_id=request_id,
+                session_id=session_id,
+                channel=channel,
+                route=route,
+                event_type="email.process_inbound.failed",
+                stage="email_preprocess",
+                status="failed",
+                title="Email preprocess failed",
+                detail="Gateway could not dispatch or reconcile email.process_inbound.",
+            )
             return
 
         status = self._safe_text(process_result.get("status")) or "failed"
@@ -6723,12 +6930,35 @@ class GatewayRuntime:
                 self._safe_text(process_result.get("error_message")),
             )
             request_record["email_process_inbound_state"] = "failed"
+            self._trace_request_event(
+                request_id=request_id,
+                session_id=session_id,
+                channel=channel,
+                route=route,
+                event_type="email.process_inbound.failed",
+                stage="email_preprocess",
+                status="failed",
+                title="Email preprocess failed",
+                detail=self._safe_text(process_result.get("error_message")) or f"email.process_inbound returned {status}.",
+                task_id=self._safe_text(process_result.get("task_id")) or None,
+            )
             return
 
         output = process_result.get("output") if isinstance(process_result.get("output"), dict) else {}
         message = request_record.get("message")
         if not isinstance(message, dict):
             request_record["email_process_inbound_state"] = "failed"
+            self._trace_request_event(
+                request_id=request_id,
+                session_id=session_id,
+                channel=channel,
+                route=route,
+                event_type="email.process_inbound.failed",
+                stage="email_preprocess",
+                status="failed",
+                title="Email preprocess failed",
+                detail="Inbound email message payload was missing after preprocess completion.",
+            )
             return
         original_content = self._safe_text(message.get("content")) or "[empty inbound email]"
         request_record["orchestrator_query_override"] = self._build_email_inbound_orchestrator_query(
@@ -6740,6 +6970,26 @@ class GatewayRuntime:
         request_record["email_process_inbound_output"] = output
         request_record["email_process_inbound_artifacts"] = (
             process_result.get("artifacts") if isinstance(process_result.get("artifacts"), list) else []
+        )
+        self._trace_request_event(
+            request_id=request_id,
+            session_id=session_id,
+            channel=channel,
+            route=route,
+            event_type="email.process_inbound.completed",
+            stage="email_preprocess",
+            status="completed",
+            title="Email preprocess completed",
+            detail=self._safe_text(output.get("summary")) or self._safe_text(output.get("response")) or None,
+            task_id=self._safe_text(process_result.get("task_id")) or None,
+            metadata={
+                "trusted_sender": bool(output.get("trusted_sender")),
+                "sender_role": self._safe_text(output.get("sender_role")) or None,
+                "matched_instruction_ids": self._normalize_string_list(
+                    [self._safe_text(item.get("instruction_id")) for item in output.get("matched_instructions", []) if isinstance(item, dict)],
+                    limit=12,
+                ),
+            },
         )
 
     async def _dispatch_email_process_inbound(
@@ -8447,10 +8697,26 @@ class GatewayRuntime:
         task_id = self._safe_text(event.get("task_id"))
         session_id = self._safe_text(event.get("session_id"))
         if request_id and task_id:
+            previous_bound_request_id = self.active_requests_by_task.get(task_id)
             self.active_requests_by_task[task_id] = request_id
             active_request = self.active_requests.get(request_id)
+            task_bound_changed = previous_bound_request_id != request_id
             if active_request is not None:
+                task_bound_changed = task_bound_changed or active_request.task_id != task_id
                 active_request.task_id = task_id
+            if task_bound_changed:
+                self._trace_request_event(
+                    request_id=request_id,
+                    session_id=session_id,
+                    channel=self._safe_text(event.get("channel")),
+                    route=self._safe_text(event.get("route")) or "opus",
+                    event_type="task.bound",
+                    stage="execution",
+                    status="active",
+                    title="Task bound to request",
+                    detail=task_id,
+                    task_id=task_id,
+                )
         if event_type == "response.complete":
             event_channel = self._safe_text(event.get("channel")) or ""
             research_provenance = self._normalize_research_provenance(
@@ -8520,6 +8786,23 @@ class GatewayRuntime:
                 event["response_blocks"] = client_response_blocks
             if activity_log:
                 event["activity_log"] = activity_log
+            self._trace_request_event(
+                request_id=request_id,
+                session_id=session_id,
+                channel=event_channel,
+                route=self._safe_text(event.get("route")) or "opus",
+                event_type="response.complete",
+                stage="response",
+                status="completed",
+                title="Assistant response completed",
+                detail=self._safe_text(event.get("content"))[:400] or None,
+                task_id=task_id,
+                specialist_receipts=self._normalize_specialist_receipts(event.get("specialist_receipts")),
+                metadata={
+                    "produced_artifact_count": len(produced_artifacts),
+                    "response_block_count": len(response_blocks),
+                },
+            )
             # Cross-channel sync: push the assistant response to connected realtime clients on other platforms.
             if event_channel and session_id:
                 self._track_background_task(
@@ -8545,6 +8828,23 @@ class GatewayRuntime:
             if task_id:
                 self.active_task_channels.pop(task_id, None)
                 self.active_requests_by_task.pop(task_id, None)
+            self._trace_request_event(
+                request_id=request_id,
+                session_id=session_id,
+                channel=self._safe_text(event.get("channel")),
+                route=self._safe_text(event.get("route")) or "opus",
+                event_type=event_type,
+                stage="terminal" if event_type in {"task.failed", "task.cancelled"} else "execution",
+                status="failed" if event_type == "task.failed" else "cancelled" if event_type == "task.cancelled" else "completed",
+                title="Task failed" if event_type == "task.failed" else "Task cancelled" if event_type == "task.cancelled" else "Task completed",
+                detail=(
+                    self._safe_text((event.get("error") or {}).get("message"))
+                    if isinstance(event.get("error"), dict)
+                    else None
+                ) or self._safe_text(event.get("message")) or None,
+                task_id=task_id,
+                completed=event_type in {"task.failed", "task.cancelled"},
+            )
 
         if task_id and session_id and event_type.startswith("task."):
             notebook = self._merge_task_notebook(
@@ -9098,13 +9398,53 @@ class GatewayRuntime:
         request_record: dict[str, Any],
     ) -> None:
         try:
+            self._trace_request_event(
+                request_id=state.request_id,
+                session_id=state.session_id,
+                channel=state.channel,
+                route=state.route,
+                event_type="request.fulfillment_started",
+                stage="fulfillment",
+                status="active",
+                title="Gateway fulfillment started",
+                task_id=state.task_id,
+                source=self._safe_text(request_record.get("source")) or None,
+                source_id=self._safe_text(request_record.get("source_id")) or None,
+                user_query_excerpt=state.user_query_excerpt or None,
+            )
             await self.fulfill_processed_message(request_record)
         except asyncio.CancelledError:
             if state.cancel_requested:
+                self._trace_request_event(
+                    request_id=state.request_id,
+                    session_id=state.session_id,
+                    channel=state.channel,
+                    route=state.route,
+                    event_type="request.cancel_requested",
+                    stage="terminal",
+                    status="cancelled",
+                    title="Request cancelled",
+                    detail="The active response was stopped.",
+                    task_id=state.task_id,
+                    completed=True,
+                )
                 await self._emit_cancelled_event(state)
                 return
             raise
         except Exception as exc:
+            self._trace_request_event(
+                request_id=state.request_id,
+                session_id=state.session_id,
+                channel=state.channel,
+                route=state.route,
+                event_type="request.error",
+                stage="terminal",
+                status="failed",
+                title="Gateway fulfillment failed",
+                detail=str(exc),
+                task_id=state.task_id,
+                completed=True,
+            )
             await self._deliver_or_queue_channel_event(
                 {
                     "type": "error",
