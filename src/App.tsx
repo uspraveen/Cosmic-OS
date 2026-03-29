@@ -4871,8 +4871,10 @@ export default function App() {
                   {mode !== 'task' && isStreaming && !activeDocsProgressMessage && (
                     <div className="streaming-indicator">
                       {streamingProgress && <div className="streaming-status">{streamingProgress}</div>}
-                      <div className="streaming-dots">
-                        <div className="dot"></div><div className="dot"></div><div className="dot"></div>
+                      <div className="streaming-dots" aria-hidden>
+                        {[0, 1, 2, 3, 4].map((i) => (
+                          <span key={i} className="streaming-dot-pix" style={{ animationDelay: `${i * 0.09}s` }} />
+                        ))}
                       </div>
                     </div>
                   )}

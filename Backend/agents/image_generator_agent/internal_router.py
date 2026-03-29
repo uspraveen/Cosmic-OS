@@ -107,7 +107,7 @@ async def _route_with_llm(
         "You are routing COSMIC image generation requests between two backends.\n"
         "Choose xai for most normal text-to-image prompts.\n"
         "Choose openai when the request is complex, text-heavy, layout-sensitive, diagram-like, multi-panel, "
-        "logo/wordmark focused, UI/dashboard oriented, or needs stronger instruction following.\n"
+        "logo/wordmark focused, UI/dashboard oriented, needs stronger instruction following, or uses many reference images.\n"
         "Return JSON only: {\"provider\":\"xai|openai\",\"reason\":\"short reason\"}."
     )
     user_content = json.dumps(
@@ -120,6 +120,7 @@ async def _route_with_llm(
             "size": str(payload.get("size") or "").strip() or None,
             "quality": str(payload.get("quality") or "").strip() or None,
             "count": int(payload.get("count") or 1),
+            "reference_image_count": int(payload.get("reference_image_count") or 0),
         },
         ensure_ascii=False,
         indent=2,
@@ -290,6 +291,11 @@ def _heuristic_route(payload: dict[str, Any], cfg: ImageGeneratorAgentConfig) ->
     score = 0
     if str(payload.get("complexity_hint") or "").strip().lower() == "complex":
         score += 3
+    reference_image_count = int(payload.get("reference_image_count") or 0)
+    if reference_image_count >= 1:
+        score += 1
+    if reference_image_count >= 2:
+        score += 2
     if len(prompt) >= 450:
         score += 2
     if re.search(r"\b(exact text|wordmark|logo|headline|caption|label|diagram|chart|dashboard|infographic|wireframe|ui|poster|storyboard|comic|multi-panel|panel)\b", prompt):

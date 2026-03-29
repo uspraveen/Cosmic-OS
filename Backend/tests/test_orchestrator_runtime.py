@@ -88,6 +88,13 @@ class FakeRedis:
         return
 
 
+_PNG_BYTES = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc`\x00\x00"
+    b"\x00\x02\x00\x01\xe2!\xbc3\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+
 def _signed_task(signing_secret: str) -> TaskEnvelope:
     task = TaskEnvelope(
         task_id="tsk_test123",
@@ -310,7 +317,7 @@ async def test_orchestrator_runtime_promotes_anthropic_generated_files_to_produc
         nonlocal message_requests
         if request.url == httpx.URL("https://api.anthropic.com/v1/messages"):
             message_requests += 1
-            assert request.headers["anthropic-beta"] == "files-api-2025-04-14"
+            assert request.headers["anthropic-beta"] == "code-execution-2025-05-22,files-api-2025-04-14"
             stream = first_turn_events if message_requests == 1 else second_turn_events
             return httpx.Response(
                 200,
@@ -1828,6 +1835,123 @@ def test_orchestrator_build_messages_omits_images_past_cap(tmp_path) -> None:
     assert messages[-1]["content"][1]["type"] == "text"
     assert "model_input=omitted_limit" in messages[-1]["content"][1]["text"]
     assert "per-turn image cap is 1" in messages[-1]["content"][1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_attaches_initial_input_artifacts_as_container_uploads(tmp_path) -> None:
+    upload_calls: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url == httpx.URL("https://api.anthropic.com/v1/files"):
+            upload_calls.append({"headers": dict(request.headers)})
+            return httpx.Response(
+                200,
+                json={
+                    "id": "file_input_001",
+                    "filename": "reference.png",
+                    "mime_type": "image/png",
+                },
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    config = OrchestratorConfig(
+        artifacts_root=tmp_path / "artifacts",
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_input_uploads.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    try:
+        artifact_path = config.artifacts_root / "tsk_prev" / "image_generator_agent" / "reference.png"
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_bytes(_PNG_BYTES)
+        task = _signed_task("signing-secret").model_copy(
+            update={
+                "input_artifacts": [
+                    {
+                        "artifact_id": "art_img_ref",
+                        "kind": "image",
+                        "mime": "image/png",
+                        "filename": "reference.png",
+                        "path": "runs/artifacts/tsk_prev/image_generator_agent/reference.png",
+                    }
+                ]
+            }
+        )
+
+        messages = runtime._build_messages(task)  # noqa: SLF001
+        messages = await runtime._attach_initial_input_artifact_blocks(messages, task.input_artifacts)  # noqa: SLF001
+    finally:
+        await runtime.stop()
+
+    assert upload_calls
+    assert messages[-1]["role"] == "user"
+    assert isinstance(messages[-1]["content"], list)
+    assert any(
+        isinstance(block, dict) and block.get("type") == "container_upload" and block.get("file_id") == "file_input_001"
+        for block in messages[-1]["content"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_build_tool_result_followup_blocks_attach_image_and_code_inputs(tmp_path) -> None:
+    upload_calls: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url == httpx.URL("https://api.anthropic.com/v1/files"):
+            upload_calls.append({"headers": dict(request.headers)})
+            return httpx.Response(
+                200,
+                json={
+                    "id": "file_input_002",
+                    "filename": "apple_product_launch_style.png",
+                    "mime_type": "image/png",
+                },
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    config = OrchestratorConfig(
+        artifacts_root=tmp_path / "artifacts",
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_tool_followups.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    try:
+        artifact_path = config.artifacts_root / "tsk_prev" / "image_generator_agent" / "apple_product_launch_style.png"
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_bytes(_PNG_BYTES)
+        result_str = json.dumps(
+            {
+                "found": True,
+                "artifacts": [
+                    {
+                        "artifact_id": "art_launch_sphere",
+                        "mime": "image/png",
+                        "filename": "apple_product_launch_style.png",
+                        "path": "runs/artifacts/tsk_prev/image_generator_agent/apple_product_launch_style.png",
+                    }
+                ],
+            }
+        )
+
+        blocks = await runtime._build_tool_result_followup_blocks([result_str])  # noqa: SLF001
+    finally:
+        await runtime.stop()
+
+    assert upload_calls
+    assert blocks[0]["type"] == "text"
+    assert any(isinstance(block, dict) and block.get("type") == "image" for block in blocks)
+    assert any(
+        isinstance(block, dict) and block.get("type") == "container_upload" and block.get("file_id") == "file_input_002"
+        for block in blocks
+    )
 
 
 @pytest.mark.asyncio

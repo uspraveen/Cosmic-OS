@@ -53,6 +53,8 @@ def normalize_openai_like_base_url(raw: str, *, default: str = "") -> str:
     if not value:
         return default
     for suffix in (
+        "/v1/images/edits",
+        "/images/edits",
         "/v1/images/generations",
         "/images/generations",
         "/v1/chat/completions",
@@ -92,6 +94,7 @@ class ImageGeneratorAgentConfig:
     default_size: str = "1024x1024"
     default_quality: str = "high"
     max_images_per_request: int = 4
+    max_reference_images: int = 4
     max_prompt_chars: int = 6000
     generation_poll_interval_sec: float = 0.0
 
@@ -141,6 +144,7 @@ class ImageGeneratorAgentConfig:
             default_size=default_size,
             default_quality=default_quality,
             max_images_per_request=max(1, _env_int("IMAGE_AGENT_MAX_IMAGES_PER_REQUEST", 4)),
+            max_reference_images=max(1, _env_int("IMAGE_AGENT_MAX_REFERENCE_IMAGES", 4)),
             max_prompt_chars=max(200, _env_int("IMAGE_AGENT_MAX_PROMPT_CHARS", 6000)),
             generation_poll_interval_sec=max(0.0, _env_float("IMAGE_AGENT_GENERATION_POLL_INTERVAL_SEC", 0.0)),
         )

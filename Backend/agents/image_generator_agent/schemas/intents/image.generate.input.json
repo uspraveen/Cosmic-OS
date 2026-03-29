@@ -1,11 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
+  "description": "Generate or edit images. Reference images should be passed via TaskEnvelope.input_artifacts, not inline in this JSON payload.",
   "properties": {
     "prompt": {
       "type": "string",
       "minLength": 3,
-      "description": "The image-generation prompt."
+      "description": "The image-generation or image-edit prompt."
     },
     "negative_prompt": {
       "type": "string",

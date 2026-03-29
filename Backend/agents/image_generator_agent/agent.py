@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import logging
+import mimetypes
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -15,7 +16,7 @@ from uuid import uuid4
 import httpx
 from PIL import Image
 
-from shared import AgentError, AgentResult, ArtifactManifest, TaskEnvelope, begin_metered_call, build_model_key, build_usage_event, connect_sync, post_usage_event, serialize_usage_metadata
+from shared import AgentError, AgentResult, ArtifactManifest, TaskEnvelope, begin_metered_call, build_model_key, build_usage_event, connect_sync, is_supported_image_artifact, post_usage_event, serialize_usage_metadata
 from shared.agent_runtime import AgentRuntime
 
 from .config import AGENT_ROOT, BACKEND_ROOT, ImageGeneratorAgentConfig
@@ -59,6 +60,14 @@ class ProviderGenerationResult:
     raw_usage: Any
     provider_request_id: str | None
     images: list[ProviderImage]
+
+
+@dataclass(slots=True)
+class ReferenceImage:
+    artifact_ref: dict[str, str]
+    filename: str
+    mime: str
+    data: bytes
 
 
 class ImageGeneratorAgentError(RuntimeError):
@@ -158,13 +167,9 @@ class ImageGeneratorAgent(AgentRuntime):
     async def _handle_generate(self, task: TaskEnvelope) -> AgentResult:
         self._load_prompt_assets()
         normalized_input = self._normalize_generate_input(task.input)
-        if task.input_artifacts:
-            raise ImageGeneratorAgentError(
-                code="INVALID_INPUT",
-                message="image.generate currently supports text-to-image only. Reference-image edits are not implemented yet.",
-                retryable=False,
-                next_action="revise_input",
-            )
+        reference_images = await self._resolve_reference_images(task.input_artifacts if isinstance(task.input_artifacts, list) else [])
+        if reference_images:
+            normalized_input["reference_image_count"] = len(reference_images)
 
         await self._emit_progress(task.task_id, "Routing image generation request", prompt=normalized_input["prompt"])
         route = await route_image_request(
@@ -177,13 +182,19 @@ class ImageGeneratorAgent(AgentRuntime):
             request_id=self._request_id(task),
             payload=normalized_input,
         )
+        route = self._resolve_reference_route(route, reference_images)
         if route.provider == "xai" and not self.config.xai_api_key:
             raise ImageGeneratorAgentError(code="AUTH_ERROR", message="xAI image generation credentials are not configured for the image generator agent.", retryable=False, next_action="configure_credentials")
         if route.provider == "openai" and not self.config.openai_api_key:
             raise ImageGeneratorAgentError(code="AUTH_ERROR", message="OpenAI image generation credentials are not configured for the image generator agent.", retryable=False, next_action="configure_credentials")
 
-        await self._emit_progress(task.task_id, f"Generating {normalized_input['count']} image(s) via {route.model}", provider=route.provider, model=route.model)
-        generation = await self._generate_with_provider(task=task, normalized_input=normalized_input, route=route)
+        progress_message = (
+            f"Editing from {len(reference_images)} reference image(s) via {route.model}"
+            if reference_images
+            else f"Generating {normalized_input['count']} image(s) via {route.model}"
+        )
+        await self._emit_progress(task.task_id, progress_message, provider=route.provider, model=route.model)
+        generation = await self._generate_with_provider(task=task, normalized_input=normalized_input, route=route, reference_images=reference_images)
         await self._emit_progress(task.task_id, "Persisting generated image artifacts", model=route.model)
 
         image_artifacts, image_refs = self._persist_generated_images(task=task, generation=generation, artifact_basename=normalized_input["artifact_basename"])
@@ -200,6 +211,7 @@ class ImageGeneratorAgent(AgentRuntime):
                 "quality": normalized_input["quality"],
                 "count": normalized_input["count"],
                 "prefer_model": normalized_input["prefer_model"],
+                "reference_images": [item.artifact_ref for item in reference_images],
                 "router_decision": {
                     "provider": route.provider,
                     "model": route.model,
@@ -216,7 +228,8 @@ class ImageGeneratorAgent(AgentRuntime):
             audience="supporting",
         )
 
-        summary = f"Generated {len(image_refs)} image{'s' if len(image_refs) != 1 else ''} via {generation.provider}:{generation.model}."
+        verb = "Edited" if reference_images else "Generated"
+        summary = f"{verb} {len(image_refs)} image{'s' if len(image_refs) != 1 else ''} via {generation.provider}:{generation.model}."
         output = {
             "response": summary,
             "message": summary,
@@ -231,6 +244,7 @@ class ImageGeneratorAgent(AgentRuntime):
             },
             "images": image_refs,
             "artifact_refs": image_refs,
+            "reference_images": [item.artifact_ref for item in reference_images],
             "provider_request_id": generation.provider_request_id,
             "provider_usage": serialize_usage_metadata(generation.raw_usage),
             "report_artifact": self._artifact_ref(report_artifact),
@@ -251,6 +265,7 @@ class ImageGeneratorAgent(AgentRuntime):
                 "provider_request_id": generation.provider_request_id,
                 "router_mode": route.router_mode,
                 "router_reason": route.reason,
+                "reference_images": [item.artifact_ref for item in reference_images],
             },
         )
         return AgentResult(status="completed", output=output, artifacts=image_artifacts + [report_artifact])
@@ -268,11 +283,38 @@ class ImageGeneratorAgent(AgentRuntime):
         )
         return AgentResult(status="completed", output={"response": response, "session_id": session_id, "entries": entries}, artifacts=[])
 
-    async def _generate_with_provider(self, *, task: TaskEnvelope, normalized_input: dict[str, Any], route: ImageRouteDecision) -> ProviderGenerationResult:
+    async def _generate_with_provider(
+        self,
+        *,
+        task: TaskEnvelope,
+        normalized_input: dict[str, Any],
+        route: ImageRouteDecision,
+        reference_images: list[ReferenceImage],
+    ) -> ProviderGenerationResult:
         if route.provider == "xai":
-            return await self._generate_via_image_api(task=task, provider="xai", model=route.model, api_key=self.config.xai_api_key, base_url=self.config.xai_base_url, timeout_sec=self.config.xai_timeout_sec, normalized_input=normalized_input, route=route)
+            return await self._generate_via_image_api(
+                task=task,
+                provider="xai",
+                model=route.model,
+                api_key=self.config.xai_api_key,
+                base_url=self.config.xai_base_url,
+                timeout_sec=self.config.xai_timeout_sec,
+                normalized_input=normalized_input,
+                route=route,
+                reference_images=reference_images,
+            )
         if route.provider == "openai":
-            return await self._generate_via_image_api(task=task, provider="openai", model=route.model, api_key=self.config.openai_api_key, base_url=self.config.openai_base_url, timeout_sec=self.config.openai_timeout_sec, normalized_input=normalized_input, route=route)
+            return await self._generate_via_image_api(
+                task=task,
+                provider="openai",
+                model=route.model,
+                api_key=self.config.openai_api_key,
+                base_url=self.config.openai_base_url,
+                timeout_sec=self.config.openai_timeout_sec,
+                normalized_input=normalized_input,
+                route=route,
+                reference_images=reference_images,
+            )
         raise ImageGeneratorAgentError(code="INVALID_INPUT", message=f"Unsupported image provider route: {route.provider}", retryable=False, next_action="revise_input")
 
     async def _generate_via_image_api(
@@ -286,32 +328,94 @@ class ImageGeneratorAgent(AgentRuntime):
         timeout_sec: float,
         normalized_input: dict[str, Any],
         route: ImageRouteDecision,
+        reference_images: list[ReferenceImage],
     ) -> ProviderGenerationResult:
         if not api_key:
             raise ImageGeneratorAgentError(code="AUTH_ERROR", message=f"{provider} image generation credentials are not configured.", retryable=False, next_action="configure_credentials")
 
-        endpoint_path = "/images/generations"
+        is_edit = bool(reference_images)
+        endpoint_path = "/images/edits" if is_edit else "/images/generations"
+        prompt = self._build_provider_prompt(normalized_input)
         payload: dict[str, Any] = {
             "model": model,
-            "prompt": self._build_provider_prompt(normalized_input),
+            "prompt": prompt,
             "n": normalized_input["count"],
         }
+        request_kwargs: dict[str, Any] = {
+            "headers": {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            "timeout": httpx.Timeout(timeout_sec, connect=min(timeout_sec, 15.0)),
+        }
+        request_payload_for_report = dict(payload)
         if provider == "openai":
             payload["size"] = normalized_input["size"]
             if normalized_input["quality"] != "auto":
                 payload["quality"] = normalized_input["quality"]
+            if is_edit:
+                form_data: dict[str, str] = {
+                    "model": model,
+                    "prompt": prompt,
+                    "n": str(normalized_input["count"]),
+                    "size": str(normalized_input["size"]),
+                    "input_fidelity": "high",
+                }
+                if normalized_input["quality"] != "auto":
+                    form_data["quality"] = str(normalized_input["quality"])
+                files = [
+                    (
+                        "image[]",
+                        (
+                            item.filename,
+                            item.data,
+                            item.mime,
+                        ),
+                    )
+                    for item in reference_images
+                ]
+                request_kwargs = {
+                    "headers": {"Authorization": f"Bearer {api_key}"},
+                    "data": form_data,
+                    "files": files,
+                    "timeout": httpx.Timeout(timeout_sec, connect=min(timeout_sec, 15.0)),
+                }
+                request_payload_for_report = {
+                    "model": model,
+                    "prompt": prompt,
+                    "n": normalized_input["count"],
+                    "size": normalized_input["size"],
+                    "quality": normalized_input["quality"],
+                    "input_fidelity": "high",
+                    "reference_images": [
+                        {
+                            "filename": item.filename,
+                            "mime": item.mime,
+                            "bytes": len(item.data),
+                        }
+                        for item in reference_images
+                    ],
+                }
         else:
             payload["response_format"] = "b64_json"
             payload.update(self._xai_request_fields_for_size(normalized_input["size"]))
+            if is_edit:
+                image_entries = [
+                    {
+                        "type": "image_url",
+                        "url": self._image_to_data_url(item),
+                    }
+                    for item in reference_images
+                ]
+                if len(image_entries) == 1:
+                    payload["image"] = image_entries[0]
+                else:
+                    payload["images"] = image_entries
+            request_kwargs["json"] = payload
 
         metered_call = begin_metered_call(prefix=f"img_{provider}")
         response_json: dict[str, Any] | None = None
         try:
             response = await self._http_client.post(
                 base_url.rstrip("/") + endpoint_path,
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=payload,
-                timeout=httpx.Timeout(timeout_sec, connect=min(timeout_sec, 15.0)),
+                **request_kwargs,
             )
             response_json = self._parse_json_response(response)
             if response.status_code >= 400:
@@ -369,12 +473,125 @@ class ImageGeneratorAgent(AgentRuntime):
         return ProviderGenerationResult(
             provider=provider,
             model=model,
-            request_payload=payload,
+            request_payload=request_payload_for_report,
             response_payload=response_json,
             raw_usage=raw_usage,
             provider_request_id=provider_request_id,
             images=images,
         )
+
+    async def _resolve_reference_images(self, input_artifacts: list[dict[str, Any]]) -> list[ReferenceImage]:
+        if not input_artifacts:
+            return []
+        references: list[ReferenceImage] = []
+        for artifact in input_artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            if not is_supported_image_artifact(artifact):
+                raise ImageGeneratorAgentError(
+                    code="INVALID_INPUT",
+                    message="image.generate reference inputs must be image artifacts only.",
+                    retryable=False,
+                    next_action="revise_input",
+                )
+            payload = await self._load_reference_image_payload(artifact)
+            if payload is None:
+                raise ImageGeneratorAgentError(
+                    code="INVALID_INPUT",
+                    message="One or more reference images could not be loaded from COSMIC artifact storage.",
+                    retryable=False,
+                    next_action="revise_input",
+                )
+            references.append(payload)
+        if len(references) > self.config.max_reference_images:
+            raise ImageGeneratorAgentError(
+                code="INVALID_INPUT",
+                message=f"image.generate supports up to {self.config.max_reference_images} reference images per request.",
+                retryable=False,
+                next_action="revise_input",
+            )
+        return references
+
+    async def _load_reference_image_payload(self, artifact: dict[str, Any]) -> ReferenceImage | None:
+        filename = self._safe_artifact_filename(
+            str(artifact.get("filename") or "").strip(),
+            fallback=Path(str(artifact.get("path") or "")).name or "reference.png",
+        )
+        mime = (
+            str(artifact.get("mime") or artifact.get("mime_type") or "").strip()
+            or mimetypes.guess_type(filename)[0]
+            or "application/octet-stream"
+        )
+        content: bytes | None = None
+        resolved_path = self._resolve_input_artifact_path(str(artifact.get("path") or "").strip())
+        if resolved_path and resolved_path.is_file():
+            try:
+                content = resolved_path.read_bytes()
+            except OSError:
+                logger.exception("image_generator_agent.reference_image_read_failed path=%s", resolved_path)
+                content = None
+        if content is None:
+            remote_url = str(artifact.get("provider_url") or artifact.get("download_url") or "").strip()
+            if remote_url:
+                try:
+                    response = await self._http_client.get(remote_url, timeout=httpx.Timeout(60.0, connect=15.0))
+                    response.raise_for_status()
+                    content = response.content
+                    if response.headers.get("content-type"):
+                        mime = str(response.headers.get("content-type") or "").split(";", 1)[0].strip() or mime
+                except Exception:
+                    logger.exception("image_generator_agent.reference_image_fetch_failed url=%s", remote_url)
+                    content = None
+        if not content:
+            return None
+        return ReferenceImage(
+            artifact_ref={
+                "artifact_id": str(artifact.get("artifact_id") or "").strip(),
+                "path": str(artifact.get("path") or "").strip(),
+                "mime": mime,
+            },
+            filename=filename,
+            mime=mime,
+            data=content,
+        )
+
+    def _resolve_reference_route(self, route: ImageRouteDecision, reference_images: list[ReferenceImage]) -> ImageRouteDecision:
+        if not reference_images:
+            return route
+        if route.provider == "xai" and len(reference_images) > 3 and self.config.openai_api_key:
+            return ImageRouteDecision(
+                provider="openai",
+                model=self.config.openai_image_model,
+                reason="Fell back to GPT Image 1.5 because this reference-image edit exceeds xAI's three-image edit limit.",
+                router_mode="edit_fallback",
+            )
+        return route
+
+    def _resolve_input_artifact_path(self, raw_path: str) -> Path | None:
+        value = str(raw_path or "").strip()
+        if not value:
+            return None
+        candidate = Path(value).expanduser()
+        if candidate.is_absolute():
+            return candidate
+        normalized = value.replace("\\", "/").lstrip("./")
+        if normalized.startswith("runs/artifacts/"):
+            relative = normalized[len("runs/artifacts/") :].strip("/")
+            if relative:
+                return (self.artifacts_root / Path(relative)).resolve()
+        return (BACKEND_ROOT / Path(normalized)).resolve()
+
+    def _image_to_data_url(self, image: ReferenceImage) -> str:
+        media_type = str(image.mime or "").strip() or "image/png"
+        return f"data:{media_type};base64,{base64.b64encode(image.data).decode('ascii')}"
+
+    def _safe_artifact_filename(self, filename: str, *, fallback: str) -> str:
+        candidate = Path(filename or "").name.strip()
+        if not candidate:
+            candidate = fallback
+        candidate = re.sub(r"[\x00-\x1f]+", "_", candidate)
+        candidate = re.sub(r"[^A-Za-z0-9._() \-]+", "_", candidate).strip(" ._")
+        return candidate or fallback
 
     async def _emit_progress(self, task_id: str, message: str, **payload: Any) -> None:
         progress_payload = {"message": message}

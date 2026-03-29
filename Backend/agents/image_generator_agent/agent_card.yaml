@@ -1,14 +1,15 @@
 agent_id: cosmic/image-generator-agent:1.0.0
 display_name: Image Generator Agent
 description: >
-  Specialist agent for text-to-image generation. It routes prompts between
-  Grok Imagine Image Pro and GPT Image 1.5, persists generated images into the
-  task artifact tree, logs router/provider usage telemetry, and can recall prior
-  image-generation runs from its private session ledger.
+  Specialist agent for text-to-image generation and reference-image editing. It
+  routes prompts between Grok Imagine Image Pro and GPT Image 1.5, persists
+  generated images into the task artifact tree, logs router/provider usage
+  telemetry, and can recall prior image-generation runs from its private session
+  ledger.
 
 intents:
   - name: image.generate
-    description: Generate one or more images from a prompt, choosing the image model internally when appropriate.
+    description: Generate one or more images from a prompt, or edit from reference images passed via TaskEnvelope.input_artifacts.
     input_schema: schemas/intents/image.generate.input.json
     output_schema: schemas/intents/image.generate.output.json
     timeout_sec: 300
@@ -16,6 +17,7 @@ intents:
       - Use this specialist when the user wants a new generated image, poster, concept render, graphic, or visual.
       - Pass a compact prompt plus key constraints; do not dump a long raw transcript.
       - Grok Imagine Image Pro is the default path, but GPT Image 1.5 is preferred for more complex, text-heavy, or layout-sensitive requests.
+      - Reuse prior COSMIC-produced images by passing artifact_ids so the specialist receives them as input_artifacts.
       - Generated image artifact filenames include the generation model name by design.
 
   - name: image.recall_session

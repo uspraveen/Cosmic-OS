@@ -14,6 +14,7 @@ All events are yielded as dicts for ndjson streaming back to the Gateway.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -54,9 +55,10 @@ from shared import (
     post_usage_event,
     sign_task_envelope,
     verify_task_envelope,
+    is_supported_image_artifact,
 )
 
-from .config import OrchestratorConfig
+from .config import BACKEND_ROOT, OrchestratorConfig
 from .prompts import build_agentic_system_prompt
 from .store.ledger import TaskLedger
 from .tools.executor import ToolExecutionContext, ToolExecutor
@@ -195,6 +197,14 @@ class AgentDispatchStats:
         }
 
 
+@dataclass(slots=True)
+class InputArtifactPayload:
+    artifact: dict[str, Any]
+    filename: str
+    mime_type: str
+    content: bytes
+
+
 class OrchestratorRuntime:
     def __init__(
         self,
@@ -226,6 +236,7 @@ class OrchestratorRuntime:
         self._agent_event_consumer_name = f"orchestrator-events-{id(self)}"
         self._featured_specialists_cache: list[dict[str, Any]] = []
         self._featured_specialists_refreshed_at: float = 0.0
+        self._anthropic_input_file_cache: dict[tuple[str, str, str], str] = {}
 
     def _featured_specialist_agent_ids(self) -> set[str]:
         return {
@@ -353,6 +364,10 @@ class OrchestratorRuntime:
 
         try:
             messages = self._build_messages(task)
+            messages = await self._attach_initial_input_artifact_blocks(
+                messages,
+                task.input_artifacts if isinstance(task.input_artifacts, list) else [],
+            )
             self._refresh_featured_specialists()
             system_prompt = build_agentic_system_prompt(
                 str(task.input.get("memory_context") or "").strip() or None,
@@ -695,7 +710,11 @@ class OrchestratorRuntime:
                             "content": result_str,
                         })
 
-                    messages.append({"role": "user", "content": tool_results})
+                    followup_blocks = await self._build_tool_result_followup_blocks(result_strs)
+                    user_content: list[dict[str, Any]] = list(tool_results)
+                    if followup_blocks:
+                        user_content.extend(followup_blocks)
+                    messages.append({"role": "user", "content": user_content})
 
                     yield {
                         **ev, "type": "task.progress",
@@ -1528,7 +1547,7 @@ class OrchestratorRuntime:
         if container_id:
             body["container"] = container_id
 
-        headers = self._anthropic_api_headers(accept="text/event-stream")
+        headers = self._anthropic_api_headers(accept="text/event-stream", include_code_execution_beta=True)
         headers["content-type"] = "application/json"
 
         for attempt in range(3):
@@ -1818,6 +1837,205 @@ class OrchestratorRuntime:
             messages.append({"role": "user", "content": current_user_content})
 
         return messages
+
+    async def _attach_initial_input_artifact_blocks(
+        self,
+        messages: list[dict[str, Any]],
+        input_artifacts: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not messages or not input_artifacts:
+            return messages
+        last_message = messages[-1]
+        if not isinstance(last_message, dict) or last_message.get("role") != "user":
+            return messages
+        staged_blocks = await self._build_artifact_followup_blocks(
+            input_artifacts,
+            include_visual_image_blocks=False,
+        )
+        if not staged_blocks:
+            return messages
+        last_message["content"] = self._merge_message_content(last_message.get("content"), staged_blocks)
+        return messages
+
+    async def _build_tool_result_followup_blocks(self, result_strs: list[str]) -> list[dict[str, Any]]:
+        artifacts = self._extract_artifacts_from_tool_results(result_strs)
+        if not artifacts:
+            return []
+        staged_blocks = await self._build_artifact_followup_blocks(
+            artifacts,
+            include_visual_image_blocks=True,
+        )
+        if not staged_blocks:
+            return []
+        note = {
+            "type": "text",
+            "text": (
+                "Resolved reusable artifacts are attached below. Any container_upload files are available "
+                "to the code_execution tool if you choose it."
+            ),
+        }
+        return [note, *staged_blocks]
+
+    def _extract_artifacts_from_tool_results(self, result_strs: list[str]) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for result_str in result_strs:
+            payload = self._parse_tool_result_json(result_str)
+            if not isinstance(payload, dict):
+                continue
+            raw_artifacts = payload.get("artifacts")
+            if not isinstance(raw_artifacts, list):
+                continue
+            for item in raw_artifacts:
+                if not isinstance(item, dict):
+                    continue
+                artifact_id = str(item.get("artifact_id") or "").strip()
+                path = str(item.get("path") or "").strip()
+                dedupe_key = (artifact_id, path)
+                if not any(dedupe_key) or dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                merged.append(dict(item))
+        return merged
+
+    async def _build_artifact_followup_blocks(
+        self,
+        artifacts: list[dict[str, Any]],
+        *,
+        include_visual_image_blocks: bool,
+    ) -> list[dict[str, Any]]:
+        if not artifacts:
+            return []
+        blocks: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        image_blocks = 0
+        staged_uploads = 0
+        for artifact in artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            artifact_id = str(artifact.get("artifact_id") or "").strip()
+            path = str(artifact.get("path") or "").strip()
+            dedupe_key = (artifact_id, path)
+            if not any(dedupe_key) or dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            payload = await self._load_artifact_payload(artifact)
+            if payload is None:
+                continue
+            if include_visual_image_blocks and is_supported_image_artifact(artifact):
+                if image_blocks < max(1, int(self.config.anthropic_max_input_images)):
+                    blocks.append(
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": payload.mime_type,
+                                "data": base64.b64encode(payload.content).decode("ascii"),
+                            },
+                        }
+                    )
+                    image_blocks += 1
+            if staged_uploads >= max(0, int(self.config.anthropic_max_staged_input_files)):
+                continue
+            file_id = await self._upload_input_artifact_to_anthropic(payload)
+            if not file_id:
+                continue
+            blocks.append({"type": "container_upload", "file_id": file_id})
+            staged_uploads += 1
+        return blocks
+
+    async def _load_artifact_payload(self, artifact: dict[str, Any]) -> InputArtifactPayload | None:
+        filename = self._sanitize_generated_filename(
+            str(artifact.get("filename") or "").strip(),
+            fallback=Path(str(artifact.get("path") or "")).name or "artifact.bin",
+        )
+        mime_type = (
+            str(artifact.get("mime") or artifact.get("mime_type") or "").strip()
+            or mimetypes.guess_type(filename)[0]
+            or "application/octet-stream"
+        )
+        resolved_path = self._resolve_logical_artifact_input_path(str(artifact.get("path") or "").strip())
+        content: bytes | None = None
+        if resolved_path and resolved_path.is_file():
+            try:
+                content = resolved_path.read_bytes()
+            except OSError:
+                logger.exception("orchestrator.artifact_input_read_failed path=%s", resolved_path)
+                content = None
+        if content is None:
+            remote_url = str(artifact.get("provider_url") or artifact.get("download_url") or "").strip()
+            if remote_url:
+                try:
+                    response = await self._client.get(remote_url)
+                    response.raise_for_status()
+                    content = response.content
+                    if response.headers.get("content-type"):
+                        mime_type = str(response.headers.get("content-type") or "").split(";", 1)[0].strip() or mime_type
+                except Exception:
+                    logger.exception("orchestrator.artifact_input_fetch_failed url=%s", remote_url)
+                    content = None
+        if not content:
+            return None
+        max_bytes = max(1024, int(self.config.anthropic_max_staged_input_file_bytes))
+        if len(content) > max_bytes:
+            logger.info(
+                "orchestrator.artifact_input_skipped_too_large artifact_id=%s size=%s max=%s",
+                str(artifact.get("artifact_id") or "").strip(),
+                len(content),
+                max_bytes,
+            )
+            return None
+        return InputArtifactPayload(
+            artifact=dict(artifact),
+            filename=filename,
+            mime_type=mime_type,
+            content=content,
+        )
+
+    def _resolve_logical_artifact_input_path(self, logical_path: str) -> Path | None:
+        value = str(logical_path or "").strip()
+        if not value:
+            return None
+        candidate = Path(value).expanduser()
+        if candidate.is_absolute():
+            return candidate
+        normalized = value.replace("\\", "/").lstrip("./")
+        if normalized.startswith("runs/artifacts/"):
+            relative = normalized[len("runs/artifacts/") :].strip("/")
+            if relative:
+                return (self.config.artifacts_root / Path(relative)).resolve()
+        return (BACKEND_ROOT / Path(normalized)).resolve()
+
+    async def _upload_input_artifact_to_anthropic(self, payload: InputArtifactPayload) -> str | None:
+        artifact_id = str(payload.artifact.get("artifact_id") or "").strip()
+        sha256 = str(payload.artifact.get("sha256") or hashlib.sha256(payload.content).hexdigest()).strip()
+        key = (artifact_id, sha256, payload.filename)
+        cached = self._anthropic_input_file_cache.get(key)
+        if cached:
+            return cached
+        headers = self._anthropic_api_headers()
+        try:
+            response = await self._client.post(
+                "https://api.anthropic.com/v1/files",
+                headers=headers,
+                files={"file": (payload.filename, payload.content, payload.mime_type)},
+            )
+            response.raise_for_status()
+            data = response.json()
+        except Exception:
+            logger.exception(
+                "orchestrator.anthropic_input_file_upload_failed artifact_id=%s filename=%s",
+                artifact_id,
+                payload.filename,
+            )
+            return None
+        if not isinstance(data, dict):
+            return None
+        file_id = str(data.get("id") or "").strip()
+        if not file_id:
+            return None
+        self._anthropic_input_file_cache[key] = file_id
+        return file_id
 
     def _prepare_messages_for_anthropic(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Build a replay-safe, canonicalized Anthropic messages list.
@@ -2413,15 +2631,22 @@ class OrchestratorRuntime:
             "created_at": metadata.get("created_at"),
         }
 
-    def _anthropic_api_headers(self, *, accept: str = "application/json") -> dict[str, str]:
+    def _anthropic_api_headers(self, *, accept: str = "application/json", include_code_execution_beta: bool = False) -> dict[str, str]:
         headers = {
             "x-api-key": self.config.anthropic_api_key,
             "anthropic-version": self.config.anthropic_version,
             "accept": accept,
         }
-        beta = str(self.config.anthropic_files_api_beta or "").strip()
-        if beta:
-            headers["anthropic-beta"] = beta
+        betas: list[str] = []
+        files_beta = str(self.config.anthropic_files_api_beta or "").strip()
+        if files_beta:
+            betas.append(files_beta)
+        if include_code_execution_beta:
+            code_beta = str(self.config.anthropic_code_execution_beta or "").strip()
+            if code_beta:
+                betas.insert(0, code_beta)
+        if betas:
+            headers["anthropic-beta"] = ",".join(self._dedupe_preserve_order(betas))
         return headers
 
     def _default_generated_filename(self, *, file_id: str, mime_type: str) -> str:
