@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "response": { "type": "string" },
+    "message": { "type": "string" },
+    "prompt": { "type": "string" },
+    "provider": { "type": "string" },
+    "model": { "type": "string" },
+    "router_decision": {
+      "type": "object",
+      "properties": {
+        "provider": { "type": "string" },
+        "model": { "type": "string" },
+        "reason": { "type": "string" },
+        "router_mode": { "type": "string" }
+      },
+      "required": ["provider", "model", "reason", "router_mode"]
+    },
+    "images": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "artifact_id": { "type": "string" },
+          "path": { "type": "string" },
+          "mime": { "type": "string" },
+          "filename": { "type": "string" },
+          "provider": { "type": "string" },
+          "model": { "type": "string" },
+          "width": { "type": ["integer", "null"] },
+          "height": { "type": ["integer", "null"] },
+          "revised_prompt": { "type": ["string", "null"] }
+        },
+        "required": ["artifact_id", "path", "mime", "filename", "provider", "model"]
+      }
+    },
+    "artifact_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "artifact_id": { "type": "string" },
+          "path": { "type": "string" },
+          "mime": { "type": "string" }
+        },
+        "required": ["artifact_id", "path", "mime"]
+      }
+    },
+    "provider_request_id": { "type": ["string", "null"] },
+    "provider_usage": { "type": ["object", "array", "string", "number", "boolean", "null"] },
+    "report_artifact": {
+      "type": "object",
+      "properties": {
+        "artifact_id": { "type": "string" },
+        "path": { "type": "string" },
+        "mime": { "type": "string" }
+      },
+      "required": ["artifact_id", "path", "mime"]
+    },
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "size": { "type": "string" },
+        "quality": { "type": "string" },
+        "count": { "type": "integer" }
+      },
+      "required": ["size", "quality", "count"]
+    }
+  },
+  "required": [
+    "response",
+    "message",
+    "prompt",
+    "provider",
+    "model",
+    "router_decision",
+    "images",
+    "artifact_refs",
+    "parameters"
+  ]
+}

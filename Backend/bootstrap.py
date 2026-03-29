@@ -91,6 +91,10 @@ EMAIL_AGENT_ENV_NAME = "email-agent.env"
 EMAIL_AGENT_SERVICE_NAME = "cosmic-email-agent.service"
 EMAIL_AGENT_ID = "cosmic/email-agent:1.0.0"
 EMAIL_AGENT_DEFAULT_INSTANCE_ID = "email-agent-1"
+IMAGE_GENERATOR_AGENT_ENV_NAME = "image-generator-agent.env"
+IMAGE_GENERATOR_AGENT_SERVICE_NAME = "cosmic-image-generator-agent.service"
+IMAGE_GENERATOR_AGENT_ID = "cosmic/image-generator-agent:1.0.0"
+IMAGE_GENERATOR_AGENT_DEFAULT_INSTANCE_ID = "image-generator-agent-1"
 CRITICAL_VENV_IMPORT_CHECKS: Tuple[Tuple[str, str], ...] = (
     ("docling", "docs parser runtime"),
 )
@@ -1216,6 +1220,169 @@ def read_email_agent_system_env(system_env_dir: Optional[Path] = None) -> Dict[s
     return parse_env_text(read_text_file(env_path, use_sudo=True))
 
 
+def image_generator_agent_repo_dir() -> Path:
+    return BACKEND_ROOT / "agents" / "image_generator_agent"
+
+
+def image_generator_agent_repo_env_path() -> Path:
+    return image_generator_agent_repo_dir() / "agent.env"
+
+
+def image_generator_agent_repo_env_example_path() -> Path:
+    return image_generator_agent_repo_dir() / "agent.env.example"
+
+
+def image_generator_agent_system_env_path(system_env_dir: Optional[Path] = None) -> Path:
+    return (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "agents" / IMAGE_GENERATOR_AGENT_ENV_NAME
+
+
+def resolve_image_generator_agent_env_source() -> Path:
+    repo_env = image_generator_agent_repo_env_path()
+    if repo_env.exists():
+        return repo_env
+    return image_generator_agent_repo_env_example_path()
+
+
+def build_image_generator_agent_env_rendered(
+    *,
+    signing_secret: str,
+    shared_internal_token: str,
+    system_env_dir: Optional[Path] = None,
+    existing_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+    external_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Tuple[Path, str, Dict[str, str]]:
+    source_path = resolve_image_generator_agent_env_source()
+    source_raw = source_path.read_text(encoding="utf-8")
+    source_data = parse_env_text(source_raw)
+    existing_env = (existing_env_by_name or {}).get(IMAGE_GENERATOR_AGENT_ENV_NAME, {})
+    external_env = (external_env_by_name or {}).get(IMAGE_GENERATOR_AGENT_ENV_NAME, {})
+
+    redis_url = first_meaningful_value(
+        external_env.get("REDIS_URL"),
+        existing_env.get("REDIS_URL"),
+        source_data.get("REDIS_URL"),
+        "redis://127.0.0.1:6379/0",
+    )
+    gateway_url = first_meaningful_value(
+        external_env.get("GATEWAY_URL"),
+        existing_env.get("GATEWAY_URL"),
+        source_data.get("GATEWAY_URL"),
+        "http://127.0.0.1:8080",
+    )
+    router_api_key = first_meaningful_value(
+        external_env.get("IMAGE_AGENT_ROUTER_API_KEY"),
+        external_env.get("OPENAI_API_KEY"),
+        existing_env.get("IMAGE_AGENT_ROUTER_API_KEY"),
+        existing_env.get("OPENAI_API_KEY"),
+        source_data.get("IMAGE_AGENT_ROUTER_API_KEY"),
+        source_data.get("OPENAI_API_KEY"),
+    )
+    router_base_url = first_meaningful_value(
+        external_env.get("IMAGE_AGENT_ROUTER_BASE_URL"),
+        external_env.get("OPENAI_BASE_URL"),
+        existing_env.get("IMAGE_AGENT_ROUTER_BASE_URL"),
+        existing_env.get("OPENAI_BASE_URL"),
+        source_data.get("IMAGE_AGENT_ROUTER_BASE_URL"),
+        source_data.get("OPENAI_BASE_URL"),
+        "https://api.openai.com/v1",
+    )
+    router_model = first_meaningful_value(
+        external_env.get("IMAGE_AGENT_ROUTER_MODEL"),
+        existing_env.get("IMAGE_AGENT_ROUTER_MODEL"),
+        source_data.get("IMAGE_AGENT_ROUTER_MODEL"),
+        "gpt-5-mini",
+    )
+    openai_api_key = first_meaningful_value(
+        external_env.get("IMAGE_AGENT_OPENAI_API_KEY"),
+        external_env.get("OPENAI_API_KEY"),
+        existing_env.get("IMAGE_AGENT_OPENAI_API_KEY"),
+        existing_env.get("OPENAI_API_KEY"),
+        source_data.get("IMAGE_AGENT_OPENAI_API_KEY"),
+        source_data.get("OPENAI_API_KEY"),
+    )
+    openai_base_url = first_meaningful_value(
+        external_env.get("IMAGE_AGENT_OPENAI_BASE_URL"),
+        external_env.get("OPENAI_BASE_URL"),
+        existing_env.get("IMAGE_AGENT_OPENAI_BASE_URL"),
+        existing_env.get("OPENAI_BASE_URL"),
+        source_data.get("IMAGE_AGENT_OPENAI_BASE_URL"),
+        source_data.get("OPENAI_BASE_URL"),
+        "https://api.openai.com/v1",
+    )
+    openai_model = first_meaningful_value(
+        external_env.get("IMAGE_AGENT_OPENAI_MODEL"),
+        existing_env.get("IMAGE_AGENT_OPENAI_MODEL"),
+        source_data.get("IMAGE_AGENT_OPENAI_MODEL"),
+        "gpt-image-1.5",
+    )
+    xai_api_key = first_meaningful_value(
+        external_env.get("IMAGE_AGENT_XAI_API_KEY"),
+        external_env.get("XAI_API_KEY"),
+        existing_env.get("IMAGE_AGENT_XAI_API_KEY"),
+        existing_env.get("XAI_API_KEY"),
+        source_data.get("IMAGE_AGENT_XAI_API_KEY"),
+        source_data.get("XAI_API_KEY"),
+    )
+    xai_base_url = first_meaningful_value(
+        external_env.get("IMAGE_AGENT_XAI_BASE_URL"),
+        existing_env.get("IMAGE_AGENT_XAI_BASE_URL"),
+        source_data.get("IMAGE_AGENT_XAI_BASE_URL"),
+        "https://api.x.ai/v1",
+    )
+    xai_model = first_meaningful_value(
+        external_env.get("IMAGE_AGENT_XAI_MODEL"),
+        existing_env.get("IMAGE_AGENT_XAI_MODEL"),
+        source_data.get("IMAGE_AGENT_XAI_MODEL"),
+        "grok-imagine-image-pro",
+    )
+    instance_id = first_meaningful_value(
+        external_env.get("INSTANCE_ID"),
+        existing_env.get("INSTANCE_ID"),
+        source_data.get("INSTANCE_ID"),
+        IMAGE_GENERATOR_AGENT_DEFAULT_INSTANCE_ID,
+    )
+
+    overrides = {
+        "REDIS_URL": redis_url or "redis://127.0.0.1:6379/0",
+        "GATEWAY_URL": gateway_url or "http://127.0.0.1:8080",
+        "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
+        "AGENT_SECRET": signing_secret,
+        "INSTANCE_ID": instance_id or IMAGE_GENERATOR_AGENT_DEFAULT_INSTANCE_ID,
+        "IMAGE_AGENT_ROUTER_BASE_URL": router_base_url or "https://api.openai.com/v1",
+        "IMAGE_AGENT_ROUTER_MODEL": router_model or "gpt-5-mini",
+        "IMAGE_AGENT_OPENAI_BASE_URL": openai_base_url or "https://api.openai.com/v1",
+        "IMAGE_AGENT_OPENAI_MODEL": openai_model or "gpt-image-1.5",
+        "IMAGE_AGENT_XAI_BASE_URL": xai_base_url or "https://api.x.ai/v1",
+        "IMAGE_AGENT_XAI_MODEL": xai_model or "grok-imagine-image-pro",
+    }
+    if router_api_key is not None:
+        overrides["IMAGE_AGENT_ROUTER_API_KEY"] = router_api_key
+    if openai_api_key is not None:
+        overrides["IMAGE_AGENT_OPENAI_API_KEY"] = openai_api_key
+    if xai_api_key is not None:
+        overrides["IMAGE_AGENT_XAI_API_KEY"] = xai_api_key
+
+    rendered = render_env_with_overrides(source_raw, overrides)
+    rendered_data = parse_env_text(rendered)
+    return image_generator_agent_system_env_path(system_env_dir), rendered, rendered_data
+
+
+def image_generator_agent_is_configured(env_values: Dict[str, str]) -> bool:
+    return (
+        meaningful_env_value(env_values.get("IMAGE_AGENT_XAI_API_KEY")) is not None
+        or meaningful_env_value(env_values.get("XAI_API_KEY")) is not None
+        or meaningful_env_value(env_values.get("IMAGE_AGENT_OPENAI_API_KEY")) is not None
+        or meaningful_env_value(env_values.get("OPENAI_API_KEY")) is not None
+    )
+
+
+def read_image_generator_agent_system_env(system_env_dir: Optional[Path] = None) -> Dict[str, str]:
+    env_path = image_generator_agent_system_env_path(system_env_dir)
+    if not env_path.exists():
+        return {}
+    return parse_env_text(read_text_file(env_path, use_sudo=True))
+
+
 def extract_host_from_url(value: Optional[str]) -> Optional[str]:
     normalized = meaningful_env_value(value)
     if normalized is None:
@@ -1389,6 +1556,9 @@ def normalize_bootstrap_env_payload(payload: Dict[str, object]) -> Dict[str, Dic
     email_agent_env = {}
     if isinstance(payload.get("email_agent_env"), dict):
         email_agent_env = dict(payload.get("email_agent_env") or {})
+    image_generator_agent_env = {}
+    if isinstance(payload.get("image_generator_agent_env"), dict):
+        image_generator_agent_env = dict(payload.get("image_generator_agent_env") or {})
     meeting_env = dict(payload.get("meeting_env") or {}) if isinstance(payload.get("meeting_env"), dict) else {}
     vm_payload = dict(payload.get("vm") or {}) if isinstance(payload.get("vm"), dict) else {}
 
@@ -1433,6 +1603,8 @@ def normalize_bootstrap_env_payload(payload: Dict[str, object]) -> Dict[str, Dic
         normalized[TABULAR_AGENT_ENV_NAME] = tabular_agent_env
     if email_agent_env:
         normalized[EMAIL_AGENT_ENV_NAME] = email_agent_env
+    if image_generator_agent_env:
+        normalized[IMAGE_GENERATOR_AGENT_ENV_NAME] = image_generator_agent_env
     required_fields = {
         "gateway.env": ("GATEWAY_LOCAL_API_TOKEN", "ANTHROPIC_API_KEY", "PERPLEXITY_API_KEY", "GATEWAY_PUBLIC_HOST"),
         "model-router.env": ("GROQ_API_KEY",),
@@ -2311,6 +2483,19 @@ def materialize_bootstrap_env_files(
     email_repo_path.write_text(email_rendered, encoding="utf-8")
     written.append(email_repo_path)
     log("Materialized repo env file from bootstrap inputs: {0}".format(email_repo_path))
+
+    image_generator_repo_path = image_generator_agent_repo_env_path()
+    _image_dest_path, image_rendered, _image_env = build_image_generator_agent_env_rendered(
+        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
+        system_env_dir=system_env_dir,
+        existing_env_by_name=existing_env_by_name,
+        external_env_by_name=external_env_by_name,
+    )
+    image_generator_repo_path.parent.mkdir(parents=True, exist_ok=True)
+    image_generator_repo_path.write_text(image_rendered, encoding="utf-8")
+    written.append(image_generator_repo_path)
+    log("Materialized repo env file from bootstrap inputs: {0}".format(image_generator_repo_path))
     return written
 
 
@@ -2409,6 +2594,19 @@ def install_service_env_files(system_env_dir: Path, *, include_memory: bool = Fa
         install_text_file(email_dest_path, email_rendered, mode="600", use_sudo=True)
         installed.append(email_dest_path)
         log("Installed system env file: {0}".format(email_dest_path))
+
+    image_dest_path, image_rendered, _image_env = build_image_generator_agent_env_rendered(
+        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
+        system_env_dir=system_env_dir,
+    )
+    run(["install", "-d", "-m", "755", str(image_dest_path.parent)], use_sudo=True)
+    if image_dest_path.exists():
+        log("System env file already exists: {0}".format(image_dest_path))
+    else:
+        install_text_file(image_dest_path, image_rendered, mode="600", use_sudo=True)
+        installed.append(image_dest_path)
+        log("Installed system env file: {0}".format(image_dest_path))
 
     return installed
 
@@ -2587,15 +2785,23 @@ def doctor(
     email_system_data = {}
     if is_linux() and email_system_path.exists():
         email_system_data = read_email_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+    image_source = resolve_image_generator_agent_env_source()
+    image_source_data = parse_env_text(image_source.read_text(encoding="utf-8")) if image_source.exists() else {}
+    image_system_path = image_generator_agent_system_env_path(DEFAULT_SYSTEM_ENV_DIR)
+    image_system_data = {}
+    if is_linux() and image_system_path.exists():
+        image_system_data = read_image_generator_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
     print("  firecrawl env src  : {0}".format(firecrawl_source if firecrawl_source.exists() else "missing"))
     print("  docs parser env src: {0}".format(docs_parser_source if docs_parser_source.exists() else "missing"))
     print("  x search env src   : {0}".format(x_twitter_source if x_twitter_source.exists() else "missing"))
     print("  email agent env src: {0}".format(email_source if email_source.exists() else "missing"))
+    print("  image agent env src: {0}".format(image_source if image_source.exists() else "missing"))
     if is_linux():
         print("  firecrawl system env: {0}".format(firecrawl_system_path if firecrawl_system_path.exists() else "missing"))
         print("  docs parser system env: {0}".format(docs_parser_system_path if docs_parser_system_path.exists() else "missing"))
         print("  x search system env: {0}".format(x_twitter_system_path if x_twitter_system_path.exists() else "missing"))
         print("  email agent system env: {0}".format(email_system_path if email_system_path.exists() else "missing"))
+        print("  image agent system env: {0}".format(image_system_path if image_system_path.exists() else "missing"))
     firecrawl_enabled = firecrawl_agent_is_configured(
         firecrawl_system_data if firecrawl_system_data else firecrawl_source_data
     )
@@ -2605,9 +2811,13 @@ def doctor(
     email_enabled = email_agent_enabled_via_env_or_integration(
         email_system_data if email_system_data else email_source_data
     )
+    image_enabled = image_generator_agent_is_configured(
+        image_system_data if image_system_data else image_source_data
+    )
     print("  firecrawl enabled  : {0}".format("yes" if firecrawl_enabled else "no"))
     print("  x search enabled   : {0}".format("yes" if x_twitter_enabled else "no"))
     print("  email agent enabled: {0}".format("yes" if email_enabled else "no"))
+    print("  image agent enabled: {0}".format("yes" if image_enabled else "no"))
     if is_linux() and shutil.which("systemctl") is not None:
         neo4j_status = run(
             ["systemctl", "is-active", DEFAULT_NEO4J_SERVICE_NAME],
@@ -2639,6 +2849,12 @@ def doctor(
             check=False,
         )
         print("  email agent service: {0}".format((email_status.stdout or "unknown").strip() or "unknown"))
+        image_status = run(
+            ["systemctl", "is-active", IMAGE_GENERATOR_AGENT_SERVICE_NAME],
+            capture_output=True,
+            check=False,
+        )
+        print("  image agent service: {0}".format((image_status.stdout or "unknown").strip() or "unknown"))
     print("  env search roots   : {0}".format(", ".join(str(path) for path in env_search_roots)))
     print("  env templates      : {0}".format(len(env_examples)))
     print("  systemd templates  : {0}".format(systemd_template_dir if systemd_template_dir.exists() else "missing"))
@@ -2799,6 +3015,26 @@ def sync_service_env_files(system_env_dir: Path, *, include_memory: bool = False
         )
         if changed_keys:
             synced.append(email_dest_path)
+    image_dest_path = image_generator_agent_system_env_path(system_env_dir)
+    if image_dest_path.exists():
+        image_existing_by_name: Dict[str, Dict[str, str]] = {
+            IMAGE_GENERATOR_AGENT_ENV_NAME: parse_env_text(read_text_file(image_dest_path, use_sudo=True)),
+        }
+        _image_dest_path, image_rendered, _image_env = build_image_generator_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+            shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
+            system_env_dir=system_env_dir,
+            existing_env_by_name=image_existing_by_name,
+        )
+        changed_keys = sync_env_file(
+            image_dest_path,
+            source_raw=image_rendered,
+            create_missing=False,
+            use_sudo=True,
+            mode="600",
+        )
+        if changed_keys:
+            synced.append(image_dest_path)
     return synced
 
 
@@ -3279,6 +3515,7 @@ def run_post_provision_health_checks(
     include_x_twitter_search_agent: bool = False,
     include_tabular_agent: bool = True,
     include_email_agent: bool = False,
+    include_image_generator_agent: bool = False,
     timeout_sec: float = DEFAULT_POST_PROVISION_TIMEOUT_SEC,
     poll_interval_sec: float = DEFAULT_POST_PROVISION_POLL_INTERVAL_SEC,
 ) -> None:
@@ -3358,6 +3595,18 @@ def run_post_provision_health_checks(
         )
         wait_for_orchestrator_agent_ready(
             EMAIL_AGENT_ID,
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+
+    if include_image_generator_agent:
+        wait_for_systemd_unit_active(
+            IMAGE_GENERATOR_AGENT_SERVICE_NAME,
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+        wait_for_orchestrator_agent_ready(
+            IMAGE_GENERATOR_AGENT_ID,
             timeout_sec=timeout_sec,
             poll_interval_sec=poll_interval_sec,
         )
@@ -3568,6 +3817,12 @@ def provision_vm(
                 log("Agent Email is configured through the shared backend integration store; bootstrap will enable and start the email agent service.")
     else:
         log("Email agent env is not configured; bootstrap will install the unit but skip enabling the email agent service.")
+    image_env = read_image_generator_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+    enable_image_generator_agent = image_generator_agent_is_configured(image_env)
+    if enable_image_generator_agent:
+        log("Image generator agent env is configured; bootstrap will enable and start the image generator agent service.")
+    else:
+        log("Image generator agent env is not configured; bootstrap will install the unit but skip enabling the image generator agent service.")
     installed = install_systemd_units(
         systemd_template_dir,
         enable_units=enable_units,
@@ -3579,6 +3834,7 @@ def provision_vm(
             + ([X_TWITTER_SEARCH_AGENT_SERVICE_NAME] if enable_units and enable_x_twitter_search_agent else [])
             + ([TABULAR_AGENT_SERVICE_NAME] if enable_units and enable_tabular_agent else [])
             + ([EMAIL_AGENT_SERVICE_NAME] if enable_units and enable_email_agent else [])
+            + ([IMAGE_GENERATOR_AGENT_SERVICE_NAME] if enable_units and enable_image_generator_agent else [])
         ),
         include_memory_env=enable_memory,
     )
@@ -3589,6 +3845,7 @@ def provision_vm(
             include_x_twitter_search_agent=enable_x_twitter_search_agent,
             include_tabular_agent=enable_tabular_agent,
             include_email_agent=enable_email_agent,
+            include_image_generator_agent=enable_image_generator_agent,
         )
 
     print("")
@@ -3840,6 +4097,8 @@ def main() -> int:
             enable_tabular_agent = True
             email_env = read_email_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
             enable_email_agent = email_agent_enabled_via_env_or_integration(email_env)
+            image_env = read_image_generator_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+            enable_image_generator_agent = image_generator_agent_is_configured(image_env)
             installed = install_systemd_units(
                 systemd_template_dir,
                 enable_units=bool(getattr(args, "enable", False)),
@@ -3851,6 +4110,7 @@ def main() -> int:
                     + ([X_TWITTER_SEARCH_AGENT_SERVICE_NAME] if enable_x_twitter_search_agent and bool(getattr(args, "enable", False)) else [])
                     + ([TABULAR_AGENT_SERVICE_NAME] if enable_tabular_agent and bool(getattr(args, "enable", False)) else [])
                     + ([EMAIL_AGENT_SERVICE_NAME] if enable_email_agent and bool(getattr(args, "enable", False)) else [])
+                    + ([IMAGE_GENERATOR_AGENT_SERVICE_NAME] if enable_image_generator_agent and bool(getattr(args, "enable", False)) else [])
                 ),
                 include_memory_env=memory_repo_dir is not None,
             )
@@ -3861,6 +4121,7 @@ def main() -> int:
                     include_x_twitter_search_agent=enable_x_twitter_search_agent,
                     include_tabular_agent=enable_tabular_agent,
                     include_email_agent=enable_email_agent,
+                    include_image_generator_agent=enable_image_generator_agent,
                 )
             print("Installed systemd units:")
             for unit_name in installed:

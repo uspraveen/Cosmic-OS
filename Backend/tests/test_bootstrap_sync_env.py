@@ -294,6 +294,38 @@ def test_normalize_bootstrap_env_payload_accepts_email_agent_env() -> None:
     assert normalized[bootstrap.EMAIL_AGENT_ENV_NAME]["COSMIC_MAIL_API_TOKEN"] == "mail-token"
 
 
+def test_normalize_bootstrap_env_payload_accepts_image_generator_agent_env() -> None:
+    normalized = bootstrap.normalize_bootstrap_env_payload(
+        {
+            "success": True,
+            "vm": {
+                "gateway_url": "http://127.0.0.1:8080",
+                "vm_dns": "localhost",
+            },
+            "gateway_env": {
+                "GATEWAY_LOCAL_API_TOKEN": "pg_live_token",
+                "ANTHROPIC_API_KEY": "anthropic-live",
+                "PERPLEXITY_API_KEY": "perplexity-live",
+                "HAIKU_MODEL": "claude-haiku-4-5",
+            },
+            "orchestrator_env": {
+                "ANTHROPIC_API_KEY": "anthropic-live",
+                "OPUS_MODEL": "claude-opus-4-6",
+            },
+            "meeting_env": {
+                "GROQ_API_KEY": "groq-live",
+            },
+            "image_generator_agent_env": {
+                "IMAGE_AGENT_XAI_API_KEY": "xai-live",
+                "IMAGE_AGENT_OPENAI_API_KEY": "openai-live",
+            },
+        }
+    )
+
+    assert normalized[bootstrap.IMAGE_GENERATOR_AGENT_ENV_NAME]["IMAGE_AGENT_XAI_API_KEY"] == "xai-live"
+    assert normalized[bootstrap.IMAGE_GENERATOR_AGENT_ENV_NAME]["IMAGE_AGENT_OPENAI_API_KEY"] == "openai-live"
+
+
 def test_normalize_bootstrap_env_payload_accepts_memory_env() -> None:
     normalized = bootstrap.normalize_bootstrap_env_payload(
         {
@@ -615,6 +647,50 @@ def test_build_email_agent_env_rendered_respects_explicit_disconnect(tmp_path, m
     assert parsed["COSMIC_MAIL_BASE_URL"] == ""
     assert parsed["COSMIC_MAIL_API_TOKEN"] == ""
     assert parsed["COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS"] == ""
+
+
+def test_build_image_generator_agent_env_rendered_prefers_external_values(tmp_path, monkeypatch) -> None:
+    backend_root = tmp_path / "Backend"
+    image_dir = backend_root / "agents" / "image_generator_agent"
+    image_dir.mkdir(parents=True)
+    (image_dir / "agent.env.example").write_text(
+        "REDIS_URL=redis://127.0.0.1:6379/0\n"
+        "GATEWAY_URL=http://127.0.0.1:8080\n"
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "AGENT_SECRET=<agent-shared-secret>\n"
+        "INSTANCE_ID=image-generator-agent-1\n"
+        "IMAGE_AGENT_ROUTER_API_KEY=\n"
+        "IMAGE_AGENT_ROUTER_BASE_URL=https://api.openai.com/v1\n"
+        "IMAGE_AGENT_ROUTER_MODEL=gpt-5-mini\n"
+        "IMAGE_AGENT_OPENAI_API_KEY=\n"
+        "IMAGE_AGENT_OPENAI_BASE_URL=https://api.openai.com/v1\n"
+        "IMAGE_AGENT_OPENAI_MODEL=gpt-image-1.5\n"
+        "IMAGE_AGENT_XAI_API_KEY=\n"
+        "IMAGE_AGENT_XAI_BASE_URL=https://api.x.ai/v1\n"
+        "IMAGE_AGENT_XAI_MODEL=grok-imagine-image-pro\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bootstrap, "BACKEND_ROOT", backend_root)
+
+    dest_path, rendered, parsed = bootstrap.build_image_generator_agent_env_rendered(
+        signing_secret="signing-secret",
+        shared_internal_token="internal-token",
+        external_env_by_name={
+            bootstrap.IMAGE_GENERATOR_AGENT_ENV_NAME: {
+                "IMAGE_AGENT_XAI_API_KEY": "xai-key",
+                "IMAGE_AGENT_OPENAI_API_KEY": "openai-key",
+                "IMAGE_AGENT_ROUTER_MODEL": "gpt-5-mini",
+            }
+        },
+    )
+
+    assert dest_path.name == bootstrap.IMAGE_GENERATOR_AGENT_ENV_NAME
+    assert "IMAGE_AGENT_XAI_API_KEY=xai-key" in rendered
+    assert parsed["IMAGE_AGENT_XAI_API_KEY"] == "xai-key"
+    assert parsed["IMAGE_AGENT_OPENAI_API_KEY"] == "openai-key"
+    assert parsed["IMAGE_AGENT_ROUTER_MODEL"] == "gpt-5-mini"
+    assert parsed["AGENT_SECRET"] == "signing-secret"
+    assert parsed["GATEWAY_INTERNAL_TOKEN"] == "internal-token"
 
 
 def test_materialize_bootstrap_env_files_can_render_memory_env(monkeypatch, tmp_path) -> None:
@@ -1298,6 +1374,44 @@ def test_run_post_provision_health_checks_waits_for_firecrawl_agent(monkeypatch)
         bootstrap.TABULAR_AGENT_SERVICE_NAME,
     ]
     assert agent_checks == [bootstrap.FIRECRAWL_AGENT_ID, bootstrap.TABULAR_AGENT_ID]
+    assert health_checks == [
+        ("orchestrator", "http://127.0.0.1:8743/health"),
+        ("gateway", "http://127.0.0.1:8080/health/ready"),
+    ]
+
+
+def test_run_post_provision_health_checks_waits_for_image_generator_agent(monkeypatch) -> None:
+    systemd_checks: list[str] = []
+    health_checks: list[tuple[str, str]] = []
+    agent_checks: list[str] = []
+
+    monkeypatch.setattr(bootstrap, "is_linux", lambda: True)
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: "/usr/bin/systemctl" if name == "systemctl" else None)
+    monkeypatch.setattr(
+        bootstrap,
+        "wait_for_systemd_unit_active",
+        lambda unit_name, **kwargs: systemd_checks.append(unit_name),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "wait_for_health_endpoint",
+        lambda url, *, check_name, **kwargs: health_checks.append((check_name, url)) or {"status": "ok"},
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "wait_for_orchestrator_agent_ready",
+        lambda agent_id, **kwargs: agent_checks.append(agent_id) or {"status": "ok"},
+    )
+
+    bootstrap.run_post_provision_health_checks(
+        include_memory=False,
+        include_image_generator_agent=True,
+        timeout_sec=1.0,
+        poll_interval_sec=0.01,
+    )
+
+    assert bootstrap.IMAGE_GENERATOR_AGENT_SERVICE_NAME in systemd_checks
+    assert bootstrap.IMAGE_GENERATOR_AGENT_ID in agent_checks
     assert health_checks == [
         ("orchestrator", "http://127.0.0.1:8743/health"),
         ("gateway", "http://127.0.0.1:8080/health/ready"),

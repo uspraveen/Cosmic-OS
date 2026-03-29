@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "prompt": {
+      "type": "string",
+      "minLength": 3,
+      "description": "The image-generation prompt."
+    },
+    "negative_prompt": {
+      "type": "string",
+      "description": "Optional things the generated image should avoid."
+    },
+    "style_hint": {
+      "type": "string",
+      "description": "Optional art direction, medium, or aesthetic hint."
+    },
+    "use_case": {
+      "type": "string",
+      "description": "Optional use case, for example poster, concept art, logo, dashboard mock, infographic."
+    },
+    "complexity_hint": {
+      "type": "string",
+      "enum": ["auto", "default", "complex"],
+      "default": "auto"
+    },
+    "prefer_model": {
+      "type": "string",
+      "description": "Optional explicit model/provider preference such as auto, xai, grok-imagine-image-pro, openai, or gpt-image-1.5."
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4,
+      "default": 1
+    },
+    "size": {
+      "type": "string",
+      "enum": ["1024x1024", "1024x1536", "1536x1024"],
+      "default": "1024x1024"
+    },
+    "quality": {
+      "type": "string",
+      "enum": ["auto", "low", "medium", "high"],
+      "default": "high"
+    },
+    "artifact_basename": {
+      "type": "string",
+      "description": "Optional desired basename for output image artifacts."
+    }
+  },
+  "required": ["prompt"]
+}

@@ -1,0 +1,75 @@
+agent_id: cosmic/image-generator-agent:1.0.0
+display_name: Image Generator Agent
+description: >
+  Specialist agent for text-to-image generation. It routes prompts between
+  Grok Imagine Image Pro and GPT Image 1.5, persists generated images into the
+  task artifact tree, logs router/provider usage telemetry, and can recall prior
+  image-generation runs from its private session ledger.
+
+intents:
+  - name: image.generate
+    description: Generate one or more images from a prompt, choosing the image model internally when appropriate.
+    input_schema: schemas/intents/image.generate.input.json
+    output_schema: schemas/intents/image.generate.output.json
+    timeout_sec: 300
+    usage_hints:
+      - Use this specialist when the user wants a new generated image, poster, concept render, graphic, or visual.
+      - Pass a compact prompt plus key constraints; do not dump a long raw transcript.
+      - Grok Imagine Image Pro is the default path, but GPT Image 1.5 is preferred for more complex, text-heavy, or layout-sensitive requests.
+      - Generated image artifact filenames include the generation model name by design.
+
+  - name: image.recall_session
+    description: Recall prior image-generation runs from the agent's private session ledger.
+    input_schema: schemas/intents/image.recall_session.input.json
+    output_schema: schemas/intents/image.recall_session.output.json
+    timeout_sec: 30
+    usage_hints:
+      - Recall prior image runs when you need exact reuse of already-generated artifacts or the prior provider/model choice.
+
+artifact_types:
+  - generated_image
+  - image_generation_report
+  - raw_json
+
+policies:
+  network_access: true
+  writable_paths:
+    - runs/artifacts
+    - agents/image_generator_agent/store
+    - agents/image_generator_agent/runtime
+  tool_access: []
+  allowed_senders:
+    - cosmic/orchestrator:1.0.0
+  intent_authorization:
+    image.generate: [cosmic/orchestrator:1.0.0]
+    image.recall_session: [cosmic/orchestrator:1.0.0]
+
+sla:
+  max_concurrency: 2
+  heartbeat_interval_sec: 10
+  heartbeat_ttl_sec: 30
+  max_task_duration_sec: 300
+  health_endpoint: /health
+  retry_policy:
+    max_attempts: 3
+    backoff: exponential
+    backoff_base_sec: 2
+    backoff_max_sec: 60
+    retryable_codes:
+      - TIMEOUT
+      - NETWORK_ERROR
+      - RATE_LIMITED
+    non_retryable_codes:
+      - INVALID_INPUT
+      - AUTH_ERROR
+      - SCHEMA_VIOLATION
+      - INTERNAL_ERROR
+
+stream_key: streams:cosmic/image-generator-agent:1.0.0
+
+version_info:
+  semver: 1.0.0
+  released_at: 2026-03-28
+  deprecated_at: null
+  remove_after: null
+  changelog: CHANGELOG.md

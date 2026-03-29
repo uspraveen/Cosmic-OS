@@ -1,0 +1,689 @@
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import logging
+import re
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from io import BytesIO
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+import httpx
+from PIL import Image
+
+from shared import AgentError, AgentResult, ArtifactManifest, TaskEnvelope, begin_metered_call, build_model_key, build_usage_event, connect_sync, post_usage_event, serialize_usage_metadata
+from shared.agent_runtime import AgentRuntime
+
+from .config import AGENT_ROOT, BACKEND_ROOT, ImageGeneratorAgentConfig
+from .internal_router import ImageRouteDecision, route_image_request
+
+logger = logging.getLogger(__name__)
+
+_RUNS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS image_generation_session_runs (
+    task_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    intent TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    artifact_json TEXT NOT NULL,
+    details_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_image_generation_session_runs_session_created
+ON image_generation_session_runs (session_id, created_at DESC);
+"""
+
+
+@dataclass(slots=True)
+class ProviderImage:
+    data: bytes
+    mime: str
+    revised_prompt: str | None
+    width: int | None
+    height: int | None
+
+
+@dataclass(slots=True)
+class ProviderGenerationResult:
+    provider: str
+    model: str
+    request_payload: dict[str, Any]
+    response_payload: dict[str, Any]
+    raw_usage: Any
+    provider_request_id: str | None
+    images: list[ProviderImage]
+
+
+class ImageGeneratorAgentError(RuntimeError):
+    def __init__(self, *, code: str, message: str, retryable: bool, next_action: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.retryable = retryable
+        self.next_action = next_action
+        self.status_code = status_code
+
+
+class ImageGeneratorAgent(AgentRuntime):
+    GENERATE_INTENT = "image.generate"
+    RECALL_SESSION_INTENT = "image.recall_session"
+
+    def __init__(
+        self,
+        *,
+        redis_client,
+        config: ImageGeneratorAgentConfig | None = None,
+        instance_id: str | None = None,
+        agent_secret: str | None = None,
+        registry_db_path: str | Path | None = None,
+        http_client: httpx.AsyncClient | None = None,
+        agent_root: str | Path | None = None,
+        artifacts_root: str | Path | None = None,
+        store_root: str | Path | None = None,
+        runtime_root: str | Path | None = None,
+    ) -> None:
+        self.config = config or ImageGeneratorAgentConfig.from_env()
+        self.agent_root = (Path(agent_root).expanduser() if agent_root else AGENT_ROOT).resolve()
+        self.prompts_root = self.agent_root / "prompts"
+        self.skills_path = self.agent_root / "skills" / "SKILLS.md"
+        self.store_root = (Path(store_root).expanduser() if store_root else self.agent_root / "store").resolve()
+        self.runtime_root = (Path(runtime_root).expanduser() if runtime_root else self.agent_root / "runtime").resolve()
+        self.data_root = self.store_root / "data"
+        self.cache_root = self.runtime_root / "cache"
+        self.logs_root = self.runtime_root / "logs"
+        self.learnings_path = self.store_root / "learnings.md"
+        self.session_db_path = self.data_root / "image_generation_session_runs.db"
+        self.artifacts_root = (Path(artifacts_root).expanduser() if artifacts_root else BACKEND_ROOT / "runs" / "artifacts").resolve()
+
+        super().__init__(
+            agent_card_path=self.agent_root / "agent_card.yaml",
+            redis_client=redis_client,
+            instance_id=instance_id,
+            agent_secret=agent_secret,
+            registry_db_path=registry_db_path,
+            gateway_url=self.config.gateway_url,
+            gateway_internal_token=self.config.gateway_internal_token,
+            http_client=http_client,
+        )
+
+    async def on_startup(self) -> None:
+        self.data_root.mkdir(parents=True, exist_ok=True)
+        self.cache_root.mkdir(parents=True, exist_ok=True)
+        self.logs_root.mkdir(parents=True, exist_ok=True)
+        self.artifacts_root.mkdir(parents=True, exist_ok=True)
+        self.store_root.mkdir(parents=True, exist_ok=True)
+        if not self.learnings_path.exists():
+            self.learnings_path.write_text(
+                "# Image Generator Agent Learnings\n\n"
+                "- Default to Grok Imagine Image Pro for normal text-to-image work.\n"
+                "- Use GPT Image 1.5 when the prompt is unusually complex, text-heavy, or layout-sensitive.\n"
+                "- Include the generation model name in artifact filenames.\n",
+                encoding="utf-8",
+            )
+        self._initialize_store()
+
+    async def execute(self, task: TaskEnvelope) -> AgentResult:
+        try:
+            if task.intent == self.GENERATE_INTENT:
+                return await self._handle_generate(task)
+            if task.intent == self.RECALL_SESSION_INTENT:
+                return await self._handle_recall_session(task)
+            return self._result_error(code="INVALID_INPUT", message=f"Unsupported intent: {task.intent}", retryable=False, next_action="escalate")
+        except ImageGeneratorAgentError as exc:
+            logger.warning(
+                "image_generator_agent.handled_error task_id=%s intent=%s code=%s status=%s message=%s",
+                task.task_id,
+                task.intent,
+                exc.code,
+                exc.status_code,
+                exc.message,
+            )
+            return self._result_error(code=exc.code, message=exc.message, retryable=exc.retryable, next_action=exc.next_action)
+        except Exception as exc:
+            logger.exception("image_generator_agent.unhandled_error task_id=%s intent=%s", task.task_id, task.intent)
+            return self._result_error(
+                code="INTERNAL_ERROR",
+                message=str(exc).strip()[:500] or "Image generator agent failed unexpectedly.",
+                retryable=False,
+                next_action="escalate",
+            )
+
+    async def _handle_generate(self, task: TaskEnvelope) -> AgentResult:
+        self._load_prompt_assets()
+        normalized_input = self._normalize_generate_input(task.input)
+        if task.input_artifacts:
+            raise ImageGeneratorAgentError(
+                code="INVALID_INPUT",
+                message="image.generate currently supports text-to-image only. Reference-image edits are not implemented yet.",
+                retryable=False,
+                next_action="revise_input",
+            )
+
+        await self._emit_progress(task.task_id, "Routing image generation request", prompt=normalized_input["prompt"])
+        route = await route_image_request(
+            cfg=self.config,
+            http_client=self._http_client,
+            agent_id=self.agent_id,
+            task_id=task.task_id,
+            parent_task_id=task.parent_task_id,
+            session_id=task.session_id,
+            request_id=self._request_id(task),
+            payload=normalized_input,
+        )
+        if route.provider == "xai" and not self.config.xai_api_key:
+            raise ImageGeneratorAgentError(code="AUTH_ERROR", message="xAI image generation credentials are not configured for the image generator agent.", retryable=False, next_action="configure_credentials")
+        if route.provider == "openai" and not self.config.openai_api_key:
+            raise ImageGeneratorAgentError(code="AUTH_ERROR", message="OpenAI image generation credentials are not configured for the image generator agent.", retryable=False, next_action="configure_credentials")
+
+        await self._emit_progress(task.task_id, f"Generating {normalized_input['count']} image(s) via {route.model}", provider=route.provider, model=route.model)
+        generation = await self._generate_with_provider(task=task, normalized_input=normalized_input, route=route)
+        await self._emit_progress(task.task_id, "Persisting generated image artifacts", model=route.model)
+
+        image_artifacts, image_refs = self._persist_generated_images(task=task, generation=generation, artifact_basename=normalized_input["artifact_basename"])
+        report_artifact = self._write_json_artifact(
+            task=task,
+            name=f"generation_report__{self._sanitize_for_filename(route.model)}.json",
+            payload={
+                "prompt": normalized_input["prompt"],
+                "negative_prompt": normalized_input["negative_prompt"],
+                "style_hint": normalized_input["style_hint"],
+                "use_case": normalized_input["use_case"],
+                "complexity_hint": normalized_input["complexity_hint"],
+                "size": normalized_input["size"],
+                "quality": normalized_input["quality"],
+                "count": normalized_input["count"],
+                "prefer_model": normalized_input["prefer_model"],
+                "router_decision": {
+                    "provider": route.provider,
+                    "model": route.model,
+                    "reason": route.reason,
+                    "router_mode": route.router_mode,
+                },
+                "provider_request_id": generation.provider_request_id,
+                "provider_usage": serialize_usage_metadata(generation.raw_usage),
+                "response_payload": self._sanitize_provider_payload_for_artifact(generation.response_payload),
+                "images": image_refs,
+            },
+            mime="application/json",
+            kind="output",
+            audience="supporting",
+        )
+
+        summary = f"Generated {len(image_refs)} image{'s' if len(image_refs) != 1 else ''} via {generation.provider}:{generation.model}."
+        output = {
+            "response": summary,
+            "message": summary,
+            "prompt": normalized_input["prompt"],
+            "provider": generation.provider,
+            "model": generation.model,
+            "router_decision": {
+                "provider": route.provider,
+                "model": route.model,
+                "reason": route.reason,
+                "router_mode": route.router_mode,
+            },
+            "images": image_refs,
+            "artifact_refs": image_refs,
+            "provider_request_id": generation.provider_request_id,
+            "provider_usage": serialize_usage_metadata(generation.raw_usage),
+            "report_artifact": self._artifact_ref(report_artifact),
+            "parameters": {
+                "size": normalized_input["size"],
+                "quality": normalized_input["quality"],
+                "count": normalized_input["count"],
+            },
+        }
+        self._record_session_run(
+            task=task,
+            prompt=normalized_input["prompt"],
+            summary=summary,
+            provider=generation.provider,
+            model=generation.model,
+            artifact_refs=image_refs + [self._artifact_ref(report_artifact)],
+            details={
+                "provider_request_id": generation.provider_request_id,
+                "router_mode": route.router_mode,
+                "router_reason": route.reason,
+            },
+        )
+        return AgentResult(status="completed", output=output, artifacts=image_artifacts + [report_artifact])
+
+    async def _handle_recall_session(self, task: TaskEnvelope) -> AgentResult:
+        session_id = str(task.input.get("session_id") or "").strip()
+        if not session_id:
+            raise ImageGeneratorAgentError(code="INVALID_INPUT", message="session_id is required for image.recall_session.", retryable=False, next_action="revise_input")
+        limit = self._optional_int(task.input.get("limit"), minimum=1, maximum=50) or 10
+        entries = self._load_session_entries(session_id=session_id, limit=limit)
+        response = (
+            f"Loaded {len(entries)} image-generation run{'s' if len(entries) != 1 else ''} from {session_id}."
+            if entries
+            else f"No image-generation runs were recorded for {session_id}."
+        )
+        return AgentResult(status="completed", output={"response": response, "session_id": session_id, "entries": entries}, artifacts=[])
+
+    async def _generate_with_provider(self, *, task: TaskEnvelope, normalized_input: dict[str, Any], route: ImageRouteDecision) -> ProviderGenerationResult:
+        if route.provider == "xai":
+            return await self._generate_via_image_api(task=task, provider="xai", model=route.model, api_key=self.config.xai_api_key, base_url=self.config.xai_base_url, timeout_sec=self.config.xai_timeout_sec, normalized_input=normalized_input, route=route)
+        if route.provider == "openai":
+            return await self._generate_via_image_api(task=task, provider="openai", model=route.model, api_key=self.config.openai_api_key, base_url=self.config.openai_base_url, timeout_sec=self.config.openai_timeout_sec, normalized_input=normalized_input, route=route)
+        raise ImageGeneratorAgentError(code="INVALID_INPUT", message=f"Unsupported image provider route: {route.provider}", retryable=False, next_action="revise_input")
+
+    async def _generate_via_image_api(
+        self,
+        *,
+        task: TaskEnvelope,
+        provider: str,
+        model: str,
+        api_key: str,
+        base_url: str,
+        timeout_sec: float,
+        normalized_input: dict[str, Any],
+        route: ImageRouteDecision,
+    ) -> ProviderGenerationResult:
+        if not api_key:
+            raise ImageGeneratorAgentError(code="AUTH_ERROR", message=f"{provider} image generation credentials are not configured.", retryable=False, next_action="configure_credentials")
+
+        endpoint_path = "/images" if provider == "openai" else "/images/generations"
+        payload: dict[str, Any] = {
+            "model": model,
+            "prompt": self._build_provider_prompt(normalized_input),
+            "n": normalized_input["count"],
+        }
+        if provider == "openai":
+            payload["size"] = normalized_input["size"]
+            if normalized_input["quality"] != "auto":
+                payload["quality"] = normalized_input["quality"]
+        else:
+            payload["response_format"] = "b64_json"
+            payload.update(self._xai_request_fields_for_size(normalized_input["size"]))
+
+        metered_call = begin_metered_call(prefix=f"img_{provider}")
+        response_json: dict[str, Any] | None = None
+        try:
+            response = await self._http_client.post(
+                base_url.rstrip("/") + endpoint_path,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=httpx.Timeout(timeout_sec, connect=min(timeout_sec, 15.0)),
+            )
+            response_json = self._parse_json_response(response)
+            if response.status_code >= 400:
+                raise self._map_provider_response_error(provider=provider, response=response, payload=response_json)
+        except httpx.TimeoutException as exc:
+            await self._post_provider_usage(metered_call=metered_call, task=task, provider=provider, model=model, raw_usage=None, provider_request_id=None, success=False, error_code="TIMEOUT", metadata={"provider": provider, "model": model, "router_mode": route.router_mode})
+            raise ImageGeneratorAgentError(code="TIMEOUT", message=f"{provider} image generation timed out before completing.", retryable=True, next_action="retry") from exc
+        except ImageGeneratorAgentError:
+            await self._post_provider_usage(
+                metered_call=metered_call,
+                task=task,
+                provider=provider,
+                model=model,
+                raw_usage=(response_json or {}).get("usage"),
+                provider_request_id=str((response_json or {}).get("id") or "").strip() or None,
+                success=False,
+                error_code="PROVIDER_ERROR",
+                metadata={"provider": provider, "model": model, "router_mode": route.router_mode},
+            )
+            raise
+        except httpx.HTTPError as exc:
+            await self._post_provider_usage(metered_call=metered_call, task=task, provider=provider, model=model, raw_usage=None, provider_request_id=None, success=False, error_code="NETWORK_ERROR", metadata={"provider": provider, "model": model, "router_mode": route.router_mode, "error": str(exc)[:200]})
+            raise ImageGeneratorAgentError(code="NETWORK_ERROR", message=f"{provider} image generation failed before a valid response was received.", retryable=True, next_action="retry") from exc
+
+        raw_usage = response_json.get("usage")
+        provider_request_id = str(response_json.get("id") or "").strip() or None
+        await self._post_provider_usage(metered_call=metered_call, task=task, provider=provider, model=model, raw_usage=raw_usage, provider_request_id=provider_request_id, success=True, error_code=None, metadata={"provider": provider, "model": model, "router_mode": route.router_mode})
+
+        items = response_json.get("data")
+        if not isinstance(items, list) or not items:
+            raise ImageGeneratorAgentError(code="INTERNAL_ERROR", message=f"{provider} returned no image payloads.", retryable=False, next_action="escalate")
+        images: list[ProviderImage] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            raw_b64 = str(item.get("b64_json") or "").strip()
+            if not raw_b64:
+                continue
+            try:
+                image_bytes = base64.b64decode(raw_b64)
+            except Exception as exc:
+                raise ImageGeneratorAgentError(code="INTERNAL_ERROR", message=f"{provider} returned an invalid image payload.", retryable=False, next_action="escalate") from exc
+            width, height = self._read_image_dimensions(image_bytes)
+            images.append(
+                ProviderImage(
+                    data=image_bytes,
+                    mime="image/png",
+                    revised_prompt=str(item.get("revised_prompt") or "").strip() or None,
+                    width=width,
+                    height=height,
+                )
+            )
+        if not images:
+            raise ImageGeneratorAgentError(code="INTERNAL_ERROR", message=f"{provider} did not return any decodable images.", retryable=False, next_action="escalate")
+        return ProviderGenerationResult(
+            provider=provider,
+            model=model,
+            request_payload=payload,
+            response_payload=response_json,
+            raw_usage=raw_usage,
+            provider_request_id=provider_request_id,
+            images=images,
+        )
+
+    async def _emit_progress(self, task_id: str, message: str, **payload: Any) -> None:
+        progress_payload = {"message": message}
+        progress_payload.update(payload)
+        await self.emit_event(task_id, "task.progress", progress_payload)
+
+    async def _post_provider_usage(
+        self,
+        *,
+        metered_call,
+        task: TaskEnvelope,
+        provider: str,
+        model: str,
+        raw_usage: Any,
+        provider_request_id: str | None,
+        success: bool,
+        error_code: str | None,
+        metadata: dict[str, Any],
+    ) -> None:
+        if not self.gateway_internal_token:
+            return
+        event = build_usage_event(
+            metered_call=metered_call,
+            source_component="agent",
+            source_id=self.agent_id,
+            task_id=task.task_id,
+            parent_task_id=task.parent_task_id,
+            session_id=task.session_id,
+            route="specialist",
+            operation="agent.image.generate.provider",
+            model_key=build_model_key(provider, model),
+            request_id=self._request_id(task),
+            provider_request_id=provider_request_id,
+            raw_usage=raw_usage,
+            success=success,
+            error_code=error_code if not success else None,
+            metadata_json=serialize_usage_metadata(metadata),
+        )
+        try:
+            await post_usage_event(client=self._http_client, gateway_url=self.gateway_url, internal_token=self.gateway_internal_token, event=event)
+        except Exception:
+            logger.exception(
+                "image_generator_agent.provider_usage_post_failed task_id=%s llm_call_id=%s",
+                task.task_id,
+                event.llm_call_id,
+            )
+
+    def _normalize_generate_input(self, payload: dict[str, Any]) -> dict[str, Any]:
+        prompt = str(payload.get("prompt") or "").strip()
+        if len(prompt) < 3:
+            raise ImageGeneratorAgentError(code="INVALID_INPUT", message="prompt is required for image.generate.", retryable=False, next_action="revise_input")
+        if len(prompt) > self.config.max_prompt_chars:
+            raise ImageGeneratorAgentError(code="INVALID_INPUT", message=f"prompt exceeds the max supported length of {self.config.max_prompt_chars} characters.", retryable=False, next_action="revise_input")
+        count = self._optional_int(payload.get("count"), minimum=1, maximum=self.config.max_images_per_request) or 1
+        size = str(payload.get("size") or self.config.default_size).strip() or self.config.default_size
+        if size not in {"1024x1024", "1024x1536", "1536x1024"}:
+            raise ImageGeneratorAgentError(code="INVALID_INPUT", message="size must be one of 1024x1024, 1024x1536, or 1536x1024.", retryable=False, next_action="revise_input")
+        quality = str(payload.get("quality") or self.config.default_quality).strip().lower() or self.config.default_quality
+        if quality not in {"auto", "low", "medium", "high"}:
+            raise ImageGeneratorAgentError(code="INVALID_INPUT", message="quality must be one of auto, low, medium, or high.", retryable=False, next_action="revise_input")
+        artifact_basename = self._sanitize_for_filename(str(payload.get("artifact_basename") or "").strip()) or self._default_artifact_basename(prompt)
+        return {
+            "prompt": prompt,
+            "negative_prompt": str(payload.get("negative_prompt") or "").strip() or None,
+            "style_hint": str(payload.get("style_hint") or "").strip() or None,
+            "use_case": str(payload.get("use_case") or "").strip() or None,
+            "complexity_hint": str(payload.get("complexity_hint") or "").strip().lower() or "auto",
+            "prefer_model": str(payload.get("prefer_model") or "").strip() or "auto",
+            "count": count,
+            "size": size,
+            "quality": quality,
+            "artifact_basename": artifact_basename,
+        }
+
+    def _build_provider_prompt(self, normalized_input: dict[str, Any]) -> str:
+        lines = [normalized_input["prompt"]]
+        if normalized_input.get("style_hint"):
+            lines.append(f"Style / direction: {normalized_input['style_hint']}")
+        if normalized_input.get("use_case"):
+            lines.append(f"Use case: {normalized_input['use_case']}")
+        if normalized_input.get("negative_prompt"):
+            lines.append(f"Avoid: {normalized_input['negative_prompt']}")
+        return "\n\n".join(lines).strip()
+
+    def _xai_request_fields_for_size(self, size: str) -> dict[str, str]:
+        if size == "1024x1536":
+            return {"aspect_ratio": "2:3"}
+        if size == "1536x1024":
+            return {"aspect_ratio": "3:2"}
+        return {"aspect_ratio": "1:1"}
+
+    def _persist_generated_images(self, *, task: TaskEnvelope, generation: ProviderGenerationResult, artifact_basename: str) -> tuple[list[ArtifactManifest], list[dict[str, Any]]]:
+        manifests: list[ArtifactManifest] = []
+        refs: list[dict[str, Any]] = []
+        model_slug = self._sanitize_for_filename(generation.model)
+        for index, item in enumerate(generation.images, start=1):
+            filename = f"{artifact_basename}__{model_slug}__{index:02d}.png"
+            path = self._task_artifact_dir(task.task_id) / filename
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(item.data)
+            manifest = self._artifact_manifest(task_id=task.task_id, path=path, mime=item.mime, kind="output", audience="deliverable")
+            manifests.append(manifest)
+            refs.append(
+                {
+                    "artifact_id": manifest.artifact_id,
+                    "path": manifest.path,
+                    "mime": manifest.mime,
+                    "filename": filename,
+                    "provider": generation.provider,
+                    "model": generation.model,
+                    "width": item.width,
+                    "height": item.height,
+                    "revised_prompt": item.revised_prompt,
+                }
+            )
+        return manifests, refs
+
+    def _write_json_artifact(self, *, task: TaskEnvelope, name: str, payload: Any, mime: str, kind: str, audience: str) -> ArtifactManifest:
+        target_dir = self._task_artifact_dir(task.task_id)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        path = target_dir / name
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return self._artifact_manifest(task_id=task.task_id, path=path, mime=mime, kind=kind, audience=audience)
+
+    def _artifact_manifest(self, *, task_id: str, path: Path, mime: str, kind: str, audience: str) -> ArtifactManifest:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        return ArtifactManifest(
+            artifact_id=f"art_{uuid4().hex[:12]}",
+            task_id=task_id,
+            mime=mime,
+            sha256=digest,
+            path=self._logical_artifact_path(path),
+            created_by_agent=self.agent_id,
+            kind=kind,
+            audience=audience,
+        )
+
+    def _logical_artifact_path(self, path: Path) -> str:
+        resolved = path.resolve()
+        try:
+            relative_to_artifacts = resolved.relative_to(self.artifacts_root.resolve())
+            return (Path("runs") / "artifacts" / relative_to_artifacts).as_posix()
+        except ValueError:
+            return resolved.relative_to(BACKEND_ROOT.resolve()).as_posix()
+
+    def _task_artifact_dir(self, task_id: str) -> Path:
+        return self.artifacts_root / task_id / "image_generator_agent"
+
+    def _initialize_store(self) -> None:
+        with connect_sync(self.session_db_path) as connection:
+            connection.executescript(_RUNS_TABLE_SQL)
+            connection.commit()
+
+    def _record_session_run(self, *, task: TaskEnvelope, prompt: str, summary: str, provider: str, model: str, artifact_refs: list[dict[str, Any]], details: dict[str, Any]) -> None:
+        session_id = str(task.session_id or "").strip()
+        if not session_id:
+            return
+        created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        with connect_sync(self.session_db_path) as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO image_generation_session_runs (
+                    task_id,
+                    session_id,
+                    intent,
+                    prompt,
+                    summary,
+                    provider,
+                    model,
+                    artifact_json,
+                    details_json,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task.task_id,
+                    session_id,
+                    task.intent,
+                    prompt,
+                    summary,
+                    provider,
+                    model,
+                    json.dumps(artifact_refs, ensure_ascii=False),
+                    json.dumps(details, ensure_ascii=False),
+                    created_at,
+                ),
+            )
+            connection.commit()
+
+    def _load_session_entries(self, *, session_id: str, limit: int) -> list[dict[str, Any]]:
+        with connect_sync(self.session_db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT task_id, intent, prompt, summary, provider, model, artifact_json, details_json, created_at
+                FROM image_generation_session_runs
+                WHERE session_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (session_id, limit),
+            ).fetchall()
+        entries: list[dict[str, Any]] = []
+        for row in rows:
+            entries.append(
+                {
+                    "task_id": row["task_id"],
+                    "intent": row["intent"],
+                    "prompt": row["prompt"],
+                    "summary": row["summary"],
+                    "provider": row["provider"],
+                    "model": row["model"],
+                    "artifact_refs": self._json_loads(row["artifact_json"], default=[]),
+                    "details": self._json_loads(row["details_json"], default={}),
+                    "created_at": row["created_at"],
+                }
+            )
+        return entries
+
+    def _load_prompt_assets(self) -> dict[str, str]:
+        return {
+            "system": self._read_text_file(self.prompts_root / "system.md"),
+            "policies": self._read_text_file(self.prompts_root / "policies.md"),
+            "skills": self._read_text_file(self.skills_path),
+            "learnings": self._read_text_file(self.learnings_path),
+        }
+
+    def _read_text_file(self, path: Path) -> str:
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return ""
+
+    def _default_artifact_basename(self, prompt: str) -> str:
+        slug = self._sanitize_for_filename(prompt)
+        return (slug[:48] if slug else "generated_image")
+
+    def _sanitize_for_filename(self, value: str) -> str:
+        normalized = re.sub(r"[^a-zA-Z0-9._-]+", "_", str(value or "").strip())
+        return normalized.strip("._-").lower()[:80] or ""
+
+    def _artifact_ref(self, artifact: ArtifactManifest) -> dict[str, str]:
+        return {"artifact_id": artifact.artifact_id, "path": artifact.path, "mime": artifact.mime}
+
+    def _sanitize_provider_payload_for_artifact(self, payload: dict[str, Any]) -> dict[str, Any]:
+        sanitized = json.loads(json.dumps(payload))
+        data = sanitized.get("data")
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and isinstance(item.get("b64_json"), str):
+                    item["b64_json"] = f"<omitted:{len(item['b64_json'])}_chars>"
+        return sanitized
+
+    def _parse_json_response(self, response: httpx.Response) -> dict[str, Any]:
+        try:
+            parsed = response.json()
+        except Exception:
+            return {"error": {"message": response.text[:1000]}}
+        return parsed if isinstance(parsed, dict) else {"data": parsed}
+
+    def _map_provider_response_error(self, *, provider: str, response: httpx.Response, payload: dict[str, Any]) -> ImageGeneratorAgentError:
+        status = response.status_code
+        message = self._extract_provider_error_message(payload) or f"{provider} returned HTTP {status}."
+        if status in {401, 403}:
+            return ImageGeneratorAgentError(code="AUTH_ERROR", message=message, retryable=False, next_action="configure_credentials", status_code=status)
+        if status in {400, 404, 409, 422}:
+            return ImageGeneratorAgentError(code="INVALID_INPUT", message=message, retryable=False, next_action="revise_input", status_code=status)
+        if status == 429:
+            return ImageGeneratorAgentError(code="RATE_LIMITED", message=message, retryable=True, next_action="retry", status_code=status)
+        if status >= 500:
+            return ImageGeneratorAgentError(code="NETWORK_ERROR", message=message, retryable=True, next_action="retry", status_code=status)
+        return ImageGeneratorAgentError(code="NETWORK_ERROR", message=message, retryable=True, next_action="retry", status_code=status)
+
+    def _extract_provider_error_message(self, payload: dict[str, Any]) -> str | None:
+        error = payload.get("error")
+        if isinstance(error, dict):
+            return str(error.get("message") or "").strip() or None
+        return None
+
+    def _read_image_dimensions(self, data: bytes) -> tuple[int | None, int | None]:
+        try:
+            with Image.open(BytesIO(data)) as image:
+                return int(image.width), int(image.height)
+        except Exception:
+            return None, None
+
+    def _request_id(self, task: TaskEnvelope) -> str | None:
+        return str(task.input.get("request_id") or "").strip() or None if isinstance(task.input, dict) else None
+
+    def _optional_int(self, value: Any, *, minimum: int, maximum: int) -> int | None:
+        if value is None or value == "":
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ImageGeneratorAgentError(code="INVALID_INPUT", message=f"Expected an integer between {minimum} and {maximum}.", retryable=False, next_action="revise_input") from exc
+        return max(minimum, min(maximum, parsed))
+
+    def _json_loads(self, raw: str | None, *, default: Any) -> Any:
+        if not raw:
+            return default
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return default
+
+    def _result_error(self, *, code: str, message: str, retryable: bool, next_action: str) -> AgentResult:
+        return AgentResult(
+            status="failed",
+            output={},
+            artifacts=[],
+            error=AgentError(code=code, retryable=retryable, message=message, next_action=next_action),
+        )
