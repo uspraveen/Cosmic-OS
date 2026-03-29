@@ -818,6 +818,8 @@ async def test_tool_executor_delegate_to_agent_dispatches_specialist_agent_and_r
     }
     assert result["url"] == "https://example.com/post"
     assert result["available_formats"] == ["markdown"]
+    assert result["artifacts_ready_in_response"] is True
+    assert result["artifact_count"] == 1
     assert result["delegation"] == {
         "intent": "firecrawl.scrape",
         "agent_id": "cosmic/firecrawl-web-scrape-agent:1.0.0",

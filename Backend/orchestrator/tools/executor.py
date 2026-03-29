@@ -1471,6 +1471,10 @@ class ToolExecutor:
         response = dict(output)
         if result.artifacts and "artifacts" not in response:
             response["artifacts"] = [artifact.model_dump(mode="json") for artifact in result.artifacts]
+        artifact_list = response.get("artifacts") if isinstance(response.get("artifacts"), list) else []
+        if artifact_list:
+            response.setdefault("artifacts_ready_in_response", True)
+            response.setdefault("artifact_count", len(artifact_list))
         response.setdefault("delegation", {"intent": intent, "agent_id": agent_id})
         return response
 
