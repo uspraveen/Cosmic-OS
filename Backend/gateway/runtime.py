@@ -7493,6 +7493,16 @@ class GatewayRuntime:
             raise PermissionError("Signed artifact URL has expired.")
         artifact = self.artifact_store.get(normalized_artifact_id)
         if artifact is None:
+            artifact = self._lookup_stored_output_artifact(normalized_artifact_id)
+            if artifact is not None:
+                self._cache_output_artifacts(
+                    request_id=self._safe_text(artifact.get("request_id")) or "",
+                    session_id=self._safe_text(artifact.get("session_id")) or "",
+                    source_channel=self._safe_text(artifact.get("source_channel")) or "",
+                    source_message_id=self._safe_text(artifact.get("source_message_id")),
+                    produced_artifacts=[artifact],
+                )
+        if artifact is None:
             raise FileNotFoundError("Artifact not found.")
         if normalized_purpose == "llm_image_fetch" and not is_supported_image_artifact(artifact):
             raise ValueError("Artifact is not an LLM-fetchable image.")
@@ -7553,6 +7563,67 @@ class GatewayRuntime:
             "media_type": self._safe_text(target.get("mime_type")) or "application/octet-stream",
             "filename": self._safe_text(target.get("filename")) or artifact_path.name,
         }
+
+    def _lookup_stored_output_artifact(self, artifact_id: str) -> dict[str, Any] | None:
+        normalized_artifact_id = self._safe_text(artifact_id)
+        if not normalized_artifact_id:
+            return None
+        message = self.session_store.find_message_by_output_artifact_id(normalized_artifact_id)
+        if not isinstance(message, dict):
+            return None
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        produced_artifacts = self._normalize_produced_artifact_list(metadata.get("produced_artifacts"))
+        target = next(
+            (
+                item
+                for item in produced_artifacts
+                if isinstance(item, dict) and self._safe_text(item.get("artifact_id")) == normalized_artifact_id
+            ),
+            None,
+        )
+        if target is None:
+            return None
+        artifact = dict(target)
+        artifact["request_id"] = self._safe_text(message.get("request_id"))
+        artifact["session_id"] = self._safe_text(message.get("session_id"))
+        artifact["source_channel"] = self._safe_text(message.get("channel"))
+        artifact["source_platform"] = self._channel_platform(self._safe_text(message.get("channel")))
+        artifact["source_message_id"] = self._safe_text(message.get("message_id"))
+        return artifact
+
+    def _cache_output_artifacts(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        source_channel: str,
+        source_message_id: str | None,
+        produced_artifacts: list[dict[str, Any]],
+    ) -> None:
+        normalized_request_id = self._safe_text(request_id)
+        normalized_session_id = self._safe_text(session_id)
+        normalized_source_channel = self._safe_text(source_channel)
+        if not normalized_request_id or not normalized_session_id or not normalized_source_channel:
+            return
+        if not isinstance(produced_artifacts, list) or not produced_artifacts:
+            return
+        try:
+            self.artifact_store.persist_output_artifacts(
+                request_id=normalized_request_id,
+                session_id=normalized_session_id,
+                source_channel=normalized_source_channel,
+                source_platform=self._channel_platform(normalized_source_channel),
+                source_message_id=self._safe_text(source_message_id),
+                artifacts=produced_artifacts,
+            )
+        except Exception:
+            logger.exception(
+                "gateway.output_artifact_cache_failed request_id=%s session_id=%s source_channel=%s artifact_count=%s",
+                normalized_request_id,
+                normalized_session_id,
+                normalized_source_channel,
+                len(produced_artifacts),
+            )
 
     async def _ensure_request_documents_parsed(self, request_record: dict[str, Any], *, send=None) -> None:
         if self._redis is None:
@@ -8387,6 +8458,14 @@ class GatewayRuntime:
                 fallback_sources=event.get("sources") if isinstance(event.get("sources"), list) else None,
             )
             produced_artifacts = self._normalize_produced_artifact_list(event.get("produced_artifacts"))
+            if produced_artifacts and request_id and session_id and event_channel:
+                self._cache_output_artifacts(
+                    request_id=request_id,
+                    session_id=session_id,
+                    source_channel=event_channel,
+                    source_message_id=None,
+                    produced_artifacts=produced_artifacts,
+                )
             response_blocks = self._build_stable_response_blocks(
                 content=self._safe_text(event.get("content")),
                 produced_artifacts=produced_artifacts,
@@ -8425,6 +8504,14 @@ class GatewayRuntime:
                 channel=event_channel,
                 route="opus",
             )
+            if assistant_message_id and produced_artifacts and request_id and session_id and event_channel:
+                self._cache_output_artifacts(
+                    request_id=request_id,
+                    session_id=session_id,
+                    source_channel=event_channel,
+                    source_message_id=assistant_message_id,
+                    produced_artifacts=produced_artifacts,
+                )
             if assistant_message_id:
                 event["message_id"] = assistant_message_id
             if client_produced_artifacts:

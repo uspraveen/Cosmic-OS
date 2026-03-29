@@ -4234,6 +4234,134 @@ def test_runtime_builds_client_response_blocks_with_image_preview() -> None:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+@pytest.mark.asyncio
+async def test_response_complete_caches_output_artifacts_for_signed_preview(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+    runtime.config.artifacts_root = tmp_path / "runs" / "artifacts"
+    runtime.config.public_base_url = "https://gateway.example.test"
+    artifact_dir = runtime.config.artifacts_root / "unit"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = artifact_dir / "chart.png"
+    artifact_path.write_bytes(b"\x89PNG\r\n\x1a\ncached-output")
+
+    await runtime.start()
+    try:
+        sent_events: list[dict[str, Any]] = []
+
+        async def send(event: dict[str, Any]) -> None:
+            sent_events.append(event)
+
+        def store_assistant_message(
+            content: str,
+            *,
+            awaiting_reply: bool,
+            metadata: dict[str, Any] | None,
+            channel: str | None,
+            route: str | None,
+        ) -> str:
+            return runtime.session_store.append_message(
+                "sess_output_preview_1",
+                role="assistant",
+                content=content,
+                route=route,
+                awaiting_reply=awaiting_reply,
+                channel=channel,
+                metadata=metadata,
+            )
+
+        await runtime._handle_orchestrator_event(
+            {
+                "type": "response.complete",
+                "request_id": "req_output_preview_1",
+                "task_id": "tsk_output_preview_1",
+                "session_id": "sess_output_preview_1",
+                "channel": "desktop:desk_output_preview_1",
+                "content": "Here is the chart.",
+                "produced_artifacts": [
+                    {
+                        "artifact_id": "art_output_chart",
+                        "path": "runs/artifacts/unit/chart.png",
+                        "filename": "chart.png",
+                        "mime_type": "image/png",
+                    }
+                ],
+            },
+            send=send,
+            store_assistant_message=store_assistant_message,
+        )
+
+        cached = runtime.artifact_store.get("art_output_chart")
+        assert cached is not None
+        assert cached["path"] == "runs/artifacts/unit/chart.png"
+        assert cached["filename"] == "chart.png"
+        assert cached["mime"] == "image/png"
+        assert any(event.get("type") == "response.complete" for event in sent_events)
+    finally:
+        await runtime.stop()
+
+
+def test_signed_artifact_content_route_serves_stored_output_artifact_preview_without_prior_cache(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+    runtime.config.artifacts_root = tmp_path / "runs" / "artifacts"
+    runtime.config.public_base_url = "https://gateway.example.test"
+    runtime.session_store.initialize()
+    runtime.artifact_store.initialize()
+    artifact_dir = runtime.config.artifacts_root / "unit"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = artifact_dir / "chart.png"
+    artifact_path.write_bytes(b"\x89PNG\r\n\x1a\nstored-output")
+
+    produced_artifacts = runtime._normalize_produced_artifact_list(
+        [
+            {
+                "artifact_id": "art_stored_chart",
+                "path": "runs/artifacts/unit/chart.png",
+                "filename": "chart.png",
+                "mime_type": "image/png",
+            }
+        ]
+    )
+    message_id = runtime.session_store.append_message(
+        "sess_output_preview_2",
+        role="assistant",
+        content="Here it is.",
+        route="opus",
+        awaiting_reply=False,
+        channel="desktop:desk_output_preview_2",
+        metadata={
+            "request_id": "req_output_preview_2",
+            "produced_artifacts": produced_artifacts,
+        },
+    )
+    assert message_id.startswith("msg_")
+    assert runtime.artifact_store.get("art_stored_chart") is None
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+
+    signed_url = runtime.mint_artifact_access_url(produced_artifacts[0], purpose="ui_preview")
+    assert signed_url is not None
+    relative_url = signed_url.replace("https://gateway.example.test", "", 1)
+
+    with TestClient(app) as client:
+        response = client.get(relative_url)
+
+    assert response.status_code == 200
+    assert response.content == b"\x89PNG\r\n\x1a\nstored-output"
+    cached = runtime.artifact_store.get("art_stored_chart")
+    assert cached is not None
+    assert cached["source_message_id"] == message_id
+
+
 def test_desktop_websocket_streams_thin_opus_route(test_client: TestClient, tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="opus")
 

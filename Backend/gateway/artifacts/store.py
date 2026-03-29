@@ -17,11 +17,11 @@ def utcnow_iso() -> str:
 
 
 class ArtifactStore:
-    """SQLite-backed store for inbound attachment metadata.
+    """SQLite-backed store for Gateway-served artifact metadata.
 
-    The store persists adapter-normalized attachment references so the Gateway
-    can pass typed manifests into downstream orchestration without depending on
-    a specific channel implementation.
+    The store persists both inbound attachment references and produced output
+    artifact references so signed preview/download URLs can resolve bytes
+    without depending on the original channel implementation.
     """
 
     def __init__(self, db_path: Path) -> None:
@@ -67,6 +67,39 @@ class ArtifactStore:
 
                 CREATE INDEX IF NOT EXISTS idx_inbound_artifacts_session
                     ON inbound_artifacts(session_id, created_at);
+
+                CREATE TABLE IF NOT EXISTS output_artifacts (
+                    artifact_id TEXT PRIMARY KEY,
+                    request_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    source_channel TEXT NOT NULL,
+                    source_platform TEXT,
+                    source_message_id TEXT,
+                    kind TEXT NOT NULL,
+                    mime_type TEXT,
+                    filename TEXT,
+                    caption TEXT,
+                    size_bytes INTEGER,
+                    width INTEGER,
+                    height INTEGER,
+                    duration_ms INTEGER,
+                    sha256 TEXT,
+                    bridge_media_ref TEXT,
+                    download_url TEXT,
+                    path TEXT,
+                    ingest_state TEXT,
+                    parse_task_id TEXT,
+                    parse_bundle_id TEXT,
+                    parsed_summary_json TEXT,
+                    metadata_json TEXT,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_output_artifacts_request
+                    ON output_artifacts(request_id, created_at);
+
+                CREATE INDEX IF NOT EXISTS idx_output_artifacts_session
+                    ON output_artifacts(session_id, created_at);
                 """
             )
             self._ensure_column(connection, "inbound_artifacts", "path", "TEXT")
@@ -74,6 +107,11 @@ class ArtifactStore:
             self._ensure_column(connection, "inbound_artifacts", "parse_task_id", "TEXT")
             self._ensure_column(connection, "inbound_artifacts", "parse_bundle_id", "TEXT")
             self._ensure_column(connection, "inbound_artifacts", "parsed_summary_json", "TEXT")
+            self._ensure_column(connection, "output_artifacts", "path", "TEXT")
+            self._ensure_column(connection, "output_artifacts", "ingest_state", "TEXT")
+            self._ensure_column(connection, "output_artifacts", "parse_task_id", "TEXT")
+            self._ensure_column(connection, "output_artifacts", "parse_bundle_id", "TEXT")
+            self._ensure_column(connection, "output_artifacts", "parsed_summary_json", "TEXT")
             connection.commit()
 
     def persist_inbound_attachments(
@@ -289,6 +327,152 @@ class ArtifactStore:
             ).fetchall()
         return self._deserialize_rows(rows, request_id=request_id, session_id=None)
 
+    def persist_output_artifacts(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        source_channel: str,
+        source_platform: str | None,
+        source_message_id: str | None,
+        artifacts: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        manifests: list[dict[str, Any]] = []
+        if not request_id or not session_id or not source_channel:
+            return manifests
+        if not isinstance(artifacts, list):
+            return manifests
+
+        created_at = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            for index, artifact in enumerate(artifacts, start=1):
+                if not isinstance(artifact, dict):
+                    continue
+                artifact_id = str(artifact.get("artifact_id") or "").strip()
+                if not artifact_id:
+                    continue
+                kind = str(artifact.get("kind") or "").strip().lower() or "file"
+                mime_type = self._normalize_text(artifact.get("mime")) or self._normalize_text(artifact.get("mime_type"))
+                filename = self._normalize_text(artifact.get("filename"))
+                size_bytes = self._normalize_int(artifact.get("size_bytes"))
+                width = self._normalize_int(artifact.get("width"))
+                height = self._normalize_int(artifact.get("height"))
+                duration_ms = self._normalize_int(artifact.get("duration_ms"))
+                sha256 = self._normalize_text(artifact.get("sha256"))
+                path = self._normalize_text(artifact.get("path"))
+                ingest_state = self._normalize_text(artifact.get("ingest_state")) or "available"
+                passthrough_metadata = {
+                    key: value
+                    for key, value in artifact.items()
+                    if key
+                    not in {
+                        "artifact_id",
+                        "kind",
+                        "mime",
+                        "mime_type",
+                        "filename",
+                        "size_bytes",
+                        "width",
+                        "height",
+                        "duration_ms",
+                        "sha256",
+                        "path",
+                        "ingest_state",
+                    }
+                }
+                try:
+                    metadata_json = json.dumps(passthrough_metadata, default=str) if passthrough_metadata else None
+                except (TypeError, ValueError):
+                    logger.exception(
+                        "artifact_store.output_metadata_serialize_failed request_id=%s artifact_id=%s kind=%s",
+                        request_id,
+                        artifact_id,
+                        kind,
+                    )
+                    metadata_json = None
+
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO output_artifacts (
+                        artifact_id,
+                        request_id,
+                        session_id,
+                        source_channel,
+                        source_platform,
+                        source_message_id,
+                        kind,
+                        mime_type,
+                        filename,
+                        caption,
+                        size_bytes,
+                        width,
+                        height,
+                        duration_ms,
+                        sha256,
+                        bridge_media_ref,
+                        download_url,
+                        path,
+                        ingest_state,
+                        parse_task_id,
+                        parse_bundle_id,
+                        parsed_summary_json,
+                        metadata_json,
+                        created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        artifact_id,
+                        request_id,
+                        session_id,
+                        source_channel,
+                        source_platform,
+                        source_message_id,
+                        kind,
+                        mime_type,
+                        filename,
+                        None,
+                        size_bytes,
+                        width,
+                        height,
+                        duration_ms,
+                        sha256,
+                        None,
+                        None,
+                        path,
+                        ingest_state,
+                        None,
+                        None,
+                        None,
+                        metadata_json,
+                        created_at,
+                    ),
+                )
+                manifests.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "request_id": request_id,
+                        "session_id": session_id,
+                        "source_channel": source_channel,
+                        "source_platform": source_platform,
+                        "source_message_id": source_message_id,
+                        "kind": kind,
+                        "mime": mime_type or "application/octet-stream",
+                        "filename": filename,
+                        "size_bytes": size_bytes,
+                        "width": width,
+                        "height": height,
+                        "duration_ms": duration_ms,
+                        "sha256": sha256,
+                        "path": path,
+                        "ingest_state": ingest_state,
+                        "index": index,
+                        "metadata": passthrough_metadata,
+                    }
+                )
+            connection.commit()
+        return manifests
+
     def list_for_session(self, session_id: str, *, limit: int = 32) -> list[dict[str, Any]]:
         if not session_id:
             return []
@@ -334,43 +518,53 @@ class ArtifactStore:
         if not artifact_id:
             return None
         with self._lock, self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT
-                    artifact_id,
-                    request_id,
-                    session_id,
-                    source_channel,
-                    source_platform,
-                    source_message_id,
-                    kind,
-                    mime_type,
-                    filename,
-                    caption,
-                    size_bytes,
-                    width,
-                    height,
-                    duration_ms,
-                    sha256,
-                    bridge_media_ref,
-                    download_url,
-                    path,
-                    ingest_state,
-                    parse_task_id,
-                    parse_bundle_id,
-                    parsed_summary_json,
-                    metadata_json,
-                    created_at
-                FROM inbound_artifacts
-                WHERE artifact_id = ?
-                LIMIT 1
-                """,
-                (artifact_id,),
-            ).fetchone()
+            row = self._get_artifact_row(connection, "inbound_artifacts", artifact_id)
+            if row is None:
+                row = self._get_artifact_row(connection, "output_artifacts", artifact_id)
         if row is None:
             return None
         records = self._deserialize_rows([row], request_id=row["request_id"], session_id=row["session_id"])
         return records[0] if records else None
+
+    def _get_artifact_row(
+        self,
+        connection: sqlite3.Connection,
+        table_name: str,
+        artifact_id: str,
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            f"""
+            SELECT
+                artifact_id,
+                request_id,
+                session_id,
+                source_channel,
+                source_platform,
+                source_message_id,
+                kind,
+                mime_type,
+                filename,
+                caption,
+                size_bytes,
+                width,
+                height,
+                duration_ms,
+                sha256,
+                bridge_media_ref,
+                download_url,
+                path,
+                ingest_state,
+                parse_task_id,
+                parse_bundle_id,
+                parsed_summary_json,
+                metadata_json,
+                created_at
+            FROM {table_name}
+            WHERE artifact_id = ?
+            LIMIT 1
+            """,
+            (artifact_id,),
+        ).fetchone()
 
     def _deserialize_rows(
         self,

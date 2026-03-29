@@ -773,6 +773,59 @@ class SessionStore:
             "metadata": metadata,
         }
 
+    def find_message_by_output_artifact_id(self, artifact_id: str, *, limit: int = 12) -> dict[str, Any] | None:
+        normalized_artifact_id = str(artifact_id or "").strip()
+        if not normalized_artifact_id:
+            return None
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    message_id,
+                    session_id,
+                    role,
+                    content,
+                    route,
+                    request_id,
+                    awaiting_reply,
+                    channel,
+                    created_at,
+                    metadata_json
+                FROM messages
+                WHERE role = 'assistant'
+                  AND metadata_json LIKE ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (f"%{normalized_artifact_id}%", max(1, limit)),
+            ).fetchall()
+
+        for row in rows:
+            metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else None
+            if not isinstance(metadata, dict):
+                continue
+            produced_artifacts = metadata.get("produced_artifacts")
+            if not isinstance(produced_artifacts, list):
+                continue
+            if not any(
+                isinstance(item, dict) and str(item.get("artifact_id") or "").strip() == normalized_artifact_id
+                for item in produced_artifacts
+            ):
+                continue
+            return {
+                "message_id": row["message_id"],
+                "session_id": row["session_id"],
+                "role": row["role"],
+                "content": row["content"],
+                "route": row["route"],
+                "request_id": row["request_id"],
+                "awaiting_reply": bool(row["awaiting_reply"]),
+                "channel": row["channel"],
+                "created_at": row["created_at"],
+                "metadata": metadata,
+            }
+        return None
+
     def clear_awaiting_reply(self, message_id: str) -> None:
         with self._lock, self._connect() as connection:
             connection.execute(
