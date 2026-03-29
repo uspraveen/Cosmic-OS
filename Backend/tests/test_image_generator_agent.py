@@ -172,7 +172,7 @@ _PNG_BYTES = (
 
 
 @pytest.mark.asyncio
-async def test_generate_via_image_api_uses_openai_images_endpoint(tmp_path: Path) -> None:
+async def test_generate_via_image_api_uses_openai_images_generations_endpoint(tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
     class _FakeHttpClient:
@@ -227,7 +227,7 @@ async def test_generate_via_image_api_uses_openai_images_endpoint(tmp_path: Path
         route=type("Route", (), {"router_mode": "explicit"})(),
     )
 
-    assert captured["url"] == "https://api.openai.com/v1/images"
+    assert captured["url"] == "https://api.openai.com/v1/images/generations"
     assert captured["json"]["size"] == "1024x1536"
     assert captured["json"]["quality"] == "high"
     assert "aspect_ratio" not in captured["json"]

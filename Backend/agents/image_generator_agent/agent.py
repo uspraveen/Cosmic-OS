@@ -290,7 +290,7 @@ class ImageGeneratorAgent(AgentRuntime):
         if not api_key:
             raise ImageGeneratorAgentError(code="AUTH_ERROR", message=f"{provider} image generation credentials are not configured.", retryable=False, next_action="configure_credentials")
 
-        endpoint_path = "/images" if provider == "openai" else "/images/generations"
+        endpoint_path = "/images/generations"
         payload: dict[str, Any] = {
             "model": model,
             "prompt": self._build_provider_prompt(normalized_input),
