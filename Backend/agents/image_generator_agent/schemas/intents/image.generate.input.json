@@ -8,6 +8,16 @@
       "minLength": 3,
       "description": "The image-generation or image-edit prompt."
     },
+    "goal": {
+      "type": "string",
+      "minLength": 3,
+      "description": "Compatibility alias for prompt."
+    },
+    "query": {
+      "type": "string",
+      "minLength": 3,
+      "description": "Compatibility alias for prompt."
+    },
     "negative_prompt": {
       "type": "string",
       "description": "Optional things the generated image should avoid."
@@ -50,5 +60,9 @@
       "description": "Optional desired basename for output image artifacts."
     }
   },
-  "required": ["prompt"]
+  "anyOf": [
+    { "required": ["prompt"] },
+    { "required": ["goal"] },
+    { "required": ["query"] }
+  ]
 }

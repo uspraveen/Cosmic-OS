@@ -76,7 +76,8 @@ async def test_image_generate_persists_artifacts_with_model_name(monkeypatch: py
     )
     await agent.on_startup()
 
-    async def fake_generate(*, task, normalized_input, route):
+    async def fake_generate(*, task, normalized_input, route, reference_images):
+        assert reference_images == []
         return ProviderGenerationResult(
             provider=route.provider,
             model=route.model,
@@ -134,7 +135,8 @@ async def test_image_recall_session_reads_prior_runs(monkeypatch: pytest.MonkeyP
     )
     await agent.on_startup()
 
-    async def fake_generate(*, task, normalized_input, route):
+    async def fake_generate(*, task, normalized_input, route, reference_images):
+        assert reference_images == []
         return ProviderGenerationResult(
             provider="openai",
             model="gpt-image-1.5",
@@ -237,6 +239,53 @@ async def test_image_generate_accepts_reference_image_artifacts(monkeypatch: pyt
             "mime": "image/png",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_image_generate_accepts_goal_alias_for_prompt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cfg = ImageGeneratorAgentConfig(
+        gateway_internal_token="",
+        openai_api_key="openai-key",
+        xai_api_key="xai-key",
+        enable_internal_router_llm=False,
+    )
+    agent = ImageGeneratorAgent(
+        redis_client=_FakeRedis(),
+        config=cfg,
+        agent_secret="test-secret",
+        artifacts_root=tmp_path / "runs" / "artifacts",
+        store_root=tmp_path / "store",
+        runtime_root=tmp_path / "runtime",
+    )
+    await agent.on_startup()
+
+    async def fake_generate(*, task, normalized_input, route, reference_images):
+        assert normalized_input["prompt"] == "Design an Apple-style launch poster for COSMIC."
+        assert reference_images == []
+        return ProviderGenerationResult(
+            provider=route.provider,
+            model=route.model,
+            request_payload={"prompt": normalized_input["prompt"]},
+            response_payload={"id": "img_goal_alias", "data": [{"b64_json": "<omitted>"}]},
+            raw_usage={"images": 1},
+            provider_request_id="img_goal_alias",
+            images=[ProviderImage(data=_PNG_BYTES, mime="image/png", revised_prompt=None, width=1, height=1)],
+        )
+
+    monkeypatch.setattr(agent, "_generate_with_provider", fake_generate)
+
+    result = await agent.execute(
+        _task_for(
+            "image.generate",
+            {
+                "goal": "Design an Apple-style launch poster for COSMIC.",
+                "artifact_basename": "launch_poster",
+            },
+        )
+    )
+
+    assert result.status == "completed"
+    assert result.output["images"][0]["filename"].startswith("launch_poster__")
 
 
 _PNG_BYTES = (

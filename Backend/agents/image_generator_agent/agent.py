@@ -640,7 +640,7 @@ class ImageGeneratorAgent(AgentRuntime):
             )
 
     def _normalize_generate_input(self, payload: dict[str, Any]) -> dict[str, Any]:
-        prompt = str(payload.get("prompt") or "").strip()
+        prompt = str(payload.get("prompt") or payload.get("goal") or payload.get("query") or "").strip()
         if len(prompt) < 3:
             raise ImageGeneratorAgentError(code="INVALID_INPUT", message="prompt is required for image.generate.", retryable=False, next_action="revise_input")
         if len(prompt) > self.config.max_prompt_chars:
