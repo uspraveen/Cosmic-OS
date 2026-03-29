@@ -1,0 +1,45 @@
+from __future__ import annotations
+
+from shared.response_blocks import build_response_blocks
+
+
+def test_build_response_blocks_splits_markdown_code_and_appends_artifacts() -> None:
+    blocks = build_response_blocks(
+        "Intro\n\n```python\nprint('hi')\n```\n\nDone",
+        [
+            {
+                "artifact_id": "art_plot",
+                "filename": "plot.png",
+                "mime_type": "image/png",
+                "size_bytes": 2048,
+                "downloadable": True,
+            }
+        ],
+    )
+
+    assert [block["type"] for block in blocks] == ["markdown", "code", "markdown", "image_artifact"]
+    assert blocks[0]["text"] == "Intro\n\n"
+    assert blocks[1]["language"] == "python"
+    assert blocks[1]["code"] == "print('hi')\n"
+    assert blocks[2]["text"] == "\n\nDone"
+    assert blocks[3]["artifact_id"] == "art_plot"
+    assert blocks[3]["filename"] == "plot.png"
+
+
+def test_build_response_blocks_places_artifact_marker_inline() -> None:
+    blocks = build_response_blocks(
+        "Here is the chart:\n\n[[artifact:plot.png]]\n\nAfter the figure.",
+        [
+            {
+                "artifact_id": "art_plot",
+                "filename": "plot.png",
+                "mime_type": "image/png",
+                "downloadable": True,
+            }
+        ],
+    )
+
+    assert [block["type"] for block in blocks] == ["markdown", "image_artifact", "markdown"]
+    assert blocks[0]["text"] == "Here is the chart:\n\n"
+    assert blocks[1]["artifact_id"] == "art_plot"
+    assert blocks[2]["text"] == "\n\nAfter the figure."

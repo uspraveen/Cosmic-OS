@@ -65,6 +65,7 @@ from shared import (
     agent_email_integration_is_disabled,
     agent_email_integration_is_configured,
     begin_metered_call,
+    build_response_blocks,
     build_model_key,
     build_usage_event,
     create_redis_client,
@@ -2499,7 +2500,8 @@ class GatewayRuntime:
         return self.session_store.list_sessions()
 
     def get_session_history(self, session_id: str) -> list[dict[str, Any]]:
-        return self.session_store.get_history(session_id)
+        history = self.session_store.get_history(session_id)
+        return [self._hydrate_history_message_for_client(item) for item in history]
 
     def get_session_history_page(
         self,
@@ -2522,7 +2524,7 @@ class GatewayRuntime:
             "limit": normalized_limit,
             "total_messages": total_messages,
             "has_more": normalized_offset + len(messages) < total_messages,
-            "messages": messages,
+            "messages": [self._hydrate_history_message_for_client(item) for item in messages],
         }
 
     def search_session_produced_artifacts(
@@ -5204,7 +5206,7 @@ class GatewayRuntime:
     ) -> dict[str, Any]:
         session_id = self._resolve_session_id(requested_session_id)
         # Fetch full day's history so the desktop shows the complete conversation
-        history = self.session_store.get_history(session_id)
+        history = [self._hydrate_history_message_for_client(item) for item in self.session_store.get_history(session_id)]
         pending_inputs = self._pending_inputs_for_channel(channel, session_id=session_id)
         active_tasks = await self._active_task_summaries(session_id=session_id, channel=channel)
         # Still-running background tasks from in-memory state
@@ -5251,7 +5253,7 @@ class GatewayRuntime:
                 "partial_thinking": meta.get("thinking_text") or "",
                 "activity_log": meta.get("activity_log"),
                 "sources": meta.get("sources"),
-                "produced_artifacts": meta.get("produced_artifacts"),
+                "produced_artifacts": self._hydrate_produced_artifact_list_for_client(meta.get("produced_artifacts")),
                 "backgrounded_at": None,
                 "completed": True,
             })
@@ -5295,11 +5297,18 @@ class GatewayRuntime:
         input_artifacts: list[dict[str, Any]] | None = None,
         produced_artifacts: list[dict[str, Any]] | None = None,
         activity_log: list[dict[str, Any]] | None = None,
+        response_blocks: list[dict[str, Any]] | None = None,
     ) -> None:
         """Push a cross-channel message to connected desktop/mobile clients on other platforms."""
         if not session_id or not channel:
             return
         origin_platform = self._channel_platform(channel)
+        client_artifacts = self._hydrate_produced_artifact_list_for_client(produced_artifacts or [])
+        client_response_blocks = self._build_client_response_blocks(
+            content=content,
+            produced_artifacts=produced_artifacts,
+            stored_blocks=response_blocks,
+        )
 
         event: dict[str, Any] = {
             "type": "crosschannel.message",
@@ -5320,10 +5329,12 @@ class GatewayRuntime:
             event["attachments"] = attachments
         if input_artifacts:
             event["input_artifacts"] = input_artifacts
-        if produced_artifacts:
-            event["produced_artifacts"] = produced_artifacts
+        if client_artifacts:
+            event["produced_artifacts"] = client_artifacts
         if activity_log:
             event["activity_log"] = activity_log
+        if client_response_blocks:
+            event["response_blocks"] = client_response_blocks
 
         for adapter in self.registry.adapters.values():
             if not isinstance(adapter, (DesktopAdapter, MobileAdapter)):
@@ -5347,6 +5358,7 @@ class GatewayRuntime:
         input_artifacts: list[dict[str, Any]] | None = None,
         produced_artifacts: list[dict[str, Any]] | None = None,
         activity_log: list[dict[str, Any]] | None = None,
+        response_blocks: list[dict[str, Any]] | None = None,
     ) -> None:
         """Push a cross-channel message to all connected desktop clients for this session.
 
@@ -5369,6 +5381,7 @@ class GatewayRuntime:
             input_artifacts=input_artifacts,
             produced_artifacts=produced_artifacts,
             activity_log=activity_log,
+            response_blocks=response_blocks,
         )
 
     def _track_background_task(self, coroutine: asyncio.Future[Any] | asyncio.Task[Any] | Any) -> None:
@@ -8374,6 +8387,15 @@ class GatewayRuntime:
                 fallback_sources=event.get("sources") if isinstance(event.get("sources"), list) else None,
             )
             produced_artifacts = self._normalize_produced_artifact_list(event.get("produced_artifacts"))
+            response_blocks = self._build_stable_response_blocks(
+                content=self._safe_text(event.get("content")),
+                produced_artifacts=produced_artifacts,
+            )
+            client_produced_artifacts = self._hydrate_produced_artifact_list_for_client(produced_artifacts)
+            client_response_blocks = self._hydrate_response_blocks_for_client(
+                response_blocks,
+                produced_artifacts=client_produced_artifacts,
+            )
             task_notebook = self.session_store.get_task_notebook(task_id) if task_id else None
             activity_log = self._normalize_activity_log(
                 task_notebook.get("activity_log") if isinstance(task_notebook, dict) else None,
@@ -8397,6 +8419,7 @@ class GatewayRuntime:
                         event.get("specialist_receipts")
                     ),
                     "produced_artifacts": produced_artifacts,
+                    "response_blocks": response_blocks,
                     "activity_log": activity_log,
                 },
                 channel=event_channel,
@@ -8404,6 +8427,10 @@ class GatewayRuntime:
             )
             if assistant_message_id:
                 event["message_id"] = assistant_message_id
+            if client_produced_artifacts:
+                event["produced_artifacts"] = client_produced_artifacts
+            if client_response_blocks:
+                event["response_blocks"] = client_response_blocks
             if activity_log:
                 event["activity_log"] = activity_log
             # Cross-channel sync: push the assistant response to connected realtime clients on other platforms.
@@ -8420,6 +8447,7 @@ class GatewayRuntime:
                         thinking_text=self._safe_text(event.get("thinking_text")),
                         produced_artifacts=produced_artifacts,
                         activity_log=activity_log,
+                        response_blocks=response_blocks,
                     )
                 )
         elif event_type == "task.input_required":
@@ -8650,6 +8678,119 @@ class GatewayRuntime:
             if len(normalized) >= 12:
                 break
         return normalized
+
+    def _hydrate_produced_artifact_list_for_client(self, value: Any) -> list[dict[str, Any]]:
+        normalized = self._normalize_produced_artifact_list(value)
+        hydrated: list[dict[str, Any]] = []
+        for artifact in normalized:
+            enriched = dict(artifact)
+            if is_supported_image_artifact(enriched) and self._safe_text(enriched.get("path")):
+                preview_url = self.mint_artifact_access_url(enriched, purpose="ui_preview")
+                if preview_url:
+                    enriched["preview_url"] = preview_url
+            hydrated.append(enriched)
+        return hydrated
+
+    def _hydrate_response_blocks_for_client(
+        self,
+        value: Any,
+        *,
+        produced_artifacts: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        artifact_by_id = {
+            self._safe_text(item.get("artifact_id")): item
+            for item in (produced_artifacts or [])
+            if isinstance(item, dict) and self._safe_text(item.get("artifact_id"))
+        }
+        artifact_by_name = {
+            self._safe_text(item.get("filename")).lower(): item
+            for item in (produced_artifacts or [])
+            if isinstance(item, dict) and self._safe_text(item.get("filename"))
+        }
+        hydrated: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            block_type = self._safe_text(item.get("type")) or "markdown"
+            block: dict[str, Any] = dict(item)
+            if block_type in {"image_artifact", "file_artifact"}:
+                artifact = (
+                    artifact_by_id.get(self._safe_text(item.get("artifact_id")))
+                    or artifact_by_name.get(self._safe_text(item.get("filename")).lower())
+                )
+                if artifact:
+                    for key in (
+                        "artifact_id",
+                        "filename",
+                        "mime_type",
+                        "size_bytes",
+                        "kind",
+                        "downloadable",
+                        "preview_url",
+                    ):
+                        if artifact.get(key) not in (None, "", [], {}):
+                            block[key] = artifact.get(key)
+            hydrated.append({key: val for key, val in block.items() if val not in (None, "", [], {})})
+        return hydrated
+
+    def _build_stable_response_blocks(
+        self,
+        *,
+        content: str | None,
+        produced_artifacts: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        return build_response_blocks(content, produced_artifacts or [])
+
+    def _build_client_response_blocks(
+        self,
+        *,
+        content: str | None,
+        produced_artifacts: list[dict[str, Any]] | None = None,
+        stored_blocks: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        client_artifacts = self._hydrate_produced_artifact_list_for_client(produced_artifacts or [])
+        stable_blocks = stored_blocks if isinstance(stored_blocks, list) and stored_blocks else self._build_stable_response_blocks(
+            content=content,
+            produced_artifacts=produced_artifacts,
+        )
+        return self._hydrate_response_blocks_for_client(stable_blocks, produced_artifacts=client_artifacts)
+
+    def _hydrate_message_metadata_for_client(self, metadata: Any) -> dict[str, Any]:
+        if not isinstance(metadata, dict):
+            return {}
+        hydrated = dict(metadata)
+        produced_artifacts = self._hydrate_produced_artifact_list_for_client(metadata.get("produced_artifacts"))
+        if produced_artifacts:
+            hydrated["produced_artifacts"] = produced_artifacts
+        response_blocks = self._build_client_response_blocks(
+            content=None,
+            produced_artifacts=self._normalize_produced_artifact_list(metadata.get("produced_artifacts")),
+            stored_blocks=metadata.get("response_blocks") if isinstance(metadata.get("response_blocks"), list) else None,
+        )
+        if response_blocks:
+            hydrated["response_blocks"] = response_blocks
+        return hydrated
+
+    def _hydrate_history_message_for_client(self, message: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(message, dict):
+            return message
+        hydrated = dict(message)
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else None
+        if metadata is not None:
+            hydrated_metadata = self._hydrate_message_metadata_for_client(metadata)
+            if not isinstance(hydrated_metadata.get("response_blocks"), list):
+                produced_artifacts = self._normalize_produced_artifact_list(metadata.get("produced_artifacts"))
+                response_blocks = self._build_client_response_blocks(
+                    content=self._safe_text(message.get("content")),
+                    produced_artifacts=produced_artifacts,
+                    stored_blocks=metadata.get("response_blocks") if isinstance(metadata.get("response_blocks"), list) else None,
+                )
+                if response_blocks:
+                    hydrated_metadata["response_blocks"] = response_blocks
+            hydrated["metadata"] = hydrated_metadata
+        return hydrated
 
     def _build_recalled_artifact_record(
         self,

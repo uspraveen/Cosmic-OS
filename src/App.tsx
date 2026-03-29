@@ -27,6 +27,7 @@ interface Message {
   content: string
   attachments?: MessageAttachment[]
   producedArtifacts?: ProducedArtifact[]
+  responseBlocks?: ResponseBlock[]
   thinking?: string
   activity?: string
   activityLog?: ActivityLogEntry[]
@@ -125,6 +126,33 @@ interface ProducedArtifact {
   createdAt?: string | null
   downloadable: boolean
 }
+
+interface ResponseMarkdownBlock {
+  id: string
+  type: 'markdown'
+  text: string
+}
+
+interface ResponseCodeBlock {
+  id: string
+  type: 'code'
+  language?: string | null
+  code: string
+}
+
+interface ResponseArtifactBlock {
+  id: string
+  type: 'image_artifact' | 'file_artifact'
+  artifactId: string
+  filename: string
+  mimeType?: string | null
+  sizeBytes?: number | null
+  kind?: string | null
+  downloadable?: boolean
+  previewUrl?: string | null
+}
+
+type ResponseBlock = ResponseMarkdownBlock | ResponseCodeBlock | ResponseArtifactBlock
 
 const isStableAssistantMessageId = (value: unknown): value is string => {
   const text = String(value || '').trim()
@@ -301,6 +329,73 @@ const normalizeProducedArtifacts = (value: unknown): ProducedArtifact[] | undefi
   return normalized.length > 0 ? normalized : undefined
 }
 
+const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined => {
+  if (!Array.isArray(value)) {
+    return undefined
+  }
+  const normalized: ResponseBlock[] = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object') {
+      continue
+    }
+    const type = typeof (item as any).type === 'string' ? (item as any).type.trim() : ''
+    const id = typeof (item as any).id === 'string' && (item as any).id.trim()
+      ? (item as any).id.trim()
+      : `block_${crypto.randomUUID()}`
+    if (type === 'markdown') {
+      const text = String((item as any).text || '')
+      if (!text) continue
+      normalized.push({ id, type: 'markdown', text })
+      continue
+    }
+    if (type === 'code') {
+      const code = String((item as any).code || '')
+      if (!code) continue
+      normalized.push({
+        id,
+        type: 'code',
+        code,
+        language: typeof (item as any).language === 'string' && (item as any).language.trim()
+          ? (item as any).language.trim()
+          : null,
+      })
+      continue
+    }
+    if (type === 'image_artifact' || type === 'file_artifact') {
+      const artifactId = typeof (item as any).artifact_id === 'string' && (item as any).artifact_id.trim()
+        ? (item as any).artifact_id.trim()
+        : typeof (item as any).artifactId === 'string' && (item as any).artifactId.trim()
+          ? (item as any).artifactId.trim()
+          : ''
+      const filename = typeof (item as any).filename === 'string' && (item as any).filename.trim()
+        ? (item as any).filename.trim()
+        : ''
+      if (!artifactId || !filename) continue
+      const rawSize = Number((item as any).size_bytes ?? (item as any).sizeBytes ?? 0)
+      normalized.push({
+        id,
+        type,
+        artifactId,
+        filename,
+        mimeType: typeof (item as any).mime_type === 'string'
+          ? (item as any).mime_type.trim()
+          : typeof (item as any).mimeType === 'string'
+            ? (item as any).mimeType.trim()
+            : null,
+        sizeBytes: Number.isFinite(rawSize) && rawSize > 0 ? rawSize : null,
+        kind: typeof (item as any).kind === 'string' ? (item as any).kind.trim() : null,
+        downloadable: (item as any).downloadable !== false,
+        previewUrl: typeof (item as any).preview_url === 'string' && (item as any).preview_url.trim()
+          ? (item as any).preview_url.trim()
+          : typeof (item as any).previewUrl === 'string' && (item as any).previewUrl.trim()
+            ? (item as any).previewUrl.trim()
+            : null,
+      })
+    }
+  }
+  return normalized.length > 0 ? normalized : undefined
+}
+
 const appendStreamText = (current: string | undefined, incoming: unknown): string => {
   const prev = String(current || '')
   const next = String(incoming || '')
@@ -430,6 +525,7 @@ const historyToMessages = (history: any[] = []): Message[] => {
       content: String(item.content || ''),
       attachments: extractMessageAttachments(item?.metadata),
       producedArtifacts: normalizeProducedArtifacts(item?.metadata?.produced_artifacts),
+      responseBlocks: normalizeResponseBlocks(item?.metadata?.response_blocks),
       thinking: typeof item?.metadata?.thinking_text === 'string' ? item.metadata.thinking_text : undefined,
       activityLog: normalizeActivityLog(item?.metadata?.activity_log),
       sources: Array.isArray(item?.metadata?.sources) ? item.metadata.sources : undefined,
@@ -480,6 +576,7 @@ const mergeHydratedMessages = (current: Message[], hydrated: Message[]): Message
       content: String(message.content || '').trim() ? message.content : existing.content,
       attachments: message.attachments ?? existing.attachments,
       producedArtifacts: message.producedArtifacts ?? existing.producedArtifacts,
+      responseBlocks: message.responseBlocks ?? existing.responseBlocks,
       thinking: typeof message.thinking === 'string' && message.thinking.trim()
         ? message.thinking
         : existing.thinking,
@@ -836,6 +933,18 @@ const AssistantProducedArtifacts = ({
   )
 }
 
+const formatArtifactKind = ({ kind, mimeType }: { kind?: string | null; mimeType?: string | null }) => {
+  const normalizedKind = String(kind || '').trim()
+  if (normalizedKind) {
+    return normalizedKind.replace(/[_-]+/g, ' ')
+  }
+  const mime = String(mimeType || '').trim()
+  if (mime.startsWith('application/pdf')) return 'pdf'
+  if (mime.includes('spreadsheet') || mime.includes('excel')) return 'spreadsheet'
+  if (mime.startsWith('image/')) return 'image'
+  return 'file'
+}
+
 const formatProducedArtifactKind = (artifact: ProducedArtifact) => {
   const kind = String(artifact.kind || '').trim()
   if (kind) {
@@ -865,6 +974,99 @@ const formatProducedArtifactNotificationSummary = (artifacts: ProducedArtifact[]
     return `${listed} · +${remainder} more`
   }
   return listed || `${artifacts.length} files are ready to download.`
+}
+
+const assistantMarkdownComponents = {
+  table: ({ node, ...props }: any) => <div className="table-wrapper"><table {...props} /></div>,
+  code: ({ node, inline, className, children, ...props }: any) => {
+    if (inline) return <code className="inline-code" {...props}>{children}</code>
+    return <div className="code-block"><code {...props}>{children}</code></div>
+  },
+  a: ({ node, ...props }: any) => <a target="_blank" rel="noopener noreferrer" {...props} />,
+}
+
+const AssistantMarkdownBlock = ({ content }: { content: string }) => (
+  <ReactMarkdown
+    remarkPlugins={[remarkGfm, remarkMath]}
+    rehypePlugins={[rehypeKatex]}
+    components={assistantMarkdownComponents}
+  >
+    {content}
+  </ReactMarkdown>
+)
+
+const AssistantResponseBlocks = ({
+  blocks,
+}: {
+  blocks?: ResponseBlock[]
+}) => {
+  if (!blocks || blocks.length <= 0) {
+    return null
+  }
+  return (
+    <div className="assistant-response-blocks">
+      {blocks.map((block) => {
+        if (block.type === 'markdown') {
+          return (
+            <div key={block.id} className="assistant-response-markdown">
+              <AssistantMarkdownBlock content={block.text} />
+            </div>
+          )
+        }
+        if (block.type === 'code') {
+          return (
+            <div key={block.id} className="assistant-response-code-shell">
+              {block.language && (
+                <div className="assistant-response-code-language">{block.language}</div>
+              )}
+              <div className="code-block assistant-response-code-block">
+                <code>{block.code}</code>
+              </div>
+            </div>
+          )
+        }
+        if (block.type === 'image_artifact') {
+          return (
+            <div key={block.id} className="assistant-inline-image-card">
+              {block.previewUrl ? (
+                <img
+                  src={block.previewUrl}
+                  alt={block.filename}
+                  className="assistant-inline-image"
+                  loading="lazy"
+                />
+              ) : (
+                <div className="assistant-inline-image-placeholder">Preview unavailable</div>
+              )}
+              <div className="assistant-inline-image-meta">
+                <div className="assistant-inline-image-name">{block.filename}</div>
+                <div className="assistant-inline-image-subtitle">
+                  {formatArtifactKind(block)}
+                  {block.sizeBytes ? ` · ${formatAttachmentSize(block.sizeBytes)}` : ''}
+                </div>
+              </div>
+            </div>
+          )
+        }
+        return (
+          <div key={block.id} className="assistant-inline-file-card">
+            <div className="assistant-inline-file-icon" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm0 2.5L18.5 9H14V4.5zM12 17l-4-4h2.5v-3h3v3H16l-4 4z" />
+              </svg>
+            </div>
+            <div className="assistant-inline-file-copy">
+              <div className="assistant-inline-file-name">{block.filename}</div>
+              <div className="assistant-inline-file-meta">
+                {formatArtifactKind(block)}
+                {block.sizeBytes ? ` · ${formatAttachmentSize(block.sizeBytes)}` : ''}
+              </div>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 const normalizeGatewayModelSelection = (value: unknown): GatewayModelSelection => {
@@ -2737,6 +2939,7 @@ export default function App() {
         setStreamingProgress('')
         setActiveSessionId((prev) => typeof event.session_id === 'string' ? event.session_id : prev)
         const producedArtifacts = normalizeProducedArtifacts((event as any).produced_artifacts)
+        const responseBlocks = normalizeResponseBlocks((event as any).response_blocks)
         const activityLog = normalizeActivityLog((event as any).activity_log)
         setMessages((prev) => {
           const sources = Array.isArray(event.sources) ? event.sources : undefined
@@ -2754,6 +2957,7 @@ export default function App() {
               content: mergeCompletedStreamText(message.content, event.content),
               sources,
               producedArtifacts: producedArtifacts ?? message.producedArtifacts,
+              responseBlocks: responseBlocks ?? message.responseBlocks,
               activityLog: activityLog ?? message.activityLog,
               requestId: typeof event.request_id === 'string' ? event.request_id : message.requestId,
               source: typeof event.source === 'string' ? event.source : message.source,
@@ -2811,7 +3015,10 @@ export default function App() {
         const producedArtifacts = role === 'assistant'
           ? normalizeProducedArtifacts((event as any).produced_artifacts)
           : undefined
-        if (!content && (!producedArtifacts || producedArtifacts.length === 0)) return
+        const responseBlocks = role === 'assistant'
+          ? normalizeResponseBlocks((event as any).response_blocks)
+          : undefined
+        if (!content && (!producedArtifacts || producedArtifacts.length === 0) && (!responseBlocks || responseBlocks.length === 0)) return
         const eventSessionId = typeof event.session_id === 'string' ? event.session_id : null
 
         // If the session rolled over, show a divider and clear old messages
@@ -2841,6 +3048,9 @@ export default function App() {
               : undefined,
             producedArtifacts: role === 'assistant'
               ? producedArtifacts
+              : undefined,
+            responseBlocks: role === 'assistant'
+              ? responseBlocks
               : undefined,
             channel: typeof event.channel === 'string' ? event.channel : null,
             sources: role === 'assistant' && Array.isArray(event.sources) ? event.sources : undefined,
@@ -4482,17 +4692,11 @@ export default function App() {
                               </div>
                               {pairedResponse && (
                                 <div className="message-row assistant" style={{ marginBottom: 8, display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
-                                  <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}
-                                    components={{
-                                      table: ({ node, ...props }) => <div className="table-wrapper"><table {...props} /></div>,
-                                      code: ({ node, inline, className, children, ...props }: any) => {
-                                        if (inline) return <code className="inline-code" {...props}>{children}</code>
-                                        return <div className="code-block"><code {...props}>{children}</code></div>
-                                      },
-                                      a: ({ node, ...props }) => <a target="_blank" rel="noopener noreferrer" {...props} />
-                                    }}>
-                                    {pairedResponse.content}
-                                  </ReactMarkdown>
+                                  {pairedResponse.responseBlocks && pairedResponse.responseBlocks.length > 0 ? (
+                                    <AssistantResponseBlocks blocks={pairedResponse.responseBlocks} />
+                                  ) : (
+                                    <AssistantMarkdownBlock content={pairedResponse.content} />
+                                  )}
                                   <AssistantProducedArtifacts
                                     messageId={pairedResponse.id}
                                     artifacts={pairedResponse.producedArtifacts}
@@ -4575,20 +4779,11 @@ export default function App() {
                             </div>
                           )}
                           <AssistantFlowTimeline entries={msg.activityLog} />
-                          <ReactMarkdown
-                            remarkPlugins={[remarkGfm, remarkMath]}
-                            rehypePlugins={[rehypeKatex]}
-                            components={{
-                              table: ({ node, ...props }) => <div className="table-wrapper"><table {...props} /></div>,
-                              code: ({ node, inline, className, children, ...props }: any) => {
-                                if (inline) return <code className="inline-code" {...props}>{children}</code>
-                                return <div className="code-block"><code {...props}>{children}</code></div>
-                              },
-                              a: ({ node, ...props }) => <a target="_blank" rel="noopener noreferrer" {...props} />
-                            }}
-                          >
-                            {msg.content}
-                          </ReactMarkdown>
+                          {msg.responseBlocks && msg.responseBlocks.length > 0 ? (
+                            <AssistantResponseBlocks blocks={msg.responseBlocks} />
+                          ) : (
+                            <AssistantMarkdownBlock content={msg.content} />
+                          )}
                           <AssistantProducedArtifacts
                             messageId={msg.id}
                             artifacts={msg.producedArtifacts}

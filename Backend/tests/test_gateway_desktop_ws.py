@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+from pathlib import Path
+import shutil
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -4189,6 +4191,47 @@ def test_signed_artifact_content_route_resizes_large_image_for_llm_fetch(tmp_pat
     optimized = Image.open(io.BytesIO(response.content))
     assert max(optimized.size) <= runtime.config.llm_image_max_edge_px
     assert optimized.size[0] * optimized.size[1] <= runtime.config.llm_image_max_pixels
+
+
+def test_runtime_builds_client_response_blocks_with_image_preview() -> None:
+    local_temp_root = Path(__file__).resolve().parents[1] / ".codex_manual_tmp"
+    local_temp_root.mkdir(parents=True, exist_ok=True)
+    tmpdir = local_temp_root / f"gw-response-blocks-{int(time.time() * 1000)}"
+    try:
+        tmpdir.mkdir(parents=True, exist_ok=True)
+        runtime = build_runtime(tmpdir)
+        runtime.config.artifacts_root = tmpdir / "runs" / "artifacts"
+        runtime.config.public_base_url = "https://gateway.example.test"
+
+        artifact_dir = runtime.config.artifacts_root / "unit"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifact_path = artifact_dir / "chart.png"
+        artifact_path.write_bytes(b"\x89PNG\r\n\x1a\nchart-preview")
+
+        produced_artifacts = runtime._normalize_produced_artifact_list(
+            [
+                {
+                    "artifact_id": "art_chart",
+                    "path": "runs/artifacts/unit/chart.png",
+                    "filename": "chart.png",
+                    "mime_type": "image/png",
+                    "downloadable": True,
+                }
+            ]
+        )
+
+        blocks = runtime._build_client_response_blocks(
+            content="Chart ready.\n\n```python\nprint('ok')\n```",
+            produced_artifacts=produced_artifacts,
+        )
+
+        assert [block["type"] for block in blocks] == ["markdown", "code", "image_artifact"]
+        assert blocks[0]["text"] == "Chart ready.\n\n"
+        assert blocks[1]["language"] == "python"
+        assert blocks[2]["artifact_id"] == "art_chart"
+        assert blocks[2]["preview_url"].startswith("https://gateway.example.test/artifacts/content/art_chart?")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def test_desktop_websocket_streams_thin_opus_route(test_client: TestClient, tmp_path) -> None:

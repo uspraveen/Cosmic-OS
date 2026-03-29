@@ -76,6 +76,7 @@ from .image_artifacts import (
     infer_image_mime_from_extension,
     is_supported_image_artifact,
 )
+from .response_blocks import build_response_blocks
 from .cosmic_mail_client import (
     CosmicMailClient,
     CosmicMailClientError,
@@ -134,6 +135,7 @@ __all__ = [
     "SUPPORTED_IMAGE_MIME_TYPES",
     "SUPPORTED_TABULAR_EXTENSIONS",
     "SUPPORTED_TABULAR_MIME_TYPES",
+    "build_response_blocks",
     "sign_task_envelope",
     "utcnow",
     "validate_outbound_version",

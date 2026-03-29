@@ -480,7 +480,8 @@ export class GatewayConnectionManager {
 
     if (eventType === 'response.complete') {
       const content = String(payload.content || '')
-      if (!content.trim()) {
+      const hasBlocks = Array.isArray(payload.response_blocks) && payload.response_blocks.length > 0
+      if (!content.trim() && !hasBlocks) {
         return
       }
       const requestId = String(payload.request_id || '').trim()
@@ -493,6 +494,9 @@ export class GatewayConnectionManager {
       }
       if (Array.isArray(payload.produced_artifacts) && payload.produced_artifacts.length > 0) {
         metadata.produced_artifacts = payload.produced_artifacts
+      }
+      if (hasBlocks) {
+        metadata.response_blocks = payload.response_blocks
       }
       if (Array.isArray(payload.activity_log) && payload.activity_log.length > 0) {
         metadata.activity_log = payload.activity_log
@@ -520,7 +524,8 @@ export class GatewayConnectionManager {
     if (eventType === 'crosschannel.message') {
       const role = String(payload.role || '').trim()
       const content = String(payload.content || '')
-      if ((role !== 'user' && role !== 'assistant') || !content.trim()) {
+      const hasBlocks = Array.isArray(payload.response_blocks) && payload.response_blocks.length > 0
+      if ((role !== 'user' && role !== 'assistant') || (!content.trim() && !hasBlocks)) {
         return
       }
       const lastItem = this.historyTail[this.historyTail.length - 1]
@@ -547,6 +552,9 @@ export class GatewayConnectionManager {
       }
       if (Array.isArray(payload.produced_artifacts) && payload.produced_artifacts.length > 0) {
         metadata.produced_artifacts = payload.produced_artifacts
+      }
+      if (Array.isArray(payload.response_blocks) && payload.response_blocks.length > 0) {
+        metadata.response_blocks = payload.response_blocks
       }
       if (Array.isArray(payload.activity_log) && payload.activity_log.length > 0) {
         metadata.activity_log = payload.activity_log
