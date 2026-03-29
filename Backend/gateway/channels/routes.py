@@ -153,6 +153,114 @@ def _error_payload(request_id: str | None, code: str, message: str) -> dict[str,
     }
 
 
+async def _stage_realtime_uploads(
+    *,
+    request_id: str,
+    device_id: str,
+    session_id: str | None,
+    files: list[UploadFile],
+    platform: str,
+    runtime: GatewayRuntime,
+    require_live_session: bool = False,
+) -> dict[str, Any]:
+    normalized_request_id = str(request_id or "").strip()
+    normalized_device_id = _normalize_device_id(str(device_id or "").strip())
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_request_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="request_id is required")
+    if not normalized_device_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="device_id is required")
+    if not normalized_session_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="session_id is required")
+    if not files:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one attachment is required")
+
+    channel = f"{platform}:{normalized_device_id}"
+    if require_live_session:
+        adapter = runtime.registry.adapters.get(platform)
+        valid_adapter = (
+            isinstance(adapter, DesktopAdapter)
+            if platform == "desktop"
+            else isinstance(adapter, MobileAdapter)
+        )
+        if not valid_adapter:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"{platform.title()} adapter unavailable",
+            )
+        tracked_session_id = str(await adapter.get_connection_session_id(channel) or "").strip()
+        if not tracked_session_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"{platform.title()} session is not active for this device. Reconnect and retry.",
+            )
+        if tracked_session_id != normalized_session_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"session_id does not match the active {platform} session for this device",
+            )
+
+    image_count = sum(
+        1
+        for upload in files
+        if is_supported_image_artifact(
+            {
+                "mime": str(upload.content_type or "").strip(),
+                "filename": str(upload.filename or "").strip(),
+            }
+        )
+    )
+    if image_count > runtime.config.max_image_attachments_per_message:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Up to {runtime.config.max_image_attachments_per_message} images can be attached in one message. "
+                f"You uploaded {image_count}."
+            ),
+        )
+
+    uploads: list[dict[str, Any]] = []
+    max_file_bytes = max(1024 * 1024, int(runtime.config.docs_upload_max_file_bytes))
+    for index, upload in enumerate(files, start=1):
+        filename = str(upload.filename or "").strip()
+        if not filename:
+            continue
+        content = await upload.read()
+        if not content:
+            continue
+        if len(content) > max_file_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=(
+                    f"Attachment exceeds the {_format_size_limit(max_file_bytes)} upload limit: {filename}"
+                ),
+            )
+        uploads.append(
+            {
+                "artifact_id": f"{platform}_att_{normalized_request_id}_{index}",
+                "filename": filename,
+                "mime_type": str(upload.content_type or "").strip() or None,
+                "content": content,
+            }
+        )
+    if not uploads:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No valid documents were uploaded")
+
+    manifests = await runtime.stage_desktop_uploads(
+        request_id=normalized_request_id,
+        session_id=normalized_session_id,
+        channel=channel,
+        uploads=uploads,
+        source_platform=platform,
+    )
+    if not manifests:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No supported document or image files were uploaded",
+        )
+    return {"attachments": manifests}
+
+
 def require_local_api_token(
     request: Request,
     runtime: GatewayRuntime = Depends(get_runtime),
@@ -785,75 +893,34 @@ async def upload_desktop_documents(
     _: None = Depends(require_local_api_token),
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
-    normalized_request_id = str(request_id or "").strip()
-    normalized_device_id = _normalize_device_id(str(device_id or "").strip())
-    normalized_session_id = str(session_id or "").strip()
-    if not normalized_request_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="request_id is required")
-    if not normalized_device_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="device_id is required")
-    if not normalized_session_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="session_id is required")
-    if not files:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one attachment is required")
-    image_count = sum(
-        1
-        for upload in files
-        if is_supported_image_artifact(
-            {
-                "mime": str(upload.content_type or "").strip(),
-                "filename": str(upload.filename or "").strip(),
-            }
-        )
+    return await _stage_realtime_uploads(
+        request_id=request_id,
+        device_id=device_id,
+        session_id=session_id,
+        files=files,
+        platform="desktop",
+        runtime=runtime,
     )
-    if image_count > runtime.config.max_image_attachments_per_message:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"Up to {runtime.config.max_image_attachments_per_message} images can be attached in one message. "
-                f"You uploaded {image_count}."
-            ),
-        )
 
-    uploads: list[dict[str, Any]] = []
-    max_file_bytes = max(1024 * 1024, int(runtime.config.docs_upload_max_file_bytes))
-    for index, upload in enumerate(files, start=1):
-        filename = str(upload.filename or "").strip()
-        if not filename:
-            continue
-        content = await upload.read()
-        if not content:
-            continue
-        if len(content) > max_file_bytes:
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=(
-                    f"Attachment exceeds the {_format_size_limit(max_file_bytes)} upload limit: {filename}"
-                ),
-            )
-        uploads.append(
-            {
-                "artifact_id": f"desktop_att_{normalized_request_id}_{index}",
-                "filename": filename,
-                "mime_type": str(upload.content_type or "").strip() or None,
-                "content": content,
-            }
-        )
-    if not uploads:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No valid documents were uploaded")
 
-    manifests = await runtime.stage_desktop_uploads(
-        request_id=normalized_request_id,
-        session_id=normalized_session_id,
-        channel=f"desktop:{normalized_device_id}",
-        uploads=uploads,
+@router.post("/channels/mobile/uploads")
+async def upload_mobile_documents(
+    request_id: str = Form(...),
+    device_id: str = Form(...),
+    session_id: str | None = Form(default=None),
+    files: list[UploadFile] = File(...),
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await _stage_realtime_uploads(
+        request_id=request_id,
+        device_id=device_id,
+        session_id=session_id,
+        files=files,
+        platform="mobile",
+        runtime=runtime,
+        require_live_session=True,
     )
-    if not manifests:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No supported document or image files were uploaded",
-        )
-    return {"attachments": manifests}
 
 
 @router.post("/tasks/{task_id}/input-reply/{input_request_id}")

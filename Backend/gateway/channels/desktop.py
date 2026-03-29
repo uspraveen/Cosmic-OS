@@ -184,6 +184,13 @@ class DesktopAdapter(ChannelAdapter):
             if conn is not None:
                 conn.session_id = session_id
 
+    async def get_connection_session_id(self, channel: str) -> str | None:
+        async with self._lock:
+            conn = self._connections.get(channel)
+            if conn is None:
+                return None
+            return conn.session_id
+
     async def broadcast_to_session(self, session_id: str, event: dict[str, Any]) -> None:
         """Send an event to ALL desktop connections tracking the given session_id.
 

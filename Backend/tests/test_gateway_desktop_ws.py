@@ -2000,6 +2000,183 @@ def test_desktop_upload_route_stages_images(tmp_path) -> None:
     assert staged_path.exists()
 
 
+def test_mobile_upload_route_stages_images_for_active_phone_session(test_client: TestClient) -> None:
+    with test_client.websocket_connect("/ws?token=test-token&device_id=mob_upload_1") as websocket:
+        websocket.send_json(
+            {
+                "type": "resume",
+                "request_id": "resume_mobile_upload_1",
+                "session_id": None,
+                "known_task_ids": [],
+            }
+        )
+        resume = websocket.receive_json()
+        assert resume["type"] == "resume.ok"
+
+        response = test_client.post(
+            "/channels/mobile/uploads",
+            headers={"Authorization": "Bearer test-token"},
+            data={
+                "request_id": "req_mobile_upload_1",
+                "session_id": resume["session_id"],
+                "device_id": "mob_upload_1",
+            },
+            files=[
+                (
+                    "files",
+                    (
+                        "photo.png",
+                        b"\x89PNG\r\n\x1a\nmobile",
+                        "image/png",
+                    ),
+                )
+            ],
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["attachments"]) == 1
+    attachment = payload["attachments"][0]
+    assert attachment["kind"] == "image"
+    assert attachment["mime"] == "image/png"
+    assert attachment["source_platform"] == "mobile"
+    assert attachment["path"].startswith("runs/artifacts/req_ingest_req_mobile_upload_1/")
+
+
+def test_mobile_upload_route_requires_active_phone_session(test_client: TestClient) -> None:
+    response = test_client.post(
+        "/channels/mobile/uploads",
+        headers={"Authorization": "Bearer test-token"},
+        data={
+            "request_id": "req_mobile_upload_inactive",
+            "session_id": "sess_20260329",
+            "device_id": "mob_upload_inactive",
+        },
+        files=[
+            (
+                "files",
+                (
+                    "photo.png",
+                    b"\x89PNG\r\n\x1a\nmobile",
+                    "image/png",
+                ),
+            )
+        ],
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Mobile session is not active for this device. Reconnect and retry."
+
+
+def test_mobile_upload_route_stages_images_for_multiple_active_phones(test_client: TestClient) -> None:
+    with test_client.websocket_connect("/ws?token=test-token&device_id=mob_upload_2a") as first_phone:
+        first_phone.send_json(
+            {
+                "type": "resume",
+                "request_id": "resume_mobile_upload_2a",
+                "session_id": None,
+                "known_task_ids": [],
+            }
+        )
+        first_resume = first_phone.receive_json()
+        assert first_resume["type"] == "resume.ok"
+
+        with test_client.websocket_connect("/ws?token=test-token&device_id=mob_upload_2b") as second_phone:
+            second_phone.send_json(
+                {
+                    "type": "resume",
+                    "request_id": "resume_mobile_upload_2b",
+                    "session_id": None,
+                    "known_task_ids": [],
+                }
+            )
+            second_resume = second_phone.receive_json()
+            assert second_resume["type"] == "resume.ok"
+
+            first_response = test_client.post(
+                "/channels/mobile/uploads",
+                headers={"Authorization": "Bearer test-token"},
+                data={
+                    "request_id": "req_mobile_upload_2a",
+                    "session_id": first_resume["session_id"],
+                    "device_id": "mob_upload_2a",
+                },
+                files=[
+                    (
+                        "files",
+                        (
+                            "photo-a.png",
+                            b"\x89PNG\r\n\x1a\nphone-a",
+                            "image/png",
+                        ),
+                    )
+                ],
+            )
+            second_response = test_client.post(
+                "/channels/mobile/uploads",
+                headers={"Authorization": "Bearer test-token"},
+                data={
+                    "request_id": "req_mobile_upload_2b",
+                    "session_id": second_resume["session_id"],
+                    "device_id": "mob_upload_2b",
+                },
+                files=[
+                    (
+                        "files",
+                        (
+                            "photo-b.png",
+                            b"\x89PNG\r\n\x1a\nphone-b",
+                            "image/png",
+                        ),
+                    )
+                ],
+            )
+
+    assert first_response.status_code == 200
+    assert first_response.json()["attachments"][0]["source_channel"] == "mobile:mob_upload_2a"
+    assert first_response.json()["attachments"][0]["source_platform"] == "mobile"
+    assert second_response.status_code == 200
+    assert second_response.json()["attachments"][0]["source_channel"] == "mobile:mob_upload_2b"
+    assert second_response.json()["attachments"][0]["source_platform"] == "mobile"
+
+
+def test_mobile_upload_route_rejects_session_mismatch_for_active_phone(test_client: TestClient) -> None:
+    with test_client.websocket_connect("/ws?token=test-token&device_id=mob_upload_3") as websocket:
+        websocket.send_json(
+            {
+                "type": "resume",
+                "request_id": "resume_mobile_upload_3",
+                "session_id": None,
+                "known_task_ids": [],
+            }
+        )
+        resume = websocket.receive_json()
+        assert resume["type"] == "resume.ok"
+
+        response = test_client.post(
+            "/channels/mobile/uploads",
+            headers={"Authorization": "Bearer test-token"},
+            data={
+                "request_id": "req_mobile_upload_mismatch",
+                "session_id": "sess_wrong_phone",
+                "device_id": "mob_upload_3",
+            },
+            files=[
+                (
+                    "files",
+                    (
+                        "photo.png",
+                        b"\x89PNG\r\n\x1a\nmobile",
+                        "image/png",
+                    ),
+                )
+            ],
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "session_id does not match the active mobile session for this device"
+
+
 @pytest.mark.asyncio
 async def test_document_attachments_force_opus_even_with_text_content(tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="haiku")
@@ -2030,6 +2207,42 @@ async def test_document_attachments_force_opus_even_with_text_content(tmp_path) 
 
     assert result["route"] == "opus"
     assert result["classification"]["signals"] == ["media_attachments"]
+
+
+@pytest.mark.asyncio
+async def test_mobile_image_attachments_stage_into_input_artifacts_and_force_opus(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="haiku")
+    await runtime.start()
+    try:
+        result = await runtime.process_incoming_user_message(
+            {
+                "content": "[image]",
+                "channel": "mobile:mob_docs",
+                "metadata": {
+                    "platform": "mobile",
+                    "message_type": "query",
+                    "attachments": [
+                        {
+                            "artifact_id": "mobile_img_1",
+                            "kind": "image",
+                            "mime_type": "image/png",
+                            "filename": "photo.png",
+                            "ingest_state": "staged",
+                            "path": "runs/artifacts/req_ingest_req_mobile_image_force/inputs/mobile_img_1/original/photo.png",
+                            "sha256": "abc123",
+                        }
+                    ],
+                },
+            }
+        )
+    finally:
+        await runtime.stop()
+
+    assert result["route"] == "opus"
+    assert result["classification"]["signals"] == ["media_attachments"]
+    assert len(result["input_artifacts"]) == 1
+    assert result["input_artifacts"][0]["kind"] == "image"
+    assert result["input_artifacts"][0]["source_platform"] == "mobile"
 
 
 @pytest.mark.asyncio

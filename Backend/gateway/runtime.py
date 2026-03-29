@@ -7051,6 +7051,7 @@ class GatewayRuntime:
         session_id: str,
         channel: str,
         uploads: list[dict[str, Any]],
+        source_platform: str = "desktop",
     ) -> list[dict[str, Any]]:
         staged_manifests: list[dict[str, Any]] = []
         if not request_id or not session_id or not channel:
@@ -7098,7 +7099,7 @@ class GatewayRuntime:
             staged_manifest = {
                 "artifact_id": artifact_id,
                 "source_channel": channel,
-                "source_platform": "desktop",
+                "source_platform": source_platform or self._channel_platform(channel) or "desktop",
                 "source_message_id": None,
                 "kind": effective_kind,
                 "mime": effective_mime,
