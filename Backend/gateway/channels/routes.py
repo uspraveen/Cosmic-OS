@@ -67,6 +67,18 @@ class TaskInputReplyRequest(BaseModel):
 
 class MobileDeviceAuthorizeRequest(BaseModel):
     device_id: str = Field(..., min_length=1, max_length=128)
+    device_name: str | None = Field(default=None, max_length=200)
+    device_name_source: str | None = Field(default=None, max_length=64)
+    model_name: str | None = Field(default=None, max_length=200)
+    brand: str | None = Field(default=None, max_length=120)
+    manufacturer: str | None = Field(default=None, max_length=120)
+    platform: str | None = Field(default=None, max_length=64)
+    os_name: str | None = Field(default=None, max_length=64)
+    os_version: str | None = Field(default=None, max_length=64)
+    device_type: str | None = Field(default=None, max_length=64)
+    is_physical_device: bool | None = None
+    app_version: str | None = Field(default=None, max_length=64)
+    app_build: str | None = Field(default=None, max_length=64)
 
 
 class PauseRequest(BaseModel):
@@ -894,7 +906,10 @@ async def authorize_mobile_device(
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
     try:
-        device = runtime.authorize_mobile_device(payload.device_id)
+        device = runtime.authorize_mobile_device(
+            payload.device_id,
+            metadata=payload.model_dump(exclude_none=True, exclude={"device_id"}),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return {"device": device}

@@ -2,6 +2,18 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 
 interface MobileDeviceRow {
   device_id: string
+  device_name?: string | null
+  device_name_source?: string | null
+  model_name?: string | null
+  brand?: string | null
+  manufacturer?: string | null
+  platform?: string | null
+  os_name?: string | null
+  os_version?: string | null
+  device_type?: string | null
+  is_physical_device?: boolean | null
+  app_version?: string | null
+  app_build?: string | null
   first_seen_at?: string | null
   last_seen_at?: string | null
   last_connected_at?: string | null
@@ -30,6 +42,37 @@ function formatTimestamp(value?: string | null): string {
     hour: '2-digit',
     minute: '2-digit',
   })
+}
+
+function compactParts(parts: Array<string | null | undefined>): string {
+  return parts
+    .map((part) => String(part || '').trim())
+    .filter(Boolean)
+    .join(' • ')
+}
+
+function getDeviceTitle(device: MobileDeviceRow): string {
+  return String(device.device_name || '').trim()
+    || String(device.model_name || '').trim()
+    || String(device.brand || '').trim()
+    || device.device_id
+}
+
+function getDeviceSubtitle(device: MobileDeviceRow): string {
+  const modelPart = String(device.model_name || '').trim() || compactParts([device.brand, device.manufacturer])
+  const osPart = compactParts([device.os_name || device.platform, device.os_version])
+  return compactParts([modelPart, osPart, device.device_type || null])
+}
+
+function getDeviceSourceLabel(device: MobileDeviceRow): string | null {
+  const source = String(device.device_name_source || '').trim()
+  if (!source) return null
+  if (source === 'generic_ios') return 'Generic iOS name'
+  if (source === 'user_assigned') return 'Phone setting name'
+  if (source === 'brand_model') return 'Brand/model fallback'
+  if (source === 'model') return 'Model fallback'
+  if (source === 'fallback') return 'Platform fallback'
+  return source.replace(/_/g, ' ')
 }
 
 export default function MobileDevicesSettings({ active }: MobileDevicesSettingsProps) {
@@ -136,6 +179,13 @@ export default function MobileDevicesSettings({ active }: MobileDevicesSettingsP
               <div className="mobile-device-card-head">
                 <div>
                   <div className="mobile-device-label">Device</div>
+                  <div className="mobile-device-name" title={getDeviceTitle(device)}>{getDeviceTitle(device)}</div>
+                  <div className="mobile-device-subtitle">
+                    {getDeviceSubtitle(device) || 'Metadata not available yet'}
+                  </div>
+                  {getDeviceSourceLabel(device) ? (
+                    <div className="mobile-device-source-note">{getDeviceSourceLabel(device)}</div>
+                  ) : null}
                   <div className="mobile-device-id" title={device.device_id}>{device.device_id}</div>
                 </div>
                 <div className="mobile-device-pill-wrap">
@@ -167,6 +217,13 @@ export default function MobileDevicesSettings({ active }: MobileDevicesSettingsP
                 <span className="mobile-device-meta-label">Session</span>
                 <span className="mobile-device-session-id" title={sessionId || '—'}>
                   {sessionId || '—'}
+                </span>
+              </div>
+
+              <div className="mobile-device-session">
+                <span className="mobile-device-meta-label">App</span>
+                <span className="mobile-device-session-id" title={compactParts([device.app_version, device.app_build ? `build ${device.app_build}` : null]) || '—'}>
+                  {compactParts([device.app_version, device.app_build ? `build ${device.app_build}` : null]) || '—'}
                 </span>
               </div>
 

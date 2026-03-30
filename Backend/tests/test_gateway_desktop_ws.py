@@ -2054,10 +2054,28 @@ def test_mobile_device_routes_authorize_list_and_revoke(test_client: TestClient)
     authorized = test_client.post(
         "/channels/mobile/devices/authorize",
         headers={"Authorization": "Bearer test-token"},
-        json={"device_id": "mob_manage_1"},
+        json={
+            "device_id": "mob_manage_1",
+            "device_name": "Praveen's Pixel 8 Pro",
+            "device_name_source": "user_assigned",
+            "model_name": "Pixel 8 Pro",
+            "brand": "Google",
+            "manufacturer": "Google",
+            "platform": "android",
+            "os_name": "Android",
+            "os_version": "14",
+            "device_type": "phone",
+            "is_physical_device": True,
+            "app_version": "1.0.0",
+            "app_build": "1",
+        },
     )
     assert authorized.status_code == 200
     assert authorized.json()["device"]["device_id"] == "mob_manage_1"
+    assert authorized.json()["device"]["device_name"] == "Praveen's Pixel 8 Pro"
+    assert authorized.json()["device"]["device_name_source"] == "user_assigned"
+    assert authorized.json()["device"]["model_name"] == "Pixel 8 Pro"
+    assert authorized.json()["device"]["platform"] == "android"
     assert authorized.json()["device"]["revoked"] is False
 
     listed = test_client.get(
@@ -2066,6 +2084,9 @@ def test_mobile_device_routes_authorize_list_and_revoke(test_client: TestClient)
     )
     assert listed.status_code == 200
     assert listed.json()["devices"][0]["device_id"] == "mob_manage_1"
+    assert listed.json()["devices"][0]["device_name"] == "Praveen's Pixel 8 Pro"
+    assert listed.json()["devices"][0]["device_name_source"] == "user_assigned"
+    assert listed.json()["devices"][0]["app_version"] == "1.0.0"
     assert listed.json()["devices"][0]["revoked"] is False
 
     revoked = test_client.delete(
@@ -2084,6 +2105,7 @@ def test_mobile_device_routes_authorize_list_and_revoke(test_client: TestClient)
     assert reauthorized.status_code == 200
     assert reauthorized.json()["device"]["device_id"] == "mob_manage_1"
     assert reauthorized.json()["device"]["revoked"] is False
+    assert reauthorized.json()["device"]["device_name"] == "Praveen's Pixel 8 Pro"
 
 
 def test_mobile_device_list_marks_active_connections(test_client: TestClient) -> None:

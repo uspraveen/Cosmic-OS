@@ -2599,13 +2599,19 @@ class GatewayRuntime:
     def is_mobile_device_revoked(self, device_id: str) -> bool:
         return self.mobile_device_store.is_revoked(device_id)
 
-    def authorize_mobile_device(self, device_id: str) -> dict[str, Any]:
+    def authorize_mobile_device(
+        self,
+        device_id: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         normalized_device_id = str(device_id or "").strip()
         if not normalized_device_id:
             raise ValueError("device_id is required")
         return self.mobile_device_store.authorize_device(
             normalized_device_id,
             channel=f"mobile:{normalized_device_id}",
+            metadata=metadata,
         )
 
     def record_mobile_device_connection(self, device_id: str, *, channel: str | None = None) -> dict[str, Any]:
