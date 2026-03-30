@@ -70,6 +70,7 @@ class GatewayConfig:
     enable_agent_email: bool = False
     agent_email_integrations_db_path: Path = BACKEND_ROOT / "gateway" / "agent_email_integrations.db"
     sessions_db_path: Path = BACKEND_ROOT / "gateway" / "sessions.db"
+    mobile_devices_db_path: Path = BACKEND_ROOT / "gateway" / "mobile_devices.db"
     usage_db_path: Path = BACKEND_ROOT / "gateway" / "usage.db"
     request_trace_db_path: Path = BACKEND_ROOT / "gateway" / "request_traces.db"
     routing_audit_db_path: Path = BACKEND_ROOT / "gateway" / "routing_audit.db"
@@ -189,6 +190,12 @@ class GatewayConfig:
             ).expanduser(),
             sessions_db_path=Path(
                 os.getenv("GATEWAY_SESSIONS_DB_PATH", str(BACKEND_ROOT / "gateway" / "sessions.db"))
+            ).expanduser(),
+            mobile_devices_db_path=Path(
+                os.getenv(
+                    "GATEWAY_MOBILE_DEVICES_DB_PATH",
+                    str(BACKEND_ROOT / "gateway" / "mobile_devices.db"),
+                )
             ).expanduser(),
             usage_db_path=Path(
                 os.getenv(

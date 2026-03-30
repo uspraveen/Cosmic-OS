@@ -65,6 +65,10 @@ class TaskInputReplyRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=8000)
 
 
+class MobileDeviceAuthorizeRequest(BaseModel):
+    device_id: str = Field(..., min_length=1, max_length=128)
+
+
 class PauseRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=200)
 
@@ -176,6 +180,11 @@ async def _stage_realtime_uploads(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one attachment is required")
 
     channel = f"{platform}:{normalized_device_id}"
+    if platform == "mobile" and runtime.is_mobile_device_revoked(normalized_device_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This mobile device was removed from desktop. Log in again on the phone to re-authorize it.",
+        )
     if require_live_session:
         adapter = runtime.registry.adapters.get(platform)
         valid_adapter = (
@@ -253,6 +262,12 @@ async def _stage_realtime_uploads(
         uploads=uploads,
         source_platform=platform,
     )
+    if platform == "mobile":
+        runtime.record_mobile_device_session(
+            normalized_device_id,
+            session_id=normalized_session_id,
+            channel=channel,
+        )
     if not manifests:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -303,6 +318,9 @@ async def verify_websocket_auth(websocket: WebSocket, runtime: GatewayRuntime) -
         await websocket.close(code=4003, reason="Invalid platform")
         return False
     platform = requested_platform or ("mobile" if device_id.startswith("mob_") else "desktop")
+    if platform == "mobile" and runtime.is_mobile_device_revoked(device_id):
+        await websocket.close(code=4004, reason="This device was removed from desktop.")
+        return False
 
     websocket.state.device_id = device_id
     websocket.state.platform = platform
@@ -348,6 +366,12 @@ async def _handle_realtime_websocket_message(
         resolved_session_id = str(response.get("session_id") or "").strip()
         if resolved_session_id:
             await adapter.update_session_id(channel, resolved_session_id)
+            if platform == "mobile":
+                runtime.record_mobile_device_session(
+                    channel.split(":", 1)[1],
+                    session_id=resolved_session_id,
+                    channel=channel,
+                )
         await adapter.send(response, channel=channel)
         return
 
@@ -516,6 +540,8 @@ async def desktop_websocket(websocket: WebSocket) -> None:
     device_id = websocket.state.device_id
     await adapter.register_connection(websocket, device_id=device_id, channel=channel)
     runtime.notify_channel_active(channel)
+    if platform == "mobile":
+        runtime.record_mobile_device_connection(device_id, channel=channel)
 
     try:
         while True:
@@ -546,6 +572,8 @@ async def desktop_websocket(websocket: WebSocket) -> None:
         pass
     finally:
         await adapter.unregister_connection(channel, websocket)
+        if platform == "mobile":
+            runtime.record_mobile_device_disconnected(device_id)
 
 
 @router.post("/internal/channels/whatsapp/incoming")
@@ -849,6 +877,49 @@ async def get_session_request_traces(
         "session_id": session_id,
         "request_traces": runtime.list_session_request_traces(session_id, limit=limit),
     }
+
+
+@router.get("/channels/mobile/devices")
+async def list_mobile_devices(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return {"devices": await runtime.list_mobile_devices()}
+
+
+@router.post("/channels/mobile/devices/authorize")
+async def authorize_mobile_device(
+    payload: MobileDeviceAuthorizeRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        device = runtime.authorize_mobile_device(payload.device_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return {"device": device}
+
+
+@router.post("/channels/mobile/devices/revoke-all")
+async def revoke_all_mobile_devices(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    result = await runtime.revoke_all_mobile_devices()
+    return result
+
+
+@router.delete("/channels/mobile/devices/{device_id}")
+async def revoke_mobile_device(
+    device_id: str,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        device = await runtime.revoke_mobile_device(_normalize_device_id(device_id) or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return {"device": device}
 
 
 @router.get("/artifacts/content/{artifact_id}")

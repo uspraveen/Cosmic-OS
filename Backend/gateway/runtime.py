@@ -35,6 +35,7 @@ from .config import GatewayConfig
 from .delivery.queue_store import DeliveryQueueStore, utcnow_iso
 from .memory import MemoryWriteAuditStore
 from .memory.client import CosmicMemoryClient, MemoryClientHTTPError, MemoryPromptContext
+from .mobile_device_store import MobileDeviceStore
 from .orchestrator_client import OrchestratorClient
 from .request_trace_store import RequestTraceStore
 from .routing.router_client import ModelRouterClient
@@ -226,6 +227,7 @@ class GatewayRuntime:
             timeout_sec=config.orchestrator_timeout_sec,
         )
         self.session_store = SessionStore(config.sessions_db_path)
+        self.mobile_device_store = MobileDeviceStore(config.mobile_devices_db_path)
         self.usage_store = UsageStore(config.usage_db_path)
         self.request_trace_store = RequestTraceStore(config.request_trace_db_path)
         self.routing_audit_store = RoutingAuditStore(config.routing_audit_db_path)
@@ -310,6 +312,7 @@ class GatewayRuntime:
 
     async def start(self) -> None:
         self.session_store.initialize()
+        self.mobile_device_store.initialize()
         self.usage_store.initialize()
         self.request_trace_store.initialize()
         self.routing_audit_store.initialize()
@@ -2567,6 +2570,84 @@ class GatewayRuntime:
 
     def list_sessions(self) -> list[dict[str, Any]]:
         return self.session_store.list_sessions()
+
+    async def list_mobile_devices(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        devices = self.mobile_device_store.list_devices(limit=limit)
+        adapter = self.registry.adapters.get("mobile")
+        active_by_device: dict[str, dict[str, Any]] = {}
+        if isinstance(adapter, MobileAdapter):
+            for connection in await adapter.list_connections():
+                device_id = str(connection.get("device_id") or "").strip()
+                if not device_id:
+                    continue
+                active_by_device[device_id] = connection
+
+        hydrated: list[dict[str, Any]] = []
+        for device in devices:
+            device_id = str(device.get("device_id") or "").strip()
+            live = active_by_device.get(device_id)
+            hydrated.append(
+                {
+                    **device,
+                    "active": live is not None,
+                    "current_channel": live.get("channel") if live else None,
+                    "current_session_id": live.get("session_id") if live else None,
+                }
+            )
+        return hydrated
+
+    def is_mobile_device_revoked(self, device_id: str) -> bool:
+        return self.mobile_device_store.is_revoked(device_id)
+
+    def authorize_mobile_device(self, device_id: str) -> dict[str, Any]:
+        normalized_device_id = str(device_id or "").strip()
+        if not normalized_device_id:
+            raise ValueError("device_id is required")
+        return self.mobile_device_store.authorize_device(
+            normalized_device_id,
+            channel=f"mobile:{normalized_device_id}",
+        )
+
+    def record_mobile_device_connection(self, device_id: str, *, channel: str | None = None) -> dict[str, Any]:
+        return self.mobile_device_store.record_connected(device_id, channel=channel)
+
+    def record_mobile_device_session(
+        self,
+        device_id: str,
+        *,
+        session_id: str | None,
+        channel: str | None = None,
+    ) -> dict[str, Any]:
+        return self.mobile_device_store.record_session(device_id, session_id=session_id, channel=channel)
+
+    def record_mobile_device_disconnected(self, device_id: str) -> dict[str, Any] | None:
+        return self.mobile_device_store.record_disconnected(device_id)
+
+    async def revoke_mobile_device(self, device_id: str, *, reason: str | None = None) -> dict[str, Any]:
+        record = self.mobile_device_store.revoke_device(device_id, reason=reason)
+        adapter = self.registry.adapters.get("mobile")
+        if isinstance(adapter, MobileAdapter):
+            await adapter.close_connection(
+                f"mobile:{str(device_id or '').strip()}",
+                code=4004,
+                reason="This device was removed from desktop.",
+            )
+        return record
+
+    async def revoke_all_mobile_devices(self, *, reason: str | None = None) -> dict[str, Any]:
+        result = self.mobile_device_store.revoke_all_devices(reason=reason)
+        adapter = self.registry.adapters.get("mobile")
+        if isinstance(adapter, MobileAdapter):
+            for connection in await adapter.list_connections():
+                channel = str(connection.get("channel") or "").strip()
+                if not channel:
+                    continue
+                await adapter.close_connection(
+                    channel,
+                    code=4004,
+                    reason="This device was removed from desktop.",
+                )
+        return result
 
     def get_session_history(self, session_id: str) -> list[dict[str, Any]]:
         history = self.session_store.get_history(session_id)

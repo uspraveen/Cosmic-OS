@@ -191,6 +191,31 @@ class DesktopAdapter(ChannelAdapter):
                 return None
             return conn.session_id
 
+    async def list_connections(self) -> list[dict[str, Any]]:
+        async with self._lock:
+            return [
+                {
+                    "channel": conn.channel,
+                    "device_id": conn.device_id,
+                    "session_id": conn.session_id,
+                }
+                for conn in self._connections.values()
+            ]
+
+    async def close_connection(self, channel: str, *, code: int = 1012, reason: str = "Connection closed") -> bool:
+        target: DesktopConnection | None = None
+        async with self._lock:
+            target = self._connections.pop(channel, None)
+            if self._primary_channel == channel:
+                self._primary_channel = next(iter(self._connections), None)
+        if target is None:
+            return False
+        try:
+            await target.websocket.close(code=code, reason=reason)
+        except Exception:
+            pass
+        return True
+
     async def broadcast_to_session(self, session_id: str, event: dict[str, Any]) -> None:
         """Send an event to ALL desktop connections tracking the given session_id.
 

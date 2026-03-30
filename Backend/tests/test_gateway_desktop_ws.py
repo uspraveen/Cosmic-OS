@@ -2043,6 +2043,104 @@ def test_mobile_upload_route_stages_images_for_active_phone_session(test_client:
     assert attachment["path"].startswith("runs/artifacts/req_ingest_req_mobile_upload_1/")
 
 
+def test_mobile_device_routes_authorize_list_and_revoke(test_client: TestClient) -> None:
+    listed_empty = test_client.get(
+        "/channels/mobile/devices",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert listed_empty.status_code == 200
+    assert listed_empty.json()["devices"] == []
+
+    authorized = test_client.post(
+        "/channels/mobile/devices/authorize",
+        headers={"Authorization": "Bearer test-token"},
+        json={"device_id": "mob_manage_1"},
+    )
+    assert authorized.status_code == 200
+    assert authorized.json()["device"]["device_id"] == "mob_manage_1"
+    assert authorized.json()["device"]["revoked"] is False
+
+    listed = test_client.get(
+        "/channels/mobile/devices",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert listed.status_code == 200
+    assert listed.json()["devices"][0]["device_id"] == "mob_manage_1"
+    assert listed.json()["devices"][0]["revoked"] is False
+
+    revoked = test_client.delete(
+        "/channels/mobile/devices/mob_manage_1",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert revoked.status_code == 200
+    assert revoked.json()["device"]["device_id"] == "mob_manage_1"
+    assert revoked.json()["device"]["revoked"] is True
+
+    reauthorized = test_client.post(
+        "/channels/mobile/devices/authorize",
+        headers={"Authorization": "Bearer test-token"},
+        json={"device_id": "mob_manage_1"},
+    )
+    assert reauthorized.status_code == 200
+    assert reauthorized.json()["device"]["device_id"] == "mob_manage_1"
+    assert reauthorized.json()["device"]["revoked"] is False
+
+
+def test_mobile_device_list_marks_active_connections(test_client: TestClient) -> None:
+    with test_client.websocket_connect("/ws?token=test-token&device_id=mob_manage_active") as websocket:
+        websocket.send_json(
+            {
+                "type": "resume",
+                "request_id": "resume_mobile_manage_active",
+                "session_id": None,
+                "known_task_ids": [],
+            }
+        )
+        resume = websocket.receive_json()
+        assert resume["type"] == "resume.ok"
+
+        listed = test_client.get(
+            "/channels/mobile/devices",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert listed.status_code == 200
+        device = next(item for item in listed.json()["devices"] if item["device_id"] == "mob_manage_active")
+        assert device["active"] is True
+        assert device["current_channel"] == "mobile:mob_manage_active"
+        assert device["current_session_id"] == resume["session_id"]
+
+
+def test_revoked_mobile_device_upload_route_is_blocked(test_client: TestClient) -> None:
+    revoked = test_client.delete(
+        "/channels/mobile/devices/mob_removed_upload",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert revoked.status_code == 200
+
+    response = test_client.post(
+        "/channels/mobile/uploads",
+        headers={"Authorization": "Bearer test-token"},
+        data={
+            "request_id": "req_mobile_removed_upload",
+            "session_id": "sess_removed",
+            "device_id": "mob_removed_upload",
+        },
+        files=[
+            (
+                "files",
+                (
+                    "photo.png",
+                    b"\x89PNG\r\n\x1a\nmobile",
+                    "image/png",
+                ),
+            )
+        ],
+    )
+
+    assert response.status_code == 403
+    assert "re-authorize" in response.json()["detail"]
+
+
 def test_mobile_upload_route_requires_active_phone_session(test_client: TestClient) -> None:
     response = test_client.post(
         "/channels/mobile/uploads",

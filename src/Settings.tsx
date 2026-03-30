@@ -5,6 +5,7 @@ import ApiConfiguration from './ApiConfiguration'
 import GoogleIntegrationsSettings from './GoogleIntegrationsSettings'
 import WhatsAppIntegrationSettings from './WhatsAppIntegrationSettings'
 import TelegramIntegrationSettings from './TelegramIntegrationSettings'
+import MobileDevicesSettings from './MobileDevicesSettings'
 import { GOOGLE_TOOL_DEFINITIONS } from './integrations'
 import type { SearchPosition } from './App'
 import './settings.css'
@@ -39,6 +40,7 @@ type SettingsView =
   | 'monitors'
   | 'api'
   | 'ui'
+  | 'devices'
   | 'integrations'
   | 'integrations-google'
   | 'integrations-whatsapp'
@@ -83,6 +85,8 @@ export default function Settings({
           ? 'Display Preferences'
           : currentView === 'ui'
             ? 'UI Settings'
+            : currentView === 'devices'
+              ? 'Mobile Devices'
             : currentView === 'integrations'
               ? 'Integrations'
               : currentView === 'integrations-whatsapp'
@@ -211,6 +215,14 @@ export default function Settings({
                   <span style={{ opacity: 0.5 }}>›</span>
                 </button>
 
+                <button className="setting-nav-btn" onClick={() => setCurrentView('devices')}>
+                  <div className="setting-nav-copy">
+                    <span style={{ fontWeight: 600 }}>Mobile Devices</span>
+                    <span className="setting-nav-subcopy">Review linked phones and remove access device-by-device or all at once.</span>
+                  </div>
+                  <span style={{ opacity: 0.5 }}>›</span>
+                </button>
+
                 <button className="setting-nav-btn" onClick={() => setCurrentView('monitors')}>
                   <div className="setting-nav-copy">
                     <span style={{ fontWeight: 600 }}>Display Preferences</span>
@@ -301,6 +313,10 @@ export default function Settings({
                 active={currentView === 'integrations-telegram'}
                 cosmicAuth={authData ? { gatewayUrl: authData.gatewayUrl, gatewayApiToken: authData.gatewayApiToken } : undefined}
               />
+            )}
+
+            {currentView === 'devices' && (
+              <MobileDevicesSettings active={currentView === 'devices'} />
             )}
 
             {currentView === 'monitors' && (

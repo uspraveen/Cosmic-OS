@@ -1717,6 +1717,45 @@ app.whenReady().then(() => {
     return callGatewayJson(config, `/sessions/${encodeURIComponent(sessionId)}/request-traces`)
   })
 
+  ipcMain.handle('gateway:list-mobile-devices', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      return { devices: [] }
+    }
+    return callGatewayJson(config, '/channels/mobile/devices')
+  })
+
+  ipcMain.handle('gateway:authorize-mobile-device', async (_, deviceId: string) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/channels/mobile/devices/authorize', {
+      method: 'POST',
+      body: { device_id: String(deviceId || '').trim() },
+    })
+  })
+
+  ipcMain.handle('gateway:revoke-mobile-device', async (_, deviceId: string) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, `/channels/mobile/devices/${encodeURIComponent(String(deviceId || '').trim())}`, {
+      method: 'DELETE',
+    })
+  })
+
+  ipcMain.handle('gateway:revoke-all-mobile-devices', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/channels/mobile/devices/revoke-all', {
+      method: 'POST',
+    })
+  })
+
   ipcMain.handle('gateway:get-system-metrics', async (_, forceRefresh?: boolean) => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {

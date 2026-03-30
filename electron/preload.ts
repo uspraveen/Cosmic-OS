@@ -107,6 +107,10 @@ contextBridge.exposeInMainWorld('cosmic', {
   listGatewaySessions: () => ipcRenderer.invoke('gateway:list-sessions'),
   getGatewaySessionHistory: (sessionId: string) => ipcRenderer.invoke('gateway:get-session-history', sessionId),
   getGatewayRequestTraces: (sessionId: string) => ipcRenderer.invoke('gateway:get-request-traces', sessionId),
+  listMobileDevices: () => ipcRenderer.invoke('gateway:list-mobile-devices'),
+  authorizeMobileDevice: (deviceId: string) => ipcRenderer.invoke('gateway:authorize-mobile-device', deviceId),
+  revokeMobileDevice: (deviceId: string) => ipcRenderer.invoke('gateway:revoke-mobile-device', deviceId),
+  revokeAllMobileDevices: () => ipcRenderer.invoke('gateway:revoke-all-mobile-devices'),
   onGatewayEvent: (cb: (data: any) => void) => {
     const listener = (_: any, data: any) => cb(data)
     ipcRenderer.on('gateway:event', listener)

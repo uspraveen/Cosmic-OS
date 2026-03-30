@@ -129,6 +129,10 @@ interface Window {
     listGatewaySessions: () => Promise<{ sessions: any[] }>
     getGatewaySessionHistory: (sessionId: string) => Promise<{ session_id: string; messages: any[] }>
     getGatewayRequestTraces: (sessionId: string) => Promise<{ session_id: string; request_traces: any[] }>
+    listMobileDevices: () => Promise<{ devices: any[] }>
+    authorizeMobileDevice: (deviceId: string) => Promise<{ device: any }>
+    revokeMobileDevice: (deviceId: string) => Promise<{ device: any }>
+    revokeAllMobileDevices: () => Promise<{ revoked_count: number; device_ids: string[]; revoked_at: string; reason: string }>
     onGatewayEvent: (cb: (data: any) => void) => () => void
     onGatewayStatus: (cb: (data: GatewaySocketState['status']) => void) => () => void
     getGatewaySystemMetrics: (forceRefresh?: boolean) => Promise<unknown>
