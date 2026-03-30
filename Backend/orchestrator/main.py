@@ -151,6 +151,19 @@ async def request_task_input(
     }
 
 
+@app.post("/internal/reverse-tasks")
+async def submit_reverse_task(
+    task: TaskEnvelope,
+    _: None = Depends(require_internal_token),
+    runtime: OrchestratorRuntime = Depends(get_runtime),
+) -> dict[str, object]:
+    payload = await runtime.accept_reverse_task(task)
+    return {
+        "ok": True,
+        **payload,
+    }
+
+
 @app.post("/internal/process/stream")
 async def process_stream(
     task: TaskEnvelope,

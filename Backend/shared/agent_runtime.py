@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -14,7 +15,18 @@ import yaml
 from registry.live_state import register_intent_index, write_heartbeat
 from registry.store import RegistryStore
 
-from .contracts import AgentError, AgentResult, EventEnvelope, Heartbeat, TaskEnvelope, TaskInProgress, verify_task_envelope
+from .contracts import (
+    SOURCE_PRIORITY_MAP,
+    AgentError,
+    AgentResult,
+    EventEnvelope,
+    Heartbeat,
+    TaskEnvelope,
+    TaskInProgress,
+    generate_task_id,
+    sign_task_envelope,
+    verify_task_envelope,
+)
 from .idempotency import RESULT_TTL_SEC, execute_with_idempotency
 from .memory_tools import MemoryRead, MemoryWrite
 from .redis_bus import EVENTS_STREAM_MAXLEN, parse_task_envelope, task_stream_name
@@ -26,6 +38,7 @@ logger = logging.getLogger(__name__)
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 WORKER_GROUP = "workers"
 STREAM_PRIORITIES = ("high", "normal", "low")
+ORCHESTRATOR_AGENT_ID = "cosmic/orchestrator:1.0.0"
 
 
 class AgentRuntime:
@@ -41,6 +54,8 @@ class AgentRuntime:
         registry_db_path: str | Path | None = None,
         gateway_url: str | None = None,
         gateway_internal_token: str | None = None,
+        orchestrator_url: str | None = None,
+        orchestrator_internal_token: str | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self.agent_card_path = Path(agent_card_path)
@@ -48,6 +63,14 @@ class AgentRuntime:
         self.agent_secret = (agent_secret or os.getenv("AGENT_SECRET", "")).strip()
         self.gateway_url = (gateway_url or os.getenv("GATEWAY_URL", "http://127.0.0.1:8080")).strip()
         self.gateway_internal_token = (gateway_internal_token or os.getenv("GATEWAY_INTERNAL_TOKEN", "")).strip()
+        self.orchestrator_url = (
+            orchestrator_url or os.getenv("ORCHESTRATOR_URL", "http://127.0.0.1:8743")
+        ).strip()
+        self.orchestrator_internal_token = (
+            orchestrator_internal_token
+            or os.getenv("ORCHESTRATOR_INTERNAL_TOKEN")
+            or self.gateway_internal_token
+        ).strip()
         self.instance_id = (instance_id or os.getenv("INSTANCE_ID", "")).strip() or f"inst-{id(self)}"
         timeout = httpx.Timeout(30.0, connect=10.0)
         self._http_client = http_client or httpx.AsyncClient(timeout=timeout, http2=True)
@@ -192,6 +215,106 @@ class AgentRuntime:
             payload["error"] = result.error.model_dump(mode="json")
         event_type = "task.completed" if result.status == "completed" else "task.failed"
         return await self.emit_event(task_id, event_type, payload)
+
+    async def submit_reverse_task(
+        self,
+        *,
+        current_task: TaskEnvelope,
+        intent: str,
+        input_payload: dict[str, Any] | None = None,
+        input_artifacts: list[dict[str, Any]] | None = None,
+        priority: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_intent = str(intent or "").strip()
+        if not normalized_intent:
+            raise RuntimeError("intent is required for reverse tasks.")
+        if not self.orchestrator_url:
+            raise RuntimeError("orchestrator_url is not configured.")
+        if not self.orchestrator_internal_token:
+            raise RuntimeError("orchestrator_internal_token is not configured.")
+        if not self.agent_secret:
+            raise RuntimeError("AGENT_SECRET is required for reverse tasks.")
+
+        reverse_input = dict(input_payload or {})
+        if "request_id" not in reverse_input:
+            inherited_request_id = str(current_task.input.get("request_id") or "").strip()
+            if inherited_request_id:
+                reverse_input["request_id"] = inherited_request_id
+
+        normalized_priority = str(priority or current_task.priority or SOURCE_PRIORITY_MAP["agent"]).strip()
+        if normalized_priority not in {"high", "normal", "low"}:
+            normalized_priority = SOURCE_PRIORITY_MAP["agent"]
+
+        reverse_task = TaskEnvelope(
+            task_id=generate_task_id(),
+            task_list_id=current_task.task_list_id,
+            parent_task_id=current_task.task_id,
+            session_id=current_task.session_id,
+            sender=self.agent_id,
+            recipient=ORCHESTRATOR_AGENT_ID,
+            intent=normalized_intent,
+            input=reverse_input,
+            input_artifacts=[item for item in (input_artifacts or []) if isinstance(item, dict)],
+            idempotency_key=str(idempotency_key or "").strip()
+            or self._build_reverse_idempotency_key(current_task.idempotency_key, normalized_intent, reverse_input),
+            deadline_ts=current_task.deadline_ts,
+            priority=normalized_priority,
+            leader_epoch=None,
+            signature="",
+            source="agent",
+            source_id=self.agent_id,
+            channel=current_task.channel,
+        )
+        signature = sign_task_envelope(reverse_task, self.agent_secret)
+        signed_task = reverse_task.model_copy(update={"signature": signature})
+        url = f"{self.orchestrator_url.rstrip('/')}/internal/reverse-tasks"
+        response = await self._http_client.post(
+            url,
+            json=signed_task.model_dump(mode="json"),
+            headers={
+                "X-Internal-Token": self.orchestrator_internal_token,
+                "Content-Type": "application/json",
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("orchestrator reverse-task response must be a JSON object.")
+        if payload.get("ok") is False:
+            raise RuntimeError(str(payload.get("error") or "reverse-task submission failed"))
+        return payload
+
+    async def request_orchestrator_delegate(
+        self,
+        *,
+        current_task: TaskEnvelope,
+        target_intent: str,
+        target_input: dict[str, Any] | None = None,
+        target_agent_id: str | None = None,
+        input_artifacts: list[dict[str, Any]] | None = None,
+        resume_payload: dict[str, Any] | None = None,
+        resume_intent: str = "agent.resume",
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "target_intent": str(target_intent or "").strip(),
+            "target_input": dict(target_input or {}),
+            "resume_payload": dict(resume_payload or {}),
+            "resume_intent": str(resume_intent or "agent.resume").strip() or "agent.resume",
+        }
+        normalized_agent_id = str(target_agent_id or "").strip()
+        if normalized_agent_id:
+            payload["target_agent_id"] = normalized_agent_id
+        normalized_reason = str(reason or "").strip()
+        if normalized_reason:
+            payload["reason"] = normalized_reason
+        return await self.submit_reverse_task(
+            current_task=current_task,
+            intent="orchestrator.delegate",
+            input_payload=payload,
+            input_artifacts=input_artifacts,
+        )
 
     async def _heartbeat_loop(self) -> None:
         while True:
@@ -352,11 +475,25 @@ class AgentRuntime:
             raise ValueError("agent.resume requires resume_input object")
 
         merged_input = dict(resume_input)
+        extra_resume_fields = {
+            key: value
+            for key, value in task.input.items()
+            if key
+            not in {
+                "resume_of_task_id",
+                "resume_intent",
+                "resume_input",
+                "reply",
+                "resume_state",
+                "input_request_id",
+            }
+        }
         merged_input["_resume"] = {
             "resume_of_task_id": resume_of_task_id,
             "input_request_id": input_request_id,
             "reply": dict(resume_reply),
             "resume_state": dict(resume_state),
+            **extra_resume_fields,
         }
         return task.model_copy(update={"intent": resume_intent, "input": merged_input})
 
@@ -380,6 +517,22 @@ class AgentRuntime:
         if not self.allowed_senders:
             return True
         return task.sender in self.allowed_senders
+
+    def _build_reverse_idempotency_key(
+        self,
+        current_idempotency_key: str,
+        intent: str,
+        input_payload: dict[str, Any],
+    ) -> str:
+        digest = hashlib.sha256(
+            json.dumps(
+                input_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        return f"{current_idempotency_key}:reverse:{intent}:{digest}"
 
     def _load_agent_card(self, path: Path) -> dict[str, Any]:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))

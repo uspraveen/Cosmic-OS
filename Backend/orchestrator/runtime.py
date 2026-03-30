@@ -1203,6 +1203,68 @@ class OrchestratorRuntime:
             if future.done() or (wait_timeout_sec is None or wait_timeout_sec <= 0):
                 self._pending_input_futures.pop(irid, None)
 
+    async def accept_reverse_task(self, task: TaskEnvelope) -> dict[str, Any]:
+        if task.recipient != self.config.orchestrator_agent_id:
+            raise RuntimeError("reverse task recipient must be the orchestrator.")
+        if task.source != "agent":
+            raise RuntimeError("reverse tasks must use source='agent'.")
+        if not verify_task_envelope(task, self._resolve_agent_secret(task.sender)):
+            raise RuntimeError("reverse task signature verification failed.")
+
+        if task.intent == "orchestrator.delegate":
+            return await self._register_reverse_delegate(task)
+        raise RuntimeError(f"Unsupported reverse intent: {task.intent}")
+
+    async def _register_reverse_delegate(self, task: TaskEnvelope) -> dict[str, Any]:
+        waiting_task_id = str(task.parent_task_id or "").strip()
+        if not waiting_task_id:
+            raise RuntimeError("orchestrator.delegate requires parent_task_id pointing to the waiting specialist task.")
+        waiting_record = self.task_ledger.get_task(waiting_task_id)
+        if waiting_record is None:
+            raise RuntimeError(f"Waiting task {waiting_task_id!r} was not found in the task ledger.")
+        waiting_recipient = str(waiting_record.get("recipient") or "").strip()
+        if waiting_recipient != task.sender:
+            raise RuntimeError("reverse task sender must own the waiting specialist task.")
+
+        target_intent = str(task.input.get("target_intent") or "").strip()
+        target_input = task.input.get("target_input")
+        if not target_intent:
+            raise RuntimeError("orchestrator.delegate requires target_intent.")
+        if not isinstance(target_input, dict):
+            raise RuntimeError("orchestrator.delegate requires target_input object.")
+
+        target_agent_id = str(task.input.get("target_agent_id") or "").strip() or None
+        resume_payload = task.input.get("resume_payload") if isinstance(task.input.get("resume_payload"), dict) else {}
+
+        self.task_ledger.create_task(task)
+        self.task_ledger.create_reverse_task_wait(
+            reverse_task_id=task.task_id,
+            waiting_task_id=waiting_task_id,
+            parent_task_id=str(waiting_record.get("parent_task_id") or "").strip() or None,
+            sender=task.sender,
+            recipient=waiting_recipient,
+            reverse_intent=task.intent,
+            target_intent=target_intent,
+            target_agent_id=target_agent_id,
+            reverse_payload={**task.input, "resume_payload": resume_payload},
+        )
+        self.task_ledger.mark_suspended(
+            task.task_id,
+            payload={
+                "reason": "reverse_delegate_registered",
+                "waiting_task_id": waiting_task_id,
+                "target_intent": target_intent,
+                "target_agent_id": target_agent_id,
+            },
+        )
+        return {
+            "reverse_task_id": task.task_id,
+            "status": "registered",
+            "waiting_task_id": waiting_task_id,
+            "target_intent": target_intent,
+            "target_agent_id": target_agent_id,
+        }
+
     def _resolve_agent_secret(self, agent_id: str) -> str:
         normalized_agent_id = str(agent_id or "").strip()
         secret = (
@@ -1354,6 +1416,100 @@ class OrchestratorRuntime:
             resume_payload=resume_payload,
         )
 
+    async def _process_pending_reverse_waits_for_waiting_task(self, waiting_task_id: str) -> None:
+        waits = self.task_ledger.list_pending_reverse_task_waits(waiting_task_id)
+        for wait in waits:
+            await self._dispatch_registered_reverse_wait(wait)
+
+    async def _dispatch_registered_reverse_wait(self, wait: dict[str, Any]) -> None:
+        reverse_task_id = str(wait.get("reverse_task_id") or "").strip()
+        waiting_task_id = str(wait.get("waiting_task_id") or "").strip()
+        reverse_record = self.task_ledger.get_task(reverse_task_id)
+        waiting_record = self.task_ledger.get_task(waiting_task_id)
+        if reverse_record is None or waiting_record is None:
+            self.task_ledger.mark_reverse_task_wait_failed(
+                reverse_task_id,
+                code="REVERSE_WAIT_INVALID",
+                message="Missing reverse task or waiting task in the ledger.",
+            )
+            if reverse_record is not None:
+                self.task_ledger.mark_failed(
+                    reverse_task_id,
+                    code="REVERSE_WAIT_INVALID",
+                    message="Missing reverse task or waiting task in the ledger.",
+                )
+            return
+
+        reverse_envelope_json = reverse_record.get("envelope_json")
+        if not isinstance(reverse_envelope_json, dict):
+            self.task_ledger.mark_reverse_task_wait_failed(
+                reverse_task_id,
+                code="REVERSE_WAIT_INVALID",
+                message="Reverse task ledger record is missing envelope_json.",
+            )
+            self.task_ledger.mark_failed(
+                reverse_task_id,
+                code="REVERSE_WAIT_INVALID",
+                message="Reverse task ledger record is missing envelope_json.",
+            )
+            return
+
+        reverse_task = TaskEnvelope.model_validate(reverse_envelope_json)
+        target_intent = str(wait.get("target_intent") or "").strip()
+        reverse_payload = wait.get("reverse_payload_json") if isinstance(wait.get("reverse_payload_json"), dict) else {}
+        target_input = reverse_payload.get("target_input")
+        if not target_intent or not isinstance(target_input, dict):
+            failure = AgentResult(
+                status="failed",
+                output={},
+                artifacts=[],
+                error=AgentError(
+                    code="INVALID_REVERSE_TASK",
+                    retryable=False,
+                    message="Reverse delegate task is missing target_intent or target_input.",
+                    next_action="escalate",
+                ),
+            )
+            await self._dispatch_resumed_task_for_reverse_result(wait, failure, delegated_task_id=None)
+            return
+
+        try:
+            delegated = await self.dispatch_agent_task(
+                parent_task=reverse_task,
+                intent=target_intent,
+                input_payload=target_input,
+                input_artifacts=reverse_task.input_artifacts,
+                agent_id=str(wait.get("target_agent_id") or "").strip() or None,
+                wait_timeout_sec=0.0,
+            )
+        except Exception as exc:
+            failure = AgentResult(
+                status="failed",
+                output={},
+                artifacts=[],
+                error=AgentError(
+                    code="REVERSE_DISPATCH_ERROR",
+                    retryable=True,
+                    message=str(exc).strip()[:500] or "Reverse delegate dispatch failed.",
+                    next_action="retry",
+                ),
+            )
+            await self._dispatch_resumed_task_for_reverse_result(wait, failure, delegated_task_id=None)
+            return
+
+        if isinstance(delegated, TaskInProgress):
+            self.task_ledger.mark_reverse_task_wait_dispatched(
+                reverse_task_id,
+                delegated_task_id=delegated.task_id,
+            )
+            self.task_ledger.mark_deferred(
+                reverse_task_id,
+                result=delegated.model_dump(mode="json"),
+            )
+            return
+
+        await self._dispatch_resumed_task_for_reverse_result(wait, delegated, delegated_task_id=None)
+
     async def _dispatch_resumed_task_for_input_reply(self, reply: dict[str, Any]) -> None:
         if self._redis is None:
             return
@@ -1411,6 +1567,131 @@ class OrchestratorRuntime:
         self._link_pending_agent_result_alias(alias_task_id=resume_task.task_id, canonical_task_id=waiting_task_id)
         await dispatch_task(resume_task, self._redis)
 
+    async def _dispatch_resumed_task_for_reverse_result(
+        self,
+        wait: dict[str, Any],
+        result: AgentResult,
+        *,
+        delegated_task_id: str | None,
+    ) -> None:
+        if self._redis is None:
+            return
+
+        reverse_task_id = str(wait.get("reverse_task_id") or "").strip()
+        waiting_task_id = str(wait.get("waiting_task_id") or "").strip()
+        waiting_record = self.task_ledger.get_task(waiting_task_id)
+        if waiting_record is None:
+            self.task_ledger.mark_reverse_task_wait_failed(
+                reverse_task_id,
+                code="WAITING_TASK_MISSING",
+                message="Waiting specialist task no longer exists.",
+            )
+            self.task_ledger.mark_failed(
+                reverse_task_id,
+                code="WAITING_TASK_MISSING",
+                message="Waiting specialist task no longer exists.",
+            )
+            return
+
+        waiting_envelope = waiting_record.get("envelope_json") if isinstance(waiting_record.get("envelope_json"), dict) else {}
+        reverse_payload = wait.get("reverse_payload_json") if isinstance(wait.get("reverse_payload_json"), dict) else {}
+        reverse_task_meta = {
+            "reverse_task_id": reverse_task_id,
+            "intent": str(wait.get("reverse_intent") or "").strip() or "orchestrator.delegate",
+            "target_intent": str(wait.get("target_intent") or "").strip() or None,
+            "target_agent_id": str(wait.get("target_agent_id") or "").strip() or None,
+            "delegated_task_id": delegated_task_id,
+        }
+        resume_input = {
+            "resume_of_task_id": waiting_task_id,
+            "resume_intent": str(waiting_record.get("intent") or "").strip(),
+            "resume_input": dict(waiting_envelope.get("input") or {}),
+            "resume_state": dict(reverse_payload.get("resume_payload") or {}),
+            "reply": {},
+            "reverse_task": reverse_task_meta,
+            "reverse_result": result.model_dump(mode="json"),
+        }
+        resume_task = TaskEnvelope(
+            task_id=generate_task_id(),
+            task_list_id=str(waiting_record.get("task_list_id") or "").strip(),
+            parent_task_id=waiting_task_id,
+            session_id=str(waiting_record.get("session_id") or "").strip() or None,
+            sender=self.config.orchestrator_agent_id,
+            recipient=str(wait.get("recipient") or waiting_record.get("recipient") or "").strip(),
+            intent=str(reverse_payload.get("resume_intent") or "agent.resume").strip() or "agent.resume",
+            input=resume_input,
+            input_artifacts=list(waiting_envelope.get("input_artifacts") or []),
+            idempotency_key=f"{str(waiting_record.get('idempotency_key') or '').strip()}:resume:{reverse_task_id}",
+            deadline_ts=None,
+            priority=str(waiting_record.get("priority") or "normal").strip() or "normal",
+            leader_epoch=None,
+            signature="",
+            source=str(waiting_record.get("source") or "agent").strip() or "agent",
+            source_id=str(waiting_record.get("source_id") or "").strip() or None,
+            channel=str(waiting_record.get("channel") or "").strip() or None,
+        )
+        signature = sign_task_envelope(resume_task, self._resolve_agent_secret(resume_task.recipient))
+        resume_task = resume_task.model_copy(update={"signature": signature})
+        self.task_ledger.create_task(resume_task)
+        self.task_ledger.mark_reverse_task_wait_resumed(
+            reverse_task_id,
+            resumed_task_id=resume_task.task_id,
+        )
+        if result.status == "completed":
+            self.task_ledger.mark_completed(
+                reverse_task_id,
+                result={
+                    "status": "completed",
+                    "delegated_task_id": delegated_task_id,
+                    "target_intent": reverse_task_meta.get("target_intent"),
+                    "target_agent_id": reverse_task_meta.get("target_agent_id"),
+                    "resume_task_id": resume_task.task_id,
+                },
+            )
+        else:
+            error = result.error or AgentError(
+                code="REVERSE_DELEGATE_FAILED",
+                retryable=False,
+                message="Delegated specialist failed.",
+                next_action="escalate",
+            )
+            self.task_ledger.mark_failed(
+                reverse_task_id,
+                code=error.code,
+                message=error.message,
+            )
+        self.task_ledger.mark_resumed(
+            waiting_task_id,
+            payload={
+                "reverse_task_id": reverse_task_id,
+                "delegated_task_id": delegated_task_id,
+                "resume_task_id": resume_task.task_id,
+                "target_intent": reverse_task_meta.get("target_intent"),
+                "target_agent_id": reverse_task_meta.get("target_agent_id"),
+                "result_status": result.status,
+            },
+        )
+        self._link_pending_agent_result_alias(alias_task_id=resume_task.task_id, canonical_task_id=waiting_task_id)
+        await dispatch_task(resume_task, self._redis)
+
+    def _fail_open_reverse_waits_for_waiting_task(
+        self,
+        waiting_task_id: str,
+        *,
+        code: str,
+        message: str,
+    ) -> None:
+        for wait in self.task_ledger.list_open_reverse_task_waits(waiting_task_id):
+            reverse_task_id = str(wait.get("reverse_task_id") or "").strip()
+            self.task_ledger.mark_reverse_task_wait_failed(
+                reverse_task_id,
+                code=code,
+                message=message,
+            )
+            reverse_task_record = self.task_ledger.get_task(reverse_task_id)
+            if reverse_task_record is not None and str(reverse_task_record.get("status") or "").strip() not in {"completed", "failed"}:
+                self.task_ledger.mark_failed(reverse_task_id, code=code, message=message)
+
     async def _agent_event_consumer_loop(self) -> None:
         assert self._redis is not None
         while True:
@@ -1438,7 +1719,10 @@ class OrchestratorRuntime:
     async def _handle_agent_event(self, event: EventEnvelope) -> None:
         self._agent_dispatch_stats.events_consumed += 1
         resume_wait = self.task_ledger.get_task_input_wait_by_resumed_task(event.task_id)
+        if resume_wait is None:
+            resume_wait = self.task_ledger.get_reverse_task_wait_by_resumed_task(event.task_id)
         canonical_task_id = str(resume_wait.get("waiting_task_id") or "").strip() if resume_wait else event.task_id
+        delegated_wait = self.task_ledger.get_reverse_task_wait_by_delegated_task(event.task_id)
 
         if event.event_type == "task.completed":
             task_record = self.task_ledger.get_task(canonical_task_id)
@@ -1446,6 +1730,19 @@ class OrchestratorRuntime:
             self.task_ledger.mark_completed(event.task_id, result=result.model_dump(mode="json"))
             if canonical_task_id != event.task_id:
                 self.task_ledger.mark_completed(canonical_task_id, result=result.model_dump(mode="json"))
+            if delegated_wait is not None:
+                self._agent_dispatch_stats.dispatches_completed += 1
+                await self._dispatch_resumed_task_for_reverse_result(
+                    delegated_wait,
+                    result,
+                    delegated_task_id=event.task_id,
+                )
+                return
+            self._fail_open_reverse_waits_for_waiting_task(
+                canonical_task_id,
+                code="WAITING_TASK_COMPLETED",
+                message="Waiting specialist task completed before its reverse delegation finished.",
+            )
             self._agent_dispatch_stats.dispatches_completed += 1
             self._record_successful_specialist_usage(task_record)
             self._resolve_pending_agent_result(canonical_task_id, result)
@@ -1462,6 +1759,19 @@ class OrchestratorRuntime:
             self.task_ledger.mark_failed(event.task_id, code=error.code, message=error.message)
             if canonical_task_id != event.task_id:
                 self.task_ledger.mark_failed(canonical_task_id, code=error.code, message=error.message)
+            if delegated_wait is not None:
+                self._agent_dispatch_stats.failed_events += 1
+                await self._dispatch_resumed_task_for_reverse_result(
+                    delegated_wait,
+                    result,
+                    delegated_task_id=event.task_id,
+                )
+                return
+            self._fail_open_reverse_waits_for_waiting_task(
+                canonical_task_id,
+                code=error.code,
+                message=error.message,
+            )
             self._agent_dispatch_stats.failed_events += 1
             self._resolve_pending_agent_result(canonical_task_id, result)
             return
@@ -1490,6 +1800,7 @@ class OrchestratorRuntime:
         if event.event_type == "task.suspended":
             self.task_ledger.mark_suspended(canonical_task_id, payload=event.payload)
             self._register_task_input_wait_from_suspension(canonical_task_id, event.payload)
+            await self._process_pending_reverse_waits_for_waiting_task(canonical_task_id)
             return
 
         if event.event_type == "task.resumed":
@@ -1505,6 +1816,19 @@ class OrchestratorRuntime:
             self.task_ledger.mark_failed(event.task_id, code=error.code, message=error.message)
             if canonical_task_id != event.task_id:
                 self.task_ledger.mark_failed(canonical_task_id, code=error.code, message=error.message)
+            if delegated_wait is not None:
+                self._agent_dispatch_stats.rejected_events += 1
+                await self._dispatch_resumed_task_for_reverse_result(
+                    delegated_wait,
+                    result,
+                    delegated_task_id=event.task_id,
+                )
+                return
+            self._fail_open_reverse_waits_for_waiting_task(
+                canonical_task_id,
+                code=error.code,
+                message=error.message,
+            )
             self._agent_dispatch_stats.rejected_events += 1
             self._resolve_pending_agent_result(canonical_task_id, result)
             return

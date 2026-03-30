@@ -20,6 +20,9 @@ Used by the internal **tabular.reason_workbook** planner (MiMo): one JSON plan s
 - Align **sheet_id**, **column semantics**, and **filters** with `sheet_catalog` / profiles before proposing SQL or steps.
 - Prefer **bounded** schema/preview reasoning over inventing cell addresses or filters.
 - Flag **wide tables** and **merged-cell regions** when they affect planned queries.
+- If the workbook is insufficient and the task needs **external information** or another capability, you may ask the orchestrator to delegate to a sibling specialist.
+- You do **not** need registry awareness. Prefer naming the needed sibling **intent** (for example `firecrawl.scrape` or `firecrawl.extract`) and let the orchestrator resolve the actual agent.
+- Delegation should stay **bounded**. Recommended default: at most once per run, only after internal workbook tools are clearly insufficient.
 
 ## execute
 

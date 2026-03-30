@@ -106,6 +106,39 @@ The specialist publishes the clarification request, emits `task.suspended`, and 
 
 Both `task.suspended` and `task.resumed` payloads include: `child_task_id`, `session_id`, `request_id`, `channel`, `source`, `source_id`, `parent_task_id`. Resumed events also include the resumed child task id and `input_request_id`.
 
+## Mid-task sibling delegation (`delegate` action, reverse task)
+
+When internal workbook tools are insufficient and the tabular specialist needs another capability, it uses **orchestrator-mediated reverse delegation** instead of direct agent-to-agent calls.
+
+| Mechanism | Role |
+|---|---|
+| `TaskEnvelope.parent_task_id` | Points to the currently running `tabular.reason_workbook` child task that will suspend and later resume. |
+| `POST {ORCHESTRATOR}/internal/reverse-tasks` | Shared runtime endpoint for signed reverse tasks. Tabular submits `intent="orchestrator.delegate"` here. |
+| `orchestrator.delegate` input | Includes `target_intent`, `target_input`, optional `target_agent_id`, and `resume_payload`. |
+| `reverse_task_waits` | Durable orchestrator ledger table that records the waiting specialist task, delegated target, and eventual resumed task. |
+| `task.suspended` | Emitted on the original tabular child task after the reverse task is registered. |
+| `agent.resume` + `task.resumed` | After the sibling specialist completes or fails, the orchestrator resumes tabular with `reverse_task` metadata and `reverse_result`. |
+
+### Recommended tabular policy
+
+- Use `delegate` only when the workbook genuinely lacks the required information or capability.
+- Prefer sibling **intents** over hardcoded sibling agent ids.
+- Good default targets for external lookup are `firecrawl.scrape` and `firecrawl.extract`.
+- Keep delegation **bounded**. Current tabular policy allows at most one delegation per run.
+
+### v1 actual behavior
+
+1. Tabular planner emits action `delegate`.
+2. `tabular_reason_graph.py` calls `agent.request_orchestrator_delegate(...)` via the shared runtime.
+3. The orchestrator registers the reverse task and durable wait first.
+4. Tabular emits `task.suspended` and returns `TaskInProgress`.
+5. Only then does the orchestrator dispatch the sibling specialist task.
+6. When the sibling result is ready, the orchestrator sends `agent.resume` to tabular.
+7. `shared/agent_runtime.py` inflates that back into `tabular.reason_workbook` with `_resume.reverse_task` and `_resume.reverse_result`.
+8. Tabular appends the delegated result into its transcript and continues the original reasoning flow.
+
+This means tabular does **not** need registry awareness. It only needs to know when to ask the orchestrator for sibling help.
+
 ## Code sandbox (execution policy)
 
 The tabular specialist runs user-generated Python scripts under COSMIC-owned execution control. This is **not** a kernel-level container — it is a Python-level sandbox with explicit policies.

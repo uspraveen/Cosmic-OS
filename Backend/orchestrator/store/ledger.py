@@ -149,6 +149,38 @@ class TaskLedger:
 
                 CREATE INDEX IF NOT EXISTS idx_task_input_waits_resumed_task
                     ON task_input_waits(resumed_task_id);
+
+                CREATE TABLE IF NOT EXISTS reverse_task_waits (
+                    reverse_task_id TEXT PRIMARY KEY,
+                    waiting_task_id TEXT NOT NULL,
+                    parent_task_id TEXT,
+                    sender TEXT NOT NULL,
+                    recipient TEXT NOT NULL,
+                    reverse_intent TEXT NOT NULL,
+                    target_intent TEXT,
+                    target_agent_id TEXT,
+                    reverse_payload_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    delegated_task_id TEXT,
+                    resumed_task_id TEXT,
+                    error_code TEXT,
+                    error_message TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    resumed_at TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_reverse_task_waits_status_updated
+                    ON reverse_task_waits(status, updated_at);
+
+                CREATE INDEX IF NOT EXISTS idx_reverse_task_waits_waiting_task
+                    ON reverse_task_waits(waiting_task_id, status);
+
+                CREATE INDEX IF NOT EXISTS idx_reverse_task_waits_delegated_task
+                    ON reverse_task_waits(delegated_task_id);
+
+                CREATE INDEX IF NOT EXISTS idx_reverse_task_waits_resumed_task
+                    ON reverse_task_waits(resumed_task_id);
                 """
             )
             connection.commit()
@@ -707,9 +739,210 @@ class TaskLedger:
             )
             connection.commit()
 
+    def create_reverse_task_wait(
+        self,
+        *,
+        reverse_task_id: str,
+        waiting_task_id: str,
+        parent_task_id: str | None,
+        sender: str,
+        recipient: str,
+        reverse_intent: str,
+        target_intent: str | None,
+        target_agent_id: str | None,
+        reverse_payload: dict[str, Any],
+    ) -> None:
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO reverse_task_waits (
+                    reverse_task_id,
+                    waiting_task_id,
+                    parent_task_id,
+                    sender,
+                    recipient,
+                    reverse_intent,
+                    target_intent,
+                    target_agent_id,
+                    reverse_payload_json,
+                    status,
+                    delegated_task_id,
+                    resumed_task_id,
+                    error_code,
+                    error_message,
+                    created_at,
+                    updated_at,
+                    resumed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL, ?, ?, NULL)
+                """,
+                (
+                    reverse_task_id,
+                    waiting_task_id,
+                    parent_task_id,
+                    sender,
+                    recipient,
+                    reverse_intent,
+                    target_intent,
+                    target_agent_id,
+                    json.dumps(reverse_payload, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+            connection.commit()
+
+    def get_reverse_task_wait(self, reverse_task_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM reverse_task_waits
+                WHERE reverse_task_id = ?
+                """,
+                (reverse_task_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._decode_reverse_task_wait(dict(row))
+
+    def list_pending_reverse_task_waits(self, waiting_task_id: str) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM reverse_task_waits
+                WHERE waiting_task_id = ?
+                  AND status = 'pending'
+                ORDER BY created_at ASC
+                """,
+                (waiting_task_id,),
+            ).fetchall()
+        return [self._decode_reverse_task_wait(dict(row)) for row in rows]
+
+    def list_open_reverse_task_waits(self, waiting_task_id: str) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM reverse_task_waits
+                WHERE waiting_task_id = ?
+                  AND status IN ('pending', 'dispatched')
+                ORDER BY created_at ASC
+                """,
+                (waiting_task_id,),
+            ).fetchall()
+        return [self._decode_reverse_task_wait(dict(row)) for row in rows]
+
+    def get_reverse_task_wait_by_delegated_task(self, delegated_task_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM reverse_task_waits
+                WHERE delegated_task_id = ?
+                """,
+                (delegated_task_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._decode_reverse_task_wait(dict(row))
+
+    def get_reverse_task_wait_by_resumed_task(self, resumed_task_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM reverse_task_waits
+                WHERE resumed_task_id = ?
+                """,
+                (resumed_task_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._decode_reverse_task_wait(dict(row))
+
+    def mark_reverse_task_wait_dispatched(self, reverse_task_id: str, *, delegated_task_id: str) -> None:
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE reverse_task_waits
+                SET status = 'dispatched',
+                    delegated_task_id = ?,
+                    error_code = NULL,
+                    error_message = NULL,
+                    updated_at = ?
+                WHERE reverse_task_id = ?
+                """,
+                (
+                    delegated_task_id,
+                    now,
+                    reverse_task_id,
+                ),
+            )
+            connection.commit()
+
+    def mark_reverse_task_wait_resumed(self, reverse_task_id: str, *, resumed_task_id: str) -> None:
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE reverse_task_waits
+                SET status = 'resumed',
+                    resumed_task_id = ?,
+                    error_code = NULL,
+                    error_message = NULL,
+                    updated_at = ?,
+                    resumed_at = ?
+                WHERE reverse_task_id = ?
+                """,
+                (
+                    resumed_task_id,
+                    now,
+                    now,
+                    reverse_task_id,
+                ),
+            )
+            connection.commit()
+
+    def mark_reverse_task_wait_failed(
+        self,
+        reverse_task_id: str,
+        *,
+        code: str,
+        message: str,
+    ) -> None:
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE reverse_task_waits
+                SET status = 'failed',
+                    error_code = ?,
+                    error_message = ?,
+                    updated_at = ?
+                WHERE reverse_task_id = ?
+                """,
+                (
+                    code,
+                    message,
+                    now,
+                    reverse_task_id,
+                ),
+            )
+            connection.commit()
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON;")
         connection.execute("PRAGMA busy_timeout = 5000;")
         return connection
+
+    def _decode_reverse_task_wait(self, record: dict[str, Any]) -> dict[str, Any]:
+        record["reverse_payload_json"] = (
+            json.loads(record["reverse_payload_json"]) if record.get("reverse_payload_json") else {}
+        )
+        return record

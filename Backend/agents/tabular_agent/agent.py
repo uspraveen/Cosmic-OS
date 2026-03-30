@@ -104,6 +104,8 @@ class TabularAgent(AgentRuntime):
             registry_db_path=registry_db_path,
             gateway_url=self.config.gateway_url,
             gateway_internal_token=self.config.gateway_internal_token,
+            orchestrator_url=self.config.orchestrator_url,
+            orchestrator_internal_token=self.config.orchestrator_internal_token,
             http_client=http_client,
         )
 

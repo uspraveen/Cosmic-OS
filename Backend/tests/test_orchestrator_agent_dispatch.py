@@ -153,6 +153,33 @@ def _parent_task(secret: str) -> TaskEnvelope:
     return task.model_copy(update={"signature": sign_task_envelope(task, secret)})
 
 
+def _tabular_waiting_task(secret: str) -> TaskEnvelope:
+    task = TaskEnvelope(
+        task_id="tsk_tabular_wait",
+        task_list_id="sess_20260315",
+        parent_task_id="tsk_parent_001",
+        session_id="sess_20260315",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/tabular-agent:1.0.0",
+        intent="tabular.reason_workbook",
+        input={
+            "bundle_id": "bundle_123",
+            "artifact_id": "art_123",
+            "goal": "Need tax context",
+            "request_id": "req_parent_001",
+        },
+        input_artifacts=[],
+        idempotency_key="idem_tabular_wait",
+        priority="high",
+        signature="",
+        created_at=utcnow(),
+        source="user",
+        source_id="desktop",
+        channel="desktop:desk_001",
+    )
+    return task.model_copy(update={"signature": sign_task_envelope(task, secret)})
+
+
 def _agent_card() -> dict[str, object]:
     return {
         "agent_id": "cosmic/research-agent:1.0.0",
@@ -509,6 +536,123 @@ async def test_dispatch_agent_task_records_usage_and_refreshes_featured_speciali
         )
         result = await dispatch_task
         featured = runtime.registry_store.list_featured_specialists(limit=3)
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_reverse_delegate_registers_and_resumes_waiting_specialist(tmp_path) -> None:
+    fake_redis = FakeRedis()
+    config = OrchestratorConfig(
+        signing_secret="gateway-secret",
+        anthropic_api_key="anthropic-key",
+        task_ledger_db_path=tmp_path / "task_ledger_reverse.db",
+        agent_registry_db_path=tmp_path / "registry_reverse.db",
+        agent_signing_secrets={
+            "cosmic/tabular-agent:1.0.0": "tabular-secret",
+            "cosmic/research-agent:1.0.0": "research-secret",
+        },
+    )
+    await _register_agent(_agent_card(), fake_redis, config.agent_registry_db_path)
+    runtime = OrchestratorRuntime(
+        config,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200))),
+        redis_client=fake_redis,
+    )
+    await runtime.start()
+    try:
+        waiting_task = _tabular_waiting_task("tabular-secret")
+        runtime.task_ledger.create_task(waiting_task)
+
+        reverse_task = TaskEnvelope(
+            task_id="tsk_reverse_delegate",
+            task_list_id=waiting_task.task_list_id,
+            parent_task_id=waiting_task.task_id,
+            session_id=waiting_task.session_id,
+            sender="cosmic/tabular-agent:1.0.0",
+            recipient="cosmic/orchestrator:1.0.0",
+            intent="orchestrator.delegate",
+            input={
+                "target_intent": "research.topic",
+                "target_input": {"query": "2026 tax filing threshold"},
+                "resume_payload": {
+                    "transcript": "Need an external definition.",
+                    "tool_round": 1,
+                    "clarify_used": False,
+                    "delegate_used": True,
+                    "steps_log": [],
+                },
+            },
+            input_artifacts=[],
+            idempotency_key="idem_reverse_delegate",
+            priority="normal",
+            signature="",
+            created_at=utcnow(),
+            source="agent",
+            source_id="cosmic/tabular-agent:1.0.0",
+            channel=waiting_task.channel,
+        )
+        reverse_task = reverse_task.model_copy(
+            update={"signature": sign_task_envelope(reverse_task, "tabular-secret")}
+        )
+
+        ack = await runtime.accept_reverse_task(reverse_task)
+        assert ack["status"] == "registered"
+        assert ack["reverse_task_id"] == "tsk_reverse_delegate"
+
+        await runtime._handle_agent_event(
+            EventEnvelope(
+                task_id=waiting_task.task_id,
+                agent_id="cosmic/tabular-agent:1.0.0",
+                event_type="task.suspended",
+                seq=1,
+                payload={
+                    "reason": "tabular_delegate",
+                    "reverse_task_id": reverse_task.task_id,
+                },
+            )
+        )
+
+        delegated_fields = await _wait_for_stream(fake_redis, "streams:cosmic/research-agent:1.0.0:normal")
+        delegated_task = parse_task_envelope(delegated_fields)
+        assert delegated_task.parent_task_id == reverse_task.task_id
+        assert delegated_task.intent == "research.topic"
+        assert delegated_task.input["query"] == "2026 tax filing threshold"
+        assert verify_task_envelope(delegated_task, "research-secret") is True
+
+        await runtime._handle_agent_event(
+            EventEnvelope(
+                task_id=delegated_task.task_id,
+                agent_id="cosmic/research-agent:1.0.0",
+                event_type="task.completed",
+                seq=1,
+                payload={
+                    "status": "completed",
+                    "output": {"summary": "Threshold found."},
+                    "artifacts": [],
+                },
+            )
+        )
+
+        resumed_fields = fake_redis.streams["streams:cosmic/tabular-agent:1.0.0:high"][-1][1]
+        resumed_task = parse_task_envelope(resumed_fields)
+        assert resumed_task.intent == "agent.resume"
+        assert resumed_task.parent_task_id == waiting_task.task_id
+        assert resumed_task.input["reverse_task"]["reverse_task_id"] == reverse_task.task_id
+        assert resumed_task.input["reverse_task"]["delegated_task_id"] == delegated_task.task_id
+        assert resumed_task.input["reverse_result"]["status"] == "completed"
+        assert resumed_task.input["reverse_result"]["output"] == {"summary": "Threshold found."}
+        assert verify_task_envelope(resumed_task, "tabular-secret") is True
+
+        reverse_wait = runtime.task_ledger.get_reverse_task_wait(reverse_task.task_id)
+        assert reverse_wait is not None
+        assert reverse_wait["status"] == "resumed"
+        assert reverse_wait["delegated_task_id"] == delegated_task.task_id
+        assert reverse_wait["resumed_task_id"] == resumed_task.task_id
+
+        reverse_record = runtime.task_ledger.get_task(reverse_task.task_id)
+        assert reverse_record is not None
+        assert reverse_record["status"] == "completed"
     finally:
         await runtime.stop()
     assert isinstance(result, AgentResult)

@@ -43,6 +43,7 @@ _VALID_ACTIONS = frozenset(
         "sql",
         "python",
         "clarify",
+        "delegate",
         "done",
         "activate_skill",
         "create_plan",
@@ -53,7 +54,7 @@ _MULTI_STEP_INSTRUCTION = """\
 You control internal tools over an already-parsed spreadsheet bundle. Reply with **one JSON object only** (no markdown).
 
 Keys:
-- "action": one of "browse", "schema", "preview", "sql", "python", "clarify", "activate_skill", "create_plan", "done"
+- "action": one of "browse", "schema", "preview", "sql", "python", "clarify", "delegate", "activate_skill", "create_plan", "done"
 - "sheet_id": string or null — required for "preview"; optional filter for "schema"
 - "sql": string or null — single read-only SELECT for "sql" (DuckDB views: s_<sheet_id>)
 - "python_code": string or null — for "python" only; duckdb/pandas; cwd is bundle root
@@ -61,6 +62,9 @@ Keys:
 - "question": string or null — for "clarify" only: concise user-facing question (blocking ambiguity)
 - "options": array of strings or null — for "clarify" only: short choices when applicable (max ~8)
 - "ambiguity": string or null — for "clarify" only: internal label (e.g. "multiple_sheets", "metric_definition")
+- "delegate_intent": string or null — for "delegate" only: another specialist intent to call via orchestrator (e.g. "firecrawl.scrape" or "firecrawl.extract")
+- "delegate_input": object or null — for "delegate" only: exact input payload for that specialist intent
+- "delegate_agent_id": string or null — optional on "delegate" only: preferred specialist agent_id when you need a specific agent
 - "skill_name": string or null — for "activate_skill" only: name of skill to activate (e.g. "three-statement", "ratio-analysis", "revenue-analytics")
 - "steps": array of strings — for "create_plan" only: ordered list of concrete step descriptions (3-8 steps)
 - "plan_step": integer or null — optional on any action: which plan step (1-based) the current action is working on
@@ -97,6 +101,10 @@ Planning rules:
   - Check the Available Skills list in context for matching triggers ("variance" → financial-variance, "MRR" → revenue-analytics, etc.)
   - Activating a skill loads domain-specific formulas and SQL patterns
   - After activation, re-decide with the new context to choose sql/python/done
+- Use **"delegate" at most once** when you need external information that is not in the workbook and cannot be resolved with your internal tools.
+  - Good use: tax/regulatory guidance lookup, checking a live definition online, scraping a known external source for supporting context.
+  - Prefer `firecrawl.scrape` or `firecrawl.extract` before anything more autonomous.
+  - Do not use "delegate" for work you can already do with browse/schema/preview/sql/python.
 - Use "python" when need Python logic (Regressions, complex Pandas, visualization data prep)
 - Use "python" for **charts and visualizations** — you have full matplotlib/seaborn access via pip_install:
   - Line charts for trends (revenue over time, margin trajectory)
@@ -170,6 +178,7 @@ class TabularReasonState(TypedDict, total=False):
     max_tool_rounds: int
     allow_python: bool
     clarify_used: bool
+    delegate_used: bool
     pending: dict[str, Any]
     steps_log: list[dict[str, Any]]
     finish_reason: str
@@ -207,6 +216,7 @@ def _build_resume_state(state: TabularReasonState) -> dict[str, Any]:
         "max_tool_rounds": int(state.get("max_tool_rounds") or 5),
         "allow_python": bool(state.get("allow_python", True)),
         "clarify_used": bool(state.get("clarify_used", False)),
+        "delegate_used": bool(state.get("delegate_used", False)),
         "steps_log": list(state.get("steps_log") or []),
         "bundle_root": state.get("bundle_root"),
         "plan_active": bool(state.get("plan_active")),
@@ -248,6 +258,87 @@ async def _run_tool(
     agent = ctx.agent
     cfg = ctx.cfg
     task = ctx.task
+
+    if action == "delegate":
+        _provenance = {
+            "child_task_id": task.task_id,
+            "session_id": task.session_id,
+            "request_id": (
+                agent._safe(task.input.get("request_id"))
+                if isinstance(task.input, dict)
+                else None
+            ),  # noqa: SLF001
+            "channel": task.channel,
+            "source": task.source,
+            "source_id": task.source_id,
+        }
+        if state.get("delegate_used"):
+            e: dict[str, Any] = {
+                "error": "delegate_already_used",
+                "kind": "delegate",
+                "delegate_status": "delegate_already_used",
+            }
+            return e, json.dumps(e, ensure_ascii=False)
+        delegate_intent = str(pending.get("delegate_intent") or "").strip()
+        delegate_input = pending.get("delegate_input")
+        if not delegate_intent:
+            e = {
+                "error": "delegate_requires_intent",
+                "kind": "delegate",
+                "delegate_status": "missing_intent",
+            }
+            return e, json.dumps(e, ensure_ascii=False)
+        if not isinstance(delegate_input, dict):
+            e = {
+                "error": "delegate_requires_input_object",
+                "kind": "delegate",
+                "delegate_status": "missing_input",
+            }
+            return e, json.dumps(e, ensure_ascii=False)
+        try:
+            resp = await agent.request_orchestrator_delegate(
+                current_task=task,
+                target_intent=delegate_intent,
+                target_input=delegate_input,
+                target_agent_id=str(pending.get("delegate_agent_id") or "").strip() or None,
+                resume_payload=_build_resume_state({**state, "delegate_used": True}),
+                reason=str(pending.get("rationale") or "").strip() or None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            e = {
+                "error": str(exc)[:500],
+                "kind": "delegate",
+                "delegate_status": "relay_error",
+                "hint": "failed_to_publish_reverse_delegate",
+            }
+            return e, json.dumps(e, ensure_ascii=False)
+        reverse_task_id = str(resp.get("reverse_task_id") or "").strip()
+        if not reverse_task_id:
+            e = {
+                "error": "missing_reverse_task_id",
+                "kind": "delegate",
+                "delegate_status": "relay_error",
+            }
+            return e, json.dumps(e, ensure_ascii=False)
+
+        suspended_payload: dict[str, Any] = {
+            "reason": "tabular_delegate",
+            "parent_task_id": getattr(task, "parent_task_id", None),
+            **_provenance,
+            "reverse_task_id": reverse_task_id,
+            "target_intent": delegate_intent,
+            "target_agent_id": str(pending.get("delegate_agent_id") or "").strip() or None,
+            "resume_intent": "agent.resume",
+            "resume_payload": _build_resume_state({**state, "delegate_used": True}),
+        }
+        await agent.emit_event(task.task_id, "task.suspended", suspended_payload)
+        out: dict[str, Any] = {
+            "kind": "delegate",
+            "delegate_status": "suspended",
+            "reverse_task_id": reverse_task_id,
+            "target_intent": delegate_intent,
+        }
+        return out, json.dumps(out, ensure_ascii=False)
 
     if action == "clarify":
         _provenance = {
@@ -705,6 +796,8 @@ def _build_graph(ctx: _GraphCtx) -> Any:
             return "finalize"
         if act == "clarify" and state.get("clarify_used"):
             return "finalize"
+        if act == "delegate" and state.get("delegate_used"):
+            return "finalize"
         if int(state.get("tool_round") or 0) >= int(state.get("max_tool_rounds") or 5):
             return "finalize"
         if act not in _VALID_ACTIONS:
@@ -722,6 +815,12 @@ def _build_graph(ctx: _GraphCtx) -> Any:
                 ctx.task.task_id,
                 "reason_clarify",
                 "Requesting user input via orchestrator task-input relay.",
+            )  # noqa: SLF001
+        if current_action == "delegate":
+            await ctx.agent._emit_stage(
+                ctx.task.task_id,
+                "reason_delegate",
+                "Requesting another specialist via orchestrator reverse delegation.",
             )  # noqa: SLF001
 
         # --- plan_step: mark in_progress BEFORE executing the tool ---
@@ -824,23 +923,34 @@ def _build_graph(ctx: _GraphCtx) -> Any:
                 out["finish_reason"] = "awaiting_clarification"
                 out["response"] = "Awaiting user clarification."
                 out["suspended"] = True
+        if current_action == "delegate":
+            out["delegate_used"] = True
+            if str(result.get("delegate_status") or "").strip().lower() == "suspended":
+                out["finish_reason"] = "awaiting_delegate"
+                out["response"] = "Awaiting delegated specialist result."
+                out["suspended"] = True
         return out
 
     def route_after_tool(state: TabularReasonState) -> str:
-        if state.get("finish_reason") == "awaiting_clarification":
+        if state.get("finish_reason") in {"awaiting_clarification", "awaiting_delegate"}:
             return "finalize"
         return "decide"
 
     async def finalize(state: TabularReasonState) -> dict[str, Any]:
-        if state.get("finish_reason") == "awaiting_clarification":
+        if state.get("finish_reason") in {"awaiting_clarification", "awaiting_delegate"}:
             last = (
                 state.get("last_tool_result")
                 if isinstance(state.get("last_tool_result"), dict)
                 else {}
             )
+            waiting_response = (
+                "Awaiting delegated specialist result."
+                if state.get("finish_reason") == "awaiting_delegate"
+                else "Awaiting user clarification."
+            )
             return {
-                "response": "Awaiting user clarification.",
-                "finish_reason": "awaiting_clarification",
+                "response": waiting_response,
+                "finish_reason": state.get("finish_reason"),
                 "suspended": True,
                 "input_request_id": last.get("input_request_id"),
                 "resume_state": _build_resume_state(state),
@@ -894,6 +1004,11 @@ def _build_graph(ctx: _GraphCtx) -> Any:
         ):
             extra = "\n(Planner requested a second clarification; only one is allowed per run.)\n"
             reason = reason or "clarify_repeat"
+        elif str(p.get("action") or "").strip().lower() == "delegate" and state.get(
+            "delegate_used"
+        ):
+            extra = "\n(Planner requested a second external delegation; only one is allowed per run.)\n"
+            reason = reason or "delegate_repeat"
         summary_user = (
             f"## Goal\n{state.get('goal')}\n{extra}\n## Transcript\n{tr[-28000:]}\n"
         )
@@ -989,6 +1104,7 @@ async def run_tabular_reason_langgraph(
         "artifact_id": artifact_id,
         "allow_python": allow_python,
         "max_tool_rounds": max_rounds,
+        "delegate_used": False,
         "resumed": bool(resume_block),
     }
     if resume_state:
@@ -996,6 +1112,7 @@ async def run_tabular_reason_langgraph(
             "transcript",
             "tool_round",
             "clarify_used",
+            "delegate_used",
             "steps_log",
             "bundle_root",
             "analysis_step_started",
@@ -1025,6 +1142,10 @@ async def run_tabular_reason_langgraph(
                 "request_id": agent._safe(task.input.get("request_id"))
                 if isinstance(task.input, dict)
                 else None,  # noqa: SLF001
+                "reverse_task_id": (
+                    str((resume_block.get("reverse_task") or {}).get("reverse_task_id") or "").strip()
+                    or None
+                ),
                 "channel": task.channel,
                 "source": task.source,
                 "source_id": task.source_id,
@@ -1037,6 +1158,28 @@ async def run_tabular_reason_langgraph(
         initial["transcript"] = (
             f"{existing}\n\n--- user_clarification ---\n{reply_text}\n"
         )
+    reverse_result = (
+        resume_block.get("reverse_result")
+        if isinstance(resume_block.get("reverse_result"), dict)
+        else {}
+    )
+    reverse_task = (
+        resume_block.get("reverse_task")
+        if isinstance(resume_block.get("reverse_task"), dict)
+        else {}
+    )
+    if reverse_result:
+        existing = str(initial.get("transcript") or "")
+        target_intent = str(reverse_task.get("target_intent") or "delegated_specialist").strip()
+        result_excerpt = json.dumps(reverse_result, ensure_ascii=False)[:12000]
+        initial["transcript"] = (
+            f"{existing}\n\n--- delegated_result {target_intent} ---\n{result_excerpt}\n"
+        )
+        initial["last_tool_result"] = {
+            "kind": "delegate",
+            "reverse_task": reverse_task,
+            "reverse_result": reverse_result,
+        }
     out = await app.ainvoke(initial)
     steps = out.get("steps_log") or []
     return {

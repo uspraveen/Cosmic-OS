@@ -776,3 +776,209 @@ async def test_langgraph_resume_creates_fresh_step_plan(monkeypatch, tmp_path: P
     # With dynamic planning, resume + immediate "done" skips plan creation
     # (MiMo decides whether to plan; fake_invoke returns "done" directly)
     assert agent.step_plan.created_steps == []
+
+
+@pytest.mark.asyncio
+async def test_langgraph_delegate_suspends_via_orchestrator(monkeypatch, tmp_path: Path) -> None:
+    (tmp_path / "preview.md").write_text("# t\n", encoding="utf-8")
+    (tmp_path / "sheet_catalog.json").write_text('{"sheets":[]}', encoding="utf-8")
+    events: list[tuple[str, str, dict]] = []
+    delegate_calls: list[dict[str, object]] = []
+
+    class _Agent:
+        agent_id = "cosmic/tabular-agent:1.0.0"
+
+        def _require(self, x: str) -> str:
+            return x
+
+        def _safe(self, x) -> str:
+            return str(x or "").strip()
+
+        async def _emit_stage(self, *a, **k) -> None:
+            return None
+
+        async def emit_event(self, task_id: str, event_type: str, payload: dict) -> str:
+            events.append((task_id, event_type, payload))
+            return "mid"
+
+        async def request_orchestrator_delegate(self, **kwargs):
+            delegate_calls.append(dict(kwargs))
+            return {"reverse_task_id": "rvt_1", "status": "registered"}
+
+        def _bundle_disk_path(self, bundle_id: str, artifact_id: str) -> Path:
+            return tmp_path
+
+    agent = _Agent()
+    task = type(
+        "T",
+        (),
+        {
+            "task_id": "child_delegate",
+            "parent_task_id": "parent_orch",
+            "session_id": "sess_x",
+            "input": {"bundle_id": "b1", "artifact_id": "a1", "goal": "Need tax context", "request_id": "req_1"},
+            "source": "orchestrator",
+            "source_id": "cosmic/orchestrator:1.0.0",
+            "channel": "desktop:test",
+            "priority": "high",
+            "task_list_id": "sess_x",
+            "deadline_ts": None,
+            "idempotency_key": "idem_1",
+        },
+    )()
+
+    cfg = type(
+        "C",
+        (),
+        {
+            "enable_internal_llm": True,
+            "mimo_api_key": "k",
+            "mimo_base_url": "https://x/v1",
+            "include_financial_fpna_prompt": False,
+            "sandbox_timeout_sec": 30.0,
+            "tabular_reason_use_langgraph": True,
+            "tabular_reason_max_tool_rounds": 5,
+            "mimo_model": "m",
+            "mimo_timeout_sec": 30.0,
+        },
+    )()
+
+    async def fake_invoke(*, operation: str, **kwargs) -> str:
+        if operation == "tabular.internal_llm.reason_step":
+            return json.dumps(
+                {
+                    "action": "delegate",
+                    "delegate_intent": "firecrawl.scrape",
+                    "delegate_input": {"url": "https://www.irs.gov/"},
+                    "rationale": "Need live tax guidance.",
+                }
+            )
+        if operation == "tabular.internal_llm.reason_answer":
+            return "Waiting."
+        return ""
+
+    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+
+    out = await iw.run_tabular_reason_workbook(
+        agent=agent,
+        task=task,
+        http_client=AsyncMock(),
+        cfg=cfg,
+    )  # type: ignore[arg-type]
+
+    assert out.get("workflow") == "langgraph"
+    assert out.get("suspended") is True
+    assert out.get("finish_reason") == "awaiting_delegate"
+    assert out.get("delegate_used") is True
+    assert len(delegate_calls) == 1
+    assert delegate_calls[0]["target_intent"] == "firecrawl.scrape"
+    assert delegate_calls[0]["target_input"] == {"url": "https://www.irs.gov/"}
+    suspended_payload = next(payload for _, event_type, payload in events if event_type == "task.suspended")
+    assert suspended_payload["reverse_task_id"] == "rvt_1"
+    assert suspended_payload["target_intent"] == "firecrawl.scrape"
+
+
+@pytest.mark.asyncio
+async def test_langgraph_resume_includes_delegated_result_context(monkeypatch, tmp_path: Path) -> None:
+    (tmp_path / "preview.md").write_text("# t\n", encoding="utf-8")
+    (tmp_path / "sheet_catalog.json").write_text('{"sheets":[]}', encoding="utf-8")
+    events: list[tuple[str, str, dict]] = []
+
+    class _Agent:
+        agent_id = "cosmic/tabular-agent:1.0.0"
+
+        def _require(self, x: str) -> str:
+            return x
+
+        def _safe(self, x) -> str:
+            return str(x or "").strip()
+
+        async def _emit_stage(self, *a, **k) -> None:
+            return None
+
+        async def emit_event(self, task_id: str, event_type: str, payload: dict) -> str:
+            events.append((task_id, event_type, payload))
+            return "mid"
+
+        def _bundle_disk_path(self, bundle_id: str, artifact_id: str) -> Path:
+            return tmp_path
+
+    agent = _Agent()
+    task = type(
+        "T",
+        (),
+        {
+            "task_id": "resume_delegate_child",
+            "parent_task_id": "child_delegate",
+            "session_id": "sess_x",
+            "input": {
+                "bundle_id": "b1",
+                "artifact_id": "a1",
+                "goal": "Need tax context",
+                "request_id": "req_1",
+                "_resume": {
+                    "resume_of_task_id": "child_delegate",
+                    "resume_state": {
+                        "transcript": "",
+                        "tool_round": 1,
+                        "clarify_used": False,
+                        "delegate_used": True,
+                        "steps_log": [],
+                    },
+                    "reply": {},
+                    "reverse_task": {
+                        "reverse_task_id": "rvt_1",
+                        "target_intent": "firecrawl.scrape",
+                        "delegated_task_id": "tsk_firecrawl_1",
+                    },
+                    "reverse_result": {
+                        "status": "completed",
+                        "output": {"markdown": "IRS guidance text"},
+                        "artifacts": [],
+                    },
+                },
+            },
+            "source": "orchestrator",
+            "source_id": "cosmic/orchestrator:1.0.0",
+            "channel": "desktop:test",
+        },
+    )()
+
+    cfg = type(
+        "C",
+        (),
+        {
+            "enable_internal_llm": True,
+            "mimo_api_key": "k",
+            "mimo_base_url": "https://x/v1",
+            "include_financial_fpna_prompt": False,
+            "sandbox_timeout_sec": 30.0,
+            "tabular_reason_use_langgraph": True,
+            "tabular_reason_max_tool_rounds": 5,
+            "mimo_model": "m",
+            "mimo_timeout_sec": 30.0,
+        },
+    )()
+
+    async def fake_invoke(*, operation: str, **kwargs) -> str:
+        if operation == "tabular.internal_llm.reason_step":
+            assert "delegated_result firecrawl.scrape" in kwargs["user_message"]
+            assert "IRS guidance text" in kwargs["user_message"]
+            return '{"action":"done","answer":"Use the IRS guidance.","rationale":"done"}'
+        if operation == "tabular.internal_llm.reason_answer":
+            return "Use the IRS guidance."
+        return ""
+
+    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+
+    out = await iw.run_tabular_reason_workbook(
+        agent=agent,
+        task=task,
+        http_client=AsyncMock(),
+        cfg=cfg,
+    )  # type: ignore[arg-type]
+
+    assert out.get("workflow") == "langgraph"
+    assert out.get("response")
+    resumed_payload = next(payload for _, event_type, payload in events if event_type == "task.resumed")
+    assert resumed_payload["reverse_task_id"] == "rvt_1"

@@ -3018,6 +3018,19 @@ class TaskEnvelope(BaseModel):
 | `source_id` | Identifies the specific origin instance: `cron_morning_email`, `wh_gmail_001`, `hook_session_reset`. Null for direct user messages. Propagated to child tasks. Used for log filtering, metrics per-source, and audit trails. |
 | `channel` | Platform/interface the task originated from or should deliver results to: `desktop:<device_id>`, `whatsapp:+1234567890`, `telegram:chat_123`, `slack:C0123456`, `cli`. Null for internal events (hooks, agent-initiated) that don't need user-facing delivery. The Gateway uses this field to route responses back to the correct channel adapter. Format is usually `{platform}:{channel_id}`. Bare `desktop` is reserved as a delivery alias meaning "the configured primary desktop device" for non-message sources such as cron, heartbeat, and webhook delivery. |
 
+#### Reverse-task conventions (specialist → orchestrator)
+
+When a specialist needs help from the orchestrator, it sends a normal `TaskEnvelope` with **`source='agent'`** and **`recipient='cosmic/orchestrator:1.0.0'`**. Reverse tasks are part of the same signed task protocol as forward dispatches; they are **not** a side channel.
+
+- `parent_task_id` SHOULD point at the currently running specialist task that will suspend and later resume.
+- `sender` is the specialist agent id; the orchestrator verifies the reverse task using that agent's signing secret.
+- For `intent='orchestrator.delegate'`, `input` SHOULD include:
+  - `target_intent`: the sibling specialist capability needed
+  - `target_input`: exact input object for that sibling task
+  - optional `target_agent_id`: only when a specific registered agent must be used
+  - optional `resume_payload`: compact specialist-owned state needed when the suspended task resumes
+- Specialists SHOULD describe the needed capability/output, not assume direct registry access or sibling topology. Live sibling discovery remains the orchestrator's job.
+
 #### `input.auth` Convention (Credential Passthrough)
 
 When an intent has `auth_requirements` declared in `agent_card.yaml` (see §6.2), the orchestrator resolves credentials at dispatch time and places them in `input.auth`. This is a convention on the `input: dict` field, not a separate model field.
@@ -4303,7 +4316,7 @@ emit_event()
 
 ### 13.1 Case 1: Agent Asks Orchestrator (Reverse Task)
 
-Agent hits ambiguity it cannot resolve. It creates a TaskEnvelope addressed TO the orchestrator, suspends its current task, and waits for a reply.
+Agent hits ambiguity or a missing capability it cannot resolve. It creates a TaskEnvelope addressed TO the orchestrator, suspends its current task, and waits for a reply.
 
 ```python
 # Agent sends a clarification request
@@ -4340,6 +4353,8 @@ Orchestrator must define these intents:
 | `orchestrator.delegate` | Agent needs another agent's output |
 | `orchestrator.escalate` | Push to gateway for human input |
 | `orchestrator.refresh_credential` | Agent's access token expired mid-task — orchestrator refreshes via Gateway and resumes agent with new token (see §22.5) |
+
+**Important specialist rule:** a specialist does **not** need to know the full sibling-agent inventory. Its responsibility is to recognize "I am blocked and need a different capability" and emit the appropriate reverse task. Agent discovery, health checks, routing, retries, and result fan-in remain orchestrator concerns.
 
 ### 13.2 Case 2: Agent Needs Human Input (Task Input Queue)
 
@@ -4441,6 +4456,8 @@ async def user_reply_consumer(redis):
 
 Route through orchestrator. Never direct agent-to-agent.
 
+Specialists SHOULD stay **registry-agnostic** by default. They may know a likely target intent (for example, `firecrawl.scrape`), but they should not depend on direct sibling connections, ad-hoc RPCs, or shared specialist databases. The orchestrator owns sibling selection, dispatch, retries, and resumption.
+
 ```python
 # WRONG — do not do this:
 # result = await docs_agent.get_context(doc_id)  # bypasses task ledger
@@ -4454,12 +4471,45 @@ Route through orchestrator. Never direct agent-to-agent.
     'intent': 'orchestrator.delegate',
     'input': {
         'target_intent': 'docs.get_section_context',
-        'input': { 'doc_id': 'doc_xyz', 'section': 'architecture' }
+        'target_input': { 'doc_id': 'doc_xyz', 'section': 'architecture' },
+        'resume_payload': { 'phase': 'collect_sources' }
     }
 }
 # Orchestrator fans out to docs_agent, waits for result,
 # then returns result to research_agent via resume envelope.
 ```
+
+#### 13.3.1 Implemented reverse-delegate lifecycle
+
+The durable lifecycle for `orchestrator.delegate` is:
+
+1. Specialist decides its own tools are insufficient and emits a signed reverse task to the orchestrator.
+2. Orchestrator verifies that:
+   - `source='agent'`
+   - the sender owns `parent_task_id`
+   - `target_intent` / `target_input` are valid
+3. Orchestrator records the reverse task plus a durable **reverse wait** entry in the task ledger.
+4. The specialist emits `task.suspended` on the waiting task and returns non-terminal control to its runtime.
+5. Only after the waiting task is durably suspended does the orchestrator dispatch the sibling specialist task.
+6. When the sibling specialist completes or fails, the orchestrator sends an `agent.resume` task back to the waiting specialist.
+7. The resumed specialist receives:
+   - `reverse_task`: metadata about the reverse delegate (`reverse_task_id`, `target_intent`, optional `target_agent_id`, delegated task id)
+   - `reverse_result`: the delegated specialist `AgentResult`
+   - the specialist's own `resume_payload`
+8. The specialist continues inside its original intent, consuming the delegated result as new evidence rather than inventing a second conversation/channel.
+
+This ordering matters. The orchestrator MUST register the reverse wait before sibling fan-out, so delegated work never races ahead of the waiting specialist's durable suspended state.
+
+#### 13.3.2 Prompt contract for future specialists
+
+Future specialist prompts/policies SHOULD follow this pattern:
+
+- Exhaust specialist-local tools and memory first.
+- If blocked on external information or an out-of-domain capability, ask the orchestrator to delegate rather than guessing.
+- Prefer a **target intent** when known; use `target_agent_id` only when a specific sibling agent is truly required.
+- Keep delegation **bounded**. Recommended default: at most one reverse delegation per specialist task unless that specialist is explicitly designed for multi-hop orchestration.
+- Do not claim sibling registry awareness. The prompt can say "the system has sibling specialists and you may ask the orchestrator for one," but should not hardcode a brittle inventory list as operational truth.
+- On resume, treat `reverse_result` as authoritative delegated output and continue the original task; do not start a new unrelated plan.
 
 ### 13.4 Task Lifecycle (Suspendable Tasks)
 
