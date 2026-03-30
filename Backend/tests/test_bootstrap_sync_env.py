@@ -416,7 +416,7 @@ def test_materialize_bootstrap_env_files_updates_repo_envs(monkeypatch, tmp_path
         "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS=\n"
         "EMAIL_AGENT_MIMO_API_KEY=\n"
         "EMAIL_AGENT_MIMO_BASE_URL=\n"
-        "EMAIL_AGENT_MIMO_MODEL=mimo-v2-pro\n",
+        "EMAIL_AGENT_MIMO_MODEL=gpt-5-mini\n",
         encoding="utf-8",
     )
 
@@ -531,7 +531,7 @@ def test_install_service_env_files_installs_firecrawl_agent_env(monkeypatch, tmp
         "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS=\n"
         "EMAIL_AGENT_MIMO_API_KEY=\n"
         "EMAIL_AGENT_MIMO_BASE_URL=\n"
-        "EMAIL_AGENT_MIMO_MODEL=mimo-v2-pro\n",
+        "EMAIL_AGENT_MIMO_MODEL=gpt-5-mini\n",
         encoding="utf-8",
     )
 
@@ -580,7 +580,7 @@ def test_build_email_agent_env_rendered_prefers_external_values(tmp_path, monkey
         "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS=\n"
         "EMAIL_AGENT_MIMO_API_KEY=\n"
         "EMAIL_AGENT_MIMO_BASE_URL=\n"
-        "EMAIL_AGENT_MIMO_MODEL=mimo-v2-pro\n",
+        "EMAIL_AGENT_MIMO_MODEL=gpt-5-mini\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(bootstrap, "BACKEND_ROOT", backend_root)
@@ -623,7 +623,7 @@ def test_build_email_agent_env_rendered_respects_explicit_disconnect(tmp_path, m
         "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS=\n"
         "EMAIL_AGENT_MIMO_API_KEY=\n"
         "EMAIL_AGENT_MIMO_BASE_URL=\n"
-        "EMAIL_AGENT_MIMO_MODEL=mimo-v2-pro\n",
+        "EMAIL_AGENT_MIMO_MODEL=gpt-5-mini\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(bootstrap, "BACKEND_ROOT", backend_root)
@@ -754,7 +754,7 @@ def test_materialize_bootstrap_env_files_can_render_memory_env(monkeypatch, tmp_
         "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS=\n"
         "EMAIL_AGENT_MIMO_API_KEY=\n"
         "EMAIL_AGENT_MIMO_BASE_URL=\n"
-        "EMAIL_AGENT_MIMO_MODEL=mimo-v2-pro\n",
+        "EMAIL_AGENT_MIMO_MODEL=gpt-5-mini\n",
         encoding="utf-8",
     )
 

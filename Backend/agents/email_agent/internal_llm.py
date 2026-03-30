@@ -1,4 +1,4 @@
-"""MiMo-v2-pro via LangChain OpenAI-compatible client + Gateway usage logging."""
+"""Email-agent internal LLM via LangChain OpenAI-compatible client + Gateway usage logging."""
 
 from __future__ import annotations
 

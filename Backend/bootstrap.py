@@ -1173,7 +1173,7 @@ def build_email_agent_env_rendered(
         external_env.get("EMAIL_AGENT_MIMO_MODEL"),
         existing_env.get("EMAIL_AGENT_MIMO_MODEL"),
         source_data.get("EMAIL_AGENT_MIMO_MODEL"),
-        "mimo-v2-pro",
+        "gpt-5-mini",
     )
     instance_id = first_meaningful_value(
         external_env.get("INSTANCE_ID"),
@@ -1188,7 +1188,7 @@ def build_email_agent_env_rendered(
         "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
         "AGENT_SECRET": signing_secret,
         "INSTANCE_ID": instance_id or EMAIL_AGENT_DEFAULT_INSTANCE_ID,
-        "EMAIL_AGENT_MIMO_MODEL": mimo_model or "mimo-v2-pro",
+        "EMAIL_AGENT_MIMO_MODEL": mimo_model or "gpt-5-mini",
     }
     if cosmic_mail_base_url is not None:
         overrides["COSMIC_MAIL_BASE_URL"] = cosmic_mail_base_url

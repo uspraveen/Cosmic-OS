@@ -78,7 +78,7 @@ class EmailAgentConfig:
     attachment_docs_parse_poll_interval_sec: float = 0.25
     mimo_api_key: str = ""
     mimo_base_url: str = ""
-    mimo_model: str = "mimo-v2-pro"
+    mimo_model: str = "gpt-5-mini"
     mimo_timeout_sec: float = 120.0
     enable_internal_llm: bool = True
     agent_email_integrations_db_path: Path = BACKEND_ROOT / "gateway" / "agent_email_integrations.db"
@@ -120,7 +120,7 @@ class EmailAgentConfig:
             mimo_base_url=normalize_mimo_openai_base_url(
                 (os.getenv("EMAIL_AGENT_MIMO_BASE_URL") or os.getenv("MIMO_OPENAI_BASE_URL") or "").strip()
             ),
-            mimo_model=os.getenv("EMAIL_AGENT_MIMO_MODEL", "mimo-v2-pro").strip() or "mimo-v2-pro",
+            mimo_model=os.getenv("EMAIL_AGENT_MIMO_MODEL", "gpt-5-mini").strip() or "gpt-5-mini",
             mimo_timeout_sec=_env_float("EMAIL_AGENT_MIMO_TIMEOUT_SEC", 120.0),
             enable_internal_llm=_env_bool("EMAIL_AGENT_ENABLE_INTERNAL_LLM", True),
             agent_email_integrations_db_path=Path(

@@ -47,7 +47,7 @@ async def test_invoke_email_mimo_omits_temperature_for_gpt5_models(monkeypatch: 
         enable_internal_llm=True,
         mimo_api_key="test-key",
         mimo_base_url="https://api.openai.com/v1",
-        mimo_model="gpt-5-nano",
+        mimo_model="gpt-5-mini",
         gateway_internal_token="",
     )
     async with httpx.AsyncClient() as client:
@@ -65,7 +65,7 @@ async def test_invoke_email_mimo_omits_temperature_for_gpt5_models(monkeypatch: 
         )
 
     assert result == "ok"
-    assert captured["model"] == "gpt-5-nano"
+    assert captured["model"] == "gpt-5-mini"
     assert "temperature" not in captured
 
 
