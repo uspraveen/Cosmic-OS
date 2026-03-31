@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "events": { "type": "array", "items": { "type": "object" }, "description": "List of normalized event objects" },
+    "count": { "type": "integer", "description": "Number of events returned" },
+    "calendar_id": { "type": "string" },
+    "time_min": { "type": "string" },
+    "time_max": { "type": "string" }
+  },
+  "required": ["events", "count"]
+}

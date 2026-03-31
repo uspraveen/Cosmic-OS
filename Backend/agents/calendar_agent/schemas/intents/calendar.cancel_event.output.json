@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "cancelled": { "type": "boolean" },
+    "event_id": { "type": "string" },
+    "calendar_id": { "type": "string" },
+    "attendees_notified": { "type": "boolean" }
+  },
+  "required": ["cancelled", "event_id"]
+}

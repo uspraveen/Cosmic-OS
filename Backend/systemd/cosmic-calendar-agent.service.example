@@ -1,0 +1,17 @@
+[Unit]
+Description=COSMIC Calendar Agent
+After=network-online.target cosmic-gateway.service cosmic-orchestrator.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<SERVICE_USER>
+Group=<SERVICE_GROUP>
+WorkingDirectory=<BACKEND_ROOT>
+EnvironmentFile=/etc/cosmic/agents/calendar-agent.env
+ExecStart=<BACKEND_ROOT>/.venv/bin/python -m agents.calendar_agent
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

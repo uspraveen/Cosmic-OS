@@ -68,20 +68,28 @@ class GatewayConfig:
     enable_whatsapp: bool = True
     enable_telegram: bool = False
     enable_agent_email: bool = False
-    agent_email_integrations_db_path: Path = BACKEND_ROOT / "gateway" / "agent_email_integrations.db"
+    agent_email_integrations_db_path: Path = (
+        BACKEND_ROOT / "gateway" / "agent_email_integrations.db"
+    )
     sessions_db_path: Path = BACKEND_ROOT / "gateway" / "sessions.db"
     mobile_devices_db_path: Path = BACKEND_ROOT / "gateway" / "mobile_devices.db"
     usage_db_path: Path = BACKEND_ROOT / "gateway" / "usage.db"
     request_trace_db_path: Path = BACKEND_ROOT / "gateway" / "request_traces.db"
     routing_audit_db_path: Path = BACKEND_ROOT / "gateway" / "routing_audit.db"
-    memory_write_audit_db_path: Path = BACKEND_ROOT / "gateway" / "memory_write_audit.db"
-    capability_wishlist_db_path: Path = BACKEND_ROOT / "gateway" / "cosmics_capability_wishlist.db"
+    memory_write_audit_db_path: Path = (
+        BACKEND_ROOT / "gateway" / "memory_write_audit.db"
+    )
+    capability_wishlist_db_path: Path = (
+        BACKEND_ROOT / "gateway" / "cosmics_capability_wishlist.db"
+    )
     artifacts_db_path: Path = BACKEND_ROOT / "gateway" / "artifacts.db"
     artifacts_root: Path = BACKEND_ROOT / "runs" / "artifacts"
     delivery_queue_db_path: Path = BACKEND_ROOT / "gateway" / "delivery_queue.db"
     scheduler_db_path: Path = BACKEND_ROOT / "gateway" / "scheduler.db"
     session_transcript_dir: Path = BACKEND_ROOT / "logs" / "sessions"
-    capability_wishlist_export_dir: Path = BACKEND_ROOT / "logs" / "cosmics_capability_wishlist"
+    capability_wishlist_export_dir: Path = (
+        BACKEND_ROOT / "logs" / "cosmics_capability_wishlist"
+    )
     session_reset_hour: int = 4
     user_timezone_fallback: str = "America/Chicago"
     cosmic_mail_base_url: str = ""
@@ -147,6 +155,11 @@ class GatewayConfig:
     memory_write_dedup_ttl_sec: int = 86_400
     session_summary_max_output_tokens: int = 2500
     max_background_tasks_per_session: int = 5
+    # Google OAuth / Credential Manager
+    credentials_db_path: Path = BACKEND_ROOT / "gateway" / "credentials.db"
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    google_redirect_uri: str = "http://localhost:8085/"
 
     @classmethod
     def from_env(cls) -> "GatewayConfig":
@@ -163,22 +176,33 @@ class GatewayConfig:
             ),
             internal_token=os.getenv("GATEWAY_INTERNAL_TOKEN", ""),
             signing_secret=os.getenv("GATEWAY_SIGNING_SECRET", "").strip(),
-            model_router_url=os.getenv("MODEL_ROUTER_URL", "http://127.0.0.1:8742").rstrip("/"),
+            model_router_url=os.getenv(
+                "MODEL_ROUTER_URL", "http://127.0.0.1:8742"
+            ).rstrip("/"),
             model_router_timeout_sec=max(
                 1.0,
                 _env_float("MODEL_ROUTER_TIMEOUT_SEC", 15.0),
             ),
-            orchestrator_url=os.getenv("ORCHESTRATOR_URL", "http://127.0.0.1:8743").rstrip("/"),
+            orchestrator_url=os.getenv(
+                "ORCHESTRATOR_URL", "http://127.0.0.1:8743"
+            ).rstrip("/"),
             orchestrator_timeout_sec=max(
                 10.0,
                 _env_float("ORCHESTRATOR_TIMEOUT_SEC", 300.0),
             ),
             redis_url=os.getenv("REDIS_URL", "").strip(),
-            task_input_requests_stream=os.getenv("TASK_INPUT_REQUESTS_STREAM", "user_input:requests").strip()
+            task_input_requests_stream=os.getenv(
+                "TASK_INPUT_REQUESTS_STREAM", "user_input:requests"
+            ).strip()
             or "user_input:requests",
-            task_input_replies_stream=os.getenv("TASK_INPUT_REPLIES_STREAM", "user_input:replies").strip()
+            task_input_replies_stream=os.getenv(
+                "TASK_INPUT_REPLIES_STREAM", "user_input:replies"
+            ).strip()
             or "user_input:replies",
-            task_input_gateway_group=os.getenv("TASK_INPUT_GATEWAY_GROUP", "gateway").strip() or "gateway",
+            task_input_gateway_group=os.getenv(
+                "TASK_INPUT_GATEWAY_GROUP", "gateway"
+            ).strip()
+            or "gateway",
             enable_whatsapp=_env_bool("WHATSAPP_ENABLED", True),
             enable_telegram=_env_bool("TELEGRAM_ENABLED", False),
             enable_agent_email=_env_bool("AGENT_EMAIL_ENABLED", False),
@@ -189,7 +213,10 @@ class GatewayConfig:
                 )
             ).expanduser(),
             sessions_db_path=Path(
-                os.getenv("GATEWAY_SESSIONS_DB_PATH", str(BACKEND_ROOT / "gateway" / "sessions.db"))
+                os.getenv(
+                    "GATEWAY_SESSIONS_DB_PATH",
+                    str(BACKEND_ROOT / "gateway" / "sessions.db"),
+                )
             ).expanduser(),
             mobile_devices_db_path=Path(
                 os.getenv(
@@ -267,17 +294,28 @@ class GatewayConfig:
                 23,
                 max(0, _env_int("SESSION_RESET_HOUR", 4)),
             ),
-            user_timezone_fallback=os.getenv("USER_TIMEZONE_FALLBACK", "America/Chicago").strip() or "America/Chicago",
-            cosmic_mail_base_url=os.getenv("COSMIC_MAIL_BASE_URL", "").strip().rstrip("/"),
+            user_timezone_fallback=os.getenv(
+                "USER_TIMEZONE_FALLBACK", "America/Chicago"
+            ).strip()
+            or "America/Chicago",
+            cosmic_mail_base_url=os.getenv("COSMIC_MAIL_BASE_URL", "")
+            .strip()
+            .rstrip("/"),
             cosmic_mail_api_token=os.getenv("COSMIC_MAIL_API_TOKEN", "").strip(),
             cosmic_mail_timeout_sec=max(
                 5.0,
                 _env_float("COSMIC_MAIL_TIMEOUT_SEC", 20.0),
             ),
-            cosmic_mail_primary_mailbox_address=os.getenv("COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS", "").strip(),
-            cosmic_mail_webhook_secret=os.getenv("COSMIC_MAIL_WEBHOOK_SECRET", "").strip(),
+            cosmic_mail_primary_mailbox_address=os.getenv(
+                "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS", ""
+            ).strip(),
+            cosmic_mail_webhook_secret=os.getenv(
+                "COSMIC_MAIL_WEBHOOK_SECRET", ""
+            ).strip(),
             cosmic_mail_webhook_signature_header=(
-                os.getenv("COSMIC_MAIL_WEBHOOK_SIGNATURE_HEADER", "X-Cosmic-Mail-Signature").strip()
+                os.getenv(
+                    "COSMIC_MAIL_WEBHOOK_SIGNATURE_HEADER", "X-Cosmic-Mail-Signature"
+                ).strip()
                 or "X-Cosmic-Mail-Signature"
             ),
             scheduler_poll_interval_sec=max(
@@ -334,7 +372,9 @@ class GatewayConfig:
             ),
             docs_auto_parse_enabled=_env_bool("GATEWAY_DOCS_AUTO_PARSE_ENABLED", True),
             docs_parser_agent_id=(
-                os.getenv("GATEWAY_DOCS_PARSER_AGENT_ID", "cosmic/docs-parser-agent:1.0.0").strip()
+                os.getenv(
+                    "GATEWAY_DOCS_PARSER_AGENT_ID", "cosmic/docs-parser-agent:1.0.0"
+                ).strip()
                 or "cosmic/docs-parser-agent:1.0.0"
             ),
             docs_upload_max_file_bytes=max(
@@ -353,9 +393,13 @@ class GatewayConfig:
                 0.05,
                 _env_float("GATEWAY_DOCS_PARSE_POLL_INTERVAL_SEC", 0.25),
             ),
-            tabular_auto_parse_enabled=_env_bool("GATEWAY_TABULAR_AUTO_PARSE_ENABLED", True),
+            tabular_auto_parse_enabled=_env_bool(
+                "GATEWAY_TABULAR_AUTO_PARSE_ENABLED", True
+            ),
             tabular_agent_id=(
-                os.getenv("GATEWAY_TABULAR_AGENT_ID", "cosmic/tabular-agent:1.0.0").strip()
+                os.getenv(
+                    "GATEWAY_TABULAR_AGENT_ID", "cosmic/tabular-agent:1.0.0"
+                ).strip()
                 or "cosmic/tabular-agent:1.0.0"
             ),
             tabular_parse_timeout_sec=max(
@@ -402,7 +446,9 @@ class GatewayConfig:
             perplexity_api_key=os.getenv("PERPLEXITY_API_KEY", "").strip(),
             perplexity_model=os.getenv("PERPLEXITY_MODEL", "sonar").strip(),
             capability_wishlist_embedding_model=(
-                os.getenv("CAPABILITY_WISHLIST_EMBEDDING_MODEL", "pplx-embed-v1-4b").strip()
+                os.getenv(
+                    "CAPABILITY_WISHLIST_EMBEDDING_MODEL", "pplx-embed-v1-4b"
+                ).strip()
                 or "pplx-embed-v1-4b"
             ),
             capability_wishlist_embedding_dimensions=max(
@@ -411,7 +457,9 @@ class GatewayConfig:
             ),
             xai_api_key=os.getenv("XAI_API_KEY", "").strip(),
             capability_wishlist_adjudicator_model=(
-                os.getenv("CAPABILITY_WISHLIST_ADJUDICATOR_MODEL", "grok-4-1-fast-reasoning").strip()
+                os.getenv(
+                    "CAPABILITY_WISHLIST_ADJUDICATOR_MODEL", "grok-4-1-fast-reasoning"
+                ).strip()
                 or "grok-4-1-fast-reasoning"
             ),
             direct_llm_timeout_sec=max(
@@ -448,7 +496,9 @@ class GatewayConfig:
                     "user_data",
                 ),
             ),
-            cosmic_memory_ingest_transcripts=_env_bool("COSMIC_MEMORY_INGEST_TRANSCRIPTS", True),
+            cosmic_memory_ingest_transcripts=_env_bool(
+                "COSMIC_MEMORY_INGEST_TRANSCRIPTS", True
+            ),
             cosmic_memory_episode_extract_graph=_env_bool(
                 "COSMIC_MEMORY_EPISODE_EXTRACT_GRAPH",
                 False,
@@ -469,4 +519,16 @@ class GatewayConfig:
                 1,
                 _env_int("GATEWAY_MAX_BACKGROUND_TASKS_PER_SESSION", 5),
             ),
+            credentials_db_path=Path(
+                os.getenv(
+                    "GATEWAY_CREDENTIALS_DB_PATH",
+                    str(BACKEND_ROOT / "gateway" / "credentials.db"),
+                )
+            ).expanduser(),
+            google_client_id=os.getenv("GOOGLE_CLIENT_ID", "").strip(),
+            google_client_secret=os.getenv("GOOGLE_CLIENT_SECRET", "").strip(),
+            google_redirect_uri=os.getenv(
+                "GOOGLE_REDIRECT_URI", "http://localhost:8085/"
+            ).strip()
+            or "http://localhost:8085/",
         )

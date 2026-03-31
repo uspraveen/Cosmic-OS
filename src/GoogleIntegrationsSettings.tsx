@@ -240,7 +240,7 @@ export default function GoogleIntegrationsSettings({ active }: GoogleIntegration
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>
           </div>
           <p className="cosmic-google-empty-title">No Google accounts yet</p>
-          <p className="cosmic-google-empty-desc">Add an account and choose Calendar, Gmail, Docs, or Drive. Cosmic stores everything locally.</p>
+          <p className="cosmic-google-empty-desc">Add an account and choose Calendar, Gmail, Docs, or Drive. Cosmic stores provider credentials on your private backend.</p>
         </div>
       ) : (
         <div className="cosmic-google-accounts">

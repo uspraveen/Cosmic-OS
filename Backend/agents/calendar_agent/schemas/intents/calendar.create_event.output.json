@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "event": { "type": "object", "description": "Created event details" },
+    "created": { "type": "boolean" },
+    "conflict_warning": { "type": "string", "description": "Warning if overlapping events exist" },
+    "conflicting_events": { "type": "array", "items": { "type": "object" } }
+  },
+  "required": ["event", "created"]
+}

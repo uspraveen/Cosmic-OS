@@ -24,7 +24,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .adapters import HaikuAdapter, PerplexityAdapter
 from .adapters.response_processor import DirectRouteHandoff
 from .artifacts.store import ArtifactStore
-from .channels.base import ChannelUnavailableError, PermanentDeliveryError, RetryableDeliveryError
+from .channels.base import (
+    ChannelUnavailableError,
+    PermanentDeliveryError,
+    RetryableDeliveryError,
+)
 from .channels.agent_email import AgentEmailAdapter
 from .channels.desktop import DesktopAdapter
 from .channels.mobile import MobileAdapter
@@ -32,15 +36,27 @@ from .channels.registry import ChannelAdapterRegistry
 from .channels.telegram import TelegramAdapter, TelegramConfig
 from .channels.whatsapp import WhatsAppAdapter, WhatsAppConfig
 from .config import GatewayConfig
+from .credentials import CredentialManager
+from .credentials.store import CredentialStore
 from .delivery.queue_store import DeliveryQueueStore, utcnow_iso
 from .memory import MemoryWriteAuditStore
-from .memory.client import CosmicMemoryClient, MemoryClientHTTPError, MemoryPromptContext
+from .memory.client import (
+    CosmicMemoryClient,
+    MemoryClientHTTPError,
+    MemoryPromptContext,
+)
 from .mobile_device_store import MobileDeviceStore
 from .orchestrator_client import OrchestratorClient
 from .request_trace_store import RequestTraceStore
 from .routing.router_client import ModelRouterClient
 from .routing.audit_store import RoutingAuditStore
-from .scheduler import CronExpressionError, SchedulerStore, compute_next_fire_at, normalize_timezone_name, render_local_fire_time
+from .scheduler import (
+    CronExpressionError,
+    SchedulerStore,
+    compute_next_fire_at,
+    normalize_timezone_name,
+    render_local_fire_time,
+)
 from .session.compaction import build_compaction_prompts
 from .session.summary import (
     build_rollover_summary_prompts,
@@ -49,9 +65,12 @@ from .session.summary import (
 from .session_store import SessionStore
 from .usage_store import UsageStore
 from .wishlist import CapabilityWishlistService, CapabilityWishlistStore
+
 try:
     from PIL import Image, ImageOps, UnidentifiedImageError
-except Exception:  # pragma: no cover - optional import guard for environments missing Pillow
+except (
+    Exception
+):  # pragma: no cover - optional import guard for environments missing Pillow
     Image = None
     ImageOps = None
     UnidentifiedImageError = Exception
@@ -231,12 +250,25 @@ class GatewayRuntime:
         self.usage_store = UsageStore(config.usage_db_path)
         self.request_trace_store = RequestTraceStore(config.request_trace_db_path)
         self.routing_audit_store = RoutingAuditStore(config.routing_audit_db_path)
-        self.memory_write_audit_store = MemoryWriteAuditStore(config.memory_write_audit_db_path)
-        self.capability_wishlist_store = CapabilityWishlistStore(config.capability_wishlist_db_path)
+        self.memory_write_audit_store = MemoryWriteAuditStore(
+            config.memory_write_audit_db_path
+        )
+        self.capability_wishlist_store = CapabilityWishlistStore(
+            config.capability_wishlist_db_path
+        )
         self.artifact_store = ArtifactStore(config.artifacts_db_path)
         self.delivery_queue_store = DeliveryQueueStore(config.delivery_queue_db_path)
         self.scheduler_store = SchedulerStore(config.scheduler_db_path)
-        self.agent_email_integration_store = AgentEmailIntegrationStore(config.agent_email_integrations_db_path)
+        self.agent_email_integration_store = AgentEmailIntegrationStore(
+            config.agent_email_integrations_db_path
+        )
+        self._credential_store = CredentialStore(config.credentials_db_path)
+        self.credential_manager = CredentialManager(
+            store=self._credential_store,
+            google_client_id=config.google_client_id,
+            google_client_secret=config.google_client_secret,
+            google_redirect_uri=config.google_redirect_uri,
+        )
         self.memory_client = CosmicMemoryClient(
             base_url=config.cosmic_memory_url,
             timeout_sec=config.cosmic_memory_timeout_sec,
@@ -272,7 +304,9 @@ class GatewayRuntime:
             connect=min(config.artifact_download_timeout_sec, 15.0),
         )
         self._artifact_client = httpx.AsyncClient(timeout=artifact_timeout, http2=True)
-        self._redis = create_redis_client(config.redis_url) if config.redis_url else None
+        self._redis = (
+            create_redis_client(config.redis_url) if config.redis_url else None
+        )
         self.started = False
         self.adapter_errors: dict[str, str] = {}
         self.active_task_channels: dict[str, str] = {}
@@ -319,10 +353,14 @@ class GatewayRuntime:
         self.memory_write_audit_store.initialize()
         self.artifact_store.initialize()
         self.delivery_queue_store.initialize()
-        self.scheduler_store.initialize(default_timezone=self.config.user_timezone_fallback)
+        self.scheduler_store.initialize(
+            default_timezone=self.config.user_timezone_fallback
+        )
         self.agent_email_integration_store.initialize()
         await self.capability_wishlist_service.initialize()
-        self._usage_event_queue = asyncio.Queue(maxsize=self.config.usage_queue_max_size)
+        self._usage_event_queue = asyncio.Queue(
+            maxsize=self.config.usage_queue_max_size
+        )
         self._sync_system_crons()
         await self.model_router.start()
         await self.orchestrator.start()
@@ -388,7 +426,11 @@ class GatewayRuntime:
             self._task_input_worker.cancel()
             await asyncio.gather(self._task_input_worker, return_exceptions=True)
             self._task_input_worker = None
-        workers = [state.worker for state in self.active_requests.values() if state.worker is not None]
+        workers = [
+            state.worker
+            for state in self.active_requests.values()
+            if state.worker is not None
+        ]
         for worker in workers:
             worker.cancel()
         if workers:
@@ -453,7 +495,9 @@ class GatewayRuntime:
             reset_hour=self.config.session_reset_hour,
         )
 
-    def _next_rollover_fire_at(self, *, timezone_name: str, now: datetime | None = None) -> str:
+    def _next_rollover_fire_at(
+        self, *, timezone_name: str, now: datetime | None = None
+    ) -> str:
         current = now or datetime.now(timezone.utc)
         if current.tzinfo is None:
             current = current.replace(tzinfo=timezone.utc)
@@ -506,7 +550,10 @@ class GatewayRuntime:
         platform, separator, _ = normalized_channel.partition(":")
         if separator:
             return platform or None
-        if normalized_channel in self.registry.adapters or normalized_channel in {"desktop", "mobile"}:
+        if normalized_channel in self.registry.adapters or normalized_channel in {
+            "desktop",
+            "mobile",
+        }:
             return normalized_channel
         return None
 
@@ -545,12 +592,17 @@ class GatewayRuntime:
         current_channel: str | None = None,
     ) -> str | None:
         normalized_current = self._safe_text(current_channel)
-        if normalized_current and self._channel_platform(normalized_current) == platform:
+        if (
+            normalized_current
+            and self._channel_platform(normalized_current) == platform
+        ):
             return normalized_current
         if platform == "desktop":
             return "desktop"
         if platform == "agent-email":
-            mailbox_address = self._safe_text(self._effective_agent_email_settings().get("primary_mailbox_address"))
+            mailbox_address = self._safe_text(
+                self._effective_agent_email_settings().get("primary_mailbox_address")
+            )
             if mailbox_address:
                 return f"agent-email:{mailbox_address}"
 
@@ -584,17 +636,26 @@ class GatewayRuntime:
             return {
                 "base_url": str(stored.base_url).strip(),
                 "api_token": str(stored.api_token).strip(),
-                "primary_mailbox_address": str(stored.primary_mailbox_address or "").strip(),
+                "primary_mailbox_address": str(
+                    stored.primary_mailbox_address or ""
+                ).strip(),
                 "webhook_secret": str(stored.webhook_secret or "").strip(),
-                "webhook_signature_header": str(stored.webhook_signature_header or "").strip() or "X-Cosmic-Mail-Signature",
+                "webhook_signature_header": str(
+                    stored.webhook_signature_header or ""
+                ).strip()
+                or "X-Cosmic-Mail-Signature",
                 "source": "integration_store",
             }
         return {
             "base_url": str(self.config.cosmic_mail_base_url or "").strip(),
             "api_token": str(self.config.cosmic_mail_api_token or "").strip(),
-            "primary_mailbox_address": str(self.config.cosmic_mail_primary_mailbox_address or "").strip(),
+            "primary_mailbox_address": str(
+                self.config.cosmic_mail_primary_mailbox_address or ""
+            ).strip(),
             "webhook_secret": str(self.config.cosmic_mail_webhook_secret or "").strip(),
-            "webhook_signature_header": str(self.config.cosmic_mail_webhook_signature_header or "").strip()
+            "webhook_signature_header": str(
+                self.config.cosmic_mail_webhook_signature_header or ""
+            ).strip()
             or "X-Cosmic-Mail-Signature",
             "source": "env",
         }
@@ -603,7 +664,9 @@ class GatewayRuntime:
         settings = self._effective_agent_email_settings()
         if settings.get("source") == "integration_store_disabled":
             return False
-        return self.config.enable_agent_email or bool(settings.get("base_url") and settings.get("api_token"))
+        return self.config.enable_agent_email or bool(
+            settings.get("base_url") and settings.get("api_token")
+        )
 
     async def _unregister_adapter(self, platform: str) -> None:
         adapter = self.registry.adapters.pop(platform, None)
@@ -623,7 +686,9 @@ class GatewayRuntime:
             return
         if not settings.get("base_url") or not settings.get("api_token"):
             await self._unregister_adapter("agent-email")
-            self.adapter_errors["agent-email"] = "Cosmic Mail base URL or API token is not configured."
+            self.adapter_errors["agent-email"] = (
+                "Cosmic Mail base URL or API token is not configured."
+            )
             return
 
         current_key = None
@@ -654,14 +719,18 @@ class GatewayRuntime:
             timeout_sec=self.config.cosmic_mail_timeout_sec,
             primary_mailbox_address=settings.get("primary_mailbox_address", ""),
             webhook_secret=settings.get("webhook_secret", ""),
-            webhook_signature_header=settings.get("webhook_signature_header", "X-Cosmic-Mail-Signature"),
+            webhook_signature_header=settings.get(
+                "webhook_signature_header", "X-Cosmic-Mail-Signature"
+            ),
         )
         await adapter.on_message(self._handle_normalized_incoming_message)
         self.registry.register(adapter)
         try:
             await adapter.start()
             self.adapter_errors.pop("agent-email", None)
-        except Exception as exc:  # pragma: no cover - startup health is environment-dependent
+        except (
+            Exception
+        ) as exc:  # pragma: no cover - startup health is environment-dependent
             self.adapter_errors["agent-email"] = str(exc)
 
     async def get_agent_email_connection_status(self) -> dict[str, Any]:
@@ -679,7 +748,8 @@ class GatewayRuntime:
                 mail_status = {"status": "error", "error": str(exc)}
         return {
             "configured": configured,
-            "explicitly_disconnected": settings.get("source") == "integration_store_disabled",
+            "explicitly_disconnected": settings.get("source")
+            == "integration_store_disabled",
             "connected": bool(mail_status and mail_status.get("connected")),
             "adapter_registered": adapter is not None,
             "healthy": adapter is not None and "agent-email" not in self.adapter_errors,
@@ -687,7 +757,9 @@ class GatewayRuntime:
             "base_url": settings.get("base_url") or "",
             "api_token": settings.get("api_token") or "",
             "primary_mailbox_address": settings.get("primary_mailbox_address") or "",
-            "trusted_senders": list(stored.trusted_senders) if stored is not None else [],
+            "trusted_senders": list(stored.trusted_senders)
+            if stored is not None
+            else [],
             "config_source": settings.get("source") or "env",
             "mail": mail_status,
         }
@@ -733,7 +805,9 @@ class GatewayRuntime:
         status["webhook"] = webhook
         return status
 
-    async def save_agent_email_trusted_senders(self, trusted_senders: list[str]) -> dict[str, Any]:
+    async def save_agent_email_trusted_senders(
+        self, trusted_senders: list[str]
+    ) -> dict[str, Any]:
         self.agent_email_integration_store.save_trusted_senders(
             trusted_senders,
             updated_at=utcnow_iso(),
@@ -744,7 +818,9 @@ class GatewayRuntime:
         normalized = self._safe_text(session_id)
         return normalized.startswith("email-thread:")
 
-    def _agent_email_message_identifiers(self, metadata: dict[str, Any] | None) -> list[str]:
+    def _agent_email_message_identifiers(
+        self, metadata: dict[str, Any] | None
+    ) -> list[str]:
         if not isinstance(metadata, dict):
             return []
         identifiers: list[str] = []
@@ -754,7 +830,9 @@ class GatewayRuntime:
                 identifiers.append(value)
         return identifiers
 
-    def _agent_email_inbound_dedupe_keys(self, *, session_id: str, metadata: dict[str, Any] | None) -> list[str]:
+    def _agent_email_inbound_dedupe_keys(
+        self, *, session_id: str, metadata: dict[str, Any] | None
+    ) -> list[str]:
         normalized_session_id = self._safe_text(session_id)
         if not normalized_session_id:
             return []
@@ -763,12 +841,18 @@ class GatewayRuntime:
             for identifier in self._agent_email_message_identifiers(metadata)
         ]
 
-    def _find_duplicate_agent_email_request(self, message: dict[str, Any]) -> dict[str, Any] | None:
+    def _find_duplicate_agent_email_request(
+        self, message: dict[str, Any]
+    ) -> dict[str, Any] | None:
         session_id = self._safe_text(message.get("session_id"))
         channel = self._safe_text(message.get("channel"))
-        if self._channel_platform(channel) != "agent-email" and not self._is_email_thread_session(session_id):
+        if self._channel_platform(
+            channel
+        ) != "agent-email" and not self._is_email_thread_session(session_id):
             return None
-        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        metadata = (
+            message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        )
         identifiers = set(self._agent_email_message_identifiers(metadata))
         if not session_id or not identifiers:
             return None
@@ -776,7 +860,11 @@ class GatewayRuntime:
         for request_record in reversed(list(self.request_records.values())):
             if self._safe_text(request_record.get("session_id")) != session_id:
                 continue
-            existing_message = request_record.get("message") if isinstance(request_record.get("message"), dict) else {}
+            existing_message = (
+                request_record.get("message")
+                if isinstance(request_record.get("message"), dict)
+                else {}
+            )
             existing_metadata = (
                 existing_message.get("metadata")
                 if isinstance(existing_message.get("metadata"), dict)
@@ -784,7 +872,9 @@ class GatewayRuntime:
             )
             if self._safe_text(existing_metadata.get("platform")) != "agent-email":
                 continue
-            existing_identifiers = set(self._agent_email_message_identifiers(existing_metadata))
+            existing_identifiers = set(
+                self._agent_email_message_identifiers(existing_metadata)
+            )
             if identifiers.isdisjoint(existing_identifiers):
                 continue
             return {
@@ -798,28 +888,42 @@ class GatewayRuntime:
         for entry in reversed(self.session_store.get_history(session_id)):
             if self._safe_text(entry.get("role")) != "user":
                 continue
-            existing_metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+            existing_metadata = (
+                entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+            )
             if self._safe_text(existing_metadata.get("platform")) != "agent-email":
                 continue
-            existing_identifiers = set(self._agent_email_message_identifiers(existing_metadata))
+            existing_identifiers = set(
+                self._agent_email_message_identifiers(existing_metadata)
+            )
             if identifiers.isdisjoint(existing_identifiers):
                 continue
             return {
                 "status": "duplicate",
                 "duplicate": True,
-                "request_id": self._safe_text(entry.get("request_id")) or self._safe_text(existing_metadata.get("request_id")) or None,
+                "request_id": self._safe_text(entry.get("request_id"))
+                or self._safe_text(existing_metadata.get("request_id"))
+                or None,
                 "session_id": session_id,
                 "channel": self._safe_text(entry.get("channel")) or channel,
             }
         return None
 
-    def reserve_agent_email_inbound(self, message: dict[str, Any]) -> tuple[list[str], dict[str, Any] | None]:
+    def reserve_agent_email_inbound(
+        self, message: dict[str, Any]
+    ) -> tuple[list[str], dict[str, Any] | None]:
         session_id = self._safe_text(message.get("session_id"))
         channel = self._safe_text(message.get("channel"))
-        if self._channel_platform(channel) != "agent-email" and not self._is_email_thread_session(session_id):
+        if self._channel_platform(
+            channel
+        ) != "agent-email" and not self._is_email_thread_session(session_id):
             return ([], None)
-        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-        dedupe_keys = self._agent_email_inbound_dedupe_keys(session_id=session_id, metadata=metadata)
+        metadata = (
+            message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        )
+        dedupe_keys = self._agent_email_inbound_dedupe_keys(
+            session_id=session_id, metadata=metadata
+        )
         duplicate = self._find_duplicate_agent_email_request(message)
         if duplicate is not None:
             return ([], duplicate)
@@ -841,7 +945,9 @@ class GatewayRuntime:
         for key in dedupe_keys:
             self._inflight_agent_email_messages.discard(self._safe_text(key).casefold())
 
-    def _email_thread_session_patch(self, metadata: dict[str, Any], *, channel: str) -> dict[str, Any]:
+    def _email_thread_session_patch(
+        self, metadata: dict[str, Any], *, channel: str
+    ) -> dict[str, Any]:
         patch: dict[str, Any] = {
             "session_scope": "email_thread",
             "rollover_exempt": True,
@@ -881,16 +987,26 @@ class GatewayRuntime:
             return prepared
 
         request = request_record if isinstance(request_record, dict) else {}
-        message = request.get("message") if isinstance(request.get("message"), dict) else {}
-        message_meta = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        message = (
+            request.get("message") if isinstance(request.get("message"), dict) else {}
+        )
+        message_meta = (
+            message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        )
         process_output = (
             request.get("email_process_inbound_output")
             if isinstance(request.get("email_process_inbound_output"), dict)
             else {}
         )
-        session_id = self._safe_text(prepared.get("session_id")) or self._safe_text(request.get("session_id"))
-        request_id = self._safe_text(prepared.get("request_id")) or self._safe_text(request.get("request_id"))
-        session_meta = self.session_store.get_session_metadata(session_id) if session_id else {}
+        session_id = self._safe_text(prepared.get("session_id")) or self._safe_text(
+            request.get("session_id")
+        )
+        request_id = self._safe_text(prepared.get("request_id")) or self._safe_text(
+            request.get("request_id")
+        )
+        session_meta = (
+            self.session_store.get_session_metadata(session_id) if session_id else {}
+        )
         user_message = (
             self.session_store.find_message_by_request_id(
                 session_id,
@@ -900,7 +1016,12 @@ class GatewayRuntime:
             if session_id and request_id
             else None
         )
-        user_meta = user_message.get("metadata") if isinstance(user_message, dict) and isinstance(user_message.get("metadata"), dict) else {}
+        user_meta = (
+            user_message.get("metadata")
+            if isinstance(user_message, dict)
+            and isinstance(user_message.get("metadata"), dict)
+            else {}
+        )
 
         def first_text(*values: Any) -> str | None:
             for value in values:
@@ -960,13 +1081,27 @@ class GatewayRuntime:
         )
 
         trusted_sender = bool(process_output.get("trusted_sender"))
-        auto_reply = process_output.get("auto_reply") if isinstance(process_output.get("auto_reply"), dict) else {}
-        auto_reply_status = self._safe_text(auto_reply.get("delivery_status")) or ("sent" if bool(auto_reply.get("sent")) else "")
+        auto_reply = (
+            process_output.get("auto_reply")
+            if isinstance(process_output.get("auto_reply"), dict)
+            else {}
+        )
+        auto_reply_status = self._safe_text(auto_reply.get("delivery_status")) or (
+            "sent" if bool(auto_reply.get("sent")) else ""
+        )
         auto_reply_acted = auto_reply_status in {"sent", "queued_for_approval"}
         auto_reply_sent = auto_reply_status == "sent"
-        sender_role = first_text(process_output.get("sender_role"), "owner" if trusted_sender else "external")
-        matched_instructions = process_output.get("matched_instructions") if isinstance(process_output.get("matched_instructions"), list) else []
-        if not matched_instructions and isinstance(process_output.get("matched_instruction"), dict):
+        sender_role = first_text(
+            process_output.get("sender_role"), "owner" if trusted_sender else "external"
+        )
+        matched_instructions = (
+            process_output.get("matched_instructions")
+            if isinstance(process_output.get("matched_instructions"), list)
+            else []
+        )
+        if not matched_instructions and isinstance(
+            process_output.get("matched_instruction"), dict
+        ):
             matched_instructions = [process_output.get("matched_instruction")]
 
         prepared.setdefault("session_scope", "email_thread")
@@ -993,15 +1128,26 @@ class GatewayRuntime:
         if matched_instructions:
             prepared["matched_instructions"] = matched_instructions
             prepared["matched_instruction_ids"] = self._normalize_string_list(
-                [self._safe_text(item.get("instruction_id")) for item in matched_instructions],
+                [
+                    self._safe_text(item.get("instruction_id"))
+                    for item in matched_instructions
+                ],
                 limit=12,
             )
-            match_reason = self._safe_text(process_output.get("instruction_match_reason"))
+            match_reason = self._safe_text(
+                process_output.get("instruction_match_reason")
+            )
             if match_reason:
                 prepared["instruction_match_reason"] = match_reason
         prepared["email_thread_reply"] = True
-        prepared["email_thread_reply_eligible"] = bool(trusted_sender and not auto_reply_acted)
-        if from_address and not prepared.get("to_recipients") and not prepared.get("to"):
+        prepared["email_thread_reply_eligible"] = bool(
+            trusted_sender and not auto_reply_acted
+        )
+        if (
+            from_address
+            and not prepared.get("to_recipients")
+            and not prepared.get("to")
+        ):
             prepared["to_recipients"] = [{"email": from_address, "name": from_name}]
         return prepared
 
@@ -1016,7 +1162,9 @@ class GatewayRuntime:
         message = request_record.get("message")
         if not isinstance(message, dict):
             return False
-        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        metadata = (
+            message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        )
         return bool(
             self._safe_text(metadata.get("thread_id"))
             and self._safe_text(metadata.get("message_id"))
@@ -1028,7 +1176,9 @@ class GatewayRuntime:
         original_content: str,
         process_output: dict[str, Any],
     ) -> str:
-        summary = self._safe_text(process_output.get("summary")) or self._safe_text(process_output.get("response"))
+        summary = self._safe_text(process_output.get("summary")) or self._safe_text(
+            process_output.get("response")
+        )
         if not summary:
             return original_content
 
@@ -1037,16 +1187,30 @@ class GatewayRuntime:
             if isinstance(process_output.get("matched_instruction"), dict)
             else None
         )
-        matched_instructions = process_output.get("matched_instructions") if isinstance(process_output.get("matched_instructions"), list) else []
+        matched_instructions = (
+            process_output.get("matched_instructions")
+            if isinstance(process_output.get("matched_instructions"), list)
+            else []
+        )
         if not matched_instructions and matched_instruction:
             matched_instructions = [matched_instruction]
-        auto_reply = process_output.get("auto_reply") if isinstance(process_output.get("auto_reply"), dict) else None
-        attachments = process_output.get("attachments") if isinstance(process_output.get("attachments"), list) else []
+        auto_reply = (
+            process_output.get("auto_reply")
+            if isinstance(process_output.get("auto_reply"), dict)
+            else None
+        )
+        attachments = (
+            process_output.get("attachments")
+            if isinstance(process_output.get("attachments"), list)
+            else []
+        )
         subject = self._safe_text(process_output.get("subject")) or None
         trusted_sender = bool(process_output.get("trusted_sender"))
         sender_role = self._safe_text(process_output.get("sender_role")) or "external"
         from_address = self._safe_text(process_output.get("from_address")) or None
-        instruction_match_reason = self._safe_text(process_output.get("instruction_match_reason")) or None
+        instruction_match_reason = (
+            self._safe_text(process_output.get("instruction_match_reason")) or None
+        )
 
         lines = [
             "The email specialist already processed this inbound email thread.",
@@ -1076,10 +1240,18 @@ class GatewayRuntime:
             )
             for item in matched_instructions[:4]:
                 label = self._safe_text(item.get("label")) or "standing instruction"
-                raw_instruction = self._safe_text(item.get("raw_user_instruction")) or None
-                behavior = item.get("behavior") if isinstance(item.get("behavior"), dict) else {}
+                raw_instruction = (
+                    self._safe_text(item.get("raw_user_instruction")) or None
+                )
+                behavior = (
+                    item.get("behavior")
+                    if isinstance(item.get("behavior"), dict)
+                    else {}
+                )
                 mode = self._safe_text(behavior.get("mode")) or "notify_only"
-                completion_mode = self._safe_text(behavior.get("completion_mode")) or "perpetual"
+                completion_mode = (
+                    self._safe_text(behavior.get("completion_mode")) or "perpetual"
+                )
                 lines.append(f"- {label} | mode={mode} | completion={completion_mode}")
                 if raw_instruction:
                     lines.append(f"  User instruction: {raw_instruction}")
@@ -1091,7 +1263,9 @@ class GatewayRuntime:
                     ]
                 )
         if auto_reply:
-            auto_reply_status = self._safe_text(auto_reply.get("delivery_status")) or ("sent" if bool(auto_reply.get("sent")) else "")
+            auto_reply_status = self._safe_text(auto_reply.get("delivery_status")) or (
+                "sent" if bool(auto_reply.get("sent")) else ""
+            )
             lines.append(
                 "An automatic reply was already sent by the email specialist."
                 if auto_reply_status == "sent"
@@ -1128,7 +1302,9 @@ class GatewayRuntime:
                 "delivery_target": resolved_channel,
                 "resolved_channel": resolved_channel,
                 "platform": self._channel_platform(resolved_channel) or "desktop",
-                "matched_by": "current_channel" if normalized_current else "desktop_default",
+                "matched_by": "current_channel"
+                if normalized_current
+                else "desktop_default",
             }
 
         if normalized_target == "current":
@@ -1137,7 +1313,9 @@ class GatewayRuntime:
                 "delivery_target": normalized_target,
                 "resolved_channel": resolved_channel,
                 "platform": self._channel_platform(resolved_channel) or "desktop",
-                "matched_by": "current_channel" if normalized_current else "desktop_default",
+                "matched_by": "current_channel"
+                if normalized_current
+                else "desktop_default",
             }
 
         if ":" in normalized_target:
@@ -1164,7 +1342,9 @@ class GatewayRuntime:
                 "matched_by": "desktop_alias",
             }
 
-        resolved_channel = self._preferred_linked_channel(platform, current_channel=normalized_current)
+        resolved_channel = self._preferred_linked_channel(
+            platform, current_channel=normalized_current
+        )
         if resolved_channel:
             return {
                 "delivery_target": platform,
@@ -1173,7 +1353,10 @@ class GatewayRuntime:
                 "matched_by": "linked_channel",
             }
 
-        if normalized_fallback and self._channel_platform(normalized_fallback) == platform:
+        if (
+            normalized_fallback
+            and self._channel_platform(normalized_fallback) == platform
+        ):
             return {
                 "delivery_target": platform,
                 "resolved_channel": normalized_fallback,
@@ -1185,26 +1368,36 @@ class GatewayRuntime:
             f"No linked {platform} channel is available yet. Ask from that channel first or provide an exact channel."
         )
 
-    def _compact_scheduler_working_set(self, working_set: dict[str, Any] | None) -> dict[str, Any] | None:
+    def _compact_scheduler_working_set(
+        self, working_set: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
         if not isinstance(working_set, dict):
             return None
         snapshot: dict[str, Any] = {}
         goal = self._safe_text(working_set.get("goal"))
         if goal:
             snapshot["goal"] = self._bounded_excerpt(goal, limit=240)
-        active_workstreams = self._normalize_string_list(working_set.get("active_workstreams"), limit=4)
+        active_workstreams = self._normalize_string_list(
+            working_set.get("active_workstreams"), limit=4
+        )
         if active_workstreams:
             snapshot["active_workstreams"] = active_workstreams
         open_loops = self._normalize_string_list(working_set.get("open_loops"), limit=4)
         if open_loops:
             snapshot["open_loops"] = open_loops
-        active_task_refs = self._normalize_string_list(working_set.get("active_task_refs"), limit=4)
+        active_task_refs = self._normalize_string_list(
+            working_set.get("active_task_refs"), limit=4
+        )
         if active_task_refs:
             snapshot["active_task_refs"] = active_task_refs
-        focus_entities = self._normalize_entity_list(working_set.get("current_focus_entities"), limit=4)
+        focus_entities = self._normalize_entity_list(
+            working_set.get("current_focus_entities"), limit=4
+        )
         if focus_entities:
             snapshot["current_focus_entities"] = [
-                self._safe_text(item.get("label")) or self._safe_text(item.get("id")) or "entity"
+                self._safe_text(item.get("label"))
+                or self._safe_text(item.get("id"))
+                or "entity"
                 for item in focus_entities
             ]
         return snapshot or None
@@ -1228,11 +1421,15 @@ class GatewayRuntime:
         if created_channel:
             packet["created_channel"] = created_channel
         if self._safe_text(context_summary):
-            packet["context_summary"] = self._bounded_excerpt(context_summary, limit=500)
+            packet["context_summary"] = self._bounded_excerpt(
+                context_summary, limit=500
+            )
 
         request_record = None
         normalized_request_id = self._safe_text(created_request_id)
-        if normalized_request_id and isinstance(self.request_records.get(normalized_request_id), dict):
+        if normalized_request_id and isinstance(
+            self.request_records.get(normalized_request_id), dict
+        ):
             request_record = self.request_records[normalized_request_id]
 
         original_request = None
@@ -1241,7 +1438,11 @@ class GatewayRuntime:
         memory_context_excerpt = None
 
         if isinstance(request_record, dict):
-            message = request_record.get("message") if isinstance(request_record.get("message"), dict) else {}
+            message = (
+                request_record.get("message")
+                if isinstance(request_record.get("message"), dict)
+                else {}
+            )
             original_request = self._safe_text(message.get("content"))
             raw_context = request_record.get("assembled_conversation_context")
             prior_context = raw_context if isinstance(raw_context, list) else []
@@ -1261,11 +1462,15 @@ class GatewayRuntime:
                 if isinstance(metadata.get("active_working_set"), dict)
                 else None
             )
-            prior_context = self._build_conversation_context(created_session_id, limit=6)
+            prior_context = self._build_conversation_context(
+                created_session_id, limit=6
+            )
 
         original_request = original_request or prompt
         if original_request:
-            packet["original_request"] = self._bounded_excerpt(original_request, limit=500)
+            packet["original_request"] = self._bounded_excerpt(
+                original_request, limit=500
+            )
 
         normalized_context: list[dict[str, str]] = []
         for item in prior_context[-4:]:
@@ -1289,7 +1494,9 @@ class GatewayRuntime:
             packet["memory_context_excerpt"] = memory_context_excerpt
         return packet or None
 
-    def _scheduler_context_conversation(self, context_packet: dict[str, Any] | None) -> list[dict[str, str]]:
+    def _scheduler_context_conversation(
+        self, context_packet: dict[str, Any] | None
+    ) -> list[dict[str, str]]:
         if not isinstance(context_packet, dict):
             return []
         raw_tail = context_packet.get("conversation_tail")
@@ -1306,7 +1513,9 @@ class GatewayRuntime:
             normalized.append({"role": role, "content": content})
         return normalized
 
-    def _render_scheduler_context_block(self, context_packet: dict[str, Any] | None) -> str | None:
+    def _render_scheduler_context_block(
+        self, context_packet: dict[str, Any] | None
+    ) -> str | None:
         if not isinstance(context_packet, dict):
             return None
 
@@ -1340,16 +1549,22 @@ class GatewayRuntime:
             goal = self._safe_text(working_set.get("goal"))
             if goal:
                 lines.extend(["", f"- Goal at creation: {goal}"])
-            active_workstreams = self._normalize_string_list(working_set.get("active_workstreams"), limit=4)
+            active_workstreams = self._normalize_string_list(
+                working_set.get("active_workstreams"), limit=4
+            )
             if active_workstreams:
                 lines.extend(["", "- Active workstreams at creation:"])
                 lines.extend(f"  - {item}" for item in active_workstreams)
-            open_loops = self._normalize_string_list(working_set.get("open_loops"), limit=4)
+            open_loops = self._normalize_string_list(
+                working_set.get("open_loops"), limit=4
+            )
             if open_loops:
                 lines.extend(["", "- Open loops at creation:"])
                 lines.extend(f"  - {item}" for item in open_loops)
 
-        memory_context_excerpt = self._safe_text(context_packet.get("memory_context_excerpt"))
+        memory_context_excerpt = self._safe_text(
+            context_packet.get("memory_context_excerpt")
+        )
         if memory_context_excerpt:
             lines.extend(["", "### Memory Snapshot", memory_context_excerpt])
 
@@ -1367,9 +1582,13 @@ class GatewayRuntime:
             return None
         return "\n\n".join(normalized_blocks)
 
-    def _scheduler_record(self, record: dict[str, Any], *, include_history: bool = False) -> dict[str, Any]:
+    def _scheduler_record(
+        self, record: dict[str, Any], *, include_history: bool = False
+    ) -> dict[str, Any]:
         payload = dict(record)
-        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        metadata = (
+            payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        )
         payload["label"] = self._safe_text(payload.get("name")) or ""
         payload["cron_expression"] = self._safe_text(payload.get("cron_expr")) or ""
         payload["next_fire_local"] = render_local_fire_time(
@@ -1381,19 +1600,31 @@ class GatewayRuntime:
             self._safe_text(payload.get("timezone")) or self.current_user_timezone(),
         )
         payload["prompt"] = self._safe_text(metadata.get("prompt"))
-        payload["delivery_target"] = self._safe_text(metadata.get("delivery_target")) or None
-        payload["delivery_channel"] = self._safe_text(metadata.get("delivery_channel")) or "desktop"
+        payload["delivery_target"] = (
+            self._safe_text(metadata.get("delivery_target")) or None
+        )
+        payload["delivery_channel"] = (
+            self._safe_text(metadata.get("delivery_channel")) or "desktop"
+        )
         payload["resolved_delivery_channel"] = payload["delivery_channel"]
         payload["one_shot"] = bool(metadata.get("one_shot"))
         payload["created_by"] = self._safe_text(metadata.get("created_by"))
-        payload["created_request_id"] = self._safe_text(metadata.get("created_request_id"))
-        payload["created_session_id"] = self._safe_text(metadata.get("created_session_id"))
+        payload["created_request_id"] = self._safe_text(
+            metadata.get("created_request_id")
+        )
+        payload["created_session_id"] = self._safe_text(
+            metadata.get("created_session_id")
+        )
         payload["created_channel"] = self._safe_text(metadata.get("created_channel"))
         payload["explicit_timezone"] = bool(metadata.get("explicit_timezone"))
-        context_packet = metadata.get("context_packet") if isinstance(metadata.get("context_packet"), dict) else {}
-        payload["context_summary"] = self._safe_text(metadata.get("context_summary")) or self._safe_text(
-            context_packet.get("context_summary")
+        context_packet = (
+            metadata.get("context_packet")
+            if isinstance(metadata.get("context_packet"), dict)
+            else {}
         )
+        payload["context_summary"] = self._safe_text(
+            metadata.get("context_summary")
+        ) or self._safe_text(context_packet.get("context_summary"))
         if include_history:
             payload["history"] = self.scheduler_store.list_cron_history(
                 self._safe_text(payload.get("cron_id")) or "",
@@ -1401,21 +1632,33 @@ class GatewayRuntime:
             )
         return payload
 
-    def _list_scheduler_crons(self, *, include_system: bool, active_only: bool) -> list[dict[str, Any]]:
+    def _list_scheduler_crons(
+        self, *, include_system: bool, active_only: bool
+    ) -> list[dict[str, Any]]:
         records = self.scheduler_store.list_crons()
         if not include_system:
-            records = [item for item in records if self._safe_text(item.get("kind")) != "system"]
+            records = [
+                item
+                for item in records
+                if self._safe_text(item.get("kind")) != "system"
+            ]
         if active_only:
             records = [
-                item for item in records
+                item
+                for item in records
                 if bool(self._safe_text(item.get("next_fire_at")) or item.get("paused"))
             ]
         return [self._scheduler_record(item, include_history=False) for item in records]
 
-    def _cron_execution_identity(self, cron_id: str, scheduled_for: str | None) -> tuple[str, str]:
+    def _cron_execution_identity(
+        self, cron_id: str, scheduled_for: str | None
+    ) -> tuple[str, str]:
         base = f"{cron_id}:{scheduled_for or 'unscheduled'}".encode("utf-8")
         digest = hashlib.sha256(base).hexdigest()[:16]
-        return (f"req_cron_{digest}", f"cron:{cron_id}:{scheduled_for or 'unscheduled'}")
+        return (
+            f"req_cron_{digest}",
+            f"cron:{cron_id}:{scheduled_for or 'unscheduled'}",
+        )
 
     async def create_scheduler_cron(
         self,
@@ -1443,7 +1686,11 @@ class GatewayRuntime:
         normalized_label = self._safe_text(label)
         normalized_prompt = self._safe_text(prompt)
         normalized_cron_expression = self._safe_text(cron_expression)
-        if not normalized_label or not normalized_prompt or not normalized_cron_expression:
+        if (
+            not normalized_label
+            or not normalized_prompt
+            or not normalized_cron_expression
+        ):
             raise ValueError("label, cron_expression, and prompt are required")
 
         effective_timezone = self._scheduler_effective_timezone(timezone_name)
@@ -1452,12 +1699,15 @@ class GatewayRuntime:
             effective_timezone,
         )
         resolution = self.resolve_channel_target(
-            delivery_target=self._safe_text(delivery_target) or self._safe_text(delivery_channel),
+            delivery_target=self._safe_text(delivery_target)
+            or self._safe_text(delivery_channel),
             current_channel=self._safe_text(created_channel),
             fallback_channel=self._safe_text(delivery_channel),
         )
         normalized_delivery_target = self._safe_text(resolution.get("delivery_target"))
-        normalized_delivery_channel = self._safe_text(resolution.get("resolved_channel")) or "desktop"
+        normalized_delivery_channel = (
+            self._safe_text(resolution.get("resolved_channel")) or "desktop"
+        )
         context_packet = self._build_scheduler_context_packet(
             prompt=normalized_prompt,
             created_request_id=self._safe_text(created_request_id),
@@ -1505,22 +1755,31 @@ class GatewayRuntime:
             self._scheduler_wakeup.set()
         return deleted
 
-    async def _build_scheduler_request_record(self, cron: dict[str, Any]) -> dict[str, Any]:
+    async def _build_scheduler_request_record(
+        self, cron: dict[str, Any]
+    ) -> dict[str, Any]:
         cron_id = self._safe_text(cron.get("cron_id")) or ""
-        metadata = cron.get("metadata") if isinstance(cron.get("metadata"), dict) else {}
+        metadata = (
+            cron.get("metadata") if isinstance(cron.get("metadata"), dict) else {}
+        )
         prompt = self._safe_text(metadata.get("prompt"))
         resolution = self.resolve_channel_target(
-            delivery_target=self._safe_text(metadata.get("delivery_target")) or self._safe_text(metadata.get("delivery_channel")),
+            delivery_target=self._safe_text(metadata.get("delivery_target"))
+            or self._safe_text(metadata.get("delivery_channel")),
             current_channel=self._safe_text(metadata.get("created_channel")),
             fallback_channel=self._safe_text(metadata.get("delivery_channel")),
         )
         channel = self._safe_text(resolution.get("resolved_channel")) or "desktop"
-        timezone_name = self._safe_text(cron.get("timezone")) or self.current_user_timezone()
+        timezone_name = (
+            self._safe_text(cron.get("timezone")) or self.current_user_timezone()
+        )
         scheduled_for = self._safe_text(cron.get("next_fire_at"))
         if not prompt:
             raise RuntimeError(f"Cron {cron_id} is missing its prompt payload.")
 
-        request_id, idempotency_key = self._cron_execution_identity(cron_id, scheduled_for)
+        request_id, idempotency_key = self._cron_execution_identity(
+            cron_id, scheduled_for
+        )
         session_id = self._current_session_id()
         session_metadata = self._ensure_session_state_seeded(session_id)
         active_working_set = (
@@ -1528,7 +1787,11 @@ class GatewayRuntime:
             if isinstance(session_metadata.get("active_working_set"), dict)
             else None
         )
-        context_packet = metadata.get("context_packet") if isinstance(metadata.get("context_packet"), dict) else None
+        context_packet = (
+            metadata.get("context_packet")
+            if isinstance(metadata.get("context_packet"), dict)
+            else None
+        )
         cron_context_block = self._render_scheduler_context_block(context_packet)
         memory_prompt_context = await self._assemble_memory_prompt_context(query=prompt)
         combined_memory_context = self._join_context_blocks(
@@ -1563,7 +1826,9 @@ class GatewayRuntime:
                     "cron_label": self._safe_text(cron.get("name")),
                     "scheduled_for": scheduled_for,
                     "delivery_channel": channel,
-                    "delivery_target": self._safe_text(resolution.get("delivery_target")),
+                    "delivery_target": self._safe_text(
+                        resolution.get("delivery_target")
+                    ),
                 },
             },
             # Cron jobs should run as fresh tasks. Creation-time chat context stays available in
@@ -1623,11 +1888,17 @@ class GatewayRuntime:
         )
         return request_record
 
-    async def _execute_custom_scheduler_cron(self, cron: dict[str, Any]) -> tuple[str, str, str | None]:
+    async def _execute_custom_scheduler_cron(
+        self, cron: dict[str, Any]
+    ) -> tuple[str, str, str | None]:
         cron_id = self._safe_text(cron.get("cron_id")) or ""
         cron_expr = self._safe_text(cron.get("cron_expr"))
-        timezone_name = self._safe_text(cron.get("timezone")) or self.current_user_timezone()
-        metadata = cron.get("metadata") if isinstance(cron.get("metadata"), dict) else {}
+        timezone_name = (
+            self._safe_text(cron.get("timezone")) or self.current_user_timezone()
+        )
+        metadata = (
+            cron.get("metadata") if isinstance(cron.get("metadata"), dict) else {}
+        )
         one_shot = bool(metadata.get("one_shot"))
         if not cron_expr:
             raise RuntimeError(f"Cron {cron_id} is missing its cron expression.")
@@ -1640,7 +1911,11 @@ class GatewayRuntime:
         if not one_shot:
             after = None
             if scheduled_for:
-                text = scheduled_for[:-1] + "+00:00" if scheduled_for.endswith("Z") else scheduled_for
+                text = (
+                    scheduled_for[:-1] + "+00:00"
+                    if scheduled_for.endswith("Z")
+                    else scheduled_for
+                )
                 try:
                     after = datetime.fromisoformat(text)
                 except ValueError:
@@ -1652,9 +1927,7 @@ class GatewayRuntime:
             )
         label = self._safe_text(cron.get("name")) or cron_id
         summary = (
-            f"Reminder ran: {label}"
-            if one_shot else
-            f"Scheduled task ran: {label}"
+            f"Reminder ran: {label}" if one_shot else f"Scheduled task ran: {label}"
         )
         return ("completed", summary, next_fire_at)
 
@@ -1684,24 +1957,37 @@ class GatewayRuntime:
             next_fire_at = None
             try:
                 if cron_id == SYSTEM_CRON_DAILY_ROLLOVER:
-                    await self._finalize_rollover_sessions(current_session_id=self._current_session_id())
+                    await self._finalize_rollover_sessions(
+                        current_session_id=self._current_session_id()
+                    )
                     status = "completed"
                     summary = "Daily rollover finalized."
                     next_fire_at = self._next_rollover_fire_at(
                         timezone_name=self.current_user_timezone()
                     )
                 else:
-                    status, summary, next_fire_at = await self._execute_custom_scheduler_cron(cron)
+                    (
+                        status,
+                        summary,
+                        next_fire_at,
+                    ) = await self._execute_custom_scheduler_cron(cron)
             except Exception as exc:
                 logger.exception("gateway.scheduler_cron_failed cron_id=%s", cron_id)
                 status = "failed"
                 summary = str(exc)
-                metadata = cron.get("metadata") if isinstance(cron.get("metadata"), dict) else {}
-                if not bool(metadata.get("one_shot")) and self._safe_text(cron.get("cron_expr")):
+                metadata = (
+                    cron.get("metadata")
+                    if isinstance(cron.get("metadata"), dict)
+                    else {}
+                )
+                if not bool(metadata.get("one_shot")) and self._safe_text(
+                    cron.get("cron_expr")
+                ):
                     try:
                         next_fire_at = compute_next_fire_at(
                             self._safe_text(cron.get("cron_expr")) or "",
-                            self._safe_text(cron.get("timezone")) or self.current_user_timezone(),
+                            self._safe_text(cron.get("timezone"))
+                            or self.current_user_timezone(),
                             after=datetime.now(timezone.utc),
                         )
                     except CronExpressionError:
@@ -1724,8 +2010,12 @@ class GatewayRuntime:
             "heartbeat": self.scheduler_store.get_heartbeat(),
         }
 
-    def list_scheduler_crons(self, *, include_system: bool = True, active_only: bool = False) -> list[dict[str, Any]]:
-        return self._list_scheduler_crons(include_system=include_system, active_only=active_only)
+    def list_scheduler_crons(
+        self, *, include_system: bool = True, active_only: bool = False
+    ) -> list[dict[str, Any]]:
+        return self._list_scheduler_crons(
+            include_system=include_system, active_only=active_only
+        )
 
     def get_scheduler_cron(self, cron_id: str) -> dict[str, Any] | None:
         record = self.scheduler_store.get_cron(cron_id)
@@ -1733,7 +2023,9 @@ class GatewayRuntime:
             return None
         return self._scheduler_record(record, include_history=True)
 
-    def pause_scheduler_cron(self, cron_id: str, *, reason: str | None = None) -> dict[str, Any] | None:
+    def pause_scheduler_cron(
+        self, cron_id: str, *, reason: str | None = None
+    ) -> dict[str, Any] | None:
         record = self.scheduler_store.pause_cron(cron_id, reason=reason)
         if record is None:
             return None
@@ -1743,12 +2035,17 @@ class GatewayRuntime:
     def resume_scheduler_cron(self, cron_id: str) -> dict[str, Any] | None:
         next_fire_at = None
         if cron_id == SYSTEM_CRON_DAILY_ROLLOVER:
-            next_fire_at = self._next_rollover_fire_at(timezone_name=self.current_user_timezone())
+            next_fire_at = self._next_rollover_fire_at(
+                timezone_name=self.current_user_timezone()
+            )
         else:
             existing = self.scheduler_store.get_cron(cron_id)
             if existing is not None:
                 cron_expr = self._safe_text(existing.get("cron_expr"))
-                timezone_name = self._safe_text(existing.get("timezone")) or self.current_user_timezone()
+                timezone_name = (
+                    self._safe_text(existing.get("timezone"))
+                    or self.current_user_timezone()
+                )
                 if cron_expr:
                     try:
                         next_fire_at = compute_next_fire_at(cron_expr, timezone_name)
@@ -1790,7 +2087,9 @@ class GatewayRuntime:
             try:
                 await adapter.start()
                 self.adapter_errors.pop(adapter.platform, None)
-            except Exception as exc:  # pragma: no cover - startup health is environment-dependent
+            except (
+                Exception
+            ) as exc:  # pragma: no cover - startup health is environment-dependent
                 self.adapter_errors[adapter.platform] = str(exc)
 
         await self.reconcile_agent_email_adapter()
@@ -1805,13 +2104,19 @@ class GatewayRuntime:
             try:
                 await adapter.start()
                 self.adapter_errors.pop(adapter.platform, None)
-            except Exception as exc:  # pragma: no cover - startup health is environment-dependent
+            except (
+                Exception
+            ) as exc:  # pragma: no cover - startup health is environment-dependent
                 self.adapter_errors[adapter.platform] = str(exc)
 
-    async def _handle_normalized_incoming_message(self, message: dict[str, Any]) -> dict[str, Any]:
+    async def _handle_normalized_incoming_message(
+        self, message: dict[str, Any]
+    ) -> dict[str, Any]:
         return await self.process_incoming_user_message(message)
 
-    async def process_incoming_user_message(self, message: dict[str, Any]) -> dict[str, Any]:
+    async def process_incoming_user_message(
+        self, message: dict[str, Any]
+    ) -> dict[str, Any]:
         content = str(message.get("content") or "").strip()
         channel = str(message.get("channel") or "").strip()
         metadata = message.get("metadata")
@@ -1823,7 +2128,9 @@ class GatewayRuntime:
         if not isinstance(conversation_context, list):
             conversation_context = []
         route_override = self._normalize_route_override(
-            message.get("route_override") if message.get("route_override") is not None else metadata.get("route_override")
+            message.get("route_override")
+            if message.get("route_override") is not None
+            else metadata.get("route_override")
         )
 
         requested_session_id = self._safe_text(message.get("session_id"))
@@ -1844,12 +2151,16 @@ class GatewayRuntime:
             "channel": channel,
             "conversation_context": conversation_context,
         }
-        if self._channel_platform(channel) == "agent-email" or self._is_email_thread_session(session_id):
+        if self._channel_platform(
+            channel
+        ) == "agent-email" or self._is_email_thread_session(session_id):
             self.session_store.update_session_metadata(
                 session_id,
                 self._email_thread_session_patch(metadata, channel=channel),
             )
-            await self._finalize_rollover_sessions(current_session_id=self._current_session_id())
+            await self._finalize_rollover_sessions(
+                current_session_id=self._current_session_id()
+            )
         else:
             await self._finalize_rollover_sessions(current_session_id=session_id)
         session_metadata = self._ensure_session_state_seeded(session_id)
@@ -1898,7 +2209,9 @@ class GatewayRuntime:
         )
         decision_latency_ms = (time.perf_counter() - decision_started_at) * 1000.0
         classification = routing_decision.classification
-        dispatch_target = "orchestrator" if classification["route"] == "opus" else "gateway"
+        dispatch_target = (
+            "orchestrator" if classification["route"] == "opus" else "gateway"
+        )
         input_artifacts = await self._persist_inbound_artifacts(
             request_id=request_id,
             session_id=session_id,
@@ -1946,7 +2259,9 @@ class GatewayRuntime:
                     role="user",
                     content=content or "[non-text inbound message]",
                     channel=channel,
-                    attachments=metadata.get("attachments") if isinstance(metadata.get("attachments"), list) else None,
+                    attachments=metadata.get("attachments")
+                    if isinstance(metadata.get("attachments"), list)
+                    else None,
                     input_artifacts=input_artifacts,
                 )
             )
@@ -2005,7 +2320,9 @@ class GatewayRuntime:
             final_route=self._safe_text(classification.get("route")) or "opus",
             dispatch_target=dispatch_target,
             confidence=self._coerce_float(classification.get("confidence"), 0.0),
-            signals=classification.get("signals") if isinstance(classification.get("signals"), list) else [],
+            signals=classification.get("signals")
+            if isinstance(classification.get("signals"), list)
+            else [],
             conversation_context=assembled_conversation_context,
             classifier_payload=routing_decision.classifier_payload,
             classifier_metrics=routing_decision.classifier_metrics,
@@ -2022,7 +2339,9 @@ class GatewayRuntime:
         request_id = self._safe_text(request_record.get("request_id"))
         session_id = self._safe_text(request_record.get("session_id"))
         if not channel or not request_id or not session_id:
-            raise ValueError("Request record is missing channel, request_id, or session_id")
+            raise ValueError(
+                "Request record is missing channel, request_id, or session_id"
+            )
 
         channel_adapter = self.registry.get_adapter(channel)
         if channel_adapter is None:
@@ -2064,27 +2383,35 @@ class GatewayRuntime:
             else:
                 email_delivery = None
             self._trace_request_event(
-                request_id=self._safe_text(delivery_event.get("request_id")) or request_id,
-                session_id=self._safe_text(delivery_event.get("session_id")) or session_id,
+                request_id=self._safe_text(delivery_event.get("request_id"))
+                or request_id,
+                session_id=self._safe_text(delivery_event.get("session_id"))
+                or session_id,
                 channel=self._safe_text(delivery_event.get("channel")) or channel,
                 route=self._safe_text(delivery_event.get("route")) or route,
                 event_type=f"delivery.{self._safe_text(delivery_event.get('type')) or 'event'}",
                 stage="delivery",
                 status=trace_status or "delivered",
-                title="Channel delivery completed" if delivery_status == "sent" else "Channel delivery deferred",
+                title="Channel delivery completed"
+                if delivery_status == "sent"
+                else "Channel delivery deferred",
                 detail=(
                     f"Gateway delivery={delivery_status}"
                     + (
                         f"; email delivery={self._safe_text(email_delivery.get('status'))}"
-                        if isinstance(email_delivery, dict) and self._safe_text(email_delivery.get("status"))
+                        if isinstance(email_delivery, dict)
+                        and self._safe_text(email_delivery.get("status"))
                         else ""
                     )
                 ),
                 task_id=self._safe_text(delivery_event.get("task_id")) or None,
-                specialist_receipts=delivery_event.get("specialist_receipts") if isinstance(delivery_event.get("specialist_receipts"), list) else None,
+                specialist_receipts=delivery_event.get("specialist_receipts")
+                if isinstance(delivery_event.get("specialist_receipts"), list)
+                else None,
                 delivery=email_delivery if isinstance(email_delivery, dict) else None,
                 metadata={"gateway_delivery_status": delivery_status},
-                completed=self._safe_text(delivery_event.get("type")) in {"response.complete", "task.failed", "task.cancelled", "error"},
+                completed=self._safe_text(delivery_event.get("type"))
+                in {"response.complete", "task.failed", "task.cancelled", "error"},
             )
             await self._maybe_schedule_delivered_memory_ingest(
                 delivery_event,
@@ -2169,7 +2496,9 @@ class GatewayRuntime:
         except DirectRouteHandoff as handoff:
             handoff_route = self._normalize_route(handoff.route)
             if handoff_route != "opus":
-                raise RuntimeError(f"Unsupported direct-model handoff route: {handoff.route}")
+                raise RuntimeError(
+                    f"Unsupported direct-model handoff route: {handoff.route}"
+                )
             await self._handle_direct_model_handoff_to_opus(
                 request_record=request_record,
                 request_id=request_id,
@@ -2207,16 +2536,33 @@ class GatewayRuntime:
                 f"{normalized_prior_route} requested Opus handoff after a direct response had already started."
             )
 
-        handoff_count = self._coerce_int(request_record.get("direct_model_handoff_count")) or 0
+        handoff_count = (
+            self._coerce_int(request_record.get("direct_model_handoff_count")) or 0
+        )
         if handoff_count >= 1:
-            raise RuntimeError("Direct model requested more than one Opus handoff for the same request.")
+            raise RuntimeError(
+                "Direct model requested more than one Opus handoff for the same request."
+            )
 
-        original_decision_source = self._safe_text(request_record.get("routing_decision_source")) or "model_router"
+        original_decision_source = (
+            self._safe_text(request_record.get("routing_decision_source"))
+            or "model_router"
+        )
         request_record.setdefault("initial_route", normalized_prior_route)
-        request_record.setdefault("initial_routing_decision_source", original_decision_source)
+        request_record.setdefault(
+            "initial_routing_decision_source", original_decision_source
+        )
 
-        classification = dict(request_record.get("classification")) if isinstance(request_record.get("classification"), dict) else {}
-        signals = list(classification.get("signals")) if isinstance(classification.get("signals"), list) else []
+        classification = (
+            dict(request_record.get("classification"))
+            if isinstance(request_record.get("classification"), dict)
+            else {}
+        )
+        signals = (
+            list(classification.get("signals"))
+            if isinstance(classification.get("signals"), list)
+            else []
+        )
         handoff_signal = f"direct_model_handoff:{normalized_prior_route}->opus"
         if handoff_signal not in signals:
             signals.append(handoff_signal)
@@ -2253,14 +2599,20 @@ class GatewayRuntime:
         if active_request is not None:
             active_request.route = "opus"
 
-        message = request_record.get("message") if isinstance(request_record.get("message"), dict) else {}
+        message = (
+            request_record.get("message")
+            if isinstance(request_record.get("message"), dict)
+            else {}
+        )
         query_text = self._safe_text(message.get("content")) or "[empty message]"
         assembled_conversation_context = (
             request_record.get("assembled_conversation_context")
             if isinstance(request_record.get("assembled_conversation_context"), list)
             else None
         )
-        route_override = normalized_prior_route if "manual_route_override" in signals else None
+        route_override = (
+            normalized_prior_route if "manual_route_override" in signals else None
+        )
         sticky_hit = original_decision_source == "sticky_awaiting_reply"
         self.routing_audit_store.append(
             request_id=request_id,
@@ -2362,10 +2714,14 @@ class GatewayRuntime:
         channel = self._safe_text(request_record.get("channel"))
         route = self._safe_text(request_record.get("route")) or "opus"
         if not request_id or not session_id or not channel:
-            raise ValueError("Request record is missing channel, request_id, or session_id")
+            raise ValueError(
+                "Request record is missing channel, request_id, or session_id"
+            )
 
         # Reject if there is already a foreground stream on this channel
-        enforce_channel_guard = self._channel_platform(channel) != "agent-email" and not self._is_email_thread_session(session_id)
+        enforce_channel_guard = self._channel_platform(
+            channel
+        ) != "agent-email" and not self._is_email_thread_session(session_id)
         has_foreground = enforce_channel_guard and any(
             s.foreground and not s.completed and s.channel == channel
             for s in self.active_requests.values()
@@ -2376,7 +2732,11 @@ class GatewayRuntime:
                 "Background it first or wait for it to complete."
             )
 
-        query_text = self._safe_text(request_record.get("query")) or self._safe_text(request_record.get("content")) or ""
+        query_text = (
+            self._safe_text(request_record.get("query"))
+            or self._safe_text(request_record.get("content"))
+            or ""
+        )
         state = ActiveRequest(
             request_id=request_id,
             session_id=session_id,
@@ -2399,7 +2759,9 @@ class GatewayRuntime:
             source_id=self._safe_text(request_record.get("source_id")) or None,
             user_query_excerpt=query_text[:240].strip() or None,
         )
-        state.worker = asyncio.create_task(self._run_request_fulfillment(state, request_record))
+        state.worker = asyncio.create_task(
+            self._run_request_fulfillment(state, request_record)
+        )
 
     async def cancel_active_fulfillment(
         self,
@@ -2411,7 +2773,9 @@ class GatewayRuntime:
     ) -> bool:
         normalized_channel = self._safe_text(channel)
         normalized_task_id = self._safe_text(task_id)
-        normalized_request_id = self._safe_text(target_request_id) or self._safe_text(request_id)
+        normalized_request_id = self._safe_text(target_request_id) or self._safe_text(
+            request_id
+        )
         if not normalized_channel:
             raise ValueError("cancel requires a channel")
         if not normalized_task_id and not normalized_request_id:
@@ -2469,7 +2833,8 @@ class GatewayRuntime:
 
         # Enforce per-session background task limit
         bg_count = sum(
-            1 for s in self.active_requests.values()
+            1
+            for s in self.active_requests.values()
             if not s.foreground and not s.completed and s.session_id == state.session_id
         )
         if bg_count >= self.config.max_background_tasks_per_session:
@@ -2486,13 +2851,17 @@ class GatewayRuntime:
                 "channel": channel,
                 "route": state.route,
                 "user_query_excerpt": state.user_query_excerpt,
-                "partial_content": state.partial_content[:500] if state.partial_content else "",
+                "partial_content": state.partial_content[:500]
+                if state.partial_content
+                else "",
             },
             channel=channel,
         )
         return True
 
-    async def foreground_background_request(self, *, channel: str, request_id: str) -> bool:
+    async def foreground_background_request(
+        self, *, channel: str, request_id: str
+    ) -> bool:
         """Move a background request back to foreground. Returns True on success."""
         state = self.active_requests.get(request_id)
 
@@ -2547,7 +2916,11 @@ class GatewayRuntime:
                 break
         if completed_msg is None:
             return False
-        meta = completed_msg.get("metadata") if isinstance(completed_msg.get("metadata"), dict) else {}
+        meta = (
+            completed_msg.get("metadata")
+            if isinstance(completed_msg.get("metadata"), dict)
+            else {}
+        )
         # Clear the background flag so build_resume_payload won't reconstruct it
         self.session_store.clear_background_flag(session_id, request_id)
         await self._deliver_or_queue_channel_event(
@@ -2614,7 +2987,9 @@ class GatewayRuntime:
             metadata=metadata,
         )
 
-    def record_mobile_device_connection(self, device_id: str, *, channel: str | None = None) -> dict[str, Any]:
+    def record_mobile_device_connection(
+        self, device_id: str, *, channel: str | None = None
+    ) -> dict[str, Any]:
         return self.mobile_device_store.record_connected(device_id, channel=channel)
 
     def record_mobile_device_session(
@@ -2624,12 +2999,18 @@ class GatewayRuntime:
         session_id: str | None,
         channel: str | None = None,
     ) -> dict[str, Any]:
-        return self.mobile_device_store.record_session(device_id, session_id=session_id, channel=channel)
+        return self.mobile_device_store.record_session(
+            device_id, session_id=session_id, channel=channel
+        )
 
-    def record_mobile_device_disconnected(self, device_id: str) -> dict[str, Any] | None:
+    def record_mobile_device_disconnected(
+        self, device_id: str
+    ) -> dict[str, Any] | None:
         return self.mobile_device_store.record_disconnected(device_id)
 
-    async def revoke_mobile_device(self, device_id: str, *, reason: str | None = None) -> dict[str, Any]:
+    async def revoke_mobile_device(
+        self, device_id: str, *, reason: str | None = None
+    ) -> dict[str, Any]:
         record = self.mobile_device_store.revoke_device(device_id, reason=reason)
         adapter = self.registry.adapters.get("mobile")
         if isinstance(adapter, MobileAdapter):
@@ -2640,7 +3021,9 @@ class GatewayRuntime:
             )
         return record
 
-    async def revoke_all_mobile_devices(self, *, reason: str | None = None) -> dict[str, Any]:
+    async def revoke_all_mobile_devices(
+        self, *, reason: str | None = None
+    ) -> dict[str, Any]:
         result = self.mobile_device_store.revoke_all_devices(reason=reason)
         adapter = self.registry.adapters.get("mobile")
         if isinstance(adapter, MobileAdapter):
@@ -2659,7 +3042,9 @@ class GatewayRuntime:
         history = self.session_store.get_history(session_id)
         return [self._hydrate_history_message_for_client(item) for item in history]
 
-    def list_session_request_traces(self, session_id: str, *, limit: int = 40) -> list[dict[str, Any]]:
+    def list_session_request_traces(
+        self, session_id: str, *, limit: int = 40
+    ) -> list[dict[str, Any]]:
         return self.request_trace_store.list_session_traces(session_id, limit=limit)
 
     def get_session_history_page(
@@ -2683,7 +3068,9 @@ class GatewayRuntime:
             "limit": normalized_limit,
             "total_messages": total_messages,
             "has_more": normalized_offset + len(messages) < total_messages,
-            "messages": [self._hydrate_history_message_for_client(item) for item in messages],
+            "messages": [
+                self._hydrate_history_message_for_client(item) for item in messages
+            ],
         }
 
     def search_session_produced_artifacts(
@@ -2726,8 +3113,14 @@ class GatewayRuntime:
             for turn in self.session_store.list_all_turn_ledger(current_session_id):
                 if not isinstance(turn, dict):
                     continue
-                metadata = turn.get("metadata") if isinstance(turn.get("metadata"), dict) else {}
-                produced_artifacts = self._normalize_produced_artifact_list(metadata.get("produced_artifacts"))
+                metadata = (
+                    turn.get("metadata")
+                    if isinstance(turn.get("metadata"), dict)
+                    else {}
+                )
+                produced_artifacts = self._normalize_produced_artifact_list(
+                    metadata.get("produced_artifacts")
+                )
                 for artifact in produced_artifacts:
                     if not isinstance(artifact, dict):
                         continue
@@ -2742,7 +3135,9 @@ class GatewayRuntime:
                         turn_entry=turn,
                         artifact=artifact,
                     )
-                    score = self._score_recalled_artifact(record, query=normalized_query, query_tokens=query_tokens)
+                    score = self._score_recalled_artifact(
+                        record, query=normalized_query, query_tokens=query_tokens
+                    )
                     if normalized_query and score <= 0:
                         continue
                     scored.append((score, record))
@@ -2775,7 +3170,11 @@ class GatewayRuntime:
         all_sessions: bool = False,
     ) -> dict[str, Any]:
         normalized_session_id = self._safe_text(session_id)
-        normalized_ids = [self._safe_text(item) for item in (artifact_ids or []) if self._safe_text(item)]
+        normalized_ids = [
+            self._safe_text(item)
+            for item in (artifact_ids or [])
+            if self._safe_text(item)
+        ]
         if not normalized_ids:
             return {
                 "session_id": normalized_session_id,
@@ -2811,13 +3210,23 @@ class GatewayRuntime:
             for turn in self.session_store.list_all_turn_ledger(current_session_id):
                 if not isinstance(turn, dict):
                     continue
-                metadata = turn.get("metadata") if isinstance(turn.get("metadata"), dict) else {}
-                produced_artifacts = self._normalize_produced_artifact_list(metadata.get("produced_artifacts"))
+                metadata = (
+                    turn.get("metadata")
+                    if isinstance(turn.get("metadata"), dict)
+                    else {}
+                )
+                produced_artifacts = self._normalize_produced_artifact_list(
+                    metadata.get("produced_artifacts")
+                )
                 for artifact in produced_artifacts:
                     if not isinstance(artifact, dict):
                         continue
                     artifact_id = self._safe_text(artifact.get("artifact_id")) or ""
-                    if not artifact_id or artifact_id not in targets or artifact_id in seen:
+                    if (
+                        not artifact_id
+                        or artifact_id not in targets
+                        or artifact_id in seen
+                    ):
                         continue
                     record = self._build_recalled_artifact_record(
                         session_id=current_session_id,
@@ -2845,7 +3254,9 @@ class GatewayRuntime:
                                 "session_id": record.get("session_id"),
                                 "request_id": record.get("request_id"),
                                 "turn_id": record.get("turn_id"),
-                                "assistant_message_id": record.get("assistant_message_id"),
+                                "assistant_message_id": record.get(
+                                    "assistant_message_id"
+                                ),
                                 "route": record.get("route"),
                                 "label": record.get("filename"),
                                 "summary": record.get("assistant_outcome"),
@@ -2877,10 +3288,14 @@ class GatewayRuntime:
         payload = self._normalize_usage_event(event)
         inserted = self.usage_store.append(payload)
         metrics_key = "persisted_events" if inserted else "deduplicated_events"
-        self._usage_queue_metrics[metrics_key] = self._usage_queue_metrics.get(metrics_key, 0) + 1
+        self._usage_queue_metrics[metrics_key] = (
+            self._usage_queue_metrics.get(metrics_key, 0) + 1
+        )
         return inserted
 
-    def submit_usage_event(self, event: UsageEvent | dict[str, Any]) -> UsageSubmitResult:
+    def submit_usage_event(
+        self, event: UsageEvent | dict[str, Any]
+    ) -> UsageSubmitResult:
         payload = self._normalize_usage_event(event)
         queue = self._usage_event_queue
         worker_active = self._usage_worker is not None and not self._usage_worker.done()
@@ -2888,7 +3303,9 @@ class GatewayRuntime:
             try:
                 queue.put_nowait(payload)
                 queue_depth = queue.qsize()
-                self._usage_queue_metrics["queued_events"] = self._usage_queue_metrics.get("queued_events", 0) + 1
+                self._usage_queue_metrics["queued_events"] = (
+                    self._usage_queue_metrics.get("queued_events", 0) + 1
+                )
                 self._usage_queue_metrics["max_queue_depth"] = max(
                     self._usage_queue_metrics.get("max_queue_depth", 0),
                     queue_depth,
@@ -2929,15 +3346,21 @@ class GatewayRuntime:
     def capability_wishlist_recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
         return self.capability_wishlist_service.list_recent(limit=limit)
 
-    async def capability_wishlist_get(self, capability_id: str) -> dict[str, Any] | None:
+    async def capability_wishlist_get(
+        self, capability_id: str
+    ) -> dict[str, Any] | None:
         return await self.capability_wishlist_service.get_item(capability_id)
 
-    async def capability_wishlist_search(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def capability_wishlist_search(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
         query = self._safe_text(payload.get("query"))
         limit = self._coerce_int(payload.get("limit")) or 3
         return await self.capability_wishlist_service.search(query=query, limit=limit)
 
-    async def capability_wishlist_capture(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def capability_wishlist_capture(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
         return await self.capability_wishlist_service.capture(
             title=self._safe_text(payload.get("title")),
             summary=self._safe_text(payload.get("summary")),
@@ -2952,7 +3375,9 @@ class GatewayRuntime:
             task_id=self._safe_text(payload.get("task_id")) or None,
             route=self._safe_text(payload.get("route")) or None,
             created_by=self._safe_text(payload.get("created_by")) or None,
-            metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+            metadata=payload.get("metadata")
+            if isinstance(payload.get("metadata"), dict)
+            else {},
         )
 
     def _record_local_usage_event(self, event: UsageEvent | dict[str, Any]) -> None:
@@ -2974,7 +3399,9 @@ class GatewayRuntime:
             logger.exception("gateway.usage_log_failed")
 
     def _normalize_usage_event(self, event: UsageEvent | dict[str, Any]) -> UsageEvent:
-        payload = event if isinstance(event, UsageEvent) else UsageEvent.model_validate(event)
+        payload = (
+            event if isinstance(event, UsageEvent) else UsageEvent.model_validate(event)
+        )
         owner_user_id = self._safe_text(self.config.owner_user_id) or None
         if owner_user_id is None:
             return payload
@@ -3044,7 +3471,9 @@ class GatewayRuntime:
             "owner_user_id": self._safe_text(self.config.owner_user_id) or None,
             "queue_depth": queue.qsize() if queue is not None else 0,
             "queue_max_size": self.config.usage_queue_max_size,
-            "worker_running": bool(self._usage_worker is not None and not self._usage_worker.done()),
+            "worker_running": bool(
+                self._usage_worker is not None and not self._usage_worker.done()
+            ),
             "queue_metrics": dict(self._usage_queue_metrics),
         }
 
@@ -3073,7 +3502,11 @@ class GatewayRuntime:
                 llm_call_placed_at=llm_call_placed_at,
                 started_perf_counter=time.perf_counter(),
             )
-        metrics = router_response.get("metrics") if isinstance(router_response.get("metrics"), dict) else {}
+        metrics = (
+            router_response.get("metrics")
+            if isinstance(router_response.get("metrics"), dict)
+            else {}
+        )
         event = build_usage_event(
             metered_call=metered_call,
             source_component="model_router",
@@ -3084,7 +3517,10 @@ class GatewayRuntime:
             operation="model_router.classify",
             model_key=model_key,
             request_id=request_id,
-            provider_request_id=self._safe_text(router_response.get("provider_request_id")) or None,
+            provider_request_id=self._safe_text(
+                router_response.get("provider_request_id")
+            )
+            or None,
             raw_usage=raw_usage,
             success=True,
             latency_ms=self._coerce_int(metrics.get("rtt_ms")),
@@ -3134,7 +3570,8 @@ class GatewayRuntime:
                 model=model or None,
                 usage_kind=self._safe_text(payload.get("usage_kind")) or None,
                 request_id=request_id,
-                provider_request_id=self._safe_text(payload.get("provider_request_id")) or None,
+                provider_request_id=self._safe_text(payload.get("provider_request_id"))
+                or None,
                 raw_usage=payload.get("raw_usage"),
                 success=bool(payload.get("success", True)),
                 error_code=self._safe_text(payload.get("error_code")) or None,
@@ -3149,7 +3586,9 @@ class GatewayRuntime:
 
         return recorder
 
-    def _merge_usage_metadata(self, primary: dict[str, Any] | None, secondary: Any) -> Any:
+    def _merge_usage_metadata(
+        self, primary: dict[str, Any] | None, secondary: Any
+    ) -> Any:
         if primary is None and secondary is None:
             return None
         if primary is None:
@@ -3197,7 +3636,9 @@ class GatewayRuntime:
             self.session_store.clear_awaiting_reply(sticky_message["message_id"])
             return RoutingDecision(
                 classification={
-                    "route": self._normalize_route(self._safe_text(sticky_message.get("route")) or "opus"),
+                    "route": self._normalize_route(
+                        self._safe_text(sticky_message.get("route")) or "opus"
+                    ),
                     "needs_latest": False,
                     "needs_citations": False,
                     "is_task": False,
@@ -3223,7 +3664,11 @@ class GatewayRuntime:
                 },
                 decision_source="media_attachments",
             )
-        if (not content or content.startswith("[")) and isinstance(attachments, list) and attachments:
+        if (
+            (not content or content.startswith("["))
+            and isinstance(attachments, list)
+            and attachments
+        ):
             return RoutingDecision(
                 classification={
                     "route": "opus",
@@ -3243,7 +3688,9 @@ class GatewayRuntime:
                 conversation_context=conversation_context,
                 memory_context=memory_context,
             )
-        except Exception as exc:  # pragma: no cover - depends on external service availability
+        except (
+            Exception
+        ) as exc:  # pragma: no cover - depends on external service availability
             return RoutingDecision(
                 classification={
                     "route": "opus",
@@ -3261,30 +3708,44 @@ class GatewayRuntime:
 
         classification = router_response.get("classification")
         if not isinstance(classification, dict):
-            raise RuntimeError("Model router returned an invalid classification payload")
+            raise RuntimeError(
+                "Model router returned an invalid classification payload"
+            )
 
         normalized_classification = {
-            "route": self._normalize_route(self._safe_text(classification.get("route")) or "opus"),
+            "route": self._normalize_route(
+                self._safe_text(classification.get("route")) or "opus"
+            ),
             "needs_latest": bool(classification.get("needs_latest")),
             "needs_citations": bool(classification.get("needs_citations")),
             "is_task": bool(classification.get("is_task")),
             "is_continuation": bool(classification.get("is_continuation")),
             "confidence": self._coerce_float(classification.get("confidence"), 0.0),
-            "signals": classification.get("signals") if isinstance(classification.get("signals"), list) else [],
+            "signals": classification.get("signals")
+            if isinstance(classification.get("signals"), list)
+            else [],
         }
         classifier_metrics = router_response.get("metrics")
         classifier_latency_ms = None
         if isinstance(classifier_metrics, dict):
-            classifier_latency_ms = self._coerce_float(classifier_metrics.get("rtt_ms"), 0.0)
+            classifier_latency_ms = self._coerce_float(
+                classifier_metrics.get("rtt_ms"), 0.0
+            )
 
         return RoutingDecision(
             classification=normalized_classification,
             decision_source="model_router",
             classifier_payload=router_response,
-            classifier_metrics=classifier_metrics if isinstance(classifier_metrics, dict) else None,
-            classifier_model=self._safe_text(router_response.get("classifier_model")) or None,
+            classifier_metrics=classifier_metrics
+            if isinstance(classifier_metrics, dict)
+            else None,
+            classifier_model=self._safe_text(router_response.get("classifier_model"))
+            or None,
             classifier_latency_ms=classifier_latency_ms,
-            raw_classifier_output=self._safe_text(router_response.get("raw_classifier_output")) or None,
+            raw_classifier_output=self._safe_text(
+                router_response.get("raw_classifier_output")
+            )
+            or None,
         )
 
     def _resolve_session_id(self, requested_session_id: Any) -> str:
@@ -3329,7 +3790,9 @@ class GatewayRuntime:
             return []
         return self._normalize_conversation_context(fallback_context)[:limit]
 
-    def _normalize_conversation_context(self, conversation_context: list[dict[str, Any]]) -> list[dict[str, str]]:
+    def _normalize_conversation_context(
+        self, conversation_context: list[dict[str, Any]]
+    ) -> list[dict[str, str]]:
         normalized: list[dict[str, str]] = []
         for item in conversation_context:
             if not isinstance(item, dict):
@@ -3384,13 +3847,17 @@ class GatewayRuntime:
         seeded_working_set = {
             "session_id": session_id,
             "goal": self._safe_text(carry_forward.get("goal")) or "",
-            "active_workstreams": self._normalize_string_list(carry_forward.get("active_workstreams")),
+            "active_workstreams": self._normalize_string_list(
+                carry_forward.get("active_workstreams")
+            ),
             "recent_decisions": [],
             "open_loops": self._normalize_string_list(carry_forward.get("open_loops")),
             "current_focus_entities": self._normalize_entity_list(
                 carry_forward.get("current_focus_entities")
             ),
-            "active_task_refs": self._normalize_string_list(carry_forward.get("active_task_refs")),
+            "active_task_refs": self._normalize_string_list(
+                carry_forward.get("active_task_refs")
+            ),
             "pending_artifact_pointers": [],
             "recent_document_artifacts": [],
             "recent_spreadsheet_artifacts": [],
@@ -3424,7 +3891,9 @@ class GatewayRuntime:
             return None
         return "\n\n".join(blocks)
 
-    def _render_active_working_set_context(self, working_set: dict[str, Any] | None) -> str | None:
+    def _render_active_working_set_context(
+        self, working_set: dict[str, Any] | None
+    ) -> str | None:
         if not isinstance(working_set, dict):
             return None
 
@@ -3432,7 +3901,9 @@ class GatewayRuntime:
         goal = self._safe_text(working_set.get("goal"))
         if goal:
             lines.extend(["", f"- Goal: {goal}"])
-        active_workstreams = self._normalize_string_list(working_set.get("active_workstreams"))
+        active_workstreams = self._normalize_string_list(
+            working_set.get("active_workstreams")
+        )
         if active_workstreams:
             lines.extend(["", "- Active workstreams:"])
             lines.extend(f"  - {item}" for item in active_workstreams[:6])
@@ -3440,37 +3911,60 @@ class GatewayRuntime:
         if open_loops:
             lines.extend(["", "- Open loops:"])
             lines.extend(f"  - {item}" for item in open_loops[:6])
-        recent_decisions = self._normalize_string_list(working_set.get("recent_decisions"))
+        recent_decisions = self._normalize_string_list(
+            working_set.get("recent_decisions")
+        )
         if recent_decisions:
             lines.extend(["", "- Recent decisions:"])
             lines.extend(f"  - {item}" for item in recent_decisions[:6])
         task_refs = self._normalize_string_list(working_set.get("active_task_refs"))
         if task_refs:
             lines.extend(["", f"- Active task refs: {', '.join(task_refs[:6])}"])
-        preferences = self._normalize_string_list(working_set.get("user_preferences_in_play"))
+        preferences = self._normalize_string_list(
+            working_set.get("user_preferences_in_play")
+        )
         if preferences:
             lines.extend(["", "- User preferences in play:"])
             lines.extend(f"  - {item}" for item in preferences[:6])
-        focus_entities = self._normalize_entity_list(working_set.get("current_focus_entities"))
+        focus_entities = self._normalize_entity_list(
+            working_set.get("current_focus_entities")
+        )
         if focus_entities:
             lines.extend(["", "- Current focus entities:"])
             for entity in focus_entities[:6]:
-                label = self._safe_text(entity.get("label")) or self._safe_text(entity.get("id")) or "entity"
+                label = (
+                    self._safe_text(entity.get("label"))
+                    or self._safe_text(entity.get("id"))
+                    or "entity"
+                )
                 entity_type = self._safe_text(entity.get("type"))
                 if entity_type:
                     lines.append(f"  - {entity_type}: {label}")
                 else:
                     lines.append(f"  - {label}")
-        artifact_refs = self._normalize_string_list(working_set.get("pending_artifact_pointers"))
+        artifact_refs = self._normalize_string_list(
+            working_set.get("pending_artifact_pointers")
+        )
         if artifact_refs:
-            lines.extend(["", f"- Pending artifact pointers: {', '.join(artifact_refs[:6])}"])
-        recent_documents = working_set.get("recent_document_artifacts") if isinstance(working_set.get("recent_document_artifacts"), list) else []
+            lines.extend(
+                ["", f"- Pending artifact pointers: {', '.join(artifact_refs[:6])}"]
+            )
+        recent_documents = (
+            working_set.get("recent_document_artifacts")
+            if isinstance(working_set.get("recent_document_artifacts"), list)
+            else []
+        )
         if recent_documents:
             lines.extend(["", "- Recent parsed documents:"])
             for document in recent_documents[:6]:
                 if not isinstance(document, dict):
                     continue
-                label = self._safe_text(document.get("title")) or self._safe_text(document.get("filename")) or self._safe_text(document.get("artifact_id")) or "document"
+                label = (
+                    self._safe_text(document.get("title"))
+                    or self._safe_text(document.get("filename"))
+                    or self._safe_text(document.get("artifact_id"))
+                    or "document"
+                )
                 parts = [label]
                 doc_id = self._safe_text(document.get("doc_id"))
                 bundle_id = self._safe_text(document.get("parse_bundle_id"))
@@ -3482,7 +3976,11 @@ class GatewayRuntime:
                 if ingest_state:
                     parts.append(f"state={ingest_state}")
                 lines.append("  - " + "; ".join(parts))
-        recent_receipts = working_set.get("recent_tool_receipts") if isinstance(working_set.get("recent_tool_receipts"), list) else []
+        recent_receipts = (
+            working_set.get("recent_tool_receipts")
+            if isinstance(working_set.get("recent_tool_receipts"), list)
+            else []
+        )
         if recent_receipts:
             lines.extend(["", "- Recent tool receipts:"])
             for receipt in recent_receipts[:RECENT_MEMORY_TOOL_RECEIPT_LIMIT]:
@@ -3515,7 +4013,9 @@ class GatewayRuntime:
                 question = self._safe_text(receipt.get("question"))
                 route = self._safe_text(receipt.get("route"))
                 paths = self._normalize_string_list(receipt.get("paths"), limit=4)
-                domains = self._normalize_string_list(receipt.get("source_domains"), limit=3)
+                domains = self._normalize_string_list(
+                    receipt.get("source_domains"), limit=3
+                )
                 source_count = self._coerce_int(receipt.get("source_count"))
                 parts: list[str] = []
                 if question:
@@ -3523,7 +4023,10 @@ class GatewayRuntime:
                 if route:
                     parts.append(f"via {route}")
                 if paths:
-                    parts.append("research=" + ", ".join(self._research_path_label(path) for path in paths))
+                    parts.append(
+                        "research="
+                        + ", ".join(self._research_path_label(path) for path in paths)
+                    )
                 if source_count:
                     parts.append(f"sources={source_count}")
                 if domains:
@@ -3542,9 +4045,13 @@ class GatewayRuntime:
                     continue
                 question = self._safe_text(receipt.get("question"))
                 intent_name = self._safe_text(receipt.get("intent"))
-                agent_label = self._safe_text(receipt.get("agent_label")) or self._safe_text(receipt.get("agent_id"))
+                agent_label = self._safe_text(
+                    receipt.get("agent_label")
+                ) or self._safe_text(receipt.get("agent_id"))
                 activity = self._safe_text(receipt.get("activity"))
-                domains = self._normalize_string_list(receipt.get("source_domains"), limit=3)
+                domains = self._normalize_string_list(
+                    receipt.get("source_domains"), limit=3
+                )
                 source_count = self._coerce_int(receipt.get("source_count"))
                 artifact_count = self._coerce_int(receipt.get("artifact_count"))
                 parts: list[str] = []
@@ -3564,7 +4071,11 @@ class GatewayRuntime:
                     parts.append(f"artifacts={artifact_count}")
                 if parts:
                     lines.append("  - " + "; ".join(parts))
-        contested_claims = working_set.get("contested_memory_claims") if isinstance(working_set.get("contested_memory_claims"), list) else []
+        contested_claims = (
+            working_set.get("contested_memory_claims")
+            if isinstance(working_set.get("contested_memory_claims"), list)
+            else []
+        )
         if contested_claims:
             lines.extend(["", "- Current user corrections against memory:"])
             for claim in contested_claims[:6]:
@@ -3579,7 +4090,9 @@ class GatewayRuntime:
 
         return "\n".join(lines) if len(lines) > 1 else None
 
-    async def _assemble_memory_prompt_context(self, *, query: str) -> MemoryPromptContext:
+    async def _assemble_memory_prompt_context(
+        self, *, query: str
+    ) -> MemoryPromptContext:
         normalized_query = str(query or "").strip()
         if not normalized_query:
             return MemoryPromptContext()
@@ -3596,7 +4109,9 @@ class GatewayRuntime:
                 kinds=self.config.cosmic_memory_passive_kinds,
             )
         except Exception:
-            logger.exception("gateway.memory_context_failed query=%r", normalized_query[:160])
+            logger.exception(
+                "gateway.memory_context_failed query=%r", normalized_query[:160]
+            )
             return MemoryPromptContext()
 
     def _schedule_background_task(self, coroutine, *, name: str) -> None:
@@ -3612,7 +4127,10 @@ class GatewayRuntime:
     ) -> None:
         if delivery_status != "sent":
             return
-        if not self.config.cosmic_memory_ingest_transcripts or not self.memory_client.enabled:
+        if (
+            not self.config.cosmic_memory_ingest_transcripts
+            or not self.memory_client.enabled
+        ):
             return
         if self._safe_text(event.get("type")) != "response.complete":
             return
@@ -3663,7 +4181,11 @@ class GatewayRuntime:
             )
             return
 
-        user_metadata = user_message.get("metadata") if isinstance(user_message.get("metadata"), dict) else {}
+        user_metadata = (
+            user_message.get("metadata")
+            if isinstance(user_message.get("metadata"), dict)
+            else {}
+        )
         assistant_meta = {
             "request_id": request_id,
             "route": self._safe_text(event.get("route")) or "opus",
@@ -3678,7 +4200,9 @@ class GatewayRuntime:
                     "observations": [
                         {
                             "role": "user",
-                            "content": str(user_message.get("content") or "[empty message]"),
+                            "content": str(
+                                user_message.get("content") or "[empty message]"
+                            ),
                             "metadata": user_metadata,
                         },
                         {
@@ -3698,7 +4222,8 @@ class GatewayRuntime:
                     "title": f"Conversation turn {request_id}",
                     "tags": [
                         "conversation_turn",
-                        self._safe_text(channel.split(":", 1)[0] if channel else None) or "unknown_channel",
+                        self._safe_text(channel.split(":", 1)[0] if channel else None)
+                        or "unknown_channel",
                     ],
                     "metadata": {
                         "request_id": request_id,
@@ -3774,7 +4299,13 @@ class GatewayRuntime:
         task_id = self._safe_text(event.get("task_id"))
         channel = self._safe_text(event.get("channel"))
         assistant_content = self._safe_text(event.get("content"))
-        if not request_id or not session_id or not task_id or not channel or not assistant_content:
+        if (
+            not request_id
+            or not session_id
+            or not task_id
+            or not channel
+            or not assistant_content
+        ):
             if task_id:
                 self.session_store.release_task_summary_write_claim(
                     task_id,
@@ -3847,13 +4378,17 @@ class GatewayRuntime:
             return
         if bool(event.get("email_auto_reply_sent")):
             return
-        instruction_ids = self._normalize_string_list(event.get("matched_instruction_ids"), limit=12)
+        instruction_ids = self._normalize_string_list(
+            event.get("matched_instruction_ids"), limit=12
+        )
         if not instruction_ids:
             return
         if self._redis is None:
             return
         self._schedule_background_task(
-            self._record_email_instruction_delivery(event=event, instruction_ids=instruction_ids),
+            self._record_email_instruction_delivery(
+                event=event, instruction_ids=instruction_ids
+            ),
             name="gateway-email-instruction-delivery",
         )
 
@@ -3878,7 +4413,8 @@ class GatewayRuntime:
             input={
                 "action": "record_delivery",
                 "instruction_ids": instruction_ids,
-                "mailbox_address": self._safe_text(event.get("mailbox_address")) or None,
+                "mailbox_address": self._safe_text(event.get("mailbox_address"))
+                or None,
                 "thread_id": self._safe_text(event.get("thread_id")) or None,
                 "message_id": self._safe_text(event.get("message_id")) or None,
                 "request_id": request_id,
@@ -3896,7 +4432,9 @@ class GatewayRuntime:
             source_id=request_id,
             channel=channel or None,
         )
-        task = task.model_copy(update={"signature": sign_task_envelope(task, self.config.signing_secret)})
+        task = task.model_copy(
+            update={"signature": sign_task_envelope(task, self.config.signing_secret)}
+        )
         try:
             await dispatch_task(task, self._redis)
             result = await self._wait_for_agent_terminal_result(
@@ -3951,7 +4489,9 @@ class GatewayRuntime:
         return await self.memory_client.memory_brief(payload)
 
     async def memory_write(self, payload: dict[str, Any]) -> dict[str, Any]:
-        normalized_payload, audit_event = self._normalize_tool_memory_write_payload(payload)
+        normalized_payload, audit_event = self._normalize_tool_memory_write_payload(
+            payload
+        )
         return await self._write_memory_record(
             payload=normalized_payload,
             audit_event=audit_event,
@@ -3959,7 +4499,9 @@ class GatewayRuntime:
         )
 
     async def memory_write_core_fact(self, payload: dict[str, Any]) -> dict[str, Any]:
-        normalized_payload, audit_event = self._normalize_tool_core_fact_payload(payload)
+        normalized_payload, audit_event = self._normalize_tool_core_fact_payload(
+            payload
+        )
         return await self._write_core_fact_record(
             payload=normalized_payload,
             audit_event=audit_event,
@@ -3991,10 +4533,14 @@ class GatewayRuntime:
     async def memory_graph_status(self) -> dict[str, Any]:
         return await self.memory_client.graph_status()
 
-    async def memory_graph_sync(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def memory_graph_sync(
+        self, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         return await self.memory_client.graph_sync(payload)
 
-    async def memory_graph_rebuild(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def memory_graph_rebuild(
+        self, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         return await self.memory_client.graph_rebuild(payload)
 
     def list_memory_write_audit(
@@ -4029,17 +4575,27 @@ class GatewayRuntime:
                 "compaction_packet": None,
                 "metadata": {},
             }
-        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        metadata = (
+            record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        )
         return {
             "session_id": session_id,
             "compacted_summary": record.get("compacted_summary"),
-            "active_working_set": metadata.get("active_working_set") if isinstance(metadata.get("active_working_set"), dict) else None,
-            "carry_forward_packet": metadata.get("carry_forward_packet") if isinstance(metadata.get("carry_forward_packet"), dict) else None,
-            "compaction_packet": metadata.get("compaction_packet") if isinstance(metadata.get("compaction_packet"), dict) else None,
+            "active_working_set": metadata.get("active_working_set")
+            if isinstance(metadata.get("active_working_set"), dict)
+            else None,
+            "carry_forward_packet": metadata.get("carry_forward_packet")
+            if isinstance(metadata.get("carry_forward_packet"), dict)
+            else None,
+            "compaction_packet": metadata.get("compaction_packet")
+            if isinstance(metadata.get("compaction_packet"), dict)
+            else None,
             "metadata": metadata,
         }
 
-    def list_turn_ledger(self, session_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
+    def list_turn_ledger(
+        self, session_id: str, *, limit: int = 20
+    ) -> list[dict[str, Any]]:
         return self.session_store.list_turn_ledger(session_id, limit=limit)
 
     def get_task_notebook(self, task_id: str) -> dict[str, Any] | None:
@@ -4056,15 +4612,23 @@ class GatewayRuntime:
     ) -> dict[str, Any]:
         payload = {
             "session": self.get_session_state(session_id),
-            "turn_ledger": self.session_store.list_turn_ledger(session_id, limit=turn_limit),
-            "raw_history": self.session_store.get_history_tail(session_id, limit=raw_history_limit),
+            "turn_ledger": self.session_store.list_turn_ledger(
+                session_id, limit=turn_limit
+            ),
+            "raw_history": self.session_store.get_history_tail(
+                session_id, limit=raw_history_limit
+            ),
         }
         normalized_task_id = self._safe_text(task_id)
         if normalized_task_id:
-            payload["task_notebook"] = self.session_store.get_task_notebook(normalized_task_id)
+            payload["task_notebook"] = self.session_store.get_task_notebook(
+                normalized_task_id
+            )
         normalized_request_id = self._safe_text(request_id)
         if normalized_request_id:
-            payload["turn"] = self.session_store.get_turn_ledger_entry(normalized_request_id)
+            payload["turn"] = self.session_store.get_turn_ledger_entry(
+                normalized_request_id
+            )
         return payload
 
     async def _maybe_schedule_delivered_turn_finalization(
@@ -4111,7 +4675,11 @@ class GatewayRuntime:
             request_id=request_id,
             role="assistant",
         )
-        request_record = self.request_records.get(request_id) if isinstance(self.request_records.get(request_id), dict) else {}
+        request_record = (
+            self.request_records.get(request_id)
+            if isinstance(self.request_records.get(request_id), dict)
+            else {}
+        )
         turn_entry = self._build_turn_ledger_entry(
             request_id=request_id,
             session_id=session_id,
@@ -4151,10 +4719,19 @@ class GatewayRuntime:
         event: dict[str, Any],
         request_record: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        user_metadata = user_message.get("metadata") if isinstance(user_message.get("metadata"), dict) else {}
-        artifacts = user_metadata.get("input_artifacts") if isinstance(user_metadata.get("input_artifacts"), list) else []
+        user_metadata = (
+            user_message.get("metadata")
+            if isinstance(user_message.get("metadata"), dict)
+            else {}
+        )
+        artifacts = (
+            user_metadata.get("input_artifacts")
+            if isinstance(user_metadata.get("input_artifacts"), list)
+            else []
+        )
         artifact_refs = [
-            self._safe_text(item.get("artifact_id")) or self._safe_text(item.get("path"))
+            self._safe_text(item.get("artifact_id"))
+            or self._safe_text(item.get("path"))
             for item in artifacts
             if isinstance(item, dict)
         ]
@@ -4162,7 +4739,9 @@ class GatewayRuntime:
         for artifact in artifacts:
             if not isinstance(artifact, dict):
                 continue
-            label = self._safe_text(artifact.get("filename")) or self._safe_text(artifact.get("artifact_id"))
+            label = self._safe_text(artifact.get("filename")) or self._safe_text(
+                artifact.get("artifact_id")
+            )
             artifact_id = self._safe_text(artifact.get("artifact_id"))
             if not label and not artifact_id:
                 continue
@@ -4174,14 +4753,27 @@ class GatewayRuntime:
                 }
             )
 
-        route = self._safe_text(event.get("route")) or self._safe_text(assistant_message.get("route") if isinstance(assistant_message, dict) else None) or "opus"
-        assistant_excerpt = self._bounded_excerpt(assistant_message.get("content") if isinstance(assistant_message, dict) else event.get("content"))
+        route = (
+            self._safe_text(event.get("route"))
+            or self._safe_text(
+                assistant_message.get("route")
+                if isinstance(assistant_message, dict)
+                else None
+            )
+            or "opus"
+        )
+        assistant_excerpt = self._bounded_excerpt(
+            assistant_message.get("content")
+            if isinstance(assistant_message, dict)
+            else event.get("content")
+        )
         awaiting_reply = bool(event.get("awaiting_reply"))
         open_loops = [assistant_excerpt] if awaiting_reply and assistant_excerpt else []
         task_id = self._safe_text(event.get("task_id"))
         assistant_metadata = (
             assistant_message.get("metadata")
-            if isinstance(assistant_message, dict) and isinstance(assistant_message.get("metadata"), dict)
+            if isinstance(assistant_message, dict)
+            and isinstance(assistant_message.get("metadata"), dict)
             else {}
         )
         produced_artifacts = self._normalize_produced_artifact_list(
@@ -4191,10 +4783,14 @@ class GatewayRuntime:
             for artifact in produced_artifacts:
                 if not isinstance(artifact, dict):
                     continue
-                artifact_ref = self._safe_text(artifact.get("artifact_id")) or self._safe_text(artifact.get("path"))
+                artifact_ref = self._safe_text(
+                    artifact.get("artifact_id")
+                ) or self._safe_text(artifact.get("path"))
                 if artifact_ref:
                     artifact_refs.append(artifact_ref)
-                label = self._safe_text(artifact.get("filename")) or self._safe_text(artifact.get("artifact_id"))
+                label = self._safe_text(artifact.get("filename")) or self._safe_text(
+                    artifact.get("artifact_id")
+                )
                 if label or artifact_ref:
                     touched_entities.append(
                         {
@@ -4207,10 +4803,14 @@ class GatewayRuntime:
             event.get("research_provenance")
             if isinstance(event.get("research_provenance"), dict)
             else assistant_metadata.get("research_provenance"),
-            fallback_sources=event.get("sources") if isinstance(event.get("sources"), list) else assistant_metadata.get("sources"),
+            fallback_sources=event.get("sources")
+            if isinstance(event.get("sources"), list)
+            else assistant_metadata.get("sources"),
         )
         sources = self._normalize_source_list(
-            event.get("sources") if isinstance(event.get("sources"), list) else assistant_metadata.get("sources"),
+            event.get("sources")
+            if isinstance(event.get("sources"), list)
+            else assistant_metadata.get("sources"),
             limit=8,
         )
         specialist_receipts = self._normalize_specialist_receipts(
@@ -4222,17 +4822,23 @@ class GatewayRuntime:
         for research_label in self._research_tool_summary_labels(research_provenance):
             if research_label not in tool_summary:
                 tool_summary.append(research_label)
-        compact_line_parts = [self._bounded_excerpt(user_message.get("content"), limit=120)]
+        compact_line_parts = [
+            self._bounded_excerpt(user_message.get("content"), limit=120)
+        ]
         if task_id:
             compact_line_parts.append(f"via {route} task {task_id}")
         else:
             compact_line_parts.append(f"via {route}")
         if assistant_excerpt:
-            compact_line_parts.append(f"-> {self._bounded_excerpt(assistant_excerpt, limit=120)}")
+            compact_line_parts.append(
+                f"-> {self._bounded_excerpt(assistant_excerpt, limit=120)}"
+            )
 
-        started_at = self._safe_text(
-            (request_record or {}).get("accepted_at")
-        ) or self._safe_text(user_message.get("created_at")) or utcnow_iso()
+        started_at = (
+            self._safe_text((request_record or {}).get("accepted_at"))
+            or self._safe_text(user_message.get("created_at"))
+            or utcnow_iso()
+        )
         completed_at = utcnow_iso()
 
         return {
@@ -4245,7 +4851,9 @@ class GatewayRuntime:
             "started_at": started_at,
             "completed_at": completed_at,
             "user_message_id": self._safe_text(user_message.get("message_id")),
-            "assistant_message_id": self._safe_text(assistant_message.get("message_id")) if isinstance(assistant_message, dict) else None,
+            "assistant_message_id": self._safe_text(assistant_message.get("message_id"))
+            if isinstance(assistant_message, dict)
+            else None,
             "user_goal": self._bounded_excerpt(user_message.get("content")),
             "user_message_excerpt": self._bounded_excerpt(user_message.get("content")),
             "assistant_outcome": assistant_excerpt,
@@ -4262,13 +4870,17 @@ class GatewayRuntime:
             "compact_line": " ".join(part for part in compact_line_parts if part),
             "metadata": {
                 "awaiting_reply": awaiting_reply,
-                "decision_source": (request_record or {}).get("routing_decision_source"),
+                "decision_source": (request_record or {}).get(
+                    "routing_decision_source"
+                ),
                 "input_artifacts": artifacts,
                 "produced_artifacts": produced_artifacts,
                 "research_provenance": research_provenance,
                 "sources": sources,
                 "specialist_receipts": specialist_receipts,
-                **({"background": True} if assistant_metadata.get("background") else {}),
+                **(
+                    {"background": True} if assistant_metadata.get("background") else {}
+                ),
             },
         }
 
@@ -4310,18 +4922,29 @@ class GatewayRuntime:
                 request_text = self._bounded_excerpt(user_message.get("content"))
             elif isinstance(self.request_records.get(request_id), dict):
                 request_record = self.request_records[request_id]
-                message = request_record.get("message") if isinstance(request_record.get("message"), dict) else {}
+                message = (
+                    request_record.get("message")
+                    if isinstance(request_record.get("message"), dict)
+                    else {}
+                )
                 request_text = self._bounded_excerpt(message.get("content"))
         if request_text and not self._safe_text(notebook.get("goal")):
             notebook["goal"] = request_text
 
-        state_message = self._safe_text(event.get("message")) or self._safe_text(event.get("content")) or self._safe_text(event.get("status")) or ""
+        state_message = (
+            self._safe_text(event.get("message"))
+            or self._safe_text(event.get("content"))
+            or self._safe_text(event.get("status"))
+            or ""
+        )
         if event_type == "task.created":
             notebook["status"] = "active"
             notebook["current_state"] = state_message or "Task created"
         elif event_type == "task.suspended":
             notebook["status"] = "waiting_for_input"
-            notebook["current_state"] = state_message or "Task suspended waiting for input"
+            notebook["current_state"] = (
+                state_message or "Task suspended waiting for input"
+            )
             notebook["open_questions"] = self._normalize_string_list(
                 [
                     *self._normalize_string_list(notebook.get("open_questions")),
@@ -4335,7 +4958,10 @@ class GatewayRuntime:
             notebook["status"] = "waiting_for_input"
             notebook["current_state"] = state_message or "Waiting for user input"
             notebook["open_questions"] = self._normalize_string_list(
-                [*self._normalize_string_list(notebook.get("open_questions")), state_message]
+                [
+                    *self._normalize_string_list(notebook.get("open_questions")),
+                    state_message,
+                ]
             )
         elif event_type == "task.completed":
             notebook["status"] = "completed"
@@ -4344,7 +4970,10 @@ class GatewayRuntime:
             notebook["status"] = "failed"
             notebook["current_state"] = state_message or "Task failed"
             notebook["failures_to_avoid"] = self._normalize_string_list(
-                [*self._normalize_string_list(notebook.get("failures_to_avoid")), state_message]
+                [
+                    *self._normalize_string_list(notebook.get("failures_to_avoid")),
+                    state_message,
+                ]
             )
         elif event_type == "task.cancelled":
             notebook["status"] = "cancelled"
@@ -4353,32 +4982,52 @@ class GatewayRuntime:
         activity_entry = self._build_task_activity_entry(event)
         if activity_entry:
             notebook["activity_log"] = self._normalize_activity_log(
-                [*self._normalize_activity_log(notebook.get("activity_log")), activity_entry],
+                [
+                    *self._normalize_activity_log(notebook.get("activity_log")),
+                    activity_entry,
+                ],
                 limit=16,
             )
 
         if turn_entry is not None:
             notebook["artifact_refs"] = self._normalize_string_list(
                 [
-                    *self._normalize_string_list(notebook.get("artifact_refs"), limit=16),
-                    *self._normalize_string_list(turn_entry.get("artifact_refs"), limit=16),
+                    *self._normalize_string_list(
+                        notebook.get("artifact_refs"), limit=16
+                    ),
+                    *self._normalize_string_list(
+                        turn_entry.get("artifact_refs"), limit=16
+                    ),
                 ],
                 limit=16,
             )
             notebook["files_touched"] = self._normalize_entity_list(
-                [*self._normalize_entity_list(notebook.get("files_touched"), limit=16), *self._normalize_entity_list(turn_entry.get("touched_entities"), limit=16)],
+                [
+                    *self._normalize_entity_list(
+                        notebook.get("files_touched"), limit=16
+                    ),
+                    *self._normalize_entity_list(
+                        turn_entry.get("touched_entities"), limit=16
+                    ),
+                ],
                 limit=16,
             )
             notebook["key_findings"] = self._normalize_string_list(
                 [
-                    *self._normalize_string_list(notebook.get("key_findings"), limit=12),
-                    *self._normalize_string_list(turn_entry.get("accomplished"), limit=12),
+                    *self._normalize_string_list(
+                        notebook.get("key_findings"), limit=12
+                    ),
+                    *self._normalize_string_list(
+                        turn_entry.get("accomplished"), limit=12
+                    ),
                 ],
                 limit=12,
             )
             notebook["compact_history"] = self._normalize_string_list(
                 [
-                    *self._normalize_string_list(notebook.get("compact_history"), limit=12),
+                    *self._normalize_string_list(
+                        notebook.get("compact_history"), limit=12
+                    ),
                     self._safe_text(turn_entry.get("compact_line")),
                 ],
                 limit=12,
@@ -4386,8 +5035,12 @@ class GatewayRuntime:
             if turn_entry.get("open_loops"):
                 notebook["open_questions"] = self._normalize_string_list(
                     [
-                        *self._normalize_string_list(notebook.get("open_questions"), limit=12),
-                        *self._normalize_string_list(turn_entry.get("open_loops"), limit=12),
+                        *self._normalize_string_list(
+                            notebook.get("open_questions"), limit=12
+                        ),
+                        *self._normalize_string_list(
+                            turn_entry.get("open_loops"), limit=12
+                        ),
                     ],
                     limit=12,
                 )
@@ -4395,28 +5048,48 @@ class GatewayRuntime:
         notebook["updated_at"] = utcnow_iso()
         return notebook
 
-    def _build_task_activity_entry(self, event: dict[str, Any]) -> dict[str, Any] | None:
+    def _build_task_activity_entry(
+        self, event: dict[str, Any]
+    ) -> dict[str, Any] | None:
         event_type = self._safe_text(event.get("type")) or ""
         status = self._safe_text(event.get("status"))
         message = self._safe_text(event.get("message"))
-        docs_progress = event.get("docs_progress") if isinstance(event.get("docs_progress"), dict) else None
+        docs_progress = (
+            event.get("docs_progress")
+            if isinstance(event.get("docs_progress"), dict)
+            else None
+        )
         tabular_progress = (
-            event.get("tabular_progress") if isinstance(event.get("tabular_progress"), dict) else None
+            event.get("tabular_progress")
+            if isinstance(event.get("tabular_progress"), dict)
+            else None
         )
         progress_state = tabular_progress or docs_progress
         label = (
-            self._safe_text(progress_state.get("label")) if isinstance(progress_state, dict) else None
-        ) or message or status
+            (
+                self._safe_text(progress_state.get("label"))
+                if isinstance(progress_state, dict)
+                else None
+            )
+            or message
+            or status
+        )
         if not label:
             return None
         kind = (
-            self._safe_text(progress_state.get("kind")) if isinstance(progress_state, dict) else None
+            self._safe_text(progress_state.get("kind"))
+            if isinstance(progress_state, dict)
+            else None
         ) or (
             "task_lifecycle"
             if event_type in {"task.suspended", "task.resumed", "task.input_required"}
             else "generic"
         )
-        stage = self._safe_text(progress_state.get("stage")) if isinstance(progress_state, dict) else None
+        stage = (
+            self._safe_text(progress_state.get("stage"))
+            if isinstance(progress_state, dict)
+            else None
+        )
         return {
             "id": f"activity_{uuid4().hex}",
             "label": label,
@@ -4468,22 +5141,42 @@ class GatewayRuntime:
 
     def _refresh_active_working_set(self, session_id: str) -> dict[str, Any]:
         metadata = self.session_store.get_session_metadata(session_id)
-        carry_forward = metadata.get("carry_forward_packet") if isinstance(metadata.get("carry_forward_packet"), dict) else {}
-        recent_turns = self.session_store.list_turn_ledger(session_id, limit=TURN_LEDGER_WINDOW_SIZE)
-        notebooks = self.session_store.list_task_notebooks(session_id, limit=TASK_NOTEBOOK_WINDOW_SIZE)
-        awaiting_reply_messages = self.session_store.list_awaiting_reply_messages(session_id, limit=8)
+        carry_forward = (
+            metadata.get("carry_forward_packet")
+            if isinstance(metadata.get("carry_forward_packet"), dict)
+            else {}
+        )
+        recent_turns = self.session_store.list_turn_ledger(
+            session_id, limit=TURN_LEDGER_WINDOW_SIZE
+        )
+        notebooks = self.session_store.list_task_notebooks(
+            session_id, limit=TASK_NOTEBOOK_WINDOW_SIZE
+        )
+        awaiting_reply_messages = self.session_store.list_awaiting_reply_messages(
+            session_id, limit=8
+        )
         session_artifacts = self.artifact_store.list_for_session(session_id, limit=24)
 
         active_task_refs = []
-        workstreams = self._normalize_string_list(carry_forward.get("active_workstreams"))
+        workstreams = self._normalize_string_list(
+            carry_forward.get("active_workstreams")
+        )
         recent_decisions: list[str] = []
         open_loops = self._normalize_string_list(carry_forward.get("open_loops"))
-        entities = self._normalize_entity_list(carry_forward.get("current_focus_entities"))
-        preferences = self._normalize_string_list(carry_forward.get("stable_user_preferences"))
+        entities = self._normalize_entity_list(
+            carry_forward.get("current_focus_entities")
+        )
+        preferences = self._normalize_string_list(
+            carry_forward.get("stable_user_preferences")
+        )
         artifact_pointers = []
         recent_document_artifacts: list[dict[str, Any]] = []
-        recent_tool_receipts = self._recent_memory_tool_receipts(session_id, limit=RECENT_MEMORY_TOOL_RECEIPT_LIMIT)
-        contested_keys, contested_ids, contested_claims = self._active_contested_memory_refs(session_id)
+        recent_tool_receipts = self._recent_memory_tool_receipts(
+            session_id, limit=RECENT_MEMORY_TOOL_RECEIPT_LIMIT
+        )
+        contested_keys, contested_ids, contested_claims = (
+            self._active_contested_memory_refs(session_id)
+        )
         goal = self._safe_text(carry_forward.get("goal")) or ""
         recent_research_receipts: list[dict[str, Any]] = []
         recent_specialist_receipts: list[dict[str, Any]] = []
@@ -4491,37 +5184,60 @@ class GatewayRuntime:
         for turn in recent_turns:
             if not goal:
                 goal = self._safe_text(turn.get("user_goal")) or ""
-            workstreams = self._normalize_string_list([*workstreams, self._safe_text(turn.get("user_goal"))], limit=8)
+            workstreams = self._normalize_string_list(
+                [*workstreams, self._safe_text(turn.get("user_goal"))], limit=8
+            )
             recent_decisions = self._normalize_string_list(
-                [*recent_decisions, *self._normalize_string_list(turn.get("decisions_made"), limit=8)],
+                [
+                    *recent_decisions,
+                    *self._normalize_string_list(turn.get("decisions_made"), limit=8),
+                ],
                 limit=8,
             )
             entities = self._normalize_entity_list(
-                [*entities, *self._normalize_entity_list(turn.get("touched_entities"), limit=8)],
+                [
+                    *entities,
+                    *self._normalize_entity_list(turn.get("touched_entities"), limit=8),
+                ],
                 limit=8,
             )
             preferences = self._normalize_string_list(
-                [*preferences, *self._normalize_string_list(turn.get("preferences_detected"), limit=8)],
+                [
+                    *preferences,
+                    *self._normalize_string_list(
+                        turn.get("preferences_detected"), limit=8
+                    ),
+                ],
                 limit=8,
             )
             active_task_refs = self._normalize_string_list(
-                [*active_task_refs, *self._normalize_string_list(turn.get("task_refs"), limit=8)],
+                [
+                    *active_task_refs,
+                    *self._normalize_string_list(turn.get("task_refs"), limit=8),
+                ],
                 limit=8,
             )
             artifact_pointers = self._normalize_string_list(
-                [*artifact_pointers, *self._normalize_string_list(turn.get("artifact_refs"), limit=8)],
+                [
+                    *artifact_pointers,
+                    *self._normalize_string_list(turn.get("artifact_refs"), limit=8),
+                ],
                 limit=8,
             )
             research_receipt = self._build_recent_research_receipt(turn)
             if research_receipt:
                 recent_research_receipts.append(research_receipt)
                 if len(recent_research_receipts) > RECENT_RESEARCH_RECEIPT_LIMIT:
-                    recent_research_receipts = recent_research_receipts[-RECENT_RESEARCH_RECEIPT_LIMIT:]
+                    recent_research_receipts = recent_research_receipts[
+                        -RECENT_RESEARCH_RECEIPT_LIMIT:
+                    ]
             specialist_receipts = self._build_recent_specialist_receipts(turn)
             if specialist_receipts:
                 recent_specialist_receipts.extend(specialist_receipts)
                 if len(recent_specialist_receipts) > RECENT_SPECIALIST_RECEIPT_LIMIT:
-                    recent_specialist_receipts = recent_specialist_receipts[-RECENT_SPECIALIST_RECEIPT_LIMIT:]
+                    recent_specialist_receipts = recent_specialist_receipts[
+                        -RECENT_SPECIALIST_RECEIPT_LIMIT:
+                    ]
 
         next_actions: list[str] = []
         for notebook in notebooks:
@@ -4536,19 +5252,39 @@ class GatewayRuntime:
                     limit=8,
                 )
                 open_loops = self._normalize_string_list(
-                    [*open_loops, *self._normalize_string_list(notebook.get("open_questions"), limit=8)],
+                    [
+                        *open_loops,
+                        *self._normalize_string_list(
+                            notebook.get("open_questions"), limit=8
+                        ),
+                    ],
                     limit=8,
                 )
                 next_actions = self._normalize_string_list(
-                    [*next_actions, *self._normalize_string_list(notebook.get("next_best_actions"), limit=8)],
+                    [
+                        *next_actions,
+                        *self._normalize_string_list(
+                            notebook.get("next_best_actions"), limit=8
+                        ),
+                    ],
                     limit=8,
                 )
             entities = self._normalize_entity_list(
-                [*entities, *self._normalize_entity_list(notebook.get("files_touched"), limit=8)],
+                [
+                    *entities,
+                    *self._normalize_entity_list(
+                        notebook.get("files_touched"), limit=8
+                    ),
+                ],
                 limit=8,
             )
             artifact_pointers = self._normalize_string_list(
-                [*artifact_pointers, *self._normalize_string_list(notebook.get("artifact_refs"), limit=8)],
+                [
+                    *artifact_pointers,
+                    *self._normalize_string_list(
+                        notebook.get("artifact_refs"), limit=8
+                    ),
+                ],
                 limit=8,
             )
 
@@ -4568,9 +5304,25 @@ class GatewayRuntime:
             ingest_state = self._safe_text(artifact.get("ingest_state")).lower()
             artifact_id = self._safe_text(artifact.get("artifact_id"))
             pointer = artifact_id or self._safe_text(artifact.get("path"))
-            if ingest_state in {"staged", "parse_pending", "stage_failed", "metadata_only", "bridge_reference"} and pointer:
-                artifact_pointers = self._normalize_string_list([*artifact_pointers, pointer], limit=8)
-            parsed_summary = artifact.get("parsed_summary") if isinstance(artifact.get("parsed_summary"), dict) else {}
+            if (
+                ingest_state
+                in {
+                    "staged",
+                    "parse_pending",
+                    "stage_failed",
+                    "metadata_only",
+                    "bridge_reference",
+                }
+                and pointer
+            ):
+                artifact_pointers = self._normalize_string_list(
+                    [*artifact_pointers, pointer], limit=8
+                )
+            parsed_summary = (
+                artifact.get("parsed_summary")
+                if isinstance(artifact.get("parsed_summary"), dict)
+                else {}
+            )
             kind = self._safe_text(artifact.get("kind")).lower()
             if kind == "spreadsheet" and (
                 ingest_state == "parsed"
@@ -4582,8 +5334,12 @@ class GatewayRuntime:
                         "artifact_id": artifact_id,
                         "filename": self._safe_text(artifact.get("filename")),
                         "ingest_state": self._safe_text(artifact.get("ingest_state")),
-                        "parse_bundle_id": self._safe_text(artifact.get("parse_bundle_id")),
-                        "parse_status": self._safe_text(parsed_summary.get("parse_status")),
+                        "parse_bundle_id": self._safe_text(
+                            artifact.get("parse_bundle_id")
+                        ),
+                        "parse_status": self._safe_text(
+                            parsed_summary.get("parse_status")
+                        ),
                         "request_id": self._safe_text(artifact.get("request_id")),
                     }
                 )
@@ -4597,9 +5353,12 @@ class GatewayRuntime:
                         "artifact_id": artifact_id,
                         "filename": self._safe_text(artifact.get("filename")),
                         "ingest_state": self._safe_text(artifact.get("ingest_state")),
-                        "parse_bundle_id": self._safe_text(artifact.get("parse_bundle_id")),
+                        "parse_bundle_id": self._safe_text(
+                            artifact.get("parse_bundle_id")
+                        ),
                         "doc_id": self._safe_text(parsed_summary.get("doc_id")),
-                        "title": self._safe_text(parsed_summary.get("title")) or self._safe_text(artifact.get("filename")),
+                        "title": self._safe_text(parsed_summary.get("title"))
+                        or self._safe_text(artifact.get("filename")),
                         "request_id": self._safe_text(artifact.get("request_id")),
                     }
                 )
@@ -4625,7 +5384,8 @@ class GatewayRuntime:
                     "filename": self._safe_text(receipt.get("filename")),
                     "ingest_state": "parsed",
                     "parse_bundle_id": bundle_id,
-                    "parse_status": self._safe_text(receipt.get("parse_status")) or "completed",
+                    "parse_status": self._safe_text(receipt.get("parse_status"))
+                    or "completed",
                     "request_id": self._safe_text(receipt.get("request_id")),
                 }
             )
@@ -4674,7 +5434,9 @@ class GatewayRuntime:
         )
         return working_set
 
-    def _recent_memory_tool_receipts(self, session_id: str, *, limit: int) -> list[dict[str, Any]]:
+    def _recent_memory_tool_receipts(
+        self, session_id: str, *, limit: int
+    ) -> list[dict[str, Any]]:
         entries = self.memory_write_audit_store.list_entries(
             session_id=session_id,
             limit=max(limit, RECENT_MEMORY_TOOL_RECEIPT_SCAN_LIMIT),
@@ -4731,7 +5493,10 @@ class GatewayRuntime:
                     continue
                 if self._safe_text(entry.get("operation")) != "memory_write_core_fact":
                     continue
-                if self._safe_text(entry.get("status")) not in {"saved", "deduplicated"}:
+                if self._safe_text(entry.get("status")) not in {
+                    "saved",
+                    "deduplicated",
+                }:
                     continue
                 recent_core_fact_entries.append(entry)
                 if len(recent_core_fact_entries) >= CONTESTED_MEMORY_RECENT_WRITE_LIMIT:
@@ -4787,8 +5552,16 @@ class GatewayRuntime:
         session_id: str,
     ) -> tuple[set[str], set[str], list[dict[str, Any]]]:
         metadata = self.session_store.get_session_metadata(session_id)
-        raw_keys = metadata.get("contested_memory_keys") if isinstance(metadata.get("contested_memory_keys"), dict) else {}
-        raw_ids = metadata.get("contested_memory_ids") if isinstance(metadata.get("contested_memory_ids"), dict) else {}
+        raw_keys = (
+            metadata.get("contested_memory_keys")
+            if isinstance(metadata.get("contested_memory_keys"), dict)
+            else {}
+        )
+        raw_ids = (
+            metadata.get("contested_memory_ids")
+            if isinstance(metadata.get("contested_memory_ids"), dict)
+            else {}
+        )
         if not raw_keys and not raw_ids:
             return set(), set(), []
 
@@ -4808,7 +5581,9 @@ class GatewayRuntime:
             created_at = self._safe_text(entry.get("created_at")) or ""
             canonical_key = self._safe_text(entry.get("canonical_key"))
             memory_id = self._safe_text(entry.get("memory_id"))
-            if canonical_key and created_at > (resolved_key_times.get(canonical_key) or ""):
+            if canonical_key and created_at > (
+                resolved_key_times.get(canonical_key) or ""
+            ):
                 resolved_key_times[canonical_key] = created_at
             if memory_id and created_at > (resolved_id_times.get(memory_id) or ""):
                 resolved_id_times[memory_id] = created_at
@@ -4850,7 +5625,9 @@ class GatewayRuntime:
         session_id: str,
         memory_prompt_context: MemoryPromptContext,
     ) -> MemoryPromptContext:
-        contested_keys, contested_ids, _ = self._active_contested_memory_refs(session_id)
+        contested_keys, contested_ids, _ = self._active_contested_memory_refs(
+            session_id
+        )
         if not contested_keys and not contested_ids:
             return memory_prompt_context
 
@@ -4912,7 +5689,8 @@ class GatewayRuntime:
         finite_contexts = [
             int(spec.context_window_tokens)
             for spec in specs
-            if isinstance(spec.context_window_tokens, int) and spec.context_window_tokens > 0
+            if isinstance(spec.context_window_tokens, int)
+            and spec.context_window_tokens > 0
         ]
         if not finite_contexts:
             return DEFAULT_CONTEXT_WINDOW_TOKENS
@@ -4936,7 +5714,9 @@ class GatewayRuntime:
     def _compaction_trigger_threshold_tokens(self) -> int:
         return max(
             1_000,
-            int(self._conversation_context_budget_tokens() * COMPACTION_TRIGGER_FRACTION),
+            int(
+                self._conversation_context_budget_tokens() * COMPACTION_TRIGGER_FRACTION
+            ),
         )
 
     def _get_model_visible_history(self, session_id: str) -> list[dict[str, Any]]:
@@ -4948,7 +5728,9 @@ class GatewayRuntime:
         )
         return self._annotate_background_results(history)
 
-    def _annotate_background_results(self, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _annotate_background_results(
+        self, history: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         """Prefix background-completed assistant messages with context so the model
         knows which user query they answer."""
         # Build lookup: request_id → user message content excerpt
@@ -4961,12 +5743,22 @@ class GatewayRuntime:
 
         annotated: list[dict[str, Any]] = []
         for msg in history:
-            metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
+            metadata = (
+                msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
+            )
             if msg.get("role") == "assistant" and metadata.get("background"):
-                reply_to = msg.get("in_reply_to_request_id") or metadata.get("request_id")
-                user_excerpt = user_excerpts.get(reply_to, "a prior request") if reply_to else "a prior request"
+                reply_to = msg.get("in_reply_to_request_id") or metadata.get(
+                    "request_id"
+                )
+                user_excerpt = (
+                    user_excerpts.get(reply_to, "a prior request")
+                    if reply_to
+                    else "a prior request"
+                )
                 prefix = f'[Background task result — in reply to: "{user_excerpt}"]\n\n'
-                annotated.append({**msg, "content": prefix + (msg.get("content") or "")})
+                annotated.append(
+                    {**msg, "content": prefix + (msg.get("content") or "")}
+                )
             else:
                 annotated.append(msg)
         return annotated
@@ -5005,7 +5797,8 @@ class GatewayRuntime:
             compactable_turns = [
                 item
                 for item in turn_ledger
-                if not recent_boundary or (self._safe_text(item.get("completed_at")) or "") < recent_boundary
+                if not recent_boundary
+                or (self._safe_text(item.get("completed_at")) or "") < recent_boundary
             ]
             if not compactable_turns:
                 return
@@ -5015,12 +5808,15 @@ class GatewayRuntime:
                 if isinstance(session_state.get("compaction_packet"), dict)
                 else {}
             )
-            compacted_until_completed_at = self._safe_text(compaction_packet.get("compacted_until_completed_at"))
+            compacted_until_completed_at = self._safe_text(
+                compaction_packet.get("compacted_until_completed_at")
+            )
             new_compactable_turns = [
                 item
                 for item in compactable_turns
                 if not compacted_until_completed_at
-                or (self._safe_text(item.get("completed_at")) or "") > compacted_until_completed_at
+                or (self._safe_text(item.get("completed_at")) or "")
+                > compacted_until_completed_at
             ]
             if not new_compactable_turns:
                 return
@@ -5033,14 +5829,17 @@ class GatewayRuntime:
                 [
                     item
                     for item in older_history
-                    if self._safe_text(item.get("request_id")) in newly_compacted_request_ids
+                    if self._safe_text(item.get("request_id"))
+                    in newly_compacted_request_ids
                 ]
                 if newly_compacted_request_ids
                 else older_history
             )
             summary_text = await self._summarize_session_compaction(
                 session_id=session_id,
-                existing_summary=self._safe_text(session_state.get("compacted_summary")),
+                existing_summary=self._safe_text(
+                    session_state.get("compacted_summary")
+                ),
                 older_history=compactable_history,
                 recent_history=recent_history,
                 compactable_turns=new_compactable_turns,
@@ -5078,7 +5877,10 @@ class GatewayRuntime:
             if not content:
                 continue
             older_lines.append(f"[{role}] {content}")
-            if sum(len(line) for line in older_lines) >= COMPACTION_RAW_MESSAGE_CHAR_LIMIT:
+            if (
+                sum(len(line) for line in older_lines)
+                >= COMPACTION_RAW_MESSAGE_CHAR_LIMIT
+            ):
                 break
 
         turn_lines: list[str] = []
@@ -5086,14 +5888,20 @@ class GatewayRuntime:
             line = self._safe_text(item.get("compact_line"))
             if not line:
                 continue
-            turn_meta = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            turn_meta = (
+                item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            )
             if turn_meta.get("background"):
                 line = f"{line} (background task)"
             turn_lines.append(f"- {line}")
             if len(turn_lines) >= 20:
                 break
         active_working_set = session_state.get("active_working_set")
-        session_metadata = session_state.get("metadata") if isinstance(session_state.get("metadata"), dict) else {}
+        session_metadata = (
+            session_state.get("metadata")
+            if isinstance(session_state.get("metadata"), dict)
+            else {}
+        )
         current_tasks = (
             active_working_set.get("active_task_refs")
             if isinstance(active_working_set, dict)
@@ -5136,7 +5944,11 @@ class GatewayRuntime:
         recent_history: list[dict[str, Any]],
         session_state: dict[str, Any],
     ) -> dict[str, Any]:
-        active_working_set = session_state.get("active_working_set") if isinstance(session_state.get("active_working_set"), dict) else {}
+        active_working_set = (
+            session_state.get("active_working_set")
+            if isinstance(session_state.get("active_working_set"), dict)
+            else {}
+        )
         goal = self._safe_text(active_working_set.get("goal")) or ""
         key_facts: list[str] = []
         preferences: list[str] = []
@@ -5150,22 +5962,59 @@ class GatewayRuntime:
             if not goal:
                 goal = self._safe_text(turn.get("user_goal")) or ""
             compacted_until_completed_at = (
-                self._safe_text(turn.get("completed_at")) or compacted_until_completed_at
+                self._safe_text(turn.get("completed_at"))
+                or compacted_until_completed_at
             )
-            key_facts = self._normalize_string_list([*key_facts, *self._normalize_string_list(turn.get("facts_learned"))], limit=10)
-            preferences = self._normalize_string_list([*preferences, *self._normalize_string_list(turn.get("preferences_detected"))], limit=10)
-            decisions = self._normalize_string_list([*decisions, *self._normalize_string_list(turn.get("decisions_made"))], limit=10)
-            accomplished = self._normalize_string_list([*accomplished, *self._normalize_string_list(turn.get("accomplished"))], limit=10)
-            touched_entities = self._normalize_entity_list([*touched_entities, *self._normalize_entity_list(turn.get("touched_entities"), limit=12)], limit=12)
-            failures = self._normalize_string_list([*failures, *self._normalize_string_list(turn.get("failures_to_avoid"))], limit=10)
-            open_loops = self._normalize_string_list([*open_loops, *self._normalize_string_list(turn.get("open_loops"))], limit=10)
+            key_facts = self._normalize_string_list(
+                [*key_facts, *self._normalize_string_list(turn.get("facts_learned"))],
+                limit=10,
+            )
+            preferences = self._normalize_string_list(
+                [
+                    *preferences,
+                    *self._normalize_string_list(turn.get("preferences_detected")),
+                ],
+                limit=10,
+            )
+            decisions = self._normalize_string_list(
+                [*decisions, *self._normalize_string_list(turn.get("decisions_made"))],
+                limit=10,
+            )
+            accomplished = self._normalize_string_list(
+                [*accomplished, *self._normalize_string_list(turn.get("accomplished"))],
+                limit=10,
+            )
+            touched_entities = self._normalize_entity_list(
+                [
+                    *touched_entities,
+                    *self._normalize_entity_list(
+                        turn.get("touched_entities"), limit=12
+                    ),
+                ],
+                limit=12,
+            )
+            failures = self._normalize_string_list(
+                [
+                    *failures,
+                    *self._normalize_string_list(turn.get("failures_to_avoid")),
+                ],
+                limit=10,
+            )
+            open_loops = self._normalize_string_list(
+                [*open_loops, *self._normalize_string_list(turn.get("open_loops"))],
+                limit=10,
+            )
         next_best_actions = []
         if recent_history:
-            next_best_actions.append("Resume from the recent uncompressed window before asking the user to repeat context.")
+            next_best_actions.append(
+                "Resume from the recent uncompressed window before asking the user to repeat context."
+            )
         return {
             "session_id": session_id,
             "goal": goal,
-            "active_workstreams": self._normalize_string_list(active_working_set.get("active_workstreams"), limit=8),
+            "active_workstreams": self._normalize_string_list(
+                active_working_set.get("active_workstreams"), limit=8
+            ),
             "key_facts": key_facts,
             "user_preferences": preferences,
             "decisions_made": decisions,
@@ -5182,8 +6031,16 @@ class GatewayRuntime:
 
     def _build_carry_forward_packet(self, session_id: str) -> dict[str, Any]:
         session_state = self.get_session_state(session_id)
-        active_working_set = session_state.get("active_working_set") if isinstance(session_state.get("active_working_set"), dict) else {}
-        compaction_packet = session_state.get("compaction_packet") if isinstance(session_state.get("compaction_packet"), dict) else {}
+        active_working_set = (
+            session_state.get("active_working_set")
+            if isinstance(session_state.get("active_working_set"), dict)
+            else {}
+        )
+        compaction_packet = (
+            session_state.get("compaction_packet")
+            if isinstance(session_state.get("compaction_packet"), dict)
+            else {}
+        )
         open_loops = self._normalize_string_list(
             [
                 *self._normalize_string_list(compaction_packet.get("open_loops")),
@@ -5191,14 +6048,26 @@ class GatewayRuntime:
             ],
             limit=8,
         )
-        active_task_refs = self._normalize_string_list(active_working_set.get("active_task_refs"), limit=8)
-        bootstrap_note = self._safe_text(compaction_packet.get("summary_markdown")) or self._safe_text(session_state.get("compacted_summary")) or ""
+        active_task_refs = self._normalize_string_list(
+            active_working_set.get("active_task_refs"), limit=8
+        )
+        bootstrap_note = (
+            self._safe_text(compaction_packet.get("summary_markdown"))
+            or self._safe_text(session_state.get("compacted_summary"))
+            or ""
+        )
         return {
-            "goal": self._safe_text(active_working_set.get("goal")) or self._safe_text(compaction_packet.get("goal")) or "",
+            "goal": self._safe_text(active_working_set.get("goal"))
+            or self._safe_text(compaction_packet.get("goal"))
+            or "",
             "active_workstreams": self._normalize_string_list(
                 [
-                    *self._normalize_string_list(compaction_packet.get("active_workstreams")),
-                    *self._normalize_string_list(active_working_set.get("active_workstreams")),
+                    *self._normalize_string_list(
+                        compaction_packet.get("active_workstreams")
+                    ),
+                    *self._normalize_string_list(
+                        active_working_set.get("active_workstreams")
+                    ),
                 ],
                 limit=8,
             ),
@@ -5206,23 +6075,35 @@ class GatewayRuntime:
             "active_task_refs": active_task_refs,
             "current_focus_entities": self._normalize_entity_list(
                 [
-                    *self._normalize_entity_list(compaction_packet.get("touched_entities"), limit=8),
-                    *self._normalize_entity_list(active_working_set.get("current_focus_entities"), limit=8),
+                    *self._normalize_entity_list(
+                        compaction_packet.get("touched_entities"), limit=8
+                    ),
+                    *self._normalize_entity_list(
+                        active_working_set.get("current_focus_entities"), limit=8
+                    ),
                 ],
                 limit=8,
             ),
             "stable_user_preferences": self._normalize_string_list(
                 [
-                    *self._normalize_string_list(compaction_packet.get("user_preferences")),
-                    *self._normalize_string_list(active_working_set.get("user_preferences_in_play")),
+                    *self._normalize_string_list(
+                        compaction_packet.get("user_preferences")
+                    ),
+                    *self._normalize_string_list(
+                        active_working_set.get("user_preferences_in_play")
+                    ),
                 ],
                 limit=8,
             ),
-            "failures_to_avoid": self._normalize_string_list(compaction_packet.get("failures_to_avoid"), limit=8),
+            "failures_to_avoid": self._normalize_string_list(
+                compaction_packet.get("failures_to_avoid"), limit=8
+            ),
             "bootstrap_note": self._bounded_excerpt(bootstrap_note, limit=400),
         }
 
-    def _apply_carry_forward_packet(self, current_session_id: str, source_session_id: str, packet: dict[str, Any]) -> None:
+    def _apply_carry_forward_packet(
+        self, current_session_id: str, source_session_id: str, packet: dict[str, Any]
+    ) -> None:
         if not packet:
             return
         metadata = self.session_store.update_session_metadata(
@@ -5240,7 +6121,9 @@ class GatewayRuntime:
         await self._maybe_send_whatsapp_activation_greeting()
         await self._maybe_send_telegram_activation_greeting()
 
-    async def _maybe_send_whatsapp_activation_greeting(self, allowed_phone: str | None = None) -> None:
+    async def _maybe_send_whatsapp_activation_greeting(
+        self, allowed_phone: str | None = None
+    ) -> None:
         adapter = self.registry.adapters.get("whatsapp")
         if adapter is None:
             return
@@ -5249,7 +6132,9 @@ class GatewayRuntime:
             status = await adapter.get_status()  # type: ignore[attr-defined]
             config = await adapter.get_config()  # type: ignore[attr-defined]
         except Exception:
-            logger.exception("gateway.channel_activation whatsapp status/config lookup failed")
+            logger.exception(
+                "gateway.channel_activation whatsapp status/config lookup failed"
+            )
             return
 
         if not bool(status.get("connected")):
@@ -5367,9 +6252,16 @@ class GatewayRuntime:
     ) -> dict[str, Any]:
         session_id = self._resolve_session_id(requested_session_id)
         # Fetch full day's history so the desktop shows the complete conversation
-        history = [self._hydrate_history_message_for_client(item) for item in self.session_store.get_history(session_id)]
-        pending_inputs = self._pending_inputs_for_channel(channel, session_id=session_id)
-        active_tasks = await self._active_task_summaries(session_id=session_id, channel=channel)
+        history = [
+            self._hydrate_history_message_for_client(item)
+            for item in self.session_store.get_history(session_id)
+        ]
+        pending_inputs = self._pending_inputs_for_channel(
+            channel, session_id=session_id
+        )
+        active_tasks = await self._active_task_summaries(
+            session_id=session_id, channel=channel
+        )
         # Still-running background tasks from in-memory state
         background_tasks = [
             {
@@ -5402,22 +6294,28 @@ class GatewayRuntime:
             user_excerpt = ""
             for umsg in history:
                 if umsg.get("role") == "user" and umsg.get("request_id") == reply_to:
-                    user_excerpt = (self._safe_text(umsg.get("content")) or "")[:120].strip()
+                    user_excerpt = (self._safe_text(umsg.get("content")) or "")[
+                        :120
+                    ].strip()
                     break
-            background_tasks.append({
-                "request_id": reply_to,
-                "task_id": meta.get("task_id"),
-                "session_id": session_id,
-                "route": msg.get("route"),
-                "user_query_excerpt": user_excerpt,
-                "partial_content": msg.get("content") or "",
-                "partial_thinking": meta.get("thinking_text") or "",
-                "activity_log": meta.get("activity_log"),
-                "sources": meta.get("sources"),
-                "produced_artifacts": self._hydrate_produced_artifact_list_for_client(meta.get("produced_artifacts")),
-                "backgrounded_at": None,
-                "completed": True,
-            })
+            background_tasks.append(
+                {
+                    "request_id": reply_to,
+                    "task_id": meta.get("task_id"),
+                    "session_id": session_id,
+                    "route": msg.get("route"),
+                    "user_query_excerpt": user_excerpt,
+                    "partial_content": msg.get("content") or "",
+                    "partial_thinking": meta.get("thinking_text") or "",
+                    "activity_log": meta.get("activity_log"),
+                    "sources": meta.get("sources"),
+                    "produced_artifacts": self._hydrate_produced_artifact_list_for_client(
+                        meta.get("produced_artifacts")
+                    ),
+                    "backgrounded_at": None,
+                    "completed": True,
+                }
+            )
         return {
             "type": "resume.ok",
             "request_id": request_id,
@@ -5464,7 +6362,9 @@ class GatewayRuntime:
         if not session_id or not channel:
             return
         origin_platform = self._channel_platform(channel)
-        client_artifacts = self._hydrate_produced_artifact_list_for_client(produced_artifacts or [])
+        client_artifacts = self._hydrate_produced_artifact_list_for_client(
+            produced_artifacts or []
+        )
         client_response_blocks = self._build_client_response_blocks(
             content=content,
             produced_artifacts=produced_artifacts,
@@ -5545,7 +6445,9 @@ class GatewayRuntime:
             response_blocks=response_blocks,
         )
 
-    def _track_background_task(self, coroutine: asyncio.Future[Any] | asyncio.Task[Any] | Any) -> None:
+    def _track_background_task(
+        self, coroutine: asyncio.Future[Any] | asyncio.Task[Any] | Any
+    ) -> None:
         task = asyncio.create_task(coroutine)
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
@@ -5564,10 +6466,19 @@ class GatewayRuntime:
         normalized_task_id = self._safe_text(task_id)
         normalized_content = self._safe_text(content)
         normalized_channel = self._safe_text(channel)
-        if not normalized_input_request_id or not normalized_task_id or not normalized_content or not normalized_channel:
-            raise ValueError("task.input_reply requires input_request_id, task_id, content, and channel")
+        if (
+            not normalized_input_request_id
+            or not normalized_task_id
+            or not normalized_content
+            or not normalized_channel
+        ):
+            raise ValueError(
+                "task.input_reply requires input_request_id, task_id, content, and channel"
+            )
 
-        resolved = self.session_store.get_task_input_request(normalized_input_request_id)
+        resolved = self.session_store.get_task_input_request(
+            normalized_input_request_id
+        )
         if resolved is None:
             raise ValueError("Unknown input_request_id")
         if self._safe_text(resolved.get("status")) != "pending":
@@ -5609,7 +6520,9 @@ class GatewayRuntime:
                 for message_id, data in messages:
                     await self._handle_task_input_stream_message(message_id, data)
 
-    async def _handle_task_input_stream_message(self, message_id: str, data: dict[str, Any]) -> None:
+    async def _handle_task_input_stream_message(
+        self, message_id: str, data: dict[str, Any]
+    ) -> None:
         assert self._redis is not None
         try:
             request = parse_stream_payload(data)
@@ -5629,12 +6542,18 @@ class GatewayRuntime:
                 "agent": self._safe_text(request.get("agent")),
                 "channel": channel,
                 "question": question,
-                "options": [str(item) for item in request.get("options", []) if str(item).strip()],
+                "options": [
+                    str(item)
+                    for item in request.get("options", [])
+                    if str(item).strip()
+                ],
                 "status": self._safe_text(request.get("status")) or "pending",
                 "timestamp": self._safe_text(request.get("timestamp")) or utcnow_iso(),
             }
             self._persist_task_input_request(event)
-            delivery_status = await self._deliver_or_queue_channel_event(event, channel=channel)
+            delivery_status = await self._deliver_or_queue_channel_event(
+                event, channel=channel
+            )
             if delivery_status == "dropped":
                 return
             await self._redis.xack(
@@ -5671,7 +6590,9 @@ class GatewayRuntime:
                     try:
                         request = parse_stream_payload(data)
                         task_id = self._safe_text(request.get("task_id")) or ""
-                        request_channel = self._resolve_task_input_channel(request, task_id=task_id)
+                        request_channel = self._resolve_task_input_channel(
+                            request, task_id=task_id
+                        )
                         if request_channel != channel:
                             continue
                         await self._handle_task_input_stream_message(message_id, data)
@@ -5681,7 +6602,9 @@ class GatewayRuntime:
             if not delivered_any:
                 return
 
-    def _resolve_task_input_channel(self, request: dict[str, Any], *, task_id: str) -> str | None:
+    def _resolve_task_input_channel(
+        self, request: dict[str, Any], *, task_id: str
+    ) -> str | None:
         explicit_channel = self._safe_text(request.get("channel"))
         if explicit_channel:
             return explicit_channel
@@ -5693,7 +6616,13 @@ class GatewayRuntime:
         session_id = self._safe_text(event.get("session_id"))
         channel = self._safe_text(event.get("channel"))
         question = self._safe_text(event.get("question"))
-        if not input_request_id or not task_id or not session_id or not channel or not question:
+        if (
+            not input_request_id
+            or not task_id
+            or not session_id
+            or not channel
+            or not question
+        ):
             return
         self.session_store.upsert_task_input_request(
             input_request_id=input_request_id,
@@ -5701,7 +6630,9 @@ class GatewayRuntime:
             session_id=session_id,
             channel=channel,
             question=question,
-            options=event.get("options") if isinstance(event.get("options"), list) else [],
+            options=event.get("options")
+            if isinstance(event.get("options"), list)
+            else [],
             agent=self._safe_text(event.get("agent")),
             metadata={
                 "timestamp": self._safe_text(event.get("timestamp")),
@@ -5714,8 +6645,12 @@ class GatewayRuntime:
         channel = self._safe_text(event.get("channel"))
         await self._deliver_or_queue_channel_event(event, channel=channel)
 
-    def _pending_inputs_for_channel(self, channel: str, *, session_id: str | None = None) -> list[dict[str, Any]]:
-        pending = self.session_store.list_pending_task_inputs(session_id=session_id, channel=channel, limit=50)
+    def _pending_inputs_for_channel(
+        self, channel: str, *, session_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        pending = self.session_store.list_pending_task_inputs(
+            session_id=session_id, channel=channel, limit=50
+        )
         persisted = self.delivery_queue_store.list_pending_inputs(channel)
         if not persisted:
             return pending
@@ -5725,7 +6660,8 @@ class GatewayRuntime:
         for item in pending + persisted:
             key = (
                 self._safe_text(item.get("task_id")),
-                self._safe_text(item.get("input_request_id")) or self._safe_text(item.get("request_id")),
+                self._safe_text(item.get("input_request_id"))
+                or self._safe_text(item.get("request_id")),
             )
             if key in seen:
                 continue
@@ -5918,9 +6854,15 @@ class GatewayRuntime:
             return
 
         self.delivery_queue_store.mark_delivered(delivery_id)
-        await self._maybe_schedule_delivered_memory_ingest(payload, delivery_status="sent")
-        await self._maybe_schedule_delivered_task_summary_write(payload, delivery_status="sent")
-        await self._maybe_schedule_delivered_email_instruction_update(payload, delivery_status="sent")
+        await self._maybe_schedule_delivered_memory_ingest(
+            payload, delivery_status="sent"
+        )
+        await self._maybe_schedule_delivered_task_summary_write(
+            payload, delivery_status="sent"
+        )
+        await self._maybe_schedule_delivered_email_instruction_update(
+            payload, delivery_status="sent"
+        )
         logger.info(
             "gateway.delivery delivered delivery_id=%s channel=%s event_type=%s",
             delivery_id,
@@ -5945,8 +6887,11 @@ class GatewayRuntime:
         if (
             bg_state is not None
             and not bg_state.foreground
-            and not self._safe_text(event.get("type", "")).startswith("task.background.")
-            and self._safe_text(event.get("type")) not in {"task.backgrounded", "task.foregrounded"}
+            and not self._safe_text(event.get("type", "")).startswith(
+                "task.background."
+            )
+            and self._safe_text(event.get("type"))
+            not in {"task.backgrounded", "task.foregrounded"}
         ):
             event = {**event, "type": f"task.background.{event.get('type', 'unknown')}"}
 
@@ -6002,10 +6947,14 @@ class GatewayRuntime:
             )
             return "queued"
 
-    async def _send_channel_event_now(self, event: dict[str, Any], channel: str) -> None:
+    async def _send_channel_event_now(
+        self, event: dict[str, Any], channel: str
+    ) -> None:
         adapter = self.registry.get_adapter(channel)
         if adapter is None:
-            raise ChannelUnavailableError(f"No adapter registered for channel: {channel!r}")
+            raise ChannelUnavailableError(
+                f"No adapter registered for channel: {channel!r}"
+            )
         await adapter.send(event, channel=channel)
 
     def _delivery_dedupe_key(self, event: dict[str, Any], channel: str) -> str | None:
@@ -6018,7 +6967,10 @@ class GatewayRuntime:
         session_id = self._safe_text(event.get("session_id"))
 
         if event_type == "response.complete":
-            if self._is_realtime_client_channel(channel) and (self._safe_text(event.get("source")) or "user") != "cron":
+            if (
+                self._is_realtime_client_channel(channel)
+                and (self._safe_text(event.get("source")) or "user") != "cron"
+            ):
                 return None
             if request_id:
                 return f"{channel}:{event_type}:{request_id}"
@@ -6031,17 +6983,29 @@ class GatewayRuntime:
                 or request_id
                 or session_id
             )
-            return f"{channel}:{event_type}:{identifier}" if identifier else self._event_fingerprint(event, channel)
+            return (
+                f"{channel}:{event_type}:{identifier}"
+                if identifier
+                else self._event_fingerprint(event, channel)
+            )
 
         if event_type == "task.completed":
             if not self._task_completed_has_visible_output(event):
                 return None
             identifier = task_id or request_id or session_id
-            return f"{channel}:{event_type}:{identifier}" if identifier else self._event_fingerprint(event, channel)
+            return (
+                f"{channel}:{event_type}:{identifier}"
+                if identifier
+                else self._event_fingerprint(event, channel)
+            )
 
         if event_type in {"task.failed", "task.cancelled", "error"}:
             identifier = task_id or request_id or session_id
-            return f"{channel}:{event_type}:{identifier}" if identifier else self._event_fingerprint(event, channel)
+            return (
+                f"{channel}:{event_type}:{identifier}"
+                if identifier
+                else self._event_fingerprint(event, channel)
+            )
 
         return None
 
@@ -6053,31 +7017,43 @@ class GatewayRuntime:
                     return True
         elif isinstance(result, str) and result.strip():
             return True
-        return bool(self._safe_text(event.get("content")) or self._safe_text(event.get("message")))
+        return bool(
+            self._safe_text(event.get("content"))
+            or self._safe_text(event.get("message"))
+        )
 
     def _event_fingerprint(self, event: dict[str, Any], channel: str) -> str:
         payload = {
             "channel": channel,
             "event": event,
         }
-        digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
         return f"{channel}:fingerprint:{digest}"
 
     def _effective_email_delivery(self, event: dict[str, Any]) -> dict[str, Any]:
         delivery = event.get("email_delivery")
         if not isinstance(delivery, dict):
             delivery = {}
-        status = self._safe_text(delivery.get("status")) or self._safe_text(event.get("email_delivery_status"))
+        status = self._safe_text(delivery.get("status")) or self._safe_text(
+            event.get("email_delivery_status")
+        )
         queued_for_approval = bool(
             delivery.get("queued_for_approval")
             if "queued_for_approval" in delivery
             else event.get("email_queued_for_approval")
         )
-        approval_id = self._safe_text(delivery.get("approval_id")) or self._safe_text(event.get("email_approval_id"))
+        approval_id = self._safe_text(delivery.get("approval_id")) or self._safe_text(
+            event.get("email_approval_id")
+        )
         if not status:
             if queued_for_approval or approval_id:
                 status = "queued_for_approval"
-            elif self._channel_platform(self._safe_text(event.get("channel"))) == "agent-email":
+            elif (
+                self._channel_platform(self._safe_text(event.get("channel")))
+                == "agent-email"
+            ):
                 status = "sent"
         resolved = dict(delivery)
         if status:
@@ -6089,10 +7065,16 @@ class GatewayRuntime:
         return resolved
 
     def _email_delivery_counts_as_sent(self, event: dict[str, Any]) -> bool:
-        return self._safe_text(self._effective_email_delivery(event).get("status")) == "sent"
+        return (
+            self._safe_text(self._effective_email_delivery(event).get("status"))
+            == "sent"
+        )
 
     def _email_delivery_counts_as_acted(self, event: dict[str, Any]) -> bool:
-        return self._safe_text(self._effective_email_delivery(event).get("status")) in {"sent", "queued_for_approval"}
+        return self._safe_text(self._effective_email_delivery(event).get("status")) in {
+            "sent",
+            "queued_for_approval",
+        }
 
     def _trace_request_event(
         self,
@@ -6119,7 +7101,11 @@ class GatewayRuntime:
         normalized_request_id = self._safe_text(request_id)
         normalized_session_id = self._safe_text(session_id)
         normalized_channel = self._safe_text(channel)
-        if not normalized_request_id or not normalized_session_id or not normalized_channel:
+        if (
+            not normalized_request_id
+            or not normalized_session_id
+            or not normalized_channel
+        ):
             return
         try:
             self.request_trace_store.record_event(
@@ -6151,7 +7137,10 @@ class GatewayRuntime:
             )
 
     def _persist_email_delivery_metadata(self, event: dict[str, Any]) -> None:
-        if self._channel_platform(self._safe_text(event.get("channel"))) != "agent-email":
+        if (
+            self._channel_platform(self._safe_text(event.get("channel")))
+            != "agent-email"
+        ):
             return
         message_id = self._safe_text(event.get("message_id"))
         if not message_id:
@@ -6166,7 +7155,8 @@ class GatewayRuntime:
                 "email_delivery": delivery,
                 "email_delivery_status": status,
                 "email_queued_for_approval": bool(delivery.get("queued_for_approval")),
-                "email_approval_id": self._safe_text(delivery.get("approval_id")) or None,
+                "email_approval_id": self._safe_text(delivery.get("approval_id"))
+                or None,
             },
         )
 
@@ -6177,7 +7167,11 @@ class GatewayRuntime:
         )
         if backoff <= 0:
             return utcnow_iso()
-        return (datetime.now(timezone.utc) + timedelta(seconds=backoff)).isoformat().replace("+00:00", "Z")
+        return (
+            (datetime.now(timezone.utc) + timedelta(seconds=backoff))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
 
     def list_channels(self) -> list[dict[str, Any]]:
         channels: list[dict[str, Any]] = []
@@ -6190,7 +7184,10 @@ class GatewayRuntime:
                     "last_error": self.adapter_errors.get(platform),
                 }
             )
-        if "agent-email" not in self.registry.adapters and self._agent_email_effectively_enabled():
+        if (
+            "agent-email" not in self.registry.adapters
+            and self._agent_email_effectively_enabled()
+        ):
             channels.append(
                 {
                     "platform": "agent-email",
@@ -6331,7 +7328,8 @@ class GatewayRuntime:
         )
         self.adapter_errors.pop("whatsapp", None)
         await self._maybe_send_whatsapp_activation_greeting(
-            allowed_phone=self._safe_text(response.get("allowed_phone")) or allowed_phone
+            allowed_phone=self._safe_text(response.get("allowed_phone"))
+            or allowed_phone
         )
         return response
 
@@ -6360,7 +7358,9 @@ class GatewayRuntime:
         await self._maybe_send_telegram_activation_greeting()
         return response
 
-    async def clear_telegram_webhook(self, *, drop_pending_updates: bool = False) -> dict[str, Any]:
+    async def clear_telegram_webhook(
+        self, *, drop_pending_updates: bool = False
+    ) -> dict[str, Any]:
         adapter = self.registry.adapters.get("telegram")
         if adapter is None:
             raise KeyError("telegram")
@@ -6394,7 +7394,9 @@ class GatewayRuntime:
         self.adapter_errors.pop("telegram", None)
         return response
 
-    async def download_whatsapp_media(self, bridge_media_ref: str) -> tuple[bytes, str | None]:
+    async def download_whatsapp_media(
+        self, bridge_media_ref: str
+    ) -> tuple[bytes, str | None]:
         adapter = self.registry.adapters.get("whatsapp")
         if adapter is None:
             raise KeyError("whatsapp")
@@ -6406,7 +7408,9 @@ class GatewayRuntime:
         """Read-only roster from the orchestrator registry (backed by registry.db)."""
         return await self.orchestrator.list_registry_agents()
 
-    async def get_desktop_system_metrics(self, *, force_refresh: bool = False) -> dict[str, Any]:
+    async def get_desktop_system_metrics(
+        self, *, force_refresh: bool = False
+    ) -> dict[str, Any]:
         now = time.monotonic()
         ttl = max(2.0, self.config.desktop_system_metrics_cache_ttl_sec)
         if (
@@ -6535,12 +7539,18 @@ class GatewayRuntime:
         tool_count = len(tool_registry) if isinstance(tool_registry, list) else 0
 
         healthy_channel_count = sum(1 for item in channels if bool(item.get("healthy")))
-        scheduler_live = self._scheduler_worker is not None and not self._scheduler_worker.done()
-        delivery_live = self._delivery_worker is not None and not self._delivery_worker.done()
+        scheduler_live = (
+            self._scheduler_worker is not None and not self._scheduler_worker.done()
+        )
+        delivery_live = (
+            self._delivery_worker is not None and not self._delivery_worker.done()
+        )
         heartbeat_paused = bool(scheduler_summary.get("heartbeat_paused"))
         pending_delivery = int(delivery_summary.get("pending_count") or 0)
         cron_count = int(scheduler_summary.get("cron_count") or 0)
-        memory_status = self._safe_text(self._memory_health_snapshot.get("status")) or "starting"
+        memory_status = (
+            self._safe_text(self._memory_health_snapshot.get("status")) or "starting"
+        )
 
         return [
             {
@@ -6562,7 +7572,8 @@ class GatewayRuntime:
             {
                 "name": "Model Router",
                 "status": self._probe_service_status(router_result),
-                "summary": self._safe_text(router_result.get("classifier_model")) or "classifier",
+                "summary": self._safe_text(router_result.get("classifier_model"))
+                or "classifier",
             },
             {
                 "name": "Memory",
@@ -6571,7 +7582,9 @@ class GatewayRuntime:
             },
             {
                 "name": "Scheduler",
-                "status": "idle" if heartbeat_paused else ("active" if scheduler_live else "down"),
+                "status": "idle"
+                if heartbeat_paused
+                else ("active" if scheduler_live else "down"),
                 "summary": self._format_service_summary(
                     primary=cron_count,
                     primary_suffix="cron",
@@ -6635,7 +7648,11 @@ class GatewayRuntime:
             or os.getenv("AWS_DEFAULT_REGION", "").strip()
             or "unknown-region"
         )
-        provider = "AWS" if (os.getenv("AWS_EXECUTION_ENV") or region != "unknown-region") else "Self-hosted"
+        provider = (
+            "AWS"
+            if (os.getenv("AWS_EXECUTION_ENV") or region != "unknown-region")
+            else "Self-hosted"
+        )
         instance_type = (
             os.getenv("AWS_INSTANCE_TYPE", "").strip()
             or os.getenv("EC2_INSTANCE_TYPE", "").strip()
@@ -6747,7 +7764,13 @@ class GatewayRuntime:
         try:
             usage = shutil.disk_usage(root_path)
         except OSError:
-            return {"path": str(root_path), "total": 0, "used": 0, "free": 0, "percent": 0.0}
+            return {
+                "path": str(root_path),
+                "total": 0,
+                "used": 0,
+                "free": 0,
+                "percent": 0.0,
+            }
         used = max(0, usage.total - usage.free)
         percent = (used / usage.total) * 100.0 if usage.total > 0 else 0.0
         return {
@@ -6845,7 +7868,9 @@ class GatewayRuntime:
         memory.setdefault("enabled", self.memory_client.enabled)
         ready = self.started and memory.get("status") not in {"starting", "error"}
         return {
-            "status": "ready" if ready else ("starting" if not self.started else "degraded"),
+            "status": "ready"
+            if ready
+            else ("starting" if not self.started else "degraded"),
             "gateway_started": self.started,
             "healthy_channel_count": len(healthy_channels),
             "adapter_errors": self.adapter_errors,
@@ -6858,9 +7883,13 @@ class GatewayRuntime:
             "scheduler": self.scheduler_store.summary(),
         }
 
-    async def _active_task_summaries(self, *, session_id: str, channel: str) -> list[dict[str, Any]]:
+    async def _active_task_summaries(
+        self, *, session_id: str, channel: str
+    ) -> list[dict[str, Any]]:
         try:
-            tasks = await self.orchestrator.list_active_tasks(session_id=session_id, channel=channel)
+            tasks = await self.orchestrator.list_active_tasks(
+                session_id=session_id, channel=channel
+            )
         except Exception:
             return []
         return tasks
@@ -6874,11 +7903,15 @@ class GatewayRuntime:
         channel: str,
     ) -> TaskEnvelope:
         if not self.config.signing_secret:
-            raise RuntimeError("GATEWAY_SIGNING_SECRET is not configured on the Gateway VM.")
+            raise RuntimeError(
+                "GATEWAY_SIGNING_SECRET is not configured on the Gateway VM."
+            )
 
         message = request_record.get("message")
         if not isinstance(message, dict):
-            raise RuntimeError("Request record is missing the normalized message payload.")
+            raise RuntimeError(
+                "Request record is missing the normalized message payload."
+            )
         orchestrator_query = (
             self._safe_text(request_record.get("orchestrator_query_override"))
             or self._safe_text(message.get("content"))
@@ -6886,7 +7919,9 @@ class GatewayRuntime:
         )
 
         prepared_input_artifacts = self._prepare_input_artifacts_for_model(
-            request_record.get("input_artifacts") if isinstance(request_record.get("input_artifacts"), list) else []
+            request_record.get("input_artifacts")
+            if isinstance(request_record.get("input_artifacts"), list)
+            else []
         )
 
         task = TaskEnvelope(
@@ -6899,13 +7934,20 @@ class GatewayRuntime:
             input={
                 "query": orchestrator_query,
                 "request_id": request_id,
-                "conversation_context": request_record.get("assembled_conversation_context") or [],
+                "conversation_context": request_record.get(
+                    "assembled_conversation_context"
+                )
+                or [],
                 "memory_context": self._safe_text(request_record.get("memory_context")),
-                "user_timezone": self._safe_text(request_record.get("cron_timezone")) or self.current_user_timezone(),
+                "user_timezone": self._safe_text(request_record.get("cron_timezone"))
+                or self.current_user_timezone(),
             },
             input_artifacts=prepared_input_artifacts,
-            idempotency_key=self._safe_text(request_record.get("idempotency_key")) or uuid4().hex,
-            priority=SOURCE_PRIORITY_MAP.get(self._safe_text(request_record.get("source")) or "user", "normal"),
+            idempotency_key=self._safe_text(request_record.get("idempotency_key"))
+            or uuid4().hex,
+            priority=SOURCE_PRIORITY_MAP.get(
+                self._safe_text(request_record.get("source")) or "user", "normal"
+            ),
             signature="",
             created_at=utcnow(),
             source=self._safe_text(request_record.get("source")) or "user",
@@ -6915,14 +7957,20 @@ class GatewayRuntime:
         signature = sign_task_envelope(task, self.config.signing_secret)
         return task.model_copy(update={"signature": signature})
 
-    def _prepare_input_artifacts_for_model(self, input_artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _prepare_input_artifacts_for_model(
+        self, input_artifacts: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         prepared: list[dict[str, Any]] = []
         for artifact in input_artifacts:
             if not isinstance(artifact, dict):
                 continue
             enriched = dict(artifact)
-            if is_supported_image_artifact(enriched) and self._safe_text(enriched.get("path")):
-                image_url = self.mint_artifact_access_url(enriched, purpose="llm_image_fetch")
+            if is_supported_image_artifact(enriched) and self._safe_text(
+                enriched.get("path")
+            ):
+                image_url = self.mint_artifact_access_url(
+                    enriched, purpose="llm_image_fetch"
+                )
                 if image_url:
                     enriched["provider_url"] = image_url
                     enriched["provider_access"] = "signed_url"
@@ -6966,7 +8014,9 @@ class GatewayRuntime:
             )
             return []
 
-    async def _ensure_request_email_processed(self, request_record: dict[str, Any]) -> None:
+    async def _ensure_request_email_processed(
+        self, request_record: dict[str, Any]
+    ) -> None:
         if not self._should_preprocess_email_inbound(request_record):
             return
         if request_record.get("email_process_inbound_state") in {"completed", "failed"}:
@@ -6984,11 +8034,14 @@ class GatewayRuntime:
             stage="email_preprocess",
             status="active",
             title="Email preprocess started",
-            task_id=self._safe_text(request_record.get("email_process_inbound_task_id")) or None,
+            task_id=self._safe_text(request_record.get("email_process_inbound_task_id"))
+            or None,
         )
 
         try:
-            process_result = await self._dispatch_email_process_inbound(request_record=request_record)
+            process_result = await self._dispatch_email_process_inbound(
+                request_record=request_record
+            )
         except Exception:
             logger.exception(
                 "gateway.email_process_inbound_failed request_id=%s",
@@ -7026,12 +8079,17 @@ class GatewayRuntime:
                 stage="email_preprocess",
                 status="failed",
                 title="Email preprocess failed",
-                detail=self._safe_text(process_result.get("error_message")) or f"email.process_inbound returned {status}.",
+                detail=self._safe_text(process_result.get("error_message"))
+                or f"email.process_inbound returned {status}.",
                 task_id=self._safe_text(process_result.get("task_id")) or None,
             )
             return
 
-        output = process_result.get("output") if isinstance(process_result.get("output"), dict) else {}
+        output = (
+            process_result.get("output")
+            if isinstance(process_result.get("output"), dict)
+            else {}
+        )
         message = request_record.get("message")
         if not isinstance(message, dict):
             request_record["email_process_inbound_state"] = "failed"
@@ -7047,16 +8105,24 @@ class GatewayRuntime:
                 detail="Inbound email message payload was missing after preprocess completion.",
             )
             return
-        original_content = self._safe_text(message.get("content")) or "[empty inbound email]"
-        request_record["orchestrator_query_override"] = self._build_email_inbound_orchestrator_query(
-            original_content=original_content,
-            process_output=output,
+        original_content = (
+            self._safe_text(message.get("content")) or "[empty inbound email]"
+        )
+        request_record["orchestrator_query_override"] = (
+            self._build_email_inbound_orchestrator_query(
+                original_content=original_content,
+                process_output=output,
+            )
         )
         request_record["email_process_inbound_state"] = "completed"
-        request_record["email_process_inbound_task_id"] = self._safe_text(process_result.get("task_id"))
+        request_record["email_process_inbound_task_id"] = self._safe_text(
+            process_result.get("task_id")
+        )
         request_record["email_process_inbound_output"] = output
         request_record["email_process_inbound_artifacts"] = (
-            process_result.get("artifacts") if isinstance(process_result.get("artifacts"), list) else []
+            process_result.get("artifacts")
+            if isinstance(process_result.get("artifacts"), list)
+            else []
         )
         self._trace_request_event(
             request_id=request_id,
@@ -7067,13 +8133,19 @@ class GatewayRuntime:
             stage="email_preprocess",
             status="completed",
             title="Email preprocess completed",
-            detail=self._safe_text(output.get("summary")) or self._safe_text(output.get("response")) or None,
+            detail=self._safe_text(output.get("summary"))
+            or self._safe_text(output.get("response"))
+            or None,
             task_id=self._safe_text(process_result.get("task_id")) or None,
             metadata={
                 "trusted_sender": bool(output.get("trusted_sender")),
                 "sender_role": self._safe_text(output.get("sender_role")) or None,
                 "matched_instruction_ids": self._normalize_string_list(
-                    [self._safe_text(item.get("instruction_id")) for item in output.get("matched_instructions", []) if isinstance(item, dict)],
+                    [
+                        self._safe_text(item.get("instruction_id"))
+                        for item in output.get("matched_instructions", [])
+                        if isinstance(item, dict)
+                    ],
                     limit=12,
                 ),
             },
@@ -7090,7 +8162,11 @@ class GatewayRuntime:
         source = self._safe_text(request_record.get("source")) or "user"
         source_id = self._safe_text(request_record.get("source_id"))
         message = request_record.get("message")
-        metadata = message.get("metadata") if isinstance(message, dict) and isinstance(message.get("metadata"), dict) else {}
+        metadata = (
+            message.get("metadata")
+            if isinstance(message, dict) and isinstance(message.get("metadata"), dict)
+            else {}
+        )
         thread_id = self._safe_text(metadata.get("thread_id"))
         message_id = self._safe_text(metadata.get("message_id"))
         if not session_id or not request_id or not thread_id or not message_id:
@@ -7123,7 +8199,9 @@ class GatewayRuntime:
             source_id=source_id or request_id,
             channel=channel or None,
         )
-        task = task.model_copy(update={"signature": sign_task_envelope(task, self.config.signing_secret)})
+        task = task.model_copy(
+            update={"signature": sign_task_envelope(task, self.config.signing_secret)}
+        )
         await dispatch_task(task, self._redis)
         return await self._wait_for_agent_terminal_result(
             task.task_id,
@@ -7147,12 +8225,16 @@ class GatewayRuntime:
         for index, upload in enumerate(uploads, start=1):
             if not isinstance(upload, dict):
                 continue
-            filename = Path(self._safe_text(upload.get("filename")) or "attachment").name
+            filename = Path(
+                self._safe_text(upload.get("filename")) or "attachment"
+            ).name
             content = upload.get("content")
             if not filename or not isinstance(content, bytes) or not content:
                 continue
 
-            artifact_id = self._safe_text(upload.get("artifact_id")) or f"art_{uuid4().hex}"
+            artifact_id = (
+                self._safe_text(upload.get("artifact_id")) or f"art_{uuid4().hex}"
+            )
             supplied_mime = self._safe_text(upload.get("mime_type"))
             effective_kind = self._supported_artifact_kind(
                 {
@@ -7166,17 +8248,33 @@ class GatewayRuntime:
             effective_mime = supplied_mime
             if not effective_mime:
                 if effective_kind == "document":
-                    effective_mime = infer_document_mime_from_extension(Path(filename).suffix)
+                    effective_mime = infer_document_mime_from_extension(
+                        Path(filename).suffix
+                    )
                 elif effective_kind == "spreadsheet":
-                    effective_mime = infer_tabular_mime_from_extension(Path(filename).suffix)
+                    effective_mime = infer_tabular_mime_from_extension(
+                        Path(filename).suffix
+                    )
                 else:
-                    effective_mime = infer_image_mime_from_extension(Path(filename).suffix)
-            width, height = self._extract_image_dimensions(
-                content=content,
-                media_type=effective_mime,
-                filename=filename,
-            ) if effective_kind == "image" else (None, None)
-            original_root = self.config.artifacts_root / f"req_ingest_{request_id}" / "inputs" / artifact_id / "original"
+                    effective_mime = infer_image_mime_from_extension(
+                        Path(filename).suffix
+                    )
+            width, height = (
+                self._extract_image_dimensions(
+                    content=content,
+                    media_type=effective_mime,
+                    filename=filename,
+                )
+                if effective_kind == "image"
+                else (None, None)
+            )
+            original_root = (
+                self.config.artifacts_root
+                / f"req_ingest_{request_id}"
+                / "inputs"
+                / artifact_id
+                / "original"
+            )
             original_root.mkdir(parents=True, exist_ok=True)
             source_path = original_root / filename
             source_path.write_bytes(content)
@@ -7186,7 +8284,9 @@ class GatewayRuntime:
             staged_manifest = {
                 "artifact_id": artifact_id,
                 "source_channel": channel,
-                "source_platform": source_platform or self._channel_platform(channel) or "desktop",
+                "source_platform": source_platform
+                or self._channel_platform(channel)
+                or "desktop",
                 "source_message_id": None,
                 "kind": effective_kind,
                 "mime": effective_mime,
@@ -7233,7 +8333,9 @@ class GatewayRuntime:
             if self._supported_artifact_kind(manifest) is None:
                 staged_manifests.append(manifest)
                 continue
-            if self._safe_text(manifest.get("path")) and self._safe_text(manifest.get("ingest_state")) in {"staged", "parsed"}:
+            if self._safe_text(manifest.get("path")) and self._safe_text(
+                manifest.get("ingest_state")
+            ) in {"staged", "parsed"}:
                 staged_manifests.append(manifest)
                 continue
             try:
@@ -7276,11 +8378,19 @@ class GatewayRuntime:
             manifest["ingest_state"] = "metadata_only"
             return manifest
 
-        filename = self._safe_text(manifest.get("filename")) or self._default_artifact_filename(
+        filename = self._safe_text(
+            manifest.get("filename")
+        ) or self._default_artifact_filename(
             artifact_id=artifact_id,
             media_type=media_type or self._safe_text(manifest.get("mime")),
         )
-        original_root = self.config.artifacts_root / f"req_ingest_{request_id}" / "inputs" / artifact_id / "original"
+        original_root = (
+            self.config.artifacts_root
+            / f"req_ingest_{request_id}"
+            / "inputs"
+            / artifact_id
+            / "original"
+        )
         original_root.mkdir(parents=True, exist_ok=True)
         source_path = original_root / filename
         source_path.write_bytes(content)
@@ -7296,17 +8406,23 @@ class GatewayRuntime:
                 effective_mime = infer_tabular_mime_from_extension(source_path.suffix)
             else:
                 effective_mime = infer_document_mime_from_extension(source_path.suffix)
-        width, height = self._extract_image_dimensions(
-            content=content,
-            media_type=effective_mime,
-            filename=filename,
-        ) if (self._supported_artifact_kind(manifest) == "image") else (None, None)
+        width, height = (
+            self._extract_image_dimensions(
+                content=content,
+                media_type=effective_mime,
+                filename=filename,
+            )
+            if (self._supported_artifact_kind(manifest) == "image")
+            else (None, None)
+        )
         metadata = dict(manifest.get("metadata") or {})
         staged = {
             **manifest,
             "session_id": session_id,
             "source_channel": channel,
-            "kind": self._supported_artifact_kind(manifest) or self._safe_text(manifest.get("kind")) or "unknown",
+            "kind": self._supported_artifact_kind(manifest)
+            or self._safe_text(manifest.get("kind"))
+            or "unknown",
             "mime": effective_mime,
             "filename": filename,
             "sha256": sha256,
@@ -7318,7 +8434,9 @@ class GatewayRuntime:
             "metadata": metadata or None,
         }
         staged_manifest_path = source_path.parent.parent / "manifest.json"
-        staged_manifest_path.write_text(json.dumps(staged, ensure_ascii=False, indent=2), encoding="utf-8")
+        staged_manifest_path.write_text(
+            json.dumps(staged, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         self.artifact_store.update_ingest_state(
             artifact_id,
             sha256=sha256,
@@ -7327,23 +8445,37 @@ class GatewayRuntime:
         )
         return staged
 
-    async def _download_artifact_bytes(self, manifest: dict[str, Any]) -> tuple[bytes | None, str | None]:
+    async def _download_artifact_bytes(
+        self, manifest: dict[str, Any]
+    ) -> tuple[bytes | None, str | None]:
         download_url = self._safe_text(manifest.get("download_url"))
         bridge_media_ref = self._safe_text(manifest.get("bridge_media_ref"))
-        source_platform = (self._safe_text(manifest.get("source_platform")) or "").lower()
+        source_platform = (
+            self._safe_text(manifest.get("source_platform")) or ""
+        ).lower()
         source_channel = (self._safe_text(manifest.get("source_channel")) or "").lower()
-        metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
+        metadata = (
+            manifest.get("metadata")
+            if isinstance(manifest.get("metadata"), dict)
+            else {}
+        )
 
         telegram_file_id = self._safe_text(metadata.get("telegram_file_id"))
         if not telegram_file_id:
             if bridge_media_ref.startswith("telegram:file:"):
                 telegram_file_id = bridge_media_ref.split("telegram:file:", 1)[1]
-        if not telegram_file_id and download_url and download_url.startswith("/internal/channels/telegram/media/"):
+        if (
+            not telegram_file_id
+            and download_url
+            and download_url.startswith("/internal/channels/telegram/media/")
+        ):
             telegram_file_id = download_url.rsplit("/", 1)[-1]
         if telegram_file_id:
             return await self.download_telegram_media(telegram_file_id)
 
-        if bridge_media_ref and (source_platform == "whatsapp" or source_channel.startswith("whatsapp:")):
+        if bridge_media_ref and (
+            source_platform == "whatsapp" or source_channel.startswith("whatsapp:")
+        ):
             return await self.download_whatsapp_media(bridge_media_ref)
 
         if not download_url:
@@ -7366,7 +8498,9 @@ class GatewayRuntime:
             return "image"
         return None
 
-    def _default_artifact_filename(self, *, artifact_id: str, media_type: str | None) -> str:
+    def _default_artifact_filename(
+        self, *, artifact_id: str, media_type: str | None
+    ) -> str:
         mime = (self._safe_text(media_type) or "").lower()
         extension_map = {
             "application/pdf": ".pdf",
@@ -7382,7 +8516,9 @@ class GatewayRuntime:
             "image/webp": ".webp",
         }
         extension = extension_map.get(mime, "")
-        safe_artifact_id = re.sub(r"[^A-Za-z0-9._-]+", "_", artifact_id).strip("._") or "document"
+        safe_artifact_id = (
+            re.sub(r"[^A-Za-z0-9._-]+", "_", artifact_id).strip("._") or "document"
+        )
         return f"{safe_artifact_id}{extension}"
 
     def _extract_image_dimensions(
@@ -7405,7 +8541,9 @@ class GatewayRuntime:
             from io import BytesIO
 
             with Image.open(BytesIO(content)) as image:
-                normalized = ImageOps.exif_transpose(image) if ImageOps is not None else image
+                normalized = (
+                    ImageOps.exif_transpose(image) if ImageOps is not None else image
+                )
                 width, height = normalized.size
                 return int(width), int(height)
         except Exception:
@@ -7427,7 +8565,9 @@ class GatewayRuntime:
         target_height = max(1, int(height * scale))
         return target_width, target_height
 
-    def _build_llm_image_variant_path(self, artifact_path: Path, media_type: str) -> Path:
+    def _build_llm_image_variant_path(
+        self, artifact_path: Path, media_type: str
+    ) -> Path:
         suffix_map = {
             "image/jpeg": ".jpg",
             "image/png": ".png",
@@ -7435,26 +8575,41 @@ class GatewayRuntime:
         }
         suffix = suffix_map.get(media_type, artifact_path.suffix or ".img")
         stem = artifact_path.stem or "image"
-        return artifact_path.parent.parent / LLM_IMAGE_VARIANT_DIR_NAME / f"{stem}.claude-input{suffix}"
+        return (
+            artifact_path.parent.parent
+            / LLM_IMAGE_VARIANT_DIR_NAME
+            / f"{stem}.claude-input{suffix}"
+        )
 
     def _maybe_build_llm_image_variant(
         self,
         artifact: dict[str, Any],
         artifact_path: Path,
     ) -> tuple[Path, str, str]:
-        media_type = (self._safe_text(artifact.get("mime")) or "application/octet-stream").lower()
+        media_type = (
+            self._safe_text(artifact.get("mime")) or "application/octet-stream"
+        ).lower()
         filename = self._safe_text(artifact.get("filename")) or artifact_path.name
         if Image is None or media_type not in {"image/jpeg", "image/png", "image/webp"}:
             return artifact_path, media_type, filename
         try:
             with Image.open(artifact_path) as image:
-                normalized = ImageOps.exif_transpose(image) if ImageOps is not None else image
+                normalized = (
+                    ImageOps.exif_transpose(image) if ImageOps is not None else image
+                )
                 width, height = normalized.size
-                target_width, target_height = self._llm_image_target_size(int(width), int(height))
+                target_width, target_height = self._llm_image_target_size(
+                    int(width), int(height)
+                )
                 if target_width == width and target_height == height:
                     return artifact_path, media_type, filename
-                variant_path = self._build_llm_image_variant_path(artifact_path, media_type)
-                if variant_path.exists() and variant_path.stat().st_mtime >= artifact_path.stat().st_mtime:
+                variant_path = self._build_llm_image_variant_path(
+                    artifact_path, media_type
+                )
+                if (
+                    variant_path.exists()
+                    and variant_path.stat().st_mtime >= artifact_path.stat().st_mtime
+                ):
                     return variant_path, media_type, variant_path.name
                 variant_path.parent.mkdir(parents=True, exist_ok=True)
                 resized = normalized.resize(
@@ -7580,14 +8735,15 @@ class GatewayRuntime:
                 mailbox_address=normalized_mailbox,
             )
             if not isinstance(mailbox, dict):
-                raise ValueError("No active Cosmic Mail mailbox is available for Agent Email.")
+                raise ValueError(
+                    "No active Cosmic Mail mailbox is available for Agent Email."
+                )
             mailbox_address = self._safe_text(mailbox.get("address"))
             if mailbox_address:
                 normalized_mailbox = mailbox_address
-            organization_id = (
-                self._safe_text(auth_context.get("organization_id"))
-                or self._safe_text(mailbox.get("organization_id"))
-            )
+            organization_id = self._safe_text(
+                auth_context.get("organization_id")
+            ) or self._safe_text(mailbox.get("organization_id"))
             effective_api_token = normalized_api_token
             token_scope = (
                 "organization"
@@ -7598,14 +8754,18 @@ class GatewayRuntime:
             )
             if token_scope == "admin":
                 if not organization_id:
-                    raise ValueError("Could not resolve the mailbox organization for Agent Email.")
+                    raise ValueError(
+                        "Could not resolve the mailbox organization for Agent Email."
+                    )
                 minted = await client.create_organization_api_key(
                     organization_id,
                     name=_AGENT_EMAIL_ORG_API_KEY_NAME,
                 )
                 minted_token = self._safe_text(minted.get("plaintext_key"))
                 if not minted_token:
-                    raise ValueError("Cosmic Mail did not return a plaintext org API key.")
+                    raise ValueError(
+                        "Cosmic Mail did not return a plaintext org API key."
+                    )
                 effective_api_token = minted_token
                 token_scope = "organization_minted"
             return {
@@ -7626,7 +8786,9 @@ class GatewayRuntime:
         webhook_url: str,
     ) -> bool:
         url = self._safe_text(webhook.get("url")) or ""
-        return url == webhook_url or url.endswith("/internal/channels/agent-email/incoming")
+        return url == webhook_url or url.endswith(
+            "/internal/channels/agent-email/incoming"
+        )
 
     async def sync_agent_email_webhook(self) -> dict[str, Any]:
         settings = self._effective_agent_email_settings()
@@ -7680,13 +8842,20 @@ class GatewayRuntime:
                 client,
                 mailbox_address=settings.get("primary_mailbox_address"),
             )
-            mailbox_id = self._safe_text(mailbox.get("id")) if isinstance(mailbox, dict) else None
+            mailbox_id = (
+                self._safe_text(mailbox.get("id"))
+                if isinstance(mailbox, dict)
+                else None
+            )
             webhook_secret = self._safe_text(settings.get("webhook_secret")) or None
             webhooks = await client.list_webhooks()
             managed = [
                 webhook
                 for webhook in webhooks
-                if isinstance(webhook, dict) and self._is_managed_agent_email_webhook(webhook, webhook_url=webhook_url)
+                if isinstance(webhook, dict)
+                and self._is_managed_agent_email_webhook(
+                    webhook, webhook_url=webhook_url
+                )
             ]
             desired_event_type = "message.received"
             desired_payload = {
@@ -7756,7 +8925,11 @@ class GatewayRuntime:
         try:
             deleted = 0
             for webhook in await client.list_webhooks():
-                if not isinstance(webhook, dict) or not self._is_managed_agent_email_webhook(webhook, webhook_url=webhook_url):
+                if not isinstance(
+                    webhook, dict
+                ) or not self._is_managed_agent_email_webhook(
+                    webhook, webhook_url=webhook_url
+                ):
                     continue
                 webhook_id = self._safe_text(webhook.get("id"))
                 if not webhook_id:
@@ -7781,7 +8954,9 @@ class GatewayRuntime:
     ) -> str:
         secret = self._safe_text(self.config.signing_secret)
         if not secret:
-            raise RuntimeError("GATEWAY_SIGNING_SECRET is required for signed artifact URLs.")
+            raise RuntimeError(
+                "GATEWAY_SIGNING_SECRET is required for signed artifact URLs."
+            )
         payload = "\n".join(
             [
                 artifact_id,
@@ -7792,7 +8967,9 @@ class GatewayRuntime:
         ).encode("utf-8")
         return hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
 
-    def mint_artifact_access_url(self, artifact: dict[str, Any], *, purpose: str = "llm_image_fetch") -> str | None:
+    def mint_artifact_access_url(
+        self, artifact: dict[str, Any], *, purpose: str = "llm_image_fetch"
+    ) -> str | None:
         if not isinstance(artifact, dict):
             return None
         artifact_id = self._safe_text(artifact.get("artifact_id"))
@@ -7803,7 +8980,9 @@ class GatewayRuntime:
         base_url = self._public_gateway_base_url()
         if not base_url:
             return None
-        expires_at = int(time.time()) + max(30, int(self.config.artifact_signed_url_ttl_sec))
+        expires_at = int(time.time()) + max(
+            30, int(self.config.artifact_signed_url_ttl_sec)
+        )
         signature = self._build_artifact_access_signature(
             artifact_id=artifact_id,
             purpose=purpose,
@@ -7824,7 +9003,11 @@ class GatewayRuntime:
         normalized_artifact_id = self._safe_text(artifact_id)
         normalized_purpose = self._safe_text(purpose)
         normalized_signature = self._safe_text(signature)
-        if not normalized_artifact_id or not normalized_purpose or not normalized_signature:
+        if (
+            not normalized_artifact_id
+            or not normalized_purpose
+            or not normalized_signature
+        ):
             raise ValueError("artifact_id, purpose, and sig are required.")
         now_ts = int(time.time())
         if expires_at < now_ts:
@@ -7836,13 +9019,18 @@ class GatewayRuntime:
                 self._cache_output_artifacts(
                     request_id=self._safe_text(artifact.get("request_id")) or "",
                     session_id=self._safe_text(artifact.get("session_id")) or "",
-                    source_channel=self._safe_text(artifact.get("source_channel")) or "",
-                    source_message_id=self._safe_text(artifact.get("source_message_id")),
+                    source_channel=self._safe_text(artifact.get("source_channel"))
+                    or "",
+                    source_message_id=self._safe_text(
+                        artifact.get("source_message_id")
+                    ),
                     produced_artifacts=[artifact],
                 )
         if artifact is None:
             raise FileNotFoundError("Artifact not found.")
-        if normalized_purpose == "llm_image_fetch" and not is_supported_image_artifact(artifact):
+        if normalized_purpose == "llm_image_fetch" and not is_supported_image_artifact(
+            artifact
+        ):
             raise ValueError("Artifact is not an LLM-fetchable image.")
         expected_signature = self._build_artifact_access_signature(
             artifact_id=normalized_artifact_id,
@@ -7852,14 +9040,22 @@ class GatewayRuntime:
         )
         if not hmac.compare_digest(normalized_signature, expected_signature):
             raise PermissionError("Invalid signed artifact URL.")
-        artifact_path = self._resolve_logical_artifact_path(self._safe_text(artifact.get("path")))
-        if artifact_path is None or not artifact_path.exists() or not artifact_path.is_file():
+        artifact_path = self._resolve_logical_artifact_path(
+            self._safe_text(artifact.get("path"))
+        )
+        if (
+            artifact_path is None
+            or not artifact_path.exists()
+            or not artifact_path.is_file()
+        ):
             raise FileNotFoundError("Artifact bytes are unavailable.")
         resolved_path = artifact_path
         media_type = self._safe_text(artifact.get("mime")) or "application/octet-stream"
         filename = self._safe_text(artifact.get("filename")) or artifact_path.name
         if normalized_purpose == "llm_image_fetch":
-            resolved_path, media_type, filename = self._maybe_build_llm_image_variant(artifact, artifact_path)
+            resolved_path, media_type, filename = self._maybe_build_llm_image_variant(
+                artifact, artifact_path
+            )
         return {
             "artifact": artifact,
             "content": resolved_path.read_bytes(),
@@ -7881,24 +9077,36 @@ class GatewayRuntime:
         message = self.session_store.get_message(normalized_message_id)
         if message is None:
             raise FileNotFoundError("Assistant message not found.")
-        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-        produced_artifacts = self._normalize_produced_artifact_list(metadata.get("produced_artifacts"))
+        metadata = (
+            message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        )
+        produced_artifacts = self._normalize_produced_artifact_list(
+            metadata.get("produced_artifacts")
+        )
         target = next(
             (
                 item
                 for item in produced_artifacts
-                if isinstance(item, dict) and self._safe_text(item.get("artifact_id")) == normalized_artifact_id
+                if isinstance(item, dict)
+                and self._safe_text(item.get("artifact_id")) == normalized_artifact_id
             ),
             None,
         )
         if target is None:
             raise FileNotFoundError("Produced artifact not found on this message.")
-        artifact_path = self._resolve_logical_artifact_path(self._safe_text(target.get("path")))
-        if artifact_path is None or not artifact_path.exists() or not artifact_path.is_file():
+        artifact_path = self._resolve_logical_artifact_path(
+            self._safe_text(target.get("path"))
+        )
+        if (
+            artifact_path is None
+            or not artifact_path.exists()
+            or not artifact_path.is_file()
+        ):
             raise FileNotFoundError("Produced artifact bytes are unavailable.")
         return {
             "content": artifact_path.read_bytes(),
-            "media_type": self._safe_text(target.get("mime_type")) or "application/octet-stream",
+            "media_type": self._safe_text(target.get("mime_type"))
+            or "application/octet-stream",
             "filename": self._safe_text(target.get("filename")) or artifact_path.name,
         }
 
@@ -7906,16 +9114,23 @@ class GatewayRuntime:
         normalized_artifact_id = self._safe_text(artifact_id)
         if not normalized_artifact_id:
             return None
-        message = self.session_store.find_message_by_output_artifact_id(normalized_artifact_id)
+        message = self.session_store.find_message_by_output_artifact_id(
+            normalized_artifact_id
+        )
         if not isinstance(message, dict):
             return None
-        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-        produced_artifacts = self._normalize_produced_artifact_list(metadata.get("produced_artifacts"))
+        metadata = (
+            message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        )
+        produced_artifacts = self._normalize_produced_artifact_list(
+            metadata.get("produced_artifacts")
+        )
         target = next(
             (
                 item
                 for item in produced_artifacts
-                if isinstance(item, dict) and self._safe_text(item.get("artifact_id")) == normalized_artifact_id
+                if isinstance(item, dict)
+                and self._safe_text(item.get("artifact_id")) == normalized_artifact_id
             ),
             None,
         )
@@ -7925,7 +9140,9 @@ class GatewayRuntime:
         artifact["request_id"] = self._safe_text(message.get("request_id"))
         artifact["session_id"] = self._safe_text(message.get("session_id"))
         artifact["source_channel"] = self._safe_text(message.get("channel"))
-        artifact["source_platform"] = self._channel_platform(self._safe_text(message.get("channel")))
+        artifact["source_platform"] = self._channel_platform(
+            self._safe_text(message.get("channel"))
+        )
         artifact["source_message_id"] = self._safe_text(message.get("message_id"))
         return artifact
 
@@ -7941,7 +9158,11 @@ class GatewayRuntime:
         normalized_request_id = self._safe_text(request_id)
         normalized_session_id = self._safe_text(session_id)
         normalized_source_channel = self._safe_text(source_channel)
-        if not normalized_request_id or not normalized_session_id or not normalized_source_channel:
+        if (
+            not normalized_request_id
+            or not normalized_session_id
+            or not normalized_source_channel
+        ):
             return
         if not isinstance(produced_artifacts, list) or not produced_artifacts:
             return
@@ -7963,15 +9184,24 @@ class GatewayRuntime:
                 len(produced_artifacts),
             )
 
-    async def _ensure_request_documents_parsed(self, request_record: dict[str, Any], *, send=None) -> None:
+    async def _ensure_request_documents_parsed(
+        self, request_record: dict[str, Any], *, send=None
+    ) -> None:
         if self._redis is None:
             return
         if self._safe_text(request_record.get("route")) != "opus":
             return
-        if not self.config.docs_auto_parse_enabled and not self.config.tabular_auto_parse_enabled:
+        if (
+            not self.config.docs_auto_parse_enabled
+            and not self.config.tabular_auto_parse_enabled
+        ):
             return
         channel = self._safe_text(request_record.get("channel")) or ""
-        input_artifacts = request_record.get("input_artifacts") if isinstance(request_record.get("input_artifacts"), list) else []
+        input_artifacts = (
+            request_record.get("input_artifacts")
+            if isinstance(request_record.get("input_artifacts"), list)
+            else []
+        )
         document_artifacts = [
             artifact
             for artifact in input_artifacts
@@ -7993,15 +9223,26 @@ class GatewayRuntime:
 
         tasks: list[Any] = []
         if document_artifacts and self.config.docs_auto_parse_enabled:
-            tasks.append(self._ensure_docs_parsed_for_request(request_record, document_artifacts, send=send, channel=channel))
+            tasks.append(
+                self._ensure_docs_parsed_for_request(
+                    request_record, document_artifacts, send=send, channel=channel
+                )
+            )
         if tabular_artifacts and self.config.tabular_auto_parse_enabled:
-            tasks.append(self._ensure_tabular_parsed_for_request(request_record, tabular_artifacts, send=send, channel=channel))
+            tasks.append(
+                self._ensure_tabular_parsed_for_request(
+                    request_record, tabular_artifacts, send=send, channel=channel
+                )
+            )
         if not tasks:
             return
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for res in results:
             if isinstance(res, Exception):
-                logger.exception("gateway.attachments_autoparse_failed request_id=%s", self._safe_text(request_record.get("request_id")))
+                logger.exception(
+                    "gateway.attachments_autoparse_failed request_id=%s",
+                    self._safe_text(request_record.get("request_id")),
+                )
 
     async def _ensure_docs_parsed_for_request(
         self,
@@ -8078,7 +9319,10 @@ class GatewayRuntime:
                 )
             return
         task_id = self._safe_text(parse_result.get("task_id")) or None
-        error_text = self._safe_text(parse_result.get("error_message")) or "docs.parse_bundle failed"
+        error_text = (
+            self._safe_text(parse_result.get("error_message"))
+            or "docs.parse_bundle failed"
+        )
         if status == "pending":
             self._apply_docs_parse_failure(
                 request_id=request_id,
@@ -8147,7 +9391,10 @@ class GatewayRuntime:
                 request_id,
                 len(tabular_artifacts),
             )
-            parse_result = {"status": "failed", "error_message": str(exc).strip() or "tabular.parse_bundle failed"}
+            parse_result = {
+                "status": "failed",
+                "error_message": str(exc).strip() or "tabular.parse_bundle failed",
+            }
         status = self._safe_text(parse_result.get("status")) or "failed"
         if status == "completed":
             self._apply_tabular_parse_success(
@@ -8175,7 +9422,10 @@ class GatewayRuntime:
                 )
             return
         task_id = self._safe_text(parse_result.get("task_id")) or None
-        error_text = self._safe_text(parse_result.get("error_message")) or "tabular.parse_bundle failed"
+        error_text = (
+            self._safe_text(parse_result.get("error_message"))
+            or "tabular.parse_bundle failed"
+        )
         if status == "pending":
             self._apply_tabular_parse_failure(
                 request_id=request_id,
@@ -8208,11 +9458,19 @@ class GatewayRuntime:
         parse_result: dict[str, Any],
         artifact_ids: list[str],
     ) -> None:
-        output = parse_result.get("output") if isinstance(parse_result.get("output"), dict) else {}
+        output = (
+            parse_result.get("output")
+            if isinstance(parse_result.get("output"), dict)
+            else {}
+        )
         bundle_id = self._safe_text(output.get("bundle_id")) or None
         parse_task_id = self._safe_text(parse_result.get("task_id")) or None
         by_artifact_id: dict[str, dict[str, Any]] = {}
-        for document in output.get("documents", []) if isinstance(output.get("documents"), list) else []:
+        for document in (
+            output.get("documents", [])
+            if isinstance(output.get("documents"), list)
+            else []
+        ):
             if not isinstance(document, dict):
                 continue
             artifact_id = self._safe_text(document.get("artifact_id"))
@@ -8230,7 +9488,12 @@ class GatewayRuntime:
                 parse_task_id=parse_task_id,
                 parse_bundle_id=bundle_id,
                 parsed_summary=document_summary,
-                docs_tools=["docs_browse", "docs_search", "docs_read", "docs_fetch_asset"],
+                docs_tools=[
+                    "docs_browse",
+                    "docs_search",
+                    "docs_read",
+                    "docs_fetch_asset",
+                ],
                 parse_error=None,
             )
             self.artifact_store.update_ingest_state(
@@ -8264,7 +9527,9 @@ class GatewayRuntime:
                 parse_task_id=task_id,
             )
 
-    def _update_request_artifact_fields(self, request_id: str, artifact_id: str, **fields: Any) -> None:
+    def _update_request_artifact_fields(
+        self, request_id: str, artifact_id: str, **fields: Any
+    ) -> None:
         if not request_id or not artifact_id:
             return
         request_record = self.request_records.get(request_id)
@@ -8320,7 +9585,10 @@ class GatewayRuntime:
                 len(artifact_ids),
             )
             return
-        error_text = self._safe_text(parse_result.get("error_message")) or "docs.parse_bundle failed"
+        error_text = (
+            self._safe_text(parse_result.get("error_message"))
+            or "docs.parse_bundle failed"
+        )
         self._apply_docs_parse_failure(
             request_id=request_id,
             artifact_ids=artifact_ids,
@@ -8342,7 +9610,10 @@ class GatewayRuntime:
         source = self._safe_text(request_record.get("source")) or "user"
         source_id = self._safe_text(request_record.get("source_id"))
         if not session_id or not request_id:
-            return {"status": "failed", "error_message": "Missing session_id or request_id for docs parsing."}
+            return {
+                "status": "failed",
+                "error_message": "Missing session_id or request_id for docs parsing.",
+            }
 
         child_input = {
             "bundle_label": f"request:{request_id}",
@@ -8383,25 +9654,32 @@ class GatewayRuntime:
             source_id=source_id or request_id,
             channel=channel or None,
         )
-        task = task.model_copy(update={"signature": sign_task_envelope(task, self.config.signing_secret)})
+        task = task.model_copy(
+            update={"signature": sign_task_envelope(task, self.config.signing_secret)}
+        )
         await dispatch_task(task, self._redis)
         return await self._wait_for_agent_terminal_result(
             task.task_id,
             timeout_sec=self.config.docs_parse_timeout_sec,
             progress_callback=(
-                (lambda event: progress_callback(
-                    self._build_docs_parse_progress_event(
-                        request_record=request_record,
-                        task_id=task.task_id,
-                        status="docs_parsing",
-                        message=self._safe_text(event.get("message")) or "Parsing attached documents.",
-                        docs_progress=self._derive_docs_parse_progress(
-                            message=self._safe_text(event.get("message")) or "Parsing attached documents.",
-                            total_documents=len(input_artifacts),
-                        ),
+                (
+                    lambda event: progress_callback(
+                        self._build_docs_parse_progress_event(
+                            request_record=request_record,
+                            task_id=task.task_id,
+                            status="docs_parsing",
+                            message=self._safe_text(event.get("message"))
+                            or "Parsing attached documents.",
+                            docs_progress=self._derive_docs_parse_progress(
+                                message=self._safe_text(event.get("message"))
+                                or "Parsing attached documents.",
+                                total_documents=len(input_artifacts),
+                            ),
+                        )
                     )
-                ))
-                if progress_callback is not None and self._is_realtime_client_channel(channel)
+                )
+                if progress_callback is not None
+                and self._is_realtime_client_channel(channel)
                 else None
             ),
             poll_interval_sec=self.config.docs_parse_poll_interval_sec,
@@ -8420,7 +9698,10 @@ class GatewayRuntime:
         source = self._safe_text(request_record.get("source")) or "user"
         source_id = self._safe_text(request_record.get("source_id"))
         if not session_id or not request_id:
-            return {"status": "failed", "error_message": "Missing session_id or request_id for tabular parsing."}
+            return {
+                "status": "failed",
+                "error_message": "Missing session_id or request_id for tabular parsing.",
+            }
 
         child_input = {
             "bundle_label": f"request:{request_id}",
@@ -8458,26 +9739,35 @@ class GatewayRuntime:
             source_id=source_id or request_id,
             channel=channel or None,
         )
-        task = task.model_copy(update={"signature": sign_task_envelope(task, self.config.signing_secret)})
+        task = task.model_copy(
+            update={"signature": sign_task_envelope(task, self.config.signing_secret)}
+        )
         await dispatch_task(task, self._redis)
         return await self._wait_for_agent_terminal_result(
             task.task_id,
             timeout_sec=self.config.tabular_parse_timeout_sec,
             progress_callback=(
-                (lambda event: progress_callback(
-                    self._build_tabular_parse_progress_event(
-                        request_record=request_record,
-                        task_id=task.task_id,
-                        status="tabular_parsing",
-                        message=self._safe_text(event.get("message")) or "Parsing spreadsheets.",
-                        tabular_progress=self._derive_tabular_parse_progress(
-                            message=self._safe_text(event.get("message")) or "Parsing spreadsheets.",
-                            payload=event.get("payload") if isinstance(event.get("payload"), dict) else {},
-                            total_files=len(input_artifacts),
-                        ),
+                (
+                    lambda event: progress_callback(
+                        self._build_tabular_parse_progress_event(
+                            request_record=request_record,
+                            task_id=task.task_id,
+                            status="tabular_parsing",
+                            message=self._safe_text(event.get("message"))
+                            or "Parsing spreadsheets.",
+                            tabular_progress=self._derive_tabular_parse_progress(
+                                message=self._safe_text(event.get("message"))
+                                or "Parsing spreadsheets.",
+                                payload=event.get("payload")
+                                if isinstance(event.get("payload"), dict)
+                                else {},
+                                total_files=len(input_artifacts),
+                            ),
+                        )
                     )
-                ))
-                if progress_callback is not None and self._is_realtime_client_channel(channel)
+                )
+                if progress_callback is not None
+                and self._is_realtime_client_channel(channel)
                 else None
             ),
             poll_interval_sec=self.config.tabular_parse_poll_interval_sec,
@@ -8492,7 +9782,10 @@ class GatewayRuntime:
         poll_interval_sec: float | None = None,
     ) -> dict[str, Any]:
         if self._redis is None:
-            return {"status": "failed", "error_message": "Redis is not available for agent result tracking."}
+            return {
+                "status": "failed",
+                "error_message": "Redis is not available for agent result tracking.",
+            }
         event_ids_key = f"task_events:{task_id}"
         seen_message_ids: set[str] = set()
         deadline = time.monotonic() + timeout_sec
@@ -8502,7 +9795,9 @@ class GatewayRuntime:
                 if message_id in seen_message_ids:
                     continue
                 seen_message_ids.add(message_id)
-                stream_entries = await self._redis.xrange("streams:events", min=message_id, max=message_id)
+                stream_entries = await self._redis.xrange(
+                    "streams:events", min=message_id, max=message_id
+                )
                 for _, fields in stream_entries:
                     event = parse_event_envelope(fields)
                     if event.task_id != task_id:
@@ -8511,12 +9806,18 @@ class GatewayRuntime:
                         return {
                             "status": "completed",
                             "task_id": task_id,
-                            "output": event.payload.get("output") if isinstance(event.payload, dict) else {},
-                            "artifacts": event.payload.get("artifacts") if isinstance(event.payload, dict) else [],
+                            "output": event.payload.get("output")
+                            if isinstance(event.payload, dict)
+                            else {},
+                            "artifacts": event.payload.get("artifacts")
+                            if isinstance(event.payload, dict)
+                            else [],
                         }
                     if event.event_type == "task.progress":
                         if progress_callback is not None:
-                            payload = event.payload if isinstance(event.payload, dict) else {}
+                            payload = (
+                                event.payload if isinstance(event.payload, dict) else {}
+                            )
                             await progress_callback(
                                 {
                                     "task_id": task_id,
@@ -8526,20 +9827,32 @@ class GatewayRuntime:
                             )
                         continue
                     if event.event_type == "task.failed":
-                        error = event.payload.get("error") if isinstance(event.payload, dict) else {}
+                        error = (
+                            event.payload.get("error")
+                            if isinstance(event.payload, dict)
+                            else {}
+                        )
                         return {
                             "status": "failed",
                             "task_id": task_id,
-                            "error_message": self._safe_text(error.get("message")) or "Agent task failed.",
+                            "error_message": self._safe_text(error.get("message"))
+                            or "Agent task failed.",
                             "error": error,
                         }
                     if event.event_type == "task.rejected":
                         return {
                             "status": "failed",
                             "task_id": task_id,
-                            "error_message": self._safe_text(event.payload.get("reason")) or "Agent task was rejected.",
+                            "error_message": self._safe_text(
+                                event.payload.get("reason")
+                            )
+                            or "Agent task was rejected.",
                         }
-            await asyncio.sleep(poll_interval_sec if poll_interval_sec is not None else self.config.docs_parse_poll_interval_sec)
+            await asyncio.sleep(
+                poll_interval_sec
+                if poll_interval_sec is not None
+                else self.config.docs_parse_poll_interval_sec
+            )
         return {
             "status": "pending",
             "task_id": task_id,
@@ -8575,7 +9888,9 @@ class GatewayRuntime:
             "percent": percent,
         }
 
-    def _derive_docs_parse_progress(self, *, message: str, total_documents: int) -> dict[str, Any]:
+    def _derive_docs_parse_progress(
+        self, *, message: str, total_documents: int
+    ) -> dict[str, Any]:
         total = max(1, total_documents)
         normalized = self._safe_text(message)
         current = 0
@@ -8584,14 +9899,19 @@ class GatewayRuntime:
         detail = normalized or "Preparing attached documents."
         percent = 0.08
 
-        parsing_match = re.search(r"Parsing document\s+(\d+)/(\d+):", normalized, re.IGNORECASE)
+        parsing_match = re.search(
+            r"Parsing document\s+(\d+)/(\d+):", normalized, re.IGNORECASE
+        )
         if parsing_match:
             current = max(1, int(parsing_match.group(1)))
             total = max(1, int(parsing_match.group(2)))
             stage = "parse"
             label = f"Parsing document {current} of {total}"
             percent = min(0.72, 0.14 + ((current - 1) / total) * 0.46)
-        elif normalized.lower().startswith("parsing ") and "uploaded document" in normalized.lower():
+        elif (
+            normalized.lower().startswith("parsing ")
+            and "uploaded document" in normalized.lower()
+        ):
             stage = "prepare"
             label = "Starting document parsing"
             percent = 0.1
@@ -8664,11 +9984,19 @@ class GatewayRuntime:
         parse_result: dict[str, Any],
         artifact_ids: list[str],
     ) -> None:
-        output = parse_result.get("output") if isinstance(parse_result.get("output"), dict) else {}
+        output = (
+            parse_result.get("output")
+            if isinstance(parse_result.get("output"), dict)
+            else {}
+        )
         bundle_id = self._safe_text(output.get("bundle_id")) or None
         parse_task_id = self._safe_text(parse_result.get("task_id")) or None
         by_artifact_id: dict[str, dict[str, Any]] = {}
-        for workbook in output.get("workbooks", []) if isinstance(output.get("workbooks"), list) else []:
+        for workbook in (
+            output.get("workbooks", [])
+            if isinstance(output.get("workbooks"), list)
+            else []
+        ):
             if not isinstance(workbook, dict):
                 continue
             aid = self._safe_text(workbook.get("artifact_id"))
@@ -8764,7 +10092,10 @@ class GatewayRuntime:
                 task_id,
             )
             return
-        error_text = self._safe_text(parse_result.get("error_message")) or "tabular.parse_bundle failed"
+        error_text = (
+            self._safe_text(parse_result.get("error_message"))
+            or "tabular.parse_bundle failed"
+        )
         self._apply_tabular_parse_failure(
             request_id=request_id,
             artifact_ids=artifact_ids,
@@ -8790,7 +10121,9 @@ class GatewayRuntime:
             active_request = self.active_requests.get(request_id)
             task_bound_changed = previous_bound_request_id != request_id
             if active_request is not None:
-                task_bound_changed = task_bound_changed or active_request.task_id != task_id
+                task_bound_changed = (
+                    task_bound_changed or active_request.task_id != task_id
+                )
                 active_request.task_id = task_id
             if task_bound_changed:
                 self._trace_request_event(
@@ -8809,9 +10142,13 @@ class GatewayRuntime:
             event_channel = self._safe_text(event.get("channel")) or ""
             research_provenance = self._normalize_research_provenance(
                 event.get("research_provenance"),
-                fallback_sources=event.get("sources") if isinstance(event.get("sources"), list) else None,
+                fallback_sources=event.get("sources")
+                if isinstance(event.get("sources"), list)
+                else None,
             )
-            produced_artifacts = self._normalize_produced_artifact_list(event.get("produced_artifacts"))
+            produced_artifacts = self._normalize_produced_artifact_list(
+                event.get("produced_artifacts")
+            )
             if produced_artifacts and request_id and session_id and event_channel:
                 self._cache_output_artifacts(
                     request_id=request_id,
@@ -8824,14 +10161,20 @@ class GatewayRuntime:
                 content=self._safe_text(event.get("content")),
                 produced_artifacts=produced_artifacts,
             )
-            client_produced_artifacts = self._hydrate_produced_artifact_list_for_client(produced_artifacts)
+            client_produced_artifacts = self._hydrate_produced_artifact_list_for_client(
+                produced_artifacts
+            )
             client_response_blocks = self._hydrate_response_blocks_for_client(
                 response_blocks,
                 produced_artifacts=client_produced_artifacts,
             )
-            task_notebook = self.session_store.get_task_notebook(task_id) if task_id else None
+            task_notebook = (
+                self.session_store.get_task_notebook(task_id) if task_id else None
+            )
             activity_log = self._normalize_activity_log(
-                task_notebook.get("activity_log") if isinstance(task_notebook, dict) else None,
+                task_notebook.get("activity_log")
+                if isinstance(task_notebook, dict)
+                else None,
                 limit=16,
             )
             assistant_message_id = store_assistant_message(
@@ -8845,7 +10188,9 @@ class GatewayRuntime:
                     "source_id": self._safe_text(event.get("source_id")),
                     "research_provenance": research_provenance,
                     "sources": self._normalize_source_list(
-                        event.get("sources") if isinstance(event.get("sources"), list) else None,
+                        event.get("sources")
+                        if isinstance(event.get("sources"), list)
+                        else None,
                         limit=8,
                     ),
                     "specialist_receipts": self._normalize_specialist_receipts(
@@ -8858,7 +10203,13 @@ class GatewayRuntime:
                 channel=event_channel,
                 route="opus",
             )
-            if assistant_message_id and produced_artifacts and request_id and session_id and event_channel:
+            if (
+                assistant_message_id
+                and produced_artifacts
+                and request_id
+                and session_id
+                and event_channel
+            ):
                 self._cache_output_artifacts(
                     request_id=request_id,
                     session_id=session_id,
@@ -8885,7 +10236,9 @@ class GatewayRuntime:
                 title="Assistant response completed",
                 detail=self._safe_text(event.get("content"))[:400] or None,
                 task_id=task_id,
-                specialist_receipts=self._normalize_specialist_receipts(event.get("specialist_receipts")),
+                specialist_receipts=self._normalize_specialist_receipts(
+                    event.get("specialist_receipts")
+                ),
                 metadata={
                     "produced_artifact_count": len(produced_artifacts),
                     "response_block_count": len(response_blocks),
@@ -8901,7 +10254,9 @@ class GatewayRuntime:
                         content=str(event.get("content") or ""),
                         channel=event_channel,
                         route="opus",
-                        sources=event.get("sources") if isinstance(event.get("sources"), list) else None,
+                        sources=event.get("sources")
+                        if isinstance(event.get("sources"), list)
+                        else None,
                         thinking_text=self._safe_text(event.get("thinking_text")),
                         produced_artifacts=produced_artifacts,
                         activity_log=activity_log,
@@ -8922,14 +10277,26 @@ class GatewayRuntime:
                 channel=self._safe_text(event.get("channel")),
                 route=self._safe_text(event.get("route")) or "opus",
                 event_type=event_type,
-                stage="terminal" if event_type in {"task.failed", "task.cancelled"} else "execution",
-                status="failed" if event_type == "task.failed" else "cancelled" if event_type == "task.cancelled" else "completed",
-                title="Task failed" if event_type == "task.failed" else "Task cancelled" if event_type == "task.cancelled" else "Task completed",
+                stage="terminal"
+                if event_type in {"task.failed", "task.cancelled"}
+                else "execution",
+                status="failed"
+                if event_type == "task.failed"
+                else "cancelled"
+                if event_type == "task.cancelled"
+                else "completed",
+                title="Task failed"
+                if event_type == "task.failed"
+                else "Task cancelled"
+                if event_type == "task.cancelled"
+                else "Task completed",
                 detail=(
                     self._safe_text((event.get("error") or {}).get("message"))
                     if isinstance(event.get("error"), dict)
                     else None
-                ) or self._safe_text(event.get("message")) or None,
+                )
+                or self._safe_text(event.get("message"))
+                or None,
                 task_id=task_id,
                 completed=event_type in {"task.failed", "task.cancelled"},
             )
@@ -8993,7 +10360,9 @@ class GatewayRuntime:
         )
 
     def _contains_opus_media_attachments(self, attachments: Any) -> bool:
-        return self._contains_document_attachments(attachments) or self._contains_image_attachments(attachments)
+        return self._contains_document_attachments(
+            attachments
+        ) or self._contains_image_attachments(attachments)
 
     def _normalize_string_list(self, values: Any, *, limit: int = 8) -> list[str]:
         if not isinstance(values, list):
@@ -9013,7 +10382,9 @@ class GatewayRuntime:
                 break
         return normalized
 
-    def _normalize_entity_list(self, values: Any, *, limit: int = 8) -> list[dict[str, Any]]:
+    def _normalize_entity_list(
+        self, values: Any, *, limit: int = 8
+    ) -> list[dict[str, Any]]:
         if not isinstance(values, list):
             return []
         normalized: list[dict[str, Any]] = []
@@ -9022,7 +10393,12 @@ class GatewayRuntime:
             if not isinstance(item, dict):
                 continue
             entity_type = self._safe_text(item.get("type")) or "entity"
-            entity_id = self._safe_text(item.get("id")) or self._safe_text(item.get("path")) or self._safe_text(item.get("url")) or self._safe_text(item.get("label"))
+            entity_id = (
+                self._safe_text(item.get("id"))
+                or self._safe_text(item.get("path"))
+                or self._safe_text(item.get("url"))
+                or self._safe_text(item.get("label"))
+            )
             if not entity_id:
                 continue
             dedupe = f"{entity_type}:{entity_id}".casefold()
@@ -9040,7 +10416,9 @@ class GatewayRuntime:
                 break
         return normalized
 
-    def _normalize_source_list(self, values: Any, *, limit: int = 8) -> list[dict[str, str]]:
+    def _normalize_source_list(
+        self, values: Any, *, limit: int = 8
+    ) -> list[dict[str, str]]:
         if not isinstance(values, list):
             return []
         normalized: list[dict[str, str]] = []
@@ -9054,7 +10432,9 @@ class GatewayRuntime:
             normalized.append(
                 {
                     "url": url,
-                    "title": self._safe_text(item.get("title")) or self._safe_text(item.get("domain")) or url,
+                    "title": self._safe_text(item.get("title"))
+                    or self._safe_text(item.get("domain"))
+                    or url,
                     "domain": self._safe_text(item.get("domain")) or "",
                 }
             )
@@ -9076,8 +10456,12 @@ class GatewayRuntime:
         if isinstance(value, dict):
             paths = self._normalize_string_list(value.get("paths"), limit=4)
             source_count = self._coerce_int(value.get("source_count"))
-            source_domains = self._normalize_string_list(value.get("source_domains"), limit=3)
-            source_sample = self._normalize_source_list(value.get("source_sample"), limit=3)
+            source_domains = self._normalize_string_list(
+                value.get("source_domains"), limit=3
+            )
+            source_sample = self._normalize_source_list(
+                value.get("source_sample"), limit=3
+            )
 
         if not source_sample:
             source_sample = self._normalize_source_list(fallback_sources, limit=3)
@@ -9085,7 +10469,11 @@ class GatewayRuntime:
             source_count = len(source_sample)
         if source_sample and not source_domains:
             source_domains = self._normalize_string_list(
-                [item.get("domain") for item in source_sample if isinstance(item, dict)],
+                [
+                    item.get("domain")
+                    for item in source_sample
+                    if isinstance(item, dict)
+                ],
                 limit=3,
             )
 
@@ -9125,7 +10513,11 @@ class GatewayRuntime:
                 or artifact_id
             )
             size_bytes: int | None = None
-            if resolved_path is not None and resolved_path.exists() and resolved_path.is_file():
+            if (
+                resolved_path is not None
+                and resolved_path.exists()
+                and resolved_path.is_file()
+            ):
                 try:
                     size_bytes = int(resolved_path.stat().st_size)
                 except OSError:
@@ -9136,16 +10528,23 @@ class GatewayRuntime:
                     for key, val in {
                         "artifact_id": artifact_id,
                         "task_id": self._safe_text(item.get("task_id")),
-                        "mime_type": self._safe_text(item.get("mime")) or self._safe_text(item.get("mime_type")),
+                        "mime_type": self._safe_text(item.get("mime"))
+                        or self._safe_text(item.get("mime_type")),
                         "filename": filename,
                         "size_bytes": size_bytes,
                         "kind": self._safe_text(item.get("kind")),
-                        "created_by_agent": self._safe_text(item.get("created_by_agent")),
+                        "created_by_agent": self._safe_text(
+                            item.get("created_by_agent")
+                        ),
                         "created_at": self._safe_text(item.get("created_at")),
                         "path": logical_path,
                         "sha256": self._safe_text(item.get("sha256")),
                         "source_url": self._safe_text(item.get("source_url")),
-                        "downloadable": bool(resolved_path is not None and resolved_path.exists() and resolved_path.is_file()),
+                        "downloadable": bool(
+                            resolved_path is not None
+                            and resolved_path.exists()
+                            and resolved_path.is_file()
+                        ),
                     }.items()
                     if val not in (None, "", [], {})
                 }
@@ -9154,13 +10553,19 @@ class GatewayRuntime:
                 break
         return normalized
 
-    def _hydrate_produced_artifact_list_for_client(self, value: Any) -> list[dict[str, Any]]:
+    def _hydrate_produced_artifact_list_for_client(
+        self, value: Any
+    ) -> list[dict[str, Any]]:
         normalized = self._normalize_produced_artifact_list(value)
         hydrated: list[dict[str, Any]] = []
         for artifact in normalized:
             enriched = dict(artifact)
-            if is_supported_image_artifact(enriched) and self._safe_text(enriched.get("path")):
-                preview_url = self.mint_artifact_access_url(enriched, purpose="ui_preview")
+            if is_supported_image_artifact(enriched) and self._safe_text(
+                enriched.get("path")
+            ):
+                preview_url = self.mint_artifact_access_url(
+                    enriched, purpose="ui_preview"
+                )
                 if preview_url:
                     enriched["preview_url"] = preview_url
             hydrated.append(enriched)
@@ -9191,10 +10596,9 @@ class GatewayRuntime:
             block_type = self._safe_text(item.get("type")) or "markdown"
             block: dict[str, Any] = dict(item)
             if block_type in {"image_artifact", "file_artifact"}:
-                artifact = (
-                    artifact_by_id.get(self._safe_text(item.get("artifact_id")))
-                    or artifact_by_name.get(self._safe_text(item.get("filename")).lower())
-                )
+                artifact = artifact_by_id.get(
+                    self._safe_text(item.get("artifact_id"))
+                ) or artifact_by_name.get(self._safe_text(item.get("filename")).lower())
                 if artifact:
                     for key in (
                         "artifact_id",
@@ -9207,7 +10611,13 @@ class GatewayRuntime:
                     ):
                         if artifact.get(key) not in (None, "", [], {}):
                             block[key] = artifact.get(key)
-            hydrated.append({key: val for key, val in block.items() if val not in (None, "", [], {})})
+            hydrated.append(
+                {
+                    key: val
+                    for key, val in block.items()
+                    if val not in (None, "", [], {})
+                }
+            )
         return hydrated
 
     def _build_stable_response_blocks(
@@ -9225,42 +10635,66 @@ class GatewayRuntime:
         produced_artifacts: list[dict[str, Any]] | None = None,
         stored_blocks: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        client_artifacts = self._hydrate_produced_artifact_list_for_client(produced_artifacts or [])
-        stable_blocks = stored_blocks if isinstance(stored_blocks, list) and stored_blocks else self._build_stable_response_blocks(
-            content=content,
-            produced_artifacts=produced_artifacts,
+        client_artifacts = self._hydrate_produced_artifact_list_for_client(
+            produced_artifacts or []
         )
-        return self._hydrate_response_blocks_for_client(stable_blocks, produced_artifacts=client_artifacts)
+        stable_blocks = (
+            stored_blocks
+            if isinstance(stored_blocks, list) and stored_blocks
+            else self._build_stable_response_blocks(
+                content=content,
+                produced_artifacts=produced_artifacts,
+            )
+        )
+        return self._hydrate_response_blocks_for_client(
+            stable_blocks, produced_artifacts=client_artifacts
+        )
 
     def _hydrate_message_metadata_for_client(self, metadata: Any) -> dict[str, Any]:
         if not isinstance(metadata, dict):
             return {}
         hydrated = dict(metadata)
-        produced_artifacts = self._hydrate_produced_artifact_list_for_client(metadata.get("produced_artifacts"))
+        produced_artifacts = self._hydrate_produced_artifact_list_for_client(
+            metadata.get("produced_artifacts")
+        )
         if produced_artifacts:
             hydrated["produced_artifacts"] = produced_artifacts
         response_blocks = self._build_client_response_blocks(
             content=None,
-            produced_artifacts=self._normalize_produced_artifact_list(metadata.get("produced_artifacts")),
-            stored_blocks=metadata.get("response_blocks") if isinstance(metadata.get("response_blocks"), list) else None,
+            produced_artifacts=self._normalize_produced_artifact_list(
+                metadata.get("produced_artifacts")
+            ),
+            stored_blocks=metadata.get("response_blocks")
+            if isinstance(metadata.get("response_blocks"), list)
+            else None,
         )
         if response_blocks:
             hydrated["response_blocks"] = response_blocks
         return hydrated
 
-    def _hydrate_history_message_for_client(self, message: dict[str, Any]) -> dict[str, Any]:
+    def _hydrate_history_message_for_client(
+        self, message: dict[str, Any]
+    ) -> dict[str, Any]:
         if not isinstance(message, dict):
             return message
         hydrated = dict(message)
-        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else None
+        metadata = (
+            message.get("metadata")
+            if isinstance(message.get("metadata"), dict)
+            else None
+        )
         if metadata is not None:
             hydrated_metadata = self._hydrate_message_metadata_for_client(metadata)
             if not isinstance(hydrated_metadata.get("response_blocks"), list):
-                produced_artifacts = self._normalize_produced_artifact_list(metadata.get("produced_artifacts"))
+                produced_artifacts = self._normalize_produced_artifact_list(
+                    metadata.get("produced_artifacts")
+                )
                 response_blocks = self._build_client_response_blocks(
                     content=self._safe_text(message.get("content")),
                     produced_artifacts=produced_artifacts,
-                    stored_blocks=metadata.get("response_blocks") if isinstance(metadata.get("response_blocks"), list) else None,
+                    stored_blocks=metadata.get("response_blocks")
+                    if isinstance(metadata.get("response_blocks"), list)
+                    else None,
                 )
                 if response_blocks:
                     hydrated_metadata["response_blocks"] = response_blocks
@@ -9278,11 +10712,19 @@ class GatewayRuntime:
         record["session_id"] = session_id
         record["turn_id"] = self._safe_text(turn_entry.get("turn_id"))
         record["request_id"] = self._safe_text(turn_entry.get("request_id"))
-        record["assistant_message_id"] = self._safe_text(turn_entry.get("assistant_message_id"))
+        record["assistant_message_id"] = self._safe_text(
+            turn_entry.get("assistant_message_id")
+        )
         record["route"] = self._safe_text(turn_entry.get("route"))
         record["user_goal"] = self._safe_text(turn_entry.get("user_goal"))
-        record["assistant_outcome"] = self._safe_text(turn_entry.get("assistant_outcome"))
-        return {key: value for key, value in record.items() if value not in (None, "", [], {})}
+        record["assistant_outcome"] = self._safe_text(
+            turn_entry.get("assistant_outcome")
+        )
+        return {
+            key: value
+            for key, value in record.items()
+            if value not in (None, "", [], {})
+        }
 
     def _score_recalled_artifact(
         self,
@@ -9296,8 +10738,12 @@ class GatewayRuntime:
         filename = (self._safe_text(record.get("filename")) or "").lower()
         artifact_id = (self._safe_text(record.get("artifact_id")) or "").lower()
         user_goal = (self._safe_text(record.get("user_goal")) or "").lower()
-        assistant_outcome = (self._safe_text(record.get("assistant_outcome")) or "").lower()
-        created_by_agent = (self._safe_text(record.get("created_by_agent")) or "").lower()
+        assistant_outcome = (
+            self._safe_text(record.get("assistant_outcome")) or ""
+        ).lower()
+        created_by_agent = (
+            self._safe_text(record.get("created_by_agent")) or ""
+        ).lower()
         route = (self._safe_text(record.get("route")) or "").lower()
         normalized_query = query.lower()
         score = 0
@@ -9309,7 +10755,16 @@ class GatewayRuntime:
             score += 12
         if normalized_query in assistant_outcome:
             score += 10
-        search_blob = " ".join([filename, artifact_id, user_goal, assistant_outcome, created_by_agent, route])
+        search_blob = " ".join(
+            [
+                filename,
+                artifact_id,
+                user_goal,
+                assistant_outcome,
+                created_by_agent,
+                route,
+            ]
+        )
         for token in query_tokens:
             if token in filename:
                 score += 6
@@ -9339,22 +10794,32 @@ class GatewayRuntime:
         normalized = str(path or "").strip()
         return labels.get(normalized, normalized)
 
-    def _research_tool_summary_labels(self, provenance: dict[str, Any] | None) -> list[str]:
+    def _research_tool_summary_labels(
+        self, provenance: dict[str, Any] | None
+    ) -> list[str]:
         if not isinstance(provenance, dict):
             return []
         return self._normalize_string_list(provenance.get("paths"), limit=4)
 
-    def _build_recent_research_receipt(self, turn: dict[str, Any]) -> dict[str, Any] | None:
+    def _build_recent_research_receipt(
+        self, turn: dict[str, Any]
+    ) -> dict[str, Any] | None:
         if not isinstance(turn, dict):
             return None
-        metadata = turn.get("metadata") if isinstance(turn.get("metadata"), dict) else {}
-        provenance = self._normalize_research_provenance(metadata.get("research_provenance"))
+        metadata = (
+            turn.get("metadata") if isinstance(turn.get("metadata"), dict) else {}
+        )
+        provenance = self._normalize_research_provenance(
+            metadata.get("research_provenance")
+        )
         if not provenance:
             return None
         receipt: dict[str, Any] = {
             "request_id": self._safe_text(turn.get("request_id")),
             "route": self._safe_text(turn.get("route")) or "opus",
-            "question": self._bounded_excerpt(turn.get("user_message_excerpt"), limit=96),
+            "question": self._bounded_excerpt(
+                turn.get("user_message_excerpt"), limit=96
+            ),
             "completed_at": self._safe_text(turn.get("completed_at")),
         }
         if isinstance(provenance.get("paths"), list):
@@ -9367,7 +10832,9 @@ class GatewayRuntime:
             receipt["source_sample"] = provenance.get("source_sample")
         return receipt
 
-    def _normalize_specialist_receipts(self, value: Any, *, limit: int = 4) -> list[dict[str, Any]]:
+    def _normalize_specialist_receipts(
+        self, value: Any, *, limit: int = 4
+    ) -> list[dict[str, Any]]:
         if not isinstance(value, list):
             return []
         normalized: list[dict[str, Any]] = []
@@ -9401,10 +10868,14 @@ class GatewayRuntime:
                 receipt["artifact_count"] = artifact_count
             if sheet_count is not None:
                 receipt["sheet_count"] = sheet_count
-            source_domains = self._normalize_string_list(item.get("source_domains"), limit=3)
+            source_domains = self._normalize_string_list(
+                item.get("source_domains"), limit=3
+            )
             if source_domains:
                 receipt["source_domains"] = source_domains
-            source_sample = self._normalize_source_list(item.get("source_sample"), limit=2)
+            source_sample = self._normalize_source_list(
+                item.get("source_sample"), limit=2
+            )
             if source_sample:
                 receipt["source_sample"] = source_sample
             if receipt:
@@ -9414,11 +10885,17 @@ class GatewayRuntime:
                 break
         return normalized
 
-    def _build_recent_specialist_receipts(self, turn: dict[str, Any]) -> list[dict[str, Any]]:
+    def _build_recent_specialist_receipts(
+        self, turn: dict[str, Any]
+    ) -> list[dict[str, Any]]:
         if not isinstance(turn, dict):
             return []
-        metadata = turn.get("metadata") if isinstance(turn.get("metadata"), dict) else {}
-        stored = self._normalize_specialist_receipts(metadata.get("specialist_receipts"))
+        metadata = (
+            turn.get("metadata") if isinstance(turn.get("metadata"), dict) else {}
+        )
+        stored = self._normalize_specialist_receipts(
+            metadata.get("specialist_receipts")
+        )
         if not stored:
             return []
         rendered: list[dict[str, Any]] = []
@@ -9591,7 +11068,9 @@ class GatewayRuntime:
             if bound_request_id == state.request_id:
                 self.active_requests_by_task.pop(state.task_id, None)
 
-    def _track_partial_stream(self, state: ActiveRequest, event: dict[str, Any]) -> None:
+    def _track_partial_stream(
+        self, state: ActiveRequest, event: dict[str, Any]
+    ) -> None:
         event_type = self._safe_text(event.get("type")) or ""
         if event_type == "response.thinking.chunk":
             state.partial_thinking += str(event.get("content") or "")
@@ -9631,7 +11110,9 @@ class GatewayRuntime:
                 "error": str(exc),
             }
 
-        snapshot = payload if isinstance(payload, dict) else {"enabled": True, "status": "ok"}
+        snapshot = (
+            payload if isinstance(payload, dict) else {"enabled": True, "status": "ok"}
+        )
         snapshot.setdefault("enabled", True)
         snapshot["checked_at"] = utcnow_iso()
         self._memory_health_snapshot = snapshot
@@ -9652,7 +11133,9 @@ class GatewayRuntime:
                     "checked_at": utcnow_iso(),
                 }
 
-    async def _finalize_rollover_sessions(self, current_session_id: str | None = None) -> None:
+    async def _finalize_rollover_sessions(
+        self, current_session_id: str | None = None
+    ) -> None:
         resolved_current_session_id = current_session_id or self._current_session_id()
         async with self._rollover_finalize_lock:
             candidates = self.session_store.list_rollover_candidates(
@@ -9672,7 +11155,9 @@ class GatewayRuntime:
                     packet,
                 )
 
-    async def _finalize_single_rollover_session(self, candidate: dict[str, Any]) -> dict[str, Any] | None:
+    async def _finalize_single_rollover_session(
+        self, candidate: dict[str, Any]
+    ) -> dict[str, Any] | None:
         session_id = self._safe_text(candidate.get("session_id"))
         if not session_id:
             return None
@@ -9685,8 +11170,12 @@ class GatewayRuntime:
             )
             return None
 
-        transcript_markdown = self._render_session_transcript_markdown(candidate, history)
-        transcript_path = self._write_session_transcript(session_id, transcript_markdown)
+        transcript_markdown = self._render_session_transcript_markdown(
+            candidate, history
+        )
+        transcript_path = self._write_session_transcript(
+            session_id, transcript_markdown
+        )
 
         summary_text: str | None = None
         summary_status = "skipped"
@@ -9699,7 +11188,9 @@ class GatewayRuntime:
                 history=history,
             )
         except Exception:
-            logger.exception("gateway.session_rollover_summary_failed session_id=%s", session_id)
+            logger.exception(
+                "gateway.session_rollover_summary_failed session_id=%s", session_id
+            )
             summary_status = "summary_failed"
         else:
             if summary_text:
@@ -9718,8 +11209,12 @@ class GatewayRuntime:
                                 payload=summary_payload,
                                 operation="session_summary_write",
                                 write_source="gateway_session_rollover",
-                                original_kind=self._safe_text(summary_payload.get("kind")),
-                                normalized_kind=self._safe_text(summary_payload.get("kind")),
+                                original_kind=self._safe_text(
+                                    summary_payload.get("kind")
+                                ),
+                                normalized_kind=self._safe_text(
+                                    summary_payload.get("kind")
+                                ),
                                 guard_applied=False,
                             ),
                         )
@@ -9786,7 +11281,9 @@ class GatewayRuntime:
 
         return "\n".join(lines).strip() + "\n"
 
-    def _write_session_transcript(self, session_id: str, transcript_markdown: str) -> str:
+    def _write_session_transcript(
+        self, session_id: str, transcript_markdown: str
+    ) -> str:
         transcript_dir = self.config.session_transcript_dir
         transcript_dir.mkdir(parents=True, exist_ok=True)
         transcript_path = transcript_dir / f"{session_id}.md"
@@ -9880,8 +11377,14 @@ class GatewayRuntime:
         user_content = self._safe_text(user_message.get("content")) or "[empty message]"
         assistant_content = self._safe_text(event.get("content")) or "[empty response]"
         route = self._safe_text(event.get("route")) or "opus"
-        metrics = event.get("metrics") if isinstance(event.get("metrics"), dict) else None
-        input_artifacts = user_message.get("metadata", {}).get("input_artifacts") if isinstance(user_message.get("metadata"), dict) else None
+        metrics = (
+            event.get("metrics") if isinstance(event.get("metrics"), dict) else None
+        )
+        input_artifacts = (
+            user_message.get("metadata", {}).get("input_artifacts")
+            if isinstance(user_message.get("metadata"), dict)
+            else None
+        )
 
         content_lines = [
             f"# Task Summary: {task_id}",
@@ -9921,7 +11424,8 @@ class GatewayRuntime:
             "tags": [
                 "task_summary",
                 route,
-                self._safe_text(channel.split(":", 1)[0] if channel else None) or "unknown_channel",
+                self._safe_text(channel.split(":", 1)[0] if channel else None)
+                or "unknown_channel",
             ],
             "metadata": metadata,
             "provenance": {
@@ -9986,10 +11490,20 @@ class GatewayRuntime:
                 ),
             )
 
-        title = self._safe_text(payload.get("title")) or self._derive_memory_title(content)
+        title = self._safe_text(payload.get("title")) or self._derive_memory_title(
+            content
+        )
         tags = self._normalize_string_list(payload.get("tags"), limit=24)
-        metadata = dict(payload.get("metadata")) if isinstance(payload.get("metadata"), dict) else {}
-        provenance = dict(payload.get("provenance")) if isinstance(payload.get("provenance"), dict) else {}
+        metadata = (
+            dict(payload.get("metadata"))
+            if isinstance(payload.get("metadata"), dict)
+            else {}
+        )
+        provenance = (
+            dict(payload.get("provenance"))
+            if isinstance(payload.get("provenance"), dict)
+            else {}
+        )
         normalized_payload = {
             "kind": normalized_kind,
             "title": title,
@@ -10024,20 +11538,28 @@ class GatewayRuntime:
         priority = min(max(priority, 0), 1000)
         always_include = self._coerce_bool(payload.get("always_include"), True)
         tags = self._normalize_string_list(payload.get("tags"), limit=24)
-        metadata = dict(payload.get("metadata")) if isinstance(payload.get("metadata"), dict) else {}
-        provenance = dict(payload.get("provenance")) if isinstance(payload.get("provenance"), dict) else {}
-        confirmation_status = self._safe_text(payload.get("confirmation_status")) or self._safe_text(
-            metadata.get("confirmation_status")
+        metadata = (
+            dict(payload.get("metadata"))
+            if isinstance(payload.get("metadata"), dict)
+            else {}
         )
-        created_in_session_id = self._safe_text(payload.get("created_in_session_id")) or self._safe_text(
-            metadata.get("created_in_session_id")
+        provenance = (
+            dict(payload.get("provenance"))
+            if isinstance(payload.get("provenance"), dict)
+            else {}
         )
-        created_by_tool = self._safe_text(payload.get("created_by_tool")) or self._safe_text(
-            metadata.get("created_by_tool")
-        )
-        contested_reason = self._safe_text(payload.get("contested_reason")) or self._safe_text(
-            metadata.get("contested_reason")
-        )
+        confirmation_status = self._safe_text(
+            payload.get("confirmation_status")
+        ) or self._safe_text(metadata.get("confirmation_status"))
+        created_in_session_id = self._safe_text(
+            payload.get("created_in_session_id")
+        ) or self._safe_text(metadata.get("created_in_session_id"))
+        created_by_tool = self._safe_text(
+            payload.get("created_by_tool")
+        ) or self._safe_text(metadata.get("created_by_tool"))
+        contested_reason = self._safe_text(
+            payload.get("contested_reason")
+        ) or self._safe_text(metadata.get("contested_reason"))
         contested_at = self._safe_text(payload.get("contested_at")) or self._safe_text(
             metadata.get("contested_at")
         )
@@ -10051,9 +11573,13 @@ class GatewayRuntime:
             metadata.setdefault("confirmation_status", "confirmed")
         metadata.setdefault(
             "created_in_session_id",
-            created_in_session_id or self._safe_text(provenance.get("session_id")) or self._safe_text(metadata.get("session_id")),
+            created_in_session_id
+            or self._safe_text(provenance.get("session_id"))
+            or self._safe_text(metadata.get("session_id")),
         )
-        metadata.setdefault("created_by_tool", created_by_tool or "memory_write_core_fact")
+        metadata.setdefault(
+            "created_by_tool", created_by_tool or "memory_write_core_fact"
+        )
         metadata["derived_from_assistant_inference"] = derived_from_assistant_inference
         if contested_reason:
             metadata["contested_reason"] = contested_reason
@@ -10098,24 +11624,44 @@ class GatewayRuntime:
     ) -> tuple[dict[str, Any], MemoryWriteAuditEvent]:
         observations = payload.get("observations")
         if not isinstance(observations, list) or not observations:
-            raise MemoryClientHTTPError(status_code=400, message="observations are required")
-        provenance = dict(payload.get("provenance")) if isinstance(payload.get("provenance"), dict) else {}
+            raise MemoryClientHTTPError(
+                status_code=400, message="observations are required"
+            )
+        provenance = (
+            dict(payload.get("provenance"))
+            if isinstance(payload.get("provenance"), dict)
+            else {}
+        )
         if not provenance:
-            raise MemoryClientHTTPError(status_code=400, message="provenance is required")
+            raise MemoryClientHTTPError(
+                status_code=400, message="provenance is required"
+            )
 
         normalized_payload = dict(payload)
-        normalized_payload["kind"] = self._safe_text(payload.get("kind")) or "transcript"
-        normalized_payload["title"] = self._safe_text(payload.get("title")) or "Transcript episode"
-        normalized_payload["tags"] = self._normalize_string_list(payload.get("tags"), limit=24)
-        normalized_payload["metadata"] = dict(payload.get("metadata")) if isinstance(payload.get("metadata"), dict) else {}
+        normalized_payload["kind"] = (
+            self._safe_text(payload.get("kind")) or "transcript"
+        )
+        normalized_payload["title"] = (
+            self._safe_text(payload.get("title")) or "Transcript episode"
+        )
+        normalized_payload["tags"] = self._normalize_string_list(
+            payload.get("tags"), limit=24
+        )
+        normalized_payload["metadata"] = (
+            dict(payload.get("metadata"))
+            if isinstance(payload.get("metadata"), dict)
+            else {}
+        )
         normalized_payload["provenance"] = provenance
 
         audit_event = self._build_memory_write_audit_event(
             payload=normalized_payload,
             operation="memory_ingest_episode",
             write_source=write_source,
-            original_kind=self._safe_text(normalized_payload.get("kind")) or "transcript",
-            normalized_kind=self._safe_text(normalized_payload.get("kind")) or "transcript",
+            original_kind=self._safe_text(normalized_payload.get("kind"))
+            or "transcript",
+            normalized_kind=self._safe_text(normalized_payload.get("kind"))
+            or "transcript",
             guard_applied=False,
         )
         return normalized_payload, audit_event
@@ -10130,8 +11676,16 @@ class GatewayRuntime:
         normalized_kind: str | None,
         guard_applied: bool,
     ) -> MemoryWriteAuditEvent:
-        metadata = dict(payload.get("metadata")) if isinstance(payload.get("metadata"), dict) else {}
-        provenance = dict(payload.get("provenance")) if isinstance(payload.get("provenance"), dict) else {}
+        metadata = (
+            dict(payload.get("metadata"))
+            if isinstance(payload.get("metadata"), dict)
+            else {}
+        )
+        provenance = (
+            dict(payload.get("provenance"))
+            if isinstance(payload.get("provenance"), dict)
+            else {}
+        )
         content_preview = self._memory_payload_preview(payload)
         content_hash = self._memory_payload_hash(
             payload,
@@ -10174,10 +11728,9 @@ class GatewayRuntime:
             or self._safe_text(metadata.get("source_id"))
             or self._safe_text(payload.get("source_id"))
         )
-        canonical_key = (
-            self._safe_text(payload.get("canonical_key"))
-            or self._safe_text(metadata.get("canonical_key"))
-        )
+        canonical_key = self._safe_text(
+            payload.get("canonical_key")
+        ) or self._safe_text(metadata.get("canonical_key"))
         tags = self._normalize_string_list(payload.get("tags"), limit=24)
         return MemoryWriteAuditEvent(
             operation=operation,
@@ -10248,7 +11801,11 @@ class GatewayRuntime:
     ) -> dict[str, Any]:
         resolved_writer_id = writer_id or audit_event.writer_id
         lock_key = None
-        if audit_event.guard_applied and resolved_writer_id and audit_event.content_hash:
+        if (
+            audit_event.guard_applied
+            and resolved_writer_id
+            and audit_event.content_hash
+        ):
             lock_key = f"{resolved_writer_id}:{audit_event.content_hash}"
 
         if lock_key is None:
@@ -10341,7 +11898,14 @@ class GatewayRuntime:
                 status="saved",
                 memory_id=memory_id,
                 response=self._summarize_memory_write_response(response),
-                deduplicated=bool(self._coerce_bool(response.get("deduplicated") if isinstance(response, dict) else False, False)),
+                deduplicated=bool(
+                    self._coerce_bool(
+                        response.get("deduplicated")
+                        if isinstance(response, dict)
+                        else False,
+                        False,
+                    )
+                ),
                 rate_limited=False,
                 indexed=True,
                 error_text=None,
@@ -10374,7 +11938,14 @@ class GatewayRuntime:
             status="saved",
             memory_id=self._extract_memory_id(response),
             response=self._summarize_memory_write_response(response),
-            deduplicated=bool(self._coerce_bool(response.get("deduplicated") if isinstance(response, dict) else False, False)),
+            deduplicated=bool(
+                self._coerce_bool(
+                    response.get("deduplicated")
+                    if isinstance(response, dict)
+                    else False,
+                    False,
+                )
+            ),
             rate_limited=False,
             indexed=True,
             error_text=None,
@@ -10390,7 +11961,10 @@ class GatewayRuntime:
                     await self._redis.expire(rate_key, MEMORY_WRITE_RATE_WINDOW_SEC)
                 return int(count) > self.config.memory_write_max_per_hour
             except Exception:
-                logger.exception("gateway.memory_write_rate_limit_redis_failed writer_id=%s", writer_id)
+                logger.exception(
+                    "gateway.memory_write_rate_limit_redis_failed writer_id=%s",
+                    writer_id,
+                )
 
         since_created_at = self._iso_seconds_ago(MEMORY_WRITE_RATE_WINDOW_SEC)
         count = self.memory_write_audit_store.count_recent_guarded_entries(
@@ -10410,18 +11984,26 @@ class GatewayRuntime:
             try:
                 memory_id = self._safe_text(await self._redis.get(dedup_key))
             except Exception:
-                logger.exception("gateway.memory_write_dedup_redis_failed writer_id=%s", writer_id)
+                logger.exception(
+                    "gateway.memory_write_dedup_redis_failed writer_id=%s", writer_id
+                )
             else:
                 if memory_id:
                     return {
                         "memory_id": memory_id,
-                        "response": {"memory_id": memory_id, "indexed": True, "deduplicated": True},
+                        "response": {
+                            "memory_id": memory_id,
+                            "indexed": True,
+                            "deduplicated": True,
+                        },
                     }
 
         return self.memory_write_audit_store.find_recent_duplicate(
             writer_id=writer_id,
             content_hash=content_hash,
-            since_created_at=self._iso_seconds_ago(self.config.memory_write_dedup_ttl_sec),
+            since_created_at=self._iso_seconds_ago(
+                self.config.memory_write_dedup_ttl_sec
+            ),
         )
 
     async def _remember_memory_write(
@@ -10441,7 +12023,9 @@ class GatewayRuntime:
                 ex=self.config.memory_write_dedup_ttl_sec,
             )
         except Exception:
-            logger.exception("gateway.memory_write_dedup_redis_store_failed writer_id=%s", writer_id)
+            logger.exception(
+                "gateway.memory_write_dedup_redis_store_failed writer_id=%s", writer_id
+            )
 
     def _append_memory_write_audit(
         self,
@@ -10498,7 +12082,9 @@ class GatewayRuntime:
                 if not isinstance(item, dict):
                     continue
                 role = self._safe_text(item.get("role")) or "unknown"
-                observation_content = self._bounded_excerpt(item.get("content"), limit=160)
+                observation_content = self._bounded_excerpt(
+                    item.get("content"), limit=160
+                )
                 if observation_content:
                     parts.append(f"{role}: {observation_content}")
             if parts:
@@ -10518,7 +12104,9 @@ class GatewayRuntime:
         if content is None:
             observations = payload.get("observations")
             if isinstance(observations, list):
-                content = json.dumps(observations, ensure_ascii=False, sort_keys=True, default=str)
+                content = json.dumps(
+                    observations, ensure_ascii=False, sort_keys=True, default=str
+                )
         if content is None:
             return None
         canonical_key = self._safe_text(payload.get("canonical_key"))
@@ -10556,7 +12144,11 @@ class GatewayRuntime:
         return lock
 
     def _iso_seconds_ago(self, seconds: int) -> str:
-        return (datetime.now(timezone.utc) - timedelta(seconds=max(1, seconds))).isoformat().replace("+00:00", "Z")
+        return (
+            (datetime.now(timezone.utc) - timedelta(seconds=max(1, seconds)))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
 
     def _build_deduplicated_memory_response(
         self,
@@ -10580,7 +12172,9 @@ class GatewayRuntime:
             normalized.setdefault("title", audit_event.title)
         return normalized
 
-    def _summarize_memory_write_response(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _summarize_memory_write_response(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
         summary: dict[str, Any] = {}
         memory_id = self._extract_memory_id(payload)
         if memory_id:

@@ -1053,6 +1053,15 @@ class OrchestratorRuntime:
             inherited_request_id = str(parent_task.input.get("request_id") or "").strip()
             if inherited_request_id:
                 child_input["request_id"] = inherited_request_id
+        auth_requirement = self._get_auth_requirement_for_intent(recipient, resolved_intent)
+        if auth_requirement and not isinstance(child_input.get("auth"), dict):
+            child_input["auth"] = await self._resolve_auth_for_child_task(
+                parent_task=parent_task,
+                recipient=recipient,
+                intent=resolved_intent,
+                child_input=child_input,
+                auth_requirement=auth_requirement,
+            )
 
         child_priority = str(priority or parent_task.priority or SOURCE_PRIORITY_MAP.get(parent_task.source, "normal")).strip()
         normalized_idempotency_key = str(idempotency_key or "").strip() or self._build_child_idempotency_key(
@@ -1213,6 +1222,8 @@ class OrchestratorRuntime:
 
         if task.intent == "orchestrator.delegate":
             return await self._register_reverse_delegate(task)
+        if task.intent == "orchestrator.refresh_credential":
+            return await self._register_reverse_refresh(task)
         raise RuntimeError(f"Unsupported reverse intent: {task.intent}")
 
     async def _register_reverse_delegate(self, task: TaskEnvelope) -> dict[str, Any]:
@@ -1265,6 +1276,51 @@ class OrchestratorRuntime:
             "target_agent_id": target_agent_id,
         }
 
+    async def _register_reverse_refresh(self, task: TaskEnvelope) -> dict[str, Any]:
+        waiting_task_id = str(task.parent_task_id or "").strip()
+        if not waiting_task_id:
+            raise RuntimeError("orchestrator.refresh_credential requires parent_task_id pointing to the waiting specialist task.")
+        waiting_record = self.task_ledger.get_task(waiting_task_id)
+        if waiting_record is None:
+            raise RuntimeError(f"Waiting task {waiting_task_id!r} was not found in the task ledger.")
+        waiting_recipient = str(waiting_record.get("recipient") or "").strip()
+        if waiting_recipient != task.sender:
+            raise RuntimeError("reverse task sender must own the waiting specialist task.")
+
+        credential_ref = str(task.input.get("credential_ref") or "").strip()
+        provider = str(task.input.get("provider") or "").strip() or None
+        if not credential_ref:
+            raise RuntimeError("orchestrator.refresh_credential requires credential_ref.")
+
+        self.task_ledger.create_task(task)
+        self.task_ledger.create_reverse_task_wait(
+            reverse_task_id=task.task_id,
+            waiting_task_id=waiting_task_id,
+            parent_task_id=str(waiting_record.get("parent_task_id") or "").strip() or None,
+            sender=task.sender,
+            recipient=waiting_recipient,
+            reverse_intent=task.intent,
+            target_intent=None,
+            target_agent_id=None,
+            reverse_payload={**task.input, "provider": provider},
+        )
+        self.task_ledger.mark_suspended(
+            task.task_id,
+            payload={
+                "reason": "credential_refresh_registered",
+                "waiting_task_id": waiting_task_id,
+                "credential_ref": credential_ref,
+                "provider": provider,
+            },
+        )
+        return {
+            "reverse_task_id": task.task_id,
+            "status": "registered",
+            "waiting_task_id": waiting_task_id,
+            "credential_ref": credential_ref,
+            "provider": provider,
+        }
+
     def _resolve_agent_secret(self, agent_id: str) -> str:
         normalized_agent_id = str(agent_id or "").strip()
         secret = (
@@ -1293,6 +1349,157 @@ class OrchestratorRuntime:
             ).encode("utf-8")
         ).hexdigest()[:16]
         return f"{parent_idempotency_key}:{agent_id}:{intent}:{digest}"
+
+    def _get_auth_requirement_for_intent(self, agent_id: str, intent: str) -> dict[str, Any] | None:
+        card = self.registry_store.get_card(agent_id)
+        if not isinstance(card, dict):
+            return None
+        auth_requirements = card.get("auth_requirements")
+        if not isinstance(auth_requirements, dict):
+            return None
+        requirement = auth_requirements.get(intent)
+        return dict(requirement) if isinstance(requirement, dict) else None
+
+    async def _resolve_auth_for_child_task(
+        self,
+        *,
+        parent_task: TaskEnvelope,
+        recipient: str,
+        intent: str,
+        child_input: dict[str, Any],
+        auth_requirement: dict[str, Any],
+    ) -> dict[str, Any]:
+        provider = str(auth_requirement.get("provider") or "").strip()
+        scopes = [
+            str(item).strip()
+            for item in (auth_requirement.get("scopes") or [])
+            if str(item).strip()
+        ]
+        if not provider or not scopes:
+            raise RuntimeError(f"Invalid auth_requirements for {recipient}::{intent}.")
+
+        payload: dict[str, Any] = {
+            "provider": provider,
+            "required_scopes": scopes,
+            "session_id": parent_task.session_id,
+            "operation_mode": self._classify_auth_operation_mode(intent),
+            "allow_primary_fallback": self._allow_primary_fallback(intent),
+        }
+
+        explicit_account_id = str(child_input.get("account_id") or "").strip()
+        if explicit_account_id:
+            payload["account_id"] = explicit_account_id
+
+        account_hint = self._extract_account_hint(child_input)
+        if account_hint:
+            payload["account_hint"] = account_hint
+
+        resource_hint = str(child_input.get("resource_hint") or "").strip()
+        if resource_hint:
+            payload["resource_hint"] = resource_hint
+
+        headers = {"Content-Type": "application/json"}
+        if self.config.internal_token:
+            headers["X-Internal-Token"] = self.config.internal_token
+
+        url = f"{self.config.gateway_url.rstrip('/')}/internal/credentials/resolve"
+        try:
+            response = await self._client.post(url, json=payload, headers=headers)
+        except httpx.HTTPError as exc:
+            raise RuntimeError(
+                f"Credential resolution failed for {intent}: unable to reach Gateway ({exc})."
+            ) from exc
+
+        if response.status_code == 409:
+            detail = {}
+            try:
+                detail = response.json().get("detail", {})
+            except Exception:
+                detail = {}
+            accounts = detail.get("accounts") if isinstance(detail, dict) else None
+            options: list[str] = []
+            if isinstance(accounts, list):
+                for account in accounts:
+                    if not isinstance(account, dict):
+                        continue
+                    label = str(
+                        account.get("account_label")
+                        or account.get("display_name")
+                        or account.get("email")
+                        or account.get("account_id")
+                        or "account"
+                    ).strip()
+                    if bool(account.get("is_primary")):
+                        label = f"{label} (primary)"
+                    options.append(label)
+            suffix = f" Available accounts: {', '.join(options)}." if options else ""
+            raise RuntimeError(
+                f"Multiple {provider} accounts are connected for {intent}. Ask the user which account to use or pass account_hint.{suffix}"
+            )
+        if response.status_code == 404:
+            raise RuntimeError(
+                f"No usable {provider} credential is available for {intent}. The user may need to connect or re-authorize the account."
+            )
+        if response.status_code == 403:
+            raise RuntimeError(
+                f"Credential resolution for {intent} was rejected by the Gateway."
+            )
+        response.raise_for_status()
+        resolved = response.json()
+        if not isinstance(resolved, dict) or not str(resolved.get("access_token") or "").strip():
+            raise RuntimeError(f"Gateway returned an invalid credential payload for {intent}.")
+        return resolved
+
+    async def _refresh_credential_via_gateway(self, credential_ref: str) -> dict[str, Any]:
+        headers = {"Content-Type": "application/json"}
+        if self.config.internal_token:
+            headers["X-Internal-Token"] = self.config.internal_token
+        url = f"{self.config.gateway_url.rstrip('/')}/internal/credentials/refresh"
+        try:
+            response = await self._client.post(
+                url,
+                json={"credential_ref": credential_ref},
+                headers=headers,
+            )
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"Gateway credential refresh failed: {exc}") from exc
+        if response.status_code == 404:
+            raise RuntimeError("Credential refresh failed because the credential was not found.")
+        if response.status_code == 403:
+            raise RuntimeError("Credential refresh was rejected by the Gateway.")
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or not str(payload.get("access_token") or "").strip():
+            raise RuntimeError("Gateway returned an invalid refreshed credential payload.")
+        return payload
+
+    def _extract_account_hint(self, child_input: dict[str, Any]) -> str | None:
+        candidate_keys = (
+            "account_hint",
+            "account",
+            "account_name",
+            "account_label",
+            "account_email",
+            "calendar_account",
+            "calendar_account_hint",
+            "google_account",
+        )
+        for key in candidate_keys:
+            value = child_input.get(key)
+            if value is None:
+                continue
+            normalized = str(value).strip()
+            if normalized:
+                return normalized
+        return None
+
+    def _classify_auth_operation_mode(self, intent: str) -> str:
+        lowered = str(intent or "").strip().lower()
+        write_markers = ("create", "update", "cancel", "delete", "send", "write", "patch", "set")
+        return "write" if any(marker in lowered for marker in write_markers) else "read"
+
+    def _allow_primary_fallback(self, intent: str) -> bool:
+        return self._classify_auth_operation_mode(intent) == "read"
 
     async def _find_available_agent(
         self,
@@ -1422,6 +1629,11 @@ class OrchestratorRuntime:
             await self._dispatch_registered_reverse_wait(wait)
 
     async def _dispatch_registered_reverse_wait(self, wait: dict[str, Any]) -> None:
+        reverse_intent = str(wait.get("reverse_intent") or "").strip()
+        if reverse_intent == "orchestrator.refresh_credential":
+            await self._process_registered_refresh_wait(wait)
+            return
+
         reverse_task_id = str(wait.get("reverse_task_id") or "").strip()
         waiting_task_id = str(wait.get("waiting_task_id") or "").strip()
         reverse_record = self.task_ledger.get_task(reverse_task_id)
@@ -1509,6 +1721,95 @@ class OrchestratorRuntime:
             return
 
         await self._dispatch_resumed_task_for_reverse_result(wait, delegated, delegated_task_id=None)
+
+    async def _process_registered_refresh_wait(self, wait: dict[str, Any]) -> None:
+        reverse_task_id = str(wait.get("reverse_task_id") or "").strip()
+        waiting_task_id = str(wait.get("waiting_task_id") or "").strip()
+        waiting_record = self.task_ledger.get_task(waiting_task_id)
+        if waiting_record is None:
+            self.task_ledger.mark_reverse_task_wait_failed(
+                reverse_task_id,
+                code="WAITING_TASK_MISSING",
+                message="Waiting specialist task no longer exists.",
+            )
+            self.task_ledger.mark_failed(
+                reverse_task_id,
+                code="WAITING_TASK_MISSING",
+                message="Waiting specialist task no longer exists.",
+            )
+            return
+
+        reverse_payload = wait.get("reverse_payload_json") if isinstance(wait.get("reverse_payload_json"), dict) else {}
+        credential_ref = str(reverse_payload.get("credential_ref") or "").strip()
+        if not credential_ref:
+            error_message = "Credential refresh request is missing credential_ref."
+            self.task_ledger.mark_reverse_task_wait_failed(
+                reverse_task_id,
+                code="INVALID_REVERSE_TASK",
+                message=error_message,
+            )
+            self.task_ledger.mark_failed(
+                reverse_task_id,
+                code="INVALID_REVERSE_TASK",
+                message=error_message,
+            )
+            self.task_ledger.mark_failed(
+                waiting_task_id,
+                code="AUTH_ERROR",
+                message=error_message,
+            )
+            self._resolve_pending_agent_result(
+                waiting_task_id,
+                AgentResult(
+                    status="failed",
+                    output={},
+                    artifacts=[],
+                    error=AgentError(
+                        code="AUTH_ERROR",
+                        retryable=False,
+                        message=error_message,
+                        next_action="escalate",
+                    ),
+                ),
+            )
+            return
+
+        try:
+            refreshed_auth = await self._refresh_credential_via_gateway(credential_ref)
+        except Exception as exc:
+            message = str(exc).strip() or "Credential refresh failed."
+            self.task_ledger.mark_reverse_task_wait_failed(
+                reverse_task_id,
+                code="AUTH_ERROR",
+                message=message,
+            )
+            self.task_ledger.mark_failed(
+                reverse_task_id,
+                code="AUTH_ERROR",
+                message=message,
+            )
+            self.task_ledger.mark_failed(
+                waiting_task_id,
+                code="AUTH_ERROR",
+                message=message,
+            )
+            self._resolve_pending_agent_result(
+                waiting_task_id,
+                AgentResult(
+                    status="failed",
+                    output={},
+                    artifacts=[],
+                    error=AgentError(
+                        code="AUTH_ERROR",
+                        retryable=False,
+                        message=message,
+                        next_action="escalate",
+                    ),
+                ),
+            )
+            return
+
+        await self._dispatch_resumed_task_for_refreshed_credential(wait, refreshed_auth)
 
     async def _dispatch_resumed_task_for_input_reply(self, reply: dict[str, Any]) -> None:
         if self._redis is None:
@@ -1669,6 +1970,104 @@ class OrchestratorRuntime:
                 "target_intent": reverse_task_meta.get("target_intent"),
                 "target_agent_id": reverse_task_meta.get("target_agent_id"),
                 "result_status": result.status,
+            },
+        )
+        self._link_pending_agent_result_alias(alias_task_id=resume_task.task_id, canonical_task_id=waiting_task_id)
+        await dispatch_task(resume_task, self._redis)
+
+    async def _dispatch_resumed_task_for_refreshed_credential(
+        self,
+        wait: dict[str, Any],
+        refreshed_auth: dict[str, Any],
+    ) -> None:
+        if self._redis is None:
+            return
+
+        reverse_task_id = str(wait.get("reverse_task_id") or "").strip()
+        waiting_task_id = str(wait.get("waiting_task_id") or "").strip()
+        waiting_record = self.task_ledger.get_task(waiting_task_id)
+        if waiting_record is None:
+            self.task_ledger.mark_reverse_task_wait_failed(
+                reverse_task_id,
+                code="WAITING_TASK_MISSING",
+                message="Waiting specialist task no longer exists.",
+            )
+            self.task_ledger.mark_failed(
+                reverse_task_id,
+                code="WAITING_TASK_MISSING",
+                message="Waiting specialist task no longer exists.",
+            )
+            return
+
+        waiting_envelope = waiting_record.get("envelope_json") if isinstance(waiting_record.get("envelope_json"), dict) else {}
+        reverse_payload = wait.get("reverse_payload_json") if isinstance(wait.get("reverse_payload_json"), dict) else {}
+        reverse_task_meta = {
+            "reverse_task_id": reverse_task_id,
+            "intent": "orchestrator.refresh_credential",
+            "credential_ref": str(refreshed_auth.get("credential_ref") or "").strip() or None,
+            "provider": str(refreshed_auth.get("provider") or reverse_payload.get("provider") or "").strip() or None,
+            "delegated_task_id": None,
+        }
+        resume_input = {
+            "auth": dict(refreshed_auth),
+            "resume_of_task_id": waiting_task_id,
+            "resume_intent": str(waiting_record.get("intent") or "").strip(),
+            "resume_input": dict(waiting_envelope.get("input") or {}),
+            "resume_state": {},
+            "reply": {},
+            "reverse_task": reverse_task_meta,
+            "reverse_result": {
+                "status": "completed",
+                "output": {
+                    "credential_ref": reverse_task_meta["credential_ref"],
+                    "provider": reverse_task_meta["provider"],
+                    "refreshed": True,
+                },
+                "artifacts": [],
+            },
+        }
+        resume_task = TaskEnvelope(
+            task_id=generate_task_id(),
+            task_list_id=str(waiting_record.get("task_list_id") or "").strip(),
+            parent_task_id=waiting_task_id,
+            session_id=str(waiting_record.get("session_id") or "").strip() or None,
+            sender=self.config.orchestrator_agent_id,
+            recipient=str(wait.get("recipient") or waiting_record.get("recipient") or "").strip(),
+            intent="agent.resume",
+            input=resume_input,
+            input_artifacts=list(waiting_envelope.get("input_artifacts") or []),
+            idempotency_key=f"{str(waiting_record.get('idempotency_key') or '').strip()}:resume:{reverse_task_id}",
+            deadline_ts=None,
+            priority=str(waiting_record.get("priority") or "normal").strip() or "normal",
+            leader_epoch=None,
+            signature="",
+            source=str(waiting_record.get("source") or "agent").strip() or "agent",
+            source_id=str(waiting_record.get("source_id") or "").strip() or None,
+            channel=str(waiting_record.get("channel") or "").strip() or None,
+        )
+        signature = sign_task_envelope(resume_task, self._resolve_agent_secret(resume_task.recipient))
+        resume_task = resume_task.model_copy(update={"signature": signature})
+        self.task_ledger.create_task(resume_task)
+        self.task_ledger.mark_reverse_task_wait_resumed(
+            reverse_task_id,
+            resumed_task_id=resume_task.task_id,
+        )
+        self.task_ledger.mark_completed(
+            reverse_task_id,
+            result={
+                "status": "completed",
+                "credential_ref": reverse_task_meta["credential_ref"],
+                "provider": reverse_task_meta["provider"],
+                "resume_task_id": resume_task.task_id,
+            },
+        )
+        self.task_ledger.mark_resumed(
+            waiting_task_id,
+            payload={
+                "reverse_task_id": reverse_task_id,
+                "resume_task_id": resume_task.task_id,
+                "refresh_credential_ref": reverse_task_meta["credential_ref"],
+                "provider": reverse_task_meta["provider"],
             },
         )
         self._link_pending_agent_result_alias(alias_task_id=resume_task.task_id, canonical_task_id=waiting_task_id)

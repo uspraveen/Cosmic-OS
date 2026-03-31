@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "event": { "type": "object", "description": "Updated event details" },
+    "updated": { "type": "boolean" },
+    "conflict_warning": { "type": "string" }
+  },
+  "required": ["event", "updated"]
+}

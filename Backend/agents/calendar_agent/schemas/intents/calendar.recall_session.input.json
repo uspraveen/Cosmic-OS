@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "session_id": { "type": "string", "description": "Session to recall" },
+    "query": { "type": "string", "description": "Optional search filter" },
+    "limit": { "type": "integer", "default": 10 }
+  },
+  "required": ["session_id"]
+}

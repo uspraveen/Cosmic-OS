@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "event_id": { "type": "string", "description": "Google event ID to update when already known" },
+    "calendar_id": { "type": "string", "default": "primary" },
+    "account_hint": { "type": "string", "description": "Friendly account selector like work, personal, or an email address" },
+    "event_query": { "type": "string", "description": "Event title/query to resolve when event_id is not known" },
+    "query": { "type": "string", "description": "Natural language update request" },
+    "time_min": { "type": "string", "description": "Optional search window start for event lookup (ISO 8601)" },
+    "time_max": { "type": "string", "description": "Optional search window end for event lookup (ISO 8601)" },
+    "summary": { "type": "string", "description": "New title" },
+    "description": { "type": "string" },
+    "location": { "type": "string" },
+    "start": { "type": "string", "description": "New start time ISO 8601" },
+    "end": { "type": "string", "description": "New end time ISO 8601" },
+    "is_all_day": { "type": "boolean" },
+    "timezone": { "type": "string" },
+    "attendees": { "type": "array", "items": { "type": "string" } },
+    "reminders": { "type": "array", "items": { "type": "integer" } }
+  }
+}

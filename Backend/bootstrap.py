@@ -95,6 +95,10 @@ IMAGE_GENERATOR_AGENT_ENV_NAME = "image-generator-agent.env"
 IMAGE_GENERATOR_AGENT_SERVICE_NAME = "cosmic-image-generator-agent.service"
 IMAGE_GENERATOR_AGENT_ID = "cosmic/image-generator-agent:1.0.0"
 IMAGE_GENERATOR_AGENT_DEFAULT_INSTANCE_ID = "image-generator-agent-1"
+CALENDAR_AGENT_ENV_NAME = "calendar-agent.env"
+CALENDAR_AGENT_SERVICE_NAME = "cosmic-calendar-agent.service"
+CALENDAR_AGENT_ID = "cosmic/calendar-agent:1.0.0"
+CALENDAR_AGENT_DEFAULT_INSTANCE_ID = "calendar-agent-1"
 CRITICAL_VENV_IMPORT_CHECKS: Tuple[Tuple[str, str], ...] = (
     ("docling", "docs parser runtime"),
 )
@@ -106,6 +110,7 @@ CORE_BACKEND_SERVICE_UNITS = (
     "cosmic-gateway.service",
     "cosmic-docs-parser-agent.service",
     "cosmic-tabular-agent.service",
+    "cosmic-calendar-agent.service",
     "cosmic-whatsapp-bridge.service",
 )
 DEFAULT_SUPABASE_URL = "https://hluenippcdiejenmteen.supabase.co"
@@ -440,8 +445,12 @@ def read_text_file(path: Path, *, use_sudo: bool = False) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def install_text_file(path: Path, content: str, *, mode: str = "600", use_sudo: bool = False) -> None:
-    with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8", newline="\n") as tmp:
+def install_text_file(
+    path: Path, content: str, *, mode: str = "600", use_sudo: bool = False
+) -> None:
+    with tempfile.NamedTemporaryFile(
+        "w", delete=False, encoding="utf-8", newline="\n"
+    ) as tmp:
         tmp.write(content)
         temp_path = Path(tmp.name)
     try:
@@ -450,7 +459,9 @@ def install_text_file(path: Path, content: str, *, mode: str = "600", use_sudo: 
         temp_path.unlink(missing_ok=True)
 
 
-def install_bytes_file(path: Path, content: bytes, *, mode: str = "644", use_sudo: bool = False) -> None:
+def install_bytes_file(
+    path: Path, content: bytes, *, mode: str = "644", use_sudo: bool = False
+) -> None:
     with tempfile.NamedTemporaryFile("wb", delete=False) as tmp:
         tmp.write(content)
         temp_path = Path(tmp.name)
@@ -469,7 +480,9 @@ def trim_blank_lines(lines: Sequence[str]) -> List[str]:
     return trimmed
 
 
-def replace_placeholder_env_entries(existing_raw: str, source_raw: str) -> Tuple[str, List[str]]:
+def replace_placeholder_env_entries(
+    existing_raw: str, source_raw: str
+) -> Tuple[str, List[str]]:
     source_values = parse_env_text(source_raw)
     replaced_keys: list[str] = []
     rendered_lines: list[str] = []
@@ -496,8 +509,12 @@ def replace_placeholder_env_entries(existing_raw: str, source_raw: str) -> Tuple
     return merged, replaced_keys
 
 
-def merge_missing_env_entries(existing_raw: str, source_raw: str) -> Tuple[str, List[str]]:
-    existing_reconciled, replaced_keys = replace_placeholder_env_entries(existing_raw, source_raw)
+def merge_missing_env_entries(
+    existing_raw: str, source_raw: str
+) -> Tuple[str, List[str]]:
+    existing_reconciled, replaced_keys = replace_placeholder_env_entries(
+        existing_raw, source_raw
+    )
     existing_keys = set(parse_env_text(existing_reconciled))
     pending_block: list[str] = []
     missing_blocks: list[Tuple[str, List[str]]] = []
@@ -534,8 +551,12 @@ def merge_missing_env_entries(existing_raw: str, source_raw: str) -> Tuple[str, 
         return normalized, replaced_keys
 
     existing_body = existing_reconciled.rstrip("\n")
-    appended_sections = ["\n".join(block).rstrip() for _key, block in missing_blocks if block]
-    appended_body = "\n\n".join(section for section in appended_sections if section).strip()
+    appended_sections = [
+        "\n".join(block).rstrip() for _key, block in missing_blocks if block
+    ]
+    appended_body = "\n\n".join(
+        section for section in appended_sections if section
+    ).strip()
     if existing_body and appended_body:
         merged = existing_body + "\n\n" + appended_body + "\n"
     elif appended_body:
@@ -629,7 +650,9 @@ def render_assignment_overrides(raw: str, overrides: Dict[str, str]) -> str:
         key, _value = line.split("=", 1)
         assignment_key = key.strip()
         if assignment_key in overrides:
-            rendered_lines.append("{0}={1}".format(assignment_key, overrides[assignment_key]))
+            rendered_lines.append(
+                "{0}={1}".format(assignment_key, overrides[assignment_key])
+            )
             seen.add(assignment_key)
         else:
             rendered_lines.append(line)
@@ -653,7 +676,9 @@ def sync_assignment_file(
     if target_path.exists():
         existing_raw = read_text_file(target_path, use_sudo=use_sudo)
     elif not create_missing:
-        raise BootstrapError("Cannot update missing config file: {0}".format(target_path))
+        raise BootstrapError(
+            "Cannot update missing config file: {0}".format(target_path)
+        )
 
     rendered = render_assignment_overrides(existing_raw, overrides)
     install_text_file(target_path, rendered, mode=mode, use_sudo=use_sudo)
@@ -683,7 +708,9 @@ def firecrawl_agent_repo_env_example_path() -> Path:
 
 
 def firecrawl_agent_system_env_path(system_env_dir: Optional[Path] = None) -> Path:
-    return (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "agents" / FIRECRAWL_AGENT_ENV_NAME
+    return (
+        (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "agents" / FIRECRAWL_AGENT_ENV_NAME
+    )
 
 
 def resolve_firecrawl_agent_env_source() -> Path:
@@ -750,7 +777,9 @@ def firecrawl_agent_is_configured(env_values: Dict[str, str]) -> bool:
     return meaningful_env_value(env_values.get("FIRECRAWL_API_KEY")) is not None
 
 
-def read_firecrawl_agent_system_env(system_env_dir: Optional[Path] = None) -> Dict[str, str]:
+def read_firecrawl_agent_system_env(
+    system_env_dir: Optional[Path] = None,
+) -> Dict[str, str]:
     env_path = firecrawl_agent_system_env_path(system_env_dir)
     if not env_path.exists():
         return {}
@@ -770,7 +799,11 @@ def docs_parser_agent_repo_env_example_path() -> Path:
 
 
 def docs_parser_agent_system_env_path(system_env_dir: Optional[Path] = None) -> Path:
-    return (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "agents" / DOCS_PARSER_AGENT_ENV_NAME
+    return (
+        (system_env_dir or DEFAULT_SYSTEM_ENV_DIR)
+        / "agents"
+        / DOCS_PARSER_AGENT_ENV_NAME
+    )
 
 
 def resolve_docs_parser_agent_env_source() -> Path:
@@ -826,7 +859,9 @@ def build_docs_parser_agent_env_rendered(
     return docs_parser_agent_system_env_path(system_env_dir), rendered, rendered_data
 
 
-def read_docs_parser_agent_system_env(system_env_dir: Optional[Path] = None) -> Dict[str, str]:
+def read_docs_parser_agent_system_env(
+    system_env_dir: Optional[Path] = None,
+) -> Dict[str, str]:
     env_path = docs_parser_agent_system_env_path(system_env_dir)
     if not env_path.exists():
         return {}
@@ -845,8 +880,14 @@ def x_twitter_search_agent_repo_env_example_path() -> Path:
     return x_twitter_search_agent_repo_dir() / "agent.env.example"
 
 
-def x_twitter_search_agent_system_env_path(system_env_dir: Optional[Path] = None) -> Path:
-    return (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "agents" / X_TWITTER_SEARCH_AGENT_ENV_NAME
+def x_twitter_search_agent_system_env_path(
+    system_env_dir: Optional[Path] = None,
+) -> Path:
+    return (
+        (system_env_dir or DEFAULT_SYSTEM_ENV_DIR)
+        / "agents"
+        / X_TWITTER_SEARCH_AGENT_ENV_NAME
+    )
 
 
 def resolve_x_twitter_search_agent_env_source() -> Path:
@@ -906,14 +947,20 @@ def build_x_twitter_search_agent_env_rendered(
 
     rendered = render_env_with_overrides(source_raw, overrides)
     rendered_data = parse_env_text(rendered)
-    return x_twitter_search_agent_system_env_path(system_env_dir), rendered, rendered_data
+    return (
+        x_twitter_search_agent_system_env_path(system_env_dir),
+        rendered,
+        rendered_data,
+    )
 
 
 def x_twitter_search_agent_is_configured(env_values: Dict[str, str]) -> bool:
     return meaningful_env_value(env_values.get("XAI_API_KEY")) is not None
 
 
-def read_x_twitter_search_agent_system_env(system_env_dir: Optional[Path] = None) -> Dict[str, str]:
+def read_x_twitter_search_agent_system_env(
+    system_env_dir: Optional[Path] = None,
+) -> Dict[str, str]:
     env_path = x_twitter_search_agent_system_env_path(system_env_dir)
     if not env_path.exists():
         return {}
@@ -933,7 +980,9 @@ def tabular_agent_repo_env_example_path() -> Path:
 
 
 def tabular_agent_system_env_path(system_env_dir: Optional[Path] = None) -> Path:
-    return (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "agents" / TABULAR_AGENT_ENV_NAME
+    return (
+        (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "agents" / TABULAR_AGENT_ENV_NAME
+    )
 
 
 def resolve_tabular_agent_env_source() -> Path:
@@ -1027,7 +1076,9 @@ def build_tabular_agent_env_rendered(
     return tabular_agent_system_env_path(system_env_dir), rendered, rendered_data
 
 
-def read_tabular_agent_system_env(system_env_dir: Optional[Path] = None) -> Dict[str, str]:
+def read_tabular_agent_system_env(
+    system_env_dir: Optional[Path] = None,
+) -> Dict[str, str]:
     env_path = tabular_agent_system_env_path(system_env_dir)
     if not env_path.exists():
         return {}
@@ -1076,7 +1127,9 @@ def read_agent_email_integration_state() -> Tuple[str, Dict[str, str]]:
     return "configured", {
         "COSMIC_MAIL_BASE_URL": str(record.base_url or "").strip(),
         "COSMIC_MAIL_API_TOKEN": str(record.api_token or "").strip(),
-        "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS": str(record.primary_mailbox_address or "").strip(),
+        "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS": str(
+            record.primary_mailbox_address or ""
+        ).strip(),
     }
 
 
@@ -1213,7 +1266,9 @@ def email_agent_is_configured(env_values: Dict[str, str]) -> bool:
     )
 
 
-def read_email_agent_system_env(system_env_dir: Optional[Path] = None) -> Dict[str, str]:
+def read_email_agent_system_env(
+    system_env_dir: Optional[Path] = None,
+) -> Dict[str, str]:
     env_path = email_agent_system_env_path(system_env_dir)
     if not env_path.exists():
         return {}
@@ -1232,8 +1287,14 @@ def image_generator_agent_repo_env_example_path() -> Path:
     return image_generator_agent_repo_dir() / "agent.env.example"
 
 
-def image_generator_agent_system_env_path(system_env_dir: Optional[Path] = None) -> Path:
-    return (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "agents" / IMAGE_GENERATOR_AGENT_ENV_NAME
+def image_generator_agent_system_env_path(
+    system_env_dir: Optional[Path] = None,
+) -> Path:
+    return (
+        (system_env_dir or DEFAULT_SYSTEM_ENV_DIR)
+        / "agents"
+        / IMAGE_GENERATOR_AGENT_ENV_NAME
+    )
 
 
 def resolve_image_generator_agent_env_source() -> Path:
@@ -1364,19 +1425,26 @@ def build_image_generator_agent_env_rendered(
 
     rendered = render_env_with_overrides(source_raw, overrides)
     rendered_data = parse_env_text(rendered)
-    return image_generator_agent_system_env_path(system_env_dir), rendered, rendered_data
+    return (
+        image_generator_agent_system_env_path(system_env_dir),
+        rendered,
+        rendered_data,
+    )
 
 
 def image_generator_agent_is_configured(env_values: Dict[str, str]) -> bool:
     return (
         meaningful_env_value(env_values.get("IMAGE_AGENT_XAI_API_KEY")) is not None
         or meaningful_env_value(env_values.get("XAI_API_KEY")) is not None
-        or meaningful_env_value(env_values.get("IMAGE_AGENT_OPENAI_API_KEY")) is not None
+        or meaningful_env_value(env_values.get("IMAGE_AGENT_OPENAI_API_KEY"))
+        is not None
         or meaningful_env_value(env_values.get("OPENAI_API_KEY")) is not None
     )
 
 
-def read_image_generator_agent_system_env(system_env_dir: Optional[Path] = None) -> Dict[str, str]:
+def read_image_generator_agent_system_env(
+    system_env_dir: Optional[Path] = None,
+) -> Dict[str, str]:
     env_path = image_generator_agent_system_env_path(system_env_dir)
     if not env_path.exists():
         return {}
@@ -1428,15 +1496,25 @@ def setup_local_redis(redis_url: Optional[str]) -> None:
     if not is_local_redis_url(redis_url):
         return
     if not is_linux():
-        raise BootstrapError("Local Redis provisioning currently targets Linux VMs only.")
+        raise BootstrapError(
+            "Local Redis provisioning currently targets Linux VMs only."
+        )
     manager = detect_package_manager()
     if not manager:
-        raise BootstrapError("REDIS_URL points to localhost, but no supported package manager was found.")
+        raise BootstrapError(
+            "REDIS_URL points to localhost, but no supported package manager was found."
+        )
     package_name = PACKAGE_NAMES["redis"].get(manager)
     if not package_name:
-        raise BootstrapError("No Redis package mapping for package manager: {0}".format(manager))
+        raise BootstrapError(
+            "No Redis package mapping for package manager: {0}".format(manager)
+        )
 
-    log("Ensuring local Redis is installed for task input queues via {0}: {1}".format(manager, package_name))
+    log(
+        "Ensuring local Redis is installed for task input queues via {0}: {1}".format(
+            manager, package_name
+        )
+    )
     install_system_packages(manager, [package_name])
 
     if shutil.which("systemctl") is None:
@@ -1459,7 +1537,9 @@ def setup_local_redis(redis_url: Optional[str]) -> None:
             continue
 
     raise BootstrapError(
-        "Installed Redis package, but could not enable a known Redis service for manager {0}.".format(manager)
+        "Installed Redis package, but could not enable a known Redis service for manager {0}.".format(
+            manager
+        )
     )
 
 
@@ -1475,7 +1555,9 @@ def ensure_office_renderer() -> None:
 
     manager = detect_package_manager()
     if not is_linux() or not manager:
-        raise BootstrapError("LibreOffice/soffice missing and no supported Linux package manager was found.")
+        raise BootstrapError(
+            "LibreOffice/soffice missing and no supported Linux package manager was found."
+        )
 
     package_name = "libreoffice"
     log("Installing Office renderer via {0}: {1}".format(manager, package_name))
@@ -1483,11 +1565,15 @@ def ensure_office_renderer() -> None:
 
     version = office_renderer_version()
     if not version:
-        raise BootstrapError("LibreOffice/soffice is still unavailable after installation.")
+        raise BootstrapError(
+            "LibreOffice/soffice is still unavailable after installation."
+        )
     log("Office renderer available: {0}".format(version))
 
 
-def missing_required_env_keys(env_path: Path, required_keys: Sequence[str]) -> List[str]:
+def missing_required_env_keys(
+    env_path: Path, required_keys: Sequence[str]
+) -> List[str]:
     if not required_keys:
         return []
     if not env_path.exists():
@@ -1501,7 +1587,9 @@ def missing_required_env_keys(env_path: Path, required_keys: Sequence[str]) -> L
     return missing
 
 
-def validate_required_service_env_files(effective_sources: Sequence[Tuple[Path, Path]]) -> None:
+def validate_required_service_env_files(
+    effective_sources: Sequence[Tuple[Path, Path]],
+) -> None:
     failures: list[str] = []
     for source_path, dest_path in effective_sources:
         required_keys = REQUIRED_SERVICE_ENV_KEYS.get(dest_path.name, ())
@@ -1526,22 +1614,40 @@ def validate_required_service_env_files(effective_sources: Sequence[Tuple[Path, 
         )
 
 
-def normalize_bootstrap_env_payload(payload: Dict[str, object]) -> Dict[str, Dict[str, str]]:
+def normalize_bootstrap_env_payload(
+    payload: Dict[str, object],
+) -> Dict[str, Dict[str, str]]:
     if not isinstance(payload, dict):
-        raise BootstrapError("Supabase bootstrap RPC returned an unexpected payload shape.")
+        raise BootstrapError(
+            "Supabase bootstrap RPC returned an unexpected payload shape."
+        )
 
     if payload.get("success") is False:
-        message = payload.get("message") or payload.get("error") or "Unknown bootstrap error."
+        message = (
+            payload.get("message") or payload.get("error") or "Unknown bootstrap error."
+        )
         raise BootstrapError("Supabase bootstrap RPC failed: {0}".format(message))
 
-    gateway_env = dict(payload.get("gateway_env") or {}) if isinstance(payload.get("gateway_env"), dict) else {}
+    gateway_env = (
+        dict(payload.get("gateway_env") or {})
+        if isinstance(payload.get("gateway_env"), dict)
+        else {}
+    )
     orchestrator_env = (
-        dict(payload.get("orchestrator_env") or {}) if isinstance(payload.get("orchestrator_env"), dict) else {}
+        dict(payload.get("orchestrator_env") or {})
+        if isinstance(payload.get("orchestrator_env"), dict)
+        else {}
     )
     model_router_env = (
-        dict(payload.get("model_router_env") or {}) if isinstance(payload.get("model_router_env"), dict) else {}
+        dict(payload.get("model_router_env") or {})
+        if isinstance(payload.get("model_router_env"), dict)
+        else {}
     )
-    memory_env = dict(payload.get("memory_env") or {}) if isinstance(payload.get("memory_env"), dict) else {}
+    memory_env = (
+        dict(payload.get("memory_env") or {})
+        if isinstance(payload.get("memory_env"), dict)
+        else {}
+    )
     firecrawl_agent_env = {}
     if isinstance(payload.get("firecrawl_agent_env"), dict):
         firecrawl_agent_env = dict(payload.get("firecrawl_agent_env") or {})
@@ -1549,7 +1655,9 @@ def normalize_bootstrap_env_payload(payload: Dict[str, object]) -> Dict[str, Dic
         firecrawl_agent_env = dict(payload.get("firecrawl_web_scrape_agent_env") or {})
     x_twitter_search_agent_env = {}
     if isinstance(payload.get("x_twitter_search_agent_env"), dict):
-        x_twitter_search_agent_env = dict(payload.get("x_twitter_search_agent_env") or {})
+        x_twitter_search_agent_env = dict(
+            payload.get("x_twitter_search_agent_env") or {}
+        )
     tabular_agent_env = {}
     if isinstance(payload.get("tabular_agent_env"), dict):
         tabular_agent_env = dict(payload.get("tabular_agent_env") or {})
@@ -1559,8 +1667,14 @@ def normalize_bootstrap_env_payload(payload: Dict[str, object]) -> Dict[str, Dic
     image_generator_agent_env = {}
     if isinstance(payload.get("image_generator_agent_env"), dict):
         image_generator_agent_env = dict(payload.get("image_generator_agent_env") or {})
-    meeting_env = dict(payload.get("meeting_env") or {}) if isinstance(payload.get("meeting_env"), dict) else {}
-    vm_payload = dict(payload.get("vm") or {}) if isinstance(payload.get("vm"), dict) else {}
+    meeting_env = (
+        dict(payload.get("meeting_env") or {})
+        if isinstance(payload.get("meeting_env"), dict)
+        else {}
+    )
+    vm_payload = (
+        dict(payload.get("vm") or {}) if isinstance(payload.get("vm"), dict) else {}
+    )
 
     if meaningful_env_value(model_router_env.get("GROQ_API_KEY")) is None:
         legacy_groq_api_key = meaningful_env_value(meeting_env.get("GROQ_API_KEY"))
@@ -1575,15 +1689,25 @@ def normalize_bootstrap_env_payload(payload: Dict[str, object]) -> Dict[str, Dic
     public_host = first_meaningful_value(
         gateway_env.get("GATEWAY_PUBLIC_HOST"),
         vm_payload.get("vm_dns") if isinstance(vm_payload.get("vm_dns"), str) else None,
-        extract_host_from_url(vm_payload.get("gateway_url") if isinstance(vm_payload.get("gateway_url"), str) else None),
+        extract_host_from_url(
+            vm_payload.get("gateway_url")
+            if isinstance(vm_payload.get("gateway_url"), str)
+            else None
+        ),
     )
     if public_host is not None:
         gateway_env["GATEWAY_PUBLIC_HOST"] = public_host
     owner_user_id = first_meaningful_value(
         gateway_env.get("COSMIC_USER_ID"),
-        vm_payload.get("user_id") if isinstance(vm_payload.get("user_id"), str) else None,
-        vm_payload.get("owner_user_id") if isinstance(vm_payload.get("owner_user_id"), str) else None,
-        vm_payload.get("vm_user_id") if isinstance(vm_payload.get("vm_user_id"), str) else None,
+        vm_payload.get("user_id")
+        if isinstance(vm_payload.get("user_id"), str)
+        else None,
+        vm_payload.get("owner_user_id")
+        if isinstance(vm_payload.get("owner_user_id"), str)
+        else None,
+        vm_payload.get("vm_user_id")
+        if isinstance(vm_payload.get("vm_user_id"), str)
+        else None,
     )
     if owner_user_id is not None:
         gateway_env["COSMIC_USER_ID"] = owner_user_id
@@ -1606,7 +1730,12 @@ def normalize_bootstrap_env_payload(payload: Dict[str, object]) -> Dict[str, Dic
     if image_generator_agent_env:
         normalized[IMAGE_GENERATOR_AGENT_ENV_NAME] = image_generator_agent_env
     required_fields = {
-        "gateway.env": ("GATEWAY_LOCAL_API_TOKEN", "ANTHROPIC_API_KEY", "PERPLEXITY_API_KEY", "GATEWAY_PUBLIC_HOST"),
+        "gateway.env": (
+            "GATEWAY_LOCAL_API_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "PERPLEXITY_API_KEY",
+            "GATEWAY_PUBLIC_HOST",
+        ),
         "model-router.env": ("GROQ_API_KEY",),
         "orchestrator.env": ("ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"),
     }
@@ -1618,7 +1747,9 @@ def normalize_bootstrap_env_payload(payload: Dict[str, object]) -> Dict[str, Dic
                 missing.append("{0}.{1}".format(env_name, key))
     if missing:
         raise BootstrapError(
-            "Supabase bootstrap payload is missing required env values: {0}".format(", ".join(missing))
+            "Supabase bootstrap payload is missing required env values: {0}".format(
+                ", ".join(missing)
+            )
         )
 
     return normalized
@@ -1636,9 +1767,13 @@ def fetch_bootstrap_env_payload(
     if token is None:
         raise BootstrapError("A bootstrap token is required to fetch VM env values.")
     if supabase_base is None or anon_key is None:
-        raise BootstrapError("Supabase URL and anon key are required to fetch VM env values.")
+        raise BootstrapError(
+            "Supabase URL and anon key are required to fetch VM env values."
+        )
 
-    rpc_url = "{0}/rest/v1/rpc/{1}".format(supabase_base.rstrip("/"), DEFAULT_SUPABASE_BOOTSTRAP_RPC)
+    rpc_url = "{0}/rest/v1/rpc/{1}".format(
+        supabase_base.rstrip("/"), DEFAULT_SUPABASE_BOOTSTRAP_RPC
+    )
     request = Request(
         rpc_url,
         data=json.dumps({"p_token": token}).encode("utf-8"),
@@ -1664,10 +1799,14 @@ def fetch_bootstrap_env_payload(
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise BootstrapError(
-            "Supabase bootstrap RPC returned HTTP {0}: {1}".format(exc.code, body or exc.reason)
+            "Supabase bootstrap RPC returned HTTP {0}: {1}".format(
+                exc.code, body or exc.reason
+            )
         ) from exc
     except URLError as exc:
-        raise BootstrapError("Failed to reach Supabase bootstrap RPC: {0}".format(exc.reason)) from exc
+        raise BootstrapError(
+            "Failed to reach Supabase bootstrap RPC: {0}".format(exc.reason)
+        ) from exc
 
     try:
         payload = json.loads(raw)
@@ -1728,7 +1867,10 @@ def maybe_reexec_with_supported_python() -> None:
     if current_version[:2] >= MIN_PYTHON:
         log(
             "Using Python {0}.{1}.{2} from {3}".format(
-                current_version[0], current_version[1], current_version[2], sys.executable
+                current_version[0],
+                current_version[1],
+                current_version[2],
+                sys.executable,
             )
         )
         return
@@ -1762,7 +1904,11 @@ def ensure_python3_available() -> None:
         if not package_name:
             raise
 
-        log("Supported Python not found. Installing {0} via {1}.".format(package_name, manager))
+        log(
+            "Supported Python not found. Installing {0} via {1}.".format(
+                package_name, manager
+            )
+        )
         install_system_packages(manager, [package_name])
 
     supported = find_supported_python()
@@ -1799,11 +1945,15 @@ def ensure_pip() -> None:
     except (BootstrapError, subprocess.CalledProcessError):
         manager = detect_package_manager()
         if not is_linux() or not manager:
-            raise BootstrapError("Failed to install pip with ensurepip and no supported package manager was found.")
+            raise BootstrapError(
+                "Failed to install pip with ensurepip and no supported package manager was found."
+            )
 
         package_name = PACKAGE_NAMES["pip"].get(manager)
         if not package_name:
-            raise BootstrapError("No pip package mapping for package manager: {0}".format(manager))
+            raise BootstrapError(
+                "No pip package mapping for package manager: {0}".format(manager)
+            )
 
         log("Installing pip package via {0}: {1}".format(manager, package_name))
         install_system_packages(manager, [package_name])
@@ -1839,17 +1989,23 @@ def ensure_venv_support() -> None:
 
     manager = detect_package_manager()
     if not is_linux() or not manager:
-        raise BootstrapError("Python venv module is missing and no supported Linux package manager was found.")
+        raise BootstrapError(
+            "Python venv module is missing and no supported Linux package manager was found."
+        )
 
     package_name = PACKAGE_NAMES["venv"].get(manager)
     if not package_name:
-        raise BootstrapError("No venv package mapping for package manager: {0}".format(manager))
+        raise BootstrapError(
+            "No venv package mapping for package manager: {0}".format(manager)
+        )
 
     log("Installing venv support via {0}: {1}".format(manager, package_name))
     install_system_packages(manager, [package_name])
 
     if not can_create_virtualenv():
-        raise BootstrapError("Python venv support is still unavailable after installation attempts.")
+        raise BootstrapError(
+            "Python venv support is still unavailable after installation attempts."
+        )
 
 
 def venv_python_path(venv_path: Path) -> Path:
@@ -1883,32 +2039,57 @@ def ensure_virtualenv(venv_path: Path) -> None:
 def upgrade_venv_pip(venv_path: Path) -> None:
     python_path = venv_python_path(venv_path)
     if not python_path.exists():
-        raise BootstrapError("Missing venv python executable at {0}".format(python_path))
+        raise BootstrapError(
+            "Missing venv python executable at {0}".format(python_path)
+        )
 
     if not venv_has_pip(venv_path):
         log("pip missing inside virtual environment. Trying ensurepip.")
         run([str(python_path), "-m", "ensurepip", "--upgrade"])
         if not venv_has_pip(venv_path):
-            raise BootstrapError("pip is still unavailable inside the virtual environment at {0}".format(venv_path))
+            raise BootstrapError(
+                "pip is still unavailable inside the virtual environment at {0}".format(
+                    venv_path
+                )
+            )
 
-    run_with_retry([str(python_path), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])
+    run_with_retry(
+        [
+            str(python_path),
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "pip",
+            "setuptools",
+            "wheel",
+        ]
+    )
 
 
 def install_python_requirements(venv_path: Path, requirements_path: Path) -> None:
     python_path = venv_python_path(venv_path)
     if not python_path.exists():
-        raise BootstrapError("Missing venv python executable at {0}".format(python_path))
+        raise BootstrapError(
+            "Missing venv python executable at {0}".format(python_path)
+        )
     if not requirements_path.exists():
-        raise BootstrapError("Missing requirements file at {0}".format(requirements_path))
+        raise BootstrapError(
+            "Missing requirements file at {0}".format(requirements_path)
+        )
 
     log("Installing backend Python dependencies from {0}".format(requirements_path))
-    run_with_retry([str(python_path), "-m", "pip", "install", "-r", str(requirements_path)])
+    run_with_retry(
+        [str(python_path), "-m", "pip", "install", "-r", str(requirements_path)]
+    )
 
 
 def verify_critical_backend_dependencies(venv_path: Path) -> None:
     python_path = venv_python_path(venv_path)
     if not python_path.exists():
-        raise BootstrapError("Missing venv python executable at {0}".format(python_path))
+        raise BootstrapError(
+            "Missing venv python executable at {0}".format(python_path)
+        )
 
     for module_name, check_label in CRITICAL_VENV_IMPORT_CHECKS:
         display_command = [str(python_path), "-c", "import {0}".format(module_name)]
@@ -1917,7 +2098,9 @@ def verify_critical_backend_dependencies(venv_path: Path) -> None:
                 [
                     str(python_path),
                     "-c",
-                    "import importlib; importlib.import_module({0!r})".format(module_name),
+                    "import importlib; importlib.import_module({0!r})".format(
+                        module_name
+                    ),
                 ],
                 capture_output=True,
             )
@@ -1950,14 +2133,21 @@ def ensure_node_toolchain() -> None:
     node_version = executable_version(["node", "--version"])
     npm_version = executable_version(["npm", "--version"])
     node_major = node_major_version(node_version)
-    if node_version and npm_version and node_major is not None and node_major >= MIN_NODE_MAJOR:
+    if (
+        node_version
+        and npm_version
+        and node_major is not None
+        and node_major >= MIN_NODE_MAJOR
+    ):
         log("Node available: {0}".format(node_version))
         log("npm available: {0}".format(npm_version))
         return
 
     manager = detect_package_manager()
     if not is_linux() or not manager:
-        raise BootstrapError("Node.js/npm missing and no supported Linux package manager was found.")
+        raise BootstrapError(
+            "Node.js/npm missing and no supported Linux package manager was found."
+        )
 
     if manager == "apt-get":
         log(
@@ -1969,7 +2159,15 @@ def ensure_node_toolchain() -> None:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".sh") as temp_script:
             setup_script = Path(temp_script.name)
         try:
-            run_with_retry(["curl", "-fsSL", "https://deb.nodesource.com/setup_20.x", "-o", str(setup_script)])
+            run_with_retry(
+                [
+                    "curl",
+                    "-fsSL",
+                    "https://deb.nodesource.com/setup_20.x",
+                    "-o",
+                    str(setup_script),
+                ]
+            )
             run(["bash", str(setup_script)], use_sudo=True)
             run_with_retry(["apt-get", "install", "-y", "nodejs"], use_sudo=True)
         finally:
@@ -1978,7 +2176,12 @@ def ensure_node_toolchain() -> None:
         node_version = executable_version(["node", "--version"])
         npm_version = executable_version(["npm", "--version"])
         node_major = node_major_version(node_version)
-        if node_version and npm_version and node_major is not None and node_major >= MIN_NODE_MAJOR:
+        if (
+            node_version
+            and npm_version
+            and node_major is not None
+            and node_major >= MIN_NODE_MAJOR
+        ):
             log("Node available: {0}".format(node_version))
             log("npm available: {0}".format(npm_version))
             return
@@ -1994,21 +2197,32 @@ def ensure_node_toolchain() -> None:
     if not node_version:
         package_name = PACKAGE_NAMES["nodejs"].get(manager)
         if not package_name:
-            raise BootstrapError("No Node.js package mapping for package manager: {0}".format(manager))
+            raise BootstrapError(
+                "No Node.js package mapping for package manager: {0}".format(manager)
+            )
         packages.append(package_name)
     if not npm_version:
         package_name = PACKAGE_NAMES["npm"].get(manager)
         if not package_name:
-            raise BootstrapError("No npm package mapping for package manager: {0}".format(manager))
+            raise BootstrapError(
+                "No npm package mapping for package manager: {0}".format(manager)
+            )
         packages.append(package_name)
 
-    log("Installing Node.js toolchain via {0}: {1}".format(manager, ", ".join(packages)))
+    log(
+        "Installing Node.js toolchain via {0}: {1}".format(manager, ", ".join(packages))
+    )
     install_system_packages(manager, packages)
 
     node_version = executable_version(["node", "--version"])
     npm_version = executable_version(["npm", "--version"])
     node_major = node_major_version(node_version)
-    if not node_version or not npm_version or node_major is None or node_major < MIN_NODE_MAJOR:
+    if (
+        not node_version
+        or not npm_version
+        or node_major is None
+        or node_major < MIN_NODE_MAJOR
+    ):
         raise BootstrapError(
             "Node.js/npm are still unavailable or too old after installation attempts. Need Node.js {0}+, got {1}.".format(
                 MIN_NODE_MAJOR,
@@ -2021,9 +2235,13 @@ def load_package_json(package_json: Path) -> dict:
     try:
         return json.loads(package_json.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
-        raise BootstrapError("Missing package.json at {0}".format(package_json)) from exc
+        raise BootstrapError(
+            "Missing package.json at {0}".format(package_json)
+        ) from exc
     except json.JSONDecodeError as exc:
-        raise BootstrapError("Invalid package.json at {0}: {1}".format(package_json, exc)) from exc
+        raise BootstrapError(
+            "Invalid package.json at {0}: {1}".format(package_json, exc)
+        ) from exc
 
 
 def service_env_specs(
@@ -2051,12 +2269,20 @@ def fallback_service_env_specs(
     system_env_dir = system_env_dir or DEFAULT_SYSTEM_ENV_DIR
     specs = [
         (BACKEND_ROOT / "gateway.env.example", system_env_dir / "gateway.env"),
-        (BACKEND_ROOT / "model_router.env.example", system_env_dir / "model-router.env"),
-        (BACKEND_ROOT / "orchestrator.env.example", system_env_dir / "orchestrator.env"),
+        (
+            BACKEND_ROOT / "model_router.env.example",
+            system_env_dir / "model-router.env",
+        ),
+        (
+            BACKEND_ROOT / "orchestrator.env.example",
+            system_env_dir / "orchestrator.env",
+        ),
         (DEFAULT_BRIDGE_DIR / ".env.example", system_env_dir / "whatsapp-bridge.env"),
     ]
     if include_memory:
-        specs.append((BACKEND_ROOT / "memory.env.example", system_env_dir / "memory.env"))
+        specs.append(
+            (BACKEND_ROOT / "memory.env.example", system_env_dir / "memory.env")
+        )
     return specs
 
 
@@ -2073,8 +2299,12 @@ def resolve_effective_service_env_sources(
             include_memory=include_memory,
         )
     }
-    for source, dest in service_env_specs(system_env_dir, include_memory=include_memory):
-        effective_sources.append((source if source.exists() else fallback_sources[dest], dest))
+    for source, dest in service_env_specs(
+        system_env_dir, include_memory=include_memory
+    ):
+        effective_sources.append(
+            (source if source.exists() else fallback_sources[dest], dest)
+        )
     return effective_sources
 
 
@@ -2100,18 +2330,34 @@ def build_service_env_overrides(
 ) -> Dict[str, Dict[str, str]]:
     existing_env_by_name = existing_env_by_name or {}
     external_env_by_name = external_env_by_name or {}
-    gateway_source = next(source for source, dest in effective_sources if dest.name == "gateway.env")
-    model_router_source = next(source for source, dest in effective_sources if dest.name == "model-router.env")
-    orchestrator_source = next(source for source, dest in effective_sources if dest.name == "orchestrator.env")
-    bridge_source = next(source for source, dest in effective_sources if dest.name == "whatsapp-bridge.env")
+    gateway_source = next(
+        source for source, dest in effective_sources if dest.name == "gateway.env"
+    )
+    model_router_source = next(
+        source for source, dest in effective_sources if dest.name == "model-router.env"
+    )
+    orchestrator_source = next(
+        source for source, dest in effective_sources if dest.name == "orchestrator.env"
+    )
+    bridge_source = next(
+        source
+        for source, dest in effective_sources
+        if dest.name == "whatsapp-bridge.env"
+    )
     memory_source = None
     if include_memory:
-        memory_source = next(source for source, dest in effective_sources if dest.name == "memory.env")
+        memory_source = next(
+            source for source, dest in effective_sources if dest.name == "memory.env"
+        )
     gateway_data = parse_env_text(gateway_source.read_text(encoding="utf-8"))
     model_router_data = parse_env_text(model_router_source.read_text(encoding="utf-8"))
     orchestrator_data = parse_env_text(orchestrator_source.read_text(encoding="utf-8"))
     bridge_data = parse_env_text(bridge_source.read_text(encoding="utf-8"))
-    memory_data = parse_env_text(memory_source.read_text(encoding="utf-8")) if memory_source is not None else {}
+    memory_data = (
+        parse_env_text(memory_source.read_text(encoding="utf-8"))
+        if memory_source is not None
+        else {}
+    )
     gateway_existing = existing_env_by_name.get("gateway.env", {})
     model_router_existing = existing_env_by_name.get("model-router.env", {})
     orchestrator_existing = existing_env_by_name.get("orchestrator.env", {})
@@ -2308,16 +2554,21 @@ def build_service_env_overrides(
         memory_neo4j_password = memory_neo4j_password or generate_safe_secret()
     if not memory_graph_warm_cache_on_startup:
         memory_graph_warm_cache_on_startup = (
-            "true" if (memory_graph_backend or "").strip().lower() == "neo4j" else "false"
+            "true"
+            if (memory_graph_backend or "").strip().lower() == "neo4j"
+            else "false"
         )
     if not memory_graph_sync_on_startup:
         memory_graph_sync_on_startup = (
-            "false" if (memory_graph_backend or "").strip().lower() == "neo4j" else "true"
+            "false"
+            if (memory_graph_backend or "").strip().lower() == "neo4j"
+            else "true"
         )
 
     overrides = {
         "gateway.env": {
-            "GATEWAY_INTERNAL_TOKEN": shared_internal_token or secrets.token_urlsafe(32),
+            "GATEWAY_INTERNAL_TOKEN": shared_internal_token
+            or secrets.token_urlsafe(32),
             "GATEWAY_LOCAL_API_TOKEN": local_api_token or secrets.token_urlsafe(24),
             "GATEWAY_SIGNING_SECRET": signing_secret or secrets.token_urlsafe(32),
             "WHATSAPP_BRIDGE_TOKEN": bridge_token or secrets.token_urlsafe(32),
@@ -2331,37 +2582,47 @@ def build_service_env_overrides(
             "GROQ_API_KEY": groq_api_key or "<groq-api-key>",
         },
         "orchestrator.env": {
-            "GATEWAY_INTERNAL_TOKEN": shared_internal_token or secrets.token_urlsafe(32),
+            "GATEWAY_INTERNAL_TOKEN": shared_internal_token
+            or secrets.token_urlsafe(32),
             "GATEWAY_SIGNING_SECRET": signing_secret or secrets.token_urlsafe(32),
             "ANTHROPIC_API_KEY": shared_anthropic_api_key or "<anthropic-api-key>",
             "ANTHROPIC_MODEL": opus_model or "claude-opus-4-6",
         },
         "whatsapp-bridge.env": {
-            "GATEWAY_INTERNAL_TOKEN": shared_internal_token or secrets.token_urlsafe(32),
+            "GATEWAY_INTERNAL_TOKEN": shared_internal_token
+            or secrets.token_urlsafe(32),
             "WHATSAPP_BRIDGE_TOKEN": bridge_token or secrets.token_urlsafe(32),
             "WHATSAPP_AUTH_DIR": whatsapp_auth_dir or str(DEFAULT_WHATSAPP_AUTH_DIR),
         },
     }
     if include_memory:
-        overrides["gateway.env"]["COSMIC_MEMORY_URL"] = memory_url or "http://127.0.0.1:8090"
+        overrides["gateway.env"]["COSMIC_MEMORY_URL"] = (
+            memory_url or "http://127.0.0.1:8090"
+        )
         overrides["memory.env"] = {
             "PERPLEXITY_API_KEY": memory_perplexity_api_key or "<perplexity-api-key>",
             "XAI_API_KEY": memory_xai_api_key or "",
-            "GATEWAY_INTERNAL_TOKEN": shared_internal_token or secrets.token_urlsafe(32),
-            "COSMIC_MEMORY_INTERNAL_TOKEN": shared_internal_token or secrets.token_urlsafe(32),
+            "GATEWAY_INTERNAL_TOKEN": shared_internal_token
+            or secrets.token_urlsafe(32),
+            "COSMIC_MEMORY_INTERNAL_TOKEN": shared_internal_token
+            or secrets.token_urlsafe(32),
             "COSMIC_MEMORY_DATA_DIR": memory_data_dir or str(DEFAULT_MEMORY_DATA_DIR),
             "COSMIC_MEMORY_SYNC_ON_STARTUP": memory_sync_on_startup or "true",
-            "COSMIC_MEMORY_GRAPH_SYNC_ON_STARTUP": memory_graph_sync_on_startup or "true",
+            "COSMIC_MEMORY_GRAPH_SYNC_ON_STARTUP": memory_graph_sync_on_startup
+            or "true",
             "COSMIC_MEMORY_GRAPH_WARM_CACHE_ON_STARTUP": memory_graph_warm_cache_on_startup
             or "false",
-            "COSMIC_MEMORY_GRAPH_DETERMINISTIC_ENABLED": memory_graph_deterministic_enabled or "true",
-            "COSMIC_MEMORY_GRAPH_EXTRACT_ENABLED": memory_graph_extract_enabled or "false",
+            "COSMIC_MEMORY_GRAPH_DETERMINISTIC_ENABLED": memory_graph_deterministic_enabled
+            or "true",
+            "COSMIC_MEMORY_GRAPH_EXTRACT_ENABLED": memory_graph_extract_enabled
+            or "false",
             "COSMIC_MEMORY_GRAPH_BACKEND": memory_graph_backend or "memory",
             "COSMIC_MEMORY_NEO4J_URI": memory_neo4j_uri or "",
             "COSMIC_MEMORY_NEO4J_USERNAME": memory_neo4j_username or "",
             "COSMIC_MEMORY_NEO4J_PASSWORD": memory_neo4j_password or "",
             "COSMIC_MEMORY_NEO4J_DATABASE": memory_neo4j_database or "neo4j",
-            "COSMIC_MEMORY_PRIMARY_USER_DISPLAY_NAME": memory_primary_user_display_name or "",
+            "COSMIC_MEMORY_PRIMARY_USER_DISPLAY_NAME": memory_primary_user_display_name
+            or "",
         }
     return overrides
 
@@ -2396,9 +2657,13 @@ def materialize_bootstrap_env_files(
     for source_path, dest_path in effective_sources:
         repo_path = repo_source_by_name[dest_path.name]
         if repo_path.exists():
-            existing_env_by_name[dest_path.name] = parse_env_text(repo_path.read_text(encoding="utf-8"))
+            existing_env_by_name[dest_path.name] = parse_env_text(
+                repo_path.read_text(encoding="utf-8")
+            )
         elif source_path.exists():
-            existing_env_by_name[dest_path.name] = parse_env_text(source_path.read_text(encoding="utf-8"))
+            existing_env_by_name[dest_path.name] = parse_env_text(
+                source_path.read_text(encoding="utf-8")
+            )
 
     overrides_by_dest = build_service_env_overrides(
         effective_sources,
@@ -2417,64 +2682,102 @@ def materialize_bootstrap_env_files(
         )
         repo_path.write_text(rendered, encoding="utf-8")
         written.append(repo_path)
-        log("Materialized repo env file from Supabase bootstrap payload: {0}".format(repo_path))
+        log(
+            "Materialized repo env file from Supabase bootstrap payload: {0}".format(
+                repo_path
+            )
+        )
 
     firecrawl_repo_path = firecrawl_agent_repo_env_path()
-    _firecrawl_dest_path, firecrawl_rendered, _firecrawl_env = build_firecrawl_agent_env_rendered(
-        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
-        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
-        system_env_dir=system_env_dir,
-        existing_env_by_name=existing_env_by_name,
-        external_env_by_name=external_env_by_name,
+    _firecrawl_dest_path, firecrawl_rendered, _firecrawl_env = (
+        build_firecrawl_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+            shared_internal_token=overrides_by_dest["gateway.env"][
+                "GATEWAY_INTERNAL_TOKEN"
+            ],
+            system_env_dir=system_env_dir,
+            existing_env_by_name=existing_env_by_name,
+            external_env_by_name=external_env_by_name,
+        )
     )
     firecrawl_repo_path.parent.mkdir(parents=True, exist_ok=True)
     firecrawl_repo_path.write_text(firecrawl_rendered, encoding="utf-8")
     written.append(firecrawl_repo_path)
-    log("Materialized repo env file from bootstrap inputs: {0}".format(firecrawl_repo_path))
+    log(
+        "Materialized repo env file from bootstrap inputs: {0}".format(
+            firecrawl_repo_path
+        )
+    )
 
     docs_parser_repo_path = docs_parser_agent_repo_env_path()
-    _docs_parser_dest_path, docs_parser_rendered, _docs_parser_env = build_docs_parser_agent_env_rendered(
-        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
-        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
-        system_env_dir=system_env_dir,
-        existing_env_by_name=existing_env_by_name,
-        external_env_by_name=external_env_by_name,
+    _docs_parser_dest_path, docs_parser_rendered, _docs_parser_env = (
+        build_docs_parser_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+            shared_internal_token=overrides_by_dest["gateway.env"][
+                "GATEWAY_INTERNAL_TOKEN"
+            ],
+            system_env_dir=system_env_dir,
+            existing_env_by_name=existing_env_by_name,
+            external_env_by_name=external_env_by_name,
+        )
     )
     docs_parser_repo_path.parent.mkdir(parents=True, exist_ok=True)
     docs_parser_repo_path.write_text(docs_parser_rendered, encoding="utf-8")
     written.append(docs_parser_repo_path)
-    log("Materialized repo env file from bootstrap inputs: {0}".format(docs_parser_repo_path))
+    log(
+        "Materialized repo env file from bootstrap inputs: {0}".format(
+            docs_parser_repo_path
+        )
+    )
 
     x_twitter_repo_path = x_twitter_search_agent_repo_env_path()
-    _x_twitter_dest_path, x_twitter_rendered, _x_twitter_env = build_x_twitter_search_agent_env_rendered(
-        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
-        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
-        system_env_dir=system_env_dir,
-        existing_env_by_name=existing_env_by_name,
-        external_env_by_name=external_env_by_name,
+    _x_twitter_dest_path, x_twitter_rendered, _x_twitter_env = (
+        build_x_twitter_search_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+            shared_internal_token=overrides_by_dest["gateway.env"][
+                "GATEWAY_INTERNAL_TOKEN"
+            ],
+            system_env_dir=system_env_dir,
+            existing_env_by_name=existing_env_by_name,
+            external_env_by_name=external_env_by_name,
+        )
     )
     x_twitter_repo_path.parent.mkdir(parents=True, exist_ok=True)
     x_twitter_repo_path.write_text(x_twitter_rendered, encoding="utf-8")
     written.append(x_twitter_repo_path)
-    log("Materialized repo env file from bootstrap inputs: {0}".format(x_twitter_repo_path))
+    log(
+        "Materialized repo env file from bootstrap inputs: {0}".format(
+            x_twitter_repo_path
+        )
+    )
 
     tabular_repo_path = tabular_agent_repo_env_path()
-    _tabular_dest_path, tabular_rendered, _tabular_env = build_tabular_agent_env_rendered(
-        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
-        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
-        system_env_dir=system_env_dir,
-        existing_env_by_name=existing_env_by_name,
-        external_env_by_name=external_env_by_name,
+    _tabular_dest_path, tabular_rendered, _tabular_env = (
+        build_tabular_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+            shared_internal_token=overrides_by_dest["gateway.env"][
+                "GATEWAY_INTERNAL_TOKEN"
+            ],
+            system_env_dir=system_env_dir,
+            existing_env_by_name=existing_env_by_name,
+            external_env_by_name=external_env_by_name,
+        )
     )
     tabular_repo_path.parent.mkdir(parents=True, exist_ok=True)
     tabular_repo_path.write_text(tabular_rendered, encoding="utf-8")
     written.append(tabular_repo_path)
-    log("Materialized repo env file from bootstrap inputs: {0}".format(tabular_repo_path))
+    log(
+        "Materialized repo env file from bootstrap inputs: {0}".format(
+            tabular_repo_path
+        )
+    )
 
     email_repo_path = email_agent_repo_env_path()
     _email_dest_path, email_rendered, _email_env = build_email_agent_env_rendered(
         signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
-        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
+        shared_internal_token=overrides_by_dest["gateway.env"][
+            "GATEWAY_INTERNAL_TOKEN"
+        ],
         system_env_dir=system_env_dir,
         existing_env_by_name=existing_env_by_name,
         external_env_by_name=external_env_by_name,
@@ -2485,23 +2788,35 @@ def materialize_bootstrap_env_files(
     log("Materialized repo env file from bootstrap inputs: {0}".format(email_repo_path))
 
     image_generator_repo_path = image_generator_agent_repo_env_path()
-    _image_dest_path, image_rendered, _image_env = build_image_generator_agent_env_rendered(
-        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
-        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
-        system_env_dir=system_env_dir,
-        existing_env_by_name=existing_env_by_name,
-        external_env_by_name=external_env_by_name,
+    _image_dest_path, image_rendered, _image_env = (
+        build_image_generator_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+            shared_internal_token=overrides_by_dest["gateway.env"][
+                "GATEWAY_INTERNAL_TOKEN"
+            ],
+            system_env_dir=system_env_dir,
+            existing_env_by_name=existing_env_by_name,
+            external_env_by_name=external_env_by_name,
+        )
     )
     image_generator_repo_path.parent.mkdir(parents=True, exist_ok=True)
     image_generator_repo_path.write_text(image_rendered, encoding="utf-8")
     written.append(image_generator_repo_path)
-    log("Materialized repo env file from bootstrap inputs: {0}".format(image_generator_repo_path))
+    log(
+        "Materialized repo env file from bootstrap inputs: {0}".format(
+            image_generator_repo_path
+        )
+    )
     return written
 
 
-def install_service_env_files(system_env_dir: Path, *, include_memory: bool = False) -> List[Path]:
+def install_service_env_files(
+    system_env_dir: Path, *, include_memory: bool = False
+) -> List[Path]:
     if not is_linux():
-        raise BootstrapError("System env provisioning currently targets Linux VMs only.")
+        raise BootstrapError(
+            "System env provisioning currently targets Linux VMs only."
+        )
 
     effective_sources = resolve_effective_service_env_sources(
         system_env_dir,
@@ -2524,67 +2839,97 @@ def install_service_env_files(system_env_dir: Path, *, include_memory: bool = Fa
             continue
 
         raw = source_path.read_text(encoding="utf-8")
-        rendered = render_env_with_overrides(raw, overrides_by_dest.get(dest_path.name, {}))
+        rendered = render_env_with_overrides(
+            raw, overrides_by_dest.get(dest_path.name, {})
+        )
         install_text_file(dest_path, rendered, mode="600", use_sudo=True)
 
         installed.append(dest_path)
         log("Installed system env file: {0}".format(dest_path))
 
-    firecrawl_dest_path, firecrawl_rendered, _firecrawl_env = build_firecrawl_agent_env_rendered(
-        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
-        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
-        system_env_dir=system_env_dir,
+    firecrawl_dest_path, firecrawl_rendered, _firecrawl_env = (
+        build_firecrawl_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+            shared_internal_token=overrides_by_dest["gateway.env"][
+                "GATEWAY_INTERNAL_TOKEN"
+            ],
+            system_env_dir=system_env_dir,
+        )
     )
     run(["install", "-d", "-m", "755", str(firecrawl_dest_path.parent)], use_sudo=True)
     if firecrawl_dest_path.exists():
         log("System env file already exists: {0}".format(firecrawl_dest_path))
     else:
-        install_text_file(firecrawl_dest_path, firecrawl_rendered, mode="600", use_sudo=True)
+        install_text_file(
+            firecrawl_dest_path, firecrawl_rendered, mode="600", use_sudo=True
+        )
         installed.append(firecrawl_dest_path)
         log("Installed system env file: {0}".format(firecrawl_dest_path))
 
-    docs_parser_dest_path, docs_parser_rendered, _docs_parser_env = build_docs_parser_agent_env_rendered(
-        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
-        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
-        system_env_dir=system_env_dir,
+    docs_parser_dest_path, docs_parser_rendered, _docs_parser_env = (
+        build_docs_parser_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+            shared_internal_token=overrides_by_dest["gateway.env"][
+                "GATEWAY_INTERNAL_TOKEN"
+            ],
+            system_env_dir=system_env_dir,
+        )
     )
-    run(["install", "-d", "-m", "755", str(docs_parser_dest_path.parent)], use_sudo=True)
+    run(
+        ["install", "-d", "-m", "755", str(docs_parser_dest_path.parent)], use_sudo=True
+    )
     if docs_parser_dest_path.exists():
         log("System env file already exists: {0}".format(docs_parser_dest_path))
     else:
-        install_text_file(docs_parser_dest_path, docs_parser_rendered, mode="600", use_sudo=True)
+        install_text_file(
+            docs_parser_dest_path, docs_parser_rendered, mode="600", use_sudo=True
+        )
         installed.append(docs_parser_dest_path)
         log("Installed system env file: {0}".format(docs_parser_dest_path))
 
-    x_twitter_dest_path, x_twitter_rendered, _x_twitter_env = build_x_twitter_search_agent_env_rendered(
-        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
-        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
-        system_env_dir=system_env_dir,
+    x_twitter_dest_path, x_twitter_rendered, _x_twitter_env = (
+        build_x_twitter_search_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+            shared_internal_token=overrides_by_dest["gateway.env"][
+                "GATEWAY_INTERNAL_TOKEN"
+            ],
+            system_env_dir=system_env_dir,
+        )
     )
     run(["install", "-d", "-m", "755", str(x_twitter_dest_path.parent)], use_sudo=True)
     if x_twitter_dest_path.exists():
         log("System env file already exists: {0}".format(x_twitter_dest_path))
     else:
-        install_text_file(x_twitter_dest_path, x_twitter_rendered, mode="600", use_sudo=True)
+        install_text_file(
+            x_twitter_dest_path, x_twitter_rendered, mode="600", use_sudo=True
+        )
         installed.append(x_twitter_dest_path)
         log("Installed system env file: {0}".format(x_twitter_dest_path))
 
-    tabular_dest_path, tabular_rendered, _tabular_env = build_tabular_agent_env_rendered(
-        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
-        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
-        system_env_dir=system_env_dir,
+    tabular_dest_path, tabular_rendered, _tabular_env = (
+        build_tabular_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+            shared_internal_token=overrides_by_dest["gateway.env"][
+                "GATEWAY_INTERNAL_TOKEN"
+            ],
+            system_env_dir=system_env_dir,
+        )
     )
     run(["install", "-d", "-m", "755", str(tabular_dest_path.parent)], use_sudo=True)
     if tabular_dest_path.exists():
         log("System env file already exists: {0}".format(tabular_dest_path))
     else:
-        install_text_file(tabular_dest_path, tabular_rendered, mode="600", use_sudo=True)
+        install_text_file(
+            tabular_dest_path, tabular_rendered, mode="600", use_sudo=True
+        )
         installed.append(tabular_dest_path)
         log("Installed system env file: {0}".format(tabular_dest_path))
 
     email_dest_path, email_rendered, _email_env = build_email_agent_env_rendered(
         signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
-        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
+        shared_internal_token=overrides_by_dest["gateway.env"][
+            "GATEWAY_INTERNAL_TOKEN"
+        ],
         system_env_dir=system_env_dir,
     )
     run(["install", "-d", "-m", "755", str(email_dest_path.parent)], use_sudo=True)
@@ -2595,10 +2940,14 @@ def install_service_env_files(system_env_dir: Path, *, include_memory: bool = Fa
         installed.append(email_dest_path)
         log("Installed system env file: {0}".format(email_dest_path))
 
-    image_dest_path, image_rendered, _image_env = build_image_generator_agent_env_rendered(
-        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
-        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
-        system_env_dir=system_env_dir,
+    image_dest_path, image_rendered, _image_env = (
+        build_image_generator_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+            shared_internal_token=overrides_by_dest["gateway.env"][
+                "GATEWAY_INTERNAL_TOKEN"
+            ],
+            system_env_dir=system_env_dir,
+        )
     )
     run(["install", "-d", "-m", "755", str(image_dest_path.parent)], use_sudo=True)
     if image_dest_path.exists():
@@ -2614,9 +2963,13 @@ def install_service_env_files(system_env_dir: Path, *, include_memory: bool = Fa
 def install_whatsapp_bridge_dependencies(bridge_dir: Path) -> None:
     package_json = bridge_dir / "package.json"
     if not bridge_dir.exists():
-        raise BootstrapError("WhatsApp bridge directory does not exist: {0}".format(bridge_dir))
+        raise BootstrapError(
+            "WhatsApp bridge directory does not exist: {0}".format(bridge_dir)
+        )
     if not package_json.exists():
-        raise BootstrapError("Missing WhatsApp bridge package.json at {0}".format(package_json))
+        raise BootstrapError(
+            "Missing WhatsApp bridge package.json at {0}".format(package_json)
+        )
 
     ensure_node_toolchain()
     package_data = load_package_json(package_json)
@@ -2631,7 +2984,11 @@ def install_whatsapp_bridge_dependencies(bridge_dir: Path) -> None:
     log("Installing WhatsApp bridge dependencies in {0}".format(bridge_dir))
     run_with_retry(install_command, check=True, capture_output=False, cwd=bridge_dir)
 
-    scripts = package_data.get("scripts") if isinstance(package_data.get("scripts"), dict) else {}
+    scripts = (
+        package_data.get("scripts")
+        if isinstance(package_data.get("scripts"), dict)
+        else {}
+    )
     if "build" in scripts:
         log("Running WhatsApp bridge build script in {0}".format(bridge_dir))
         run(["npm", "run", "build"], check=True, capture_output=False, cwd=bridge_dir)
@@ -2653,9 +3010,13 @@ def install_systemd_units(
     if not is_linux():
         raise BootstrapError("Systemd install currently targets Linux VMs only.")
     if shutil.which("systemctl") is None:
-        raise BootstrapError("systemctl not found. This host does not appear to use systemd.")
+        raise BootstrapError(
+            "systemctl not found. This host does not appear to use systemd."
+        )
     if not template_dir.exists():
-        raise BootstrapError("Systemd template directory does not exist: {0}".format(template_dir))
+        raise BootstrapError(
+            "Systemd template directory does not exist: {0}".format(template_dir)
+        )
 
     selected_optional_templates = set(include_optional_templates or [])
     templates = sorted(
@@ -2668,7 +3029,9 @@ def install_systemd_units(
         )
     )
     if not templates:
-        raise BootstrapError("No systemd template files found in {0}".format(template_dir))
+        raise BootstrapError(
+            "No systemd template files found in {0}".format(template_dir)
+        )
 
     install_service_env_files(DEFAULT_SYSTEM_ENV_DIR, include_memory=include_memory_env)
 
@@ -2701,7 +3064,13 @@ def install_systemd_units(
             )
             rendered_path.write_text(rendered_text, encoding="utf-8")
             run(
-                ["install", "-m", "644", str(rendered_path), "/etc/systemd/system/{0}".format(rendered_name)],
+                [
+                    "install",
+                    "-m",
+                    "644",
+                    str(rendered_path),
+                    "/etc/systemd/system/{0}".format(rendered_name),
+                ],
                 use_sudo=True,
             )
             installed_names.append(rendered_name)
@@ -2709,11 +3078,16 @@ def install_systemd_units(
     run(["systemctl", "daemon-reload"], use_sudo=True)
 
     if enable_units and installed_names:
-        preferred_units = [name for name in installed_names if name.endswith(".target")] or installed_names
+        preferred_units = [
+            name for name in installed_names if name.endswith(".target")
+        ] or installed_names
         additional_units = [name for name in (extra_enable_units or []) if name]
         run(["systemctl", "enable", *preferred_units, *additional_units], use_sudo=True)
         if start_units:
-            run(["systemctl", "restart", *preferred_units, *additional_units], use_sudo=True)
+            run(
+                ["systemctl", "restart", *preferred_units, *additional_units],
+                use_sudo=True,
+            )
 
     return installed_names
 
@@ -2732,15 +3106,21 @@ def doctor(
 
     print("COSMIC Backend bootstrap doctor")
     print("  platform           : {0}".format(sys.platform))
-    print("  current python     : {0}.{1}.{2} ({3})".format(
-        current_version[0], current_version[1], current_version[2], sys.executable
-    ))
+    print(
+        "  current python     : {0}.{1}.{2} ({3})".format(
+            current_version[0], current_version[1], current_version[2], sys.executable
+        )
+    )
     print("  python supported   : {0}".format("yes" if current_supported else "no"))
     print("  package manager    : {0}".format(manager or "not found"))
     print("  pip available      : {0}".format("yes" if has_pip() else "no"))
     print("  venv available     : {0}".format("yes" if has_venv_module() else "no"))
     print("  target venv        : {0}".format(venv_path))
-    print("  venv exists        : {0}".format("yes" if venv_python_path(venv_path).exists() else "no"))
+    print(
+        "  venv exists        : {0}".format(
+            "yes" if venv_python_path(venv_path).exists() else "no"
+        )
+    )
     docs_parser_dependency_status = "venv missing"
     if venv_has_pip(venv_path):
         try:
@@ -2752,13 +3132,33 @@ def doctor(
         docs_parser_dependency_status = "venv missing pip"
     print("  docs parser deps   : {0}".format(docs_parser_dependency_status))
     print("  office renderer    : {0}".format(office_renderer_version() or "missing"))
-    print("  requirements file  : {0}".format(requirements_path if requirements_path.exists() else "missing"))
-    print("  node available     : {0}".format(executable_version(["node", "--version"]) or "no"))
-    print("  npm available      : {0}".format(executable_version(["npm", "--version"]) or "no"))
-    print("  bridge dir         : {0}".format(bridge_dir if bridge_dir.exists() else "missing"))
-    print("  bridge package     : {0}".format(
-        (bridge_dir / "package.json") if (bridge_dir / "package.json").exists() else "missing"
-    ))
+    print(
+        "  requirements file  : {0}".format(
+            requirements_path if requirements_path.exists() else "missing"
+        )
+    )
+    print(
+        "  node available     : {0}".format(
+            executable_version(["node", "--version"]) or "no"
+        )
+    )
+    print(
+        "  npm available      : {0}".format(
+            executable_version(["npm", "--version"]) or "no"
+        )
+    )
+    print(
+        "  bridge dir         : {0}".format(
+            bridge_dir if bridge_dir.exists() else "missing"
+        )
+    )
+    print(
+        "  bridge package     : {0}".format(
+            (bridge_dir / "package.json")
+            if (bridge_dir / "package.json").exists()
+            else "missing"
+        )
+    )
     print("  memory repo target : {0}".format(DEFAULT_MEMORY_REPO_DIR))
     print(
         "  memory repo exists : {0}".format(
@@ -2766,7 +3166,11 @@ def doctor(
         )
     )
     firecrawl_source = resolve_firecrawl_agent_env_source()
-    firecrawl_source_data = parse_env_text(firecrawl_source.read_text(encoding="utf-8")) if firecrawl_source.exists() else {}
+    firecrawl_source_data = (
+        parse_env_text(firecrawl_source.read_text(encoding="utf-8"))
+        if firecrawl_source.exists()
+        else {}
+    )
     firecrawl_system_path = firecrawl_agent_system_env_path(DEFAULT_SYSTEM_ENV_DIR)
     firecrawl_system_data = {}
     if is_linux() and firecrawl_system_path.exists():
@@ -2774,34 +3178,94 @@ def doctor(
     docs_parser_source = resolve_docs_parser_agent_env_source()
     docs_parser_system_path = docs_parser_agent_system_env_path(DEFAULT_SYSTEM_ENV_DIR)
     x_twitter_source = resolve_x_twitter_search_agent_env_source()
-    x_twitter_source_data = parse_env_text(x_twitter_source.read_text(encoding="utf-8")) if x_twitter_source.exists() else {}
-    x_twitter_system_path = x_twitter_search_agent_system_env_path(DEFAULT_SYSTEM_ENV_DIR)
+    x_twitter_source_data = (
+        parse_env_text(x_twitter_source.read_text(encoding="utf-8"))
+        if x_twitter_source.exists()
+        else {}
+    )
+    x_twitter_system_path = x_twitter_search_agent_system_env_path(
+        DEFAULT_SYSTEM_ENV_DIR
+    )
     x_twitter_system_data = {}
     if is_linux() and x_twitter_system_path.exists():
-        x_twitter_system_data = read_x_twitter_search_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+        x_twitter_system_data = read_x_twitter_search_agent_system_env(
+            DEFAULT_SYSTEM_ENV_DIR
+        )
     email_source = resolve_email_agent_env_source()
-    email_source_data = parse_env_text(email_source.read_text(encoding="utf-8")) if email_source.exists() else {}
+    email_source_data = (
+        parse_env_text(email_source.read_text(encoding="utf-8"))
+        if email_source.exists()
+        else {}
+    )
     email_system_path = email_agent_system_env_path(DEFAULT_SYSTEM_ENV_DIR)
     email_system_data = {}
     if is_linux() and email_system_path.exists():
         email_system_data = read_email_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
     image_source = resolve_image_generator_agent_env_source()
-    image_source_data = parse_env_text(image_source.read_text(encoding="utf-8")) if image_source.exists() else {}
+    image_source_data = (
+        parse_env_text(image_source.read_text(encoding="utf-8"))
+        if image_source.exists()
+        else {}
+    )
     image_system_path = image_generator_agent_system_env_path(DEFAULT_SYSTEM_ENV_DIR)
     image_system_data = {}
     if is_linux() and image_system_path.exists():
-        image_system_data = read_image_generator_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
-    print("  firecrawl env src  : {0}".format(firecrawl_source if firecrawl_source.exists() else "missing"))
-    print("  docs parser env src: {0}".format(docs_parser_source if docs_parser_source.exists() else "missing"))
-    print("  x search env src   : {0}".format(x_twitter_source if x_twitter_source.exists() else "missing"))
-    print("  email agent env src: {0}".format(email_source if email_source.exists() else "missing"))
-    print("  image agent env src: {0}".format(image_source if image_source.exists() else "missing"))
+        image_system_data = read_image_generator_agent_system_env(
+            DEFAULT_SYSTEM_ENV_DIR
+        )
+    print(
+        "  firecrawl env src  : {0}".format(
+            firecrawl_source if firecrawl_source.exists() else "missing"
+        )
+    )
+    print(
+        "  docs parser env src: {0}".format(
+            docs_parser_source if docs_parser_source.exists() else "missing"
+        )
+    )
+    print(
+        "  x search env src   : {0}".format(
+            x_twitter_source if x_twitter_source.exists() else "missing"
+        )
+    )
+    print(
+        "  email agent env src: {0}".format(
+            email_source if email_source.exists() else "missing"
+        )
+    )
+    print(
+        "  image agent env src: {0}".format(
+            image_source if image_source.exists() else "missing"
+        )
+    )
     if is_linux():
-        print("  firecrawl system env: {0}".format(firecrawl_system_path if firecrawl_system_path.exists() else "missing"))
-        print("  docs parser system env: {0}".format(docs_parser_system_path if docs_parser_system_path.exists() else "missing"))
-        print("  x search system env: {0}".format(x_twitter_system_path if x_twitter_system_path.exists() else "missing"))
-        print("  email agent system env: {0}".format(email_system_path if email_system_path.exists() else "missing"))
-        print("  image agent system env: {0}".format(image_system_path if image_system_path.exists() else "missing"))
+        print(
+            "  firecrawl system env: {0}".format(
+                firecrawl_system_path if firecrawl_system_path.exists() else "missing"
+            )
+        )
+        print(
+            "  docs parser system env: {0}".format(
+                docs_parser_system_path
+                if docs_parser_system_path.exists()
+                else "missing"
+            )
+        )
+        print(
+            "  x search system env: {0}".format(
+                x_twitter_system_path if x_twitter_system_path.exists() else "missing"
+            )
+        )
+        print(
+            "  email agent system env: {0}".format(
+                email_system_path if email_system_path.exists() else "missing"
+            )
+        )
+        print(
+            "  image agent system env: {0}".format(
+                image_system_path if image_system_path.exists() else "missing"
+            )
+        )
     firecrawl_enabled = firecrawl_agent_is_configured(
         firecrawl_system_data if firecrawl_system_data else firecrawl_source_data
     )
@@ -2824,45 +3288,82 @@ def doctor(
             capture_output=True,
             check=False,
         )
-        print("  neo4j service      : {0}".format((neo4j_status.stdout or "unknown").strip() or "unknown"))
+        print(
+            "  neo4j service      : {0}".format(
+                (neo4j_status.stdout or "unknown").strip() or "unknown"
+            )
+        )
         firecrawl_status = run(
             ["systemctl", "is-active", FIRECRAWL_AGENT_SERVICE_NAME],
             capture_output=True,
             check=False,
         )
-        print("  firecrawl service  : {0}".format((firecrawl_status.stdout or "unknown").strip() or "unknown"))
+        print(
+            "  firecrawl service  : {0}".format(
+                (firecrawl_status.stdout or "unknown").strip() or "unknown"
+            )
+        )
         docs_parser_status = run(
             ["systemctl", "is-active", DOCS_PARSER_AGENT_SERVICE_NAME],
             capture_output=True,
             check=False,
         )
-        print("  docs parser service: {0}".format((docs_parser_status.stdout or "unknown").strip() or "unknown"))
+        print(
+            "  docs parser service: {0}".format(
+                (docs_parser_status.stdout or "unknown").strip() or "unknown"
+            )
+        )
         x_twitter_status = run(
             ["systemctl", "is-active", X_TWITTER_SEARCH_AGENT_SERVICE_NAME],
             capture_output=True,
             check=False,
         )
-        print("  x search service   : {0}".format((x_twitter_status.stdout or "unknown").strip() or "unknown"))
+        print(
+            "  x search service   : {0}".format(
+                (x_twitter_status.stdout or "unknown").strip() or "unknown"
+            )
+        )
         email_status = run(
             ["systemctl", "is-active", EMAIL_AGENT_SERVICE_NAME],
             capture_output=True,
             check=False,
         )
-        print("  email agent service: {0}".format((email_status.stdout or "unknown").strip() or "unknown"))
+        print(
+            "  email agent service: {0}".format(
+                (email_status.stdout or "unknown").strip() or "unknown"
+            )
+        )
         image_status = run(
             ["systemctl", "is-active", IMAGE_GENERATOR_AGENT_SERVICE_NAME],
             capture_output=True,
             check=False,
         )
-        print("  image agent service: {0}".format((image_status.stdout or "unknown").strip() or "unknown"))
-    print("  env search roots   : {0}".format(", ".join(str(path) for path in env_search_roots)))
+        print(
+            "  image agent service: {0}".format(
+                (image_status.stdout or "unknown").strip() or "unknown"
+            )
+        )
+    print(
+        "  env search roots   : {0}".format(
+            ", ".join(str(path) for path in env_search_roots)
+        )
+    )
     print("  env templates      : {0}".format(len(env_examples)))
-    print("  systemd templates  : {0}".format(systemd_template_dir if systemd_template_dir.exists() else "missing"))
+    print(
+        "  systemd templates  : {0}".format(
+            systemd_template_dir if systemd_template_dir.exists() else "missing"
+        )
+    )
 
     effective_sources: list[Tuple[Path, Path]] = []
-    fallback_sources = {dest: source for source, dest in fallback_service_env_specs(DEFAULT_SYSTEM_ENV_DIR)}
+    fallback_sources = {
+        dest: source
+        for source, dest in fallback_service_env_specs(DEFAULT_SYSTEM_ENV_DIR)
+    }
     for source, dest in service_env_specs(DEFAULT_SYSTEM_ENV_DIR):
-        effective_sources.append((source if source.exists() else fallback_sources[dest], dest))
+        effective_sources.append(
+            (source if source.exists() else fallback_sources[dest], dest)
+        )
 
     for source_path, dest_path in effective_sources:
         required_keys = REQUIRED_SERVICE_ENV_KEYS.get(dest_path.name, ())
@@ -2872,7 +3373,9 @@ def doctor(
         print(
             "  required env check : {0} -> {1}".format(
                 source_path,
-                "ok" if not missing_keys else "missing {0}".format(", ".join(missing_keys)),
+                "ok"
+                if not missing_keys
+                else "missing {0}".format(", ".join(missing_keys)),
             )
         )
 
@@ -2893,13 +3396,21 @@ def sync_repo_env_files(search_roots: Sequence[Path]) -> List[Path]:
     for example_path in discover_env_example_files(search_roots):
         target_path = example_target_path(example_path)
         source_raw = example_path.read_text(encoding="utf-8")
-        changed_keys = sync_env_file(target_path, source_raw=source_raw, create_missing=True, use_sudo=False, mode="644")
+        changed_keys = sync_env_file(
+            target_path,
+            source_raw=source_raw,
+            create_missing=True,
+            use_sudo=False,
+            mode="644",
+        )
         if changed_keys or target_path.exists():
             synced.append(target_path)
     return synced
 
 
-def sync_service_env_files(system_env_dir: Path, *, include_memory: bool = False) -> List[Path]:
+def sync_service_env_files(
+    system_env_dir: Path, *, include_memory: bool = False
+) -> List[Path]:
     if not is_linux():
         raise BootstrapError("System env syncing currently targets Linux VMs only.")
 
@@ -2912,7 +3423,9 @@ def sync_service_env_files(system_env_dir: Path, *, include_memory: bool = False
     for _source_path, dest_path in effective_sources:
         if not dest_path.exists():
             continue
-        existing_env_by_name[dest_path.name] = parse_env_text(read_text_file(dest_path, use_sudo=True))
+        existing_env_by_name[dest_path.name] = parse_env_text(
+            read_text_file(dest_path, use_sudo=True)
+        )
 
     overrides_by_dest = build_service_env_overrides(
         effective_sources,
@@ -2923,7 +3436,9 @@ def sync_service_env_files(system_env_dir: Path, *, include_memory: bool = False
     synced: list[Path] = []
     for source_path, dest_path in effective_sources:
         raw = source_path.read_text(encoding="utf-8")
-        rendered = render_env_with_overrides(raw, overrides_by_dest.get(dest_path.name, {}))
+        rendered = render_env_with_overrides(
+            raw, overrides_by_dest.get(dest_path.name, {})
+        )
         changed_keys = sync_env_file(
             dest_path,
             source_raw=rendered,
@@ -2937,13 +3452,21 @@ def sync_service_env_files(system_env_dir: Path, *, include_memory: bool = False
     firecrawl_dest_path = firecrawl_agent_system_env_path(system_env_dir)
     if firecrawl_dest_path.exists():
         firecrawl_existing_by_name: Dict[str, Dict[str, str]] = {
-            FIRECRAWL_AGENT_ENV_NAME: parse_env_text(read_text_file(firecrawl_dest_path, use_sudo=True)),
+            FIRECRAWL_AGENT_ENV_NAME: parse_env_text(
+                read_text_file(firecrawl_dest_path, use_sudo=True)
+            ),
         }
-        _firecrawl_dest_path, firecrawl_rendered, _firecrawl_env = build_firecrawl_agent_env_rendered(
-            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
-            shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
-            system_env_dir=system_env_dir,
-            existing_env_by_name=firecrawl_existing_by_name,
+        _firecrawl_dest_path, firecrawl_rendered, _firecrawl_env = (
+            build_firecrawl_agent_env_rendered(
+                signing_secret=overrides_by_dest["gateway.env"][
+                    "GATEWAY_SIGNING_SECRET"
+                ],
+                shared_internal_token=overrides_by_dest["gateway.env"][
+                    "GATEWAY_INTERNAL_TOKEN"
+                ],
+                system_env_dir=system_env_dir,
+                existing_env_by_name=firecrawl_existing_by_name,
+            )
         )
         changed_keys = sync_env_file(
             firecrawl_dest_path,
@@ -2958,13 +3481,21 @@ def sync_service_env_files(system_env_dir: Path, *, include_memory: bool = False
     docs_parser_dest_path = docs_parser_agent_system_env_path(system_env_dir)
     if docs_parser_dest_path.exists():
         docs_parser_existing_by_name: Dict[str, Dict[str, str]] = {
-            DOCS_PARSER_AGENT_ENV_NAME: parse_env_text(read_text_file(docs_parser_dest_path, use_sudo=True)),
+            DOCS_PARSER_AGENT_ENV_NAME: parse_env_text(
+                read_text_file(docs_parser_dest_path, use_sudo=True)
+            ),
         }
-        _docs_parser_dest_path, docs_parser_rendered, _docs_parser_env = build_docs_parser_agent_env_rendered(
-            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
-            shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
-            system_env_dir=system_env_dir,
-            existing_env_by_name=docs_parser_existing_by_name,
+        _docs_parser_dest_path, docs_parser_rendered, _docs_parser_env = (
+            build_docs_parser_agent_env_rendered(
+                signing_secret=overrides_by_dest["gateway.env"][
+                    "GATEWAY_SIGNING_SECRET"
+                ],
+                shared_internal_token=overrides_by_dest["gateway.env"][
+                    "GATEWAY_INTERNAL_TOKEN"
+                ],
+                system_env_dir=system_env_dir,
+                existing_env_by_name=docs_parser_existing_by_name,
+            )
         )
         changed_keys = sync_env_file(
             docs_parser_dest_path,
@@ -2978,13 +3509,21 @@ def sync_service_env_files(system_env_dir: Path, *, include_memory: bool = False
     tabular_dest_path = tabular_agent_system_env_path(system_env_dir)
     if tabular_dest_path.exists():
         tabular_existing_by_name: Dict[str, Dict[str, str]] = {
-            TABULAR_AGENT_ENV_NAME: parse_env_text(read_text_file(tabular_dest_path, use_sudo=True)),
+            TABULAR_AGENT_ENV_NAME: parse_env_text(
+                read_text_file(tabular_dest_path, use_sudo=True)
+            ),
         }
-        _tabular_dest_path, tabular_rendered, _tabular_env = build_tabular_agent_env_rendered(
-            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
-            shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
-            system_env_dir=system_env_dir,
-            existing_env_by_name=tabular_existing_by_name,
+        _tabular_dest_path, tabular_rendered, _tabular_env = (
+            build_tabular_agent_env_rendered(
+                signing_secret=overrides_by_dest["gateway.env"][
+                    "GATEWAY_SIGNING_SECRET"
+                ],
+                shared_internal_token=overrides_by_dest["gateway.env"][
+                    "GATEWAY_INTERNAL_TOKEN"
+                ],
+                system_env_dir=system_env_dir,
+                existing_env_by_name=tabular_existing_by_name,
+            )
         )
         changed_keys = sync_env_file(
             tabular_dest_path,
@@ -2998,11 +3537,15 @@ def sync_service_env_files(system_env_dir: Path, *, include_memory: bool = False
     email_dest_path = email_agent_system_env_path(system_env_dir)
     if email_dest_path.exists():
         email_existing_by_name: Dict[str, Dict[str, str]] = {
-            EMAIL_AGENT_ENV_NAME: parse_env_text(read_text_file(email_dest_path, use_sudo=True)),
+            EMAIL_AGENT_ENV_NAME: parse_env_text(
+                read_text_file(email_dest_path, use_sudo=True)
+            ),
         }
         _email_dest_path, email_rendered, _email_env = build_email_agent_env_rendered(
             signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
-            shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
+            shared_internal_token=overrides_by_dest["gateway.env"][
+                "GATEWAY_INTERNAL_TOKEN"
+            ],
             system_env_dir=system_env_dir,
             existing_env_by_name=email_existing_by_name,
         )
@@ -3018,13 +3561,21 @@ def sync_service_env_files(system_env_dir: Path, *, include_memory: bool = False
     image_dest_path = image_generator_agent_system_env_path(system_env_dir)
     if image_dest_path.exists():
         image_existing_by_name: Dict[str, Dict[str, str]] = {
-            IMAGE_GENERATOR_AGENT_ENV_NAME: parse_env_text(read_text_file(image_dest_path, use_sudo=True)),
+            IMAGE_GENERATOR_AGENT_ENV_NAME: parse_env_text(
+                read_text_file(image_dest_path, use_sudo=True)
+            ),
         }
-        _image_dest_path, image_rendered, _image_env = build_image_generator_agent_env_rendered(
-            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
-            shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
-            system_env_dir=system_env_dir,
-            existing_env_by_name=image_existing_by_name,
+        _image_dest_path, image_rendered, _image_env = (
+            build_image_generator_agent_env_rendered(
+                signing_secret=overrides_by_dest["gateway.env"][
+                    "GATEWAY_SIGNING_SECRET"
+                ],
+                shared_internal_token=overrides_by_dest["gateway.env"][
+                    "GATEWAY_INTERNAL_TOKEN"
+                ],
+                system_env_dir=system_env_dir,
+                existing_env_by_name=image_existing_by_name,
+            )
         )
         changed_keys = sync_env_file(
             image_dest_path,
@@ -3084,16 +3635,22 @@ def setup_whatsapp_bridge(bridge_dir: Path) -> None:
     install_whatsapp_bridge_dependencies(bridge_dir)
 
 
-def resolve_memory_repo_dir(configured_path: Path | None, *, allow_missing: bool = False) -> Path | None:
+def resolve_memory_repo_dir(
+    configured_path: Path | None, *, allow_missing: bool = False
+) -> Path | None:
     if configured_path is None:
         return None
     resolved = configured_path.expanduser().resolve()
     if not resolved.exists():
         if allow_missing:
             return resolved
-        raise BootstrapError("cosmic-memory repo directory does not exist: {0}".format(resolved))
+        raise BootstrapError(
+            "cosmic-memory repo directory does not exist: {0}".format(resolved)
+        )
     if not (resolved / "pyproject.toml").exists():
-        raise BootstrapError("cosmic-memory repo is missing pyproject.toml: {0}".format(resolved))
+        raise BootstrapError(
+            "cosmic-memory repo is missing pyproject.toml: {0}".format(resolved)
+        )
     return resolved
 
 
@@ -3104,24 +3661,32 @@ def ensure_git_available() -> None:
         raise BootstrapError("git is required to fetch cosmic-memory.")
     manager = detect_package_manager()
     if not manager:
-        raise BootstrapError("git is required to fetch cosmic-memory, but no supported package manager was found.")
+        raise BootstrapError(
+            "git is required to fetch cosmic-memory, but no supported package manager was found."
+        )
     install_system_packages(manager, ["git"])
     if shutil.which("git") is None:
         raise BootstrapError("git is still unavailable after installation attempts.")
 
 
-def ensure_memory_repo_checkout(memory_repo_dir: Path, memory_repo_url: str, memory_repo_ref: str) -> Path:
+def ensure_memory_repo_checkout(
+    memory_repo_dir: Path, memory_repo_url: str, memory_repo_ref: str
+) -> Path:
     resolved = resolve_memory_repo_dir(memory_repo_dir, allow_missing=True)
     if resolved is None:
         raise BootstrapError("cosmic-memory repo path could not be resolved.")
     if resolved.exists():
         if not resolved.is_dir():
-            raise BootstrapError("cosmic-memory repo path is not a directory: {0}".format(resolved))
+            raise BootstrapError(
+                "cosmic-memory repo path is not a directory: {0}".format(resolved)
+            )
         if (resolved / "pyproject.toml").exists():
             return resolve_memory_repo_dir(resolved)
         if any(resolved.iterdir()):
             raise BootstrapError(
-                "cosmic-memory checkout target exists but is not a valid repo: {0}".format(resolved)
+                "cosmic-memory checkout target exists but is not a valid repo: {0}".format(
+                    resolved
+                )
             )
     ensure_git_available()
     resolved.parent.mkdir(parents=True, exist_ok=True)
@@ -3159,14 +3724,19 @@ def apt_has_candidate(package_name: str) -> bool:
 def ensure_neo4j_apt_repository() -> None:
     manager = detect_package_manager()
     if manager != "apt-get":
-        raise BootstrapError("Automatic Neo4j provisioning currently supports apt-get based Linux VMs only.")
+        raise BootstrapError(
+            "Automatic Neo4j provisioning currently supports apt-get based Linux VMs only."
+        )
 
     install_system_packages(manager, ["ca-certificates", "gpg"])
     if is_ubuntu_host() and not apt_has_candidate("daemon"):
         install_system_packages(manager, ["software-properties-common"])
         run_with_retry(["add-apt-repository", "-y", "universe"], use_sudo=True)
 
-    run(["install", "-d", "-m", "755", str(DEFAULT_NEO4J_APT_KEYRING_PATH.parent)], use_sudo=True)
+    run(
+        ["install", "-d", "-m", "755", str(DEFAULT_NEO4J_APT_KEYRING_PATH.parent)],
+        use_sudo=True,
+    )
     request = Request(
         DEFAULT_NEO4J_APT_KEY_URL,
         headers={"User-Agent": "cosmic-bootstrap/1.0"},
@@ -3185,7 +3755,14 @@ def ensure_neo4j_apt_repository() -> None:
         dearmored_key_path = temp_dir_path / "neo4j.gpg"
         raw_key_path.write_bytes(key_bytes)
         run(
-            ["gpg", "--dearmor", "--yes", "--output", str(dearmored_key_path), str(raw_key_path)],
+            [
+                "gpg",
+                "--dearmor",
+                "--yes",
+                "--output",
+                str(dearmored_key_path),
+                str(raw_key_path),
+            ],
             capture_output=False,
             check=True,
         )
@@ -3209,7 +3786,10 @@ def ensure_neo4j_package_installed() -> bool:
     ensure_neo4j_apt_repository()
     if apt_package_installed("neo4j"):
         return False
-    run_with_retry(["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "neo4j"], use_sudo=True)
+    run_with_retry(
+        ["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "neo4j"],
+        use_sudo=True,
+    )
     return True
 
 
@@ -3275,7 +3855,9 @@ def set_neo4j_initial_password(password: str) -> None:
     )
 
 
-def rotate_neo4j_password(uri: str, username: str, current_password: str, new_password: str) -> None:
+def rotate_neo4j_password(
+    uri: str, username: str, current_password: str, new_password: str
+) -> None:
     query = "ALTER CURRENT USER SET PASSWORD FROM '{0}' TO '{1}'".format(
         current_password,
         new_password,
@@ -3309,17 +3891,37 @@ def rotate_neo4j_password(uri: str, username: str, current_password: str, new_pa
 
 def setup_neo4j(memory_env_path: Path) -> None:
     if not is_linux():
-        raise BootstrapError("Automatic Neo4j provisioning currently targets Linux VMs only.")
+        raise BootstrapError(
+            "Automatic Neo4j provisioning currently targets Linux VMs only."
+        )
 
     env_data = parse_env_text(read_text_file(memory_env_path, use_sudo=True))
-    graph_backend = (first_meaningful_value(env_data.get("COSMIC_MEMORY_GRAPH_BACKEND"), "neo4j") or "").strip().lower()
+    graph_backend = (
+        (
+            first_meaningful_value(env_data.get("COSMIC_MEMORY_GRAPH_BACKEND"), "neo4j")
+            or ""
+        )
+        .strip()
+        .lower()
+    )
     if graph_backend != "neo4j":
-        log("Skipping Neo4j provisioning because COSMIC_MEMORY_GRAPH_BACKEND={0}.".format(graph_backend or "<empty>"))
+        log(
+            "Skipping Neo4j provisioning because COSMIC_MEMORY_GRAPH_BACKEND={0}.".format(
+                graph_backend or "<empty>"
+            )
+        )
         return
 
-    neo4j_uri = first_meaningful_value(env_data.get("COSMIC_MEMORY_NEO4J_URI"), DEFAULT_NEO4J_URI) or DEFAULT_NEO4J_URI
+    neo4j_uri = (
+        first_meaningful_value(
+            env_data.get("COSMIC_MEMORY_NEO4J_URI"), DEFAULT_NEO4J_URI
+        )
+        or DEFAULT_NEO4J_URI
+    )
     neo4j_username = (
-        first_meaningful_value(env_data.get("COSMIC_MEMORY_NEO4J_USERNAME"), DEFAULT_NEO4J_USERNAME)
+        first_meaningful_value(
+            env_data.get("COSMIC_MEMORY_NEO4J_USERNAME"), DEFAULT_NEO4J_USERNAME
+        )
         or DEFAULT_NEO4J_USERNAME
     )
     neo4j_password = meaningful_env_value(env_data.get("COSMIC_MEMORY_NEO4J_PASSWORD"))
@@ -3341,10 +3943,14 @@ def setup_neo4j(memory_env_path: Path) -> None:
         try:
             set_neo4j_initial_password(neo4j_password)
         except subprocess.CalledProcessError:
-            log("Neo4j initial password setup was not accepted before first start; will verify or rotate after service startup.")
+            log(
+                "Neo4j initial password setup was not accepted before first start; will verify or rotate after service startup."
+            )
 
     if shutil.which("systemctl") is None:
-        raise BootstrapError("systemctl not found. Neo4j provisioning expects a systemd-based Linux VM.")
+        raise BootstrapError(
+            "systemctl not found. Neo4j provisioning expects a systemd-based Linux VM."
+        )
 
     run(["systemctl", "enable", DEFAULT_NEO4J_SERVICE_NAME], use_sudo=True)
     run(["systemctl", "restart", DEFAULT_NEO4J_SERVICE_NAME], use_sudo=True)
@@ -3410,9 +4016,13 @@ def fetch_json(url: str, *, timeout_sec: float = 5.0) -> dict[str, object]:
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise BootstrapError("Health endpoint returned invalid JSON for {0}: {1}".format(url, exc)) from exc
+        raise BootstrapError(
+            "Health endpoint returned invalid JSON for {0}: {1}".format(url, exc)
+        ) from exc
     if not isinstance(parsed, dict):
-        raise BootstrapError("Health endpoint returned unexpected payload for {0}.".format(url))
+        raise BootstrapError(
+            "Health endpoint returned unexpected payload for {0}.".format(url)
+        )
     return parsed
 
 
@@ -3520,9 +4130,13 @@ def run_post_provision_health_checks(
     poll_interval_sec: float = DEFAULT_POST_PROVISION_POLL_INTERVAL_SEC,
 ) -> None:
     if not is_linux():
-        raise BootstrapError("Post-provision readiness checks currently target Linux VMs only.")
+        raise BootstrapError(
+            "Post-provision readiness checks currently target Linux VMs only."
+        )
     if shutil.which("systemctl") is None:
-        raise BootstrapError("systemctl not found. Post-provision readiness checks require a systemd-based Linux VM.")
+        raise BootstrapError(
+            "systemctl not found. Post-provision readiness checks require a systemd-based Linux VM."
+        )
 
     for unit_name in CORE_BACKEND_SERVICE_UNITS:
         wait_for_systemd_unit_active(
@@ -3633,9 +4247,13 @@ def setup_cosmic_memory(
 
     python_path = venv_python_path(venv_path)
     if not python_path.exists():
-        raise BootstrapError("Missing venv python executable at {0}".format(python_path))
+        raise BootstrapError(
+            "Missing venv python executable at {0}".format(python_path)
+        )
 
-    memory_repo = ensure_memory_repo_checkout(memory_repo_dir, memory_repo_url, memory_repo_ref)
+    memory_repo = ensure_memory_repo_checkout(
+        memory_repo_dir, memory_repo_url, memory_repo_ref
+    )
 
     install_target = "{0}[qdrant-local,graph,llm]".format(memory_repo)
     log("Installing cosmic-memory package from {0}".format(memory_repo))
@@ -3656,9 +4274,16 @@ def setup_vm_edge(
     if not is_linux():
         raise BootstrapError("VM edge setup currently targets Linux VMs only.")
     if not edge_setup_script.exists():
-        raise BootstrapError("VM edge setup script does not exist: {0}".format(edge_setup_script))
+        raise BootstrapError(
+            "VM edge setup script does not exist: {0}".format(edge_setup_script)
+        )
 
-    command = [sys.executable, str(edge_setup_script), "--gateway-env", str(gateway_env_path)]
+    command = [
+        sys.executable,
+        str(edge_setup_script),
+        "--gateway-env",
+        str(gateway_env_path),
+    ]
     if gateway_host:
         command.extend(["--gateway-host", gateway_host])
     if force:
@@ -3791,50 +4416,96 @@ def provision_vm(
     firecrawl_env = read_firecrawl_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
     enable_firecrawl_agent = firecrawl_agent_is_configured(firecrawl_env)
     if enable_firecrawl_agent:
-        log("Firecrawl agent env is configured; bootstrap will enable and start the Firecrawl agent service.")
+        log(
+            "Firecrawl agent env is configured; bootstrap will enable and start the Firecrawl agent service."
+        )
     else:
-        log("Firecrawl agent env is not configured; bootstrap will install the unit but skip enabling the agent service.")
+        log(
+            "Firecrawl agent env is not configured; bootstrap will install the unit but skip enabling the agent service."
+        )
     x_twitter_env = read_x_twitter_search_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
     enable_x_twitter_search_agent = x_twitter_search_agent_is_configured(x_twitter_env)
     if enable_x_twitter_search_agent:
-        log("X/Twitter search agent env is configured; bootstrap will enable and start the X/Twitter search agent service.")
+        log(
+            "X/Twitter search agent env is configured; bootstrap will enable and start the X/Twitter search agent service."
+        )
     else:
-        log("X/Twitter search agent env is not configured; bootstrap will install the unit but skip enabling the agent service.")
+        log(
+            "X/Twitter search agent env is not configured; bootstrap will install the unit but skip enabling the agent service."
+        )
     tabular_env = read_tabular_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
     if meaningful_env_value(tabular_env.get("TABULAR_AGENT_MIMO_API_KEY")) is not None:
-        log("Tabular agent env includes MiMo credentials; bootstrap will enable and start the tabular agent service with internal LLM support.")
+        log(
+            "Tabular agent env includes MiMo credentials; bootstrap will enable and start the tabular agent service with internal LLM support."
+        )
     else:
-        log("Tabular agent env does not include MiMo credentials; bootstrap will still enable and start the tabular agent service for deterministic spreadsheet work.")
+        log(
+            "Tabular agent env does not include MiMo credentials; bootstrap will still enable and start the tabular agent service for deterministic spreadsheet work."
+        )
     email_env = read_email_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
     enable_email_agent = email_agent_enabled_via_env_or_integration(email_env)
     if enable_email_agent:
         if meaningful_env_value(email_env.get("EMAIL_AGENT_MIMO_API_KEY")) is not None:
-            log("Email agent env is configured with Cosmic Mail + MiMo credentials; bootstrap will enable and start the email agent service.")
+            log(
+                "Email agent env is configured with Cosmic Mail + MiMo credentials; bootstrap will enable and start the email agent service."
+            )
         else:
             if email_agent_is_configured(email_env):
-                log("Email agent env is configured with Cosmic Mail credentials but no MiMo key; bootstrap will still enable and start the email agent service.")
+                log(
+                    "Email agent env is configured with Cosmic Mail credentials but no MiMo key; bootstrap will still enable and start the email agent service."
+                )
             else:
-                log("Agent Email is configured through the shared backend integration store; bootstrap will enable and start the email agent service.")
+                log(
+                    "Agent Email is configured through the shared backend integration store; bootstrap will enable and start the email agent service."
+                )
     else:
-        log("Email agent env is not configured; bootstrap will install the unit but skip enabling the email agent service.")
+        log(
+            "Email agent env is not configured; bootstrap will install the unit but skip enabling the email agent service."
+        )
     image_env = read_image_generator_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
     enable_image_generator_agent = image_generator_agent_is_configured(image_env)
     if enable_image_generator_agent:
-        log("Image generator agent env is configured; bootstrap will enable and start the image generator agent service.")
+        log(
+            "Image generator agent env is configured; bootstrap will enable and start the image generator agent service."
+        )
     else:
-        log("Image generator agent env is not configured; bootstrap will install the unit but skip enabling the image generator agent service.")
+        log(
+            "Image generator agent env is not configured; bootstrap will install the unit but skip enabling the image generator agent service."
+        )
     installed = install_systemd_units(
         systemd_template_dir,
         enable_units=enable_units,
         start_units=start_units,
-        include_optional_templates=["cosmic-memory.service.example"] if enable_memory else [],
+        include_optional_templates=["cosmic-memory.service.example"]
+        if enable_memory
+        else [],
         extra_enable_units=(
             (["cosmic-memory.service"] if enable_units and enable_memory else [])
-            + ([FIRECRAWL_AGENT_SERVICE_NAME] if enable_units and enable_firecrawl_agent else [])
-            + ([X_TWITTER_SEARCH_AGENT_SERVICE_NAME] if enable_units and enable_x_twitter_search_agent else [])
-            + ([TABULAR_AGENT_SERVICE_NAME] if enable_units and enable_tabular_agent else [])
-            + ([EMAIL_AGENT_SERVICE_NAME] if enable_units and enable_email_agent else [])
-            + ([IMAGE_GENERATOR_AGENT_SERVICE_NAME] if enable_units and enable_image_generator_agent else [])
+            + (
+                [FIRECRAWL_AGENT_SERVICE_NAME]
+                if enable_units and enable_firecrawl_agent
+                else []
+            )
+            + (
+                [X_TWITTER_SEARCH_AGENT_SERVICE_NAME]
+                if enable_units and enable_x_twitter_search_agent
+                else []
+            )
+            + (
+                [TABULAR_AGENT_SERVICE_NAME]
+                if enable_units and enable_tabular_agent
+                else []
+            )
+            + (
+                [EMAIL_AGENT_SERVICE_NAME]
+                if enable_units and enable_email_agent
+                else []
+            )
+            + (
+                [IMAGE_GENERATOR_AGENT_SERVICE_NAME]
+                if enable_units and enable_image_generator_agent
+                else []
+            )
         ),
         include_memory_env=enable_memory,
     )
@@ -3855,7 +4526,9 @@ def provision_vm(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Bootstrap COSMIC Backend on a Linux VM.")
+    parser = argparse.ArgumentParser(
+        description="Bootstrap COSMIC Backend on a Linux VM."
+    )
     parser.add_argument(
         "--venv-path",
         default=str(DEFAULT_VENV_PATH),
@@ -3944,7 +4617,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers = parser.add_subparsers(dest="command")
-    subparsers.add_parser("doctor", help="Check current bootstrap prerequisites without changing the system.")
+    subparsers.add_parser(
+        "doctor",
+        help="Check current bootstrap prerequisites without changing the system.",
+    )
     subparsers.add_parser(
         "bootstrap",
         help="Install missing prerequisites, create the backend virtual environment, install Python deps, and install WhatsApp bridge deps.",
@@ -4014,26 +4690,38 @@ def main() -> int:
         and meaningful_env_value(getattr(args, "memory_repo_dir", "")) is not None
         else None
     )
-    memory_repo_url = meaningful_env_value(getattr(args, "memory_repo_url", "")) or DEFAULT_MEMORY_REPO_URL
-    memory_repo_ref = meaningful_env_value(getattr(args, "memory_repo_ref", "")) or DEFAULT_MEMORY_REPO_REF
-    bootstrap_token = (
-        meaningful_env_value(getattr(args, "bootstrap_token", ""))
-        or meaningful_env_value(os.getenv("COSMIC_BOOTSTRAP_TOKEN"))
+    memory_repo_url = (
+        meaningful_env_value(getattr(args, "memory_repo_url", ""))
+        or DEFAULT_MEMORY_REPO_URL
     )
-    supabase_url = meaningful_env_value(getattr(args, "supabase_url", "")) or DEFAULT_SUPABASE_URL
+    memory_repo_ref = (
+        meaningful_env_value(getattr(args, "memory_repo_ref", ""))
+        or DEFAULT_MEMORY_REPO_REF
+    )
+    bootstrap_token = meaningful_env_value(
+        getattr(args, "bootstrap_token", "")
+    ) or meaningful_env_value(os.getenv("COSMIC_BOOTSTRAP_TOKEN"))
+    supabase_url = (
+        meaningful_env_value(getattr(args, "supabase_url", "")) or DEFAULT_SUPABASE_URL
+    )
     supabase_anon_key = (
         meaningful_env_value(getattr(args, "supabase_anon_key", ""))
         or meaningful_env_value(os.getenv("COSMIC_SUPABASE_ANON_KEY"))
         or DEFAULT_SUPABASE_ANON_KEY
     )
     env_search_roots = [
-        Path(item).expanduser().resolve()
-        for item in (args.env_search_root or [])
+        Path(item).expanduser().resolve() for item in (args.env_search_root or [])
     ] or list(DEFAULT_ENV_SEARCH_ROOTS)
 
     try:
         if command == "doctor":
-            doctor(venv_path, requirements_path, bridge_dir, systemd_template_dir, env_search_roots)
+            doctor(
+                venv_path,
+                requirements_path,
+                bridge_dir,
+                systemd_template_dir,
+                env_search_roots,
+            )
         elif command == "setup-env":
             setup_env_files(env_search_roots)
             if bootstrap_token is not None:
@@ -4056,7 +4744,9 @@ def main() -> int:
             )
         elif command == "fetch-bootstrap-env":
             if bootstrap_token is None:
-                raise BootstrapError("fetch-bootstrap-env requires --bootstrap-token or COSMIC_BOOTSTRAP_TOKEN.")
+                raise BootstrapError(
+                    "fetch-bootstrap-env requires --bootstrap-token or COSMIC_BOOTSTRAP_TOKEN."
+                )
             materialize_bootstrap_env_files(
                 env_search_roots,
                 DEFAULT_SYSTEM_ENV_DIR,
@@ -4092,29 +4782,67 @@ def main() -> int:
                 install_service_env_files(DEFAULT_SYSTEM_ENV_DIR, include_memory=False)
             firecrawl_env = read_firecrawl_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
             enable_firecrawl_agent = firecrawl_agent_is_configured(firecrawl_env)
-            x_twitter_env = read_x_twitter_search_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
-            enable_x_twitter_search_agent = x_twitter_search_agent_is_configured(x_twitter_env)
+            x_twitter_env = read_x_twitter_search_agent_system_env(
+                DEFAULT_SYSTEM_ENV_DIR
+            )
+            enable_x_twitter_search_agent = x_twitter_search_agent_is_configured(
+                x_twitter_env
+            )
             enable_tabular_agent = True
             email_env = read_email_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
             enable_email_agent = email_agent_enabled_via_env_or_integration(email_env)
             image_env = read_image_generator_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
-            enable_image_generator_agent = image_generator_agent_is_configured(image_env)
+            enable_image_generator_agent = image_generator_agent_is_configured(
+                image_env
+            )
             installed = install_systemd_units(
                 systemd_template_dir,
                 enable_units=bool(getattr(args, "enable", False)),
                 start_units=bool(getattr(args, "start", False)),
-                include_optional_templates=["cosmic-memory.service.example"] if memory_repo_dir is not None else [],
+                include_optional_templates=["cosmic-memory.service.example"]
+                if memory_repo_dir is not None
+                else [],
                 extra_enable_units=(
-                    (["cosmic-memory.service"] if memory_repo_dir is not None and bool(getattr(args, "enable", False)) else [])
-                    + ([FIRECRAWL_AGENT_SERVICE_NAME] if enable_firecrawl_agent and bool(getattr(args, "enable", False)) else [])
-                    + ([X_TWITTER_SEARCH_AGENT_SERVICE_NAME] if enable_x_twitter_search_agent and bool(getattr(args, "enable", False)) else [])
-                    + ([TABULAR_AGENT_SERVICE_NAME] if enable_tabular_agent and bool(getattr(args, "enable", False)) else [])
-                    + ([EMAIL_AGENT_SERVICE_NAME] if enable_email_agent and bool(getattr(args, "enable", False)) else [])
-                    + ([IMAGE_GENERATOR_AGENT_SERVICE_NAME] if enable_image_generator_agent and bool(getattr(args, "enable", False)) else [])
+                    (
+                        ["cosmic-memory.service"]
+                        if memory_repo_dir is not None
+                        and bool(getattr(args, "enable", False))
+                        else []
+                    )
+                    + (
+                        [FIRECRAWL_AGENT_SERVICE_NAME]
+                        if enable_firecrawl_agent
+                        and bool(getattr(args, "enable", False))
+                        else []
+                    )
+                    + (
+                        [X_TWITTER_SEARCH_AGENT_SERVICE_NAME]
+                        if enable_x_twitter_search_agent
+                        and bool(getattr(args, "enable", False))
+                        else []
+                    )
+                    + (
+                        [TABULAR_AGENT_SERVICE_NAME]
+                        if enable_tabular_agent and bool(getattr(args, "enable", False))
+                        else []
+                    )
+                    + (
+                        [EMAIL_AGENT_SERVICE_NAME]
+                        if enable_email_agent and bool(getattr(args, "enable", False))
+                        else []
+                    )
+                    + (
+                        [IMAGE_GENERATOR_AGENT_SERVICE_NAME]
+                        if enable_image_generator_agent
+                        and bool(getattr(args, "enable", False))
+                        else []
+                    )
                 ),
                 include_memory_env=memory_repo_dir is not None,
             )
-            if bool(getattr(args, "enable", False)) and bool(getattr(args, "start", False)):
+            if bool(getattr(args, "enable", False)) and bool(
+                getattr(args, "start", False)
+            ):
                 run_post_provision_health_checks(
                     include_memory=memory_repo_dir is not None,
                     include_firecrawl_agent=enable_firecrawl_agent,

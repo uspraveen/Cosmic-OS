@@ -87,8 +87,8 @@ export const GOOGLE_TOOL_DEFINITIONS: IntegrationToolDefinition[] = [
     platformLabel: 'Events',
     description: 'Upcoming events, meeting timelines, and schedule context.',
     scopes: [
-      'https://www.googleapis.com/auth/calendar.events.readonly',
-      'https://www.googleapis.com/auth/calendar.calendarlist.readonly',
+      'https://www.googleapis.com/auth/calendar',
+      'https://www.googleapis.com/auth/calendar.events',
     ],
   },
   {

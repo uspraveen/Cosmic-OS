@@ -1,0 +1,145 @@
+# agents/calendar_agent/agent_card.yaml
+
+agent_id: cosmic/calendar-agent:1.0.0
+display_name: Calendar Agent
+description: >
+  Specialist agent for Google Calendar management. Handles event listing, creation,
+  updates, cancellation, free-slot discovery, and scheduling coordination across
+  connected Google accounts. Uses a bounded internal LangGraph workflow so it can
+  resolve human-friendly hints, identify target events, check conflicts, and then
+  act without turning Opus into the calendar domain expert.
+
+intents:
+  - name: calendar.list_events
+    description: Query calendar events by date range, title search, or calendar selection
+    input_schema: schemas/intents/calendar.list_events.input.json
+    output_schema: schemas/intents/calendar.list_events.output.json
+    timeout_sec: 60
+    usage_hints:
+      - Use this for agenda lookups, title searches, and "what do I have" questions.
+      - Human-friendly account/calendar hints are fine; the user should not need internal account ids.
+
+  - name: calendar.create_event
+    description: Create a new calendar event with attendees, time, location, description, and reminders
+    input_schema: schemas/intents/calendar.create_event.input.json
+    output_schema: schemas/intents/calendar.create_event.output.json
+    timeout_sec: 60
+    usage_hints:
+      - Use this for meeting scheduling and explicit calendar creation requests.
+      - Plain-language requests are acceptable; the specialist will normalize them internally before calling Google Calendar.
+      - Expect conflict warnings when the requested slot overlaps existing events.
+
+  - name: calendar.find_free_slots
+    description: Find available time slots considering existing events, timezone, working hours, and buffers
+    input_schema: schemas/intents/calendar.find_free_slots.input.json
+    output_schema: schemas/intents/calendar.find_free_slots.output.json
+    timeout_sec: 60
+    usage_hints:
+      - Use this for "find time", "what slots work", or coordination requests that need open availability rather than a mutation.
+      - If the user references multiple calendars or a work/personal account preference, pass those hints through naturally.
+
+  - name: calendar.update_event
+    description: Partially update an existing event (title, time, location, attendees, reminders)
+    input_schema: schemas/intents/calendar.update_event.input.json
+    output_schema: schemas/intents/calendar.update_event.output.json
+    timeout_sec: 60
+    usage_hints:
+      - Use this when the user wants to move, rename, or otherwise change an existing event.
+      - The user does not need a raw event_id. A human event description plus a bounded time window is sufficient when available.
+      - Pass only the fields the user wants changed; let the specialist preserve the rest.
+
+  - name: calendar.cancel_event
+    description: Cancel a calendar event, optionally notifying attendees
+    input_schema: schemas/intents/calendar.cancel_event.input.json
+    output_schema: schemas/intents/calendar.cancel_event.output.json
+    timeout_sec: 30
+    usage_hints:
+      - Use this when the user wants an event removed or cancelled.
+      - Human event descriptions are fine; the specialist will do a bounded lookup before cancelling.
+
+  - name: calendar.recall_session
+    description: Recall prior calendar operations from the agent session ledger
+    input_schema: schemas/intents/calendar.recall_session.input.json
+    output_schema: schemas/intents/calendar.recall_session.output.json
+    timeout_sec: 30
+    usage_hints:
+      - Recall prior calendar-agent work when you need exact reuse of a previous calendar action instead of recomputing it.
+
+auth_requirements:
+  calendar.list_events:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/calendar
+      - https://www.googleapis.com/auth/calendar.events
+  calendar.create_event:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/calendar
+      - https://www.googleapis.com/auth/calendar.events
+  calendar.find_free_slots:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/calendar
+      - https://www.googleapis.com/auth/calendar.events
+  calendar.update_event:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/calendar
+      - https://www.googleapis.com/auth/calendar.events
+  calendar.cancel_event:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/calendar
+      - https://www.googleapis.com/auth/calendar.events
+
+artifact_types:
+  - calendar_event
+  - free_slots_report
+  - calendar_agenda
+
+policies:
+  network_access: true
+  writable_paths:
+    - runs/artifacts
+    - agents/calendar_agent/store
+    - agents/calendar_agent/runtime
+  tool_access: []
+  allowed_senders:
+    - cosmic/orchestrator:1.0.0
+  intent_authorization:
+    calendar.list_events: [cosmic/orchestrator:1.0.0]
+    calendar.create_event: [cosmic/orchestrator:1.0.0]
+    calendar.find_free_slots: [cosmic/orchestrator:1.0.0]
+    calendar.update_event: [cosmic/orchestrator:1.0.0]
+    calendar.cancel_event: [cosmic/orchestrator:1.0.0]
+    calendar.recall_session: [cosmic/orchestrator:1.0.0]
+
+sla:
+  max_concurrency: 2
+  heartbeat_interval_sec: 10
+  heartbeat_ttl_sec: 30
+  max_task_duration_sec: 120
+  health_endpoint: /health
+  retry_policy:
+    max_attempts: 3
+    backoff: exponential
+    backoff_base_sec: 2
+    backoff_max_sec: 60
+    retryable_codes:
+      - TIMEOUT
+      - NETWORK_ERROR
+      - RATE_LIMITED
+    non_retryable_codes:
+      - INVALID_INPUT
+      - AUTH_ERROR
+      - SCHEMA_VIOLATION
+      - INTERNAL_ERROR
+
+stream_key: streams:cosmic/calendar-agent:1.0.0
+
+version_info:
+  semver: 1.0.0
+  released_at: "2026-03-30"
+  deprecated_at: null
+  remove_after: null
+  changelog: CHANGELOG.md

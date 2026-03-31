@@ -4,15 +4,18 @@ import os
 import sys
 import threading
 import time
+import webbrowser
 
+import requests
 from database import db
-from google_integration import connect_google_account, disconnect_google_account, get_google_calendar_agenda_snapshot
 
 logging.basicConfig(level=logging.ERROR)
 
 PRINT_LOCK = threading.Lock()
 GOOGLE_AUTH_LOCK = threading.Lock()
 CALENDAR_FETCH_LOCK = threading.Lock()
+DEFAULT_GATEWAY_URL = "http://127.0.0.1:8080"
+DEFAULT_GOOGLE_CONNECT_TIMEOUT_SECONDS = 120
 
 
 def emit(tag, payload):
@@ -25,8 +28,77 @@ def emit_settings():
     emit("SETTINGS", db.get_all_settings())
 
 
+def _get_gateway_url():
+    value = str(
+        db.get_setting("gatewayUrl", "") or os.getenv("GATEWAY_URL", DEFAULT_GATEWAY_URL)
+    ).strip()
+    return value.rstrip("/") or DEFAULT_GATEWAY_URL
+
+
+def _get_gateway_local_token():
+    return str(
+        db.get_setting("gatewayLocalApiToken", "") or os.getenv("GATEWAY_LOCAL_API_TOKEN", "")
+    ).strip()
+
+
+def _gateway_headers():
+    headers = {"Content-Type": "application/json"}
+    token = _get_gateway_local_token()
+    if token:
+        headers["X-Local-Token"] = token
+    return headers
+
+
+def _gateway_request(method, path, *, payload=None, params=None, timeout=30):
+    response = requests.request(
+        method.upper(),
+        f"{_get_gateway_url()}{path}",
+        headers=_gateway_headers(),
+        json=payload,
+        params=params,
+        timeout=timeout,
+    )
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("detail")
+        except Exception:
+            detail = response.text
+        if isinstance(detail, dict):
+            message = str(detail.get("message") or detail.get("error") or detail)
+        elif isinstance(detail, list):
+            message = "; ".join(str(item) for item in detail)
+        else:
+            message = str(detail or response.text or f"Gateway HTTP {response.status_code}")
+        raise RuntimeError(message.strip() or f"Gateway HTTP {response.status_code}")
+    if response.content:
+        return response.json()
+    return {}
+
+
+def _get_gateway_integrations_snapshot():
+    return _gateway_request("GET", "/internal/credentials/google/snapshot", timeout=20)
+
+
+def _get_gateway_calendar_agenda_snapshot():
+    return _gateway_request("GET", "/internal/google/calendar/agenda", timeout=45)
+
+
+def _list_gateway_google_accounts():
+    payload = _gateway_request(
+        "GET",
+        "/internal/credentials/accounts",
+        params={"provider": "google"},
+        timeout=20,
+    )
+    accounts = payload.get("accounts") if isinstance(payload, dict) else []
+    return accounts if isinstance(accounts, list) else []
+
+
 def emit_integrations():
-    emit("INTEGRATIONS", db.get_integrations_snapshot())
+    try:
+        emit("INTEGRATIONS", _get_gateway_integrations_snapshot())
+    except Exception:
+        emit("INTEGRATIONS", db.get_integrations_snapshot())
 
 
 def build_key_status():
@@ -78,7 +150,7 @@ def run_calendar_agenda_fetch():
         return
 
     try:
-        emit_calendar_agenda(get_google_calendar_agenda_snapshot())
+        emit_calendar_agenda(_get_gateway_calendar_agenda_snapshot())
     except Exception as exc:
         emit_calendar_agenda(
             {
@@ -104,17 +176,97 @@ def run_google_connect(payload):
         return
 
     try:
-        saved_account = db.save_integration_account(payload)
-        account_id = saved_account["account_id"]
-        account_details = account_event_details(saved_account)
+        requested_scopes = [
+            str(item).strip()
+            for item in (payload.get("required_scopes") or [])
+            if str(item).strip()
+        ]
+        selected_tools = [
+            str(item).strip()
+            for item in (payload.get("selected_tools") or [])
+            if str(item).strip()
+        ]
+        requested_label = str(payload.get("account_label") or "").strip()
+        requested_primary = bool(payload.get("is_primary"))
+        platform_key = str(payload.get("platform_key") or "workspace").strip() or "workspace"
+
+        existing_accounts = _list_gateway_google_accounts()
+        existing_ids = {
+            str(item.get("account_id") or "").strip()
+            for item in existing_accounts
+            if isinstance(item, dict) and str(item.get("account_id") or "").strip()
+        }
+
+        start_payload = _gateway_request(
+            "POST",
+            "/auth/connect/google",
+            payload={
+                "scopes": requested_scopes,
+                "account_label": requested_label or None,
+                "selected_tools": selected_tools,
+                "is_primary": requested_primary,
+                "platform_key": platform_key,
+            },
+            timeout=20,
+        )
+        authorize_url = str(start_payload.get("authorize_url") or "").strip()
+        if not authorize_url:
+            raise RuntimeError("Gateway did not return a Google authorize URL.")
+
         emit_integrations()
         emit_event(
             "auth_started",
             account_id=account_id,
             message="Opening Google sign-in in your browser.",
-            extra=account_details,
+            extra=account_event_details(payload),
         )
-        connected_account = connect_google_account(saved_account)
+        webbrowser.open(authorize_url, new=1, autoraise=True)
+
+        deadline = time.time() + max(30, DEFAULT_GOOGLE_CONNECT_TIMEOUT_SECONDS)
+        connected_account = None
+        while time.time() < deadline:
+            time.sleep(1.0)
+            accounts = _list_gateway_google_accounts()
+            if account_id and not account_id.startswith("draft-"):
+                connected_account = next(
+                    (
+                        item
+                        for item in accounts
+                        if str(item.get("account_id") or "").strip() == account_id
+                        and str(item.get("status") or "").strip() == "active"
+                        and bool(item.get("has_refresh_token"))
+                    ),
+                    None,
+                )
+            if connected_account is None:
+                connected_account = next(
+                    (
+                        item
+                        for item in accounts
+                        if str(item.get("account_id") or "").strip() not in existing_ids
+                        and str(item.get("status") or "").strip() == "active"
+                        and bool(item.get("has_refresh_token"))
+                    ),
+                    None,
+                )
+            if connected_account is None and requested_label:
+                connected_account = next(
+                    (
+                        item
+                        for item in accounts
+                        if str(item.get("account_label") or "").strip() == requested_label
+                        and str(item.get("status") or "").strip() == "active"
+                        and bool(item.get("has_refresh_token"))
+                    ),
+                    None,
+                )
+            if connected_account is not None:
+                break
+
+        if connected_account is None:
+            raise RuntimeError("Google sign-in did not finish before the timeout window closed.")
+
+        account_id = str(connected_account.get("account_id") or account_id).strip()
         emit_event(
             "auth_success",
             account_id=account_id,
@@ -124,17 +276,11 @@ def run_google_connect(payload):
         emit_integrations()
         threading.Thread(target=run_calendar_agenda_fetch, daemon=True).start()
     except Exception as exc:
-        if account_id:
-            db.update_integration_account_auth(
-                account_id,
-                status="needs_auth",
-                metadata_patch={"last_auth_error": str(exc)},
-            )
         emit_event(
             "auth_error",
             account_id=account_id,
             message=str(exc),
-            extra=account_event_details(saved_account if "saved_account" in locals() else payload),
+            extra=account_event_details(payload),
         )
         emit_integrations()
     finally:
@@ -143,14 +289,26 @@ def run_google_connect(payload):
 
 def run_google_disconnect(account_id):
     try:
-        account = db.get_integration_account(account_id)
+        account = next(
+            (
+                item
+                for item in _list_gateway_google_accounts()
+                if str(item.get("account_id") or "").strip() == str(account_id or "").strip()
+            ),
+            None,
+        )
         emit_event(
             "disconnect_started",
             account_id=account_id,
             message="Disconnecting Google account.",
             extra=account_event_details(account),
         )
-        disconnected_account = disconnect_google_account(account_id)
+        payload = _gateway_request(
+            "DELETE",
+            f"/internal/credentials/accounts/{account_id}",
+            timeout=20,
+        )
+        disconnected_account = payload.get("account") if isinstance(payload, dict) else {}
         emit_event(
             "disconnect_success",
             account_id=account_id,
@@ -167,6 +325,45 @@ def run_google_disconnect(account_id):
             extra=account_event_details(locals().get("account")),
         )
         emit_integrations()
+
+
+def run_save_google_account(payload):
+    account_id = str(payload.get("account_id") or "").strip()
+    if not account_id or account_id.startswith("draft-"):
+        emit_integrations()
+        return
+    _gateway_request(
+        "PATCH",
+        f"/internal/credentials/accounts/{account_id}",
+        payload={
+            "account_label": str(payload.get("account_label") or "").strip() or None,
+            "is_primary": bool(payload.get("is_primary")),
+            "selected_tools": [
+                str(item).strip()
+                for item in (payload.get("selected_tools") or [])
+                if str(item).strip()
+            ],
+            "required_scopes": [
+                str(item).strip()
+                for item in (payload.get("required_scopes") or [])
+                if str(item).strip()
+            ],
+            "platform_key": str(payload.get("platform_key") or "workspace").strip() or "workspace",
+        },
+        timeout=20,
+    )
+    emit_integrations()
+    threading.Thread(target=run_calendar_agenda_fetch, daemon=True).start()
+
+
+def run_delete_google_account(account_id):
+    _gateway_request(
+        "DELETE",
+        f"/internal/credentials/accounts/{account_id}/purge",
+        timeout=20,
+    )
+    emit_integrations()
+    threading.Thread(target=run_calendar_agenda_fetch, daemon=True).start()
 
 
 def main():
@@ -208,15 +405,11 @@ def main():
 
             elif line.startswith("SAVE_INTEGRATION_ACCOUNT:"):
                 payload = json.loads(line.split(":", 1)[1])
-                db.save_integration_account(payload)
-                emit_integrations()
-                threading.Thread(target=run_calendar_agenda_fetch, daemon=True).start()
+                threading.Thread(target=run_save_google_account, args=(payload,), daemon=True).start()
 
             elif line.startswith("DELETE_INTEGRATION_ACCOUNT:"):
                 account_id = line.split(":", 1)[1]
-                db.delete_integration_account(account_id)
-                emit_integrations()
-                threading.Thread(target=run_calendar_agenda_fetch, daemon=True).start()
+                threading.Thread(target=run_delete_google_account, args=(account_id,), daemon=True).start()
 
             elif line.startswith("CONNECT_GOOGLE_ACCOUNT:"):
                 payload = json.loads(line.split(":", 1)[1])

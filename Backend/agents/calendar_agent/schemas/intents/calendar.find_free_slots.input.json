@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "duration_min": { "type": "integer", "description": "Desired slot duration in minutes", "default": 30 },
+    "date_range_start": { "type": "string", "description": "ISO 8601 start of search range" },
+    "date_range_end": { "type": "string", "description": "ISO 8601 end of search range" },
+    "calendar_ids": { "type": "array", "items": { "type": "string" }, "description": "Calendars to check", "default": ["primary"] },
+    "account_hint": { "type": "string", "description": "Friendly account selector like work, personal, or an email address" },
+    "timezone": { "type": "string", "description": "IANA timezone" },
+    "working_hour_start": { "type": "integer", "description": "Working hours start (0-23)", "default": 9 },
+    "working_hour_end": { "type": "integer", "description": "Working hours end (0-24)", "default": 17 },
+    "buffer_min": { "type": "integer", "description": "Buffer between meetings in minutes", "default": 15 },
+    "query": { "type": "string", "description": "Natural language free-slot request" }
+  }
+}

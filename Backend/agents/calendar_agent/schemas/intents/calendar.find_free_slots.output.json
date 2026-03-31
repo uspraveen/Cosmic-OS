@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "free_slots": { "type": "array", "items": { "type": "object", "properties": {
+      "start": { "type": "string" },
+      "end": { "type": "string" },
+      "duration_min": { "type": "integer" }
+    }}, "description": "Available time slots" },
+    "count": { "type": "integer" },
+    "duration_min": { "type": "integer" },
+    "date_range_start": { "type": "string" },
+    "date_range_end": { "type": "string" },
+    "timezone": { "type": "string" },
+    "working_hours": { "type": "object" }
+  },
+  "required": ["free_slots", "count"]
+}
