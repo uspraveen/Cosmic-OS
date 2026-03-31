@@ -1451,6 +1451,181 @@ def read_image_generator_agent_system_env(
     return parse_env_text(read_text_file(env_path, use_sudo=True))
 
 
+def calendar_agent_repo_dir() -> Path:
+    return BACKEND_ROOT / "agents" / "calendar_agent"
+
+
+def calendar_agent_repo_env_path() -> Path:
+    return calendar_agent_repo_dir() / "agent.env"
+
+
+def calendar_agent_repo_env_example_path() -> Path:
+    return calendar_agent_repo_dir() / "agent.env.example"
+
+
+def calendar_agent_system_env_path(system_env_dir: Optional[Path] = None) -> Path:
+    return (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "agents" / CALENDAR_AGENT_ENV_NAME
+
+
+def resolve_calendar_agent_env_source() -> Path:
+    repo_env = calendar_agent_repo_env_path()
+    if repo_env.exists():
+        return repo_env
+    return calendar_agent_repo_env_example_path()
+
+
+def build_calendar_agent_env_rendered(
+    *,
+    signing_secret: str,
+    shared_internal_token: str,
+    system_env_dir: Optional[Path] = None,
+    existing_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+    external_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Tuple[Path, str, Dict[str, str]]:
+    source_path = resolve_calendar_agent_env_source()
+    source_raw = source_path.read_text(encoding="utf-8")
+    source_data = parse_env_text(source_raw)
+    existing_env = (existing_env_by_name or {}).get(CALENDAR_AGENT_ENV_NAME, {})
+    external_env = (external_env_by_name or {}).get(CALENDAR_AGENT_ENV_NAME, {})
+
+    redis_url = first_meaningful_value(
+        external_env.get("REDIS_URL"),
+        existing_env.get("REDIS_URL"),
+        source_data.get("REDIS_URL"),
+        "redis://127.0.0.1:6379/0",
+    )
+    gateway_url = first_meaningful_value(
+        external_env.get("GATEWAY_URL"),
+        existing_env.get("GATEWAY_URL"),
+        source_data.get("GATEWAY_URL"),
+        "http://127.0.0.1:8080",
+    )
+    mimo_api_key = first_meaningful_value(
+        external_env.get("CALENDAR_AGENT_MIMO_API_KEY"),
+        external_env.get("MIMO_API_KEY"),
+        existing_env.get("CALENDAR_AGENT_MIMO_API_KEY"),
+        existing_env.get("MIMO_API_KEY"),
+        source_data.get("CALENDAR_AGENT_MIMO_API_KEY"),
+        source_data.get("MIMO_API_KEY"),
+    )
+    mimo_base_url = first_meaningful_value(
+        external_env.get("CALENDAR_AGENT_MIMO_BASE_URL"),
+        external_env.get("MIMO_OPENAI_BASE_URL"),
+        existing_env.get("CALENDAR_AGENT_MIMO_BASE_URL"),
+        existing_env.get("MIMO_OPENAI_BASE_URL"),
+        source_data.get("CALENDAR_AGENT_MIMO_BASE_URL"),
+        source_data.get("MIMO_OPENAI_BASE_URL"),
+    )
+    mimo_model = first_meaningful_value(
+        external_env.get("CALENDAR_AGENT_MIMO_MODEL"),
+        existing_env.get("CALENDAR_AGENT_MIMO_MODEL"),
+        source_data.get("CALENDAR_AGENT_MIMO_MODEL"),
+        "gpt-5-mini",
+    )
+    mimo_timeout_sec = first_meaningful_value(
+        external_env.get("CALENDAR_AGENT_MIMO_TIMEOUT_SEC"),
+        existing_env.get("CALENDAR_AGENT_MIMO_TIMEOUT_SEC"),
+        source_data.get("CALENDAR_AGENT_MIMO_TIMEOUT_SEC"),
+        "120.0",
+    )
+    enable_internal_llm = first_meaningful_value(
+        external_env.get("CALENDAR_AGENT_ENABLE_INTERNAL_LLM"),
+        existing_env.get("CALENDAR_AGENT_ENABLE_INTERNAL_LLM"),
+        source_data.get("CALENDAR_AGENT_ENABLE_INTERNAL_LLM"),
+        "true",
+    )
+    use_langgraph = first_meaningful_value(
+        external_env.get("CALENDAR_AGENT_USE_LANGGRAPH"),
+        existing_env.get("CALENDAR_AGENT_USE_LANGGRAPH"),
+        source_data.get("CALENDAR_AGENT_USE_LANGGRAPH"),
+        "true",
+    )
+    max_tool_rounds = first_meaningful_value(
+        external_env.get("CALENDAR_AGENT_MAX_TOOL_ROUNDS"),
+        existing_env.get("CALENDAR_AGENT_MAX_TOOL_ROUNDS"),
+        source_data.get("CALENDAR_AGENT_MAX_TOOL_ROUNDS"),
+        "6",
+    )
+    default_timezone = first_meaningful_value(
+        external_env.get("CALENDAR_AGENT_DEFAULT_TIMEZONE"),
+        existing_env.get("CALENDAR_AGENT_DEFAULT_TIMEZONE"),
+        source_data.get("CALENDAR_AGENT_DEFAULT_TIMEZONE"),
+        "America/Chicago",
+    )
+    working_hour_start = first_meaningful_value(
+        external_env.get("CALENDAR_AGENT_WORKING_HOUR_START"),
+        existing_env.get("CALENDAR_AGENT_WORKING_HOUR_START"),
+        source_data.get("CALENDAR_AGENT_WORKING_HOUR_START"),
+        "9",
+    )
+    working_hour_end = first_meaningful_value(
+        external_env.get("CALENDAR_AGENT_WORKING_HOUR_END"),
+        existing_env.get("CALENDAR_AGENT_WORKING_HOUR_END"),
+        source_data.get("CALENDAR_AGENT_WORKING_HOUR_END"),
+        "17",
+    )
+    default_duration_min = first_meaningful_value(
+        external_env.get("CALENDAR_AGENT_DEFAULT_EVENT_DURATION_MIN"),
+        existing_env.get("CALENDAR_AGENT_DEFAULT_EVENT_DURATION_MIN"),
+        source_data.get("CALENDAR_AGENT_DEFAULT_EVENT_DURATION_MIN"),
+        "30",
+    )
+    buffer_min = first_meaningful_value(
+        external_env.get("CALENDAR_AGENT_BUFFER_MIN"),
+        existing_env.get("CALENDAR_AGENT_BUFFER_MIN"),
+        source_data.get("CALENDAR_AGENT_BUFFER_MIN"),
+        "15",
+    )
+    max_events_per_list = first_meaningful_value(
+        external_env.get("CALENDAR_AGENT_MAX_EVENTS_PER_LIST"),
+        existing_env.get("CALENDAR_AGENT_MAX_EVENTS_PER_LIST"),
+        source_data.get("CALENDAR_AGENT_MAX_EVENTS_PER_LIST"),
+        "50",
+    )
+    instance_id = first_meaningful_value(
+        external_env.get("INSTANCE_ID"),
+        existing_env.get("INSTANCE_ID"),
+        source_data.get("INSTANCE_ID"),
+        CALENDAR_AGENT_DEFAULT_INSTANCE_ID,
+    )
+
+    overrides = {
+        "REDIS_URL": redis_url or "redis://127.0.0.1:6379/0",
+        "GATEWAY_URL": gateway_url or "http://127.0.0.1:8080",
+        "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
+        "AGENT_SECRET": signing_secret,
+        "INSTANCE_ID": instance_id or CALENDAR_AGENT_DEFAULT_INSTANCE_ID,
+        "CALENDAR_AGENT_MIMO_MODEL": mimo_model or "gpt-5-mini",
+        "CALENDAR_AGENT_MIMO_TIMEOUT_SEC": mimo_timeout_sec or "120.0",
+        "CALENDAR_AGENT_ENABLE_INTERNAL_LLM": enable_internal_llm or "true",
+        "CALENDAR_AGENT_USE_LANGGRAPH": use_langgraph or "true",
+        "CALENDAR_AGENT_MAX_TOOL_ROUNDS": max_tool_rounds or "6",
+        "CALENDAR_AGENT_DEFAULT_TIMEZONE": default_timezone or "America/Chicago",
+        "CALENDAR_AGENT_WORKING_HOUR_START": working_hour_start or "9",
+        "CALENDAR_AGENT_WORKING_HOUR_END": working_hour_end or "17",
+        "CALENDAR_AGENT_DEFAULT_EVENT_DURATION_MIN": default_duration_min or "30",
+        "CALENDAR_AGENT_BUFFER_MIN": buffer_min or "15",
+        "CALENDAR_AGENT_MAX_EVENTS_PER_LIST": max_events_per_list or "50",
+    }
+    if mimo_api_key is not None:
+        overrides["CALENDAR_AGENT_MIMO_API_KEY"] = mimo_api_key
+    if mimo_base_url is not None:
+        overrides["CALENDAR_AGENT_MIMO_BASE_URL"] = mimo_base_url
+
+    rendered = render_env_with_overrides(source_raw, overrides)
+    rendered_data = parse_env_text(rendered)
+    return calendar_agent_system_env_path(system_env_dir), rendered, rendered_data
+
+
+def read_calendar_agent_system_env(
+    system_env_dir: Optional[Path] = None,
+) -> Dict[str, str]:
+    env_path = calendar_agent_system_env_path(system_env_dir)
+    if not env_path.exists():
+        return {}
+    return parse_env_text(read_text_file(env_path, use_sudo=True))
+
+
 def extract_host_from_url(value: Optional[str]) -> Optional[str]:
     normalized = meaningful_env_value(value)
     if normalized is None:
@@ -2807,6 +2982,27 @@ def materialize_bootstrap_env_files(
             image_generator_repo_path
         )
     )
+
+    calendar_repo_path = calendar_agent_repo_env_path()
+    _calendar_dest_path, calendar_rendered, _calendar_env = (
+        build_calendar_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+            shared_internal_token=overrides_by_dest["gateway.env"][
+                "GATEWAY_INTERNAL_TOKEN"
+            ],
+            system_env_dir=system_env_dir,
+            existing_env_by_name=existing_env_by_name,
+            external_env_by_name=external_env_by_name,
+        )
+    )
+    calendar_repo_path.parent.mkdir(parents=True, exist_ok=True)
+    calendar_repo_path.write_text(calendar_rendered, encoding="utf-8")
+    written.append(calendar_repo_path)
+    log(
+        "Materialized repo env file from bootstrap inputs: {0}".format(
+            calendar_repo_path
+        )
+    )
     return written
 
 
@@ -2956,6 +3152,25 @@ def install_service_env_files(
         install_text_file(image_dest_path, image_rendered, mode="600", use_sudo=True)
         installed.append(image_dest_path)
         log("Installed system env file: {0}".format(image_dest_path))
+
+    calendar_dest_path, calendar_rendered, _calendar_env = (
+        build_calendar_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+            shared_internal_token=overrides_by_dest["gateway.env"][
+                "GATEWAY_INTERNAL_TOKEN"
+            ],
+            system_env_dir=system_env_dir,
+        )
+    )
+    run(["install", "-d", "-m", "755", str(calendar_dest_path.parent)], use_sudo=True)
+    if calendar_dest_path.exists():
+        log("System env file already exists: {0}".format(calendar_dest_path))
+    else:
+        install_text_file(
+            calendar_dest_path, calendar_rendered, mode="600", use_sudo=True
+        )
+        installed.append(calendar_dest_path)
+        log("Installed system env file: {0}".format(calendar_dest_path))
 
     return installed
 
@@ -3586,6 +3801,34 @@ def sync_service_env_files(
         )
         if changed_keys:
             synced.append(image_dest_path)
+    calendar_dest_path = calendar_agent_system_env_path(system_env_dir)
+    if calendar_dest_path.exists():
+        calendar_existing_by_name: Dict[str, Dict[str, str]] = {
+            CALENDAR_AGENT_ENV_NAME: parse_env_text(
+                read_text_file(calendar_dest_path, use_sudo=True)
+            ),
+        }
+        _calendar_dest_path, calendar_rendered, _calendar_env = (
+            build_calendar_agent_env_rendered(
+                signing_secret=overrides_by_dest["gateway.env"][
+                    "GATEWAY_SIGNING_SECRET"
+                ],
+                shared_internal_token=overrides_by_dest["gateway.env"][
+                    "GATEWAY_INTERNAL_TOKEN"
+                ],
+                system_env_dir=system_env_dir,
+                existing_env_by_name=calendar_existing_by_name,
+            )
+        )
+        changed_keys = sync_env_file(
+            calendar_dest_path,
+            source_raw=calendar_rendered,
+            create_missing=False,
+            use_sudo=True,
+            mode="600",
+        )
+        if changed_keys:
+            synced.append(calendar_dest_path)
     return synced
 
 

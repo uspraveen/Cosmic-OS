@@ -79,6 +79,23 @@ export default function GoogleIntegrationsSettings({ active }: GoogleIntegration
         setDisconnectingAccountId(event.account_id)
       } else if (event.type === 'disconnect_success' || event.type === 'disconnect_error') {
         setDisconnectingAccountId(null)
+      } else if (event.type === 'delete_started') {
+        setDeletingAccountId(event.account_id)
+      } else if (event.type === 'delete_success' || event.type === 'delete_error') {
+        setDeletingAccountId(null)
+        if (event.type === 'delete_success') {
+          const title = event.account_label || event.display_name || event.email || 'Google account'
+          window.dispatchEvent(
+            new CustomEvent('cosmic:island-notification', {
+              detail: {
+                type: 'success',
+                provider: 'Google',
+                title: `${title} removed`,
+                message: `${title} was removed from Cosmic.`,
+              },
+            }),
+          )
+        }
       }
 
       if (event.message) {
@@ -158,17 +175,6 @@ export default function GoogleIntegrationsSettings({ active }: GoogleIntegration
 
     setDeletingAccountId(account.account_id)
     window.cosmic?.deleteIntegrationAccount(account.account_id)
-    setBanner('Account removed.')
-    window.dispatchEvent(
-      new CustomEvent('cosmic:island-notification', {
-        detail: {
-          type: 'success',
-          provider: 'Google',
-          title: `${getAccountTitle(account)} removed`,
-          message: `${getAccountTitle(account)} was removed from Cosmic.`,
-        },
-      }),
-    )
   }
 
   const handleSetPrimary = (accountId: string) => {

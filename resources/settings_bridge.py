@@ -1,3 +1,4 @@
+import html
 import json
 import logging
 import os
@@ -5,6 +6,8 @@ import sys
 import threading
 import time
 import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 import requests
 from database import db
@@ -16,6 +19,7 @@ GOOGLE_AUTH_LOCK = threading.Lock()
 CALENDAR_FETCH_LOCK = threading.Lock()
 DEFAULT_GATEWAY_URL = "http://127.0.0.1:8080"
 DEFAULT_GOOGLE_CONNECT_TIMEOUT_SECONDS = 120
+DEFAULT_GOOGLE_REDIRECT_URI = "http://localhost:8085/"
 
 
 def emit(tag, payload):
@@ -28,17 +32,68 @@ def emit_settings():
     emit("SETTINGS", db.get_all_settings())
 
 
+def _get_saved_setting(*keys):
+    for key in keys:
+        value = str(db.get_setting(key, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _get_saved_cosmic_auth():
+    raw = str(db.get_setting("cosmicAuth", "") or "").strip()
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def _get_gateway_url():
-    value = str(
-        db.get_setting("gatewayUrl", "") or os.getenv("GATEWAY_URL", DEFAULT_GATEWAY_URL)
+    auth_payload = _get_saved_cosmic_auth()
+    value = (
+        _get_saved_setting("gatewayBaseUrl", "gatewayUrl")
+        or str(auth_payload.get("gatewayUrl") or "").strip()
+        or os.getenv("GATEWAY_URL", DEFAULT_GATEWAY_URL)
     ).strip()
     return value.rstrip("/") or DEFAULT_GATEWAY_URL
 
 
-def _get_gateway_local_token():
-    return str(
-        db.get_setting("gatewayLocalApiToken", "") or os.getenv("GATEWAY_LOCAL_API_TOKEN", "")
+def _get_google_redirect_uri():
+    value = str(
+        _get_saved_setting("googleRedirectUri")
+        or os.getenv("GOOGLE_REDIRECT_URI", DEFAULT_GOOGLE_REDIRECT_URI)
     ).strip()
+    if value and not value.endswith("/"):
+        value = f"{value}/"
+    return value or DEFAULT_GOOGLE_REDIRECT_URI
+
+
+def _get_gateway_local_token():
+    auth_payload = _get_saved_cosmic_auth()
+    return (
+        _get_saved_setting("gatewayApiToken", "gatewayLocalApiToken")
+        or str(auth_payload.get("gatewayApiToken") or "").strip()
+        or os.getenv("GATEWAY_LOCAL_API_TOKEN", "")
+        or os.getenv("GATEWAY_API_TOKEN", "")
+    ).strip()
+
+
+def _parse_redirect_uri(redirect_uri):
+    parsed = urlparse(str(redirect_uri or "").strip() or DEFAULT_GOOGLE_REDIRECT_URI)
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 8085
+    path = parsed.path or "/"
+    return host, port, path
+
+
+def _normalize_callback_path(path):
+    value = str(path or "").strip() or "/"
+    if value != "/" and value.endswith("/"):
+        value = value.rstrip("/")
+    return value or "/"
 
 
 def _gateway_headers():
@@ -73,6 +128,132 @@ def _gateway_request(method, path, *, payload=None, params=None, timeout=30):
     if response.content:
         return response.json()
     return {}
+
+
+def _html_page(title, message, *, badge="COSMIC", accent="#8aa7ff"):
+    safe_title = html.escape(str(title or "COSMIC").strip() or "COSMIC")
+    safe_message = html.escape(str(message or "").strip() or "You can return to the app.")
+    safe_badge = html.escape(str(badge or "COSMIC").strip() or "COSMIC")
+    return f"""<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>{safe_title}</title>
+    <style>
+      body {{ background: #050607; color: #f5f7fb; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; min-height: 100vh; display: grid; place-items: center; }}
+      .card {{ width: min(92vw, 520px); padding: 32px 28px; border-radius: 24px; background: linear-gradient(180deg, rgba(22,26,34,.96), rgba(10,12,16,.98)); border: 1px solid rgba(255,255,255,.08); box-shadow: 0 24px 80px rgba(0,0,0,.45); }}
+      h1 {{ margin: 0 0 8px; font-size: 28px; }}
+      p {{ margin: 0; color: rgba(235,240,248,.74); line-height: 1.6; }}
+      .badge {{ display: inline-block; margin-bottom: 16px; padding: 6px 10px; border-radius: 999px; background: {accent}; color: #f5f7fb; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; }}
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="badge">{safe_badge}</div>
+      <h1>{safe_title}</h1>
+      <p>{safe_message}</p>
+    </div>
+  </body>
+</html>"""
+
+
+def _start_google_callback_bridge():
+    gateway_url = _get_gateway_url()
+    redirect_uri = _get_google_redirect_uri()
+    host, port, expected_path = _parse_redirect_uri(redirect_uri)
+    expected_path = _normalize_callback_path(expected_path)
+    result = {"ok": False, "error": "", "status_code": None}
+    completed = threading.Event()
+    server = None
+
+    class CallbackHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            return
+
+        def _finish(self, status_code, body, *, content_type="text/html; charset=utf-8"):
+            body_bytes = body if isinstance(body, bytes) else str(body).encode("utf-8")
+            self.send_response(status_code)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body_bytes)))
+            self.end_headers()
+            self.wfile.write(body_bytes)
+
+        def do_GET(self):
+            parsed = urlparse(self.path)
+            request_path = _normalize_callback_path(parsed.path)
+            if request_path != expected_path:
+                self._finish(404, _html_page("Callback Not Found", "This page is reserved for Google sign-in.", badge="404", accent="#4c5a78"))
+                return
+
+            params = parse_qs(parsed.query)
+            code = str((params.get("code") or [""])[0] or "").strip()
+            state = str((params.get("state") or [""])[0] or "").strip()
+            error = str((params.get("error") or [""])[0] or "").strip()
+
+            try:
+                response = requests.get(
+                    f"{gateway_url}/auth/callback/google",
+                    params={"code": code, "state": state, "error": error},
+                    timeout=30,
+                )
+                result["status_code"] = response.status_code
+                result["ok"] = response.status_code < 400
+                if not result["ok"]:
+                    detail = response.text
+                    try:
+                        payload = response.json()
+                    except Exception:
+                        payload = {}
+                    if isinstance(payload, dict):
+                        detail = str(payload.get("detail") or payload.get("message") or detail)
+                    result["error"] = detail.strip() or f"Gateway HTTP {response.status_code}"
+                self._finish(
+                    response.status_code,
+                    response.content or _html_page("Google Connected", "You can return to the app.").encode("utf-8"),
+                    content_type=response.headers.get("Content-Type", "text/html; charset=utf-8"),
+                )
+            except Exception as exc:
+                result["status_code"] = 502
+                result["ok"] = False
+                result["error"] = f"Failed to complete Google sign-in with COSMIC Gateway: {exc}"
+                self._finish(
+                    502,
+                    _html_page(
+                        "COSMIC Couldn't Finish Sign-In",
+                        result["error"],
+                        badge="Error",
+                        accent="#7b3c44",
+                    ),
+                )
+            finally:
+                completed.set()
+                if server is not None:
+                    threading.Thread(target=server.shutdown, daemon=True).start()
+
+    try:
+        server = ThreadingHTTPServer((host, port), CallbackHandler)
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not start the local Google sign-in listener on {host}:{port}. "
+            f"Close any other process using that port and try again."
+        ) from exc
+
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True)
+    thread.start()
+
+    def shutdown():
+        try:
+            server.shutdown()
+        except Exception:
+            pass
+        try:
+            server.server_close()
+        except Exception:
+            pass
+
+    return completed, result, shutdown
 
 
 def _get_gateway_integrations_snapshot():
@@ -176,6 +357,9 @@ def run_google_connect(payload):
         return
 
     try:
+        callback_done = None
+        callback_result = None
+        callback_shutdown = None
         requested_scopes = [
             str(item).strip()
             for item in (payload.get("required_scopes") or [])
@@ -212,6 +396,7 @@ def run_google_connect(payload):
         authorize_url = str(start_payload.get("authorize_url") or "").strip()
         if not authorize_url:
             raise RuntimeError("Gateway did not return a Google authorize URL.")
+        callback_done, callback_result, callback_shutdown = _start_google_callback_bridge()
 
         emit_integrations()
         emit_event(
@@ -225,6 +410,8 @@ def run_google_connect(payload):
         deadline = time.time() + max(30, DEFAULT_GOOGLE_CONNECT_TIMEOUT_SECONDS)
         connected_account = None
         while time.time() < deadline:
+            if callback_done is not None and callback_done.is_set() and callback_result and callback_result.get("error"):
+                raise RuntimeError(str(callback_result.get("error") or "Google sign-in failed."))
             time.sleep(1.0)
             accounts = _list_gateway_google_accounts()
             if account_id and not account_id.startswith("draft-"):
@@ -264,6 +451,8 @@ def run_google_connect(payload):
                 break
 
         if connected_account is None:
+            if callback_result and callback_result.get("error"):
+                raise RuntimeError(str(callback_result.get("error") or "Google sign-in failed."))
             raise RuntimeError("Google sign-in did not finish before the timeout window closed.")
 
         account_id = str(connected_account.get("account_id") or account_id).strip()
@@ -284,6 +473,9 @@ def run_google_connect(payload):
         )
         emit_integrations()
     finally:
+        callback_shutdown = locals().get("callback_shutdown")
+        if callable(callback_shutdown):
+            callback_shutdown()
         GOOGLE_AUTH_LOCK.release()
 
 
@@ -357,13 +549,42 @@ def run_save_google_account(payload):
 
 
 def run_delete_google_account(account_id):
-    _gateway_request(
-        "DELETE",
-        f"/internal/credentials/accounts/{account_id}/purge",
-        timeout=20,
-    )
-    emit_integrations()
-    threading.Thread(target=run_calendar_agenda_fetch, daemon=True).start()
+    try:
+        account = next(
+            (
+                item
+                for item in _list_gateway_google_accounts()
+                if str(item.get("account_id") or "").strip() == str(account_id or "").strip()
+            ),
+            None,
+        )
+        emit_event(
+            "delete_started",
+            account_id=account_id,
+            message="Removing Google account from Cosmic.",
+            extra=account_event_details(account),
+        )
+        _gateway_request(
+            "DELETE",
+            f"/internal/credentials/accounts/{account_id}/purge",
+            timeout=20,
+        )
+        emit_event(
+            "delete_success",
+            account_id=account_id,
+            message="Google account removed.",
+            extra=account_event_details(account),
+        )
+        emit_integrations()
+        threading.Thread(target=run_calendar_agenda_fetch, daemon=True).start()
+    except Exception as exc:
+        emit_event(
+            "delete_error",
+            account_id=account_id,
+            message=str(exc),
+            extra=account_event_details(locals().get("account")),
+        )
+        emit_integrations()
 
 
 def main():
