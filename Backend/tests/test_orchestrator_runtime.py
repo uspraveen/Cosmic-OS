@@ -122,6 +122,10 @@ def _signed_task(signing_secret: str) -> TaskEnvelope:
     return task.model_copy(update={"signature": sign_task_envelope(task, signing_secret)})
 
 
+def _fake_sse(event: str, payload: dict[str, object]) -> object:
+    return type("SSE", (), {"event": event, "data": json.dumps(payload)})()
+
+
 @pytest.mark.asyncio
 async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
     events = [
@@ -2076,3 +2080,189 @@ async def test_request_user_input_publishes_request_and_resumes_on_reply(tmp_pat
         assert row == ("answered", "Use staging.")
     finally:
         await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_runtime_retries_transient_overload_before_response_text(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        anthropic_overload_retry_attempts=1,
+        anthropic_overload_initial_backoff_sec=0.01,
+        anthropic_overload_max_backoff_sec=0.01,
+        task_ledger_db_path=tmp_path / "task_ledger_overload_retry.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    task = _signed_task("signing-secret")
+    stream_call_count = 0
+
+    async def scripted_stream(**kwargs):
+        nonlocal stream_call_count
+        del kwargs
+        stream_call_count += 1
+        if stream_call_count == 1:
+            events = [
+                _fake_sse("message", {"type": "message_start", "message": {"usage": {"input_tokens": 12}}}),
+                _fake_sse("message", {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking"}}),
+                _fake_sse(
+                    "message",
+                    {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "thinking_delta", "thinking": "Checking capacity..."},
+                    },
+                ),
+                _fake_sse("message", {"type": "error", "error": {"message": "Overloaded"}}),
+            ]
+        else:
+            events = [
+                _fake_sse("message", {"type": "message_start", "message": {"usage": {"input_tokens": 10}}}),
+                _fake_sse("message", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+                _fake_sse(
+                    "message",
+                    {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "text_delta", "text": "Your calendar is clear today."},
+                    },
+                ),
+                _fake_sse("message", {"type": "content_block_stop", "index": 0}),
+                _fake_sse(
+                    "message",
+                    {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 8}},
+                ),
+                _fake_sse("message", {"type": "message_stop"}),
+            ]
+        for item in events:
+            yield item
+
+    runtime._stream_anthropic_events = scripted_stream  # type: ignore[method-assign]
+
+    await runtime.start()
+    try:
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+
+    assert stream_call_count == 2
+    retry_events = [
+        event for event in streamed_events if event["type"] == "task.progress" and event.get("status") == "retrying"
+    ]
+    assert retry_events == [
+        {
+            "task_id": "tsk_test123",
+            "request_id": "req_test123",
+            "session_id": "sess_20260307",
+            "channel": "desktop:desk_test",
+            "type": "task.progress",
+            "status": "retrying",
+            "iteration": 1,
+            "message": "Opus hit temporary capacity. Retrying automatically...",
+        }
+    ]
+    complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert complete_event["content"] == "Your calendar is clear today."
+    assert streamed_events[-1]["type"] == "task.completed"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_runtime_surfaces_friendly_overload_failure_after_retries_exhaust(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        anthropic_overload_retry_attempts=1,
+        anthropic_overload_initial_backoff_sec=0.01,
+        anthropic_overload_max_backoff_sec=0.01,
+        task_ledger_db_path=tmp_path / "task_ledger_overload_fail.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    task = _signed_task("signing-secret")
+    stream_call_count = 0
+
+    async def scripted_stream(**kwargs):
+        nonlocal stream_call_count
+        del kwargs
+        stream_call_count += 1
+        if False:
+            yield None
+        raise RuntimeError("Overloaded")
+
+    runtime._stream_anthropic_events = scripted_stream  # type: ignore[method-assign]
+
+    await runtime.start()
+    try:
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+
+    assert stream_call_count == 2
+    failed_event = next(event for event in streamed_events if event["type"] == "task.failed")
+    assert failed_event["error"] == {
+        "code": "OPUS_TEMPORARILY_OVERLOADED",
+        "message": "Opus is temporarily overloaded right now. Please try again in a moment.",
+        "retryable": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_runtime_can_retry_with_fallback_model_after_overload(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        anthropic_overload_retry_attempts=0,
+        anthropic_overload_initial_backoff_sec=0.01,
+        anthropic_overload_max_backoff_sec=0.01,
+        anthropic_overload_fallback_model="claude-haiku-4-5",
+        task_ledger_db_path=tmp_path / "task_ledger_overload_fallback.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    task = _signed_task("signing-secret")
+    model_overrides: list[str | None] = []
+
+    async def scripted_stream(**kwargs):
+        model_overrides.append(kwargs.get("model_override"))
+        if len(model_overrides) == 1:
+            if False:
+                yield None
+            raise RuntimeError("Overloaded")
+        yield _fake_sse("message", {"type": "message_start", "message": {"usage": {"input_tokens": 10}}})
+        yield _fake_sse("message", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}})
+        yield _fake_sse(
+            "message",
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "Fallback model completed the turn."},
+            },
+        )
+        yield _fake_sse("message", {"type": "content_block_stop", "index": 0})
+        yield _fake_sse(
+            "message",
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 6}},
+        )
+        yield _fake_sse("message", {"type": "message_stop"})
+
+    runtime._stream_anthropic_events = scripted_stream  # type: ignore[method-assign]
+
+    await runtime.start()
+    try:
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+
+    assert model_overrides == [None, "claude-haiku-4-5"]
+    retry_event = next(
+        event for event in streamed_events if event["type"] == "task.progress" and event.get("status") == "retrying"
+    )
+    assert retry_event["message"] == "Opus hit temporary capacity. Retrying with a standby model..."
+    complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert complete_event["content"] == "Fallback model completed the turn."

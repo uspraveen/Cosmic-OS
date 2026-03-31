@@ -149,6 +149,20 @@ class ActiveTaskRun:
     cancel_message: str = "Response stopped."
 
 
+class OrchestratorTaskError(RuntimeError):
+    def __init__(self, message: str, *, code: str, retryable: bool) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+
+
+@dataclass(slots=True)
+class AnthropicRetryPlan:
+    message: str
+    backoff_sec: float
+    model_override: str | None = None
+
+
 @dataclass(slots=True)
 class AnthropicLoopStats:
     anthropic_requests: int = 0
@@ -394,9 +408,6 @@ class OrchestratorRuntime:
 
             while iteration < max_iterations:
                 iteration += 1
-                anthropic_requests += 1
-                if container_id:
-                    container_reuse_turns += 1
                 messages = self._prepare_messages_for_anthropic(messages)
                 max_request_context_chars = max(
                     max_request_context_chars,
@@ -405,158 +416,210 @@ class OrchestratorRuntime:
                 max_request_message_count = max(max_request_message_count, len(messages))
 
                 # ── Stream one Anthropic turn ───────────────────
+                turn_overload_retries = 0
+                turn_model_override: str | None = None
+                turn_fallback_used = False
                 blocks: dict[int, ContentBlock] = {}
                 turn_usage: dict[str, Any] = {}
                 turn_stop_reason: str | None = None
-                reasoning_announced = False
-                responding_announced = False
 
-                async for sse in self._stream_anthropic_events(
-                    system_prompt=system_prompt,
-                    messages=messages,
-                    tools=tools,
-                    container_id=container_id,
-                    usage_context={
-                        "task_id": task.task_id,
-                        "request_id": request_id,
-                        "session_id": session_id,
-                        "route": "opus",
-                        "operation": "orchestrator.process",
-                        "metadata_json": {
-                            "iteration": iteration,
-                            "source": task.source,
-                            "source_id": task.source_id,
-                            "channel": channel,
-                        },
-                    },
-                ):
-                    if sse.event == "ping" or not sse.data:
-                        continue
-                    payload = json.loads(sse.data)
-                    ptype = str(payload.get("type") or "")
+                while True:
+                    if container_id:
+                        container_reuse_turns += 1
+                    anthropic_requests += 1
+                    blocks = {}
+                    turn_usage = {}
+                    turn_stop_reason = None
+                    reasoning_announced = False
+                    responding_announced = False
+                    server_tool_progress_emitted = False
 
-                    # ── message_start ───────────────────────────
-                    if ptype == "message_start":
-                        msg_obj = payload.get("message", {})
-                        turn_usage = self._merge_usage(turn_usage, msg_obj.get("usage"))
-                        # Fallback container capture from message_start
-                        _cont = msg_obj.get("container")
-                        if isinstance(_cont, dict):
-                            _cid = _cont.get("id")
-                            if _cid:
-                                container_id = str(_cid)
-                                container_captured = True
-                        continue
-
-                    # ── message_delta ───────────────────────────
-                    if ptype == "message_delta":
-                        turn_usage = self._merge_usage(turn_usage, payload.get("usage"))
-                        delta = payload.get("delta")
-                        if isinstance(delta, dict):
-                            turn_stop_reason = str(delta.get("stop_reason") or "").strip() or turn_stop_reason
-                            # Capture container_id from delta.container.id (primary location)
-                            _cont = delta.get("container")
-                            if isinstance(_cont, dict):
-                                _cid = _cont.get("id")
-                                if _cid:
-                                    container_id = str(_cid)
-                                    container_captured = True
-                        continue
-
-                    # ── error ───────────────────────────────────
-                    if ptype == "error":
-                        err = payload.get("error")
-                        msg = str(err.get("message") or "Anthropic stream error") if isinstance(err, dict) else "Anthropic stream error"
-                        raise RuntimeError(msg)
-
-                    # ── content_block_start ─────────────────────
-                    if ptype == "content_block_start":
-                        idx = int(payload.get("index", 0))
-                        cb = payload.get("content_block") or {}
-                        btype = str(cb.get("type") or "text")
-                        block = ContentBlock(index=idx, block_type=btype)
-                        if btype == "tool_use":
-                            block.tool_id = str(cb.get("id") or "")
-                            block.tool_name = str(cb.get("name") or "")
-                        elif btype == "server_tool_use":
-                            block.tool_id = str(cb.get("id") or "")
-                            block.tool_name = str(cb.get("name") or "")
-                        elif ContentBlock._is_server_tool_result_block(btype):
-                            block.raw_block = dict(cb)
-                        blocks[idx] = block
-                        # Emit progress for server-side tool calls
-                        if btype == "server_tool_use":
-                            if block.tool_name == "web_search":
-                                progress_msg = "Searching the web..."
-                            elif block.tool_name == "web_fetch":
-                                progress_msg = "Fetching web page..."
-                            elif block.tool_name == "code_execution":
-                                progress_msg = "Running server-side code execution..."
-                            else:
-                                progress_msg = f"Using server-side tool: {block.tool_name}..."
-                            yield {**ev, "type": "task.progress", "status": "tool_call", "iteration": iteration, "tool_name": block.tool_name, "message": progress_msg}
-                        continue
-
-                    # ── content_block_delta ─────────────────────
-                    if ptype == "content_block_delta":
-                        idx = int(payload.get("index", 0))
-                        block = blocks.get(idx)
-                        if block is None:
-                            continue
-                        delta = payload.get("delta") or {}
-                        dtype = str(delta.get("type") or "")
-
-                        if dtype == "thinking_delta":
-                            chunk = str(delta.get("thinking") or "")
-                            if not chunk:
-                                continue
-                            block.thinking_text += chunk
-                            if not reasoning_announced:
-                                reasoning_announced = True
-                                yield {**ev, "type": "task.progress", "status": "thinking", "message": "Opus is reasoning through the request."}
-                            if iteration == 1:
-                                yield {**ev, "type": "response.thinking.chunk", "content": chunk, "done": False}
-
-                        elif dtype == "signature_delta":
-                            sig = str(delta.get("signature") or "")
-                            block.signature += sig
-
-                        elif dtype == "text_delta":
-                            chunk = str(delta.get("text") or "")
-                            if not chunk:
-                                continue
-                            block.text += chunk
-                            if not responding_announced:
-                                responding_announced = True
-                                yield {**ev, "type": "task.progress", "status": "responding", "message": "Opus is writing the response."}
-                            yield {**ev, "type": "response.chunk", "content": chunk, "done": False}
-
-                        elif dtype == "input_json_delta":
-                            partial = str(delta.get("partial_json") or "")
-                            block.input_json += partial
-
-                        continue
-
-                    # ── content_block_stop ─────────────────────
-                    if ptype == "content_block_stop":
-                        idx = int(payload.get("index", 0))
-                        block = blocks.get(idx)
-                        if block and block.block_type == "server_tool_use":
-                            # Now we have the full input — emit detailed progress
-                            try:
-                                pi = json.loads(block.input_json) if block.input_json else {}
-                            except json.JSONDecodeError:
-                                pi = {}
-                            progress_msg = build_tool_progress_message(block.tool_name, pi)
-                            yield {
-                                **ev, "type": "task.progress",
-                                "status": "tool_call",
+                    stream_kwargs: dict[str, Any] = {
+                        "system_prompt": system_prompt,
+                        "messages": messages,
+                        "tools": tools,
+                        "container_id": container_id,
+                        "usage_context": {
+                            "task_id": task.task_id,
+                            "request_id": request_id,
+                            "session_id": session_id,
+                            "route": "opus",
+                            "operation": "orchestrator.process",
+                            "metadata_json": {
                                 "iteration": iteration,
-                                "tool_name": block.tool_name,
-                                "message": progress_msg,
-                            }
+                                "source": task.source,
+                                "source_id": task.source_id,
+                                "channel": channel,
+                            },
+                        },
+                    }
+                    if turn_model_override:
+                        stream_kwargs["model_override"] = turn_model_override
+
+                    try:
+                        async for sse in self._stream_anthropic_events(**stream_kwargs):
+                            if sse.event == "ping" or not sse.data:
+                                continue
+                            payload = json.loads(sse.data)
+                            ptype = str(payload.get("type") or "")
+
+                            # ── message_start ───────────────────────────
+                            if ptype == "message_start":
+                                msg_obj = payload.get("message", {})
+                                turn_usage = self._merge_usage(turn_usage, msg_obj.get("usage"))
+                                # Fallback container capture from message_start
+                                _cont = msg_obj.get("container")
+                                if isinstance(_cont, dict):
+                                    _cid = _cont.get("id")
+                                    if _cid:
+                                        container_id = str(_cid)
+                                        container_captured = True
+                                continue
+
+                            # ── message_delta ───────────────────────────
+                            if ptype == "message_delta":
+                                turn_usage = self._merge_usage(turn_usage, payload.get("usage"))
+                                delta = payload.get("delta")
+                                if isinstance(delta, dict):
+                                    turn_stop_reason = str(delta.get("stop_reason") or "").strip() or turn_stop_reason
+                                    # Capture container_id from delta.container.id (primary location)
+                                    _cont = delta.get("container")
+                                    if isinstance(_cont, dict):
+                                        _cid = _cont.get("id")
+                                        if _cid:
+                                            container_id = str(_cid)
+                                            container_captured = True
+                                continue
+
+                            # ── error ───────────────────────────────────
+                            if ptype == "error":
+                                err = payload.get("error")
+                                msg = str(err.get("message") or "Anthropic stream error") if isinstance(err, dict) else "Anthropic stream error"
+                                raise RuntimeError(msg)
+
+                            # ── content_block_start ─────────────────────
+                            if ptype == "content_block_start":
+                                idx = int(payload.get("index", 0))
+                                cb = payload.get("content_block") or {}
+                                btype = str(cb.get("type") or "text")
+                                block = ContentBlock(index=idx, block_type=btype)
+                                if btype == "tool_use":
+                                    block.tool_id = str(cb.get("id") or "")
+                                    block.tool_name = str(cb.get("name") or "")
+                                elif btype == "server_tool_use":
+                                    block.tool_id = str(cb.get("id") or "")
+                                    block.tool_name = str(cb.get("name") or "")
+                                elif ContentBlock._is_server_tool_result_block(btype):
+                                    block.raw_block = dict(cb)
+                                blocks[idx] = block
+                                # Emit progress for server-side tool calls
+                                if btype == "server_tool_use":
+                                    server_tool_progress_emitted = True
+                                    if block.tool_name == "web_search":
+                                        progress_msg = "Searching the web..."
+                                    elif block.tool_name == "web_fetch":
+                                        progress_msg = "Fetching web page..."
+                                    elif block.tool_name == "code_execution":
+                                        progress_msg = "Running server-side code execution..."
+                                    else:
+                                        progress_msg = f"Using server-side tool: {block.tool_name}..."
+                                    yield {**ev, "type": "task.progress", "status": "tool_call", "iteration": iteration, "tool_name": block.tool_name, "message": progress_msg}
+                                continue
+
+                            # ── content_block_delta ─────────────────────
+                            if ptype == "content_block_delta":
+                                idx = int(payload.get("index", 0))
+                                block = blocks.get(idx)
+                                if block is None:
+                                    continue
+                                delta = payload.get("delta") or {}
+                                dtype = str(delta.get("type") or "")
+
+                                if dtype == "thinking_delta":
+                                    chunk = str(delta.get("thinking") or "")
+                                    if not chunk:
+                                        continue
+                                    block.thinking_text += chunk
+                                    if not reasoning_announced:
+                                        reasoning_announced = True
+                                        yield {**ev, "type": "task.progress", "status": "thinking", "message": "Opus is reasoning through the request."}
+                                    if iteration == 1:
+                                        yield {**ev, "type": "response.thinking.chunk", "content": chunk, "done": False}
+
+                                elif dtype == "signature_delta":
+                                    sig = str(delta.get("signature") or "")
+                                    block.signature += sig
+
+                                elif dtype == "text_delta":
+                                    chunk = str(delta.get("text") or "")
+                                    if not chunk:
+                                        continue
+                                    block.text += chunk
+                                    if not responding_announced:
+                                        responding_announced = True
+                                        yield {**ev, "type": "task.progress", "status": "responding", "message": "Opus is writing the response."}
+                                    yield {**ev, "type": "response.chunk", "content": chunk, "done": False}
+
+                                elif dtype == "input_json_delta":
+                                    partial = str(delta.get("partial_json") or "")
+                                    block.input_json += partial
+
+                                continue
+
+                            # ── content_block_stop ─────────────────────
+                            if ptype == "content_block_stop":
+                                idx = int(payload.get("index", 0))
+                                block = blocks.get(idx)
+                                if block and block.block_type == "server_tool_use":
+                                    # Now we have the full input — emit detailed progress
+                                    try:
+                                        pi = json.loads(block.input_json) if block.input_json else {}
+                                    except json.JSONDecodeError:
+                                        pi = {}
+                                    progress_msg = build_tool_progress_message(block.tool_name, pi)
+                                    yield {
+                                        **ev, "type": "task.progress",
+                                        "status": "tool_call",
+                                        "iteration": iteration,
+                                        "tool_name": block.tool_name,
+                                        "message": progress_msg,
+                                    }
+                                continue
+                            # message_stop — nothing to do
+                        break
+                    except RuntimeError as exc:
+                        retry_plan = self._plan_anthropic_turn_retry(
+                            exc=exc,
+                            retry_count=turn_overload_retries,
+                            responding_announced=responding_announced,
+                            server_tool_progress_emitted=server_tool_progress_emitted,
+                            active_model=turn_model_override or self.config.anthropic_model,
+                            fallback_used=turn_fallback_used,
+                        )
+                        if retry_plan is None:
+                            raise self._normalize_anthropic_turn_error(exc) from exc
+                        logger.warning(
+                            "orchestrator.anthropic_retry task_id=%s request_id=%s iteration=%s model=%s retry_count=%s reason=%s",
+                            task.task_id,
+                            request_id,
+                            iteration,
+                            turn_model_override or self.config.anthropic_model,
+                            turn_overload_retries + 1,
+                            self._normalize_anthropic_error_text(str(exc)),
+                        )
+                        yield {
+                            **ev,
+                            "type": "task.progress",
+                            "status": "retrying",
+                            "iteration": iteration,
+                            "message": retry_plan.message,
+                        }
+                        await asyncio.sleep(retry_plan.backoff_sec)
+                        turn_overload_retries += 1
+                        if retry_plan.model_override:
+                            turn_model_override = retry_plan.model_override
+                            turn_fallback_used = True
                         continue
-                    # message_stop — nothing to do
 
                 # ── End of Anthropic turn ───────────────────────
                 cumulative_usage = self._merge_usage(cumulative_usage, turn_usage)
@@ -804,11 +867,18 @@ class OrchestratorRuntime:
                 return
             raise
         except Exception as exc:
-            message = str(exc).strip() or "Orchestrator processing failed."
-            self.task_ledger.mark_failed(task.task_id, code="OPUS_UPSTREAM_ERROR", message=message)
+            if isinstance(exc, OrchestratorTaskError):
+                code = exc.code
+                message = str(exc).strip() or "Orchestrator processing failed."
+                retryable = exc.retryable
+            else:
+                code = "OPUS_UPSTREAM_ERROR"
+                message = str(exc).strip() or "Orchestrator processing failed."
+                retryable = False
+            self.task_ledger.mark_failed(task.task_id, code=code, message=message)
             yield {
                 **ev, "type": "task.failed", "route": "opus", "status": "failed",
-                "error": {"code": "OPUS_UPSTREAM_ERROR", "message": message, "retryable": False},
+                "error": {"code": code, "message": message, "retryable": retryable},
             }
         finally:
             self._record_anthropic_loop_stats(
@@ -2244,8 +2314,10 @@ class OrchestratorRuntime:
         tools: list[dict[str, Any]] | None = None,
         container_id: str | None = None,
         usage_context: dict[str, Any] | None = None,
+        model_override: str | None = None,
     ) -> AsyncIterator[SSEEvent]:
         url = "https://api.anthropic.com/v1/messages"
+        model_name = str(model_override or self.config.anthropic_model).strip() or self.config.anthropic_model
         system_payload: str | list[dict[str, Any]]
         if self.config.anthropic_prompt_cache_enabled:
             system_payload = [
@@ -2258,7 +2330,7 @@ class OrchestratorRuntime:
         else:
             system_payload = system_prompt
         body: dict[str, Any] = {
-            "model": self.config.anthropic_model,
+            "model": model_name,
             "max_tokens": self.config.max_tokens,
             "stream": True,
             "thinking": {"type": "adaptive"},
@@ -2307,7 +2379,7 @@ class OrchestratorRuntime:
                         yield item
                 await self._record_internal_usage_event(
                     metered_call=metered_call,
-                    model_key=build_model_key("anthropic", self.config.anthropic_model),
+                    model_key=build_model_key("anthropic", model_name),
                     usage_context=usage_context,
                     provider_request_id=provider_request_id,
                     raw_usage=usage,
@@ -2324,7 +2396,7 @@ class OrchestratorRuntime:
             except (httpx.HTTPError, RuntimeError, ValueError) as exc:
                 await self._record_internal_usage_event(
                     metered_call=metered_call,
-                    model_key=build_model_key("anthropic", self.config.anthropic_model),
+                    model_key=build_model_key("anthropic", model_name),
                     usage_context=usage_context,
                     provider_request_id=provider_request_id,
                     raw_usage=usage,
@@ -2944,6 +3016,73 @@ class OrchestratorRuntime:
                 if msg:
                     return msg
         return f"status={status_code}"
+
+    @staticmethod
+    def _normalize_anthropic_error_text(message: str) -> str:
+        normalized = str(message or "").strip()
+        if normalized.lower().startswith("anthropic api error:"):
+            normalized = normalized.split(":", 1)[1].strip()
+        return normalized or "Anthropic API error"
+
+    def _is_transient_anthropic_overload(self, exc: BaseException) -> bool:
+        message = self._normalize_anthropic_error_text(str(exc)).lower()
+        if not message:
+            return False
+        if re.search(r"\bstatus=(429|503|529)\b", message):
+            return True
+        overload_markers = (
+            "overloaded",
+            "overload",
+            "capacity",
+            "rate limit",
+            "too many requests",
+            "temporarily unavailable",
+            "server overloaded",
+        )
+        return any(marker in message for marker in overload_markers)
+
+    def _anthropic_overload_backoff_sec(self, retry_count: int) -> float:
+        delay = self.config.anthropic_overload_initial_backoff_sec * (2 ** max(0, retry_count))
+        return min(delay, self.config.anthropic_overload_max_backoff_sec)
+
+    def _plan_anthropic_turn_retry(
+        self,
+        *,
+        exc: BaseException,
+        retry_count: int,
+        responding_announced: bool,
+        server_tool_progress_emitted: bool,
+        active_model: str,
+        fallback_used: bool,
+    ) -> AnthropicRetryPlan | None:
+        if not self._is_transient_anthropic_overload(exc):
+            return None
+        if responding_announced or server_tool_progress_emitted:
+            return None
+        if retry_count < self.config.anthropic_overload_retry_attempts:
+            return AnthropicRetryPlan(
+                message="Opus hit temporary capacity. Retrying automatically...",
+                backoff_sec=self._anthropic_overload_backoff_sec(retry_count),
+            )
+        fallback_model = str(self.config.anthropic_overload_fallback_model or "").strip()
+        if fallback_model and not fallback_used and fallback_model != active_model:
+            return AnthropicRetryPlan(
+                message="Opus hit temporary capacity. Retrying with a standby model...",
+                backoff_sec=self._anthropic_overload_backoff_sec(retry_count),
+                model_override=fallback_model,
+            )
+        return None
+
+    def _normalize_anthropic_turn_error(self, exc: BaseException) -> BaseException:
+        if isinstance(exc, OrchestratorTaskError):
+            return exc
+        if self._is_transient_anthropic_overload(exc):
+            return OrchestratorTaskError(
+                "Opus is temporarily overloaded right now. Please try again in a moment.",
+                code="OPUS_TEMPORARILY_OVERLOADED",
+                retryable=True,
+            )
+        return exc
 
     @staticmethod
     def _collect_perplexity_sources(result_str: str, sources: list[dict[str, str]]) -> None:

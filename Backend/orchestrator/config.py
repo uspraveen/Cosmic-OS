@@ -72,6 +72,10 @@ class OrchestratorConfig:
     signing_secret: str = ""
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-opus-4-6"
+    anthropic_overload_retry_attempts: int = 1
+    anthropic_overload_initial_backoff_sec: float = 1.0
+    anthropic_overload_max_backoff_sec: float = 4.0
+    anthropic_overload_fallback_model: str = ""
     anthropic_version: str = "2023-06-01"
     anthropic_files_api_beta: str = "files-api-2025-04-14"
     anthropic_code_execution_beta: str = "code-execution-2025-05-22"
@@ -114,6 +118,16 @@ class OrchestratorConfig:
             signing_secret=os.getenv("GATEWAY_SIGNING_SECRET", "").strip(),
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", "").strip(),
             anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-opus-4-6").strip(),
+            anthropic_overload_retry_attempts=max(0, _env_int("ANTHROPIC_OVERLOAD_RETRY_ATTEMPTS", 1)),
+            anthropic_overload_initial_backoff_sec=max(
+                0.1,
+                _env_float("ANTHROPIC_OVERLOAD_INITIAL_BACKOFF_SEC", 1.0),
+            ),
+            anthropic_overload_max_backoff_sec=max(
+                0.1,
+                _env_float("ANTHROPIC_OVERLOAD_MAX_BACKOFF_SEC", 4.0),
+            ),
+            anthropic_overload_fallback_model=os.getenv("ANTHROPIC_OVERLOAD_FALLBACK_MODEL", "").strip(),
             anthropic_version=os.getenv("ANTHROPIC_VERSION", "2023-06-01").strip(),
             anthropic_files_api_beta=os.getenv("ANTHROPIC_FILES_API_BETA", "files-api-2025-04-14").strip(),
             anthropic_code_execution_beta=os.getenv("ANTHROPIC_CODE_EXECUTION_BETA", "code-execution-2025-05-22").strip(),
