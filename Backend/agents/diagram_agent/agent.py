@@ -64,7 +64,7 @@ class DiagramAgent(AgentRuntime):
         self._cfg = config or DiagramAgentConfig.from_env()
         super().__init__(
             agent_card_path=str(AGENT_ROOT / "agent_card.yaml"),
-            redis=redis_client,
+            redis_client=redis_client,
         )
         self.prompts_dir = AGENT_ROOT / "prompts"
         self.learnings_path = AGENT_ROOT / "store" / "learnings.md"
