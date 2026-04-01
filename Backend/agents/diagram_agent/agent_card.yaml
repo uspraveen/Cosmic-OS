@@ -1,0 +1,76 @@
+# agents/diagram_agent/agent_card.yaml
+
+agent_id: cosmic/diagram-agent:1.0.0
+display_name: Diagram Agent
+description: >
+  Specialist agent for generating diagrams from natural language descriptions.
+  Supports Mermaid (sequence, flowchart, ERD, Gantt), D2 (architecture, schema),
+  and Excalidraw (hand-drawn whiteboard) formats. Renders to SVG/PNG artifacts.
+
+intents:
+  - name: diagram.create
+    description: Generate a diagram from a natural language description or structured spec
+    input_schema: schemas/intents/diagram.create.input.json
+    output_schema: schemas/intents/diagram.create.output.json
+    timeout_sec: 120
+
+  - name: diagram.modify
+    description: Modify an existing diagram definition (add node, change flow, restyle)
+    input_schema: schemas/intents/diagram.modify.input.json
+    output_schema: schemas/intents/diagram.modify.output.json
+    timeout_sec: 120
+
+  - name: diagram.recall_session
+    description: Recall prior diagram generation operations from the session ledger
+    input_schema: schemas/intents/diagram.recall_session.input.json
+    output_schema: schemas/intents/diagram.recall_session.output.json
+    timeout_sec: 30
+
+artifact_types:
+  - diagram_svg
+  - diagram_png
+  - diagram_source
+
+policies:
+  network_access: false
+  writable_paths:
+    - runs/artifacts
+    - agents/diagram_agent/store
+    - agents/diagram_agent/runtime
+  tool_access: []
+  allowed_senders:
+    - cosmic/orchestrator:1.0.0
+  intent_authorization:
+    diagram.create: [cosmic/orchestrator:1.0.0]
+    diagram.modify: [cosmic/orchestrator:1.0.0]
+    diagram.recall_session: [cosmic/orchestrator:1.0.0]
+
+sla:
+  max_concurrency: 2
+  heartbeat_interval_sec: 10
+  heartbeat_ttl_sec: 30
+  max_task_duration_sec: 180
+  health_endpoint: /health
+  retry_policy:
+    max_attempts: 3
+    backoff: exponential
+    backoff_base_sec: 2
+    backoff_max_sec: 60
+    retryable_codes:
+      - TIMEOUT
+      - NETWORK_ERROR
+      - RATE_LIMITED
+    non_retryable_codes:
+      - INVALID_INPUT
+      - AUTH_ERROR
+      - SCHEMA_VIOLATION
+      - INTERNAL_ERROR
+
+stream_key: streams:cosmic/diagram-agent:1.0.0
+
+version_info:
+  semver: 1.0.0
+  released_at: "2026-03-31"
+  deprecated_at: null
+  remove_after: null
+  changelog: CHANGELOG.md

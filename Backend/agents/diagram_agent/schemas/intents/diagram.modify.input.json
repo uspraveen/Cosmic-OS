@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "existing_definition": { "type": "string", "description": "Current diagram source code to modify" },
+    "renderer": { "type": "string", "enum": ["mermaid", "d2", "excalidraw"], "description": "Renderer of the existing diagram" },
+    "modification_request": { "type": "string", "description": "What to change in the diagram" },
+    "output_format": { "type": "string", "enum": ["svg", "png", "both"], "default": "svg" }
+  },
+  "required": ["existing_definition", "renderer", "modification_request"]
+}

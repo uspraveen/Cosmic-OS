@@ -99,6 +99,10 @@ CALENDAR_AGENT_ENV_NAME = "calendar-agent.env"
 CALENDAR_AGENT_SERVICE_NAME = "cosmic-calendar-agent.service"
 CALENDAR_AGENT_ID = "cosmic/calendar-agent:1.0.0"
 CALENDAR_AGENT_DEFAULT_INSTANCE_ID = "calendar-agent-1"
+DIAGRAM_AGENT_ENV_NAME = "diagram-agent.env"
+DIAGRAM_AGENT_SERVICE_NAME = "cosmic-diagram-agent.service"
+DIAGRAM_AGENT_ID = "cosmic/diagram-agent:1.0.0"
+DIAGRAM_AGENT_DEFAULT_INSTANCE_ID = "diagram-agent-1"
 CRITICAL_VENV_IMPORT_CHECKS: Tuple[Tuple[str, str], ...] = (
     ("docling", "docs parser runtime"),
 )
@@ -111,6 +115,7 @@ CORE_BACKEND_SERVICE_UNITS = (
     "cosmic-docs-parser-agent.service",
     "cosmic-tabular-agent.service",
     "cosmic-calendar-agent.service",
+    "cosmic-diagram-agent.service",
     "cosmic-whatsapp-bridge.service",
 )
 DEFAULT_SUPABASE_URL = "https://hluenippcdiejenmteen.supabase.co"
@@ -1464,7 +1469,9 @@ def calendar_agent_repo_env_example_path() -> Path:
 
 
 def calendar_agent_system_env_path(system_env_dir: Optional[Path] = None) -> Path:
-    return (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "agents" / CALENDAR_AGENT_ENV_NAME
+    return (
+        (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "agents" / CALENDAR_AGENT_ENV_NAME
+    )
 
 
 def resolve_calendar_agent_env_source() -> Path:
@@ -1621,6 +1628,211 @@ def read_calendar_agent_system_env(
     system_env_dir: Optional[Path] = None,
 ) -> Dict[str, str]:
     env_path = calendar_agent_system_env_path(system_env_dir)
+    if not env_path.exists():
+        return {}
+    return parse_env_text(read_text_file(env_path, use_sudo=True))
+
+
+def diagram_agent_repo_dir() -> Path:
+    return BACKEND_ROOT / "agents" / "diagram_agent"
+
+
+def diagram_agent_repo_env_path() -> Path:
+    return diagram_agent_repo_dir() / "agent.env"
+
+
+def diagram_agent_repo_env_example_path() -> Path:
+    return diagram_agent_repo_dir() / "agent.env.example"
+
+
+def diagram_agent_system_env_path(system_env_dir: Optional[Path] = None) -> Path:
+    return (
+        (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "agents" / DIAGRAM_AGENT_ENV_NAME
+    )
+
+
+def resolve_diagram_agent_env_source() -> Path:
+    repo_env = diagram_agent_repo_env_path()
+    if repo_env.exists():
+        return repo_env
+    return diagram_agent_repo_env_example_path()
+
+
+def build_diagram_agent_env_rendered(
+    *,
+    signing_secret: str,
+    shared_internal_token: str,
+    system_env_dir: Optional[Path] = None,
+    existing_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+    external_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Tuple[Path, str, Dict[str, str]]:
+    source_path = resolve_diagram_agent_env_source()
+    source_raw = source_path.read_text(encoding="utf-8")
+    source_data = parse_env_text(source_raw)
+    existing_env = (existing_env_by_name or {}).get(DIAGRAM_AGENT_ENV_NAME, {})
+    external_env = (external_env_by_name or {}).get(DIAGRAM_AGENT_ENV_NAME, {})
+
+    redis_url = first_meaningful_value(
+        external_env.get("REDIS_URL"),
+        existing_env.get("REDIS_URL"),
+        source_data.get("REDIS_URL"),
+        "redis://127.0.0.1:6379/0",
+    )
+    gateway_url = first_meaningful_value(
+        external_env.get("GATEWAY_URL"),
+        existing_env.get("GATEWAY_URL"),
+        source_data.get("GATEWAY_URL"),
+        "http://127.0.0.1:8080",
+    )
+    mimo_api_key = first_meaningful_value(
+        external_env.get("DIAGRAM_AGENT_MIMO_API_KEY"),
+        external_env.get("MIMO_API_KEY"),
+        existing_env.get("DIAGRAM_AGENT_MIMO_API_KEY"),
+        existing_env.get("MIMO_API_KEY"),
+        source_data.get("DIAGRAM_AGENT_MIMO_API_KEY"),
+        source_data.get("MIMO_API_KEY"),
+    )
+    mimo_base_url = first_meaningful_value(
+        external_env.get("DIAGRAM_AGENT_MIMO_BASE_URL"),
+        external_env.get("MIMO_OPENAI_BASE_URL"),
+        existing_env.get("DIAGRAM_AGENT_MIMO_BASE_URL"),
+        existing_env.get("MIMO_OPENAI_BASE_URL"),
+        source_data.get("DIAGRAM_AGENT_MIMO_BASE_URL"),
+        source_data.get("MIMO_OPENAI_BASE_URL"),
+    )
+    mimo_model = first_meaningful_value(
+        external_env.get("DIAGRAM_AGENT_MIMO_MODEL"),
+        existing_env.get("DIAGRAM_AGENT_MIMO_MODEL"),
+        source_data.get("DIAGRAM_AGENT_MIMO_MODEL"),
+        "gpt-5-mini",
+    )
+    mimo_timeout_sec = first_meaningful_value(
+        external_env.get("DIAGRAM_AGENT_MIMO_TIMEOUT_SEC"),
+        existing_env.get("DIAGRAM_AGENT_MIMO_TIMEOUT_SEC"),
+        source_data.get("DIAGRAM_AGENT_MIMO_TIMEOUT_SEC"),
+        "120.0",
+    )
+    enable_internal_llm = first_meaningful_value(
+        external_env.get("DIAGRAM_AGENT_ENABLE_INTERNAL_LLM"),
+        existing_env.get("DIAGRAM_AGENT_ENABLE_INTERNAL_LLM"),
+        source_data.get("DIAGRAM_AGENT_ENABLE_INTERNAL_LLM"),
+        "true",
+    )
+    use_langgraph = first_meaningful_value(
+        external_env.get("DIAGRAM_AGENT_USE_LANGGRAPH"),
+        existing_env.get("DIAGRAM_AGENT_USE_LANGGRAPH"),
+        source_data.get("DIAGRAM_AGENT_USE_LANGGRAPH"),
+        "true",
+    )
+    max_tool_rounds = first_meaningful_value(
+        external_env.get("DIAGRAM_AGENT_MAX_TOOL_ROUNDS"),
+        existing_env.get("DIAGRAM_AGENT_MAX_TOOL_ROUNDS"),
+        source_data.get("DIAGRAM_AGENT_MAX_TOOL_ROUNDS"),
+        "6",
+    )
+    mmdc_path = first_meaningful_value(
+        external_env.get("DIAGRAM_AGENT_MMDC_PATH"),
+        existing_env.get("DIAGRAM_AGENT_MMDC_PATH"),
+        source_data.get("DIAGRAM_AGENT_MMDC_PATH"),
+        "mmdc",
+    )
+    d2_path = first_meaningful_value(
+        external_env.get("DIAGRAM_AGENT_D2_PATH"),
+        existing_env.get("DIAGRAM_AGENT_D2_PATH"),
+        source_data.get("DIAGRAM_AGENT_D2_PATH"),
+        "d2",
+    )
+    default_format = first_meaningful_value(
+        external_env.get("DIAGRAM_AGENT_DEFAULT_FORMAT"),
+        existing_env.get("DIAGRAM_AGENT_DEFAULT_FORMAT"),
+        source_data.get("DIAGRAM_AGENT_DEFAULT_FORMAT"),
+        "svg",
+    )
+    default_theme = first_meaningful_value(
+        external_env.get("DIAGRAM_AGENT_DEFAULT_THEME"),
+        existing_env.get("DIAGRAM_AGENT_DEFAULT_THEME"),
+        source_data.get("DIAGRAM_AGENT_DEFAULT_THEME"),
+        "default",
+    )
+    mermaid_bg = first_meaningful_value(
+        external_env.get("DIAGRAM_AGENT_MERMAID_BG"),
+        existing_env.get("DIAGRAM_AGENT_MERMAID_BG"),
+        source_data.get("DIAGRAM_AGENT_MERMAID_BG"),
+        "white",
+    )
+    d2_sketch = first_meaningful_value(
+        external_env.get("DIAGRAM_AGENT_D2_SKETCH"),
+        existing_env.get("DIAGRAM_AGENT_D2_SKETCH"),
+        source_data.get("DIAGRAM_AGENT_D2_SKETCH"),
+        "false",
+    )
+    d2_pad = first_meaningful_value(
+        external_env.get("DIAGRAM_AGENT_D2_PAD"),
+        existing_env.get("DIAGRAM_AGENT_D2_PAD"),
+        source_data.get("DIAGRAM_AGENT_D2_PAD"),
+        "100",
+    )
+    max_width = first_meaningful_value(
+        external_env.get("DIAGRAM_AGENT_MAX_WIDTH_PX"),
+        existing_env.get("DIAGRAM_AGENT_MAX_WIDTH_PX"),
+        source_data.get("DIAGRAM_AGENT_MAX_WIDTH_PX"),
+        "2400",
+    )
+    max_height = first_meaningful_value(
+        external_env.get("DIAGRAM_AGENT_MAX_HEIGHT_PX"),
+        existing_env.get("DIAGRAM_AGENT_MAX_HEIGHT_PX"),
+        source_data.get("DIAGRAM_AGENT_MAX_HEIGHT_PX"),
+        "1600",
+    )
+    instance_id = first_meaningful_value(
+        external_env.get("INSTANCE_ID"),
+        existing_env.get("INSTANCE_ID"),
+        source_data.get("INSTANCE_ID"),
+        DIAGRAM_AGENT_DEFAULT_INSTANCE_ID,
+    )
+
+    overrides = {
+        "REDIS_URL": redis_url or "redis://127.0.0.1:6379/0",
+        "GATEWAY_URL": gateway_url or "http://127.0.0.1:8080",
+        "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
+        "AGENT_SECRET": signing_secret,
+        "INSTANCE_ID": instance_id or DIAGRAM_AGENT_DEFAULT_INSTANCE_ID,
+        "DIAGRAM_AGENT_MIMO_MODEL": mimo_model or "gpt-5-mini",
+        "DIAGRAM_AGENT_MIMO_TIMEOUT_SEC": mimo_timeout_sec or "120.0",
+        "DIAGRAM_AGENT_ENABLE_INTERNAL_LLM": enable_internal_llm or "true",
+        "DIAGRAM_AGENT_USE_LANGGRAPH": use_langgraph or "true",
+        "DIAGRAM_AGENT_MAX_TOOL_ROUNDS": max_tool_rounds or "6",
+        "DIAGRAM_AGENT_MMDC_PATH": mmdc_path or "mmdc",
+        "DIAGRAM_AGENT_D2_PATH": d2_path or "d2",
+        "DIAGRAM_AGENT_DEFAULT_FORMAT": default_format or "svg",
+        "DIAGRAM_AGENT_DEFAULT_THEME": default_theme or "default",
+        "DIAGRAM_AGENT_MERMAID_BG": mermaid_bg or "white",
+        "DIAGRAM_AGENT_D2_SKETCH": d2_sketch or "false",
+        "DIAGRAM_AGENT_D2_PAD": d2_pad or "100",
+        "DIAGRAM_AGENT_MAX_WIDTH_PX": max_width or "2400",
+        "DIAGRAM_AGENT_MAX_HEIGHT_PX": max_height or "1600",
+    }
+    if mimo_api_key is not None:
+        overrides["DIAGRAM_AGENT_MIMO_API_KEY"] = mimo_api_key
+    if mimo_base_url is not None:
+        overrides["DIAGRAM_AGENT_MIMO_BASE_URL"] = mimo_base_url
+
+    rendered = render_env_with_overrides(source_raw, overrides)
+    rendered_data = parse_env_text(rendered)
+    return diagram_agent_system_env_path(system_env_dir), rendered, rendered_data
+
+
+def diagram_agent_is_configured(env_values: Dict[str, str]) -> bool:
+    return (
+        meaningful_env_value(env_values.get("DIAGRAM_AGENT_MIMO_API_KEY")) is not None
+        or meaningful_env_value(env_values.get("MIMO_API_KEY")) is not None
+    )
+
+
+def read_diagram_agent_system_env(
+    system_env_dir: Optional[Path] = None,
+) -> Dict[str, str]:
+    env_path = diagram_agent_system_env_path(system_env_dir)
     if not env_path.exists():
         return {}
     return parse_env_text(read_text_file(env_path, use_sudo=True))
@@ -3003,6 +3215,27 @@ def materialize_bootstrap_env_files(
             calendar_repo_path
         )
     )
+
+    diagram_repo_path = diagram_agent_repo_env_path()
+    _diagram_dest_path, diagram_rendered, _diagram_env = (
+        build_diagram_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+            shared_internal_token=overrides_by_dest["gateway.env"][
+                "GATEWAY_INTERNAL_TOKEN"
+            ],
+            system_env_dir=system_env_dir,
+            existing_env_by_name=existing_env_by_name,
+            external_env_by_name=external_env_by_name,
+        )
+    )
+    diagram_repo_path.parent.mkdir(parents=True, exist_ok=True)
+    diagram_repo_path.write_text(diagram_rendered, encoding="utf-8")
+    written.append(diagram_repo_path)
+    log(
+        "Materialized repo env file from bootstrap inputs: {0}".format(
+            diagram_repo_path
+        )
+    )
     return written
 
 
@@ -3171,6 +3404,25 @@ def install_service_env_files(
         )
         installed.append(calendar_dest_path)
         log("Installed system env file: {0}".format(calendar_dest_path))
+
+    diagram_dest_path, diagram_rendered, _diagram_env = (
+        build_diagram_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+            shared_internal_token=overrides_by_dest["gateway.env"][
+                "GATEWAY_INTERNAL_TOKEN"
+            ],
+            system_env_dir=system_env_dir,
+        )
+    )
+    run(["install", "-d", "-m", "755", str(diagram_dest_path.parent)], use_sudo=True)
+    if diagram_dest_path.exists():
+        log("System env file already exists: {0}".format(diagram_dest_path))
+    else:
+        install_text_file(
+            diagram_dest_path, diagram_rendered, mode="600", use_sudo=True
+        )
+        installed.append(diagram_dest_path)
+        log("Installed system env file: {0}".format(diagram_dest_path))
 
     return installed
 
@@ -3428,6 +3680,16 @@ def doctor(
         image_system_data = read_image_generator_agent_system_env(
             DEFAULT_SYSTEM_ENV_DIR
         )
+    diagram_source = resolve_diagram_agent_env_source()
+    diagram_source_data = (
+        parse_env_text(diagram_source.read_text(encoding="utf-8"))
+        if diagram_source.exists()
+        else {}
+    )
+    diagram_system_path = diagram_agent_system_env_path(DEFAULT_SYSTEM_ENV_DIR)
+    diagram_system_data = {}
+    if is_linux() and diagram_system_path.exists():
+        diagram_system_data = read_diagram_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
     print(
         "  firecrawl env src  : {0}".format(
             firecrawl_source if firecrawl_source.exists() else "missing"
@@ -3451,6 +3713,11 @@ def doctor(
     print(
         "  image agent env src: {0}".format(
             image_source if image_source.exists() else "missing"
+        )
+    )
+    print(
+        "  diagram agent env src: {0}".format(
+            diagram_source if diagram_source.exists() else "missing"
         )
     )
     if is_linux():
@@ -3481,6 +3748,11 @@ def doctor(
                 image_system_path if image_system_path.exists() else "missing"
             )
         )
+        print(
+            "  diagram agent system env: {0}".format(
+                diagram_system_path if diagram_system_path.exists() else "missing"
+            )
+        )
     firecrawl_enabled = firecrawl_agent_is_configured(
         firecrawl_system_data if firecrawl_system_data else firecrawl_source_data
     )
@@ -3493,10 +3765,14 @@ def doctor(
     image_enabled = image_generator_agent_is_configured(
         image_system_data if image_system_data else image_source_data
     )
+    diagram_enabled = diagram_agent_is_configured(
+        diagram_system_data if diagram_system_data else diagram_source_data
+    )
     print("  firecrawl enabled  : {0}".format("yes" if firecrawl_enabled else "no"))
     print("  x search enabled   : {0}".format("yes" if x_twitter_enabled else "no"))
     print("  email agent enabled: {0}".format("yes" if email_enabled else "no"))
     print("  image agent enabled: {0}".format("yes" if image_enabled else "no"))
+    print("  diagram agent enabled: {0}".format("yes" if diagram_enabled else "no"))
     if is_linux() and shutil.which("systemctl") is not None:
         neo4j_status = run(
             ["systemctl", "is-active", DEFAULT_NEO4J_SERVICE_NAME],
@@ -3556,6 +3832,16 @@ def doctor(
         print(
             "  image agent service: {0}".format(
                 (image_status.stdout or "unknown").strip() or "unknown"
+            )
+        )
+        diagram_status = run(
+            ["systemctl", "is-active", DIAGRAM_AGENT_SERVICE_NAME],
+            capture_output=True,
+            check=False,
+        )
+        print(
+            "  diagram agent service: {0}".format(
+                (diagram_status.stdout or "unknown").strip() or "unknown"
             )
         )
     print(
@@ -3829,6 +4115,34 @@ def sync_service_env_files(
         )
         if changed_keys:
             synced.append(calendar_dest_path)
+    diagram_dest_path = diagram_agent_system_env_path(system_env_dir)
+    if diagram_dest_path.exists():
+        diagram_existing_by_name: Dict[str, Dict[str, str]] = {
+            DIAGRAM_AGENT_ENV_NAME: parse_env_text(
+                read_text_file(diagram_dest_path, use_sudo=True)
+            ),
+        }
+        _diagram_dest_path, diagram_rendered, _diagram_env = (
+            build_diagram_agent_env_rendered(
+                signing_secret=overrides_by_dest["gateway.env"][
+                    "GATEWAY_SIGNING_SECRET"
+                ],
+                shared_internal_token=overrides_by_dest["gateway.env"][
+                    "GATEWAY_INTERNAL_TOKEN"
+                ],
+                system_env_dir=system_env_dir,
+                existing_env_by_name=diagram_existing_by_name,
+            )
+        )
+        changed_keys = sync_env_file(
+            diagram_dest_path,
+            source_raw=diagram_rendered,
+            create_missing=False,
+            use_sudo=True,
+            mode="600",
+        )
+        if changed_keys:
+            synced.append(diagram_dest_path)
     return synced
 
 
@@ -4369,6 +4683,7 @@ def run_post_provision_health_checks(
     include_tabular_agent: bool = True,
     include_email_agent: bool = False,
     include_image_generator_agent: bool = False,
+    include_diagram_agent: bool = False,
     timeout_sec: float = DEFAULT_POST_PROVISION_TIMEOUT_SEC,
     poll_interval_sec: float = DEFAULT_POST_PROVISION_POLL_INTERVAL_SEC,
 ) -> None:
@@ -4464,6 +4779,18 @@ def run_post_provision_health_checks(
         )
         wait_for_orchestrator_agent_ready(
             IMAGE_GENERATOR_AGENT_ID,
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+
+    if include_diagram_agent:
+        wait_for_systemd_unit_active(
+            DIAGRAM_AGENT_SERVICE_NAME,
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+        wait_for_orchestrator_agent_ready(
+            DIAGRAM_AGENT_ID,
             timeout_sec=timeout_sec,
             poll_interval_sec=poll_interval_sec,
         )
@@ -4715,6 +5042,16 @@ def provision_vm(
         log(
             "Image generator agent env is not configured; bootstrap will install the unit but skip enabling the image generator agent service."
         )
+    diagram_env = read_diagram_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+    enable_diagram_agent = diagram_agent_is_configured(diagram_env)
+    if enable_diagram_agent:
+        log(
+            "Diagram agent env is configured; bootstrap will enable and start the diagram agent service."
+        )
+    else:
+        log(
+            "Diagram agent env is not configured; bootstrap will install the unit but skip enabling the diagram agent service."
+        )
     installed = install_systemd_units(
         systemd_template_dir,
         enable_units=enable_units,
@@ -4749,6 +5086,11 @@ def provision_vm(
                 if enable_units and enable_image_generator_agent
                 else []
             )
+            + (
+                [DIAGRAM_AGENT_SERVICE_NAME]
+                if enable_units and enable_diagram_agent
+                else []
+            )
         ),
         include_memory_env=enable_memory,
     )
@@ -4760,6 +5102,7 @@ def provision_vm(
             include_tabular_agent=enable_tabular_agent,
             include_email_agent=enable_email_agent,
             include_image_generator_agent=enable_image_generator_agent,
+            include_diagram_agent=enable_diagram_agent,
         )
 
     print("")
@@ -5038,6 +5381,8 @@ def main() -> int:
             enable_image_generator_agent = image_generator_agent_is_configured(
                 image_env
             )
+            diagram_env = read_diagram_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+            enable_diagram_agent = diagram_agent_is_configured(diagram_env)
             installed = install_systemd_units(
                 systemd_template_dir,
                 enable_units=bool(getattr(args, "enable", False)),
@@ -5080,6 +5425,11 @@ def main() -> int:
                         and bool(getattr(args, "enable", False))
                         else []
                     )
+                    + (
+                        [DIAGRAM_AGENT_SERVICE_NAME]
+                        if enable_diagram_agent and bool(getattr(args, "enable", False))
+                        else []
+                    )
                 ),
                 include_memory_env=memory_repo_dir is not None,
             )
@@ -5093,6 +5443,7 @@ def main() -> int:
                     include_tabular_agent=enable_tabular_agent,
                     include_email_agent=enable_email_agent,
                     include_image_generator_agent=enable_image_generator_agent,
+                    include_diagram_agent=enable_diagram_agent,
                 )
             print("Installed systemd units:")
             for unit_name in installed:

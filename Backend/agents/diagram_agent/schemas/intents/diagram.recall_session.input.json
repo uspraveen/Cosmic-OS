@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "session_id": { "type": "string" },
+    "query": { "type": "string" },
+    "limit": { "type": "integer", "default": 10 }
+  },
+  "required": ["session_id"]
+}

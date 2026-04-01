@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "description": { "type": "string", "description": "Natural language description of the diagram to create" },
+    "preferred_renderer": { "type": "string", "enum": ["mermaid", "d2", "excalidraw"], "description": "Preferred renderer (agent will override if clearly inappropriate)" },
+    "output_format": { "type": "string", "enum": ["svg", "png", "both"], "default": "svg", "description": "Output format for rendered diagram" },
+    "title": { "type": "string", "description": "Optional title for the diagram" },
+    "context": { "type": "string", "description": "Additional context (e.g., code snippets, existing architecture)" }
+  },
+  "required": ["description"]
+}

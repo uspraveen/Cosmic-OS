@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "renderer": { "type": "string", "enum": ["mermaid", "d2", "excalidraw"] },
+    "diagram_type": { "type": "string" },
+    "title": { "type": "string" },
+    "definition": { "type": "string", "description": "The diagram source code" },
+    "output_format": { "type": "string" },
+    "rendered": { "type": "boolean" },
+    "render_error": { "type": "string" },
+    "artifacts": { "type": "array", "items": { "type": "object" } }
+  },
+  "required": ["renderer", "definition", "rendered"]
+}

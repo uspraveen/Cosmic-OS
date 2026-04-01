@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "renderer": { "type": "string" },
+    "definition": { "type": "string" },
+    "changes": { "type": "string" },
+    "output_format": { "type": "string" },
+    "rendered": { "type": "boolean" },
+    "render_error": { "type": "string" }
+  },
+  "required": ["renderer", "definition", "rendered"]
+}
