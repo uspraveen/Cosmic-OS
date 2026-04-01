@@ -18,9 +18,14 @@ from uuid import uuid4
 import httpx
 
 from shared.agent_runtime import AgentRuntime
-from shared.contracts import AgentError, AgentResult, ArtifactManifest, TaskEnvelope
+from shared.contracts import (
+    AgentError,
+    AgentResult,
+    ArtifactManifest,
+    TaskEnvelope,
+    utcnow,
+)
 from shared.sqlite_client import connect_sync
-from shared.time_utils import utcnow
 
 from .config import AGENT_ROOT, BACKEND_ROOT, DiagramAgentConfig
 from .internal_llm import (
