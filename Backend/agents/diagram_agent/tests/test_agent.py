@@ -119,6 +119,29 @@ class TestRenderers:
 
         asyncio.run(_run())
 
+    def test_explain_mermaid_missing_chrome(self):
+        from agents.diagram_agent.renderers import RenderError, explain_render_error
+
+        error = RenderError(
+            "mermaid",
+            "mmdc exited with code 1",
+            stderr="Error: Could not find Chrome (ver. 131.0.6778.204).",
+        )
+        explained = explain_render_error(error)
+        assert "Chrome/headless-shell" in explained
+        assert "missing on this machine" in explained
+
+    def test_explain_d2_stderr_uses_first_meaningful_line(self):
+        from agents.diagram_agent.renderers import RenderError, explain_render_error
+
+        error = RenderError(
+            "d2",
+            "d2 exited with code 1",
+            stderr="\nerror:\nsyntax error near line 2\nstack trace follows\n",
+        )
+        explained = explain_render_error(error)
+        assert explained.endswith("syntax error near line 2")
+
 
 # ── Skills tests ──────────────────────────────────────────────────────────────
 

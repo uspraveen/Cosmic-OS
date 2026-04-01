@@ -24,6 +24,43 @@ class RenderError(Exception):
         super().__init__(f"[{renderer}] {message}")
 
 
+def _first_meaningful_stderr_line(stderr: str) -> str:
+    for raw_line in str(stderr or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.lower() in {"error:", "stderr:"}:
+            continue
+        return line
+    return ""
+
+
+def explain_render_error(error: RenderError) -> str:
+    """Return a concise actionable message for renderer failures."""
+    base = str(error)
+    stderr = str(getattr(error, "stderr", "") or "").strip()
+    if not stderr:
+        return base
+
+    stderr_lower = stderr.lower()
+    if error.renderer == "mermaid" and (
+        "could not find chrome" in stderr_lower
+        or "chrome-headless-shell" in stderr_lower
+        or "puppeteer" in stderr_lower
+    ):
+        return (
+            "[mermaid] Mermaid rendering requires Chrome/headless-shell for mmdc, "
+            "but that browser runtime is missing on this machine."
+        )
+
+    detail = _first_meaningful_stderr_line(stderr)
+    if not detail:
+        return base
+    if detail.startswith(base):
+        return detail
+    return f"{base}: {detail}"
+
+
 async def render_mermaid(
     definition: str,
     *,

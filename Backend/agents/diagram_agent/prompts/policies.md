@@ -23,7 +23,8 @@
 - Always attempt to render via CLI before returning.
 - If CLI fails, return the source code as an artifact with a clear note about the render failure.
 - Clean up temp files after rendering.
-- Output both SVG and PNG when requested; default to SVG.
+- Support `svg` and `png` output formats; default to SVG.
+- Surface concrete renderer/runtime causes when available (for example missing Chrome for Mermaid CLI), not just generic exit codes.
 
 ### Excalidraw Specifics
 - Use consistent seed values based on element IDs for deterministic rendering.

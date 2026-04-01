@@ -33,6 +33,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+try:
+    import pwd
+except ImportError:  # pragma: no cover - unavailable on Windows
+    pwd = None
+
 from shared import (
     AgentEmailIntegrationStore,
     agent_email_integration_is_configured,
@@ -59,6 +64,7 @@ DEFAULT_MEMORY_REPO_URL = "https://github.com/uspraveen/cosmic-memory.git"
 DEFAULT_MEMORY_REPO_REF = "main"
 DEFAULT_SYSTEM_ENV_DIR = Path("/etc/cosmic")
 DEFAULT_WHATSAPP_AUTH_DIR = Path("/var/lib/cosmic/whatsapp/auth")
+DEFAULT_DIAGRAM_PUPPETEER_CACHE_DIR = Path("/var/lib/cosmic/diagram-agent/puppeteer")
 DEFAULT_MEMORY_DATA_DIR = Path("/var/lib/cosmic/memory")
 DEFAULT_NEO4J_APT_KEY_URL = "https://debian.neo4j.com/neotechnology.gpg.key"
 DEFAULT_NEO4J_APT_KEYRING_PATH = Path("/etc/apt/keyrings/neotechnology.gpg")
@@ -137,6 +143,7 @@ PYTHON_CANDIDATES = [
     "python3",
 ]
 MIN_NODE_MAJOR = 20
+MERMAID_CLI_PACKAGE = "@mermaid-js/mermaid-cli"
 DEFAULT_RETRY_ATTEMPTS = 4
 DEFAULT_RETRY_INITIAL_DELAY_SEC = 1.5
 PACKAGE_NAMES: Dict[str, Dict[str, str]] = {
@@ -1742,6 +1749,12 @@ def build_diagram_agent_env_rendered(
         source_data.get("DIAGRAM_AGENT_D2_PATH"),
         "d2",
     )
+    puppeteer_cache_dir = first_meaningful_value(
+        external_env.get("PUPPETEER_CACHE_DIR"),
+        existing_env.get("PUPPETEER_CACHE_DIR"),
+        source_data.get("PUPPETEER_CACHE_DIR"),
+        str(DEFAULT_DIAGRAM_PUPPETEER_CACHE_DIR),
+    )
     default_format = first_meaningful_value(
         external_env.get("DIAGRAM_AGENT_DEFAULT_FORMAT"),
         existing_env.get("DIAGRAM_AGENT_DEFAULT_FORMAT"),
@@ -1804,6 +1817,8 @@ def build_diagram_agent_env_rendered(
         "DIAGRAM_AGENT_MAX_TOOL_ROUNDS": max_tool_rounds or "6",
         "DIAGRAM_AGENT_MMDC_PATH": mmdc_path or "mmdc",
         "DIAGRAM_AGENT_D2_PATH": d2_path or "d2",
+        "PUPPETEER_CACHE_DIR": puppeteer_cache_dir
+        or str(DEFAULT_DIAGRAM_PUPPETEER_CACHE_DIR),
         "DIAGRAM_AGENT_DEFAULT_FORMAT": default_format or "svg",
         "DIAGRAM_AGENT_DEFAULT_THEME": default_theme or "default",
         "DIAGRAM_AGENT_MERMAID_BG": mermaid_bg or "white",
@@ -3465,6 +3480,92 @@ def current_service_user() -> str:
     return os.getenv("SUDO_USER") or os.getenv("USER") or getpass.getuser()
 
 
+def current_service_home() -> Path:
+    service_user = current_service_user()
+    if pwd is not None:
+        try:
+            return Path(pwd.getpwnam(service_user).pw_dir)
+        except KeyError:
+            pass
+    return Path.home()
+
+
+def ensure_diagram_renderer_dependencies() -> None:
+    if not is_linux():
+        raise BootstrapError("Diagram renderer setup currently targets Linux VMs only.")
+
+    ensure_node_toolchain()
+    if shutil.which("mmdc") is None:
+        log(
+            "Installing Mermaid CLI globally because the diagram agent depends on mmdc."
+        )
+        run_with_retry(
+            ["npm", "install", "-g", MERMAID_CLI_PACKAGE],
+            use_sudo=True,
+        )
+        if shutil.which("mmdc") is None:
+            raise BootstrapError("Mermaid CLI (mmdc) is still unavailable after install.")
+
+    service_user = current_service_user()
+    service_home = current_service_home()
+    cache_dir = DEFAULT_DIAGRAM_PUPPETEER_CACHE_DIR
+    run(
+        [
+            "install",
+            "-d",
+            "-m",
+            "755",
+            "-o",
+            service_user,
+            "-g",
+            service_user,
+            str(cache_dir),
+        ],
+        use_sudo=True,
+    )
+
+    existing_browser = any(
+        path.is_file() and "chrome" in path.name.lower() for path in cache_dir.rglob("*")
+    )
+    if not existing_browser:
+        log(
+            "Installing Puppeteer-managed Chrome runtime for Mermaid rendering."
+        )
+        if shutil.which("runuser") is None:
+            raise BootstrapError(
+                "runuser is required to install the Mermaid browser runtime as the service user."
+            )
+        run_with_retry(
+            [
+                "runuser",
+                "-u",
+                service_user,
+                "--",
+                "env",
+                "HOME={0}".format(service_home),
+                "PUPPETEER_CACHE_DIR={0}".format(cache_dir),
+                "npx",
+                "--yes",
+                "puppeteer",
+                "browsers",
+                "install",
+                "chrome",
+            ],
+            use_sudo=True,
+        )
+    else:
+        log(
+            "Puppeteer Chrome runtime already present for Mermaid rendering at {0}".format(
+                cache_dir
+            )
+        )
+
+    if shutil.which("d2") is None:
+        log(
+            "Warning: d2 is not currently installed. Mermaid and Excalidraw will work, but D2 diagrams will remain unavailable until d2 is installed."
+        )
+
+
 def install_systemd_units(
     template_dir: Path,
     *,
@@ -3515,6 +3616,20 @@ def install_systemd_units(
             "-g",
             service_user,
             str(DEFAULT_WHATSAPP_AUTH_DIR),
+        ],
+        use_sudo=True,
+    )
+    run(
+        [
+            "install",
+            "-d",
+            "-m",
+            "755",
+            "-o",
+            service_user,
+            "-g",
+            service_user,
+            str(DEFAULT_DIAGRAM_PUPPETEER_CACHE_DIR),
         ],
         use_sudo=True,
     )
@@ -4190,6 +4305,13 @@ def setup_whatsapp_bridge(bridge_dir: Path) -> None:
         raise BootstrapError("This bootstrap flow currently targets Linux VMs only.")
 
     install_whatsapp_bridge_dependencies(bridge_dir)
+
+
+def setup_diagram_renderers() -> None:
+    if not is_linux():
+        raise BootstrapError("This bootstrap flow currently targets Linux VMs only.")
+
+    ensure_diagram_renderer_dependencies()
 
 
 def resolve_memory_repo_dir(
@@ -4903,6 +5025,7 @@ def bootstrap(
             memory_repo_ref=memory_repo_ref,
         )
     setup_whatsapp_bridge(bridge_dir)
+    setup_diagram_renderers()
     if not skip_edge and edge_setup_script is not None and gateway_env_path is not None:
         setup_vm_edge(
             edge_setup_script,

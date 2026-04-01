@@ -32,7 +32,13 @@ from .internal_llm import (
     modify_diagram,
     validate_diagram_render,
 )
-from .renderers import RenderError, render_d2, render_excalidraw, render_mermaid
+from .renderers import (
+    RenderError,
+    explain_render_error,
+    render_d2,
+    render_excalidraw,
+    render_mermaid,
+)
 from .skills import build_skills_context, discover_skills
 
 logger = logging.getLogger(__name__)
@@ -95,6 +101,11 @@ class DiagramWorkflowState(TypedDict, total=False):
     analyzed: bool
     rendered: bool
     finalized: bool
+
+
+def _normalize_output_format(value: str | None) -> str:
+    normalized = str(value or "").strip().lower()
+    return "png" if normalized == "png" else "svg"
 
 
 def _result_error(
@@ -339,7 +350,7 @@ def _build_graph(cfg: DiagramAgentConfig, ctx: _GraphCtx):
             return {
                 **bump,
                 "render_ok": False,
-                "render_error": str(exc),
+                "render_error": explain_render_error(exc),
                 "rendered": True,
             }
         except Exception as exc:
@@ -518,9 +529,12 @@ def _build_graph(cfg: DiagramAgentConfig, ctx: _GraphCtx):
                     )
                 )
 
-            # Source definition artifact
+        if definition:
             source_ext = {"mermaid": "mmd", "d2": "d2", "excalidraw": "excalidraw"}.get(
                 renderer, "txt"
+            )
+            source_mime = (
+                "application/json" if renderer == "excalidraw" else "text/plain"
             )
             source_path = task_artifact_dir / f"diagram_source.{source_ext}"
             source_path.write_text(definition, encoding="utf-8")
@@ -528,7 +542,7 @@ def _build_graph(cfg: DiagramAgentConfig, ctx: _GraphCtx):
                 agent._artifact_manifest(
                     task_id=task.task_id,
                     path=source_path,
-                    mime="text/plain",
+                    mime=source_mime,
                     kind="output",
                     audience="supporting",
                 )
@@ -684,7 +698,7 @@ async def run_diagram_langgraph(*, agent: Any, task: TaskEnvelope) -> AgentResul
     # Extract input
     desc = task.input.get("description", "") or task.input.get("query", "")
     preferred_renderer = task.input.get("preferred_renderer")
-    output_format = task.input.get("output_format", "svg")
+    output_format = _normalize_output_format(task.input.get("output_format"))
     title = task.input.get("title", "")
     context = task.input.get("context", "")
 

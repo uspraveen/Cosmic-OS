@@ -34,7 +34,13 @@ from .internal_llm import (
     regenerate_diagram_with_feedback,
     validate_diagram_render,
 )
-from .renderers import RenderError, render_d2, render_excalidraw, render_mermaid
+from .renderers import (
+    RenderError,
+    explain_render_error,
+    render_d2,
+    render_excalidraw,
+    render_mermaid,
+)
 from .skills import discover_skills
 
 logger = logging.getLogger(__name__)
@@ -180,6 +186,11 @@ class DiagramAgent(AgentRuntime):
 
     # ── Direct Handlers (fallback when LangGraph unavailable) ─────────
 
+    @staticmethod
+    def _normalize_output_format(value: str | None) -> str:
+        normalized = str(value or "").strip().lower()
+        return "png" if normalized == "png" else "svg"
+
     async def handle_diagram_create(self, task: TaskEnvelope) -> AgentResult:
         """Direct handler for diagram.create."""
         desc = task.input.get("description", "") or task.input.get("query", "")
@@ -197,7 +208,7 @@ class DiagramAgent(AgentRuntime):
             )
 
         preferred = task.input.get("preferred_renderer")
-        output_format = task.input.get("output_format", "svg")
+        output_format = self._normalize_output_format(task.input.get("output_format"))
 
         # Skills context for LLM
         skills = discover_skills()
@@ -304,7 +315,9 @@ class DiagramAgent(AgentRuntime):
             definition=llm_result.get("definition", ""),
             diagram_type="modified",
             title=f"Modified: {llm_result.get('changes', '')[:80]}",
-            output_format=task.input.get("output_format", "svg"),
+            output_format=self._normalize_output_format(
+                task.input.get("output_format")
+            ),
         )
 
     async def handle_diagram_recall_session(self, task: TaskEnvelope) -> AgentResult:
@@ -399,8 +412,8 @@ class DiagramAgent(AgentRuntime):
             render_ok = True
             content = result.get("content", b"")
         except RenderError as exc:
-            render_error = str(exc)
-            logger.warning("diagram.render_failed: %s", exc)
+            render_error = explain_render_error(exc)
+            logger.warning("diagram.render_failed: %s", render_error)
 
         # ── Visual validation loop ────────────────────────────────────
         validation_pass = True
@@ -495,8 +508,26 @@ class DiagramAgent(AgentRuntime):
                     pass  # Keep last good render
 
         artifacts: list[ArtifactManifest] = []
+        if definition:
+            source_ext = {"mermaid": "mmd", "d2": "d2", "excalidraw": "excalidraw"}.get(
+                renderer, "txt"
+            )
+            source_mime = (
+                "application/json" if renderer == "excalidraw" else "text/plain"
+            )
+            source_path = task_artifact_dir / f"diagram_source.{source_ext}"
+            source_path.write_text(definition, encoding="utf-8")
+            artifacts.append(
+                self._artifact_manifest(
+                    task_id=task.task_id,
+                    path=source_path,
+                    mime=source_mime,
+                    kind="output",
+                    audience="supporting",
+                )
+            )
+
         if render_ok and content:
-            # Rendered output artifact
             if renderer == "excalidraw":
                 out_mime = "application/json"
             elif output_format == "png":
@@ -519,22 +550,6 @@ class DiagramAgent(AgentRuntime):
                         audience="deliverable",
                     )
                 )
-
-            # Source definition artifact
-            source_ext = {"mermaid": "mmd", "d2": "d2", "excalidraw": "excalidraw"}.get(
-                renderer, "txt"
-            )
-            source_path = task_artifact_dir / f"diagram_source.{source_ext}"
-            source_path.write_text(definition, encoding="utf-8")
-            artifacts.append(
-                self._artifact_manifest(
-                    task_id=task.task_id,
-                    path=source_path,
-                    mime="text/plain",
-                    kind="output",
-                    audience="supporting",
-                )
-            )
 
         # Save session
         try:
