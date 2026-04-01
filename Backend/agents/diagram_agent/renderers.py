@@ -68,6 +68,7 @@ async def render_mermaid(
     output_format: str = "svg",
     background: str = "white",
     theme: str = "default",
+    disable_sandbox: bool = False,
     output_path: Path | None = None,
 ) -> dict[str, Any]:
     """Render Mermaid definition to SVG/PNG via mmdc CLI.
@@ -94,6 +95,20 @@ async def render_mermaid(
             "-t",
             theme,
         ]
+        if disable_sandbox:
+            puppeteer_config_path = tmpdir_path / "puppeteer-config.json"
+            puppeteer_config_path.write_text(
+                json.dumps(
+                    {
+                        "args": [
+                            "--no-sandbox",
+                            "--disable-setuid-sandbox",
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cmd.extend(["-p", str(puppeteer_config_path)])
         if output_format == "png":
             cmd.extend(["-s", "2"])
 

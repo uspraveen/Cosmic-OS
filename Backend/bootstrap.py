@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import getpass
+import re
 import secrets
 import time
 from pathlib import Path
@@ -1773,6 +1774,12 @@ def build_diagram_agent_env_rendered(
         source_data.get("DIAGRAM_AGENT_MERMAID_BG"),
         "white",
     )
+    mermaid_disable_sandbox = first_meaningful_value(
+        external_env.get("DIAGRAM_AGENT_MERMAID_DISABLE_SANDBOX"),
+        existing_env.get("DIAGRAM_AGENT_MERMAID_DISABLE_SANDBOX"),
+        source_data.get("DIAGRAM_AGENT_MERMAID_DISABLE_SANDBOX"),
+        "true",
+    )
     d2_sketch = first_meaningful_value(
         external_env.get("DIAGRAM_AGENT_D2_SKETCH"),
         existing_env.get("DIAGRAM_AGENT_D2_SKETCH"),
@@ -1822,6 +1829,7 @@ def build_diagram_agent_env_rendered(
         "DIAGRAM_AGENT_DEFAULT_FORMAT": default_format or "svg",
         "DIAGRAM_AGENT_DEFAULT_THEME": default_theme or "default",
         "DIAGRAM_AGENT_MERMAID_BG": mermaid_bg or "white",
+        "DIAGRAM_AGENT_MERMAID_DISABLE_SANDBOX": mermaid_disable_sandbox or "true",
         "DIAGRAM_AGENT_D2_SKETCH": d2_sketch or "false",
         "DIAGRAM_AGENT_D2_PAD": d2_pad or "100",
         "DIAGRAM_AGENT_MAX_WIDTH_PX": max_width or "2400",
@@ -3490,6 +3498,77 @@ def current_service_home() -> Path:
     return Path.home()
 
 
+def _extract_missing_chrome_revision(stderr: str) -> Optional[str]:
+    match = re.search(r"Could not find Chrome \(ver\. ([^)]+)\)", str(stderr or ""))
+    if not match:
+        return None
+    return match.group(1).strip() or None
+
+
+def _run_mermaid_smoke(*, service_user: str, service_home: Path, cache_dir: Path) -> None:
+    if shutil.which("runuser") is None:
+        raise BootstrapError(
+            "runuser is required to validate Mermaid rendering as the service user."
+        )
+
+    smoke_script = (
+        'tmpdir="$(mktemp -d)"; '
+        'trap \'rm -rf "$tmpdir"\' EXIT; '
+        'cat >"$tmpdir/input.mmd" <<\'EOF_MMD\'\n'
+        "graph TD\n"
+        "A-->B\n"
+        "EOF_MMD\n"
+        'cat >"$tmpdir/puppeteer-config.json" <<\'EOF_PUPPETEER\'\n'
+        '{"args":["--no-sandbox","--disable-setuid-sandbox"]}\n'
+        "EOF_PUPPETEER\n"
+        'mmdc -i "$tmpdir/input.mmd" -o "$tmpdir/output.svg" -p "$tmpdir/puppeteer-config.json"; '
+        'test -s "$tmpdir/output.svg"'
+    )
+    run(
+        [
+            "runuser",
+            "-u",
+            service_user,
+            "--",
+            "env",
+            "HOME={0}".format(service_home),
+            "PUPPETEER_CACHE_DIR={0}".format(cache_dir),
+            "bash",
+            "-lc",
+            smoke_script,
+        ],
+        use_sudo=True,
+        capture_output=True,
+    )
+
+
+def _install_mermaid_browser_revision(
+    *, service_user: str, service_home: Path, cache_dir: Path, revision: str
+) -> None:
+    if shutil.which("runuser") is None:
+        raise BootstrapError(
+            "runuser is required to install the Mermaid browser runtime as the service user."
+        )
+    run_with_retry(
+        [
+            "runuser",
+            "-u",
+            service_user,
+            "--",
+            "env",
+            "HOME={0}".format(service_home),
+            "PUPPETEER_CACHE_DIR={0}".format(cache_dir),
+            "npx",
+            "--yes",
+            "puppeteer",
+            "browsers",
+            "install",
+            "chrome-headless-shell@{0}".format(revision),
+        ],
+        use_sudo=True,
+    )
+
+
 def ensure_diagram_renderer_dependencies() -> None:
     if not is_linux():
         raise BootstrapError("Diagram renderer setup currently targets Linux VMs only.")
@@ -3524,41 +3603,53 @@ def ensure_diagram_renderer_dependencies() -> None:
         use_sudo=True,
     )
 
-    existing_browser = any(
-        path.is_file() and "chrome" in path.name.lower() for path in cache_dir.rglob("*")
-    )
-    if not existing_browser:
-        log(
-            "Installing Puppeteer-managed Chrome runtime for Mermaid rendering."
+    try:
+        _run_mermaid_smoke(
+            service_user=service_user,
+            service_home=service_home,
+            cache_dir=cache_dir,
         )
-        if shutil.which("runuser") is None:
+        log("Verified Mermaid renderer runtime via mmdc smoke test.")
+    except subprocess.CalledProcessError as exc:
+        combined_output = "\n".join(
+            part.strip() for part in (exc.stdout or "", exc.stderr or "") if part.strip()
+        )
+        required_revision = _extract_missing_chrome_revision(combined_output)
+        if required_revision is None:
             raise BootstrapError(
-                "runuser is required to install the Mermaid browser runtime as the service user."
-            )
-        run_with_retry(
-            [
-                "runuser",
-                "-u",
-                service_user,
-                "--",
-                "env",
-                "HOME={0}".format(service_home),
-                "PUPPETEER_CACHE_DIR={0}".format(cache_dir),
-                "npx",
-                "--yes",
-                "puppeteer",
-                "browsers",
-                "install",
-                "chrome",
-            ],
-            use_sudo=True,
-        )
-    else:
+                "Mermaid renderer smoke failed after bootstrap: {0}".format(
+                    combined_output or str(exc)
+                )
+            ) from exc
         log(
-            "Puppeteer Chrome runtime already present for Mermaid rendering at {0}".format(
-                cache_dir
+            "Installing Mermaid browser runtime required by mmdc: chrome-headless-shell@{0}".format(
+                required_revision
             )
         )
+        _install_mermaid_browser_revision(
+            service_user=service_user,
+            service_home=service_home,
+            cache_dir=cache_dir,
+            revision=required_revision,
+        )
+        try:
+            _run_mermaid_smoke(
+                service_user=service_user,
+                service_home=service_home,
+                cache_dir=cache_dir,
+            )
+            log("Verified Mermaid renderer runtime via mmdc smoke test.")
+        except subprocess.CalledProcessError as retry_exc:
+            retry_output = "\n".join(
+                part.strip()
+                for part in (retry_exc.stdout or "", retry_exc.stderr or "")
+                if part.strip()
+            )
+            raise BootstrapError(
+                "Mermaid renderer still failed after installing the required browser runtime: {0}".format(
+                    retry_output or str(retry_exc)
+                )
+            ) from retry_exc
 
     if shutil.which("d2") is None:
         log(

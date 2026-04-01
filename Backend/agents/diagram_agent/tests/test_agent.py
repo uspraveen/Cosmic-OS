@@ -24,6 +24,7 @@ class TestConfig:
         assert cfg.diagram_use_langgraph is True
         assert cfg.diagram_max_tool_rounds == 6
         assert cfg.default_format == "svg"
+        assert cfg.mermaid_disable_sandbox is True
 
     def test_config_from_env(self):
         from agents.diagram_agent.config import DiagramAgentConfig

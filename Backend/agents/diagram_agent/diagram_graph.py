@@ -314,6 +314,7 @@ def _build_graph(cfg: DiagramAgentConfig, ctx: _GraphCtx):
                     output_format=output_format,
                     background=cfg.mermaid_background,
                     theme=cfg.default_theme,
+                    disable_sandbox=cfg.mermaid_disable_sandbox,
                     output_path=out_path,
                 )
             elif renderer == "d2":

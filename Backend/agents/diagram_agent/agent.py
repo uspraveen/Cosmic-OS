@@ -390,6 +390,7 @@ class DiagramAgent(AgentRuntime):
                     output_format=output_format,
                     background=self._cfg.mermaid_background,
                     theme=self._cfg.default_theme,
+                    disable_sandbox=self._cfg.mermaid_disable_sandbox,
                     output_path=out_path,
                 )
             elif renderer == "d2":
@@ -486,6 +487,7 @@ class DiagramAgent(AgentRuntime):
                             output_format=output_format,
                             background=self._cfg.mermaid_background,
                             theme=self._cfg.default_theme,
+                            disable_sandbox=self._cfg.mermaid_disable_sandbox,
                             output_path=out_path,
                         )
                     elif renderer == "d2":

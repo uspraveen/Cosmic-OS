@@ -79,6 +79,7 @@ class DiagramAgentConfig:
     default_format: str = "svg"
     default_theme: str = "default"
     mermaid_background: str = "white"
+    mermaid_disable_sandbox: bool = True
     d2_sketch: bool = False
     d2_pad: int = 100
     excalidraw_theme: str = "hand-drawn"
@@ -122,6 +123,9 @@ class DiagramAgentConfig:
             or "default",
             mermaid_background=os.getenv("DIAGRAM_AGENT_MERMAID_BG", "white").strip()
             or "white",
+            mermaid_disable_sandbox=_env_bool(
+                "DIAGRAM_AGENT_MERMAID_DISABLE_SANDBOX", True
+            ),
             d2_sketch=_env_bool("DIAGRAM_AGENT_D2_SKETCH", False),
             d2_pad=max(0, _env_int("DIAGRAM_AGENT_D2_PAD", 100)),
             output_max_width_px=max(200, _env_int("DIAGRAM_AGENT_MAX_WIDTH_PX", 2400)),
