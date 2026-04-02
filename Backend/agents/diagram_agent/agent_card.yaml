@@ -13,18 +13,30 @@ intents:
     input_schema: schemas/intents/diagram.create.input.json
     output_schema: schemas/intents/diagram.create.output.json
     timeout_sec: 120
+    usage_hints:
+      - Use this for rendered diagram requests such as Mermaid, D2, or Excalidraw outputs.
+      - Pass a compact diagram brief plus bounded supporting context; do not dump a long raw transcript or whole document into the payload.
+      - If the user uploads a large PDF or document and wants one diagram from it, use docs parsing/retrieval first and then delegate a compact extracted brief here.
+      - If the user explicitly asks for Mermaid, D2, or Excalidraw, pass that renderer preference through naturally.
+      - Prefer SVG by default unless the downstream consumer explicitly needs PNG.
 
   - name: diagram.modify
     description: Modify an existing diagram definition (add node, change flow, restyle)
     input_schema: schemas/intents/diagram.modify.input.json
     output_schema: schemas/intents/diagram.modify.output.json
     timeout_sec: 120
+    usage_hints:
+      - Use this when an existing diagram/source artifact should be updated instead of recreated from scratch.
+      - Reuse prior COSMIC-produced diagram artifacts when available rather than pasting large source blobs into prompt text.
+      - Pass a compact modification brief that states what should change and what should remain stable.
 
   - name: diagram.recall_session
     description: Recall prior diagram generation operations from the session ledger
     input_schema: schemas/intents/diagram.recall_session.input.json
     output_schema: schemas/intents/diagram.recall_session.output.json
     timeout_sec: 30
+    usage_hints:
+      - Recall prior diagram-agent work when you need exact reuse of an earlier diagram result, source definition, or renderer choice.
 
 artifact_types:
   - diagram_svg

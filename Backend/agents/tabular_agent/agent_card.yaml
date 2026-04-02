@@ -16,6 +16,9 @@ intents:
   - name: tabular.parse_bundle
     description: Parse one or more spreadsheet artifacts into canonical tabular bundles.
     timeout_sec: 300
+    usage_hints:
+      - Use this first for uploaded spreadsheets so later tabular work can operate on the canonical workbook bundle instead of raw files.
+      - Prefer parsing once and reusing the resulting bundle for browse, schema, preview, query, export, and reasoning steps.
   - name: tabular.browse_workbook
     description: List workbooks and handles for a tabular bundle.
     timeout_sec: 60

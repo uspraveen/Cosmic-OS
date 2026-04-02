@@ -11,6 +11,9 @@ intents:
     input_schema: schemas/intents/docs.parse_bundle.input.json
     output_schema: schemas/intents/docs.parse_bundle.output.json
     timeout_sec: 240
+    usage_hints:
+      - Use this once per uploaded document set to create the canonical parsed bundle before deeper document retrieval or downstream specialist work.
+      - Prefer passing uploaded source artifacts here instead of asking other specialists to read raw PDFs or DOCX files directly.
   - name: docs.browse_bundle
     description: Browse parsed-bundle indexes such as documents, sections, pages, slides, chunks, tables, figures, or asset metadata without loading full content.
     input_schema: schemas/intents/docs.browse_bundle.input.json
