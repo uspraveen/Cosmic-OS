@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "source_pptx_path": { "type": "string", "description": "Path to the existing PPTX to edit" },
+    "edit_request": { "type": "string", "description": "Natural language description of the edits to make" },
+    "source_artifacts": { "type": "array", "items": { "type": "object" }, "description": "Optional source artifacts (PDFs, images, docs-parser bundles) to reuse during edits" }
+  },
+  "required": ["source_pptx_path", "edit_request"]
+}

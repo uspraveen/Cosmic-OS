@@ -110,6 +110,10 @@ DIAGRAM_AGENT_ENV_NAME = "diagram-agent.env"
 DIAGRAM_AGENT_SERVICE_NAME = "cosmic-diagram-agent.service"
 DIAGRAM_AGENT_ID = "cosmic/diagram-agent:1.0.0"
 DIAGRAM_AGENT_DEFAULT_INSTANCE_ID = "diagram-agent-1"
+SLIDE_AGENT_ENV_NAME = "slide-agent.env"
+SLIDE_AGENT_SERVICE_NAME = "cosmic-slide-agent.service"
+SLIDE_AGENT_ID = "cosmic/slide-agent:1.0.0"
+SLIDE_AGENT_DEFAULT_INSTANCE_ID = "slide-agent-1"
 CRITICAL_VENV_IMPORT_CHECKS: Tuple[Tuple[str, str], ...] = (
     ("docling", "docs parser runtime"),
 )
@@ -123,6 +127,7 @@ CORE_BACKEND_SERVICE_UNITS = (
     "cosmic-tabular-agent.service",
     "cosmic-calendar-agent.service",
     "cosmic-diagram-agent.service",
+    "cosmic-slide-agent.service",
     "cosmic-whatsapp-bridge.service",
 )
 DEFAULT_SUPABASE_URL = "https://hluenippcdiejenmteen.supabase.co"
@@ -1861,6 +1866,212 @@ def read_diagram_agent_system_env(
     return parse_env_text(read_text_file(env_path, use_sudo=True))
 
 
+def slide_agent_repo_dir() -> Path:
+    return BACKEND_ROOT / "agents" / "slide_agent"
+
+
+def slide_agent_repo_env_path() -> Path:
+    return slide_agent_repo_dir() / "agent.env"
+
+
+def slide_agent_repo_env_example_path() -> Path:
+    return slide_agent_repo_dir() / "agent.env.example"
+
+
+def slide_agent_system_env_path(system_env_dir: Optional[Path] = None) -> Path:
+    return (
+        (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "agents" / SLIDE_AGENT_ENV_NAME
+    )
+
+
+def resolve_slide_agent_env_source() -> Path:
+    repo_env = slide_agent_repo_env_path()
+    if repo_env.exists():
+        return repo_env
+    return slide_agent_repo_env_example_path()
+
+
+def build_slide_agent_env_rendered(
+    *,
+    signing_secret: str,
+    shared_internal_token: str,
+    system_env_dir: Optional[Path] = None,
+    existing_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+    external_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Tuple[Path, str, Dict[str, str]]:
+    source_path = resolve_slide_agent_env_source()
+    source_raw = source_path.read_text(encoding="utf-8")
+    source_data = parse_env_text(source_raw)
+    existing_env = (existing_env_by_name or {}).get(SLIDE_AGENT_ENV_NAME, {})
+    external_env = (external_env_by_name or {}).get(SLIDE_AGENT_ENV_NAME, {})
+
+    redis_url = first_meaningful_value(
+        external_env.get("REDIS_URL"),
+        existing_env.get("REDIS_URL"),
+        source_data.get("REDIS_URL"),
+        "redis://127.0.0.1:6379/0",
+    )
+    gateway_url = first_meaningful_value(
+        external_env.get("GATEWAY_URL"),
+        existing_env.get("GATEWAY_URL"),
+        source_data.get("GATEWAY_URL"),
+        "http://127.0.0.1:8080",
+    )
+    mimo_api_key = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_MIMO_API_KEY"),
+        external_env.get("MIMO_API_KEY"),
+        existing_env.get("SLIDE_AGENT_MIMO_API_KEY"),
+        existing_env.get("MIMO_API_KEY"),
+        source_data.get("SLIDE_AGENT_MIMO_API_KEY"),
+        source_data.get("MIMO_API_KEY"),
+    )
+    mimo_base_url = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_MIMO_BASE_URL"),
+        external_env.get("MIMO_OPENAI_BASE_URL"),
+        existing_env.get("SLIDE_AGENT_MIMO_BASE_URL"),
+        existing_env.get("MIMO_OPENAI_BASE_URL"),
+        source_data.get("SLIDE_AGENT_MIMO_BASE_URL"),
+        source_data.get("MIMO_OPENAI_BASE_URL"),
+    )
+    mimo_model = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_MIMO_MODEL"),
+        existing_env.get("SLIDE_AGENT_MIMO_MODEL"),
+        source_data.get("SLIDE_AGENT_MIMO_MODEL"),
+        "gpt-5-mini",
+    )
+    mimo_timeout_sec = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_MIMO_TIMEOUT_SEC"),
+        existing_env.get("SLIDE_AGENT_MIMO_TIMEOUT_SEC"),
+        source_data.get("SLIDE_AGENT_MIMO_TIMEOUT_SEC"),
+        "120.0",
+    )
+    enable_internal_llm = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_ENABLE_INTERNAL_LLM"),
+        existing_env.get("SLIDE_AGENT_ENABLE_INTERNAL_LLM"),
+        source_data.get("SLIDE_AGENT_ENABLE_INTERNAL_LLM"),
+        "true",
+    )
+    use_langgraph = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_USE_LANGGRAPH"),
+        existing_env.get("SLIDE_AGENT_USE_LANGGRAPH"),
+        source_data.get("SLIDE_AGENT_USE_LANGGRAPH"),
+        "true",
+    )
+    max_tool_rounds = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_MAX_TOOL_ROUNDS"),
+        existing_env.get("SLIDE_AGENT_MAX_TOOL_ROUNDS"),
+        source_data.get("SLIDE_AGENT_MAX_TOOL_ROUNDS"),
+        "10",
+    )
+    max_doc_context_requests = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_MAX_DOC_CONTEXT_REQUESTS"),
+        existing_env.get("SLIDE_AGENT_MAX_DOC_CONTEXT_REQUESTS"),
+        source_data.get("SLIDE_AGENT_MAX_DOC_CONTEXT_REQUESTS"),
+        "2",
+    )
+    default_template = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_DEFAULT_TEMPLATE"),
+        existing_env.get("SLIDE_AGENT_DEFAULT_TEMPLATE"),
+        source_data.get("SLIDE_AGENT_DEFAULT_TEMPLATE"),
+        "corporate-dark",
+    )
+    libreoffice_path = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_LIBREOFFICE_PATH"),
+        existing_env.get("SLIDE_AGENT_LIBREOFFICE_PATH"),
+        source_data.get("SLIDE_AGENT_LIBREOFFICE_PATH"),
+        "soffice",
+    )
+    pdftoppm_path = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_PDFTOPPM_PATH"),
+        existing_env.get("SLIDE_AGENT_PDFTOPPM_PATH"),
+        source_data.get("SLIDE_AGENT_PDFTOPPM_PATH"),
+        "pdftoppm",
+    )
+    render_dpi = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_RENDER_DPI"),
+        existing_env.get("SLIDE_AGENT_RENDER_DPI"),
+        source_data.get("SLIDE_AGENT_RENDER_DPI"),
+        "200",
+    )
+    export_pdf = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_EXPORT_PDF"),
+        existing_env.get("SLIDE_AGENT_EXPORT_PDF"),
+        source_data.get("SLIDE_AGENT_EXPORT_PDF"),
+        "true",
+    )
+    max_slides = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_MAX_SLIDES"),
+        existing_env.get("SLIDE_AGENT_MAX_SLIDES"),
+        source_data.get("SLIDE_AGENT_MAX_SLIDES"),
+        "50",
+    )
+    max_validation_attempts = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_MAX_VALIDATION_ATTEMPTS"),
+        existing_env.get("SLIDE_AGENT_MAX_VALIDATION_ATTEMPTS"),
+        source_data.get("SLIDE_AGENT_MAX_VALIDATION_ATTEMPTS"),
+        "2",
+    )
+    docs_parser_agent_id = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_DOCS_PARSER_AGENT_ID"),
+        existing_env.get("SLIDE_AGENT_DOCS_PARSER_AGENT_ID"),
+        source_data.get("SLIDE_AGENT_DOCS_PARSER_AGENT_ID"),
+        DOCS_PARSER_AGENT_ID,
+    )
+    instance_id = first_meaningful_value(
+        external_env.get("INSTANCE_ID"),
+        existing_env.get("INSTANCE_ID"),
+        source_data.get("INSTANCE_ID"),
+        SLIDE_AGENT_DEFAULT_INSTANCE_ID,
+    )
+
+    overrides = {
+        "REDIS_URL": redis_url or "redis://127.0.0.1:6379/0",
+        "GATEWAY_URL": gateway_url or "http://127.0.0.1:8080",
+        "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
+        "AGENT_SECRET": signing_secret,
+        "INSTANCE_ID": instance_id or SLIDE_AGENT_DEFAULT_INSTANCE_ID,
+        "SLIDE_AGENT_MIMO_MODEL": mimo_model or "gpt-5-mini",
+        "SLIDE_AGENT_MIMO_TIMEOUT_SEC": mimo_timeout_sec or "120.0",
+        "SLIDE_AGENT_ENABLE_INTERNAL_LLM": enable_internal_llm or "true",
+        "SLIDE_AGENT_USE_LANGGRAPH": use_langgraph or "true",
+        "SLIDE_AGENT_MAX_TOOL_ROUNDS": max_tool_rounds or "10",
+        "SLIDE_AGENT_MAX_DOC_CONTEXT_REQUESTS": max_doc_context_requests or "2",
+        "SLIDE_AGENT_DEFAULT_TEMPLATE": default_template or "corporate-dark",
+        "SLIDE_AGENT_LIBREOFFICE_PATH": libreoffice_path or "soffice",
+        "SLIDE_AGENT_PDFTOPPM_PATH": pdftoppm_path or "pdftoppm",
+        "SLIDE_AGENT_RENDER_DPI": render_dpi or "200",
+        "SLIDE_AGENT_EXPORT_PDF": export_pdf or "true",
+        "SLIDE_AGENT_MAX_SLIDES": max_slides or "50",
+        "SLIDE_AGENT_MAX_VALIDATION_ATTEMPTS": max_validation_attempts or "2",
+        "SLIDE_AGENT_DOCS_PARSER_AGENT_ID": docs_parser_agent_id
+        or DOCS_PARSER_AGENT_ID,
+    }
+    if mimo_api_key is not None:
+        overrides["SLIDE_AGENT_MIMO_API_KEY"] = mimo_api_key
+    if mimo_base_url is not None:
+        overrides["SLIDE_AGENT_MIMO_BASE_URL"] = mimo_base_url
+
+    rendered = render_env_with_overrides(source_raw, overrides)
+    rendered_data = parse_env_text(rendered)
+    return slide_agent_system_env_path(system_env_dir), rendered, rendered_data
+
+
+def slide_agent_is_configured(env_values: Dict[str, str]) -> bool:
+    return (
+        meaningful_env_value(env_values.get("SLIDE_AGENT_MIMO_API_KEY")) is not None
+        or meaningful_env_value(env_values.get("MIMO_API_KEY")) is not None
+    )
+
+
+def read_slide_agent_system_env(
+    system_env_dir: Optional[Path] = None,
+) -> Dict[str, str]:
+    env_path = slide_agent_system_env_path(system_env_dir)
+    if not env_path.exists():
+        return {}
+    return parse_env_text(read_text_file(env_path, use_sudo=True))
+
+
 def extract_host_from_url(value: Optional[str]) -> Optional[str]:
     normalized = meaningful_env_value(value)
     if normalized is None:
@@ -3259,6 +3470,25 @@ def materialize_bootstrap_env_files(
             diagram_repo_path
         )
     )
+
+    slide_repo_path = slide_agent_repo_env_path()
+    _slide_dest_path, slide_rendered, _slide_env = build_slide_agent_env_rendered(
+        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+        shared_internal_token=overrides_by_dest["gateway.env"][
+            "GATEWAY_INTERNAL_TOKEN"
+        ],
+        system_env_dir=system_env_dir,
+        existing_env_by_name=existing_env_by_name,
+        external_env_by_name=external_env_by_name,
+    )
+    slide_repo_path.parent.mkdir(parents=True, exist_ok=True)
+    slide_repo_path.write_text(slide_rendered, encoding="utf-8")
+    written.append(slide_repo_path)
+    log(
+        "Materialized repo env file from bootstrap inputs: {0}".format(
+            slide_repo_path
+        )
+    )
     return written
 
 
@@ -3447,6 +3677,21 @@ def install_service_env_files(
         installed.append(diagram_dest_path)
         log("Installed system env file: {0}".format(diagram_dest_path))
 
+    slide_dest_path, slide_rendered, _slide_env = build_slide_agent_env_rendered(
+        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+        shared_internal_token=overrides_by_dest["gateway.env"][
+            "GATEWAY_INTERNAL_TOKEN"
+        ],
+        system_env_dir=system_env_dir,
+    )
+    run(["install", "-d", "-m", "755", str(slide_dest_path.parent)], use_sudo=True)
+    if slide_dest_path.exists():
+        log("System env file already exists: {0}".format(slide_dest_path))
+    else:
+        install_text_file(slide_dest_path, slide_rendered, mode="600", use_sudo=True)
+        installed.append(slide_dest_path)
+        log("Installed system env file: {0}".format(slide_dest_path))
+
     return installed
 
 
@@ -3505,7 +3750,9 @@ def _extract_missing_chrome_revision(stderr: str) -> Optional[str]:
     return match.group(1).strip() or None
 
 
-def _run_mermaid_smoke(*, service_user: str, service_home: Path, cache_dir: Path) -> None:
+def _run_mermaid_smoke(
+    *, service_user: str, service_home: Path, cache_dir: Path
+) -> None:
     if shutil.which("runuser") is None:
         raise BootstrapError(
             "runuser is required to validate Mermaid rendering as the service user."
@@ -3513,12 +3760,12 @@ def _run_mermaid_smoke(*, service_user: str, service_home: Path, cache_dir: Path
 
     smoke_script = (
         'tmpdir="$(mktemp -d)"; '
-        'trap \'rm -rf "$tmpdir"\' EXIT; '
-        'cat >"$tmpdir/input.mmd" <<\'EOF_MMD\'\n'
+        "trap 'rm -rf \"$tmpdir\"' EXIT; "
+        "cat >\"$tmpdir/input.mmd\" <<'EOF_MMD'\n"
         "graph TD\n"
         "A-->B\n"
         "EOF_MMD\n"
-        'cat >"$tmpdir/puppeteer-config.json" <<\'EOF_PUPPETEER\'\n'
+        "cat >\"$tmpdir/puppeteer-config.json\" <<'EOF_PUPPETEER'\n"
         '{"args":["--no-sandbox","--disable-setuid-sandbox"]}\n'
         "EOF_PUPPETEER\n"
         'mmdc -i "$tmpdir/input.mmd" -o "$tmpdir/output.svg" -p "$tmpdir/puppeteer-config.json"; '
@@ -3583,7 +3830,9 @@ def ensure_diagram_renderer_dependencies() -> None:
             use_sudo=True,
         )
         if shutil.which("mmdc") is None:
-            raise BootstrapError("Mermaid CLI (mmdc) is still unavailable after install.")
+            raise BootstrapError(
+                "Mermaid CLI (mmdc) is still unavailable after install."
+            )
 
     service_user = current_service_user()
     service_home = current_service_home()
@@ -3612,7 +3861,9 @@ def ensure_diagram_renderer_dependencies() -> None:
         log("Verified Mermaid renderer runtime via mmdc smoke test.")
     except subprocess.CalledProcessError as exc:
         combined_output = "\n".join(
-            part.strip() for part in (exc.stdout or "", exc.stderr or "") if part.strip()
+            part.strip()
+            for part in (exc.stdout or "", exc.stderr or "")
+            if part.strip()
         )
         required_revision = _extract_missing_chrome_revision(combined_output)
         if required_revision is None:
@@ -3896,6 +4147,16 @@ def doctor(
     diagram_system_data = {}
     if is_linux() and diagram_system_path.exists():
         diagram_system_data = read_diagram_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+    slide_source = resolve_slide_agent_env_source()
+    slide_source_data = (
+        parse_env_text(slide_source.read_text(encoding="utf-8"))
+        if slide_source.exists()
+        else {}
+    )
+    slide_system_path = slide_agent_system_env_path(DEFAULT_SYSTEM_ENV_DIR)
+    slide_system_data = {}
+    if is_linux() and slide_system_path.exists():
+        slide_system_data = read_slide_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
     print(
         "  firecrawl env src  : {0}".format(
             firecrawl_source if firecrawl_source.exists() else "missing"
@@ -3924,6 +4185,11 @@ def doctor(
     print(
         "  diagram agent env src: {0}".format(
             diagram_source if diagram_source.exists() else "missing"
+        )
+    )
+    print(
+        "  slide agent env src: {0}".format(
+            slide_source if slide_source.exists() else "missing"
         )
     )
     if is_linux():
@@ -3959,6 +4225,11 @@ def doctor(
                 diagram_system_path if diagram_system_path.exists() else "missing"
             )
         )
+        print(
+            "  slide agent system env: {0}".format(
+                slide_system_path if slide_system_path.exists() else "missing"
+            )
+        )
     firecrawl_enabled = firecrawl_agent_is_configured(
         firecrawl_system_data if firecrawl_system_data else firecrawl_source_data
     )
@@ -3974,11 +4245,15 @@ def doctor(
     diagram_enabled = diagram_agent_is_configured(
         diagram_system_data if diagram_system_data else diagram_source_data
     )
+    slide_enabled = slide_agent_is_configured(
+        slide_system_data if slide_system_data else slide_source_data
+    )
     print("  firecrawl enabled  : {0}".format("yes" if firecrawl_enabled else "no"))
     print("  x search enabled   : {0}".format("yes" if x_twitter_enabled else "no"))
     print("  email agent enabled: {0}".format("yes" if email_enabled else "no"))
     print("  image agent enabled: {0}".format("yes" if image_enabled else "no"))
     print("  diagram agent enabled: {0}".format("yes" if diagram_enabled else "no"))
+    print("  slide agent enabled: {0}".format("yes" if slide_enabled else "no"))
     if is_linux() and shutil.which("systemctl") is not None:
         neo4j_status = run(
             ["systemctl", "is-active", DEFAULT_NEO4J_SERVICE_NAME],
@@ -4349,6 +4624,34 @@ def sync_service_env_files(
         )
         if changed_keys:
             synced.append(diagram_dest_path)
+    slide_dest_path = slide_agent_system_env_path(system_env_dir)
+    if slide_dest_path.exists():
+        slide_existing_by_name: Dict[str, Dict[str, str]] = {
+            SLIDE_AGENT_ENV_NAME: parse_env_text(
+                read_text_file(slide_dest_path, use_sudo=True)
+            ),
+        }
+        _slide_dest_path, slide_rendered, _slide_env = (
+            build_slide_agent_env_rendered(
+                signing_secret=overrides_by_dest["gateway.env"][
+                    "GATEWAY_SIGNING_SECRET"
+                ],
+                shared_internal_token=overrides_by_dest["gateway.env"][
+                    "GATEWAY_INTERNAL_TOKEN"
+                ],
+                system_env_dir=system_env_dir,
+                existing_env_by_name=slide_existing_by_name,
+            )
+        )
+        changed_keys = sync_env_file(
+            slide_dest_path,
+            source_raw=slide_rendered,
+            create_missing=False,
+            use_sudo=True,
+            mode="600",
+        )
+        if changed_keys:
+            synced.append(slide_dest_path)
     return synced
 
 
@@ -4897,6 +5200,7 @@ def run_post_provision_health_checks(
     include_email_agent: bool = False,
     include_image_generator_agent: bool = False,
     include_diagram_agent: bool = False,
+    include_slide_agent: bool = False,
     timeout_sec: float = DEFAULT_POST_PROVISION_TIMEOUT_SEC,
     poll_interval_sec: float = DEFAULT_POST_PROVISION_POLL_INTERVAL_SEC,
 ) -> None:
@@ -5004,6 +5308,18 @@ def run_post_provision_health_checks(
         )
         wait_for_orchestrator_agent_ready(
             DIAGRAM_AGENT_ID,
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+
+    if include_slide_agent:
+        wait_for_systemd_unit_active(
+            SLIDE_AGENT_SERVICE_NAME,
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+        wait_for_orchestrator_agent_ready(
+            SLIDE_AGENT_ID,
             timeout_sec=timeout_sec,
             poll_interval_sec=poll_interval_sec,
         )
@@ -5266,6 +5582,16 @@ def provision_vm(
         log(
             "Diagram agent env is not configured; bootstrap will install the unit but skip enabling the diagram agent service."
         )
+    slide_env = read_slide_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+    enable_slide_agent = slide_agent_is_configured(slide_env)
+    if enable_slide_agent:
+        log(
+            "Slide agent env is configured; bootstrap will enable and start the slide agent service."
+        )
+    else:
+        log(
+            "Slide agent env is not configured; bootstrap will install the unit but skip enabling the slide agent service."
+        )
     installed = install_systemd_units(
         systemd_template_dir,
         enable_units=enable_units,
@@ -5305,6 +5631,11 @@ def provision_vm(
                 if enable_units and enable_diagram_agent
                 else []
             )
+            + (
+                [SLIDE_AGENT_SERVICE_NAME]
+                if enable_units and enable_slide_agent
+                else []
+            )
         ),
         include_memory_env=enable_memory,
     )
@@ -5317,6 +5648,7 @@ def provision_vm(
             include_email_agent=enable_email_agent,
             include_image_generator_agent=enable_image_generator_agent,
             include_diagram_agent=enable_diagram_agent,
+            include_slide_agent=enable_slide_agent,
         )
 
     print("")
@@ -5597,6 +5929,8 @@ def main() -> int:
             )
             diagram_env = read_diagram_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
             enable_diagram_agent = diagram_agent_is_configured(diagram_env)
+            slide_env = read_slide_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+            enable_slide_agent = slide_agent_is_configured(slide_env)
             installed = install_systemd_units(
                 systemd_template_dir,
                 enable_units=bool(getattr(args, "enable", False)),
@@ -5644,6 +5978,11 @@ def main() -> int:
                         if enable_diagram_agent and bool(getattr(args, "enable", False))
                         else []
                     )
+                    + (
+                        [SLIDE_AGENT_SERVICE_NAME]
+                        if enable_slide_agent and bool(getattr(args, "enable", False))
+                        else []
+                    )
                 ),
                 include_memory_env=memory_repo_dir is not None,
             )
@@ -5658,6 +5997,7 @@ def main() -> int:
                     include_email_agent=enable_email_agent,
                     include_image_generator_agent=enable_image_generator_agent,
                     include_diagram_agent=enable_diagram_agent,
+                    include_slide_agent=enable_slide_agent,
                 )
             print("Installed systemd units:")
             for unit_name in installed:

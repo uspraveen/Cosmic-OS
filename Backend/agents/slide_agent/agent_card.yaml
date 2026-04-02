@@ -1,0 +1,91 @@
+# agents/slide_agent/agent_card.yaml
+
+agent_id: cosmic/slide-agent:1.0.0
+display_name: Slide Agent
+description: >
+  Specialist agent for creating and editing PowerPoint presentations.
+  Plans full slide decks in JSON, builds them with python-pptx using professional
+  templates, reads parsed document bundles locally, delegates image/diagram generation,
+  and uses orchestrator-mediated docs lookups only when deeper source retrieval is needed.
+
+intents:
+  - name: slide.create
+    description: Create a new slide deck from a description, document, or structured data
+    input_schema: schemas/intents/slide.create.input.json
+    output_schema: schemas/intents/slide.create.output.json
+    timeout_sec: 300
+    usage_hints:
+      - Use this for new decks from a brief, parsed document bundle, uploaded source artifact, or structured data payload.
+      - Prefer passing compact bundle refs and `source_artifacts`; do not inline whole documents, full image bytes, or long extracted text into the payload.
+      - Parsed document bundles are the canonical source for uploaded PDFs/DOCX/PPTX. The slide agent reads those bundles locally and only asks the docs specialist for deeper retrieval through orchestrator when needed.
+      - If the user wants generated visuals, let the slide agent delegate image or diagram creation internally; do not pre-generate every asset unless the request explicitly calls for that.
+
+  - name: slide.edit
+    description: Edit an existing PPTX (add/remove/reorder slides, restyle, modify content)
+    input_schema: schemas/intents/slide.edit.input.json
+    output_schema: schemas/intents/slide.edit.output.json
+    timeout_sec: 300
+    usage_hints:
+      - Use this when the user already has a PPTX and wants bounded edits, restyling, content replacement, or new slides added into the deck.
+      - Pass the existing PPTX as an input artifact plus a compact edit brief; do not expand the whole deck into prompt text.
+      - If edits depend on uploaded documents, pass their parsed bundle artifacts or source artifacts and let the slide agent read them locally before requesting deeper docs retrieval through orchestrator.
+      - If an edit needs a replacement visual, the slide agent can orchestrator-delegate image or diagram generation and then apply the returned artifact to the deck.
+
+  - name: slide.recall_session
+    description: Recall prior slide operations from the session ledger
+    input_schema: schemas/intents/slide.recall_session.input.json
+    output_schema: schemas/intents/slide.recall_session.output.json
+    timeout_sec: 30
+    usage_hints:
+      - Recall prior slide-agent work when you want to reuse an earlier deck/edit result instead of replanning from scratch.
+
+artifact_types:
+  - slide_pptx
+  - slide_pdf
+  - slide_preview_png
+  - slide_source_json
+
+policies:
+  network_access: true
+  writable_paths:
+    - runs/artifacts
+    - agents/slide_agent/store
+    - agents/slide_agent/runtime
+    - agents/slide_agent/templates
+  tool_access: []
+  allowed_senders:
+    - cosmic/orchestrator:1.0.0
+  intent_authorization:
+    slide.create: [cosmic/orchestrator:1.0.0]
+    slide.edit: [cosmic/orchestrator:1.0.0]
+    slide.recall_session: [cosmic/orchestrator:1.0.0]
+
+sla:
+  max_concurrency: 2
+  heartbeat_interval_sec: 10
+  heartbeat_ttl_sec: 30
+  max_task_duration_sec: 600
+  health_endpoint: /health
+  retry_policy:
+    max_attempts: 3
+    backoff: exponential
+    backoff_base_sec: 2
+    backoff_max_sec: 60
+    retryable_codes:
+      - TIMEOUT
+      - NETWORK_ERROR
+      - RATE_LIMITED
+    non_retryable_codes:
+      - INVALID_INPUT
+      - AUTH_ERROR
+      - SCHEMA_VIOLATION
+      - INTERNAL_ERROR
+
+stream_key: streams:cosmic/slide-agent:1.0.0
+
+version_info:
+  semver: 1.0.0
+  released_at: "2026-04-01"
+  deprecated_at: null
+  remove_after: null
+  changelog: CHANGELOG.md

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "pptx_path": { "type": "string" },
+    "pdf_path": { "type": "string" },
+    "slide_count": { "type": "integer" },
+    "template": { "type": "string" },
+    "title": { "type": "string" },
+    "validation_pass": { "type": "boolean" },
+    "validation_issues": { "type": "array", "items": { "type": "string" } }
+  },
+  "required": ["pptx_path", "slide_count"]
+}
