@@ -196,6 +196,14 @@ interface ActivityLogEntry {
   stage?: string | null
   kind?: string | null
   createdAt: string
+  flowRole?: string | null
+  delegatedTaskId?: string | null
+  parentDelegatedTaskId?: string | null
+  specialistTaskId?: string | null
+  agentId?: string | null
+  agentLabel?: string | null
+  intent?: string | null
+  specialistEventType?: string | null
 }
 
 interface DocsProgressState {
@@ -481,7 +489,11 @@ const appendActivityLogEntry = (
     (last.detail || '') === (nextEntry.detail || '') &&
     (last.status || '') === (nextEntry.status || '') &&
     (last.stage || '') === (nextEntry.stage || '') &&
-    (last.kind || '') === (nextEntry.kind || '')
+    (last.kind || '') === (nextEntry.kind || '') &&
+    (last.flowRole || '') === (nextEntry.flowRole || '') &&
+    (last.delegatedTaskId || '') === (nextEntry.delegatedTaskId || '') &&
+    (last.parentDelegatedTaskId || '') === (nextEntry.parentDelegatedTaskId || '') &&
+    (last.specialistTaskId || '') === (nextEntry.specialistTaskId || '')
   ) {
     return existing
   }
@@ -523,6 +535,44 @@ const normalizeActivityLog = (value: unknown): ActivityLogEntry[] | undefined =>
         : typeof (item as any).createdAt === 'string' && (item as any).createdAt.trim()
           ? (item as any).createdAt.trim()
           : new Date().toISOString(),
+      flowRole: typeof (item as any).flow_role === 'string' && (item as any).flow_role.trim()
+        ? (item as any).flow_role.trim()
+        : typeof (item as any).flowRole === 'string' && (item as any).flowRole.trim()
+          ? (item as any).flowRole.trim()
+          : null,
+      delegatedTaskId: typeof (item as any).delegated_task_id === 'string' && (item as any).delegated_task_id.trim()
+        ? (item as any).delegated_task_id.trim()
+        : typeof (item as any).delegatedTaskId === 'string' && (item as any).delegatedTaskId.trim()
+          ? (item as any).delegatedTaskId.trim()
+          : null,
+      parentDelegatedTaskId: typeof (item as any).parent_delegated_task_id === 'string' && (item as any).parent_delegated_task_id.trim()
+        ? (item as any).parent_delegated_task_id.trim()
+        : typeof (item as any).parentDelegatedTaskId === 'string' && (item as any).parentDelegatedTaskId.trim()
+          ? (item as any).parentDelegatedTaskId.trim()
+          : null,
+      specialistTaskId: typeof (item as any).specialist_task_id === 'string' && (item as any).specialist_task_id.trim()
+        ? (item as any).specialist_task_id.trim()
+        : typeof (item as any).specialistTaskId === 'string' && (item as any).specialistTaskId.trim()
+          ? (item as any).specialistTaskId.trim()
+          : null,
+      agentId: typeof (item as any).agent_id === 'string' && (item as any).agent_id.trim()
+        ? (item as any).agent_id.trim()
+        : typeof (item as any).agentId === 'string' && (item as any).agentId.trim()
+          ? (item as any).agentId.trim()
+          : null,
+      agentLabel: typeof (item as any).agent_label === 'string' && (item as any).agent_label.trim()
+        ? (item as any).agent_label.trim()
+        : typeof (item as any).agentLabel === 'string' && (item as any).agentLabel.trim()
+          ? (item as any).agentLabel.trim()
+          : null,
+      intent: typeof (item as any).intent === 'string' && (item as any).intent.trim()
+        ? (item as any).intent.trim()
+        : null,
+      specialistEventType: typeof (item as any).specialist_event_type === 'string' && (item as any).specialist_event_type.trim()
+        ? (item as any).specialist_event_type.trim()
+        : typeof (item as any).specialistEventType === 'string' && (item as any).specialistEventType.trim()
+          ? (item as any).specialistEventType.trim()
+          : null,
     }
     const last = normalized[normalized.length - 1]
     if (
@@ -531,13 +581,96 @@ const normalizeActivityLog = (value: unknown): ActivityLogEntry[] | undefined =>
       (last.detail || '') === (entry.detail || '') &&
       (last.status || '') === (entry.status || '') &&
       (last.stage || '') === (entry.stage || '') &&
-      (last.kind || '') === (entry.kind || '')
+      (last.kind || '') === (entry.kind || '') &&
+      (last.flowRole || '') === (entry.flowRole || '') &&
+      (last.delegatedTaskId || '') === (entry.delegatedTaskId || '') &&
+      (last.parentDelegatedTaskId || '') === (entry.parentDelegatedTaskId || '') &&
+      (last.specialistTaskId || '') === (entry.specialistTaskId || '')
     ) {
       continue
     }
     normalized.push(entry)
   }
   return normalized.length > 0 ? normalized : undefined
+}
+
+const mergeActivityLogEntries = (
+  current: ActivityLogEntry[] | undefined,
+  incoming: ActivityLogEntry[] | undefined,
+): ActivityLogEntry[] | undefined => {
+  let merged = Array.isArray(current) ? current : undefined
+  for (const entry of incoming || []) {
+    const { id: _id, createdAt: _createdAt, ...rest } = entry
+    merged = appendActivityLogEntry(merged, rest)
+  }
+  return merged
+}
+
+const formatSpecialistAgentLabel = (value: unknown) => {
+  const raw = String(value || '').trim()
+  if (!raw) {
+    return 'Specialist'
+  }
+  const normalized = raw
+    .replace(/^cosmic\//i, '')
+    .replace(/:.*$/, '')
+    .replace(/[-_]/g, ' ')
+    .trim()
+  if (!normalized) {
+    return raw
+  }
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1)
+}
+
+const buildProgressActivityEntries = (
+  event: any,
+  activityText: string,
+  statusMessage: string,
+  progressState?: DocsProgressState | TabularProgressState,
+): Omit<ActivityLogEntry, 'id' | 'createdAt'>[] => {
+  const specialistDelegations = Array.isArray(event?.specialist_delegations)
+    ? event.specialist_delegations
+    : []
+  if (specialistDelegations.length > 0) {
+    return specialistDelegations.map((item: any) => ({
+      label: String(item?.activity || '').trim() || `Delegated ${String(item?.intent || 'specialist work').trim()}`,
+      detail: statusMessage || undefined,
+      status: String(event?.status || '').trim() || null,
+      stage: progressState?.stage || null,
+      kind: 'delegation',
+      flowRole: 'delegation',
+      delegatedTaskId: String(item?.task_id || '').trim() || null,
+      agentId: String(item?.agent_id || '').trim() || null,
+      agentLabel: String(item?.agent_label || '').trim() || formatSpecialistAgentLabel(item?.agent_id),
+      intent: String(item?.intent || '').trim() || null,
+    }))
+  }
+  const specialist = event?.specialist && typeof event.specialist === 'object'
+    ? event.specialist
+    : null
+  if (specialist) {
+    return [{
+      label: activityText,
+      detail: statusMessage && statusMessage !== activityText ? statusMessage : undefined,
+      status: String(event?.status || '').trim() || null,
+      stage: progressState?.stage || null,
+      kind: 'specialist_flow',
+      flowRole: 'specialist',
+      parentDelegatedTaskId: String(specialist.attach_to_task_id || '').trim() || null,
+      specialistTaskId: String(specialist.task_id || '').trim() || null,
+      agentId: String(specialist.agent_id || '').trim() || null,
+      agentLabel: String(specialist.agent_label || '').trim() || formatSpecialistAgentLabel(specialist.agent_id),
+      intent: String(specialist.intent || '').trim() || null,
+      specialistEventType: String(specialist.event_type || '').trim() || null,
+    }]
+  }
+  return [{
+    label: activityText,
+    detail: statusMessage || undefined,
+    status: String(event?.status || '').trim() || null,
+    stage: progressState?.stage || null,
+    kind: progressState?.kind || 'generic',
+  }]
 }
 
 const historyToMessages = (history: any[] = []): Message[] => {
@@ -969,23 +1102,68 @@ const AssistantFlowTimeline = ({ entries }: { entries?: ActivityLogEntry[] }) =>
   if (!entries || entries.length <= 0) {
     return null
   }
+  const delegationMap = new Map<string, ActivityLogEntry>()
+  for (const entry of entries) {
+    const delegatedTaskId = String(entry.delegatedTaskId || '').trim()
+    if (delegatedTaskId) {
+      delegationMap.set(delegatedTaskId, entry)
+    }
+  }
+  const childEntriesByParent = new Map<string, ActivityLogEntry[]>()
+  const rootEntries: ActivityLogEntry[] = []
+  for (const entry of entries) {
+    const parentDelegatedTaskId = String(entry.parentDelegatedTaskId || '').trim()
+    if (parentDelegatedTaskId && delegationMap.has(parentDelegatedTaskId)) {
+      const existing = childEntriesByParent.get(parentDelegatedTaskId) || []
+      childEntriesByParent.set(parentDelegatedTaskId, [...existing, entry])
+      continue
+    }
+    rootEntries.push(entry)
+  }
   return (
     <div className="assistant-flow" title="Agentic flow captured during this response">
       <div className="assistant-flow-label">Flow</div>
       <div className="assistant-flow-list">
-        {entries.map((entry, index) => (
-          <div key={entry.id} className="assistant-flow-item">
-            <div className="assistant-flow-marker" aria-hidden="true">
-              <span>{index + 1}</span>
-            </div>
-            <div className="assistant-flow-copy">
-              <div className="assistant-flow-title">{entry.label}</div>
-              {entry.detail && entry.detail !== entry.label && (
-                <div className="assistant-flow-detail">{entry.detail}</div>
+        {rootEntries.map((entry, index) => {
+          const children = childEntriesByParent.get(String(entry.delegatedTaskId || '').trim()) || []
+          return (
+            <div key={entry.id} className="assistant-flow-node">
+              <div className="assistant-flow-item">
+                <div className="assistant-flow-marker" aria-hidden="true">
+                  <span>{index + 1}</span>
+                </div>
+                <div className="assistant-flow-copy">
+                  <div className="assistant-flow-title">{entry.label}</div>
+                  {entry.detail && entry.detail !== entry.label && (
+                    <div className="assistant-flow-detail">{entry.detail}</div>
+                  )}
+                </div>
+              </div>
+              {children.length > 0 && (
+                <div className="assistant-flow-children">
+                  {children.map((child, childIndex) => (
+                    <div key={child.id} className="assistant-flow-item child">
+                      <div className="assistant-flow-marker child" aria-hidden="true">
+                        <span>{`${index + 1}.${childIndex + 1}`}</span>
+                      </div>
+                      <div className="assistant-flow-copy">
+                        <div className="assistant-flow-title">
+                          {child.label}
+                          {child.agentLabel && (
+                            <span className="assistant-flow-agent-chip">{child.agentLabel}</span>
+                          )}
+                        </div>
+                        {child.detail && child.detail !== child.label && (
+                          <div className="assistant-flow-detail">{child.detail}</div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
     </div>
   )
@@ -3005,6 +3183,7 @@ export default function App() {
           const progressState = tabularProgress ?? docsProgress
           const fallbackMessage = eventStatus ? `Task ${eventStatus}...` : 'Working in the background...'
           const activityText = progressState?.label || statusMessage || fallbackMessage
+          const activityEntries = buildProgressActivityEntries(event, activityText, statusMessage, progressState)
           upsertBackgroundTask({
             requestId,
             taskId: taskId || null,
@@ -3016,13 +3195,14 @@ export default function App() {
             backgroundedAt: null,
             completed: false,
             activity: activityText,
-            activityLog: appendActivityLogEntry(undefined, {
-              label: activityText,
-              detail: statusMessage || undefined,
-              status: eventStatus || null,
-              stage: progressState?.stage || null,
-              kind: progressState?.kind || 'generic',
-            }),
+            activityLog: mergeActivityLogEntries(
+              undefined,
+              activityEntries.map((entry) => ({
+                id: `activity_${crypto.randomUUID()}`,
+                createdAt: new Date().toISOString(),
+                ...entry,
+              })),
+            ),
             progress: progressState,
           })
           patchBackgroundTask(requestId, (current) => ({
@@ -3031,13 +3211,14 @@ export default function App() {
             sessionId: typeof event.session_id === 'string' ? event.session_id : current.sessionId,
             route: typeof event.route === 'string' ? event.route : current.route,
             activity: activityText,
-            activityLog: appendActivityLogEntry(current.activityLog, {
-              label: activityText,
-              detail: statusMessage || undefined,
-              status: eventStatus || null,
-              stage: progressState?.stage || null,
-              kind: progressState?.kind || 'generic',
-            }),
+            activityLog: mergeActivityLogEntries(
+              current.activityLog,
+              activityEntries.map((entry) => ({
+                id: `activity_${crypto.randomUUID()}`,
+                createdAt: new Date().toISOString(),
+                ...entry,
+              })),
+            ),
             progress: progressState,
             completed: false,
           }))
@@ -3079,7 +3260,7 @@ export default function App() {
               ? event.thinking_text
               : current.partialThinking,
             producedArtifacts: producedArtifacts ?? current.producedArtifacts,
-            activityLog: activityLog ?? current.activityLog,
+            activityLog: mergeActivityLogEntries(current.activityLog, activityLog),
             sources: Array.isArray(event.sources) ? event.sources : current.sources,
             progress: undefined,
             completed: true,
@@ -3213,6 +3394,7 @@ export default function App() {
         const progressState = tabularProgress ?? docsProgress
         const fallbackMessage = eventStatus ? `Task ${eventStatus}...` : 'Working on your request...'
         const activityText = progressState?.label || statusMessage || fallbackMessage
+        const activityEntries = buildProgressActivityEntries(event, activityText, statusMessage, progressState)
         setStreamingProgress(activityText)
         setMessages((prev) => {
           const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
@@ -3223,13 +3405,14 @@ export default function App() {
             return {
               ...message,
               activity: activityText,
-              activityLog: appendActivityLogEntry(message.activityLog, {
-                label: activityText,
-                detail: statusMessage || undefined,
-                status: eventStatus || null,
-                stage: progressState?.stage || null,
-                kind: progressState?.kind || 'generic',
-              }),
+              activityLog: mergeActivityLogEntries(
+                message.activityLog,
+                activityEntries.map((entry) => ({
+                  id: `activity_${crypto.randomUUID()}`,
+                  createdAt: new Date().toISOString(),
+                  ...entry,
+                })),
+              ),
               progress: progressState,
               stopped: false,
             }
@@ -3301,7 +3484,7 @@ export default function App() {
               sources,
               producedArtifacts: producedArtifacts ?? message.producedArtifacts,
               responseBlocks: responseBlocks ?? message.responseBlocks,
-              activityLog: activityLog ?? message.activityLog,
+              activityLog: mergeActivityLogEntries(message.activityLog, activityLog),
               requestId: typeof event.request_id === 'string' ? event.request_id : message.requestId,
               source: typeof event.source === 'string' ? event.source : message.source,
               sourceId: typeof event.source_id === 'string' ? event.source_id : message.sourceId,

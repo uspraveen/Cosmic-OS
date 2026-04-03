@@ -790,6 +790,11 @@ class OrchestratorRuntime:
                             result_strs,
                             parallel=all_read_only and len(turn_tool_blocks) > 1,
                         ),
+                        "specialist_delegations": self._extract_specialist_delegations(
+                            turn_tool_blocks,
+                            parsed_inputs,
+                            result_strs,
+                        ),
                     }
                     continue
 
@@ -1180,7 +1185,18 @@ class OrchestratorRuntime:
                 return result
 
             try:
-                return await asyncio.wait_for(asyncio.shield(pending_result), timeout=wait_timeout)
+                result = await asyncio.wait_for(
+                    asyncio.shield(pending_result), timeout=wait_timeout
+                )
+                if isinstance(result, AgentResult):
+                    output = (
+                        dict(result.output)
+                        if isinstance(result.output, dict)
+                        else {}
+                    )
+                    output.setdefault("delegated_task_id", child_task.task_id)
+                    return result.model_copy(update={"output": output})
+                return result
             except asyncio.TimeoutError:
                 self._agent_dispatch_stats.wait_timeouts += 1
                 result = self._build_in_progress_result(child_task.task_id, normalized_idempotency_key, timeout_sec=timeout_sec)
@@ -3740,6 +3756,54 @@ class OrchestratorRuntime:
                 return "Tool work completed. Continuing..."
             phrases.append(self._format_found_pages_phrase("completed tool work for", tool_names))
         return self._compose_tool_loop_message(phrases, parallel=parallel)
+
+    def _extract_specialist_delegations(
+        self,
+        tool_blocks: list[ContentBlock],
+        parsed_inputs: list[dict[str, Any]],
+        result_strs: list[str],
+    ) -> list[dict[str, Any]]:
+        delegations: list[dict[str, Any]] = []
+        for block, tool_input, result_str in zip(tool_blocks, parsed_inputs, result_strs):
+            if block.tool_name != "delegate_to_agent":
+                continue
+            data = self._parse_tool_result_json(result_str)
+            delegation = data.get("delegation") if isinstance(data, dict) and isinstance(data.get("delegation"), dict) else {}
+            intent_name = self._activity_excerpt(
+                delegation.get("intent") or tool_input.get("intent"),
+                limit=96,
+            )
+            agent_id = self._activity_excerpt(
+                delegation.get("agent_id") or tool_input.get("agent_id"),
+                limit=120,
+            )
+            task_id = self._activity_excerpt(
+                delegation.get("task_id")
+                or (data.get("delegated_task_id") if isinstance(data, dict) else None)
+                or (data.get("task_id") if isinstance(data, dict) else None),
+                limit=96,
+            )
+            agent_label = self._activity_agent_label(agent_id)
+            activity = self._activity_excerpt(
+                self._summarize_local_tool_activity(block.tool_name, tool_input, result_str),
+                limit=160,
+            )
+            if not (intent_name or agent_id or task_id):
+                continue
+            delegations.append(
+                {
+                    key: value
+                    for key, value in {
+                        "intent": intent_name,
+                        "agent_id": agent_id,
+                        "agent_label": agent_label,
+                        "task_id": task_id,
+                        "activity": activity,
+                    }.items()
+                    if value not in (None, "")
+                }
+            )
+        return delegations
 
     def _summarize_local_tool_activity(
         self,

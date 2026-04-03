@@ -62,6 +62,11 @@ class GatewayConfig:
     orchestrator_url: str = "http://127.0.0.1:8743"
     orchestrator_timeout_sec: float = 300.0
     redis_url: str = ""
+    agent_events_stream: str = "streams:events"
+    agent_events_gateway_group: str = "gateway-specialist-events"
+    orchestrator_task_ledger_db_path: Path = (
+        BACKEND_ROOT / "agents" / "orchestrator" / "store" / "data" / "task_ledger.db"
+    )
     task_input_requests_stream: str = "user_input:requests"
     task_input_replies_stream: str = "user_input:replies"
     task_input_gateway_group: str = "gateway"
@@ -191,6 +196,25 @@ class GatewayConfig:
                 _env_float("ORCHESTRATOR_TIMEOUT_SEC", 300.0),
             ),
             redis_url=os.getenv("REDIS_URL", "").strip(),
+            agent_events_stream=os.getenv("AGENT_EVENTS_STREAM", "streams:events").strip()
+            or "streams:events",
+            agent_events_gateway_group=os.getenv(
+                "GATEWAY_AGENT_EVENTS_GROUP", "gateway-specialist-events"
+            ).strip()
+            or "gateway-specialist-events",
+            orchestrator_task_ledger_db_path=Path(
+                os.getenv(
+                    "ORCHESTRATOR_TASK_LEDGER_DB_PATH",
+                    str(
+                        BACKEND_ROOT
+                        / "agents"
+                        / "orchestrator"
+                        / "store"
+                        / "data"
+                        / "task_ledger.db"
+                    ),
+                )
+            ).expanduser(),
             task_input_requests_stream=os.getenv(
                 "TASK_INPUT_REQUESTS_STREAM", "user_input:requests"
             ).strip()

@@ -65,6 +65,7 @@ from .session.summary import (
 from .session_store import SessionStore
 from .usage_store import UsageStore
 from .wishlist import CapabilityWishlistService, CapabilityWishlistStore
+from orchestrator.store.ledger import TaskLedger
 
 try:
     from PIL import Image, ImageOps, UnidentifiedImageError
@@ -307,6 +308,9 @@ class GatewayRuntime:
         self._redis = (
             create_redis_client(config.redis_url) if config.redis_url else None
         )
+        self._orchestrator_task_ledger = TaskLedger(
+            config.orchestrator_task_ledger_db_path
+        )
         self.started = False
         self.adapter_errors: dict[str, str] = {}
         self.active_task_channels: dict[str, str] = {}
@@ -331,6 +335,7 @@ class GatewayRuntime:
         self._scheduler_worker: asyncio.Task[None] | None = None
         self._scheduler_wakeup = asyncio.Event()
         self._task_input_worker: asyncio.Task[None] | None = None
+        self._specialist_event_worker: asyncio.Task[None] | None = None
         self._rollover_finalize_lock = asyncio.Lock()
         self._session_compaction_lock = asyncio.Lock()
         self._memory_health_worker: asyncio.Task[None] | None = None
@@ -357,6 +362,7 @@ class GatewayRuntime:
             default_timezone=self.config.user_timezone_fallback
         )
         self.agent_email_integration_store.initialize()
+        self._orchestrator_task_ledger.initialize()
         await self.capability_wishlist_service.initialize()
         self._usage_event_queue = asyncio.Queue(
             maxsize=self.config.usage_queue_max_size
@@ -370,6 +376,11 @@ class GatewayRuntime:
                 self._redis,
                 stream=self.config.task_input_requests_stream,
                 group=self.config.task_input_gateway_group,
+            )
+            await ensure_stream_group(
+                self._redis,
+                stream=self.config.agent_events_stream,
+                group=self.config.agent_events_gateway_group,
             )
         if self.memory_client.enabled:
             await self._refresh_memory_health()
@@ -400,6 +411,10 @@ class GatewayRuntime:
                 self._task_input_consumer_loop(),
                 name="gateway-task-input-consumer",
             )
+            self._specialist_event_worker = asyncio.create_task(
+                self._specialist_event_consumer_loop(),
+                name="gateway-specialist-event-consumer",
+            )
         await self._finalize_rollover_sessions()
         await self._send_channel_activation_greetings()
         self.started = True
@@ -426,6 +441,12 @@ class GatewayRuntime:
             self._task_input_worker.cancel()
             await asyncio.gather(self._task_input_worker, return_exceptions=True)
             self._task_input_worker = None
+        if self._specialist_event_worker is not None:
+            self._specialist_event_worker.cancel()
+            await asyncio.gather(
+                self._specialist_event_worker, return_exceptions=True
+            )
+            self._specialist_event_worker = None
         workers = [
             state.worker
             for state in self.active_requests.values()
@@ -5098,7 +5119,28 @@ class GatewayRuntime:
             "stage": stage,
             "kind": kind,
             "created_at": utcnow_iso(),
+            **self._extract_activity_specialist_metadata(event),
         }
+
+    def _extract_activity_specialist_metadata(
+        self,
+        event: dict[str, Any],
+    ) -> dict[str, Any]:
+        specialist = event.get("specialist") if isinstance(event.get("specialist"), dict) else None
+        if not isinstance(specialist, dict):
+            return {}
+        metadata = {
+            "flow_role": "specialist",
+            "specialist_task_id": self._safe_text(specialist.get("task_id")),
+            "parent_delegated_task_id": self._safe_text(
+                specialist.get("attach_to_task_id")
+            ),
+            "agent_id": self._safe_text(specialist.get("agent_id")),
+            "agent_label": self._safe_text(specialist.get("agent_label")),
+            "intent": self._safe_text(specialist.get("intent")),
+            "specialist_event_type": self._safe_text(specialist.get("event_type")),
+        }
+        return {key: value for key, value in metadata.items() if value}
 
     def _normalize_activity_log(
         self,
@@ -5123,6 +5165,18 @@ class GatewayRuntime:
                 "stage": self._safe_text(entry.get("stage")),
                 "kind": self._safe_text(entry.get("kind")) or "generic",
                 "created_at": self._safe_text(entry.get("created_at")) or utcnow_iso(),
+                "flow_role": self._safe_text(entry.get("flow_role")),
+                "delegated_task_id": self._safe_text(entry.get("delegated_task_id")),
+                "parent_delegated_task_id": self._safe_text(
+                    entry.get("parent_delegated_task_id")
+                ),
+                "specialist_task_id": self._safe_text(entry.get("specialist_task_id")),
+                "agent_id": self._safe_text(entry.get("agent_id")),
+                "agent_label": self._safe_text(entry.get("agent_label")),
+                "intent": self._safe_text(entry.get("intent")),
+                "specialist_event_type": self._safe_text(
+                    entry.get("specialist_event_type")
+                ),
             }
             last = normalized[-1] if normalized else None
             if (
@@ -5132,6 +5186,13 @@ class GatewayRuntime:
                 and (last.get("status") or "") == (item["status"] or "")
                 and (last.get("stage") or "") == (item["stage"] or "")
                 and (last.get("kind") or "") == (item["kind"] or "")
+                and (last.get("flow_role") or "") == (item.get("flow_role") or "")
+                and (last.get("delegated_task_id") or "")
+                == (item.get("delegated_task_id") or "")
+                and (last.get("parent_delegated_task_id") or "")
+                == (item.get("parent_delegated_task_id") or "")
+                and (last.get("specialist_task_id") or "")
+                == (item.get("specialist_task_id") or "")
             ):
                 continue
             normalized.append(item)
@@ -6570,6 +6631,262 @@ class GatewayRuntime:
                 self.config.task_input_gateway_group,
                 message_id,
             )
+
+    async def _specialist_event_consumer_loop(self) -> None:
+        assert self._redis is not None
+        consumer_name = "gateway-specialist-{0}".format(id(self))
+        while True:
+            entries = await self._redis.xreadgroup(
+                groupname=self.config.agent_events_gateway_group,
+                consumername=consumer_name,
+                streams={self.config.agent_events_stream: ">"},
+                count=20,
+                block=1000,
+            )
+            for _stream, messages in entries:
+                for message_id, data in messages:
+                    await self._handle_specialist_event_stream_message(
+                        message_id, data
+                    )
+
+    async def _handle_specialist_event_stream_message(
+        self, message_id: str, data: dict[str, Any]
+    ) -> None:
+        assert self._redis is not None
+        try:
+            event = parse_event_envelope(data)
+            forwarded = self._build_specialist_flow_event(event)
+            if forwarded is None:
+                await self._redis.xack(
+                    self.config.agent_events_stream,
+                    self.config.agent_events_gateway_group,
+                    message_id,
+                )
+                return
+            root_task_id = self._safe_text(forwarded.get("task_id"))
+            session_id = self._safe_text(forwarded.get("session_id"))
+            request_id = self._safe_text(forwarded.get("request_id"))
+            if root_task_id and session_id:
+                notebook = self._merge_task_notebook(
+                    task_id=root_task_id,
+                    session_id=session_id,
+                    request_id=request_id,
+                    event=forwarded,
+                )
+                self.session_store.upsert_task_notebook(root_task_id, session_id, notebook)
+                self._refresh_active_working_set(session_id)
+            await self._deliver_or_queue_channel_event(
+                forwarded,
+                channel=self._safe_text(forwarded.get("channel")),
+            )
+            await self._redis.xack(
+                self.config.agent_events_stream,
+                self.config.agent_events_gateway_group,
+                message_id,
+            )
+        except ChannelUnavailableError:
+            return
+        except Exception:
+            logger.exception(
+                "gateway.specialist_event_consumer_failed msg_id=%s", message_id
+            )
+            await self._redis.xack(
+                self.config.agent_events_stream,
+                self.config.agent_events_gateway_group,
+                message_id,
+            )
+
+    def _build_specialist_flow_event(
+        self,
+        event: Any,
+    ) -> dict[str, Any] | None:
+        if event is None:
+            return None
+        agent_id = self._safe_text(getattr(event, "agent_id", None))
+        if not agent_id or agent_id == "cosmic/orchestrator:1.0.0":
+            return None
+        event_type = self._safe_text(getattr(event, "event_type", None)) or ""
+        if event_type not in {
+            "task.accepted",
+            "task.progress",
+            "task.suspended",
+            "task.resumed",
+            "task.completed",
+            "task.failed",
+            "task.rejected",
+            "task.deferred",
+        }:
+            return None
+
+        context = self._resolve_specialist_request_context(
+            self._safe_text(getattr(event, "task_id", None))
+        )
+        if context is None:
+            return None
+        payload = getattr(event, "payload", None)
+        payload = payload if isinstance(payload, dict) else {}
+        message = self._specialist_progress_message(
+            event_type=event_type,
+            payload=payload,
+            agent_label=context["agent_label"],
+            intent=context["intent"],
+        )
+        forwarded = {
+            "type": "task.progress",
+            "route": "opus",
+            "request_id": context["request_id"],
+            "session_id": context["session_id"],
+            "task_id": context["root_task_id"],
+            "channel": context["channel"],
+            "status": f"specialist_{event_type.split('.', 1)[-1]}",
+            "message": message,
+            "specialist": {
+                "task_id": context["task_id"],
+                "direct_parent_task_id": context["direct_parent_task_id"],
+                "root_task_id": context["root_task_id"],
+                "attach_to_task_id": context["attach_to_task_id"],
+                "agent_id": context["agent_id"],
+                "agent_label": context["agent_label"],
+                "intent": context["intent"],
+                "event_type": event_type,
+                "status": self._safe_text(payload.get("status")),
+                "message": self._safe_text(payload.get("message")) or message,
+            },
+        }
+        return forwarded
+
+    def _resolve_specialist_request_context(
+        self,
+        task_id: str | None,
+    ) -> dict[str, str] | None:
+        normalized_task_id = self._safe_text(task_id)
+        if not normalized_task_id:
+            return None
+        task_record = self._orchestrator_task_ledger.get_task(normalized_task_id)
+        if task_record is None:
+            return None
+        direct_parent_task_id = self._safe_text(task_record.get("parent_task_id"))
+        if not direct_parent_task_id:
+            return None
+
+        root_record = task_record
+        root_task_id = normalized_task_id
+        visited: set[str] = set()
+        while True:
+            current_task_id = self._safe_text(root_record.get("task_id")) or root_task_id
+            if not current_task_id or current_task_id in visited:
+                break
+            visited.add(current_task_id)
+            parent_task_id = self._safe_text(root_record.get("parent_task_id"))
+            if not parent_task_id:
+                root_task_id = current_task_id
+                break
+            parent_record = self._orchestrator_task_ledger.get_task(parent_task_id)
+            if parent_record is None:
+                root_task_id = current_task_id
+                break
+            root_record = parent_record
+            root_task_id = self._safe_text(parent_record.get("task_id")) or parent_task_id
+
+        request_id = (
+            self.active_requests_by_task.get(root_task_id)
+            or self._safe_text(root_record.get("request_id"))
+            or self._safe_text(task_record.get("request_id"))
+        )
+        if not request_id or request_id not in self.active_requests:
+            return None
+        active_request = self.active_requests.get(request_id)
+        if active_request is None:
+            return None
+
+        session_id = (
+            self._safe_text(root_record.get("session_id"))
+            or self._safe_text(task_record.get("session_id"))
+            or active_request.session_id
+        )
+        channel = (
+            self._safe_text(root_record.get("channel"))
+            or self._safe_text(task_record.get("channel"))
+            or active_request.channel
+        )
+        if not session_id or not channel:
+            return None
+
+        attach_to_task_id = (
+            normalized_task_id
+            if direct_parent_task_id == root_task_id
+            else direct_parent_task_id
+        )
+        agent_id = (
+            self._safe_text(task_record.get("recipient"))
+            or self._safe_text(task_record.get("sender"))
+            or "specialist"
+        )
+        intent = self._safe_text(task_record.get("intent")) or "specialist.work"
+        return {
+            "task_id": normalized_task_id,
+            "direct_parent_task_id": direct_parent_task_id,
+            "root_task_id": root_task_id,
+            "attach_to_task_id": attach_to_task_id or normalized_task_id,
+            "request_id": request_id,
+            "session_id": session_id,
+            "channel": channel,
+            "agent_id": agent_id,
+            "agent_label": self._specialist_agent_label(agent_id),
+            "intent": intent,
+        }
+
+    def _specialist_agent_label(self, agent_id: str | None) -> str:
+        raw = self._safe_text(agent_id) or "specialist"
+        normalized = raw
+        if "/" in normalized:
+            normalized = normalized.split("/", 1)[1]
+        if ":" in normalized:
+            normalized = normalized.split(":", 1)[0]
+        normalized = normalized.replace("-", " ").replace("_", " ").strip()
+        return normalized or raw
+
+    def _specialist_progress_message(
+        self,
+        *,
+        event_type: str,
+        payload: dict[str, Any],
+        agent_label: str,
+        intent: str,
+    ) -> str:
+        payload_message = self._safe_text(payload.get("message"))
+        intent_label = intent.replace("_", " ")
+        prefix = agent_label[0].upper() + agent_label[1:] if agent_label else "Specialist"
+        if payload_message:
+            if payload_message.lower().startswith(prefix.lower()):
+                return payload_message
+            return f"{prefix}: {payload_message}"
+        if event_type == "task.accepted":
+            return f"{prefix} accepted {intent_label}."
+        if event_type == "task.suspended":
+            return f"{prefix} is waiting for more input."
+        if event_type == "task.resumed":
+            return f"{prefix} resumed {intent_label}."
+        if event_type == "task.completed":
+            return f"{prefix} completed {intent_label}."
+        if event_type == "task.failed":
+            error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+            error_message = self._safe_text(error.get("message"))
+            return (
+                f"{prefix} failed {intent_label}: {error_message}"
+                if error_message
+                else f"{prefix} failed {intent_label}."
+            )
+        if event_type == "task.rejected":
+            reason = self._safe_text(payload.get("reason"))
+            return (
+                f"{prefix} rejected {intent_label}: {reason}"
+                if reason
+                else f"{prefix} rejected {intent_label}."
+            )
+        if event_type == "task.deferred":
+            return f"{prefix} is still running {intent_label}."
+        return f"{prefix} is working on {intent_label}."
 
     async def _drain_pending_task_inputs(self, channel: str) -> None:
         if self._redis is None:

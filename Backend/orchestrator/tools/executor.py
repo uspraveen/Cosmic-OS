@@ -1453,7 +1453,11 @@ class ToolExecutor:
                 "idempotency_key": result.idempotency_key,
                 "check_after_sec": result.check_after_sec,
                 "message": f"{intent} is still running in the specialist agent.",
-                "delegation": {"intent": intent, "agent_id": agent_id},
+                "delegation": {
+                    "intent": intent,
+                    "agent_id": agent_id,
+                    "task_id": result.task_id,
+                },
             }
 
         if result.status != "completed":
@@ -1464,7 +1468,15 @@ class ToolExecutor:
                 "retryable": error.retryable if error else False,
                 "next_action": error.next_action if error else "escalate",
                 "message": error.message if error else f"{intent} failed in the specialist agent.",
-                "delegation": {"intent": intent, "agent_id": agent_id},
+                "delegation": {
+                    "intent": intent,
+                    "agent_id": agent_id,
+                    "task_id": (
+                        result.output.get("delegated_task_id")
+                        if isinstance(result.output, dict)
+                        else None
+                    ),
+                },
             }
 
         output = result.output if isinstance(result.output, dict) else {}
@@ -1475,7 +1487,14 @@ class ToolExecutor:
         if artifact_list:
             response.setdefault("artifacts_ready_in_response", True)
             response.setdefault("artifact_count", len(artifact_list))
-        response.setdefault("delegation", {"intent": intent, "agent_id": agent_id})
+        response.setdefault(
+            "delegation",
+            {
+                "intent": intent,
+                "agent_id": agent_id,
+                "task_id": response.get("delegated_task_id") or response.get("task_id"),
+            },
+        )
         return response
 
     async def _resolve_delegate_input_artifacts(

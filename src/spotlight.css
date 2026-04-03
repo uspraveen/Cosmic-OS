@@ -3139,10 +3139,20 @@ kbd {
   gap: 10px;
 }
 
+.assistant-flow-node {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .assistant-flow-item {
   display: flex;
   align-items: flex-start;
   gap: 10px;
+}
+
+.assistant-flow-item.child {
+  gap: 8px;
 }
 
 .assistant-flow-marker {
@@ -3160,15 +3170,49 @@ kbd {
   border: 1px solid rgba(122, 202, 255, 0.3);
 }
 
+.assistant-flow-marker.child {
+  width: auto;
+  min-width: 34px;
+  padding: 0 8px;
+  color: rgba(214, 231, 255, 0.92);
+  background: rgba(214, 231, 255, 0.08);
+  border-color: rgba(214, 231, 255, 0.18);
+}
+
 .assistant-flow-copy {
   min-width: 0;
   flex: 1;
+}
+
+.assistant-flow-children {
+  margin-left: 28px;
+  padding-left: 14px;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .assistant-flow-title {
   font-size: 13px;
   line-height: 1.45;
   color: rgba(255, 255, 255, 0.9);
+}
+
+.assistant-flow-agent-chip {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(122, 202, 255, 0.12);
+  border: 1px solid rgba(122, 202, 255, 0.18);
+  color: rgba(214, 238, 255, 0.92);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  vertical-align: middle;
 }
 
 .assistant-flow-detail {

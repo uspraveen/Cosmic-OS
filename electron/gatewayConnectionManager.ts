@@ -32,11 +32,219 @@ interface DesktopQueryAttachment {
   metadata?: Record<string, unknown> | null
 }
 
+interface ForegroundStreamSnapshot {
+  stream_key: string
+  request_id?: string | null
+  task_id?: string | null
+  session_id?: string | null
+  route?: string | null
+  message_id?: string | null
+  content?: string
+  thinking_text?: string
+  activity?: string
+  activity_log?: any[]
+  docs_progress?: unknown
+  tabular_progress?: unknown
+  produced_artifacts?: any[]
+  response_blocks?: any[]
+  sources?: any[]
+  channel?: string | null
+  source?: string | null
+  source_id?: string | null
+  awaiting_reply?: boolean
+  completed?: boolean
+  failed?: boolean
+  error?: string | null
+  updated_at: string
+}
+
 const CONNECT_TIMEOUT_MS = 15000
 const HEARTBEAT_INTERVAL_MS = 25000
 const HEARTBEAT_STALE_MS = 70000
 const RESUME_TIMEOUT_MS = 10000
 const MAX_RESUME_ATTEMPTS = 2
+const FOREGROUND_STREAM_TTL_MS = 10 * 60 * 1000
+
+function appendCachedStreamText(current: string | undefined, incoming: unknown): string {
+  const prev = String(current || '')
+  const next = String(incoming || '')
+  if (!next) {
+    return prev
+  }
+  if (!prev) {
+    return next
+  }
+
+  const prevEnd = prev.slice(-1)
+  const nextStart = next.slice(0, 1)
+  if (!prevEnd || !nextStart || /\s/.test(prevEnd) || /\s/.test(nextStart)) {
+    return `${prev}${next}`
+  }
+  if (/[\.\!\?\:\u2026]/.test(prevEnd) && /[A-Z0-9"'`(\[]/.test(nextStart)) {
+    return `${prev}\n\n${next}`
+  }
+  if (/[A-Za-z0-9]/.test(prevEnd) && /[A-Za-z0-9]/.test(nextStart)) {
+    return `${prev} ${next}`
+  }
+  return `${prev}${next}`
+}
+
+function mergeCachedCompletedText(current: string | undefined, completed: unknown): string {
+  const prev = String(current || '')
+  const finalText = String(completed || '')
+  if (!prev) {
+    return finalText
+  }
+  if (!finalText) {
+    return prev
+  }
+  const normalizedPrev = prev.replace(/\s+/g, ' ').trim()
+  const normalizedFinal = finalText.replace(/\s+/g, ' ').trim()
+  if (normalizedPrev && normalizedFinal && normalizedPrev === normalizedFinal) {
+    return prev
+  }
+  if (normalizedPrev && normalizedFinal && normalizedFinal.startsWith(normalizedPrev)) {
+    return finalText
+  }
+  return finalText
+}
+
+function appendCachedActivityLog(
+  current: any[] | undefined,
+  entry: {
+    label: string
+    detail?: string
+    status?: string | null
+    stage?: string | null
+    kind?: string | null
+    flow_role?: string | null
+    delegated_task_id?: string | null
+    parent_delegated_task_id?: string | null
+    specialist_task_id?: string | null
+    agent_id?: string | null
+    agent_label?: string | null
+    intent?: string | null
+    specialist_event_type?: string | null
+  },
+) {
+  const label = String(entry.label || '').trim()
+  if (!label) {
+    return Array.isArray(current) ? current : undefined
+  }
+  const existing = Array.isArray(current) ? current : []
+  const nextEntry = {
+    id: `activity_${crypto.randomUUID()}`,
+    createdAt: new Date().toISOString(),
+    label,
+    detail: typeof entry.detail === 'string' && entry.detail.trim() ? entry.detail.trim() : undefined,
+    status: typeof entry.status === 'string' && entry.status.trim() ? entry.status.trim() : null,
+    stage: typeof entry.stage === 'string' && entry.stage.trim() ? entry.stage.trim() : null,
+    kind: typeof entry.kind === 'string' && entry.kind.trim() ? entry.kind.trim() : null,
+    flow_role: typeof entry.flow_role === 'string' && entry.flow_role.trim() ? entry.flow_role.trim() : null,
+    delegated_task_id: typeof entry.delegated_task_id === 'string' && entry.delegated_task_id.trim() ? entry.delegated_task_id.trim() : null,
+    parent_delegated_task_id: typeof entry.parent_delegated_task_id === 'string' && entry.parent_delegated_task_id.trim() ? entry.parent_delegated_task_id.trim() : null,
+    specialist_task_id: typeof entry.specialist_task_id === 'string' && entry.specialist_task_id.trim() ? entry.specialist_task_id.trim() : null,
+    agent_id: typeof entry.agent_id === 'string' && entry.agent_id.trim() ? entry.agent_id.trim() : null,
+    agent_label: typeof entry.agent_label === 'string' && entry.agent_label.trim() ? entry.agent_label.trim() : null,
+    intent: typeof entry.intent === 'string' && entry.intent.trim() ? entry.intent.trim() : null,
+    specialist_event_type: typeof entry.specialist_event_type === 'string' && entry.specialist_event_type.trim() ? entry.specialist_event_type.trim() : null,
+  }
+  const last = existing[existing.length - 1]
+  if (
+    last &&
+    String(last.label || '') === nextEntry.label &&
+    String(last.detail || '') === String(nextEntry.detail || '') &&
+    String(last.status || '') === String(nextEntry.status || '') &&
+    String(last.stage || '') === String(nextEntry.stage || '') &&
+    String(last.kind || '') === String(nextEntry.kind || '') &&
+    String((last as any).flow_role || '') === String(nextEntry.flow_role || '') &&
+    String((last as any).delegated_task_id || '') === String(nextEntry.delegated_task_id || '') &&
+    String((last as any).parent_delegated_task_id || '') === String(nextEntry.parent_delegated_task_id || '') &&
+    String((last as any).specialist_task_id || '') === String(nextEntry.specialist_task_id || '')
+  ) {
+    return existing
+  }
+  return [...existing, nextEntry]
+}
+
+function formatSpecialistAgentLabel(value: unknown) {
+  const raw = String(value || '').trim()
+  if (!raw) {
+    return 'Specialist'
+  }
+  const normalized = raw
+    .replace(/^cosmic\//i, '')
+    .replace(/:.*$/, '')
+    .replace(/[-_]/g, ' ')
+    .trim()
+  if (!normalized) {
+    return raw
+  }
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1)
+}
+
+function buildCachedProgressEntries(
+  payload: any,
+  activityText: string,
+  statusMessage: string,
+  progressStage: string | null,
+  progressKind: string,
+) {
+  const specialistDelegations = Array.isArray(payload?.specialist_delegations)
+    ? payload.specialist_delegations
+    : []
+  if (specialistDelegations.length > 0) {
+    return specialistDelegations.map((item: any) => ({
+      label: String(item?.activity || '').trim() || `Delegated ${String(item?.intent || 'specialist work').trim()}`,
+      detail: statusMessage || undefined,
+      status: typeof payload?.status === 'string' ? payload.status.trim() : null,
+      stage: progressStage,
+      kind: 'delegation',
+      flow_role: 'delegation',
+      delegated_task_id: String(item?.task_id || '').trim() || null,
+      agent_id: String(item?.agent_id || '').trim() || null,
+      agent_label: String(item?.agent_label || '').trim() || formatSpecialistAgentLabel(item?.agent_id),
+      intent: String(item?.intent || '').trim() || null,
+    }))
+  }
+  const specialist = payload?.specialist && typeof payload.specialist === 'object'
+    ? payload.specialist
+    : null
+  if (specialist) {
+    return [{
+      label: activityText,
+      detail: statusMessage && statusMessage !== activityText ? statusMessage : undefined,
+      status: typeof payload?.status === 'string' ? payload.status.trim() : null,
+      stage: progressStage,
+      kind: 'specialist_flow',
+      flow_role: 'specialist',
+      parent_delegated_task_id: String(specialist.attach_to_task_id || '').trim() || null,
+      specialist_task_id: String(specialist.task_id || '').trim() || null,
+      agent_id: String(specialist.agent_id || '').trim() || null,
+      agent_label: String(specialist.agent_label || '').trim() || formatSpecialistAgentLabel(specialist.agent_id),
+      intent: String(specialist.intent || '').trim() || null,
+      specialist_event_type: String(specialist.event_type || '').trim() || null,
+    }]
+  }
+  return [{
+    label: activityText,
+    detail: statusMessage || undefined,
+    status: typeof payload?.status === 'string' ? payload.status.trim() : null,
+    stage: progressStage,
+    kind: progressKind,
+  }]
+}
+
+function mergeCachedActivityLogs(current: any[] | undefined, incoming: any[] | undefined) {
+  let merged = Array.isArray(current) ? current : undefined
+  for (const item of incoming || []) {
+    if (!item || typeof item !== 'object') {
+      continue
+    }
+    merged = appendCachedActivityLog(merged, item as any)
+  }
+  return merged
+}
 
 function normalizeGatewayBaseUrl(rawBaseUrl: string) {
   const trimmed = String(rawBaseUrl || '').trim()
@@ -104,6 +312,10 @@ export class GatewayConnectionManager {
   private currentSessionId: string | null = null
   private historyTail: any[] = []
   private knownTaskIds = new Set<string>()
+  private foregroundStreams = new Map<string, ForegroundStreamSnapshot>()
+  private foregroundStreamRequestIndex = new Map<string, string>()
+  private foregroundStreamTaskIndex = new Map<string, string>()
+  private backgroundedRequestIds = new Set<string>()
   private status: GatewayConnectionStatus = {
     state: 'idle',
     connected: false,
@@ -241,6 +453,10 @@ export class GatewayConnectionManager {
     this.currentSessionId = null
     this.historyTail = []
     this.knownTaskIds.clear()
+    this.foregroundStreams.clear()
+    this.foregroundStreamRequestIndex.clear()
+    this.foregroundStreamTaskIndex.clear()
+    this.backgroundedRequestIds.clear()
     if (this.socket) {
       const socket = this.socket
       this.socket = null
@@ -350,6 +566,7 @@ export class GatewayConnectionManager {
       sessionId: this.currentSessionId,
       historyTail: this.historyTail,
       knownTaskIds: Array.from(this.knownTaskIds),
+      foregroundStreams: this.getForegroundStreams(),
       config: this.config ? { ...this.config, apiToken: undefined } : null,
     }
   }
@@ -575,6 +792,341 @@ export class GatewayConnectionManager {
     }
   }
 
+  private resolveForegroundStreamKey(payload: any) {
+    const requestId = typeof payload?.request_id === 'string' ? payload.request_id.trim() : ''
+    const taskId = typeof payload?.task_id === 'string' ? payload.task_id.trim() : ''
+    if (requestId) {
+      const existing = this.foregroundStreamRequestIndex.get(requestId)
+      if (existing) {
+        return existing
+      }
+    }
+    if (taskId) {
+      const existing = this.foregroundStreamTaskIndex.get(taskId)
+      if (existing) {
+        return existing
+      }
+    }
+    if (requestId) {
+      return `request:${requestId}`
+    }
+    if (taskId) {
+      return `task:${taskId}`
+    }
+    return null
+  }
+
+  private upsertForegroundStream(
+    payload: any,
+    patch: Partial<Omit<ForegroundStreamSnapshot, 'stream_key' | 'updated_at'>> = {},
+  ) {
+    const key = this.resolveForegroundStreamKey(payload)
+    if (!key) {
+      return null
+    }
+    const existing = this.foregroundStreams.get(key)
+    const requestId =
+      typeof patch.request_id === 'string'
+        ? patch.request_id.trim()
+        : typeof payload?.request_id === 'string'
+          ? payload.request_id.trim()
+          : typeof existing?.request_id === 'string'
+            ? existing.request_id.trim()
+            : ''
+    const taskId =
+      typeof patch.task_id === 'string'
+        ? patch.task_id.trim()
+        : typeof payload?.task_id === 'string'
+          ? payload.task_id.trim()
+          : typeof existing?.task_id === 'string'
+            ? existing.task_id.trim()
+            : ''
+
+    const next: ForegroundStreamSnapshot = {
+      ...(existing || {}),
+      ...patch,
+      stream_key: key,
+      request_id: requestId || null,
+      task_id: taskId || null,
+      updated_at: new Date().toISOString(),
+    }
+
+    this.foregroundStreams.set(key, next)
+    if (requestId) {
+      this.foregroundStreamRequestIndex.set(requestId, key)
+    }
+    if (taskId) {
+      this.foregroundStreamTaskIndex.set(taskId, key)
+    }
+    return next
+  }
+
+  private removeForegroundStream(payload: any) {
+    const key = this.resolveForegroundStreamKey(payload)
+    if (!key) {
+      return
+    }
+    const existing = this.foregroundStreams.get(key)
+    if (!existing) {
+      return
+    }
+    const requestId = typeof existing.request_id === 'string' ? existing.request_id.trim() : ''
+    const taskId = typeof existing.task_id === 'string' ? existing.task_id.trim() : ''
+    if (requestId) {
+      this.foregroundStreamRequestIndex.delete(requestId)
+    }
+    if (taskId) {
+      this.foregroundStreamTaskIndex.delete(taskId)
+    }
+    this.foregroundStreams.delete(key)
+  }
+
+  private pruneForegroundStreams() {
+    const now = Date.now()
+    for (const stream of Array.from(this.foregroundStreams.values())) {
+      const updatedAt = Date.parse(String(stream.updated_at || ''))
+      if (Number.isFinite(updatedAt) && now - updatedAt > FOREGROUND_STREAM_TTL_MS) {
+        this.removeForegroundStream({ request_id: stream.request_id, task_id: stream.task_id })
+      }
+    }
+  }
+
+  private pruneForegroundStreamsFromHistory() {
+    const assistantRequestIds = new Set<string>()
+    for (const item of this.historyTail) {
+      if (!item || typeof item !== 'object' || String(item?.role || '').trim() !== 'assistant') {
+        continue
+      }
+      const requestId =
+        typeof item?.request_id === 'string' && item.request_id.trim()
+          ? item.request_id.trim()
+          : typeof item?.metadata?.request_id === 'string' && item.metadata.request_id.trim()
+            ? item.metadata.request_id.trim()
+            : ''
+      if (requestId) {
+        assistantRequestIds.add(requestId)
+      }
+    }
+
+    for (const requestId of assistantRequestIds) {
+      const key = this.foregroundStreamRequestIndex.get(requestId)
+      if (!key) {
+        continue
+      }
+      const stream = this.foregroundStreams.get(key)
+      if (!stream) {
+        continue
+      }
+      const taskId = typeof stream.task_id === 'string' ? stream.task_id.trim() : ''
+      if (stream.completed || stream.failed || !taskId || !this.knownTaskIds.has(taskId)) {
+        this.removeForegroundStream({ request_id: requestId, task_id: taskId })
+      }
+    }
+  }
+
+  private getForegroundStreams() {
+    this.pruneForegroundStreams()
+    return Array.from(this.foregroundStreams.values())
+      .filter((stream) => {
+        const requestId = typeof stream.request_id === 'string' ? stream.request_id.trim() : ''
+        return !requestId || !this.backgroundedRequestIds.has(requestId)
+      })
+      .sort((left, right) => Date.parse(String(left.updated_at || '')) - Date.parse(String(right.updated_at || '')))
+  }
+
+  private captureForegroundStreamEvent(payload: any, eventType: string) {
+    if (!payload || typeof payload !== 'object') {
+      return
+    }
+    const requestId = typeof payload.request_id === 'string' ? payload.request_id.trim() : ''
+    if (eventType === 'task.backgrounded') {
+      if (requestId) {
+        this.backgroundedRequestIds.add(requestId)
+      }
+      this.removeForegroundStream(payload)
+      return
+    }
+    if (eventType.startsWith('task.background.')) {
+      return
+    }
+    if (requestId && this.backgroundedRequestIds.has(requestId) && eventType !== 'task.foregrounded') {
+      return
+    }
+
+    if (eventType === 'task.foregrounded' && requestId) {
+      this.backgroundedRequestIds.delete(requestId)
+      this.upsertForegroundStream(payload, {
+        session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
+        route: typeof payload.route === 'string' ? payload.route : undefined,
+        content: typeof payload.partial_content === 'string' ? payload.partial_content : undefined,
+        thinking_text: typeof payload.partial_thinking === 'string' ? payload.partial_thinking : undefined,
+        activity: typeof payload.activity === 'string' ? payload.activity : undefined,
+        activity_log: Array.isArray(payload.activity_log) ? payload.activity_log : undefined,
+        docs_progress: payload.docs_progress,
+        tabular_progress: payload.tabular_progress,
+        produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : undefined,
+        sources: Array.isArray(payload.sources) ? payload.sources : undefined,
+        completed: Boolean(payload.completed),
+        failed: Boolean(payload.failed),
+        error: typeof payload.error === 'string' ? payload.error : undefined,
+      })
+      return
+    }
+
+    if (eventType === 'route_result' || eventType === 'task.created') {
+      this.upsertForegroundStream(payload, {
+        session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
+        route: typeof payload.route === 'string' ? payload.route : undefined,
+      })
+      return
+    }
+
+    if (eventType === 'task.progress') {
+      const eventStatus = typeof payload.status === 'string' ? payload.status.trim() : ''
+      const statusMessage = typeof payload.message === 'string' ? payload.message.trim() : ''
+      const progressState = payload.tabular_progress ?? payload.docs_progress
+      const progressLabel =
+        progressState && typeof progressState === 'object' && typeof progressState.label === 'string'
+          ? progressState.label.trim()
+          : ''
+      const progressStage =
+        progressState && typeof progressState === 'object' && typeof progressState.stage === 'string'
+          ? progressState.stage.trim()
+          : null
+      const progressKind =
+        progressState && typeof progressState === 'object' && typeof (progressState as any).kind === 'string'
+          ? String((progressState as any).kind).trim()
+          : payload.tabular_progress
+            ? 'tabular_parse'
+            : payload.docs_progress
+            ? 'docs_parse'
+              : 'generic'
+      const activityText = progressLabel || statusMessage || (eventStatus ? `Task ${eventStatus}...` : 'Working on your request...')
+      const activityEntries = buildCachedProgressEntries(
+        payload,
+        activityText,
+        statusMessage,
+        progressStage,
+        progressKind,
+      )
+      const existing = this.upsertForegroundStream(payload, {
+        session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
+        route: typeof payload.route === 'string' ? payload.route : undefined,
+      })
+      this.upsertForegroundStream(payload, {
+        session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
+        route: typeof payload.route === 'string' ? payload.route : undefined,
+        activity: activityText,
+        activity_log: mergeCachedActivityLogs(
+          Array.isArray(payload.activity_log) ? payload.activity_log : existing?.activity_log,
+          activityEntries,
+        ),
+        docs_progress: payload.docs_progress,
+        tabular_progress: payload.tabular_progress,
+        completed: false,
+        failed: false,
+      })
+      return
+    }
+
+    if (eventType === 'response.chunk') {
+      const existing = this.upsertForegroundStream(payload, {
+        session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
+        route: typeof payload.route === 'string' ? payload.route : undefined,
+        completed: false,
+        failed: false,
+      })
+      if (existing) {
+        this.upsertForegroundStream(payload, {
+          content: appendCachedStreamText(existing.content, payload.content),
+        })
+      }
+      return
+    }
+
+    if (eventType === 'response.thinking.chunk') {
+      const existing = this.upsertForegroundStream(payload, {
+        session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
+        route: typeof payload.route === 'string' ? payload.route : undefined,
+        completed: false,
+        failed: false,
+      })
+      if (existing) {
+        this.upsertForegroundStream(payload, {
+          thinking_text: appendCachedStreamText(existing.thinking_text, payload.content),
+        })
+      }
+      return
+    }
+
+    if (eventType === 'response.complete') {
+      const existing = this.upsertForegroundStream(payload, {
+        session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
+        route: typeof payload.route === 'string' ? payload.route : undefined,
+      })
+      this.upsertForegroundStream(payload, {
+        session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
+        route: typeof payload.route === 'string' ? payload.route : undefined,
+        message_id: typeof payload.message_id === 'string' ? payload.message_id : undefined,
+        activity_log: mergeCachedActivityLogs(
+          existing?.activity_log,
+          Array.isArray(payload.activity_log) ? payload.activity_log : undefined,
+        ),
+        produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : undefined,
+        response_blocks: Array.isArray(payload.response_blocks) ? payload.response_blocks : undefined,
+        sources: Array.isArray(payload.sources) ? payload.sources : undefined,
+        channel: typeof payload.channel === 'string' ? payload.channel : undefined,
+        source: typeof payload.source === 'string' ? payload.source : undefined,
+        source_id: typeof payload.source_id === 'string' ? payload.source_id : undefined,
+        awaiting_reply: payload.awaiting_reply === true,
+        completed: true,
+        failed: false,
+      })
+      if (existing) {
+        this.upsertForegroundStream(payload, {
+          content: mergeCachedCompletedText(existing.content, payload.content),
+        })
+      }
+      return
+    }
+
+    if (eventType === 'task.failed') {
+      const errorMessage =
+        typeof payload?.error?.message === 'string' && payload.error.message.trim()
+          ? payload.error.message.trim()
+          : typeof payload.message === 'string' && payload.message.trim()
+            ? payload.message.trim()
+            : 'Opus task failed.'
+      this.upsertForegroundStream(payload, {
+        session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
+        route: typeof payload.route === 'string' ? payload.route : undefined,
+        content: errorMessage,
+        completed: true,
+        failed: true,
+        error: errorMessage,
+      })
+      return
+    }
+
+    if (eventType === 'task.cancelled') {
+      this.upsertForegroundStream(payload, {
+        session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
+        route: typeof payload.route === 'string' ? payload.route : undefined,
+        completed: true,
+      })
+      return
+    }
+
+    if (eventType === 'task.completed') {
+      this.upsertForegroundStream(payload, {
+        session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
+        route: typeof payload.route === 'string' ? payload.route : undefined,
+        completed: true,
+        failed: false,
+      })
+    }
+  }
+
   private sendPing() {
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || undefined
     this.sendJson({
@@ -648,7 +1200,18 @@ export class GatewayConnectionManager {
       this.knownTaskIds.delete(String(payload.task_id))
     }
 
+    this.captureForegroundStreamEvent(payload, eventType)
     this.applyEventToHistory(payload, eventType)
+    this.pruneForegroundStreamsFromHistory()
+    if (eventType === 'response.complete') {
+      this.removeForegroundStream(payload)
+    }
+    if (eventType === 'resume.ok') {
+      payload = {
+        ...payload,
+        foreground_streams: this.getForegroundStreams(),
+      }
+    }
 
     this.emitToRenderer('gateway:event', payload)
   }
