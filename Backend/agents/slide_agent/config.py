@@ -14,6 +14,10 @@ BACKEND_ROOT = AGENT_ROOT.parent.parent
 
 __all__ = ["SlideAgentConfig", "AGENT_ROOT", "BACKEND_ROOT"]
 
+DEFAULT_SLIDE_AGENT_MIMO_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_SLIDE_AGENT_MIMO_MODEL = "qwen/qwen3.6-plus:free"
+DEFAULT_SLIDE_AGENT_MIMO_APP_NAME = "COSMIC Slide Agent"
+
 load_dotenv(AGENT_ROOT / "agent.env")
 load_dotenv(BACKEND_ROOT / ".env")
 
@@ -63,11 +67,16 @@ class SlideAgentConfig:
     redis_url: str = "redis://127.0.0.1:6379/0"
     gateway_url: str = "http://127.0.0.1:8080"
     gateway_internal_token: str = ""
-    # Internal LLM (gpt-5-mini)
+    # Internal LLM (OpenRouter qwen/qwen3.6-plus:free)
     mimo_api_key: str = ""
-    mimo_base_url: str = ""
-    mimo_model: str = "gpt-5-mini"
+    mimo_base_url: str = DEFAULT_SLIDE_AGENT_MIMO_BASE_URL
+    mimo_model: str = DEFAULT_SLIDE_AGENT_MIMO_MODEL
     mimo_timeout_sec: float = 120.0
+    mimo_temperature: float = 1.0
+    mimo_reasoning_enabled: bool = True
+    mimo_reasoning_max_tokens: int = 256
+    mimo_app_name: str = DEFAULT_SLIDE_AGENT_MIMO_APP_NAME
+    mimo_site_url: str = ""
     enable_internal_llm: bool = True
     # LangGraph
     slide_use_langgraph: bool = True
@@ -101,18 +110,41 @@ class SlideAgentConfig:
             gateway_url=os.getenv("GATEWAY_URL", "http://127.0.0.1:8080").strip(),
             gateway_internal_token=os.getenv("GATEWAY_INTERNAL_TOKEN", "").strip(),
             mimo_api_key=(
-                os.getenv("SLIDE_AGENT_MIMO_API_KEY") or os.getenv("MIMO_API_KEY") or ""
+                os.getenv("SLIDE_AGENT_MIMO_API_KEY")
+                or os.getenv("OPENROUTER_API_KEY")
+                or os.getenv("MIMO_API_KEY")
+                or ""
             ).strip(),
             mimo_base_url=_normalize_openai_base_url(
                 (
                     os.getenv("SLIDE_AGENT_MIMO_BASE_URL")
+                    or os.getenv("OPENROUTER_BASE_URL")
                     or os.getenv("MIMO_OPENAI_BASE_URL")
-                    or ""
+                    or DEFAULT_SLIDE_AGENT_MIMO_BASE_URL
                 ).strip()
             ),
-            mimo_model=(os.getenv("SLIDE_AGENT_MIMO_MODEL") or "gpt-5-mini").strip()
-            or "gpt-5-mini",
+            mimo_model=(
+                os.getenv("SLIDE_AGENT_MIMO_MODEL") or DEFAULT_SLIDE_AGENT_MIMO_MODEL
+            ).strip()
+            or DEFAULT_SLIDE_AGENT_MIMO_MODEL,
             mimo_timeout_sec=_env_float("SLIDE_AGENT_MIMO_TIMEOUT_SEC", 120.0),
+            mimo_temperature=_env_float("SLIDE_AGENT_MIMO_TEMPERATURE", 1.0),
+            mimo_reasoning_enabled=_env_bool(
+                "SLIDE_AGENT_MIMO_REASONING_ENABLED", True
+            ),
+            mimo_reasoning_max_tokens=max(
+                0, _env_int("SLIDE_AGENT_MIMO_REASONING_MAX_TOKENS", 256)
+            ),
+            mimo_app_name=(
+                os.getenv("SLIDE_AGENT_MIMO_APP_NAME")
+                or DEFAULT_SLIDE_AGENT_MIMO_APP_NAME
+            ).strip()
+            or DEFAULT_SLIDE_AGENT_MIMO_APP_NAME,
+            mimo_site_url=(
+                os.getenv("SLIDE_AGENT_MIMO_SITE_URL")
+                or os.getenv("OPENROUTER_SITE_URL")
+                or ""
+            ).strip(),
             enable_internal_llm=_env_bool("SLIDE_AGENT_ENABLE_INTERNAL_LLM", True),
             slide_use_langgraph=_env_bool("SLIDE_AGENT_USE_LANGGRAPH", True),
             slide_max_tool_rounds=max(1, _env_int("SLIDE_AGENT_MAX_TOOL_ROUNDS", 10)),

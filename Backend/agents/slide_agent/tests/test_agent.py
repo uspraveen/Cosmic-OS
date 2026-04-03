@@ -17,7 +17,11 @@ class TestConfig:
         from agents.slide_agent.config import SlideAgentConfig
 
         cfg = SlideAgentConfig()
-        assert cfg.mimo_model == "gpt-5-mini"
+        assert cfg.mimo_base_url == "https://openrouter.ai/api/v1"
+        assert cfg.mimo_model == "qwen/qwen3.6-plus:free"
+        assert cfg.mimo_temperature == 1.0
+        assert cfg.mimo_reasoning_enabled is True
+        assert cfg.mimo_reasoning_max_tokens == 256
         assert cfg.slide_use_langgraph is True
         assert cfg.default_template == "corporate-dark"
         assert cfg.export_pdf is True
@@ -179,6 +183,36 @@ class TestSlideBuilder:
         assert result.exists()
         assert result.stat().st_size > 0
 
+    def test_build_deck_applies_template_background_defaults(self, tmp_path):
+        pytest.importorskip("pptx")
+        from agents.slide_agent.slide_builder import SlideBuilder
+        from pptx import Presentation
+
+        builder = SlideBuilder(Path(__file__).parent.parent / "templates")
+        plan = {
+            "deck": {
+                "title": "Pitch Deck",
+                "template": "pitch-deck",
+                "theme": {
+                    "text_color": "#ffffff",
+                    "font_family": "Calibri",
+                },
+            },
+            "slides": [
+                {
+                    "slide_number": 1,
+                    "layout": "title_slide",
+                    "title": "COSMIC",
+                    "subtitle": "Your Personal AI OS",
+                }
+            ],
+        }
+        output_path = tmp_path / "pitch_test.pptx"
+        result = builder.build_deck(plan, output_path)
+        prs = Presentation(str(result))
+        slide = prs.slides[0]
+        assert str(slide.background.fill.fore_color.rgb) == "0F0F23"
+
     def test_extract_structure(self, tmp_path):
         pytest.importorskip("pptx")
         from agents.slide_agent.slide_builder import SlideBuilder
@@ -214,6 +248,24 @@ class TestSchemas:
             assert path.exists(), f"Missing schema: {name}"
             data = json.loads(path.read_text())
             assert "type" in data
+
+
+class TestValidationHeuristics:
+    def test_detect_blank_or_low_contrast_slide(self):
+        from io import BytesIO
+
+        from PIL import Image
+
+        from agents.slide_agent.internal_llm import _detect_blank_or_low_contrast_slide
+
+        image = Image.new("RGB", (960, 540), "white")
+        buf = BytesIO()
+        image.save(buf, format="PNG")
+
+        result = _detect_blank_or_low_contrast_slide(buf.getvalue())
+        assert result is not None
+        assert result["pass"] is False
+        assert any("blank" in issue.lower() for issue in result["issues"])
 
 
 class TestAgentCard:
@@ -268,6 +320,21 @@ class TestAgentCard:
 
 
 class TestInternalLLM:
+    def test_openrouter_helpers(self):
+        from agents.slide_agent.config import SlideAgentConfig
+        from agents.slide_agent.internal_llm import (
+            _effective_temperature,
+            _extra_body,
+            _usage_provider_name,
+        )
+
+        cfg = SlideAgentConfig(mimo_temperature=2.0)
+        assert _usage_provider_name(cfg) == "openrouter"
+        assert _effective_temperature(cfg) == 1.0
+        assert _extra_body(cfg) == {
+            "reasoning": {"enabled": True, "max_tokens": 256}
+        }
+
     def test_plan_deck_signature(self):
         import inspect
         from agents.slide_agent.internal_llm import plan_deck

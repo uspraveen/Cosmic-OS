@@ -1919,31 +1919,71 @@ def build_slide_agent_env_rendered(
     )
     mimo_api_key = first_meaningful_value(
         external_env.get("SLIDE_AGENT_MIMO_API_KEY"),
+        external_env.get("OPENROUTER_API_KEY"),
         external_env.get("MIMO_API_KEY"),
         existing_env.get("SLIDE_AGENT_MIMO_API_KEY"),
+        existing_env.get("OPENROUTER_API_KEY"),
         existing_env.get("MIMO_API_KEY"),
         source_data.get("SLIDE_AGENT_MIMO_API_KEY"),
+        source_data.get("OPENROUTER_API_KEY"),
         source_data.get("MIMO_API_KEY"),
     )
     mimo_base_url = first_meaningful_value(
         external_env.get("SLIDE_AGENT_MIMO_BASE_URL"),
+        external_env.get("OPENROUTER_BASE_URL"),
         external_env.get("MIMO_OPENAI_BASE_URL"),
         existing_env.get("SLIDE_AGENT_MIMO_BASE_URL"),
+        existing_env.get("OPENROUTER_BASE_URL"),
         existing_env.get("MIMO_OPENAI_BASE_URL"),
         source_data.get("SLIDE_AGENT_MIMO_BASE_URL"),
+        source_data.get("OPENROUTER_BASE_URL"),
         source_data.get("MIMO_OPENAI_BASE_URL"),
+        "https://openrouter.ai/api/v1",
     )
     mimo_model = first_meaningful_value(
         external_env.get("SLIDE_AGENT_MIMO_MODEL"),
         existing_env.get("SLIDE_AGENT_MIMO_MODEL"),
         source_data.get("SLIDE_AGENT_MIMO_MODEL"),
-        "gpt-5-mini",
+        "qwen/qwen3.6-plus:free",
     )
     mimo_timeout_sec = first_meaningful_value(
         external_env.get("SLIDE_AGENT_MIMO_TIMEOUT_SEC"),
         existing_env.get("SLIDE_AGENT_MIMO_TIMEOUT_SEC"),
         source_data.get("SLIDE_AGENT_MIMO_TIMEOUT_SEC"),
         "120.0",
+    )
+    mimo_temperature = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_MIMO_TEMPERATURE"),
+        existing_env.get("SLIDE_AGENT_MIMO_TEMPERATURE"),
+        source_data.get("SLIDE_AGENT_MIMO_TEMPERATURE"),
+        "1.0",
+    )
+    mimo_reasoning_enabled = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_MIMO_REASONING_ENABLED"),
+        existing_env.get("SLIDE_AGENT_MIMO_REASONING_ENABLED"),
+        source_data.get("SLIDE_AGENT_MIMO_REASONING_ENABLED"),
+        "true",
+    )
+    mimo_reasoning_max_tokens = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_MIMO_REASONING_MAX_TOKENS"),
+        existing_env.get("SLIDE_AGENT_MIMO_REASONING_MAX_TOKENS"),
+        source_data.get("SLIDE_AGENT_MIMO_REASONING_MAX_TOKENS"),
+        "256",
+    )
+    mimo_app_name = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_MIMO_APP_NAME"),
+        existing_env.get("SLIDE_AGENT_MIMO_APP_NAME"),
+        source_data.get("SLIDE_AGENT_MIMO_APP_NAME"),
+        "COSMIC Slide Agent",
+    )
+    mimo_site_url = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_MIMO_SITE_URL"),
+        external_env.get("OPENROUTER_SITE_URL"),
+        existing_env.get("SLIDE_AGENT_MIMO_SITE_URL"),
+        existing_env.get("OPENROUTER_SITE_URL"),
+        source_data.get("SLIDE_AGENT_MIMO_SITE_URL"),
+        source_data.get("OPENROUTER_SITE_URL"),
+        "",
     )
     enable_internal_llm = first_meaningful_value(
         external_env.get("SLIDE_AGENT_ENABLE_INTERNAL_LLM"),
@@ -2030,8 +2070,13 @@ def build_slide_agent_env_rendered(
         "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
         "AGENT_SECRET": signing_secret,
         "INSTANCE_ID": instance_id or SLIDE_AGENT_DEFAULT_INSTANCE_ID,
-        "SLIDE_AGENT_MIMO_MODEL": mimo_model or "gpt-5-mini",
+        "SLIDE_AGENT_MIMO_MODEL": mimo_model or "qwen/qwen3.6-plus:free",
         "SLIDE_AGENT_MIMO_TIMEOUT_SEC": mimo_timeout_sec or "120.0",
+        "SLIDE_AGENT_MIMO_TEMPERATURE": mimo_temperature or "1.0",
+        "SLIDE_AGENT_MIMO_REASONING_ENABLED": mimo_reasoning_enabled or "true",
+        "SLIDE_AGENT_MIMO_REASONING_MAX_TOKENS": mimo_reasoning_max_tokens or "256",
+        "SLIDE_AGENT_MIMO_APP_NAME": mimo_app_name or "COSMIC Slide Agent",
+        "SLIDE_AGENT_MIMO_SITE_URL": mimo_site_url or "",
         "SLIDE_AGENT_ENABLE_INTERNAL_LLM": enable_internal_llm or "true",
         "SLIDE_AGENT_USE_LANGGRAPH": use_langgraph or "true",
         "SLIDE_AGENT_MAX_TOOL_ROUNDS": max_tool_rounds or "10",

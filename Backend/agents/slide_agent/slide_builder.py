@@ -26,6 +26,8 @@ from pptx.enum.chart import XL_CHART_TYPE
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.util import Emu, Inches, Pt
 
+from .templates_registry import get_template
+
 logger = logging.getLogger(__name__)
 
 # Layout name → index mapping (for built-in template)
@@ -184,7 +186,7 @@ class SlideBuilder:
             prs.slide_height = Inches(plan_dims["height"])
         # else: keep template's native dimensions
 
-        theme = deck_def.get("theme", {})
+        theme = self._effective_theme(template_name, deck_def.get("theme", {}))
 
         for slide_def in slides_def:
             self._add_slide(prs, slide_def, theme)
@@ -192,6 +194,20 @@ class SlideBuilder:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         prs.save(str(output_path))
         return output_path
+
+    def _effective_theme(
+        self, template_name: str, theme: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Merge template defaults with LLM-provided theme overrides."""
+        merged = dict(theme or {})
+        template_meta = get_template(template_name) or {}
+        if template_meta:
+            merged.setdefault("background_color", template_meta.get("background"))
+            merged.setdefault("text_color", template_meta.get("text_color"))
+            accents = template_meta.get("accent_colors") or []
+            if accents:
+                merged.setdefault("accent_color", accents[0])
+        return merged
 
     def apply_edits(
         self, prs: Presentation, operations: list[dict[str, Any]]
@@ -344,14 +360,16 @@ class SlideBuilder:
                 self._add_blank_content(slide, slide_def, theme)
 
         # Background
-        bg = slide_def.get("background")
-        if bg and bg.get("color"):
+        bg = slide_def.get("background") or {}
+        bg_color = bg.get("color") or theme.get("background_color") or theme.get(
+            "background"
+        )
+        if bg_color:
             try:
-                slide.follow_master_background = False
                 slide.background.fill.solid()
-                slide.background.fill.fore_color.rgb = _hex_to_rgb(bg["color"])
-            except Exception:
-                pass
+                slide.background.fill.fore_color.rgb = _hex_to_rgb(bg_color)
+            except Exception as exc:
+                logger.warning("Failed to apply slide background color %s: %s", bg_color, exc)
 
         # Speaker notes
         notes = _safe_text(slide_def.get("speaker_notes"))
@@ -706,11 +724,14 @@ class SlideBuilder:
             # Apply background
             if primary_color:
                 try:
-                    slide.follow_master_background = False
                     slide.background.fill.solid()
                     slide.background.fill.fore_color.rgb = _hex_to_rgb(primary_color)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to restyle slide background color %s: %s",
+                        primary_color,
+                        exc,
+                    )
 
             # Apply text color to all text shapes
             if text_color or font_family:

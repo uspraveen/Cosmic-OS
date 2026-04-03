@@ -1,6 +1,6 @@
 """Slide-agent internal LLM via LangChain OpenAI-compatible client.
 
-Uses gpt-5-mini for:
+Uses OpenRouter qwen/qwen3.6-plus:free for:
 - Deck planning: analyze input → DeckPlan JSON
 - Edit planning: translate edit requests → operation list
 - Vision validation: check rendered slide PNGs for quality
@@ -12,16 +12,66 @@ from __future__ import annotations
 import json
 import logging
 import time
+from io import BytesIO
 from typing import Any
 from uuid import uuid4
 
 import httpx
+from PIL import Image, ImageStat
 
 from shared.usage import UsageEvent, post_usage_event, serialize_usage_metadata
 
 from .config import SlideAgentConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _is_openrouter_base_url(base_url: str) -> bool:
+    return "openrouter.ai" in (base_url or "").strip().lower()
+
+
+def _usage_provider_name(cfg: SlideAgentConfig) -> str:
+    if _is_openrouter_base_url(cfg.mimo_base_url):
+        return "openrouter"
+    return "openai_compatible"
+
+
+def _supports_temperature(model_name: str) -> bool:
+    normalized = (model_name or "").strip().lower()
+    return not normalized.startswith("gpt-5")
+
+
+def _effective_temperature(cfg: SlideAgentConfig) -> float:
+    raw = max(0.0, float(cfg.mimo_temperature))
+    if _is_openrouter_base_url(cfg.mimo_base_url) and "qwen/" in cfg.mimo_model.lower():
+        return min(raw, 1.0)
+    return raw
+
+
+def _extra_body(cfg: SlideAgentConfig) -> dict[str, Any] | None:
+    if not _is_openrouter_base_url(cfg.mimo_base_url):
+        return None
+    if not cfg.mimo_reasoning_enabled or cfg.mimo_reasoning_max_tokens <= 0:
+        return None
+    return {
+        "reasoning": {
+            "enabled": True,
+            "max_tokens": int(cfg.mimo_reasoning_max_tokens),
+        }
+    }
+
+
+def _default_headers(cfg: SlideAgentConfig) -> dict[str, str] | None:
+    if not _is_openrouter_base_url(cfg.mimo_base_url):
+        return None
+    headers: dict[str, str] = {}
+    app_name = (cfg.mimo_app_name or "").strip()
+    if app_name:
+        headers["X-Title"] = app_name
+    site_url = (cfg.mimo_site_url or "").strip()
+    if site_url:
+        headers["HTTP-Referer"] = site_url
+    return headers or None
 
 
 async def _invoke_llm(
@@ -62,12 +112,21 @@ async def _invoke_llm(
             http2=False,
             follow_redirects=True,
         ) as mimo_http:
-            llm = ChatOpenAI(
-                model=cfg.mimo_model,
-                api_key=cfg.mimo_api_key,
-                base_url=cfg.mimo_base_url,
-                http_async_client=mimo_http,
-            )
+            llm_kwargs: dict[str, Any] = {
+                "model": cfg.mimo_model,
+                "api_key": cfg.mimo_api_key,
+                "base_url": cfg.mimo_base_url,
+                "http_async_client": mimo_http,
+            }
+            if _supports_temperature(cfg.mimo_model):
+                llm_kwargs["temperature"] = _effective_temperature(cfg)
+            extra_body = _extra_body(cfg)
+            if extra_body is not None:
+                llm_kwargs["extra_body"] = extra_body
+            default_headers = _default_headers(cfg)
+            if default_headers is not None:
+                llm_kwargs["default_headers"] = default_headers
+            llm = ChatOpenAI(**llm_kwargs)
             result = await llm.ainvoke(messages)
     except Exception as exc:
         logger.warning("slide_agent.internal_llm_error: %s", exc)
@@ -94,7 +153,7 @@ async def _invoke_llm(
                 source=source or "",
                 source_id=source_id or "",
                 channel=channel or "",
-                provider="openai_compatible",
+                provider=_usage_provider_name(cfg),
                 model=cfg.mimo_model,
                 usage_kind="chat_completion",
                 ok=True,
@@ -207,6 +266,17 @@ Common layouts:
 - table: styled data table
 - flow_diagram: connected boxes with arrows
 
+## Aesthetic Bar
+
+Every slide must look intentional, polished, and presentation-ready. Avoid layouts that feel
+like an unstyled template dump.
+
+- Use strong hierarchy: one dominant headline, one clear secondary element, then restrained support.
+- Use whitespace deliberately. Empty space should feel premium, not accidental.
+- Avoid top-left-heavy compositions unless the template layout clearly demands it.
+- For a simple intro slide, prefer one memorable title plus one crisp subtitle or proof line over a dense bullet stack.
+- Keep supporting copy compact and punchy. If a slide can say less, say less.
+
 ## Font Constraint
 
 ALWAYS use system fonts only. These render correctly on any machine with Office/PowerPoint:
@@ -216,10 +286,17 @@ ALWAYS use system fonts only. These render correctly on any machine with Office/
 
 Do NOT use Google Fonts, custom fonts, or fonts not listed above.
 If the user requests a custom font, substitute the closest system font from the list.
+Do NOT use emoji, dingbats, checkmark glyphs, or icon-like Unicode symbols in titles
+or bullets. Use plain text instead.
 
 ## Rules
 - Each slide MUST have a layout that exists in the template
 - Each slide MUST have a title (except blank)
+- For a one-slide intro/cover slide, prefer a title-slide-compatible layout and keep
+  the hierarchy simple: a large title, a clear subtitle, then at most one short
+  supporting line or a few concise bullets only if the user explicitly asks.
+- For a one-slide pitch/intro deck, center or intentionally balance the composition
+  within the template zones; do not cram everything into the top-left with large dead space.
 - Keep bullets concise (5-8 words per bullet, 3-6 per slide)
 - Charts should have clear titles and labeled series
 - Tables should have headers and 3-10 data rows
@@ -302,6 +379,43 @@ async def plan_deck(
     context = f"Request: {description}\n"
     if template:
         context += f"Preferred template: {template}\n"
+    desc_lower = description.lower()
+    derived_design_brief: list[str] = []
+    if not template and any(
+        token in desc_lower for token in ("pitch deck", "pitchdeck", "investor")
+    ):
+        derived_design_brief.append(
+            "Prefer the `pitch-deck` template unless the source materials clearly demand another template."
+        )
+    if any(
+        token in desc_lower
+        for token in (
+            "intro slide",
+            "cover slide",
+            "title slide",
+            "one slide",
+            "1 slide",
+            "single slide",
+        )
+    ):
+        derived_design_brief.append(
+            "Treat this as a premium one-slide cover: large headline, crisp subtitle, at most one short supporting line, strong contrast, and balanced composition."
+        )
+    if any(
+        token in desc_lower
+        for token in (
+            "simple slide",
+            "simple deck",
+            "test slide",
+            "test deck",
+            "smoke test",
+        )
+    ):
+        derived_design_brief.append(
+            "Even if the request is simple, the design must feel polished, intentional, and not like placeholder output."
+        )
+    if derived_design_brief:
+        context += "\nDesign steering:\n- " + "\n- ".join(derived_design_brief) + "\n"
     if input_data:
         extra_data = dict(input_data)
         template_layouts = extra_data.pop("_template_layouts", None)
@@ -466,10 +580,42 @@ Check for:
 5. **Chart clarity**: Chart labels visible? Data bars/lines readable?
 6. **Table readability**: Headers distinguishable? Cell text legible?
 7. **Consistency**: Does it match professional presentation standards?
+8. **Cover-slide quality**: If this is an intro/title slide, does it have strong title hierarchy,
+   visible subtitle/supporting line, and a centered or intentionally balanced composition?
+9. **Visual intent**: Does the slide feel designed, or does it look like placeholder content was
+   dumped into the top-left of a template?
 
 Pass if the slide is clearly readable and professional-looking.
-Fail if text is cut off, images overlap, or the layout is confusing.
+Fail if the slide appears blank, text blends into the background, images overlap,
+or the layout is confusing or visually weak.
 """
+
+
+def _detect_blank_or_low_contrast_slide(png_bytes: bytes) -> dict[str, Any] | None:
+    """Fast heuristic guard for obviously blank or near-blank slides."""
+    try:
+        image = Image.open(BytesIO(png_bytes)).convert("RGB")
+    except Exception:
+        return None
+
+    stat = ImageStat.Stat(image)
+    avg_brightness = sum(stat.mean) / 3.0
+    avg_stddev = sum(stat.stddev) / 3.0
+
+    if avg_brightness >= 248 and avg_stddev <= 3.0:
+        return {
+            "pass": False,
+            "issues": [
+                "Rendered slide appears blank or nearly blank.",
+                "Slide has extremely low visual contrast.",
+            ],
+            "suggestion": (
+                "Apply an explicit contrasting background and ensure text uses a "
+                "readable color with visible hierarchy."
+            ),
+            "confidence": 0.99,
+        }
+    return None
 
 
 async def validate_slide(
@@ -488,6 +634,10 @@ async def validate_slide(
     """Validate a single rendered slide using vision."""
     if not png_bytes or len(png_bytes) < 100:
         return None
+
+    heuristic_failure = _detect_blank_or_low_contrast_slide(png_bytes)
+    if heuristic_failure is not None:
+        return heuristic_failure
 
     import base64
 
@@ -547,6 +697,8 @@ Rules:
 - Keep the same layout unless the issue is about layout
 - Fix specific issues mentioned in the feedback
 - Maintain professional quality
+- Strengthen hierarchy, balance, and contrast when the feedback suggests the slide feels weak,
+  top-heavy, blank, or like placeholder output
 """
 
 

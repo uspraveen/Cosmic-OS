@@ -15,6 +15,8 @@
 - Include speaker_notes on every slide.
 - Use charts for data comparisons, tables for structured data, images for concepts.
 - Match template to context: corporate-dark for business, minimal for clean, pitch-deck for startups.
+- For a one-slide intro or pitch cover, prefer a strong title-slide composition with one dominant headline, one crisp subtitle, and deliberately balanced whitespace.
+- Avoid layouts that leave the deck looking top-left-heavy, placeholder-like, or visually accidental.
 
 ### Image Delegation
 - When a slide needs a custom image, set `source.kind: "generate"` with a descriptive prompt.
@@ -36,9 +38,10 @@
 
 ### Validation
 - Render each slide to PNG via LibreOffice + pdftoppm.
-- Send each PNG to gpt-5-mini vision for quality assessment.
+- Send each PNG to the internal review model for quality assessment.
 - If issues found and attempts < max: regenerate corrected definitions via LLM, rebuild, re-validate.
 - If max attempts reached: accept with warning, include issues in output.
+- Reject slides that look blank, low-contrast, top-heavy, or visually weak even if the text technically rendered.
 
 ### Editing
 - Parse existing deck structure before editing.
