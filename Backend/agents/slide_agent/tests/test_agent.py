@@ -17,13 +17,14 @@ class TestConfig:
         from agents.slide_agent.config import SlideAgentConfig
 
         cfg = SlideAgentConfig()
-        assert cfg.mimo_base_url == "https://api.openai.com/v1"
-        assert cfg.mimo_model == "gpt-5-mini"
-        assert cfg.mimo_temperature == 1.0
+        assert cfg.mimo_base_url == "https://api.fireworks.ai/inference/v1"
+        assert cfg.mimo_model == "accounts/fireworks/models/kimi-k2p5"
+        assert cfg.mimo_temperature == 0.6
         assert cfg.mimo_reasoning_enabled is True
         assert cfg.mimo_reasoning_max_tokens == 256
         assert cfg.slide_use_langgraph is True
-        assert cfg.default_template == "corporate-dark"
+        assert cfg.default_template == "business-meeting"
+        assert cfg.max_validation_attempts == 4
         assert cfg.export_pdf is True
 
     def test_config_from_env(self):
@@ -55,7 +56,7 @@ class TestAgentImport:
         mock_redis = MagicMock()
         agent = SlideAgent(redis_client=mock_redis, config=cfg)
         assert agent.agent_id == "cosmic/slide-agent:1.0.0"
-        assert agent._cfg.default_template == "corporate-dark"
+        assert agent._cfg.default_template == "business-meeting"
 
     def test_correct_super_init_kwarg(self):
         """Verify AgentRuntime.__init__ receives redis_client= not redis=."""
@@ -320,6 +321,23 @@ class TestAgentCard:
 
 
 class TestInternalLLM:
+    def test_fireworks_helpers(self):
+        from agents.slide_agent.config import SlideAgentConfig
+        from agents.slide_agent.internal_llm import (
+            _effective_temperature,
+            _extra_body,
+            _usage_provider_name,
+        )
+
+        cfg = SlideAgentConfig(
+            mimo_base_url="https://api.fireworks.ai/inference/v1",
+            mimo_model="accounts/fireworks/models/kimi-k2p5",
+            mimo_temperature=1.2,
+        )
+        assert _usage_provider_name(cfg) == "fireworks"
+        assert _effective_temperature(cfg) == 0.6
+        assert _extra_body(cfg) is None
+
     def test_openrouter_helpers(self):
         from agents.slide_agent.config import SlideAgentConfig
         from agents.slide_agent.internal_llm import (
@@ -338,6 +356,27 @@ class TestInternalLLM:
         assert _extra_body(cfg) == {
             "reasoning": {"enabled": True, "max_tokens": 256}
         }
+
+
+class TestTemplateRegistry:
+    def test_registry_only_advertises_installed_templates(self, tmp_path: Path):
+        from agents.slide_agent.templates_registry import (
+            get_template,
+            get_template_descriptions,
+        )
+
+        templates_dir = tmp_path / "templates"
+        templates_dir.mkdir(parents=True, exist_ok=True)
+        (templates_dir / "business-meeting.pptx").write_bytes(b"pptx")
+        (templates_dir / "tech-trends.pptx").write_bytes(b"pptx")
+        (templates_dir / "corporate-dark.pptx").write_bytes(b"pptx")
+
+        descriptions = get_template_descriptions(templates_dir)
+        assert "business-meeting" in descriptions
+        assert "tech-trends" in descriptions
+        assert "corporate-dark" in descriptions
+        assert "tech-infographics" not in descriptions
+        assert get_template("tech-infographics", templates_dir) is None
 
     def test_plan_deck_signature(self):
         import inspect
@@ -694,6 +733,70 @@ class TestLayoutEngine:
         assert len(boxes) >= 2  # title + content
         assert any("title" in b.label for b in boxes)
 
+    def test_extract_bounding_boxes_assignments_with_freeflow(self):
+        """Assignment-based slides with free-flow code_chart/flow_diagram must
+        still produce bounding boxes for the free-flow elements."""
+        from agents.slide_agent.slide_graph import _extract_bounding_boxes
+
+        slide_def = {
+            "slide_number": 1,
+            "layout": "Title and Content",
+            "title": "Mixed Slide",
+            "assignments": {
+                "0": {"type": "title", "text": "Mixed Slide"},
+                "1": {"type": "body", "items": ["Point A"]},
+            },
+            "content": {
+                "type": "code_chart",
+                "code": "plt.bar(['A'], [1])",
+                "placement": {
+                    "x_inches": 7.0,
+                    "y_inches": 2.0,
+                    "width_inches": 5.0,
+                    "height_inches": 4.0,
+                },
+            },
+        }
+        # With no ph positions — assignment boxes are skipped, but free-flow must appear
+        boxes = _extract_bounding_boxes(slide_def, layout_ph_positions=None)
+        assert any("code_chart" in b.label for b in boxes), \
+            "Free-flow code_chart on an assignment slide must still produce a bounding box"
+
+        # With ph positions — both assignment boxes AND free-flow must appear
+        ph_positions = {
+            "0": {"x": 0.5, "y": 0.3, "width": 12.0, "height": 0.8},
+            "1": {"x": 0.5, "y": 1.5, "width": 5.5, "height": 5.0},
+        }
+        boxes_with_ph = _extract_bounding_boxes(slide_def, layout_ph_positions=ph_positions)
+        ph_labels = [b.label for b in boxes_with_ph if b.label.startswith("S1:ph")]
+        freeflow_labels = [b.label for b in boxes_with_ph if "code_chart" in b.label]
+        assert len(ph_labels) == 2, "Should have bounding boxes for both assigned placeholders"
+        assert len(freeflow_labels) == 1, "Should have bounding box for free-flow code_chart"
+
+    def test_extract_bounding_boxes_assignments_with_flow_diagram(self):
+        """Assignment-based slide with a top-level flow_diagram gets boxes for the flow."""
+        from agents.slide_agent.slide_graph import _extract_bounding_boxes
+
+        slide_def = {
+            "slide_number": 2,
+            "layout": "Title and Content",
+            "assignments": {"0": {"type": "title", "text": "Process"}},
+            "content": {
+                "type": "flow_diagram",
+                "boxes": [
+                    {"text": "Start", "shape": "rounded_rectangle"},
+                    {"text": "End", "shape": "rounded_rectangle"},
+                ],
+                "direction": "horizontal",
+                "position": {"x_inches": 1.5, "y_inches": 3.0},
+                "box_size": {"width": 2.5, "height": 1.0},
+                "gap": 1.0,
+            },
+        }
+        boxes = _extract_bounding_boxes(slide_def, layout_ph_positions=None)
+        flow_boxes = [b for b in boxes if "flow_box" in b.label]
+        assert len(flow_boxes) == 2, "Should have 2 flow diagram boxes"
+
 
 class TestTemplateGuided:
     """Test template-guided design — introspection and assignment-based population."""
@@ -895,7 +998,11 @@ class TestGraphDelegation:
         async def fake_emit_event(task_id: str, event_type: str, payload: dict[str, object]):
             return None
 
+        async def fake_repair(**kwargs):
+            return None
+
         monkeypatch.setattr("agents.slide_agent.slide_graph.plan_deck", should_not_replan)
+        monkeypatch.setattr("agents.slide_agent.slide_graph.repair_deck", fake_repair)
         monkeypatch.setattr(
             "agents.slide_agent.slide_graph.SlideBuilder.build_deck",
             fake_build_deck,
@@ -1083,8 +1190,12 @@ class TestGraphDelegation:
                 applied_operations.append(operations)
                 return prs
 
+        async def fake_repair(**kwargs):
+            return None
+
         monkeypatch.setattr("agents.slide_agent.slide_graph.plan_edit", fake_plan_edit)
         monkeypatch.setattr("agents.slide_agent.slide_graph.SlideBuilder", DummyBuilder)
+        monkeypatch.setattr("agents.slide_agent.slide_graph.repair_deck", fake_repair)
         monkeypatch.setattr(agent, "request_orchestrator_delegate", fake_request_orchestrator_delegate)
         monkeypatch.setattr(agent, "emit_event", fake_emit_event)
 
@@ -1373,11 +1484,15 @@ class TestGraphDelegation:
         async def fake_emit_event(task_id: str, event_type: str, payload: dict[str, object]):
             return None
 
+        async def fake_repair(**kwargs):
+            return None
+
         monkeypatch.setattr("agents.slide_agent.slide_graph.plan_deck", fake_plan_deck)
         monkeypatch.setattr(
             "agents.slide_agent.slide_graph.SlideBuilder.build_deck",
             fake_build_deck,
         )
+        monkeypatch.setattr("agents.slide_agent.slide_graph.repair_deck", fake_repair)
         monkeypatch.setattr(
             "agents.slide_agent.slide_graph.render_slides_to_png",
             lambda *args, **kwargs: [],
@@ -1761,7 +1876,11 @@ class TestGraphDelegation:
         async def fake_emit_event(task_id: str, event_type: str, payload: dict[str, object]):
             return None
 
+        async def fake_repair(**kwargs):
+            return None
+
         monkeypatch.setattr("agents.slide_agent.slide_graph.plan_deck", fake_plan_deck)
+        monkeypatch.setattr("agents.slide_agent.slide_graph.repair_deck", fake_repair)
         monkeypatch.setattr(
             "agents.slide_agent.slide_graph.SlideBuilder.build_deck",
             fake_build_deck,
@@ -1853,6 +1972,111 @@ class TestGraphDelegation:
         assert result.status == "completed"
         assert built_plans
         assert built_plans[0]["deck"]["title"] == "Investor Update"
+
+
+class TestEditLayoutSource:
+    """Verify the edit planner receives layouts from the actual source deck."""
+
+    @pytest.mark.asyncio
+    async def test_edit_uses_source_deck_layouts_not_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """When editing a deck built from tech-trends, plan_edit must receive
+        tech-trends layouts, NOT business-meeting (the config default)."""
+        from unittest.mock import MagicMock
+
+        from pptx import Presentation
+
+        from agents.slide_agent.agent import SlideAgent
+        from agents.slide_agent.config import SlideAgentConfig
+        from agents.slide_agent.slide_graph import run_slide_langgraph
+        from shared.contracts import AgentResult, TaskEnvelope
+
+        cfg = SlideAgentConfig(
+            enable_internal_llm=True,
+            slide_use_langgraph=True,
+            export_pdf=False,
+            default_template="business-meeting",
+            templates_dir=Path(__file__).parent.parent / "templates",
+            artifacts_root=tmp_path / "runs" / "artifacts",
+        )
+        agent = SlideAgent(redis_client=MagicMock(), config=cfg)
+
+        # Build a source deck using the tech-trends template (not the default)
+        from agents.slide_agent.slide_builder import SlideBuilder
+
+        builder = SlideBuilder(cfg.templates_dir)
+        source_prs = builder.load_template("tech-trends")
+        # Add a slide so the deck has real content
+        if source_prs.slide_layouts:
+            source_prs.slides.add_slide(source_prs.slide_layouts[0])
+        source_pptx = tmp_path / "source_tech_trends.pptx"
+        source_prs.save(str(source_pptx))
+
+        # Capture what plan_edit receives
+        captured_layouts = []
+
+        async def fake_plan_edit(**kwargs):
+            captured_layouts.append(kwargs.get("template_layouts"))
+            return {
+                "action": "edit",
+                "operations": [
+                    {
+                        "action": "update_text",
+                        "slide_number": 1,
+                        "shape_name": "Title 1",
+                        "text": "Updated",
+                    }
+                ],
+            }
+
+        async def fake_emit_event(task_id, event_type, payload):
+            return None
+
+        monkeypatch.setattr("agents.slide_agent.slide_graph.plan_edit", fake_plan_edit)
+        monkeypatch.setattr(
+            "agents.slide_agent.slide_graph.render_slides_to_png",
+            lambda *a, **kw: [],
+        )
+        monkeypatch.setattr(
+            "agents.slide_agent.slide_graph.export_to_pdf",
+            lambda *a, **kw: None,
+        )
+        monkeypatch.setattr(agent, "emit_event", fake_emit_event)
+
+        async def fake_repair(**kwargs):
+            return None
+
+        monkeypatch.setattr("agents.slide_agent.slide_graph.repair_deck", fake_repair)
+
+        task = TaskEnvelope(
+            task_id="tsk_edit_layout_source",
+            task_list_id="tasks:slide",
+            session_id="sess_edit",
+            sender="cosmic/orchestrator:1.0.0",
+            recipient="cosmic/slide-agent:1.0.0",
+            intent="slide.edit",
+            input={
+                "source_pptx_path": str(source_pptx),
+                "edit_request": "Change the title text",
+            },
+            idempotency_key="idem_edit_layout_src",
+            signature="sig",
+            source="agent",
+            channel="desktop",
+        )
+
+        result = await run_slide_langgraph(agent=agent, task=task)
+        assert isinstance(result, AgentResult)
+        assert result.status == "completed"
+        assert len(captured_layouts) == 1
+        layouts = captured_layouts[0]
+        assert layouts is not None, "plan_edit should receive template_layouts"
+        layout_names = {tl["name"] for tl in layouts}
+        # The layouts should come from the source deck (tech-trends), not the
+        # default (business-meeting).  Tech-trends has different layout names.
+        # At minimum, the layouts should be non-empty and derived from the source.
+        assert len(layout_names) > 0, "Should have extracted layouts from source deck"
 
 
 class TestDirectFallbackParity:

@@ -1919,32 +1919,41 @@ def build_slide_agent_env_rendered(
     )
     mimo_api_key = first_meaningful_value(
         external_env.get("SLIDE_AGENT_MIMO_API_KEY"),
+        external_env.get("FIREWORKS_API_KEY"),
         external_env.get("MIMO_API_KEY"),
         external_env.get("OPENROUTER_API_KEY"),
         existing_env.get("SLIDE_AGENT_MIMO_API_KEY"),
+        existing_env.get("FIREWORKS_API_KEY"),
         existing_env.get("MIMO_API_KEY"),
         existing_env.get("OPENROUTER_API_KEY"),
         source_data.get("SLIDE_AGENT_MIMO_API_KEY"),
+        source_data.get("FIREWORKS_API_KEY"),
         source_data.get("MIMO_API_KEY"),
         source_data.get("OPENROUTER_API_KEY"),
     )
     mimo_base_url = first_meaningful_value(
         external_env.get("SLIDE_AGENT_MIMO_BASE_URL"),
+        external_env.get("FIREWORKS_BASE_URL"),
         external_env.get("MIMO_OPENAI_BASE_URL"),
         external_env.get("OPENROUTER_BASE_URL"),
         existing_env.get("SLIDE_AGENT_MIMO_BASE_URL"),
+        existing_env.get("FIREWORKS_BASE_URL"),
         existing_env.get("MIMO_OPENAI_BASE_URL"),
         existing_env.get("OPENROUTER_BASE_URL"),
         source_data.get("SLIDE_AGENT_MIMO_BASE_URL"),
+        source_data.get("FIREWORKS_BASE_URL"),
         source_data.get("MIMO_OPENAI_BASE_URL"),
         source_data.get("OPENROUTER_BASE_URL"),
-        "https://api.openai.com/v1",
+        "https://api.fireworks.ai/inference/v1",
     )
     mimo_model = first_meaningful_value(
         external_env.get("SLIDE_AGENT_MIMO_MODEL"),
+        external_env.get("FIREWORKS_KIMI_MODEL"),
         existing_env.get("SLIDE_AGENT_MIMO_MODEL"),
+        existing_env.get("FIREWORKS_KIMI_MODEL"),
         source_data.get("SLIDE_AGENT_MIMO_MODEL"),
-        "gpt-5-mini",
+        source_data.get("FIREWORKS_KIMI_MODEL"),
+        "accounts/fireworks/models/kimi-k2p5",
     )
     mimo_timeout_sec = first_meaningful_value(
         external_env.get("SLIDE_AGENT_MIMO_TIMEOUT_SEC"),
@@ -1956,7 +1965,7 @@ def build_slide_agent_env_rendered(
         external_env.get("SLIDE_AGENT_MIMO_TEMPERATURE"),
         existing_env.get("SLIDE_AGENT_MIMO_TEMPERATURE"),
         source_data.get("SLIDE_AGENT_MIMO_TEMPERATURE"),
-        "1.0",
+        "0.6",
     )
     mimo_reasoning_enabled = first_meaningful_value(
         external_env.get("SLIDE_AGENT_MIMO_REASONING_ENABLED"),
@@ -2013,7 +2022,7 @@ def build_slide_agent_env_rendered(
         external_env.get("SLIDE_AGENT_DEFAULT_TEMPLATE"),
         existing_env.get("SLIDE_AGENT_DEFAULT_TEMPLATE"),
         source_data.get("SLIDE_AGENT_DEFAULT_TEMPLATE"),
-        "corporate-dark",
+        "business-meeting",
     )
     libreoffice_path = first_meaningful_value(
         external_env.get("SLIDE_AGENT_LIBREOFFICE_PATH"),
@@ -2049,7 +2058,7 @@ def build_slide_agent_env_rendered(
         external_env.get("SLIDE_AGENT_MAX_VALIDATION_ATTEMPTS"),
         existing_env.get("SLIDE_AGENT_MAX_VALIDATION_ATTEMPTS"),
         source_data.get("SLIDE_AGENT_MAX_VALIDATION_ATTEMPTS"),
-        "2",
+        "4",
     )
     docs_parser_agent_id = first_meaningful_value(
         external_env.get("SLIDE_AGENT_DOCS_PARSER_AGENT_ID"),
@@ -2070,9 +2079,9 @@ def build_slide_agent_env_rendered(
         "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
         "AGENT_SECRET": signing_secret,
         "INSTANCE_ID": instance_id or SLIDE_AGENT_DEFAULT_INSTANCE_ID,
-        "SLIDE_AGENT_MIMO_MODEL": mimo_model or "gpt-5-mini",
+        "SLIDE_AGENT_MIMO_MODEL": mimo_model or "accounts/fireworks/models/kimi-k2p5",
         "SLIDE_AGENT_MIMO_TIMEOUT_SEC": mimo_timeout_sec or "120.0",
-        "SLIDE_AGENT_MIMO_TEMPERATURE": mimo_temperature or "1.0",
+        "SLIDE_AGENT_MIMO_TEMPERATURE": mimo_temperature or "0.6",
         "SLIDE_AGENT_MIMO_REASONING_ENABLED": mimo_reasoning_enabled or "true",
         "SLIDE_AGENT_MIMO_REASONING_MAX_TOKENS": mimo_reasoning_max_tokens or "256",
         "SLIDE_AGENT_MIMO_APP_NAME": mimo_app_name or "COSMIC Slide Agent",
@@ -2081,13 +2090,13 @@ def build_slide_agent_env_rendered(
         "SLIDE_AGENT_USE_LANGGRAPH": use_langgraph or "true",
         "SLIDE_AGENT_MAX_TOOL_ROUNDS": max_tool_rounds or "10",
         "SLIDE_AGENT_MAX_DOC_CONTEXT_REQUESTS": max_doc_context_requests or "2",
-        "SLIDE_AGENT_DEFAULT_TEMPLATE": default_template or "corporate-dark",
+        "SLIDE_AGENT_DEFAULT_TEMPLATE": default_template or "business-meeting",
         "SLIDE_AGENT_LIBREOFFICE_PATH": libreoffice_path or "soffice",
         "SLIDE_AGENT_PDFTOPPM_PATH": pdftoppm_path or "pdftoppm",
         "SLIDE_AGENT_RENDER_DPI": render_dpi or "200",
         "SLIDE_AGENT_EXPORT_PDF": export_pdf or "true",
         "SLIDE_AGENT_MAX_SLIDES": max_slides or "50",
-        "SLIDE_AGENT_MAX_VALIDATION_ATTEMPTS": max_validation_attempts or "2",
+        "SLIDE_AGENT_MAX_VALIDATION_ATTEMPTS": max_validation_attempts or "4",
         "SLIDE_AGENT_DOCS_PARSER_AGENT_ID": docs_parser_agent_id
         or DOCS_PARSER_AGENT_ID,
     }
@@ -2104,6 +2113,7 @@ def build_slide_agent_env_rendered(
 def slide_agent_is_configured(env_values: Dict[str, str]) -> bool:
     return (
         meaningful_env_value(env_values.get("SLIDE_AGENT_MIMO_API_KEY")) is not None
+        or meaningful_env_value(env_values.get("FIREWORKS_API_KEY")) is not None
         or meaningful_env_value(env_values.get("MIMO_API_KEY")) is not None
     )
 

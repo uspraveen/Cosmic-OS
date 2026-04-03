@@ -35,7 +35,7 @@ from shared.contracts import (
 
 from .config import AGENT_ROOT, BACKEND_ROOT, SlideAgentConfig
 from .internal_llm import plan_deck, plan_edit, repair_deck, validate_slide
-from .slide_builder import SlideBuilder, export_to_pdf, render_slides_to_png
+from .slide_builder import SlideBuilder, auto_map_legacy_to_assignments, export_to_pdf, render_slides_to_png
 
 logger = logging.getLogger(__name__)
 
@@ -1491,12 +1491,98 @@ def _apply_reverse_asset(
     return updated_plan, edit_operations
 
 
-def _extract_bounding_boxes(slide_def: dict[str, Any]) -> list:
-    """Extract bounding boxes from a slide definition for layout validation."""
+def _extract_bounding_boxes(
+    slide_def: dict[str, Any],
+    layout_ph_positions: dict[str, dict[str, float]] | None = None,
+) -> list:
+    """Extract bounding boxes from a slide definition for layout validation.
+
+    For template-guided slides (with ``assignments``), use the actual placeholder
+    positions from the template when available.  If positions are unknown, trust
+    the template designer — assignment-based slides use pre-balanced, non-overlapping
+    placeholders by construction, so only the free-flow content (``code_chart``,
+    ``flow_diagram``, legacy ``content``/``image`` fields) needs geometric checking.
+    """
     from .layout_engine import BoundingBox
 
     elements: list[BoundingBox] = []
     slide_num = slide_def.get("slide_number", 0)
+    assignments = slide_def.get("assignments")
+
+    # ── Assignment-based slides ───────────────────────────────────────
+    if assignments and isinstance(assignments, dict):
+        if layout_ph_positions:
+            # We have actual placeholder geometry from the template — validate it
+            for idx_str, _assignment in assignments.items():
+                ph_pos = layout_ph_positions.get(idx_str)
+                if not ph_pos:
+                    continue  # Unknown placeholder — nothing to validate
+                a_type = _assignment.get("type", "body") if isinstance(_assignment, dict) else "body"
+                elem_type = "text"
+                if a_type in ("chart",):
+                    elem_type = "chart"
+                elif a_type in ("table",):
+                    elem_type = "table"
+                elif a_type in ("image",):
+                    elem_type = "image"
+                elements.append(
+                    BoundingBox(
+                        x=ph_pos.get("x", 0),
+                        y=ph_pos.get("y", 0),
+                        width=ph_pos.get("width", 1),
+                        height=ph_pos.get("height", 1),
+                        label=f"S{slide_num}:ph{idx_str}",
+                        element_type=elem_type,
+                    )
+                )
+        # Also validate any free-flow exceptions (code_chart, flow_diagram)
+        # that the prompt allows alongside assignments.
+        for slot_name in ("content", "left_content", "right_content"):
+            slot = slide_def.get(slot_name, {})
+            if not isinstance(slot, dict):
+                continue
+            slot_type = slot.get("type", "")
+            if slot_type == "code_chart":
+                placement = slot.get("placement", {})
+                elements.append(
+                    BoundingBox(
+                        x=placement.get("x_inches", 0.8),
+                        y=placement.get("y_inches", 1.5),
+                        width=placement.get("width_inches", 11.7),
+                        height=placement.get("height_inches", 5.5),
+                        label=f"S{slide_num}:{slot_name}_code_chart",
+                        element_type="chart",
+                    )
+                )
+            elif slot_type == "flow_diagram":
+                boxes = slot.get("boxes", [])
+                if boxes:
+                    direction = slot.get("direction", "horizontal")
+                    position = slot.get("position", {})
+                    box_size = slot.get("box_size", {})
+                    gap = slot.get("gap", 0.8)
+                    bw = box_size.get("width", 2.5)
+                    bh = box_size.get("height", 1)
+                    bx = position.get("x_inches", 1.5)
+                    by = position.get("y_inches", 2.5)
+                    for i, _box in enumerate(boxes):
+                        elements.append(
+                            BoundingBox(
+                                x=bx, y=by, width=bw, height=bh,
+                                label=f"S{slide_num}:flow_box_{i}",
+                                element_type="shape",
+                            )
+                        )
+                        if direction == "horizontal":
+                            bx += bw + gap
+                        else:
+                            by += bh + gap
+
+        # For pure assignment slides with no free-flow content and no
+        # layout_ph_positions, trust the template designer.
+        return elements
+
+    # ── Legacy free-flow slides ───────────────────────────────────────
 
     # Title
     if slide_def.get("title"):
@@ -1901,9 +1987,7 @@ def _build_graph(cfg: SlideAgentConfig, ctx: _GraphCtx):
             # Parse existing deck structure
             source_path = state.get("source_pptx_path", "")
             if source_path and Path(source_path).exists():
-                from .slide_builder import SlideBuilder as SB
-
-                builder = SB(cfg.templates_dir)
+                builder = SlideBuilder(cfg.templates_dir)
                 prs = builder.load_existing(Path(source_path))
                 structure = builder.extract_structure(prs)
             else:
@@ -1914,6 +1998,22 @@ def _build_graph(cfg: SlideAgentConfig, ctx: _GraphCtx):
                 visual_assets=source_visual_assets,
             )
 
+            # Extract template layouts from the actual source deck being edited,
+            # so the edit planner gets the real layout names and placeholder indices.
+            # Falls back to loading by template name only if the source isn't available.
+            edit_template_layouts = None
+            try:
+                edit_builder = SlideBuilder(cfg.templates_dir)
+                if source_path and Path(source_path).exists():
+                    edit_source_prs = edit_builder.load_existing(Path(source_path))
+                    edit_template_layouts = edit_builder.extract_layouts(edit_source_prs)
+                if not edit_template_layouts:
+                    edit_template_name = state.get("template", "") or cfg.default_template
+                    edit_template_prs = edit_builder.load_template(edit_template_name)
+                    edit_template_layouts = edit_builder.extract_layouts(edit_template_prs)
+            except Exception:
+                pass
+
             edit_result = await plan_edit(
                 cfg=cfg,
                 http_client=httpx.AsyncClient(timeout=30),
@@ -1923,6 +2023,7 @@ def _build_graph(cfg: SlideAgentConfig, ctx: _GraphCtx):
                 document_context=document_context_payload
                 if document_context_payload["items"]
                 else None,
+                template_layouts=edit_template_layouts,
                 task_id=task.task_id,
                 session_id=task.session_id,
                 source=task.source,
@@ -1978,10 +2079,9 @@ def _build_graph(cfg: SlideAgentConfig, ctx: _GraphCtx):
                     desc = f"{desc}\n\n[Purpose: {plan_step_text}]"
 
             # Extract template layout structure for template-guided planning
-            from .slide_builder import SlideBuilder as _SB
             from .templates_registry import get_template_descriptions
 
-            template_builder = _SB(cfg.templates_dir)
+            template_builder = SlideBuilder(cfg.templates_dir)
             template_name = state.get("template", "") or cfg.default_template
             template_prs = template_builder.load_template(template_name)
             template_layouts = template_builder.extract_layouts(template_prs)
@@ -1989,7 +2089,7 @@ def _build_graph(cfg: SlideAgentConfig, ctx: _GraphCtx):
             # Inject template structure + registry into input_data for LLM
             input_data = dict(state.get("input_data") or {})
             input_data["_template_layouts"] = template_layouts
-            input_data["_available_templates"] = get_template_descriptions()
+            input_data["_available_templates"] = get_template_descriptions(cfg.templates_dir)
             source_materials = _build_source_material_prompt_payload(
                 documents=source_documents,
                 visual_assets=source_visual_assets,
@@ -2562,25 +2662,176 @@ def _build_graph(cfg: SlideAgentConfig, ctx: _GraphCtx):
                     )
                 )
 
-                layout_issues: list[str] = []
-                for slide_def in slides:
-                    elements = _extract_bounding_boxes(slide_def)
-                    report = layout_engine.validate(
-                        elements,
-                        title_present=bool(slide_def.get("title")),
-                    )
-                    if not report.valid:
-                        slide_num = slide_def.get("slide_number", "?")
-                        for issue in report.errors:
-                            layout_issues.append(
-                                f"Slide {slide_num}: {issue.code}: {issue.message}"
-                            )
+                # ── Auto-map legacy fields to template-guided assignments ─
+                template_name = deck_def.get("template", "") or cfg.default_template
+                _template_prs = builder.load_template(template_name)
+                _template_layouts_list = builder.extract_layouts(_template_prs)
 
-                if layout_issues:
+                # Build layout → placeholder info for auto-mapping
+                _layout_ph_info: dict[str, list[dict[str, Any]]] = {}
+                _layout_placeholders: dict[str, set[int]] = {}
+                for _tl in _template_layouts_list:
+                    _layout_ph_info[_tl["name"]] = _tl.get("placeholders", [])
+                    _layout_placeholders[_tl["name"]] = {
+                        ph["idx"] for ph in _tl.get("placeholders", [])
+                    }
+
+                for slide_def in slides:
+                    layout_name = slide_def.get("layout", "")
+                    ph_info = _layout_ph_info.get(layout_name, [])
+                    if not ph_info:
+                        # Try case-insensitive match for ph_info
+                        for tl_name, tl_phs in _layout_ph_info.items():
+                            if tl_name.lower() == layout_name.lower():
+                                ph_info = tl_phs
+                                break
+                    auto_map_legacy_to_assignments(slide_def, ph_info)
+
+                # ── Validate placeholder indices against template ─────
+
+                for slide_def in slides:
+                    layout_name = slide_def.get("layout", "")
+                    valid_indices = _layout_placeholders.get(layout_name)
+                    if valid_indices is None:
+                        # LLM hallucinated a layout name — find closest match
+                        layout_lower = layout_name.lower().replace("_", " ")
+                        best_match = None
+                        for tl_name in _layout_placeholders:
+                            if tl_name.lower().replace("_", " ") == layout_lower:
+                                best_match = tl_name
+                                break
+                        if best_match is None:
+                            # Fuzzy: check if any template layout name contains the key words
+                            for tl_name in _layout_placeholders:
+                                if any(
+                                    word in tl_name.lower()
+                                    for word in layout_lower.split()
+                                    if len(word) > 3
+                                ):
+                                    best_match = tl_name
+                                    break
+                        if best_match is None:
+                            best_match = "Title and Content"
+                            if best_match not in _layout_placeholders:
+                                best_match = next(iter(_layout_placeholders), layout_name)
+                        logger.warning(
+                            "Layout '%s' not found in template, remapped to '%s'",
+                            layout_name,
+                            best_match,
+                        )
+                        slide_def["layout"] = best_match
+                        valid_indices = _layout_placeholders.get(best_match, set())
+
+                    assignments = slide_def.get("assignments")
+                    if isinstance(assignments, dict) and valid_indices is not None:
+                        invalid_keys = [
+                            k for k in assignments
+                            if int(k) not in valid_indices
+                        ]
+                        for k in invalid_keys:
+                            logger.warning(
+                                "Slide %s: dropping assignment idx=%s (not in layout '%s', valid=%s)",
+                                slide_def.get("slide_number", "?"),
+                                k,
+                                slide_def.get("layout", ""),
+                                sorted(valid_indices),
+                            )
+                            # Try to rescue the content into a valid placeholder
+                            orphan = assignments.pop(k)
+                            # Find body/content placeholder that isn't already assigned
+                            for candidate_idx in sorted(valid_indices):
+                                if str(candidate_idx) not in assignments and candidate_idx not in (0,):
+                                    assignments[str(candidate_idx)] = orphan
+                                    logger.info(
+                                        "Slide %s: rescued orphan assignment idx=%s → idx=%s",
+                                        slide_def.get("slide_number", "?"),
+                                        k,
+                                        candidate_idx,
+                                    )
+                                    break
+
+                # ── Build layout → placeholder positions for validation ─────
+                _layout_ph_positions: dict[str, dict[str, dict[str, float]]] = {}
+                for _tl in _template_layouts_list:
+                    ph_pos_map: dict[str, dict[str, float]] = {}
+                    for ph in _tl.get("placeholders", []):
+                        zone = ph.get("zone", {})
+                        ph_pos_map[str(ph["idx"])] = {
+                            "x": zone.get("x_inches", 0),
+                            "y": zone.get("y_inches", 0),
+                            "width": zone.get("width_inches", 1),
+                            "height": zone.get("height_inches", 1),
+                        }
+                    _layout_ph_positions[_tl["name"]] = ph_pos_map
+
+                # ── Pre-build layout validation (BLOCKING, internal loop) ─
+                max_layout_attempts = int(
+                    state.get("max_validation_attempts")
+                    or cfg.max_validation_attempts
+                )
+                for layout_attempt in range(max_layout_attempts):
+                    layout_issues: list[str] = []
+                    for slide_def in slides:
+                        slide_layout = slide_def.get("layout", "")
+                        ph_positions = _layout_ph_positions.get(slide_layout)
+                        elements = _extract_bounding_boxes(slide_def, layout_ph_positions=ph_positions)
+                        report = layout_engine.validate(
+                            elements,
+                            title_present=bool(slide_def.get("title")),
+                        )
+                        if not report.valid:
+                            slide_num = slide_def.get("slide_number", "?")
+                            for issue in report.errors:
+                                layout_issues.append(
+                                    f"Slide {slide_num}: {issue.code}: {issue.message}"
+                                )
+                    if not layout_issues:
+                        break  # Clean layout — proceed to build
+
                     logger.warning(
-                        "Pre-build layout issues found: %s",
+                        "Pre-build layout errors (attempt %d/%d), triggering repair: %s",
+                        layout_attempt + 1,
+                        max_layout_attempts,
                         "; ".join(layout_issues[:5]),
                     )
+                    # Build a structured validation result for the repair LLM
+                    layout_validation_results = []
+                    for issue_text in layout_issues:
+                        parts = issue_text.split(": ", 2)
+                        slide_num_str = parts[0].replace("Slide ", "") if len(parts) > 0 else "?"
+                        try:
+                            sn = int(slide_num_str)
+                        except ValueError:
+                            sn = 1
+                        layout_validation_results.append({
+                            "slide_number": sn,
+                            "issues": [issue_text],
+                            "suggestion": "Fix element positions to stay within slide bounds and avoid overlaps.",
+                        })
+                    repair_result = await repair_deck(
+                        cfg=cfg,
+                        http_client=httpx.AsyncClient(timeout=30),
+                        slide_plans=slides,
+                        validation_results=layout_validation_results,
+                        template_layouts=_template_layouts_list,
+                        task_id=task.task_id,
+                        session_id=task.session_id,
+                        source=task.source,
+                        source_id=task.source_id,
+                        channel=task.channel,
+                    )
+                    if repair_result and repair_result.get("slides"):
+                        for repaired in repair_result["slides"]:
+                            sn = repaired.get("slide_number", 0)
+                            if 0 < sn <= len(slides):
+                                slides[sn - 1] = repaired
+                        deck_plan["slides"] = slides
+                else:
+                    if layout_issues:
+                        logger.warning(
+                            "Pre-build layout errors after max attempts, building anyway: %s",
+                            "; ".join(layout_issues[:5]),
+                        )
 
                 builder.build_deck(deck_plan, output_path)
 
@@ -2612,7 +2863,7 @@ def _build_graph(cfg: SlideAgentConfig, ctx: _GraphCtx):
             }
 
         attempts = int(state.get("validation_attempts") or 0) + 1
-        max_attempts = int(state.get("max_validation_attempts") or 2)
+        max_attempts = int(state.get("max_validation_attempts") or cfg.max_validation_attempts)
 
         pptx_path = Path(state["pptx_path"])
         pngs = render_slides_to_png(
@@ -2709,11 +2960,22 @@ def _build_graph(cfg: SlideAgentConfig, ctx: _GraphCtx):
             }
 
         # Repair: send feedback to LLM for corrected definitions
+        # Extract template layouts for the repair prompt
+        _repair_template_layouts = None
+        try:
+            _repair_template_name = deck_plan.get("deck", {}).get("template", "") or cfg.default_template
+            _repair_builder = SlideBuilder(cfg.templates_dir)
+            _repair_prs = _repair_builder.load_template(_repair_template_name)
+            _repair_template_layouts = _repair_builder.extract_layouts(_repair_prs)
+        except Exception:
+            pass
+
         repair_result = await repair_deck(
             cfg=cfg,
             http_client=httpx.AsyncClient(timeout=30),
             slide_plans=slides_def,
             validation_results=all_issues,
+            template_layouts=_repair_template_layouts,
             task_id=task.task_id,
             session_id=task.session_id,
             source=task.source,

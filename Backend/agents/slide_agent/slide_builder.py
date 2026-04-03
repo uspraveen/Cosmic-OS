@@ -42,6 +42,156 @@ _LAYOUT_MAP = {
     "blank": 6,
 }
 
+# System fonts that are safe across Windows/Mac/Office
+_SYSTEM_FONTS = {
+    "calibri", "arial", "segoe ui", "helvetica", "verdana",
+    "cambria", "times new roman", "georgia",
+    "consolas", "courier new",
+}
+
+def _enforce_system_font(font_family: str) -> str:
+    """Return the font if it's a known system font, otherwise fall back to Calibri."""
+    if not font_family:
+        return "Calibri"
+    if font_family.strip().lower() in _SYSTEM_FONTS:
+        return font_family.strip()
+    # Check partial matches (e.g., "Segoe UI Semibold" → allow)
+    lower = font_family.strip().lower()
+    for sf in _SYSTEM_FONTS:
+        if lower.startswith(sf):
+            return font_family.strip()
+    logger.warning("Non-system font '%s' replaced with 'Calibri'", font_family)
+    return "Calibri"
+
+
+# Placeholder indices used for footer/meta — never assign content to these
+_FOOTER_PLACEHOLDER_INDICES = {10, 11, 12}
+_FOOTER_ROLES = {"footer", "date", "slide_number"}
+
+
+def auto_map_legacy_to_assignments(
+    slide_def: dict[str, Any],
+    layout_placeholders: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Convert legacy content/image/chart/table fields to template-guided assignments.
+
+    If the slide already has assignments, returns it unchanged.
+    For BLANK layouts, returns unchanged (free-flow is expected).
+    For code_chart and flow_diagram content types, returns unchanged (need custom positioning).
+    """
+    if slide_def.get("assignments"):
+        return slide_def  # Already template-guided
+
+    layout_name = str(slide_def.get("layout") or "").strip().upper()
+    if "BLANK" in layout_name:
+        return slide_def  # Blank layout: free-flow is correct
+
+    # Check for content types that require free-flow
+    for slot in ("content", "left_content", "right_content"):
+        slot_content = slide_def.get(slot, {})
+        if isinstance(slot_content, dict) and slot_content.get("type") in (
+            "code_chart",
+            "flow_diagram",
+        ):
+            return slide_def  # These need custom positioning
+
+    # Filter out footer/meta placeholders
+    content_phs = [
+        ph
+        for ph in layout_placeholders
+        if ph.get("idx") not in _FOOTER_PLACEHOLDER_INDICES
+        and ph.get("role") not in _FOOTER_ROLES
+    ]
+    if not content_phs:
+        return slide_def  # No content placeholders available
+
+    assignments: dict[str, Any] = {}
+
+    # Map title → first title placeholder
+    title_ph = next((ph for ph in content_phs if ph.get("role") == "title"), None)
+    if title_ph and slide_def.get("title"):
+        assignments[str(title_ph["idx"])] = {
+            "type": "title",
+            "text": str(slide_def["title"]),
+        }
+
+    # Map subtitle → first subtitle placeholder
+    subtitle_ph = next(
+        (ph for ph in content_phs if ph.get("role") == "subtitle"), None
+    )
+    if subtitle_ph and slide_def.get("subtitle"):
+        assignments[str(subtitle_ph["idx"])] = {
+            "type": "subtitle",
+            "text": str(slide_def["subtitle"]),
+        }
+
+    # Collect body/content placeholders (not yet assigned)
+    body_phs = [
+        ph
+        for ph in content_phs
+        if ph.get("role") in ("body", "content", "object")
+        and str(ph.get("idx")) not in assignments
+    ]
+
+    # Map content (bullets/paragraph)
+    content = slide_def.get("content")
+    if isinstance(content, dict) and body_phs:
+        assignments[str(body_phs[0]["idx"])] = content
+        body_phs = body_phs[1:]
+
+    # Map two-column content
+    left = slide_def.get("left_content")
+    if isinstance(left, dict) and body_phs:
+        assignments[str(body_phs[0]["idx"])] = left
+        body_phs = body_phs[1:]
+    right = slide_def.get("right_content")
+    if isinstance(right, dict) and body_phs:
+        assignments[str(body_phs[0]["idx"])] = right
+        body_phs = body_phs[1:]
+
+    # Map chart → next available body placeholder
+    chart = slide_def.get("chart")
+    if isinstance(chart, dict) and body_phs:
+        chart_assignment = dict(chart)
+        chart_assignment.setdefault("type", "chart")
+        assignments[str(body_phs[0]["idx"])] = chart_assignment
+        body_phs = body_phs[1:]
+
+    # Map table → next available body placeholder
+    table = slide_def.get("table")
+    if isinstance(table, dict) and body_phs:
+        table_assignment = dict(table)
+        table_assignment.setdefault("type", "table")
+        assignments[str(body_phs[0]["idx"])] = table_assignment
+        body_phs = body_phs[1:]
+
+    # Map image → picture placeholder first, then body placeholder
+    image = slide_def.get("image")
+    if isinstance(image, dict):
+        image_ph = next(
+            (ph for ph in content_phs if ph.get("role") == "image" and str(ph.get("idx")) not in assignments),
+            None,
+        )
+        if image_ph:
+            image_assignment = dict(image)
+            image_assignment.setdefault("type", "image")
+            assignments[str(image_ph["idx"])] = image_assignment
+        elif body_phs:
+            image_assignment = dict(image)
+            image_assignment.setdefault("type", "image")
+            assignments[str(body_phs[0]["idx"])] = image_assignment
+
+    if assignments:
+        slide_def["assignments"] = assignments
+        logger.info(
+            "Auto-mapped legacy fields to assignments for slide %s (layout=%s, indices=%s)",
+            slide_def.get("slide_number", "?"),
+            slide_def.get("layout", "?"),
+            sorted(assignments.keys()),
+        )
+
+    return slide_def
+
 # Chart type string → XL_CHART_TYPE mapping
 _CHART_TYPE_MAP = {
     "column_clustered": XL_CHART_TYPE.COLUMN_CLUSTERED,
@@ -78,30 +228,66 @@ class SlideBuilder:
     def __init__(self, templates_dir: Path) -> None:
         self._templates_dir = templates_dir
 
+    @staticmethod
+    def _strip_content_slides(prs: Presentation) -> Presentation:
+        """Remove all existing content slides from a template, preserving layouts and masters.
+
+        Downloaded templates (Slidesgo, etc.) ship with 18-33 example slides.
+        Without stripping, every generated deck would start with those junk slides.
+        """
+        while len(prs.slides._sldIdLst) > 0:
+            sld_id = prs.slides._sldIdLst[0]
+            rId = sld_id.attrib.get(
+                "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+            )
+            if rId:
+                try:
+                    prs.part.drop_rel(rId)
+                except Exception:
+                    pass
+            prs.slides._sldIdLst.remove(sld_id)
+        return prs
+
     def load_template(self, template_name: str) -> Presentation:
-        """Load a template PPTX, or create blank if not found.
+        """Load a template PPTX, strip example slides, return clean canvas.
 
         Supports:
-        - Built-in: "corporate-dark", "corporate-light", "minimal", "pitch-deck"
+        - Built-in: "tech-trends", "business-meeting", "science-lesson", "tech-infographics"
+        - Legacy: "corporate-dark", "corporate-light", "minimal", "pitch-deck"
         - User-uploaded: "user:template-name" (looks in templates/user/)
         - File path: absolute or relative .pptx path
         """
+        prs = None
         if template_name and template_name != "blank":
             if template_name.startswith("user:"):
                 user_name = template_name[5:]
                 user_path = self._templates_dir / "user" / f"{user_name}.pptx"
                 if user_path.exists():
-                    return Presentation(str(user_path))
+                    prs = Presentation(str(user_path))
             else:
                 template_path = self._templates_dir / f"{template_name}.pptx"
                 if template_path.exists():
-                    return Presentation(str(template_path))
+                    prs = Presentation(str(template_path))
 
-            p = Path(template_name)
-            if p.exists() and p.suffix == ".pptx":
-                return Presentation(str(p))
+            if prs is None:
+                p = Path(template_name)
+                if p.exists() and p.suffix == ".pptx":
+                    prs = Presentation(str(p))
 
-        return Presentation()
+        if prs is None:
+            logger.warning(
+                "Template '%s' not found in %s — falling back to blank presentation. "
+                "Slides will have no background design or decorative elements.",
+                template_name,
+                self._templates_dir,
+            )
+            return Presentation()
+
+        # Strip example/demo slides that ship with downloaded templates
+        if len(prs.slides) > 0:
+            self._strip_content_slides(prs)
+
+        return prs
 
     def extract_layouts(self, prs: Presentation) -> list[dict[str, Any]]:
         """Extract layout structure from a presentation.
@@ -200,7 +386,7 @@ class SlideBuilder:
     ) -> dict[str, Any]:
         """Merge template defaults with LLM-provided theme overrides."""
         merged = dict(theme or {})
-        template_meta = get_template(template_name) or {}
+        template_meta = get_template(template_name, self._templates_dir) or {}
         if template_meta:
             merged.setdefault("background_color", template_meta.get("background"))
             merged.setdefault("text_color", template_meta.get("text_color"))
@@ -291,13 +477,30 @@ class SlideBuilder:
     ) -> None:
         """Add a single slide from a slide definition."""
         layout_name = slide_def.get("layout", "content")
-        layout_idx = _LAYOUT_MAP.get(layout_name, 1)
 
-        # Clamp to available layouts
-        if layout_idx >= len(prs.slide_layouts):
-            layout_idx = 1
+        # First try: exact match by template layout name (LLM should use these)
+        matched_layout = None
+        for layout in prs.slide_layouts:
+            if layout.name == layout_name:
+                matched_layout = layout
+                break
 
-        slide = prs.slides.add_slide(prs.slide_layouts[layout_idx])
+        # Second try: case-insensitive match
+        if matched_layout is None:
+            layout_lower = layout_name.lower().strip()
+            for layout in prs.slide_layouts:
+                if layout.name.lower().strip() == layout_lower:
+                    matched_layout = layout
+                    break
+
+        # Third try: legacy _LAYOUT_MAP index
+        if matched_layout is None:
+            layout_idx = _LAYOUT_MAP.get(layout_name, 1)
+            if layout_idx >= len(prs.slide_layouts):
+                layout_idx = 1
+            matched_layout = prs.slide_layouts[layout_idx]
+
+        slide = prs.slides.add_slide(matched_layout)
 
         # Title
         title_text = _safe_text(slide_def.get("title"))
@@ -574,16 +777,22 @@ class SlideBuilder:
     def _edit_add_slide(self, prs: Presentation, op: dict) -> None:
         after = op.get("after_slide", len(prs.slides))
         layout_name = op.get("layout", "content")
-        layout_idx = _LAYOUT_MAP.get(layout_name, 1)
-        if layout_idx >= len(prs.slide_layouts):
-            layout_idx = 1
 
-        slide_def = {
+        slide_def: dict[str, Any] = {
             "layout": layout_name,
             "title": op.get("title", ""),
-            "content": op.get("content", {}),
             "subtitle": op.get("subtitle", ""),
+            "speaker_notes": op.get("speaker_notes", ""),
         }
+        # Forward template-guided assignments (preferred) or legacy content
+        if op.get("assignments"):
+            slide_def["assignments"] = op["assignments"]
+        if op.get("content"):
+            slide_def["content"] = op["content"]
+        # Forward other legacy fields for backward compatibility
+        for legacy_key in ("left_content", "right_content", "image", "chart", "table"):
+            if op.get(legacy_key):
+                slide_def[legacy_key] = op[legacy_key]
 
         # python-pptx doesn't support insert at position natively.
         # We add at the end and reorder.
@@ -619,8 +828,34 @@ class SlideBuilder:
         if not (1 <= slide_num <= len(prs.slides)):
             return
         slide = prs.slides[slide_num - 1]
+
+        # Update title
         if "title" in changes and slide.shapes.title:
             slide.shapes.title.text = str(changes["title"])
+            self._style_text_frame(
+                slide.shapes.title.text_frame,
+                font_size=28,
+                font_family="Calibri",
+            )
+
+        # Update subtitle (placeholder idx 1 on title layouts)
+        if "subtitle" in changes:
+            for ph in slide.placeholders:
+                if ph.placeholder_format.idx == 1:
+                    ph.text = _safe_text(changes["subtitle"])
+                    self._style_text_frame(ph.text_frame, font_size=20, font_family="Calibri")
+                    break
+
+        # Template-guided assignment updates
+        if "assignments" in changes:
+            self._apply_assignments(slide, changes["assignments"], changes.get("theme", {}))
+
+        # Speaker notes
+        if "speaker_notes" in changes:
+            notes_text = _safe_text(changes["speaker_notes"])
+            if notes_text:
+                notes_slide = slide.notes_slide
+                notes_slide.notes_text_frame.text = notes_text
 
     def _edit_update_text(self, prs: Presentation, op: dict) -> None:
         slide_num = op.get("slide_number", 1)
@@ -735,6 +970,7 @@ class SlideBuilder:
 
             # Apply text color to all text shapes
             if text_color or font_family:
+                safe_font = _enforce_system_font(font_family) if font_family else None
                 for shape in slide.shapes:
                     if shape.has_text_frame:
                         for p in shape.text_frame.paragraphs:
@@ -744,8 +980,8 @@ class SlideBuilder:
                                         run.font.color.rgb = _hex_to_rgb(text_color)
                                     except Exception:
                                         pass
-                                if font_family:
-                                    run.font.name = font_family
+                                if safe_font:
+                                    run.font.name = safe_font
 
     def apply_transition(
         self, slide, *, transition_type: str = "fade", speed: str = "med"
@@ -996,10 +1232,11 @@ class SlideBuilder:
         color_hex: str | None = None,
     ) -> None:
         """Apply consistent styling to a text frame."""
+        safe_font = _enforce_system_font(font_family)
         for p in tf.paragraphs:
             for run in p.runs:
                 run.font.size = Pt(font_size)
-                run.font.name = font_family
+                run.font.name = safe_font
                 if color_hex:
                     try:
                         run.font.color.rgb = _hex_to_rgb(color_hex)

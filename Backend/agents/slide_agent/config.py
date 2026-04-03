@@ -14,8 +14,8 @@ BACKEND_ROOT = AGENT_ROOT.parent.parent
 
 __all__ = ["SlideAgentConfig", "AGENT_ROOT", "BACKEND_ROOT"]
 
-DEFAULT_SLIDE_AGENT_MIMO_BASE_URL = "https://api.openai.com/v1"
-DEFAULT_SLIDE_AGENT_MIMO_MODEL = "gpt-5-mini"
+DEFAULT_SLIDE_AGENT_MIMO_BASE_URL = "https://api.fireworks.ai/inference/v1"
+DEFAULT_SLIDE_AGENT_MIMO_MODEL = "accounts/fireworks/models/kimi-k2p5"
 DEFAULT_SLIDE_AGENT_MIMO_APP_NAME = "COSMIC Slide Agent"
 
 load_dotenv(AGENT_ROOT / "agent.env")
@@ -67,12 +67,13 @@ class SlideAgentConfig:
     redis_url: str = "redis://127.0.0.1:6379/0"
     gateway_url: str = "http://127.0.0.1:8080"
     gateway_internal_token: str = ""
-    # Internal LLM (default: OpenAI gpt-5-mini; OpenRouter remains optional)
+    # Internal LLM (default: Fireworks Kimi K2.5; other OpenAI-compatible
+    # providers remain optional)
     mimo_api_key: str = ""
     mimo_base_url: str = DEFAULT_SLIDE_AGENT_MIMO_BASE_URL
     mimo_model: str = DEFAULT_SLIDE_AGENT_MIMO_MODEL
     mimo_timeout_sec: float = 120.0
-    mimo_temperature: float = 1.0
+    mimo_temperature: float = 0.6
     mimo_reasoning_enabled: bool = True
     mimo_reasoning_max_tokens: int = 256
     mimo_app_name: str = DEFAULT_SLIDE_AGENT_MIMO_APP_NAME
@@ -84,7 +85,7 @@ class SlideAgentConfig:
     slide_max_doc_context_requests: int = 2
     # Templates
     templates_dir: Path = AGENT_ROOT / "templates"
-    default_template: str = "corporate-dark"
+    default_template: str = "business-meeting"
     # Rendering
     libreoffice_path: str = "soffice"
     pdftoppm_path: str = "pdftoppm"
@@ -95,7 +96,7 @@ class SlideAgentConfig:
     export_pdf: bool = True
     max_slides: int = 50
     # Validation
-    max_validation_attempts: int = 2
+    max_validation_attempts: int = 4
     # Artifacts
     artifacts_root: Path = BACKEND_ROOT / "runs" / "artifacts"
     # Image generation delegation
@@ -111,6 +112,7 @@ class SlideAgentConfig:
             gateway_internal_token=os.getenv("GATEWAY_INTERNAL_TOKEN", "").strip(),
             mimo_api_key=(
                 os.getenv("SLIDE_AGENT_MIMO_API_KEY")
+                or os.getenv("FIREWORKS_API_KEY")
                 or os.getenv("MIMO_API_KEY")
                 or os.getenv("OPENROUTER_API_KEY")
                 or ""
@@ -118,17 +120,20 @@ class SlideAgentConfig:
             mimo_base_url=_normalize_openai_base_url(
                 (
                     os.getenv("SLIDE_AGENT_MIMO_BASE_URL")
+                    or os.getenv("FIREWORKS_BASE_URL")
                     or os.getenv("MIMO_OPENAI_BASE_URL")
                     or os.getenv("OPENROUTER_BASE_URL")
                     or DEFAULT_SLIDE_AGENT_MIMO_BASE_URL
                 ).strip()
             ),
             mimo_model=(
-                os.getenv("SLIDE_AGENT_MIMO_MODEL") or DEFAULT_SLIDE_AGENT_MIMO_MODEL
+                os.getenv("SLIDE_AGENT_MIMO_MODEL")
+                or os.getenv("FIREWORKS_KIMI_MODEL")
+                or DEFAULT_SLIDE_AGENT_MIMO_MODEL
             ).strip()
             or DEFAULT_SLIDE_AGENT_MIMO_MODEL,
             mimo_timeout_sec=_env_float("SLIDE_AGENT_MIMO_TIMEOUT_SEC", 120.0),
-            mimo_temperature=_env_float("SLIDE_AGENT_MIMO_TEMPERATURE", 1.0),
+            mimo_temperature=_env_float("SLIDE_AGENT_MIMO_TEMPERATURE", 0.6),
             mimo_reasoning_enabled=_env_bool(
                 "SLIDE_AGENT_MIMO_REASONING_ENABLED", True
             ),
@@ -155,9 +160,9 @@ class SlideAgentConfig:
                 os.getenv("SLIDE_AGENT_TEMPLATES_DIR", str(AGENT_ROOT / "templates"))
             ).expanduser(),
             default_template=os.getenv(
-                "SLIDE_AGENT_DEFAULT_TEMPLATE", "corporate-dark"
+                "SLIDE_AGENT_DEFAULT_TEMPLATE", "business-meeting"
             ).strip()
-            or "corporate-dark",
+            or "business-meeting",
             libreoffice_path=os.getenv(
                 "SLIDE_AGENT_LIBREOFFICE_PATH", "soffice"
             ).strip()
@@ -170,7 +175,7 @@ class SlideAgentConfig:
             export_pdf=_env_bool("SLIDE_AGENT_EXPORT_PDF", True),
             max_slides=max(1, _env_int("SLIDE_AGENT_MAX_SLIDES", 50)),
             max_validation_attempts=max(
-                1, _env_int("SLIDE_AGENT_MAX_VALIDATION_ATTEMPTS", 2)
+                1, _env_int("SLIDE_AGENT_MAX_VALIDATION_ATTEMPTS", 4)
             ),
             artifacts_root=Path(
                 os.getenv(
