@@ -1,6 +1,6 @@
 """Slide-agent internal LLM via LangChain OpenAI-compatible client.
 
-Uses OpenRouter qwen/qwen3.6-plus:free for:
+Defaults to OpenAI gpt-5-mini for:
 - Deck planning: analyze input → DeckPlan JSON
 - Edit planning: translate edit requests → operation list
 - Vision validation: check rendered slide PNGs for quality

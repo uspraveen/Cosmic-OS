@@ -1919,32 +1919,32 @@ def build_slide_agent_env_rendered(
     )
     mimo_api_key = first_meaningful_value(
         external_env.get("SLIDE_AGENT_MIMO_API_KEY"),
-        external_env.get("OPENROUTER_API_KEY"),
         external_env.get("MIMO_API_KEY"),
+        external_env.get("OPENROUTER_API_KEY"),
         existing_env.get("SLIDE_AGENT_MIMO_API_KEY"),
-        existing_env.get("OPENROUTER_API_KEY"),
         existing_env.get("MIMO_API_KEY"),
+        existing_env.get("OPENROUTER_API_KEY"),
         source_data.get("SLIDE_AGENT_MIMO_API_KEY"),
-        source_data.get("OPENROUTER_API_KEY"),
         source_data.get("MIMO_API_KEY"),
+        source_data.get("OPENROUTER_API_KEY"),
     )
     mimo_base_url = first_meaningful_value(
         external_env.get("SLIDE_AGENT_MIMO_BASE_URL"),
-        external_env.get("OPENROUTER_BASE_URL"),
         external_env.get("MIMO_OPENAI_BASE_URL"),
+        external_env.get("OPENROUTER_BASE_URL"),
         existing_env.get("SLIDE_AGENT_MIMO_BASE_URL"),
-        existing_env.get("OPENROUTER_BASE_URL"),
         existing_env.get("MIMO_OPENAI_BASE_URL"),
+        existing_env.get("OPENROUTER_BASE_URL"),
         source_data.get("SLIDE_AGENT_MIMO_BASE_URL"),
-        source_data.get("OPENROUTER_BASE_URL"),
         source_data.get("MIMO_OPENAI_BASE_URL"),
-        "https://openrouter.ai/api/v1",
+        source_data.get("OPENROUTER_BASE_URL"),
+        "https://api.openai.com/v1",
     )
     mimo_model = first_meaningful_value(
         external_env.get("SLIDE_AGENT_MIMO_MODEL"),
         existing_env.get("SLIDE_AGENT_MIMO_MODEL"),
         source_data.get("SLIDE_AGENT_MIMO_MODEL"),
-        "qwen/qwen3.6-plus:free",
+        "gpt-5-mini",
     )
     mimo_timeout_sec = first_meaningful_value(
         external_env.get("SLIDE_AGENT_MIMO_TIMEOUT_SEC"),
@@ -2070,7 +2070,7 @@ def build_slide_agent_env_rendered(
         "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
         "AGENT_SECRET": signing_secret,
         "INSTANCE_ID": instance_id or SLIDE_AGENT_DEFAULT_INSTANCE_ID,
-        "SLIDE_AGENT_MIMO_MODEL": mimo_model or "qwen/qwen3.6-plus:free",
+        "SLIDE_AGENT_MIMO_MODEL": mimo_model or "gpt-5-mini",
         "SLIDE_AGENT_MIMO_TIMEOUT_SEC": mimo_timeout_sec or "120.0",
         "SLIDE_AGENT_MIMO_TEMPERATURE": mimo_temperature or "1.0",
         "SLIDE_AGENT_MIMO_REASONING_ENABLED": mimo_reasoning_enabled or "true",

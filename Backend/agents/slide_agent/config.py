@@ -14,8 +14,8 @@ BACKEND_ROOT = AGENT_ROOT.parent.parent
 
 __all__ = ["SlideAgentConfig", "AGENT_ROOT", "BACKEND_ROOT"]
 
-DEFAULT_SLIDE_AGENT_MIMO_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_SLIDE_AGENT_MIMO_MODEL = "qwen/qwen3.6-plus:free"
+DEFAULT_SLIDE_AGENT_MIMO_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_SLIDE_AGENT_MIMO_MODEL = "gpt-5-mini"
 DEFAULT_SLIDE_AGENT_MIMO_APP_NAME = "COSMIC Slide Agent"
 
 load_dotenv(AGENT_ROOT / "agent.env")
@@ -67,7 +67,7 @@ class SlideAgentConfig:
     redis_url: str = "redis://127.0.0.1:6379/0"
     gateway_url: str = "http://127.0.0.1:8080"
     gateway_internal_token: str = ""
-    # Internal LLM (OpenRouter qwen/qwen3.6-plus:free)
+    # Internal LLM (default: OpenAI gpt-5-mini; OpenRouter remains optional)
     mimo_api_key: str = ""
     mimo_base_url: str = DEFAULT_SLIDE_AGENT_MIMO_BASE_URL
     mimo_model: str = DEFAULT_SLIDE_AGENT_MIMO_MODEL
@@ -111,15 +111,15 @@ class SlideAgentConfig:
             gateway_internal_token=os.getenv("GATEWAY_INTERNAL_TOKEN", "").strip(),
             mimo_api_key=(
                 os.getenv("SLIDE_AGENT_MIMO_API_KEY")
-                or os.getenv("OPENROUTER_API_KEY")
                 or os.getenv("MIMO_API_KEY")
+                or os.getenv("OPENROUTER_API_KEY")
                 or ""
             ).strip(),
             mimo_base_url=_normalize_openai_base_url(
                 (
                     os.getenv("SLIDE_AGENT_MIMO_BASE_URL")
-                    or os.getenv("OPENROUTER_BASE_URL")
                     or os.getenv("MIMO_OPENAI_BASE_URL")
+                    or os.getenv("OPENROUTER_BASE_URL")
                     or DEFAULT_SLIDE_AGENT_MIMO_BASE_URL
                 ).strip()
             ),

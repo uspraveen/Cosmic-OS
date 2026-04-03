@@ -17,8 +17,8 @@ class TestConfig:
         from agents.slide_agent.config import SlideAgentConfig
 
         cfg = SlideAgentConfig()
-        assert cfg.mimo_base_url == "https://openrouter.ai/api/v1"
-        assert cfg.mimo_model == "qwen/qwen3.6-plus:free"
+        assert cfg.mimo_base_url == "https://api.openai.com/v1"
+        assert cfg.mimo_model == "gpt-5-mini"
         assert cfg.mimo_temperature == 1.0
         assert cfg.mimo_reasoning_enabled is True
         assert cfg.mimo_reasoning_max_tokens == 256
@@ -328,7 +328,11 @@ class TestInternalLLM:
             _usage_provider_name,
         )
 
-        cfg = SlideAgentConfig(mimo_temperature=2.0)
+        cfg = SlideAgentConfig(
+            mimo_base_url="https://openrouter.ai/api/v1",
+            mimo_model="qwen/qwen3.6-plus:free",
+            mimo_temperature=2.0,
+        )
         assert _usage_provider_name(cfg) == "openrouter"
         assert _effective_temperature(cfg) == 1.0
         assert _extra_body(cfg) == {
