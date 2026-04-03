@@ -3,7 +3,7 @@
   "type": "object",
   "properties": {
     "description": { "type": "string", "description": "Natural language description of the slide deck to create" },
-    "template": { "type": "string", "description": "Template name (corporate-dark, corporate-light, minimal, pitch-deck, blank)" },
+    "template": { "type": "string", "description": "Template name (business-meeting, tech-trends, science-lesson, tech-infographics, blank)" },
     "data": { "type": "object", "description": "Structured data to include in the deck (tables, chart data, etc.)" },
     "source_artifacts": { "type": "array", "items": { "type": "object" }, "description": "Input artifacts (PDFs, images) to incorporate" }
   },

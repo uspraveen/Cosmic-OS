@@ -1,13 +1,14 @@
 """Bounded LangGraph workflow for diagram specialist intents.
 
-Flow: analyze_request -> decide -> generate_definition -> render -> validate -> finalize
+Flow: analyze_request -> generate_definition -> render -> validate -> finalize
 
 The graph:
-1. Analyzes the user's natural language description via internal LLM
+1. Analyzes the user's natural language description via a compact renderer index
 2. Selects the best renderer (Mermaid/D2/Excalidraw)
-3. Generates the diagram definition
-4. Renders via CLI (mmdc/d2) or outputs JSON (Excalidraw)
-5. Validates output and returns artifacts
+3. Loads only the selected renderer skill body (progressive disclosure)
+4. Generates the diagram definition
+5. Renders via CLI (mmdc/d2) or outputs JSON (Excalidraw)
+6. Validates output and returns artifacts
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from shared.contracts import AgentError, AgentResult, ArtifactManifest, TaskEnve
 from .config import DiagramAgentConfig
 from .internal_llm import (
     analyze_diagram_request,
+    generate_diagram_definition,
     modify_diagram,
     validate_diagram_render,
 )
@@ -39,7 +41,12 @@ from .renderers import (
     render_excalidraw,
     render_mermaid,
 )
-from .skills import build_skills_context, discover_skills
+from .skills import (
+    build_selected_skill_context,
+    build_skills_context,
+    discover_skills,
+    find_skill,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +78,7 @@ class DiagramWorkflowState(TypedDict, total=False):
     # LLM output
     llm_renderer: str
     llm_diagram_type: str
+    llm_title: str
     llm_definition: str
     llm_confidence: float
     llm_reasoning: str
@@ -89,7 +97,8 @@ class DiagramWorkflowState(TypedDict, total=False):
     validation_attempts: int
     max_validation_attempts: int
     # Skills
-    skills_context: str
+    skills_index: str
+    selected_skill_context: str
     # Plan
     plan_active: bool
     plan_step: int | None
@@ -153,32 +162,61 @@ async def _step_plan_update(
         logger.debug("diagram.graph.step_plan_update_failed", exc_info=True)
 
 
+async def _emit_node_progress(ctx: _GraphCtx, *, node: str, message: str) -> None:
+    try:
+        await ctx.agent.emit_event(
+            ctx.task.task_id,
+            "task.progress",
+            {
+                "type": "agent_node_progress",
+                "status": "in_progress",
+                "node": node,
+                "message": message,
+                "source": ctx.task.source,
+                "source_id": ctx.task.source_id,
+                "channel": ctx.task.channel,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("diagram.graph.node_progress_failed", exc_info=True)
+
+
 def _build_graph(cfg: DiagramAgentConfig, ctx: _GraphCtx):
     graph = StateGraph(DiagramWorkflowState)
     task = ctx.task
     agent = ctx.agent
 
     async def analyze_request(state: DiagramWorkflowState) -> dict[str, Any]:
-        """Analyze the user's request and generate the diagram definition.
+        """Analyze the user's request and choose the renderer/work plan.
 
         The LLM may return action="create_plan" for multi-step requests.
         In that case, we create the plan via StepPlan and re-enter this node.
         """
         bump = _bump_round(state, action="analyze")
+        if bump.get("agent_result") is None:
+            await _emit_node_progress(
+                ctx,
+                node="analyze_request",
+                message="Analyzing the request and choosing the diagram approach.",
+            )
         intent = state.get("intent", "")
 
-        # Discover skills for context
+        # Discover the compact renderer index for the analysis phase.
         skills = discover_skills()
-        skills_ctx = build_skills_context(skills)
+        skills_index = build_skills_context(skills)
 
         if intent == "diagram.modify":
+            renderer = state.get("existing_renderer", "mermaid")
+            selected_skill_context = build_selected_skill_context(
+                find_skill(skills, renderer)
+            )
             llm_result = await modify_diagram(
                 cfg=cfg,
                 http_client=__import__("httpx").AsyncClient(timeout=30),
-                renderer=state.get("existing_renderer", "mermaid"),
+                renderer=renderer,
                 existing_definition=state.get("existing_definition", ""),
                 modification_request=state.get("modification_request", ""),
-                skills_context=skills_ctx,
+                renderer_skill_context=selected_skill_context,
                 task_id=task.task_id,
                 session_id=task.session_id,
                 source=task.source,
@@ -188,14 +226,14 @@ def _build_graph(cfg: DiagramAgentConfig, ctx: _GraphCtx):
             if llm_result:
                 return {
                     **bump,
-                    "llm_renderer": llm_result.get(
-                        "renderer", state.get("existing_renderer", "mermaid")
-                    ),
+                    "llm_renderer": llm_result.get("renderer", renderer),
                     "llm_definition": llm_result.get("definition", ""),
                     "llm_confidence": llm_result.get("confidence", 0.0),
                     "llm_changes": llm_result.get("changes", ""),
+                    "llm_title": state.get("title", ""),
                     "analyzed": True,
-                    "skills_context": skills_ctx,
+                    "skills_index": skills_index,
+                    "selected_skill_context": selected_skill_context,
                 }
         else:
             # diagram.create
@@ -216,8 +254,9 @@ def _build_graph(cfg: DiagramAgentConfig, ctx: _GraphCtx):
                 http_client=__import__("httpx").AsyncClient(timeout=30),
                 description=desc,
                 preferred_renderer=state.get("preferred_renderer"),
-                skills_context=skills_ctx,
+                skills_index=skills_index,
                 plan_step_text=plan_step_text,
+                allow_planning=not bool(state.get("plan_active")),
                 task_id=task.task_id,
                 session_id=task.session_id,
                 source=task.source,
@@ -226,6 +265,8 @@ def _build_graph(cfg: DiagramAgentConfig, ctx: _GraphCtx):
             )
             if llm_result:
                 action = llm_result.get("action", "generate")
+                if action == "create_plan" and state.get("plan_active"):
+                    action = "generate"
 
                 # Handle create_plan (same pattern as tabular agent)
                 if action == "create_plan":
@@ -235,11 +276,12 @@ def _build_graph(cfg: DiagramAgentConfig, ctx: _GraphCtx):
                         # Empty plan — skip planning, proceed to generate
                         return {**bump, "analyzed": False, "plan_active": False}
 
-                    validation_cap = max(1, int(state.get("max_validation_attempts") or 2))
-                    required_rounds = 1 + (len(steps) * ((2 * validation_cap) + 1))
+                    validation_cap = max(
+                        1, int(state.get("max_validation_attempts") or 2)
+                    )
                     effective_max_rounds = max(
                         int(state.get("max_tool_rounds") or cfg.diagram_max_tool_rounds),
-                        required_rounds,
+                        1 + (len(steps) * (2 + (2 * validation_cap))),
                     )
 
                     step_plan = getattr(agent, "step_plan", None)
@@ -263,15 +305,20 @@ def _build_graph(cfg: DiagramAgentConfig, ctx: _GraphCtx):
                     }
 
                 # Handle generate (normal flow)
+                renderer = llm_result.get("renderer", "mermaid")
+                selected_skill_context = build_selected_skill_context(
+                    find_skill(skills, renderer)
+                )
                 return {
                     **bump,
-                    "llm_renderer": llm_result.get("renderer", "mermaid"),
+                    "llm_renderer": renderer,
                     "llm_diagram_type": llm_result.get("diagram_type", "other"),
-                    "llm_definition": llm_result.get("definition", ""),
+                    "llm_title": llm_result.get("title", state.get("title", "")),
                     "llm_confidence": llm_result.get("confidence", 0.0),
                     "llm_reasoning": llm_result.get("reasoning", ""),
                     "analyzed": True,
-                    "skills_context": skills_ctx,
+                    "skills_index": skills_index,
+                    "selected_skill_context": selected_skill_context,
                 }
 
         # LLM failed — return error
@@ -286,9 +333,82 @@ def _build_graph(cfg: DiagramAgentConfig, ctx: _GraphCtx):
             ),
         }
 
+    async def generate_definition(state: DiagramWorkflowState) -> dict[str, Any]:
+        """Generate the final definition using only the selected renderer skill."""
+        if state.get("llm_definition"):
+            return {}
+
+        bump = _bump_round(state, action="generate_definition")
+        if bump.get("agent_result") is None:
+            await _emit_node_progress(
+                ctx,
+                node="generate_definition",
+                message="Generating the diagram definition for the selected renderer.",
+            )
+        if bump.get("agent_result") is not None:
+            return bump
+
+        desc = state.get("description", "")
+        if not desc:
+            desc = task.input.get("description", "") or task.input.get("query", "")
+
+        plan_step_text = ""
+        if state.get("plan_active"):
+            plan_steps = state.get("plan_steps") or []
+            current_step = int(state.get("plan_step") or 1)
+            if 0 < current_step <= len(plan_steps):
+                plan_step_text = plan_steps[current_step - 1]
+
+        llm_result = await generate_diagram_definition(
+            cfg=cfg,
+            http_client=__import__("httpx").AsyncClient(timeout=30),
+            description=desc,
+            renderer=state.get("llm_renderer", "mermaid"),
+            diagram_type=state.get("llm_diagram_type", "other"),
+            title=state.get("llm_title") or state.get("title", ""),
+            renderer_skill_context=state.get("selected_skill_context", ""),
+            plan_step_text=plan_step_text,
+            task_id=task.task_id,
+            session_id=task.session_id,
+            source=task.source,
+            source_id=task.source_id,
+            channel=task.channel,
+        )
+        if llm_result:
+            return {
+                **bump,
+                "llm_renderer": llm_result.get(
+                    "renderer", state.get("llm_renderer", "mermaid")
+                ),
+                "llm_diagram_type": llm_result.get(
+                    "diagram_type", state.get("llm_diagram_type", "other")
+                ),
+                "llm_title": llm_result.get("title", state.get("llm_title", "")),
+                "llm_definition": llm_result.get("definition", ""),
+                "llm_confidence": llm_result.get("confidence", 0.0),
+                "llm_reasoning": llm_result.get("reasoning", ""),
+            }
+
+        return {
+            **bump,
+            "next_action": "finish",
+            "agent_result": _result_error(
+                code="INTERNAL_ERROR",
+                retryable=True,
+                message="Internal LLM failed to generate the diagram definition.",
+                next_action="retry",
+            ),
+        }
+
     async def render_diagram(state: DiagramWorkflowState) -> dict[str, Any]:
         """Render the generated definition via CLI. Writes to runs/artifacts/<task_id>/diagram_agent/."""
         bump = _bump_round(state, action="render")
+        if bump.get("agent_result") is None:
+            await _emit_node_progress(
+                ctx,
+                node="render_diagram",
+                message="Rendering the diagram artifact.",
+            )
         renderer = state.get("llm_renderer", "mermaid")
         definition = state.get("llm_definition", "")
         output_format = state.get("output_format", "svg")
@@ -369,6 +489,12 @@ def _build_graph(cfg: DiagramAgentConfig, ctx: _GraphCtx):
         the suggestion as context for re-generation.
         """
         bump = _bump_round(state, action="validate")
+        if bump.get("agent_result") is None:
+            await _emit_node_progress(
+                ctx,
+                node="validate_diagram",
+                message="Validating the rendered diagram and checking for fixes.",
+            )
         renderer = state.get("llm_renderer", "mermaid")
         definition = state.get("llm_definition", "")
         diagram_type = state.get("llm_diagram_type", "other")
@@ -460,6 +586,7 @@ def _build_graph(cfg: DiagramAgentConfig, ctx: _GraphCtx):
             validation_issues=issues,
             validation_suggestion=suggestion,
             diagram_type=diagram_type,
+            renderer_skill_context=state.get("selected_skill_context", ""),
             task_id=task.task_id,
             session_id=task.session_id,
             source=task.source,
@@ -484,6 +611,11 @@ def _build_graph(cfg: DiagramAgentConfig, ctx: _GraphCtx):
 
     async def finalize(state: DiagramWorkflowState) -> dict[str, Any]:
         """Build artifacts for current cycle. If plan has more steps, loop back."""
+        await _emit_node_progress(
+            ctx,
+            node="finalize",
+            message="Finalizing diagram artifacts and packaging the result.",
+        )
         if state.get("agent_result") is not None:
             # Error result or pre-built — skip remaining plan steps (don't mark as completed)
             if state.get("plan_active"):
@@ -498,7 +630,11 @@ def _build_graph(cfg: DiagramAgentConfig, ctx: _GraphCtx):
         renderer = state.get("llm_renderer", "mermaid")
         definition = state.get("llm_definition", "")
         diagram_type = state.get("llm_diagram_type", "other")
-        title = state.get("title") or state.get("llm_reasoning", "")[:100]
+        title = (
+            state.get("llm_title")
+            or state.get("title")
+            or state.get("llm_reasoning", "")[:100]
+        )
         render_ok = state.get("render_ok", False)
         render_error = state.get("render_error", "")
         output_format = state.get("render_format", "svg")
@@ -596,11 +732,13 @@ def _build_graph(cfg: DiagramAgentConfig, ctx: _GraphCtx):
                     "validation_issues": [],
                     "validation_suggestion": "",
                     "validation_attempts": 0,
+                    "llm_title": "",
                     "llm_definition": "",
                     "llm_renderer": "",
                     "llm_diagram_type": "",
                     "llm_confidence": 0.0,
                     "llm_reasoning": "",
+                    "selected_skill_context": "",
                     "accumulated_artifacts": accumulated,
                     "accumulated_outputs": accumulated_outputs,
                 }
@@ -642,6 +780,15 @@ def _build_graph(cfg: DiagramAgentConfig, ctx: _GraphCtx):
             return "analyze"
         if not state.get("analyzed"):
             return "finish"
+        if state.get("llm_definition"):
+            return "render"
+        return "generate"
+
+    def route_after_generate(state: DiagramWorkflowState) -> str:
+        if state.get("agent_result") is not None:
+            return "finish"
+        if not state.get("llm_definition"):
+            return "finish"
         return "render"
 
     def route_after_render(state: DiagramWorkflowState) -> str:
@@ -662,6 +809,7 @@ def _build_graph(cfg: DiagramAgentConfig, ctx: _GraphCtx):
 
     # Nodes
     graph.add_node("analyze_request", analyze_request)
+    graph.add_node("generate_definition", generate_definition)
     graph.add_node("render_diagram", render_diagram)
     graph.add_node("validate_diagram", validate_diagram)
     graph.add_node("finalize", finalize)
@@ -671,7 +819,17 @@ def _build_graph(cfg: DiagramAgentConfig, ctx: _GraphCtx):
     graph.add_conditional_edges(
         "analyze_request",
         route_after_analyze,
-        {"render": "render_diagram", "analyze": "analyze_request", "finish": END},
+        {
+            "generate": "generate_definition",
+            "render": "render_diagram",
+            "analyze": "analyze_request",
+            "finish": END,
+        },
+    )
+    graph.add_conditional_edges(
+        "generate_definition",
+        route_after_generate,
+        {"render": "render_diagram", "finish": END},
     )
     graph.add_conditional_edges(
         "render_diagram",
@@ -732,6 +890,9 @@ async def run_diagram_langgraph(*, agent: Any, task: TaskEnvelope) -> AgentResul
         "modification_request": task.input.get("modification_request", ""),
         "existing_definition": task.input.get("existing_definition", ""),
         "existing_renderer": task.input.get("renderer", "mermaid"),
+        "llm_title": "",
+        "skills_index": "",
+        "selected_skill_context": "",
         # Validation
         "validated": False,
         "validation_pass": False,

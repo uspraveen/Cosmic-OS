@@ -12,6 +12,10 @@
 - Always use the internal LLM to select the best renderer based on content.
 - If the user explicitly requests a renderer, honor it unless it's clearly wrong (e.g., D2 for a sequence diagram).
 - Default to Mermaid for ambiguous requests — it covers the most diagram types.
+- Keep renderer selection and renderer-specific syntax generation as separate phases.
+- The analysis phase should only use the compact all-renderers index.
+- The generation/modification phase should only use the selected renderer skill body.
+- For D2 specifically, use native D2 direction words (`right`, `left`, `down`, `up`) and never Graphviz/Mermaid aliases like `LR` or `TB`.
 
 ### Definition Quality
 - Generate complete, valid definitions. No placeholders like "// add more nodes here".

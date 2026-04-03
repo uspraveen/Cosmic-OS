@@ -28,18 +28,19 @@ Output ONLY valid JSON with this shape:
   "operation": "list" | "create" | "find_free" | "update" | "cancel",
   "params": {
     // operation-specific parameters:
-    // list:    { "time_range": { "start": ISO, "end": ISO }, "search_query": str, "calendar_id": str|null,
+    // list:    { "time_range": { "start": ISO, "end": ISO }, "search_query": str|null, "calendar_id": str|null,
     //            "account_hint": str|null }
     // create:  { "summary": str, "start": ISO, "end": ISO, "timezone": str, "attendees": [email],
     //            "location": str, "description": str, "is_all_day": bool, "reminders": [min],
-    //            "calendar_id": str|null, "account_hint": str|null }
+    //            "add_google_meet": bool, "calendar_id": str|null, "account_hint": str|null }
     // find_free: { "duration_min": int, "date_range": { "start": ISO, "end": ISO },
     //              "timezone": str, "working_hours": { "start": int, "end": int },
     //              "calendar_ids": [str], "account_hint": str|null }
     // update:  { "event_id": str|null, "event_query": str|null, "calendar_id": str|null,
     //            "account_hint": str|null, "time_range": { "start": ISO, "end": ISO }|null,
     //            "patch": { "summary": str?, "description": str?, "location": str?, "start": ISO?, "end": ISO?,
-    //                       "timezone": str?, "is_all_day": bool?, "attendees": [email]?, "reminders": [min]? } }
+    //                       "timezone": str?, "is_all_day": bool?, "attendees": [email]?, "reminders": [min]?,
+    //                       "add_google_meet": bool? } }
     // cancel:  { "event_id": str|null, "event_query": str|null, "calendar_id": str|null,
     //            "account_hint": str|null, "time_range": { "start": ISO, "end": ISO }|null,
     //            "notify_attendees": bool }
@@ -56,9 +57,11 @@ Rules:
 - Keep `account_hint` human-friendly. Good examples: "work", "personal", "alex@company.com". Do not invent internal account ids.
 - For "schedule a meeting with X", operation=create.
 - For "what do I have" / "show my calendar", operation=list.
+- Set `search_query` only when the user is actually searching by title or keyword. Do not copy the whole natural-language agenda request into `search_query`.
 - For "find a 30 minute slot", operation=find_free.
 - For "change the title" / "move to 3pm", operation=update.
 - For "cancel" / "delete the event", operation=cancel.
+- If the user asks for a Google Meet / Meet link / video conference, set `add_google_meet=true` on create or inside the update patch.
 - For update/cancel without a raw event_id, provide the best available `event_query` and a narrow `time_range` that helps bounded event lookup.
 - If the user implies a specific account like "work" or "personal", set `account_hint`.
 - If the user implies multiple calendars for availability, populate `calendar_ids`.

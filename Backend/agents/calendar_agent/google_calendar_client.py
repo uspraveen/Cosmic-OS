@@ -10,6 +10,7 @@ import logging
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 
 import httpx
 
@@ -135,6 +136,7 @@ class GoogleCalendarClient:
         location: str = "",
         attendees: list[str] | None = None,
         reminders: list[int] | None = None,
+        add_google_meet: bool = False,
     ) -> dict[str, Any]:
         """Create a new calendar event.
 
@@ -165,6 +167,15 @@ class GoogleCalendarClient:
             }
         else:
             body["reminders"] = {"useDefault": True}
+        params: dict[str, Any] = {"sendUpdates": "all" if attendees else "none"}
+        if add_google_meet:
+            body["conferenceData"] = {
+                "createRequest": {
+                    "requestId": f"meet_{uuid4().hex}",
+                    "conferenceSolutionKey": {"type": "hangoutsMeet"},
+                }
+            }
+            params["conferenceDataVersion"] = 1
 
         encoded_cal_id = urllib.parse.quote(calendar_id, safe="")
         async with httpx.AsyncClient(timeout=30) as client:
@@ -172,7 +183,7 @@ class GoogleCalendarClient:
                 f"{_CALENDAR_BASE}/calendars/{encoded_cal_id}/events",
                 headers={**self._headers, "Content-Type": "application/json"},
                 json=body,
-                params={"sendUpdates": "all" if attendees else "none"},
+                params=params,
             )
             if resp.status_code == 401:
                 raise PermissionError("Google access token expired.")
@@ -191,12 +202,24 @@ class GoogleCalendarClient:
         """Partially update an event. Uses PATCH for partial update safety."""
         encoded_cal_id = urllib.parse.quote(calendar_id, safe="")
         encoded_event_id = urllib.parse.quote(event_id, safe="")
+        body = dict(patch)
+        add_google_meet = _coerce_bool(body.pop("add_google_meet", False))
+        params: dict[str, Any] = {"sendUpdates": "all"}
+        if add_google_meet and "conferenceData" not in body:
+            body["conferenceData"] = {
+                "createRequest": {
+                    "requestId": f"meet_{uuid4().hex}",
+                    "conferenceSolutionKey": {"type": "hangoutsMeet"},
+                }
+            }
+        if "conferenceData" in body:
+            params["conferenceDataVersion"] = 1
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.patch(
                 f"{_CALENDAR_BASE}/calendars/{encoded_cal_id}/events/{encoded_event_id}",
                 headers={**self._headers, "Content-Type": "application/json"},
-                json=patch,
-                params={"sendUpdates": "all"},
+                json=body,
+                params=params,
             )
             if resp.status_code == 401:
                 raise PermissionError("Google access token expired.")
@@ -294,7 +317,7 @@ def _normalize_event(item: dict[str, Any], calendar_id: str) -> dict[str, Any]:
         "is_all_day": is_all_day,
         "status": str(item.get("status") or "confirmed").strip() or "confirmed",
         "html_link": str(item.get("htmlLink") or "").strip(),
-        "meeting_link": str(item.get("hangoutLink") or "").strip(),
+        "meeting_link": _extract_meeting_link(item),
         "color_id": str(item.get("colorId") or "").strip(),
         "recurring_event_id": str(item.get("recurringEventId") or "").strip() or None,
         "organizer": str(
@@ -327,3 +350,34 @@ def _now_rfc3339() -> str:
 
 def _future_rfc3339(days: int = 30) -> str:
     return (datetime.now(tz=timezone.utc) + timedelta(days=days)).isoformat()
+
+
+def _extract_meeting_link(item: dict[str, Any]) -> str:
+    direct = str(item.get("hangoutLink") or "").strip()
+    if direct:
+        return direct
+    conference = item.get("conferenceData")
+    if isinstance(conference, dict):
+        entry_points = conference.get("entryPoints")
+        if isinstance(entry_points, list):
+            for entry in entry_points:
+                if not isinstance(entry, dict):
+                    continue
+                if str(entry.get("entryPointType") or "").strip().lower() != "video":
+                    continue
+                uri = str(entry.get("uri") or "").strip()
+                if uri:
+                    return uri
+    return ""
+
+
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", ""}:
+            return False
+    return bool(value)

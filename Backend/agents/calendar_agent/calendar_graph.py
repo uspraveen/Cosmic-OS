@@ -42,6 +42,8 @@ class CalendarWorkflowState(TypedDict, total=False):
     calendar_id: str
     calendar_ids: list[str]
     query: str
+    raw_query: str
+    search_query: str | None
     time_min: str
     time_max: str
     max_results: int
@@ -54,6 +56,7 @@ class CalendarWorkflowState(TypedDict, total=False):
     location: str
     attendees: list[str]
     reminders: list[int] | None
+    add_google_meet: bool
     duration_min: int
     date_range_start: str
     date_range_end: str
@@ -107,6 +110,25 @@ def _bump_round(state: CalendarWorkflowState, *, action: str) -> dict[str, Any]:
     return {"tool_round": rounds}
 
 
+async def _emit_node_progress(ctx: _GraphCtx, *, node: str, message: str) -> None:
+    try:
+        await ctx.agent.emit_event(
+            ctx.task.task_id,
+            "task.progress",
+            {
+                "type": "agent_node_progress",
+                "status": "in_progress",
+                "node": node,
+                "message": message,
+                "source": ctx.task.source,
+                "source_id": ctx.task.source_id,
+                "channel": ctx.task.channel,
+            },
+        )
+    except Exception:
+        logger.debug("calendar.graph.node_progress_failed", exc_info=True)
+
+
 def _default_list_window() -> tuple[str, str]:
     now = datetime.now(tz=timezone.utc)
     time_min = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -128,6 +150,11 @@ def _safe_int(value: Any, default: int) -> int:
 
 
 async def _normalize_request(state: CalendarWorkflowState, ctx: _GraphCtx) -> CalendarWorkflowState:
+    await _emit_node_progress(
+        ctx,
+        node="normalize_request",
+        message="Normalizing the calendar request and extracting parameters.",
+    )
     agent = ctx.agent
     task = ctx.task
     raw = dict(task.input)
@@ -158,20 +185,30 @@ async def _normalize_request(state: CalendarWorkflowState, ctx: _GraphCtx) -> Ca
     if intent == "calendar.list_events":
         time_min = str(raw.get("time_min") or "").strip()
         time_max = str(raw.get("time_max") or "").strip()
-        query = str(raw.get("query") or "").strip()
+        raw_query = str(raw.get("query") or "").strip()
         max_results = min(_safe_int(raw.get("max_results", agent._cfg.max_events_per_list), agent._cfg.max_events_per_list), 250)  # noqa: SLF001
+        search_query = agent._coerce_list_search_query(  # noqa: SLF001
+            raw_query=raw_query,
+            explicit_search_query=raw.get("search_query"),
+        )
         if isinstance(llm_params, dict) and llm_result and llm_result.get("operation") == "list":
             time_range = llm_params.get("time_range") if isinstance(llm_params.get("time_range"), dict) else {}
             time_min = time_min or str(time_range.get("start") or "").strip()
             time_max = time_max or str(time_range.get("end") or "").strip()
-            query = query or str(llm_params.get("search_query") or "").strip()
+            search_query = agent._coerce_list_search_query(  # noqa: SLF001
+                raw_query=raw_query,
+                explicit_search_query=raw.get("search_query"),
+                llm_params=llm_params,
+            )
             updates["calendar_id"] = str(llm_params.get("calendar_id") or updates["calendar_id"]).strip() or "primary"
         if not time_min or not time_max:
             time_min, time_max = _default_list_window()
         updates.update({
             "time_min": time_min,
             "time_max": time_max,
-            "query": query,
+            "raw_query": raw_query,
+            "search_query": search_query,
+            "query": search_query or "",
             "max_results": max_results,
         })
         return updates
@@ -185,6 +222,7 @@ async def _normalize_request(state: CalendarWorkflowState, ctx: _GraphCtx) -> Ca
         location = str(raw.get("location") or "").strip()
         attendees = _coerce_attendee_emails(raw.get("attendees"))
         reminders = _coerce_int_list(raw.get("reminders"))
+        add_google_meet = _coerce_bool(raw.get("add_google_meet", False))
         if isinstance(llm_params, dict) and llm_result and llm_result.get("operation") == "create":
             summary = summary or str(llm_params.get("summary") or "").strip()
             start = start or str(llm_params.get("start") or "").strip()
@@ -195,6 +233,8 @@ async def _normalize_request(state: CalendarWorkflowState, ctx: _GraphCtx) -> Ca
             attendees = attendees or _coerce_attendee_emails(llm_params.get("attendees"))
             if reminders is None:
                 reminders = _coerce_int_list(llm_params.get("reminders"))
+            if "add_google_meet" in llm_params:
+                add_google_meet = _coerce_bool(llm_params.get("add_google_meet"))
             updates["timezone"] = str(llm_params.get("timezone") or updates["timezone"]).strip() or tz
             updates["calendar_id"] = str(llm_params.get("calendar_id") or updates["calendar_id"]).strip() or "primary"
         updates.update({
@@ -206,6 +246,7 @@ async def _normalize_request(state: CalendarWorkflowState, ctx: _GraphCtx) -> Ca
             "location": location,
             "attendees": attendees,
             "reminders": reminders,
+            "add_google_meet": add_google_meet,
         })
         return updates
 
@@ -260,9 +301,13 @@ async def _normalize_request(state: CalendarWorkflowState, ctx: _GraphCtx) -> Ca
             patch["attendees"] = raw["attendees"]
         if "reminders" in raw:
             patch["reminders"] = raw["reminders"]
+        if "add_google_meet" in raw:
+            patch["add_google_meet"] = raw["add_google_meet"]
         if isinstance(llm_params, dict) and llm_result and llm_result.get("operation") == "update":
             event_id = event_id or str(llm_params.get("event_id") or "").strip()
             updates["calendar_id"] = str(llm_params.get("calendar_id") or updates["calendar_id"]).strip() or "primary"
+            if "add_google_meet" in llm_params and "add_google_meet" not in patch:
+                patch["add_google_meet"] = llm_params.get("add_google_meet")
         patch = agent._merge_patch_from_params(patch, llm_params)  # noqa: SLF001
         patch = agent._normalize_patch(patch, timezone_name=str(raw.get("timezone") or updates["timezone"]))  # noqa: SLF001
         updates.update({
@@ -322,6 +367,18 @@ def _coerce_int_list(value: Any) -> list[int] | None:
     return values
 
 
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", ""}:
+            return False
+    return bool(value)
+
+
 def _time_changed(patch: dict[str, Any]) -> bool:
     return "start" in patch or "end" in patch
 
@@ -378,6 +435,11 @@ async def _list_events(state: CalendarWorkflowState, ctx: _GraphCtx) -> Calendar
     round_update = _bump_round(state, action="list_events")
     if round_update.get("agent_result") is not None:
         return round_update
+    await _emit_node_progress(
+        ctx,
+        node="list_events",
+        message="Listing events from Google Calendar.",
+    )
 
     agent = ctx.agent
     task = ctx.task
@@ -388,9 +450,14 @@ async def _list_events(state: CalendarWorkflowState, ctx: _GraphCtx) -> Calendar
         time_min=str(state.get("time_min") or ""),
         time_max=str(state.get("time_max") or ""),
         max_results=int(state.get("max_results") or agent._cfg.max_events_per_list),  # noqa: SLF001
-        query=str(state.get("query") or "") or None,
+        query=str(state.get("search_query") or "") or None,
     )
-    agent._save_session(task, "list", query=str(state.get("query") or ""), event_ids=[e["event_id"] for e in events])  # noqa: SLF001
+    agent._save_session(  # noqa: SLF001
+        task,
+        "list",
+        query=str(state.get("search_query") or state.get("raw_query") or ""),
+        event_ids=[e["event_id"] for e in events],
+    )
     await agent._maybe_update_step(2, "completed", f"Found {len(events)} matching event(s).")  # noqa: SLF001
     await agent._maybe_update_step(3, "completed", "Calendar lookup summarized.")  # noqa: SLF001
     return {
@@ -405,6 +472,8 @@ async def _list_events(state: CalendarWorkflowState, ctx: _GraphCtx) -> Calendar
                 "calendar_id": str(state.get("calendar_id") or "primary"),
                 "time_min": str(state.get("time_min") or ""),
                 "time_max": str(state.get("time_max") or ""),
+                "search_query": str(state.get("search_query") or "") or None,
+                "resolved_account": agent._resolved_account_output(),  # noqa: SLF001
                 "workflow": "langgraph",
                 "rounds_used": int(round_update["tool_round"]),
             },
@@ -418,6 +487,11 @@ async def _query_busy(state: CalendarWorkflowState, ctx: _GraphCtx) -> CalendarW
     round_update = _bump_round(state, action="query_busy")
     if round_update.get("agent_result") is not None:
         return round_update
+    await _emit_node_progress(
+        ctx,
+        node="query_busy",
+        message="Checking busy periods across the selected calendars.",
+    )
 
     agent = ctx.agent
     client = agent._get_calendar_client()  # noqa: SLF001
@@ -439,6 +513,11 @@ async def _compute_free_slots(state: CalendarWorkflowState, ctx: _GraphCtx) -> C
     round_update = _bump_round(state, action="compute_free_slots")
     if round_update.get("agent_result") is not None:
         return round_update
+    await _emit_node_progress(
+        ctx,
+        node="compute_free_slots",
+        message="Computing available time slots from the busy periods.",
+    )
 
     agent = ctx.agent
     task = ctx.task
@@ -527,6 +606,11 @@ async def _resolve_target_event(state: CalendarWorkflowState, ctx: _GraphCtx) ->
     round_update = _bump_round(state, action="resolve_target_event")
     if round_update.get("agent_result") is not None:
         return round_update
+    await _emit_node_progress(
+        ctx,
+        node="resolve_target_event",
+        message="Resolving the target calendar event.",
+    )
 
     agent = ctx.agent
     task = ctx.task
@@ -567,6 +651,11 @@ async def _check_create_conflicts(state: CalendarWorkflowState, ctx: _GraphCtx) 
     round_update = _bump_round(state, action="check_create_conflicts")
     if round_update.get("agent_result") is not None:
         return round_update
+    await _emit_node_progress(
+        ctx,
+        node="check_create_conflicts",
+        message="Checking the requested time slot for conflicts.",
+    )
 
     agent = ctx.agent
     client = agent._get_calendar_client()  # noqa: SLF001
@@ -613,6 +702,11 @@ async def _create_event(state: CalendarWorkflowState, ctx: _GraphCtx) -> Calenda
     round_update = _bump_round(state, action="create_event")
     if round_update.get("agent_result") is not None:
         return round_update
+    await _emit_node_progress(
+        ctx,
+        node="create_event",
+        message="Creating the calendar event.",
+    )
 
     agent = ctx.agent
     task = ctx.task
@@ -636,6 +730,7 @@ async def _create_event(state: CalendarWorkflowState, ctx: _GraphCtx) -> Calenda
         location=str(state.get("location") or ""),
         attendees=list(state.get("attendees") or []),
         reminders=state.get("reminders"),
+        add_google_meet=bool(state.get("add_google_meet", False)),
     )
     agent._save_session(task, "create", query=summary, event_ids=[event["event_id"]])  # noqa: SLF001
     await agent._maybe_update_step(3, "completed", f"Created {event['event_id']}.")  # noqa: SLF001
@@ -651,6 +746,11 @@ async def _check_update_conflicts(state: CalendarWorkflowState, ctx: _GraphCtx) 
     round_update = _bump_round(state, action="check_update_conflicts")
     if round_update.get("agent_result") is not None:
         return round_update
+    await _emit_node_progress(
+        ctx,
+        node="check_update_conflicts",
+        message="Checking the updated time slot for overlaps.",
+    )
 
     agent = ctx.agent
     client = agent._get_calendar_client()  # noqa: SLF001
@@ -685,6 +785,11 @@ async def _update_event(state: CalendarWorkflowState, ctx: _GraphCtx) -> Calenda
     round_update = _bump_round(state, action="update_event")
     if round_update.get("agent_result") is not None:
         return round_update
+    await _emit_node_progress(
+        ctx,
+        node="update_event",
+        message="Applying the calendar event update.",
+    )
 
     agent = ctx.agent
     task = ctx.task
@@ -700,7 +805,11 @@ async def _update_event(state: CalendarWorkflowState, ctx: _GraphCtx) -> Calenda
             ),
         }
 
-    step_no = 4 if _time_changed(patch) else 3
+    if _time_changed(patch):
+        step_no = 4
+    else:
+        step_no = 4
+        await agent._maybe_update_step(3, "skipped", "No time change requested; overlap check not needed.")  # noqa: SLF001
     await agent._maybe_update_step(step_no, "in_progress", "Applying update in Google Calendar.")  # noqa: SLF001
     event = await client.update_event(
         calendar_id=str(state.get("calendar_id") or "primary"),
@@ -720,6 +829,11 @@ async def _cancel_event(state: CalendarWorkflowState, ctx: _GraphCtx) -> Calenda
     round_update = _bump_round(state, action="cancel_event")
     if round_update.get("agent_result") is not None:
         return round_update
+    await _emit_node_progress(
+        ctx,
+        node="cancel_event",
+        message="Cancelling the calendar event.",
+    )
 
     agent = ctx.agent
     task = ctx.task

@@ -16,18 +16,27 @@ intents:
       - Use this when a real inbound email arrives and the system needs email-native understanding, not just transport delivery.
       - Keep attachments inside the email agent workflow unless another specialist explicitly needs them later.
 
-  - name: email.reason
-    description: High-level email reasoning entrypoint for searching, summarizing, drafting, replying to, or sending email from a compact brief.
-    input_schema: schemas/intents/email.reason.input.json
-    output_schema: schemas/intents/email.reason.output.json
+  - name: email.handle
+    description: Canonical email handling entrypoint for searching, summarizing, drafting, replying to, or sending email from a compact brief while the specialist normalizes one execution plan internally.
+    input_schema: schemas/intents/email.handle.input.json
+    output_schema: schemas/intents/email.handle.output.json
     timeout_sec: 240
     usage_hints:
       - Use this specialist for almost anything involving reading, understanding, drafting, replying to, or sending email.
       - Pass a compact context_brief and optional draft_seed; do not pass a long raw conversation transcript.
+      - If a prior run already produced a draft_id and the next step is to send that same draft, pass the draft_id back so the specialist can continue directly instead of recomposing.
       - When sending a previously produced file, resolve it first and pass its artifact_id via delegate_to_agent artifact_ids so it arrives here as TaskEnvelope.input_artifacts.
       - For attachment-specific requests in an email thread, use this to resolve the correct attachment and cached docs bundle first; then continue with the normal docs tools for actual document reading.
       - For new outbound drafts, attached_input_artifact_count is the attachment upload signal; resolved_attachment is only for resolving thread attachments.
       - Do not use this specialist for simple already-final cron or heartbeat delivery to an email channel.
+
+  - name: email.reason
+    description: Legacy alias for `email.handle`. Prefer `email.handle` for new work.
+    input_schema: schemas/intents/email.reason.input.json
+    output_schema: schemas/intents/email.reason.output.json
+    timeout_sec: 240
+    usage_hints:
+      - Backward-compatible alias only. New orchestration should prefer `email.handle`.
 
   - name: email.manage_instruction
     description: Create, list, enable, disable, or remove standing email instructions that the email specialist may use on inbound mail.
@@ -65,6 +74,7 @@ policies:
     - cosmic/orchestrator:1.0.0
   intent_authorization:
     email.process_inbound: [cosmic/gateway:1.0.0, cosmic/orchestrator:1.0.0]
+    email.handle: [cosmic/orchestrator:1.0.0]
     email.reason: [cosmic/orchestrator:1.0.0]
     email.manage_instruction: [cosmic/gateway:1.0.0, cosmic/orchestrator:1.0.0]
     email.recall_session: [cosmic/orchestrator:1.0.0]

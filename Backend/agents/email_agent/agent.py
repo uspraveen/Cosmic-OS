@@ -127,6 +127,7 @@ class EmailAgentError(RuntimeError):
 
 class EmailAgent(AgentRuntime):
     PROCESS_INBOUND = "email.process_inbound"
+    HANDLE = "email.handle"
     REASON = "email.reason"
     MANAGE_INSTRUCTION = "email.manage_instruction"
     RECALL_SESSION = "email.recall_session"
@@ -218,15 +219,16 @@ class EmailAgent(AgentRuntime):
 
     async def execute(self, task: TaskEnvelope) -> AgentResult:
         started = time.perf_counter()
-        operation = self._operation_for_intent(task.intent)
+        intent = self._canonical_intent(task.intent)
+        operation = self._operation_for_intent(intent)
         try:
-            if task.intent == self.PROCESS_INBOUND:
+            if intent == self.PROCESS_INBOUND:
                 result = await self._handle_process_inbound(task)
-            elif task.intent == self.REASON:
+            elif intent == self.HANDLE:
                 result = await self._handle_reason(task)
-            elif task.intent == self.MANAGE_INSTRUCTION:
+            elif intent == self.MANAGE_INSTRUCTION:
                 result = await self._handle_manage_instruction(task)
-            elif task.intent == self.RECALL_SESSION:
+            elif intent == self.RECALL_SESSION:
                 result = await self._handle_recall_session(task)
             else:
                 await self._maybe_log_usage(
@@ -266,14 +268,21 @@ class EmailAgent(AgentRuntime):
             started,
             success=True,
             error_code=None,
-            metadata=self._usage_metadata(task.intent, result),
+            metadata=self._usage_metadata(intent, result),
         )
         return result
+
+    def _canonical_intent(self, intent: str) -> str:
+        normalized = self._safe_text(intent)
+        if normalized == self.REASON:
+            return self.HANDLE
+        return normalized
 
     def _operation_for_intent(self, intent: str) -> str:
         return {
             self.PROCESS_INBOUND: "email.process_inbound",
-            self.REASON: "email.reason",
+            self.HANDLE: "email.handle",
+            self.REASON: "email.handle",
             self.MANAGE_INSTRUCTION: "email.manage_instruction",
             self.RECALL_SESSION: "email.recall_session",
         }.get(intent, intent)
@@ -281,7 +290,7 @@ class EmailAgent(AgentRuntime):
     def _usage_metadata(self, intent: str, result: AgentResult) -> dict[str, Any]:
         output = result.output if isinstance(result.output, dict) else {}
         metadata: dict[str, Any] = {"status": result.status}
-        if intent in {self.PROCESS_INBOUND, self.REASON}:
+        if intent in {self.PROCESS_INBOUND, self.HANDLE, self.REASON}:
             metadata["thread_id"] = output.get("thread_id")
             metadata["message_id"] = output.get("message_id")
             metadata["sent"] = output.get("sent")
@@ -450,39 +459,38 @@ class EmailAgent(AgentRuntime):
         thread_id = self._optional_text(task.input, "thread_id")
         message_id = self._optional_text(task.input, "message_id")
         mailbox_address = self._optional_text(task.input, "mailbox_address")
+        mailbox_id = self._optional_text(task.input, "mailbox_id")
         query = self._optional_text(task.input, "query")
         send = bool(task.input.get("send"))
         subject = self._optional_text(task.input, "subject")
         tone_hint = self._optional_text(task.input, "tone_hint")
         context_brief = self._optional_text(task.input, "context_brief")
         draft_seed = self._optional_text(task.input, "draft_seed")
+        draft_id = self._optional_text(task.input, "draft_id")
         attachment_id = self._optional_text(task.input, "attachment_id")
         attachment_name = self._optional_text(task.input, "attachment_name")
-        recipients = self._normalize_recipient_list(task.input.get("to_recipients"))
-        cc_recipients = self._normalize_recipient_list(task.input.get("cc_recipients"))
-        bcc_recipients = self._normalize_recipient_list(task.input.get("bcc_recipients"))
-        inferred = self._infer_reason_goal_hints(goal)
-        if not recipients:
-            recipients = inferred.get("to_recipients") or []
-        if not cc_recipients:
-            cc_recipients = inferred.get("cc_recipients") or []
-        if not bcc_recipients:
-            bcc_recipients = inferred.get("bcc_recipients") or []
-        recipients, cc_recipients, bcc_recipients = self._dedupe_recipient_groups(
-            recipients,
-            cc_recipients,
-            bcc_recipients,
+        plan = self._build_reason_execution_plan(
+            goal=goal,
+            query=query,
+            context_brief=context_brief,
+            draft_seed=draft_seed,
+            send=send,
+            subject=subject,
+            to_recipients=self._normalize_recipient_list(task.input.get("to_recipients")),
+            cc_recipients=self._normalize_recipient_list(task.input.get("cc_recipients")),
+            bcc_recipients=self._normalize_recipient_list(task.input.get("bcc_recipients")),
+            draft_id=draft_id,
         )
-        if not subject:
-            subject = self._safe_text(inferred.get("subject"))
-        if not draft_seed:
-            draft_seed = self._safe_text(inferred.get("body"))
-        if not query:
-            query = self._safe_text(inferred.get("query"))
-        if not send:
-            send = bool(inferred.get("send"))
-        mode_hint = self._safe_text(inferred.get("mode")).lower()
-        read_like_goal = self._is_read_like_goal(goal) or self._is_read_like_goal(query or "")
+        query = plan["query"]
+        send = plan["send"]
+        subject = plan["subject"]
+        draft_seed = plan["draft_seed"]
+        recipients = plan["to_recipients"]
+        cc_recipients = plan["cc_recipients"]
+        bcc_recipients = plan["bcc_recipients"]
+        draft_id = plan["draft_id"]
+        mode_hint = plan["mode_hint"]
+        read_like_goal = plan["read_like_goal"]
         artifacts: list[ArtifactManifest] = []
         default_docs_tools: list[str] = []
 
@@ -525,7 +533,58 @@ class EmailAgent(AgentRuntime):
             }
             self._record_session_run(
                 task=task,
-                intent=self.REASON,
+                intent=self.HANDLE,
+                mailbox_address=mailbox_address,
+                thread_id=self._safe_text(output.get("thread_id")) or thread_id,
+                message_id=self._safe_text(output.get("message_id")) or message_id,
+                summary=output,
+            )
+            return AgentResult(status="completed", output=output, artifacts=artifacts, error=None)
+
+        if draft_id and send and not read_like_goal:
+            sent_payload = await self.mail_client.send_draft(draft_id)
+            delivery = self._normalize_mail_delivery_result(sent_payload, draft_id=draft_id)
+            artifacts.append(
+                self._write_json_artifact(
+                    task_id=task.task_id,
+                    name="send_result.json",
+                    payload=sent_payload,
+                    mime="application/json",
+                    kind="output",
+                    audience="supporting",
+                )
+            )
+            response_text = "Queued the existing draft for delivery."
+            delivery_note = self._mail_delivery_note(delivery)
+            if delivery_note:
+                response_text = delivery_note
+            output = {
+                "response": response_text,
+                "action": "send_existing_draft",
+                "sent": bool(delivery and delivery.get("sent")),
+                "thread_id": self._safe_text(delivery.get("thread_id")) if isinstance(delivery, dict) else None,
+                "message_id": self._safe_text(delivery.get("message_id")) if isinstance(delivery, dict) else None,
+                "draft_id": self._safe_text(delivery.get("draft_id")) if isinstance(delivery, dict) else draft_id,
+                "summary": response_text,
+                "to_recipients": recipients,
+                "cc_recipients": cc_recipients,
+                "bcc_recipients": bcc_recipients,
+                "search_results": [],
+                "bundle_id": None,
+                "docs_tools": default_docs_tools,
+                "resolved_attachment": None,
+                "attachment_resolution_status": None,
+                "attached_input_artifact_count": None,
+                "attached_input_artifacts": None,
+                "failed_input_artifact_count": None,
+                "failed_input_artifacts": None,
+                "delivery_status": self._safe_text(delivery.get("delivery_status")) if isinstance(delivery, dict) else None,
+                "queued_for_approval": bool(delivery.get("queued_for_approval")) if isinstance(delivery, dict) else False,
+                "approval_id": self._safe_text(delivery.get("approval_id")) if isinstance(delivery, dict) else None,
+            }
+            self._record_session_run(
+                task=task,
+                intent=self.HANDLE,
                 mailbox_address=mailbox_address,
                 thread_id=self._safe_text(output.get("thread_id")) or thread_id,
                 message_id=self._safe_text(output.get("message_id")) or message_id,
@@ -558,8 +617,7 @@ class EmailAgent(AgentRuntime):
                 if send:
                     mailbox = await self._resolve_mailbox(
                         mailbox_address=mailbox_address,
-                        mailbox_id=self._optional_text(task.input, "mailbox_id")
-                        or self._safe_text(context.get("thread", {}).get("mailbox_id")),
+                        mailbox_id=mailbox_id or self._safe_text(context.get("thread", {}).get("mailbox_id")),
                     )
                     reply_payload: dict[str, Any] = {
                         "mailbox_id": mailbox["id"],
@@ -753,7 +811,7 @@ class EmailAgent(AgentRuntime):
 
         self._record_session_run(
             task=task,
-            intent=self.REASON,
+            intent=self.HANDLE,
             mailbox_address=mailbox_address,
             thread_id=thread_id,
             message_id=message_id,
@@ -824,6 +882,136 @@ class EmailAgent(AgentRuntime):
             inferred["mode"] = "compose"
             inferred["send"] = "send" in lowered and "draft" not in lowered
         return inferred
+
+    def _build_reason_execution_plan(
+        self,
+        *,
+        goal: str,
+        query: str | None,
+        context_brief: str | None,
+        draft_seed: str | None,
+        send: bool,
+        subject: str | None,
+        to_recipients: list[dict[str, Any]],
+        cc_recipients: list[dict[str, Any]],
+        bcc_recipients: list[dict[str, Any]],
+        draft_id: str | None,
+    ) -> dict[str, Any]:
+        goal_hints = self._infer_reason_goal_hints(goal)
+        context_hints = self._infer_reason_goal_hints(context_brief or "")
+        structured_draft_hints = self._infer_structured_email_hints(draft_seed or "")
+        inferred = self._merge_reason_hints(goal_hints, context_hints, structured_draft_hints)
+
+        if not to_recipients:
+            to_recipients = inferred.get("to_recipients") or []
+        if not cc_recipients:
+            cc_recipients = inferred.get("cc_recipients") or []
+        if not bcc_recipients:
+            bcc_recipients = inferred.get("bcc_recipients") or []
+        to_recipients, cc_recipients, bcc_recipients = self._dedupe_recipient_groups(
+            to_recipients,
+            cc_recipients,
+            bcc_recipients,
+        )
+
+        normalized_subject = self._safe_text(subject) or self._safe_text(inferred.get("subject")) or None
+        normalized_draft_seed = self._safe_text(draft_seed) or None
+        if structured_draft_hints:
+            normalized_draft_seed = self._safe_text(structured_draft_hints.get("body")) or None
+        if not normalized_draft_seed:
+            normalized_draft_seed = self._safe_text(inferred.get("body")) or None
+        normalized_query = self._safe_text(query) or self._safe_text(goal_hints.get("query")) or None
+        normalized_send = bool(send or goal_hints.get("send") or context_hints.get("send"))
+        mode_hint = self._safe_text(inferred.get("mode")).lower()
+        read_like_goal = self._is_read_like_goal(goal) or self._is_read_like_goal(normalized_query or "")
+
+        return {
+            "query": normalized_query,
+            "send": normalized_send,
+            "subject": normalized_subject,
+            "draft_seed": normalized_draft_seed,
+            "to_recipients": to_recipients,
+            "cc_recipients": cc_recipients,
+            "bcc_recipients": bcc_recipients,
+            "draft_id": self._safe_text(draft_id) or None,
+            "mode_hint": mode_hint,
+            "read_like_goal": read_like_goal,
+        }
+
+    def _merge_reason_hints(self, *hints: dict[str, Any]) -> dict[str, Any]:
+        merged: dict[str, Any] = {
+            "subject": "",
+            "body": "",
+            "query": "",
+            "mode": "",
+            "send": False,
+            "to_recipients": [],
+            "cc_recipients": [],
+            "bcc_recipients": [],
+        }
+        to_recipients: list[dict[str, Any]] = []
+        cc_recipients: list[dict[str, Any]] = []
+        bcc_recipients: list[dict[str, Any]] = []
+        for hint in hints:
+            if not isinstance(hint, dict):
+                continue
+            if not merged["subject"]:
+                merged["subject"] = self._safe_text(hint.get("subject"))
+            if not merged["body"]:
+                merged["body"] = self._safe_text(hint.get("body"))
+            if not merged["query"]:
+                merged["query"] = self._safe_text(hint.get("query"))
+            if not merged["mode"]:
+                merged["mode"] = self._safe_text(hint.get("mode"))
+            if hint.get("send"):
+                merged["send"] = True
+            to_recipients.extend(self._normalize_recipient_list(hint.get("to_recipients")))
+            cc_recipients.extend(self._normalize_recipient_list(hint.get("cc_recipients")))
+            bcc_recipients.extend(self._normalize_recipient_list(hint.get("bcc_recipients")))
+        merged["to_recipients"], merged["cc_recipients"], merged["bcc_recipients"] = self._dedupe_recipient_groups(
+            to_recipients,
+            cc_recipients,
+            bcc_recipients,
+        )
+        return merged
+
+    def _infer_structured_email_hints(self, text: str) -> dict[str, Any]:
+        normalized = self._safe_text(text)
+        if not normalized:
+            return {}
+
+        def _extract_header_segment(label: str) -> str:
+            pattern = rf"(?is)(?:^|\n)\s*{label}\s*:\s*(?P<segment>.+?)(?=(?:\n\s*(?:to|cc|bcc|subject)\s*:)|\n{{2,}}|$)"
+            match = re.search(pattern, normalized)
+            return self._safe_text(match.group("segment")) if match else ""
+
+        subject = _extract_header_segment("subject")
+        to_segment = _extract_header_segment("to")
+        cc_segment = _extract_header_segment("cc")
+        bcc_segment = _extract_header_segment("bcc")
+        has_headers = any((subject, to_segment, cc_segment, bcc_segment))
+        if not has_headers:
+            return {}
+
+        blank_line_split = re.split(r"\n\s*\n", normalized, maxsplit=1)
+        body = self._safe_text(blank_line_split[1]) if len(blank_line_split) > 1 else ""
+        to_recipients = self._infer_recipient_hints(to_segment)["all"] if to_segment else []
+        cc_recipients = self._infer_recipient_hints(cc_segment)["all"] if cc_segment else []
+        bcc_recipients = self._infer_recipient_hints(bcc_segment)["all"] if bcc_segment else []
+        to_recipients, cc_recipients, bcc_recipients = self._dedupe_recipient_groups(
+            to_recipients,
+            cc_recipients,
+            bcc_recipients,
+        )
+        return {
+            "subject": subject,
+            "body": body,
+            "mode": "compose" if any((to_recipients, cc_recipients, bcc_recipients, subject, body)) else "",
+            "send": False,
+            "to_recipients": to_recipients,
+            "cc_recipients": cc_recipients,
+            "bcc_recipients": bcc_recipients,
+        }
 
     async def _handle_manage_instruction(self, task: TaskEnvelope) -> AgentResult:
         action = self._required_text(task.input, "action").lower()

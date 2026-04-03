@@ -1273,6 +1273,23 @@ async def _step_plan_update(
         logger.debug("slide.graph.step_plan_update_failed", exc_info=True)
 
 
+async def _emit_node_progress(ctx: _GraphCtx, *, node: str, message: str) -> None:
+    try:
+        await ctx.agent.emit_event(
+            ctx.task.task_id,
+            "task.progress",
+            {
+                "type": "agent_node_progress",
+                "status": "in_progress",
+                "node": node,
+                "message": message,
+                **_provenance_payload(ctx.task),
+            },
+        )
+    except Exception:
+        logger.debug("slide.graph.node_progress_failed", exc_info=True)
+
+
 _RESUME_STATE_KEYS = (
     "tool_round",
     "max_tool_rounds",
@@ -1721,6 +1738,12 @@ def _build_graph(cfg: SlideAgentConfig, ctx: _GraphCtx):
     async def prepare_source_materials(state: SlideWorkflowState) -> dict[str, Any]:
         """Normalize uploaded/source artifacts and parse raw documents when needed."""
         bump = _bump_round(state, action="prepare_source_materials")
+        if bump.get("agent_result") is None:
+            await _emit_node_progress(
+                ctx,
+                node="prepare_source_materials",
+                message="Preparing source materials and checking uploaded artifacts.",
+            )
         source_artifacts = _merge_artifact_descriptors(
             state.get("source_artifacts"),
             _collect_task_source_artifacts(task),
@@ -1863,6 +1886,12 @@ def _build_graph(cfg: SlideAgentConfig, ctx: _GraphCtx):
     async def analyze_request(state: SlideWorkflowState) -> dict[str, Any]:
         """Analyze the user's request and produce a DeckPlan or edit operations."""
         bump = _bump_round(state, action="analyze")
+        if bump.get("agent_result") is None:
+            await _emit_node_progress(
+                ctx,
+                node="analyze_request",
+                message="Planning the deck structure and slide layout.",
+            )
         if state.get("analyzed") and (
             state.get("llm_deck_plan")
             or (state.get("intent") == "slide.edit" and "llm_edit_operations" in state)
@@ -2164,6 +2193,12 @@ def _build_graph(cfg: SlideAgentConfig, ctx: _GraphCtx):
         Stores delegation requests in state for the build phase to use.
         """
         bump = _bump_round(state, action="prepare_assets")
+        if bump.get("agent_result") is None:
+            await _emit_node_progress(
+                ctx,
+                node="prepare_assets",
+                message="Preparing charts, images, and other slide assets.",
+            )
         deck_plan = state.get("llm_deck_plan", {})
         slides = _json_safe_copy(deck_plan.get("slides") or [])
         edit_operations = _json_safe_copy(state.get("llm_edit_operations") or [])
@@ -2578,6 +2613,12 @@ def _build_graph(cfg: SlideAgentConfig, ctx: _GraphCtx):
     async def build_slides(state: SlideWorkflowState) -> dict[str, Any]:
         """Build the PPTX from the plan using python-pptx."""
         bump = _bump_round(state, action="build")
+        if bump.get("agent_result") is None:
+            await _emit_node_progress(
+                ctx,
+                node="build_slides",
+                message="Building the PowerPoint deck and placing content.",
+            )
 
         intent = state.get("intent", "")
         task_artifacts_dir = agent._task_artifact_dir(task.task_id)
@@ -2661,6 +2702,19 @@ def _build_graph(cfg: SlideAgentConfig, ctx: _GraphCtx):
                         height=deck_def.get("dimensions", {}).get("height", 7.5),
                     )
                 )
+
+                # ── Enforce known template selection ───────────────────
+                from .templates_registry import TEMPLATE_NAMES
+
+                llm_template = (deck_def.get("template", "") or "").strip()
+                if llm_template and llm_template not in TEMPLATE_NAMES:
+                    logger.warning(
+                        "LLM chose unknown template '%s' — overriding to '%s'.",
+                        llm_template,
+                        cfg.default_template,
+                    )
+                    deck_def["template"] = cfg.default_template
+                    deck_plan["deck"] = deck_def
 
                 # ── Auto-map legacy fields to template-guided assignments ─
                 template_name = deck_def.get("template", "") or cfg.default_template
@@ -2852,6 +2906,12 @@ def _build_graph(cfg: SlideAgentConfig, ctx: _GraphCtx):
     async def render_and_validate(state: SlideWorkflowState) -> dict[str, Any]:
         """Render slides to PNG and validate each with vision."""
         bump = _bump_round(state, action="validate")
+        if bump.get("agent_result") is None:
+            await _emit_node_progress(
+                ctx,
+                node="render_and_validate",
+                message="Rendering previews and validating slide quality.",
+            )
 
         if not state.get("build_ok") or not state.get("pptx_path"):
             return {
@@ -3006,6 +3066,11 @@ def _build_graph(cfg: SlideAgentConfig, ctx: _GraphCtx):
 
     async def finalize(state: SlideWorkflowState) -> dict[str, Any]:
         """Build artifacts for current cycle. If plan has more steps, loop back."""
+        await _emit_node_progress(
+            ctx,
+            node="finalize",
+            message="Finalizing slide artifacts and packaging the result.",
+        )
         if state.get("agent_result") is not None:
             if state.get("plan_active"):
                 current = int(state.get("plan_step") or 1)

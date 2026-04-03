@@ -8,6 +8,7 @@ import pytest
 
 from agents.tabular_agent import internal_workflow as iw
 from agents.tabular_agent import tabular_reason_graph as trg
+from agents.tabular_agent.skills import discover_skills, load_skill_content
 
 
 class _StepPlanSpy:
@@ -982,3 +983,192 @@ async def test_langgraph_resume_includes_delegated_result_context(monkeypatch, t
     assert out.get("response")
     resumed_payload = next(payload for _, event_type, payload in events if event_type == "task.resumed")
     assert resumed_payload["reverse_task_id"] == "rvt_1"
+
+
+@pytest.mark.asyncio
+async def test_langgraph_active_skill_context_isolated_from_transcript(monkeypatch, tmp_path: Path) -> None:
+    (tmp_path / "preview.md").write_text("# t\n", encoding="utf-8")
+    (tmp_path / "sheet_catalog.json").write_text('{"sheets":[]}', encoding="utf-8")
+
+    skills_dir = Path(trg.AGENT_ROOT) / "skills"
+    discovered = discover_skills(skills_dir)
+    ratio_skill = next(s for s in discovered if s["name"] == "ratio-analysis")
+    ratio_body = load_skill_content(ratio_skill["path"]) or ""
+    ratio_fragment = ratio_body[:120]
+
+    class _Agent:
+        def _require(self, x: str) -> str:
+            return x
+
+        def _safe(self, x) -> str:
+            return str(x or "").strip()
+
+        async def _emit_stage(self, *a, **k) -> None:
+            return None
+
+        def _bundle_disk_path(self, bundle_id: str, artifact_id: str) -> Path:
+            return tmp_path
+
+    agent = _Agent()
+    task = type(
+        "T",
+        (),
+        {
+            "task_id": "task_skill_ctx",
+            "session_id": "sess_skill_ctx",
+            "input": {"bundle_id": "b1", "artifact_id": "a1", "goal": "analyze ROE"},
+            "source": "user",
+            "source_id": "u1",
+            "channel": "desktop:test",
+        },
+    )()
+
+    cfg = type(
+        "C",
+        (),
+        {
+            "enable_internal_llm": True,
+            "mimo_api_key": "k",
+            "mimo_base_url": "https://x/v1",
+            "include_financial_fpna_prompt": False,
+            "sandbox_timeout_sec": 30.0,
+            "tabular_reason_use_langgraph": True,
+            "tabular_reason_max_tool_rounds": 5,
+            "skills_enabled": True,
+            "skills_dir": str(skills_dir),
+            "mimo_model": "m",
+            "mimo_timeout_sec": 30.0,
+        },
+    )()
+
+    step = {"n": 0}
+
+    async def fake_invoke(*, operation: str, **kwargs) -> str:
+        if operation == "tabular.internal_llm.reason_step":
+            step["n"] += 1
+            if step["n"] == 1:
+                assert "## Available Skills" in kwargs["system_content"]
+                return '{"action":"activate_skill","skill_name":"ratio-analysis","rationale":"Need finance formulas"}'
+            assert "## Active Skill" in kwargs["system_content"]
+            assert "Name: ratio-analysis" in kwargs["system_content"]
+            assert ratio_fragment in kwargs["system_content"]
+            assert ratio_fragment not in kwargs["user_message"]
+            return '{"action":"done","answer":"ROE analysis ready","rationale":"done"}'
+        if operation == "tabular.internal_llm.reason_answer":
+            return "ROE analysis ready"
+        return ""
+
+    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+
+    out = await iw.run_tabular_reason_workbook(
+        agent=agent,
+        task=task,
+        http_client=AsyncMock(),
+        cfg=cfg,
+    )  # type: ignore[arg-type]
+
+    assert out.get("workflow") == "langgraph"
+    assert out.get("response")
+    assert step["n"] >= 2
+
+
+@pytest.mark.asyncio
+async def test_langgraph_resume_preserves_active_skill_context(monkeypatch, tmp_path: Path) -> None:
+    (tmp_path / "preview.md").write_text("# t\n", encoding="utf-8")
+    (tmp_path / "sheet_catalog.json").write_text('{"sheets":[]}', encoding="utf-8")
+
+    skills_dir = Path(trg.AGENT_ROOT) / "skills"
+    discovered = discover_skills(skills_dir)
+    ratio_skill = next(s for s in discovered if s["name"] == "ratio-analysis")
+    ratio_body = load_skill_content(ratio_skill["path"]) or ""
+    ratio_fragment = ratio_body[:120]
+
+    class _Agent:
+        def _require(self, x: str) -> str:
+            return x
+
+        def _safe(self, x) -> str:
+            return str(x or "").strip()
+
+        async def _emit_stage(self, *a, **k) -> None:
+            return None
+
+        async def emit_event(self, *a, **k) -> str:
+            return "mid"
+
+        def _bundle_disk_path(self, bundle_id: str, artifact_id: str) -> Path:
+            return tmp_path
+
+    agent = _Agent()
+    task = type(
+        "T",
+        (),
+        {
+            "task_id": "task_skill_resume",
+            "parent_task_id": "parent_skill_resume",
+            "session_id": "sess_skill_resume",
+            "input": {
+                "bundle_id": "b1",
+                "artifact_id": "a1",
+                "goal": "analyze ROE",
+                "_resume": {
+                    "resume_of_task_id": "task_prior",
+                    "input_request_id": "uir_skill",
+                    "resume_state": {
+                        "transcript": "--- prior work ---",
+                        "tool_round": 1,
+                        "clarify_used": False,
+                        "delegate_used": False,
+                        "steps_log": [],
+                        "active_skill_name": "ratio-analysis",
+                        "active_skill_content": ratio_body,
+                    },
+                    "reply": {"content": "continue"},
+                },
+            },
+            "source": "orchestrator",
+            "source_id": "cosmic/orchestrator:1.0.0",
+            "channel": "desktop:test",
+        },
+    )()
+
+    cfg = type(
+        "C",
+        (),
+        {
+            "enable_internal_llm": True,
+            "mimo_api_key": "k",
+            "mimo_base_url": "https://x/v1",
+            "include_financial_fpna_prompt": False,
+            "sandbox_timeout_sec": 30.0,
+            "tabular_reason_use_langgraph": True,
+            "tabular_reason_max_tool_rounds": 5,
+            "skills_enabled": True,
+            "skills_dir": str(skills_dir),
+            "mimo_model": "m",
+            "mimo_timeout_sec": 30.0,
+        },
+    )()
+
+    async def fake_invoke(*, operation: str, **kwargs) -> str:
+        if operation == "tabular.internal_llm.reason_step":
+            assert "## Active Skill" in kwargs["system_content"]
+            assert "Name: ratio-analysis" in kwargs["system_content"]
+            assert ratio_fragment in kwargs["system_content"]
+            assert ratio_fragment not in kwargs["user_message"]
+            return '{"action":"done","answer":"resume ok","rationale":"done"}'
+        if operation == "tabular.internal_llm.reason_answer":
+            return "resume ok"
+        return ""
+
+    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+
+    out = await iw.run_tabular_reason_workbook(
+        agent=agent,
+        task=task,
+        http_client=AsyncMock(),
+        cfg=cfg,
+    )  # type: ignore[arg-type]
+
+    assert out.get("workflow") == "langgraph"
+    assert out.get("response")

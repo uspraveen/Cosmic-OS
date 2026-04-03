@@ -13,6 +13,7 @@
     "location": { "type": "string" },
     "attendees": { "type": "array", "items": { "type": "string" }, "description": "List of attendee emails" },
     "reminders": { "type": "array", "items": { "type": "integer" }, "description": "Minutes before event for reminders" },
+    "add_google_meet": { "type": "boolean", "description": "Whether to create the event with a Google Meet link" },
     "query": { "type": "string", "description": "Natural language scheduling request (alternative to structured params)" }
   }
 }

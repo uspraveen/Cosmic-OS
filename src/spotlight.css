@@ -1230,6 +1230,7 @@ kbd {
   height: 40px;
   flex-shrink: 0;
   border-radius: 14px;
+  overflow: hidden;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1243,10 +1244,10 @@ kbd {
 }
 
 .task-interrupt-logo {
-  width: 26px;
-  height: 26px;
+  width: 30px;
+  height: 30px;
   object-fit: contain;
-  object-position: 58% 50%;
+  object-position: 50% 50%;
   filter: drop-shadow(0 4px 10px rgba(255, 255, 255, 0.12));
 }
 
@@ -1387,9 +1388,9 @@ kbd {
 }
 
 .task-interrupt-shell.compact .task-interrupt-logo {
-  width: 18px;
-  height: 18px;
-  object-position: 58% 50%;
+  width: 22px;
+  height: 22px;
+  object-position: 50% 50%;
 }
 
 .task-interrupt-shell.compact .task-interrupt-kicker {

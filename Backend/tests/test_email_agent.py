@@ -441,6 +441,151 @@ async def test_email_agent_reason_compose_reports_approval_queue_truthfully(tmp_
 
 
 @pytest.mark.asyncio
+async def test_email_agent_reason_send_existing_draft_without_recompose(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+            enable_internal_llm=True,
+        ),
+    )
+
+    monkeypatch.setattr(agent, "_ensure_mail_client_ready", AsyncMock(return_value=None))
+
+    async def fail_compose(*args, **kwargs):
+        raise AssertionError("existing draft send should not recompose the email")
+
+    monkeypatch.setattr(agent, "_compose_new_email", fail_compose)
+    monkeypatch.setattr(agent, "_create_outbound_draft", fail_compose)
+
+    class FakeMailClient:
+        base_url = "http://cosmic-mail.local"
+        api_token = "mail-token"
+        timeout_sec = 20.0
+
+        async def aclose(self):
+            return None
+
+        async def send_draft(self, draft_id):
+            assert draft_id == "draft_existing"
+            return {
+                "queued_for_approval": True,
+                "approval_id": "apr_existing",
+                "draft": {"id": "draft_existing"},
+            }
+
+    agent.mail_client = FakeMailClient()  # type: ignore[assignment]
+
+    task = _make_task(
+        intent="email.handle",
+        task_id="tsk_reason_send_existing_draft",
+        input_payload={
+            "goal": "Send the existing draft now.",
+            "draft_id": "draft_existing",
+            "send": True,
+            "request_id": "req_send_existing_draft",
+        },
+    )
+
+    result = await agent.execute(task)
+
+    assert result.status == "completed"
+    assert result.output["action"] == "send_existing_draft"
+    assert result.output["sent"] is False
+    assert result.output["draft_id"] == "draft_existing"
+    assert result.output["delivery_status"] == "queued_for_approval"
+    assert result.output["queued_for_approval"] is True
+    assert result.output["approval_id"] == "apr_existing"
+    assert "approval" in result.output["response"].lower()
+
+
+@pytest.mark.asyncio
+async def test_email_agent_reason_infers_recipients_and_subject_from_structured_draft_seed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+            enable_internal_llm=True,
+        ),
+    )
+
+    async def fake_compose_new_email(**kwargs):
+        assert kwargs["recipients"] == [{"email": "arun@example.com", "name": None}]
+        assert kwargs["cc_recipients"] == [{"email": "uspraveenraj@gmail.com", "name": None}]
+        assert kwargs["bcc_recipients"] == []
+        assert kwargs["subject"] == "Gaming daily drop"
+        assert kwargs["draft_seed"] == "Hey Arun,\n\nHere is the latest gaming update."
+        return {
+            "subject": kwargs["subject"],
+            "body": kwargs["draft_seed"],
+            "summary": "Prepared an outbound email draft.",
+        }
+
+    async def fake_create_outbound_draft(**kwargs):
+        assert kwargs["recipients"] == [{"email": "arun@example.com", "name": None}]
+        assert kwargs["cc_recipients"] == [{"email": "uspraveenraj@gmail.com", "name": None}]
+        assert kwargs["subject"] == "Gaming daily drop"
+        assert kwargs["text_body"] == "Hey Arun,\n\nHere is the latest gaming update."
+        return {"id": "draft_structured_seed"}
+
+    async def fake_upload_input_artifacts_to_draft(*args, **kwargs):
+        return {"attempted": 0, "uploaded": [], "failed": []}
+
+    monkeypatch.setattr(agent, "_ensure_mail_client_ready", AsyncMock(return_value=None))
+    monkeypatch.setattr(agent, "_compose_new_email", fake_compose_new_email)
+    monkeypatch.setattr(agent, "_create_outbound_draft", fake_create_outbound_draft)
+    monkeypatch.setattr(agent, "_upload_input_artifacts_to_draft", fake_upload_input_artifacts_to_draft)
+
+    class FakeMailClient:
+        base_url = "http://cosmic-mail.local"
+        api_token = "mail-token"
+        timeout_sec = 20.0
+
+        async def aclose(self):
+            return None
+
+        async def send_draft(self, draft_id):
+            assert draft_id == "draft_structured_seed"
+            return {"id": "msg_structured_seed", "thread_id": "thr_structured_seed"}
+
+    agent.mail_client = FakeMailClient()  # type: ignore[assignment]
+
+    task = _make_task(
+        intent="email.handle",
+        task_id="tsk_reason_structured_seed",
+        input_payload={
+            "goal": "Handle this outbound email request.",
+            "context_brief": "Send this outbound email now.",
+            "draft_seed": (
+                "To: arun@example.com\n"
+                "CC: uspraveenraj@gmail.com\n"
+                "Subject: Gaming daily drop\n\n"
+                "Hey Arun,\n\nHere is the latest gaming update."
+            ),
+            "send": True,
+            "request_id": "req_structured_seed",
+        },
+    )
+
+    result = await agent.execute(task)
+
+    assert result.status == "completed"
+    assert result.output["action"] == "compose_email"
+    assert result.output["sent"] is True
+    assert result.output["draft_id"] == "draft_structured_seed"
+    assert result.output["message_id"] == "msg_structured_seed"
+    assert result.output["to_recipients"] == [{"email": "arun@example.com", "name": None}]
+    assert result.output["cc_recipients"] == [{"email": "uspraveenraj@gmail.com", "name": None}]
+
+
+@pytest.mark.asyncio
 async def test_email_agent_reason_infers_following_content_body_from_plain_goal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

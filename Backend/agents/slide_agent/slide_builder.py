@@ -253,7 +253,7 @@ class SlideBuilder:
 
         Supports:
         - Built-in: "tech-trends", "business-meeting", "science-lesson", "tech-infographics"
-        - Legacy: "corporate-dark", "corporate-light", "minimal", "pitch-deck"
+        - Fallback: "blank" (empty presentation with no design)
         - User-uploaded: "user:template-name" (looks in templates/user/)
         - File path: absolute or relative .pptx path
         """

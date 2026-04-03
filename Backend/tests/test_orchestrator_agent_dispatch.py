@@ -206,6 +206,35 @@ def _agent_card() -> dict[str, object]:
     }
 
 
+def _calendar_agent_card() -> dict[str, object]:
+    return {
+        "agent_id": "cosmic/calendar-agent:1.0.0",
+        "display_name": "Calendar Agent",
+        "description": "Specialist agent for calendar scheduling and event management.",
+        "sla": {
+            "max_concurrency": 2,
+            "heartbeat_ttl_sec": 30,
+            "max_task_duration_sec": 180,
+        },
+        "intents": [
+            {
+                "name": "calendar.list_events",
+                "description": "List calendar events.",
+                "timeout_sec": 60,
+            },
+        ],
+        "auth_requirements": {
+            "calendar.list_events": {
+                "provider": "google",
+                "scopes": [
+                    "https://www.googleapis.com/auth/calendar",
+                    "https://www.googleapis.com/auth/calendar.events",
+                ],
+            }
+        },
+    }
+
+
 async def _register_agent(card: dict[str, object], redis_client: FakeRedis, registry_db_path) -> None:
     store = RegistryStore(registry_db_path)
     store.initialize()
@@ -821,5 +850,185 @@ async def test_orchestrator_dispatch_passes_input_artifacts_to_child_task(tmp_pa
         result = await dispatch
         assert isinstance(result, AgentResult)
         assert result.output["ok"] is True
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_injects_resolved_auth_into_child_task(tmp_path) -> None:
+    fake_redis = FakeRedis()
+    captured_requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/credentials/resolve":
+            captured_requests.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(
+                200,
+                json={
+                    "credential_ref": "cred_google_123",
+                    "access_token": "token-google-123",
+                    "provider": "google",
+                    "scopes": [
+                        "https://www.googleapis.com/auth/calendar",
+                        "https://www.googleapis.com/auth/calendar.events",
+                    ],
+                    "expires_at": "2026-03-30T18:00:00+00:00",
+                    "account_id": "acc_work",
+                },
+            )
+        return httpx.Response(200)
+
+    config = OrchestratorConfig(
+        signing_secret="gateway-secret",
+        internal_token="internal-token",
+        gateway_url="http://gateway.test",
+        anthropic_api_key="anthropic-key",
+        agent_signing_secrets={"cosmic/calendar-agent:1.0.0": "calendar-secret"},
+        task_ledger_db_path=tmp_path / "task_ledger_calendar_auth.db",
+        agent_registry_db_path=tmp_path / "registry_calendar_auth.db",
+    )
+    await _register_agent(_calendar_agent_card(), fake_redis, config.agent_registry_db_path)
+    runtime = OrchestratorRuntime(
+        config,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        redis_client=fake_redis,
+    )
+    await runtime.start()
+    try:
+        result = await runtime.dispatch_agent_task(
+            parent_task=_parent_task("gateway-secret"),
+            intent="calendar.list_events",
+            input_payload={"query": "What is on my work calendar tomorrow?", "account_hint": "work"},
+            wait_timeout_sec=0.0,
+        )
+        assert isinstance(result, TaskInProgress)
+
+        fields = await _wait_for_stream(fake_redis, "streams:cosmic/calendar-agent:1.0.0:high")
+        child_task = parse_task_envelope(fields)
+        assert child_task.input["auth"]["access_token"] == "token-google-123"
+        assert child_task.input["auth"]["credential_ref"] == "cred_google_123"
+        assert child_task.input["account_hint"] == "work"
+
+        assert captured_requests == [
+            {
+                "provider": "google",
+                "required_scopes": [
+                    "https://www.googleapis.com/auth/calendar",
+                    "https://www.googleapis.com/auth/calendar.events",
+                ],
+                "session_id": "sess_20260315",
+                "operation_mode": "read",
+                "allow_primary_fallback": True,
+                "account_hint": "work",
+            }
+        ]
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_refresh_reverse_task_resumes_waiting_specialist_with_new_auth(tmp_path) -> None:
+    fake_redis = FakeRedis()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/credentials/refresh":
+            body = json.loads(request.content.decode("utf-8"))
+            assert body == {"credential_ref": "cred_google_456"}
+            return httpx.Response(
+                200,
+                json={
+                    "credential_ref": "cred_google_456",
+                    "access_token": "refreshed-token",
+                    "provider": "google",
+                    "scopes": ["https://www.googleapis.com/auth/calendar"],
+                    "expires_at": "2026-03-30T19:00:00+00:00",
+                },
+            )
+        return httpx.Response(200)
+
+    config = OrchestratorConfig(
+        signing_secret="gateway-secret",
+        internal_token="internal-token",
+        gateway_url="http://gateway.test",
+        anthropic_api_key="anthropic-key",
+        task_ledger_db_path=tmp_path / "task_ledger_refresh.db",
+        agent_registry_db_path=tmp_path / "registry_refresh.db",
+        agent_signing_secrets={"cosmic/calendar-agent:1.0.0": "calendar-secret"},
+    )
+    runtime = OrchestratorRuntime(
+        config,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        redis_client=fake_redis,
+    )
+    await runtime.start()
+    try:
+        waiting_task = TaskEnvelope(
+            task_id="tsk_calendar_wait",
+            task_list_id="sess_20260315",
+            parent_task_id="tsk_parent_001",
+            session_id="sess_20260315",
+            sender="cosmic/orchestrator:1.0.0",
+            recipient="cosmic/calendar-agent:1.0.0",
+            intent="calendar.list_events",
+            input={"query": "what is on my calendar tomorrow", "request_id": "req_parent_001"},
+            input_artifacts=[],
+            idempotency_key="idem_calendar_wait",
+            priority="high",
+            signature="",
+            created_at=utcnow(),
+            source="user",
+            source_id="desktop",
+            channel="desktop:desk_001",
+        )
+        waiting_task = waiting_task.model_copy(
+            update={"signature": sign_task_envelope(waiting_task, "calendar-secret")}
+        )
+        runtime.task_ledger.create_task(waiting_task)
+
+        reverse_task = TaskEnvelope(
+            task_id="tsk_reverse_refresh",
+            task_list_id=waiting_task.task_list_id,
+            parent_task_id=waiting_task.task_id,
+            session_id=waiting_task.session_id,
+            sender="cosmic/calendar-agent:1.0.0",
+            recipient="cosmic/orchestrator:1.0.0",
+            intent="orchestrator.refresh_credential",
+            input={"credential_ref": "cred_google_456", "provider": "google"},
+            input_artifacts=[],
+            idempotency_key="idem_reverse_refresh",
+            priority="normal",
+            signature="",
+            created_at=utcnow(),
+            source="agent",
+            source_id="cosmic/calendar-agent:1.0.0",
+            channel=waiting_task.channel,
+        )
+        reverse_task = reverse_task.model_copy(
+            update={"signature": sign_task_envelope(reverse_task, "calendar-secret")}
+        )
+
+        ack = await runtime.accept_reverse_task(reverse_task)
+        assert ack["status"] == "registered"
+
+        await runtime._handle_agent_event(
+            EventEnvelope(
+                task_id=waiting_task.task_id,
+                agent_id="cosmic/calendar-agent:1.0.0",
+                event_type="task.suspended",
+                seq=1,
+                payload={"reason": "auth_refresh", "credential_ref": "cred_google_456"},
+            )
+        )
+
+        resumed_fields = await _wait_for_stream(fake_redis, "streams:cosmic/calendar-agent:1.0.0:high")
+        resumed_task = parse_task_envelope(resumed_fields)
+        assert resumed_task.intent == "agent.resume"
+        assert resumed_task.input["auth"]["access_token"] == "refreshed-token"
+        assert resumed_task.input["reverse_task"]["intent"] == "orchestrator.refresh_credential"
+        assert resumed_task.input["reverse_result"]["output"]["refreshed"] is True
+
+        reverse_wait = runtime.task_ledger.get_reverse_task_wait(reverse_task.task_id)
+        assert reverse_wait is not None
+        assert reverse_wait["status"] == "resumed"
     finally:
         await runtime.stop()

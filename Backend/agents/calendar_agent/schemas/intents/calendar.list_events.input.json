@@ -2,7 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {
-    "query": { "type": "string", "description": "Natural language query or title search" },
+    "query": { "type": "string", "description": "Natural language calendar request" },
+    "search_query": { "type": "string", "description": "Optional explicit title/keyword filter for Google Calendar search" },
     "time_min": { "type": "string", "description": "ISO 8601 start of time range" },
     "time_max": { "type": "string", "description": "ISO 8601 end of time range" },
     "calendar_id": { "type": "string", "description": "Google calendar ID, defaults to 'primary'", "default": "primary" },

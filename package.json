@@ -61,7 +61,7 @@
   "build": {
     "appId": "com.cosmic.spotlight",
     "win": {
-      "icon": "public/cosmic-glassy-thunder-logo.png"
+      "icon": "public/cosmic-ball-logo-v1.1.png"
     }
   }
 }

@@ -333,14 +333,13 @@ For ALL other layouts, use `assignments`. Period.
 
 ## Template Selection
 
-Prefer premium templates (★) over legacy ones. Match template to content:
-- **business-meeting** ★: Default for general business, meetings, proposals, reports
-- **tech-trends** ★: Data-heavy, technical, startup pitches, investor decks, product roadmaps (21 layouts)
-- **science-lesson** ★: Educational, training, workshops, tutorials, onboarding
-- **tech-infographics** ★: Infographics, visual comparisons, feature overviews, process flows
+Match template to content:
+- **business-meeting**: Default for general business, meetings, proposals, reports
+- **tech-trends**: Data-heavy, technical, startup pitches, investor decks, product roadmaps (21 layouts)
+- **science-lesson**: Educational, training, workshops, tutorials, onboarding
+- **tech-infographics**: Infographics, visual comparisons, feature overviews, process flows
 
-Legacy templates (corporate-dark, corporate-light, minimal, pitch-deck) have no real design.
-Only use them if the user explicitly requests a dark theme or names them specifically.
+You MUST choose one of the four templates listed above. Do NOT invent or use any other template name.
 
 ## Slide Count Guidance
 
@@ -374,7 +373,7 @@ No emoji, dingbats, checkmark glyphs, or icon-like Unicode in titles or bullets.
 
 ## Rules Summary
 - Every slide MUST have a `layout` that exists EXACTLY in `_template_layouts`
-- Every non-BLANK slide MUST have `assignments` (not legacy `content`/`chart`/`table`/`image` fields)
+- Every non-BLANK slide MUST have `assignments` (not free-form `content`/`chart`/`table`/`image` fields)
 - Every slide MUST have a `title` (except BLANK)
 - Use `"action": "generate"` for single-deck requests
 - Use `"action": "create_plan"` with `"steps": [...]` for complex multi-deck requests

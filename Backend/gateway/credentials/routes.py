@@ -92,6 +92,25 @@ def _check_internal_token(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Invalid internal token")
 
 
+def _extract_google_meeting_link(item: dict[str, Any]) -> str:
+    direct = str(item.get("hangoutLink") or "").strip()
+    if direct:
+        return direct
+    conference = item.get("conferenceData")
+    if isinstance(conference, dict):
+        entry_points = conference.get("entryPoints")
+        if isinstance(entry_points, list):
+            for entry in entry_points:
+                if not isinstance(entry, dict):
+                    continue
+                if str(entry.get("entryPointType") or "").strip().lower() != "video":
+                    continue
+                uri = str(entry.get("uri") or "").strip()
+                if uri:
+                    return uri
+    return ""
+
+
 # ── Desktop-facing OAuth routes ──────────────────────────────────────────────
 
 
@@ -510,7 +529,7 @@ async def _fetch_events(
                 "isAllDay": is_all_day,
                 "status": str(item.get("status") or "confirmed").strip() or "confirmed",
                 "htmlLink": str(item.get("htmlLink") or "").strip(),
-                "meetingLink": str(item.get("hangoutLink") or "").strip(),
+                "meetingLink": _extract_google_meeting_link(item),
                 "colorId": str(item.get("colorId") or "").strip(),
                 "organizer": str(
                     (item.get("organizer") or {}).get("email")

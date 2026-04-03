@@ -287,6 +287,27 @@ class TestEventNormalization:
         event = _normalize_event(raw, "primary")
         assert event["recurring_event_id"] == "series_abc"
 
+    def test_meeting_link_extracted_from_conference_data_entry_points(self):
+        from agents.calendar_agent.google_calendar_client import _normalize_event
+
+        raw = {
+            "id": "evt_meet_1",
+            "summary": "Meet-enabled Event",
+            "start": {"dateTime": "2026-03-31T19:00:00Z"},
+            "end": {"dateTime": "2026-03-31T20:00:00Z"},
+            "conferenceData": {
+                "entryPoints": [
+                    {
+                        "entryPointType": "video",
+                        "uri": "https://meet.google.com/xyz-abcd-123",
+                    }
+                ]
+            },
+            "status": "confirmed",
+        }
+        event = _normalize_event(raw, "primary")
+        assert event["meeting_link"] == "https://meet.google.com/xyz-abcd-123"
+
 
 # ── Test config ───────────────────────────────────────────────────────────────
 
@@ -573,6 +594,78 @@ async def test_execute_prefers_langgraph_when_enabled():
 
 
 @pytest.mark.asyncio
+async def test_handle_calendar_list_events_does_not_use_natural_language_query_as_google_search():
+    from agents.calendar_agent.agent import CalendarAgent
+    from agents.calendar_agent.config import CalendarAgentConfig
+
+    agent = CalendarAgent(
+        redis_client=MagicMock(),
+        config=CalendarAgentConfig(enable_internal_llm=False, calendar_use_langgraph=False),
+    )
+    agent.db = MagicMock()
+    agent.auth = {
+        "account_id": "acc_primary",
+        "account_email": "usp.upenn@gmail.com",
+        "account_display_name": "Praveen Raj U S",
+        "account_label": "Google account",
+        "account_is_primary": True,
+    }
+
+    task = TaskEnvelope(
+        task_id="tsk_list_nl_query",
+        task_list_id="sess_list_nl_query",
+        parent_task_id=None,
+        session_id="sess_list_nl_query",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/calendar-agent:1.0.0",
+        intent="calendar.list_events",
+        input={"query": "What's on my calendar today and this week?"},
+        input_artifacts=[],
+        idempotency_key="idem_list_nl_query",
+        priority="high",
+        signature="sig",
+        created_at=utcnow(),
+        source="user",
+        source_id="desktop",
+        channel="desktop:desk_001",
+    )
+
+    fake_client = AsyncMock()
+    fake_client.list_events.return_value = []
+
+    with (
+        patch.object(agent, "_get_calendar_client", return_value=fake_client),
+        patch.object(
+            agent,
+            "_parse_natural_language",
+            AsyncMock(
+                return_value={
+                    "operation": "list",
+                    "params": {
+                        "time_range": {
+                            "start": "2026-03-31T00:00:00Z",
+                            "end": "2026-04-05T23:59:59Z",
+                        }
+                    },
+                }
+            ),
+        ),
+    ):
+        result = await agent.handle_calendar_list_events(task)
+
+    assert result.status == "completed"
+    assert result.output["search_query"] is None
+    assert result.output["resolved_account"]["email"] == "usp.upenn@gmail.com"
+    fake_client.list_events.assert_awaited_once_with(
+        calendar_id="primary",
+        time_min="2026-03-31T00:00:00Z",
+        time_max="2026-04-05T23:59:59Z",
+        max_results=agent._cfg.max_events_per_list,
+        query=None,
+    )
+
+
+@pytest.mark.asyncio
 async def test_execute_falls_back_to_legacy_handler_when_langgraph_disabled():
     from agents.calendar_agent.agent import CalendarAgent
     from agents.calendar_agent.config import CalendarAgentConfig
@@ -613,6 +706,154 @@ async def test_execute_falls_back_to_legacy_handler_when_langgraph_disabled():
     assert result.status == "completed"
     assert result.output["legacy"] is True
     handler.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_handle_calendar_create_event_passes_add_google_meet():
+    from agents.calendar_agent.agent import CalendarAgent
+    from agents.calendar_agent.config import CalendarAgentConfig
+
+    agent = CalendarAgent(
+        redis_client=MagicMock(),
+        config=CalendarAgentConfig(enable_internal_llm=False, calendar_use_langgraph=False),
+    )
+    agent.db = MagicMock()
+
+    task = TaskEnvelope(
+        task_id="tsk_create_meet",
+        task_list_id="sess_create_meet",
+        parent_task_id=None,
+        session_id="sess_create_meet",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/calendar-agent:1.0.0",
+        intent="calendar.create_event",
+        input={
+            "summary": "Alpha Agent Architecture Meet",
+            "start": "2026-03-31T19:00:00-05:00",
+            "end": "2026-03-31T20:00:00-05:00",
+            "timezone": "America/Chicago",
+            "attendees": ["uspraveenraj@gmail.com"],
+            "add_google_meet": True,
+        },
+        input_artifacts=[],
+        idempotency_key="idem_create_meet",
+        priority="high",
+        signature="sig",
+        created_at=utcnow(),
+        source="user",
+        source_id="desktop",
+        channel="desktop:desk_001",
+    )
+
+    fake_client = AsyncMock()
+    fake_client.list_events.return_value = []
+    fake_client.create_event.return_value = {
+        "event_id": "evt_create_meet",
+        "calendar_id": "primary",
+        "summary": "Alpha Agent Architecture Meet",
+        "meeting_link": "https://meet.google.com/xyz-abcd-123",
+        "status": "confirmed",
+    }
+
+    with patch.object(agent, "_get_calendar_client", return_value=fake_client):
+        result = await agent.handle_calendar_create_event(task)
+
+    assert result.status == "completed"
+    assert result.output["event"]["meeting_link"] == "https://meet.google.com/xyz-abcd-123"
+    fake_client.create_event.assert_awaited_once_with(
+        calendar_id="primary",
+        summary="Alpha Agent Architecture Meet",
+        start={"dateTime": "2026-03-31T19:00:00-05:00", "timeZone": "America/Chicago"},
+        end={"dateTime": "2026-03-31T20:00:00-05:00", "timeZone": "America/Chicago"},
+        timezone="America/Chicago",
+        description="",
+        location="",
+        attendees=["uspraveenraj@gmail.com"],
+        reminders=None,
+        add_google_meet=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_langgraph_list_events_returns_resolved_account_and_avoids_natural_language_search_filter():
+    from agents.calendar_agent.agent import CalendarAgent
+    from agents.calendar_agent.config import CalendarAgentConfig
+
+    agent = CalendarAgent(
+        redis_client=MagicMock(),
+        config=CalendarAgentConfig(enable_internal_llm=False, calendar_use_langgraph=True),
+    )
+    agent.db = MagicMock()
+    agent.auth = {
+        "account_id": "acc_primary",
+        "account_email": "usp.upenn@gmail.com",
+        "account_display_name": "Praveen Raj U S",
+        "account_label": "Google account",
+        "account_is_primary": True,
+    }
+
+    task = TaskEnvelope(
+        task_id="tsk_graph_list",
+        task_list_id="sess_graph_list",
+        parent_task_id=None,
+        session_id="sess_graph_list",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/calendar-agent:1.0.0",
+        intent="calendar.list_events",
+        input={"query": "What's on my calendar today and this week?"},
+        input_artifacts=[],
+        idempotency_key="idem_graph_list",
+        priority="high",
+        signature="sig",
+        created_at=utcnow(),
+        source="user",
+        source_id="desktop",
+        channel="desktop:desk_001",
+    )
+
+    fake_client = AsyncMock()
+    fake_client.list_events.return_value = [
+        {
+            "event_id": "evt_alpha",
+            "calendar_id": "primary",
+            "summary": "Alpha Agent Architecture Meet",
+            "start": "2026-03-31T16:30:00Z",
+            "end": "2026-03-31T17:30:00Z",
+            "status": "confirmed",
+        }
+    ]
+
+    with (
+        patch.object(agent, "_get_calendar_client", return_value=fake_client),
+        patch.object(
+            agent,
+            "_parse_natural_language",
+            AsyncMock(
+                return_value={
+                    "operation": "list",
+                    "params": {
+                        "time_range": {
+                            "start": "2026-03-31T00:00:00Z",
+                            "end": "2026-04-05T23:59:59Z",
+                        }
+                    },
+                }
+            ),
+        ),
+    ):
+        result = await agent.execute(task)
+
+    assert result.status == "completed"
+    assert result.output["count"] == 1
+    assert result.output["search_query"] is None
+    assert result.output["resolved_account"]["email"] == "usp.upenn@gmail.com"
+    fake_client.list_events.assert_awaited_once_with(
+        calendar_id="primary",
+        time_min="2026-03-31T00:00:00Z",
+        time_max="2026-04-05T23:59:59Z",
+        max_results=agent._cfg.max_events_per_list,
+        query=None,
+    )
 
 
 @pytest.mark.asyncio
@@ -697,6 +938,97 @@ async def test_langgraph_update_event_resolves_query_and_updates_event():
     kwargs = fake_client.update_event.await_args.kwargs
     assert kwargs["event_id"] == "evt_lunch_1"
     assert kwargs["patch"]["start"]["dateTime"] == "2026-03-31T15:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_langgraph_update_event_add_google_meet_skips_conflict_step_when_time_unchanged():
+    from agents.calendar_agent.agent import CalendarAgent
+    from agents.calendar_agent.config import CalendarAgentConfig
+
+    agent = CalendarAgent(
+        redis_client=MagicMock(),
+        config=CalendarAgentConfig(enable_internal_llm=False, calendar_use_langgraph=True),
+    )
+    agent.db = MagicMock()
+    agent.step_plan = MagicMock()
+    agent.step_plan.create = AsyncMock()
+    agent.step_plan.update = AsyncMock()
+
+    task = TaskEnvelope(
+        task_id="tsk_graph_add_meet",
+        task_list_id="sess_graph_add_meet",
+        parent_task_id=None,
+        session_id="sess_graph_add_meet",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/calendar-agent:1.0.0",
+        intent="calendar.update_event",
+        input={"query": "Add a Google Meet link to the Alpha Agent Architecture Meet event at 7pm CDT today"},
+        input_artifacts=[],
+        idempotency_key="idem_graph_add_meet",
+        priority="high",
+        signature="sig",
+        created_at=utcnow(),
+        source="user",
+        source_id="desktop",
+        channel="desktop:desk_001",
+    )
+
+    fake_client = AsyncMock()
+    fake_client.list_events.return_value = [
+        {
+            "event_id": "evt_alpha_7pm",
+            "calendar_id": "primary",
+            "summary": "Alpha Agent Architecture Meet",
+            "start": "2026-04-01T00:00:00Z",
+            "status": "confirmed",
+        }
+    ]
+    fake_client.update_event.return_value = {
+        "event_id": "evt_alpha_7pm",
+        "calendar_id": "primary",
+        "summary": "Alpha Agent Architecture Meet",
+        "meeting_link": "https://meet.google.com/xyz-abcd-123",
+        "status": "confirmed",
+    }
+
+    with (
+        patch.object(agent, "_get_calendar_client", return_value=fake_client),
+        patch.object(
+            agent,
+            "_parse_natural_language",
+            AsyncMock(
+                return_value={
+                    "operation": "update",
+                    "params": {
+                        "event_query": "Alpha Agent Architecture Meet",
+                        "time_range": {
+                            "start": "2026-03-31T23:30:00Z",
+                            "end": "2026-04-01T01:30:00Z",
+                        },
+                        "patch": {"add_google_meet": True},
+                    },
+                }
+            ),
+        ),
+    ):
+        result = await agent.execute(task)
+
+    assert result.status == "completed"
+    assert result.output["workflow"] == "langgraph"
+    assert result.output["event"]["meeting_link"] == "https://meet.google.com/xyz-abcd-123"
+    fake_client.update_event.assert_awaited_once_with(
+        calendar_id="primary",
+        event_id="evt_alpha_7pm",
+        patch={"add_google_meet": True},
+    )
+    assert any(
+        call.args[0] == 3 and call.args[1] == "skipped"
+        for call in agent.step_plan.update.await_args_list
+    )
+    assert any(
+        call.args[0] == 4 and call.args[1] == "completed"
+        for call in agent.step_plan.update.await_args_list
+    )
 
 
 @pytest.mark.asyncio

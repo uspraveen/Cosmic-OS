@@ -143,6 +143,69 @@ class TestRenderers:
         explained = explain_render_error(error)
         assert explained.endswith("syntax error near line 2")
 
+    def test_normalize_d2_definition_direction_aliases(self):
+        from agents.diagram_agent.renderers import normalize_d2_definition
+
+        definition = "direction: LR\nUser -> API -> DB\n"
+        normalized = normalize_d2_definition(definition)
+        assert "direction: right" in normalized
+        assert "direction: LR" not in normalized
+
+    def test_render_d2_png_relies_on_output_extension_not_flag(self, monkeypatch):
+        import asyncio
+        import shutil
+        import tempfile
+        from pathlib import Path
+
+        from agents.diagram_agent import renderers
+
+        recorded = {}
+        temp_root = Path.cwd() / ".diagram_pytest_tmp"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        temp_dir = temp_root / "render_d2_png_flag_check"
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
+        class FakeTemporaryDirectory:
+            def __init__(self, path: Path):
+                self.name = str(path)
+
+            def __enter__(self):
+                return self.name
+
+            def __exit__(self, exc_type, exc, tb):
+                shutil.rmtree(self.name, ignore_errors=True)
+
+        def fake_run(cmd, capture_output, text, timeout, check):
+            recorded["cmd"] = list(cmd)
+            output_path = Path(cmd[-1])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text("<svg />", encoding="utf-8")
+
+            class Result:
+                returncode = 0
+                stderr = ""
+
+            return Result()
+
+        monkeypatch.setattr(renderers.subprocess, "run", fake_run)
+        monkeypatch.setattr(
+            renderers.tempfile,
+            "TemporaryDirectory",
+            lambda prefix="": FakeTemporaryDirectory(temp_dir),
+        )
+
+        result = asyncio.run(
+            renderers.render_d2(
+                "direction: LR\nUser -> API -> DB\n",
+                d2_path="d2",
+                output_format="png",
+            )
+        )
+
+        assert result["output_format"] == "png"
+        assert "--png" not in recorded["cmd"]
+
 
 # ── Skills tests ──────────────────────────────────────────────────────────────
 
@@ -174,6 +237,20 @@ class TestSkills:
         assert "mermaid" in ctx.lower()
         assert "d2" in ctx.lower()
         assert "excalidraw" in ctx.lower()
+
+    def test_build_selected_skill_context_loads_only_requested_renderer(self):
+        from agents.diagram_agent.skills import (
+            build_selected_skill_context,
+            discover_skills,
+            find_skill,
+        )
+
+        skills = discover_skills()
+        d2_skill = find_skill(skills, "d2")
+        ctx = build_selected_skill_context(d2_skill)
+        assert "D2 Diagram Skill" in ctx
+        assert "Mermaid Diagram Skill" not in ctx
+        assert "Excalidraw Diagram Skill" not in ctx
 
 
 # ── Schema tests ──────────────────────────────────────────────────────────────
@@ -241,6 +318,16 @@ class TestAgentCard:
             output_path = schemas_dir / intent["output_schema"].split("/")[-1]
             assert input_path.exists(), f"Missing input schema for {intent['name']}"
             assert output_path.exists(), f"Missing output schema for {intent['name']}"
+
+    def test_usage_hints_present_for_primary_intents(self):
+        import yaml
+
+        card_path = Path(__file__).resolve().parent.parent / "agent_card.yaml"
+        data = yaml.safe_load(card_path.read_text())
+        intents = {item["name"]: item for item in data["intents"]}
+        assert intents["diagram.create"].get("usage_hints")
+        assert intents["diagram.modify"].get("usage_hints")
+        assert intents["diagram.recall_session"].get("usage_hints")
 
 
 # ── Regression: StepPlan and skills context ────────────────────────────────────
@@ -322,23 +409,32 @@ class TestStepPlanSemantics:
 
 
 class TestSkillsContextInjection:
-    """Verify skills context is built and available for LLM calls."""
+    """Verify progressive-disclosure parameters exist on the LLM helpers."""
 
-    def test_analyze_diagram_request_accepts_skills_context(self):
-        """analyze_diagram_request should accept skills_context parameter."""
+    def test_analyze_diagram_request_accepts_skills_index(self):
+        """analyze_diagram_request should accept compact index and planning controls."""
         import inspect
         from agents.diagram_agent.internal_llm import analyze_diagram_request
 
         sig = inspect.signature(analyze_diagram_request)
-        assert "skills_context" in sig.parameters
+        assert "skills_index" in sig.parameters
+        assert "allow_planning" in sig.parameters
 
-    def test_modify_diagram_accepts_skills_context(self):
-        """modify_diagram should accept skills_context parameter."""
+    def test_generate_diagram_definition_accepts_renderer_skill_context(self):
+        """generate_diagram_definition should accept only the selected renderer skill."""
+        import inspect
+        from agents.diagram_agent.internal_llm import generate_diagram_definition
+
+        sig = inspect.signature(generate_diagram_definition)
+        assert "renderer_skill_context" in sig.parameters
+
+    def test_modify_diagram_accepts_renderer_skill_context(self):
+        """modify_diagram should accept renderer_skill_context parameter."""
         import inspect
         from agents.diagram_agent.internal_llm import modify_diagram
 
         sig = inspect.signature(modify_diagram)
-        assert "skills_context" in sig.parameters
+        assert "renderer_skill_context" in sig.parameters
 
     def test_regenerate_diagram_with_feedback_exists(self):
         """regenerate_diagram_with_feedback function should exist."""
@@ -348,6 +444,7 @@ class TestSkillsContextInjection:
         sig = inspect.signature(regenerate_diagram_with_feedback)
         assert "validation_issues" in sig.parameters
         assert "validation_suggestion" in sig.parameters
+        assert "renderer_skill_context" in sig.parameters
 
 
 class TestGraphTopology:
@@ -386,7 +483,6 @@ class TestPlanExecutionBehavior:
         import asyncio
         import hashlib
         import shutil
-        import tempfile
         from datetime import datetime, timezone
         from pathlib import Path
         from uuid import uuid4
@@ -451,33 +547,84 @@ class TestPlanExecutionBehavior:
         temp_root = runtime_tmp_root / f"artifacts_{uuid4().hex[:8]}"
         temp_root.mkdir(parents=True, exist_ok=True)
 
+        observed_skill_indices = []
+        observed_generation_contexts = []
+
         async def fake_analyze_diagram_request(**kwargs):
             step_text = kwargs.get("plan_step_text", "")
+            observed_skill_indices.append(kwargs.get("skills_index", ""))
             observed_steps.append(step_text)
             if not step_text:
                 return {
                     "action": "create_plan",
-                    "steps": ["draw ingress flow", "draw database schema"],
+                    "steps": ["draw auth sequence", "draw deployment topology"],
                 }
-            if step_text == "draw ingress flow":
+            if step_text == "draw auth sequence":
                 return {
                     "action": "generate",
                     "renderer": "mermaid",
-                    "diagram_type": "flowchart",
-                    "definition": "graph TD\nIngress-->Auth",
+                    "diagram_type": "sequence",
+                    "title": "Auth sequence",
                     "confidence": 0.92,
-                    "reasoning": "Ingress flow",
+                    "reasoning": "Use mermaid for sequence flow",
                 }
             return {
                 "action": "generate",
-                "renderer": "mermaid",
-                "diagram_type": "flowchart",
-                "definition": "graph TD\nDB-->Cache",
+                "renderer": "d2",
+                "diagram_type": "architecture",
+                "title": "Deployment topology",
                 "confidence": 0.91,
-                "reasoning": "Database schema",
+                "reasoning": "Use D2 for architecture layout",
+            }
+
+        async def fake_generate_diagram_definition(**kwargs):
+            renderer = kwargs["renderer"]
+            ctx = kwargs.get("renderer_skill_context", "")
+            observed_generation_contexts.append((renderer, ctx))
+            if renderer == "mermaid":
+                assert "Mermaid Diagram Skill" in ctx
+                assert "D2 Diagram Skill" not in ctx
+                assert "Excalidraw Diagram Skill" not in ctx
+                return {
+                    "renderer": "mermaid",
+                    "diagram_type": "sequence",
+                    "title": "Auth sequence",
+                    "definition": "sequenceDiagram\nUser->>Gateway: Login",
+                    "confidence": 0.95,
+                    "reasoning": "Simple auth sequence",
+                }
+            assert "D2 Diagram Skill" in ctx
+            assert "Mermaid Diagram Skill" not in ctx
+            assert "Excalidraw Diagram Skill" not in ctx
+            return {
+                "renderer": "d2",
+                "diagram_type": "architecture",
+                "title": "Deployment topology",
+                "definition": "direction: right\nUser -> Gateway -> Worker",
+                "confidence": 0.94,
+                "reasoning": "Simple deployment layout",
             }
 
         async def fake_render_mermaid(
+            definition,
+            *,
+            output_path=None,
+            output_format="svg",
+            **kwargs,
+        ):
+            assert output_path is not None
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(
+                f"<svg><text>{definition}</text></svg>",
+                encoding="utf-8",
+            )
+            return {
+                "output_path": output_path,
+                "output_format": output_format,
+                "content": output_path.read_bytes(),
+            }
+
+        async def fake_render_d2(
             definition,
             *,
             output_path=None,
@@ -524,18 +671,24 @@ class TestPlanExecutionBehavior:
         import agents.diagram_agent.diagram_graph as diagram_graph
 
         original_analyze = diagram_graph.analyze_diagram_request
+        original_generate = diagram_graph.generate_diagram_definition
         original_render = diagram_graph.render_mermaid
+        original_render_d2 = diagram_graph.render_d2
         original_validate = diagram_graph.validate_diagram_render
 
         try:
             diagram_graph.analyze_diagram_request = fake_analyze_diagram_request
+            diagram_graph.generate_diagram_definition = fake_generate_diagram_definition
             diagram_graph.render_mermaid = fake_render_mermaid
+            diagram_graph.render_d2 = fake_render_d2
             diagram_graph.validate_diagram_render = fake_validate_diagram_render
 
             result = asyncio.run(run_diagram_langgraph(agent=fake_agent, task=task))
         finally:
             diagram_graph.analyze_diagram_request = original_analyze
+            diagram_graph.generate_diagram_definition = original_generate
             diagram_graph.render_mermaid = original_render
+            diagram_graph.render_d2 = original_render_d2
             diagram_graph.validate_diagram_render = original_validate
             shutil.rmtree(temp_root, ignore_errors=True)
 
@@ -543,18 +696,23 @@ class TestPlanExecutionBehavior:
         assert result.output["count"] == 2
         assert len(result.output["diagrams"]) == 2
         assert [entry["title"] for entry in result.output["diagrams"]] == [
-            "Ingress flow",
-            "Database schema",
+            "Auth sequence",
+            "Deployment topology",
         ]
         assert len(result.artifacts) == 4
         assert fake_agent.step_plan.created == [
-            "draw ingress flow",
-            "draw database schema",
+            "draw auth sequence",
+            "draw deployment topology",
         ]
-        assert observed_steps == ["", "draw ingress flow", "draw database schema"]
+        assert observed_steps == ["", "draw auth sequence", "draw deployment topology"]
+        assert all("Available Renderers" in idx for idx in observed_skill_indices if idx)
+        assert [renderer for renderer, _ in observed_generation_contexts] == [
+            "mermaid",
+            "d2",
+        ]
         assert fake_agent.step_plan.updates == [
             {"step": 1, "status": "in_progress", "note": None},
-            {"step": 1, "status": "completed", "note": "Ingress flow"},
+            {"step": 1, "status": "completed", "note": "Auth sequence"},
             {"step": 2, "status": "in_progress", "note": "Starting next plan step"},
-            {"step": 2, "status": "completed", "note": "Database schema"},
+            {"step": 2, "status": "completed", "note": "Deployment topology"},
         ]

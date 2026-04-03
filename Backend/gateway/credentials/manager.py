@@ -443,6 +443,8 @@ class CredentialManager:
             scopes_used=list(required_scopes),
         )
 
+        account = self._store.get_account(account_id) or {}
+
         return {
             "credential_ref": cred["credential_ref"],
             "access_token": cred["access_token"],
@@ -450,6 +452,10 @@ class CredentialManager:
             "scopes": cred["granted_scopes"],
             "expires_at": expires_at_iso,
             "account_id": account_id,
+            "account_email": str(account.get("email") or "").strip() or None,
+            "account_display_name": str(account.get("display_name") or "").strip() or None,
+            "account_label": str(account.get("account_label") or "").strip() or None,
+            "account_is_primary": bool(account.get("is_primary")),
             "operation_mode": normalized_operation_mode or None,
         }
 

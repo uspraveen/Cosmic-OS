@@ -211,6 +211,31 @@ def build_skills_context(
     return "\n\n".join(parts)
 
 
+def build_active_skill_context(
+    skill_name: str | None,
+    skill_content: str | None,
+) -> str:
+    """Format the currently activated skill as isolated planner context.
+
+    This keeps the full skill body out of the shared transcript while still
+    making it available to later planner turns after ``activate_skill``.
+    """
+    name = str(skill_name or "").strip()
+    content = str(skill_content or "").strip()
+    if not name or not content:
+        return ""
+    return "\n".join(
+        [
+            "## Active Skill",
+            f"Name: {name}",
+            "Use this activated skill's formulas, heuristics, and SQL patterns when deciding the next action.",
+            "Treat it as the currently selected domain context. Do not assume other skill bodies are active unless another activate_skill action occurs.",
+            "",
+            content,
+        ]
+    ).strip()
+
+
 __all__ = [
     "SkillMetadata",
     "Skill",
@@ -218,4 +243,5 @@ __all__ = [
     "load_skill_content",
     "format_skills_index",
     "build_skills_context",
+    "build_active_skill_context",
 ]

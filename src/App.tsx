@@ -3184,6 +3184,7 @@ export default function App() {
           const fallbackMessage = eventStatus ? `Task ${eventStatus}...` : 'Working in the background...'
           const activityText = progressState?.label || statusMessage || fallbackMessage
           const activityEntries = buildProgressActivityEntries(event, activityText, statusMessage, progressState)
+          const activityLog = normalizeActivityLog((event as any).activity_log)
           upsertBackgroundTask({
             requestId,
             taskId: taskId || null,
@@ -3196,7 +3197,7 @@ export default function App() {
             completed: false,
             activity: activityText,
             activityLog: mergeActivityLogEntries(
-              undefined,
+              activityLog,
               activityEntries.map((entry) => ({
                 id: `activity_${crypto.randomUUID()}`,
                 createdAt: new Date().toISOString(),
@@ -3212,7 +3213,7 @@ export default function App() {
             route: typeof event.route === 'string' ? event.route : current.route,
             activity: activityText,
             activityLog: mergeActivityLogEntries(
-              current.activityLog,
+              mergeActivityLogEntries(current.activityLog, activityLog),
               activityEntries.map((entry) => ({
                 id: `activity_${crypto.randomUUID()}`,
                 createdAt: new Date().toISOString(),
@@ -3395,6 +3396,7 @@ export default function App() {
         const fallbackMessage = eventStatus ? `Task ${eventStatus}...` : 'Working on your request...'
         const activityText = progressState?.label || statusMessage || fallbackMessage
         const activityEntries = buildProgressActivityEntries(event, activityText, statusMessage, progressState)
+        const activityLog = normalizeActivityLog((event as any).activity_log)
         setStreamingProgress(activityText)
         setMessages((prev) => {
           const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
@@ -3406,7 +3408,7 @@ export default function App() {
               ...message,
               activity: activityText,
               activityLog: mergeActivityLogEntries(
-                message.activityLog,
+                mergeActivityLogEntries(message.activityLog, activityLog),
                 activityEntries.map((entry) => ({
                   id: `activity_${crypto.randomUUID()}`,
                   createdAt: new Date().toISOString(),

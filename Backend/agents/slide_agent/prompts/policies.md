@@ -10,7 +10,7 @@
 
 ### Template Selection
 
-Always prefer premium templates (professionally designed, with rich backgrounds and layouts):
+Choose the best-fit template for each request:
 
 | Template | Best for |
 |----------|----------|
@@ -19,7 +19,7 @@ Always prefer premium templates (professionally designed, with rich backgrounds 
 | **science-lesson** | Training, workshops, tutorials, onboarding, educational content |
 | **tech-infographics** | Infographics, data viz, comparisons, process flows, feature overviews |
 
-Legacy templates (corporate-dark, corporate-light, minimal, pitch-deck) have bare-bones design. Only use if the user explicitly names one or requests a dark theme.
+Only these four templates are available. Do not use any other template name.
 
 ### Deck Planning
 - Always plan the full deck as JSON before building.

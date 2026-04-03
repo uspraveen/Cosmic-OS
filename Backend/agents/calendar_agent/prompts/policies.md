@@ -20,12 +20,14 @@
 - Use the bounded LangGraph workflow for phase-1 calendar execution. Normalize first, then resolve targets, check conflicts when relevant, perform the Google action, and stop.
 - Keep the internal workflow narrow. Do not turn a calendar task into general-purpose orchestration or open-ended research.
 - Respect the configured round cap. If the workflow is still blocked after bounded resolution, fail clearly instead of looping.
+- For `calendar.list_events`, treat the natural-language request as planning input, not as a Google Calendar `q` filter. Only send a search query to Google when the user is explicitly searching by title/keyword.
 
 ### Event Creation
 - Always detect conflicts before creating. If conflicts exist, include a `conflict_warning` in the output.
 - Default to 30-minute duration if user doesn't specify.
 - Default to user's working hours (9am-5pm) for scheduling.
 - For natural language input, use the internal LLM to parse, but validate its output before calling the API.
+- If the user asks for a Google Meet / Meet link / video conference, set `add_google_meet` and create the event with conference data so attendees receive the join link.
 
 ### Event Updates
 - Use PATCH (partial update) — never send a full event replacement.
@@ -33,6 +35,7 @@
 - For recurring events, the `recurring_event_id` field identifies the series. Do not modify the series unless explicitly asked.
 - If the user does not provide `event_id`, do a bounded lookup using title/query + time window before failing.
 - If multiple plausible events remain after lookup, stop and escalate instead of guessing.
+- Support adding a Google Meet link by patching conference data when the user explicitly asks for Meet/video conferencing.
 
 ### Event Cancellation
 - Default to notifying attendees (`notify_attendees: true`).
@@ -52,6 +55,7 @@
 - The user may refer to accounts with human-friendly labels like "work", "personal", or an email address. The orchestrator/Gateway resolve that to an internal account.
 - Use the provided credential; do not invent your own account selection logic inside the Google API layer.
 - Treat `account_hint` as a human-facing routing hint only. Never expect or require the user to provide raw internal account ids.
+- When you return results, include the resolved account metadata if available so the orchestrator can truthfully say which account/calendar was checked.
 
 ### Time Semantics
 - All timed events: `{"dateTime": "2026-03-30T14:00:00+05:30", "timeZone": "Asia/Kolkata"}`

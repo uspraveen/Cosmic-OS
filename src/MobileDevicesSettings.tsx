@@ -75,6 +75,20 @@ function getDeviceSourceLabel(device: MobileDeviceRow): string | null {
   return source.replace(/_/g, ' ')
 }
 
+function PhoneGlyph({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M8 3.5h8A2.5 2.5 0 0 1 18.5 6v12A2.5 2.5 0 0 1 16 20.5H8A2.5 2.5 0 0 1 5.5 18V6A2.5 2.5 0 0 1 8 3.5Z"
+        stroke="currentColor"
+        strokeWidth="1.35"
+        strokeLinejoin="round"
+      />
+      <path d="M10 18.25h4" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
+    </svg>
+  )
+}
+
 export default function MobileDevicesSettings({ active }: MobileDevicesSettingsProps) {
   const [devices, setDevices] = useState<MobileDeviceRow[]>([])
   const [loading, setLoading] = useState(false)
@@ -137,34 +151,65 @@ export default function MobileDevicesSettings({ active }: MobileDevicesSettingsP
 
   return (
     <div className="setting-subpage mobile-devices-page">
-      <div className="mobile-devices-hero">
-        <div>
-          <strong>Linked mobile devices</strong>
-          <p>Remove one phone or revoke all phones from the desktop. Removed phones must log in again to re-authorize.</p>
+      <header className="mobile-devices-header">
+        <div className="mobile-devices-header-top">
+          <div className="mobile-devices-header-text">
+            <span className="mobile-devices-kicker">Gateway</span>
+            <h2 className="mobile-devices-title">Mobile devices</h2>
+          </div>
+          <div className="mobile-devices-header-actions">
+            <button
+              type="button"
+              className="mobile-devices-btn mobile-devices-btn--subtle"
+              onClick={() => void refreshDevices()}
+              disabled={loading || revokingAll}
+            >
+              {loading ? 'Refreshing…' : 'Refresh'}
+            </button>
+            <button
+              type="button"
+              className="mobile-devices-btn mobile-devices-btn--danger"
+              onClick={() => void handleRevokeAll()}
+              disabled={devices.length === 0 || revokingAll}
+            >
+              {revokingAll ? 'Removing…' : 'Remove all'}
+            </button>
+          </div>
         </div>
-        <div className="mobile-devices-hero-actions">
-          <button className="mobile-devices-secondary-btn" onClick={() => void refreshDevices()} disabled={loading || revokingAll}>
-            {loading ? 'Refreshing…' : 'Refresh'}
-          </button>
-          <button
-            className="mobile-devices-danger-btn"
-            onClick={() => void handleRevokeAll()}
-            disabled={devices.length === 0 || revokingAll}
-          >
-            {revokingAll ? 'Removing…' : 'Remove all'}
-          </button>
+        <p className="mobile-devices-lead">
+          Phones linked to this desktop can chat through your VM. Remove a device here to require sign-in again on that phone.
+        </p>
+      </header>
+
+      <div className="mobile-devices-stats" aria-label="Device summary">
+        <div className="mobile-devices-stat">
+          <span className="mobile-devices-stat-value">{devices.length}</span>
+          <span className="mobile-devices-stat-label">Known</span>
+        </div>
+        <div className="mobile-devices-stat mobile-devices-stat--accent">
+          <span className="mobile-devices-stat-value">{activeCount}</span>
+          <span className="mobile-devices-stat-label">Active</span>
         </div>
       </div>
 
-      <div className="mobile-devices-summary">
-        <span>{devices.length} known device{devices.length === 1 ? '' : 's'}</span>
-        <span>{activeCount} active now</span>
-      </div>
+      {error ? (
+        <div className="mobile-devices-error" role="alert">
+          {error}
+        </div>
+      ) : null}
 
-      {error ? <div className="mobile-devices-error">{error}</div> : null}
+      {loading && devices.length === 0 ? (
+        <div className="mobile-devices-loading" aria-live="polite">
+          <span className="mobile-devices-loading-dot" />
+          Loading devices…
+        </div>
+      ) : null}
 
       {devices.length === 0 && !loading ? (
         <div className="mobile-devices-empty">
+          <div className="mobile-devices-empty-icon" aria-hidden>
+            <PhoneGlyph className="mobile-devices-empty-glyph" />
+          </div>
           <strong>No phones linked yet</strong>
           <p>A phone appears here after it opens chat against your VM.</p>
         </div>
@@ -174,57 +219,82 @@ export default function MobileDevicesSettings({ active }: MobileDevicesSettingsP
         {devices.map((device) => {
           const removingThis = revokingDeviceId === device.device_id
           const sessionId = device.current_session_id || device.last_session_id || ''
+          const revoked = !!device.revoked
           return (
-            <article key={device.device_id} className="mobile-device-card">
-              <div className="mobile-device-card-head">
-                <div>
-                  <div className="mobile-device-label">Device</div>
-                  <div className="mobile-device-name" title={getDeviceTitle(device)}>{getDeviceTitle(device)}</div>
+            <article
+              key={device.device_id}
+              className={`mobile-device-card${revoked ? ' is-revoked' : ''}`}
+            >
+              <div className="mobile-device-card-top">
+                <div className="mobile-device-icon-wrap" aria-hidden>
+                  <PhoneGlyph className="mobile-device-icon" />
+                </div>
+                <div className="mobile-device-card-main">
+                  <div className="mobile-device-card-title-row">
+                    <div className="mobile-device-title-block">
+                      <span className="mobile-device-eyebrow">Device</span>
+                      <div className="mobile-device-name" title={getDeviceTitle(device)}>
+                        {getDeviceTitle(device)}
+                      </div>
+                    </div>
+                    <div className="mobile-device-pill-wrap">
+                      {device.active && !device.revoked ? (
+                        <span className="mobile-device-pill is-active">Active</span>
+                      ) : null}
+                      {device.revoked ? <span className="mobile-device-pill is-revoked">Removed</span> : null}
+                    </div>
+                  </div>
                   <div className="mobile-device-subtitle">
                     {getDeviceSubtitle(device) || 'Metadata not available yet'}
                   </div>
                   {getDeviceSourceLabel(device) ? (
-                    <div className="mobile-device-source-note">{getDeviceSourceLabel(device)}</div>
+                    <span className="mobile-device-source-chip">{getDeviceSourceLabel(device)}</span>
                   ) : null}
-                  <div className="mobile-device-id" title={device.device_id}>{device.device_id}</div>
-                </div>
-                <div className="mobile-device-pill-wrap">
-                  {device.active && !device.revoked ? <span className="mobile-device-pill is-active">Active</span> : null}
-                  {device.revoked ? <span className="mobile-device-pill is-revoked">Removed</span> : null}
+                  <div className="mobile-device-id" title={device.device_id}>
+                    {device.device_id}
+                  </div>
                 </div>
               </div>
 
-              <div className="mobile-device-meta-grid">
-                <div>
-                  <span className="mobile-device-meta-label">First seen</span>
-                  <span className="mobile-device-meta-value">{formatTimestamp(device.first_seen_at)}</span>
+              <div className="mobile-device-meta-panel">
+                <div className="mobile-device-meta-grid">
+                  <div className="mobile-device-meta-cell">
+                    <span className="mobile-device-meta-label">First seen</span>
+                    <span className="mobile-device-meta-value">{formatTimestamp(device.first_seen_at)}</span>
+                  </div>
+                  <div className="mobile-device-meta-cell">
+                    <span className="mobile-device-meta-label">Last seen</span>
+                    <span className="mobile-device-meta-value">{formatTimestamp(device.last_seen_at)}</span>
+                  </div>
+                  <div className="mobile-device-meta-cell">
+                    <span className="mobile-device-meta-label">Connected</span>
+                    <span className="mobile-device-meta-value">{formatTimestamp(device.last_connected_at)}</span>
+                  </div>
+                  <div className="mobile-device-meta-cell">
+                    <span className="mobile-device-meta-label">Disconnected</span>
+                    <span className="mobile-device-meta-value">{formatTimestamp(device.last_disconnected_at)}</span>
+                  </div>
                 </div>
-                <div>
-                  <span className="mobile-device-meta-label">Last seen</span>
-                  <span className="mobile-device-meta-value">{formatTimestamp(device.last_seen_at)}</span>
-                </div>
-                <div>
-                  <span className="mobile-device-meta-label">Connected</span>
-                  <span className="mobile-device-meta-value">{formatTimestamp(device.last_connected_at)}</span>
-                </div>
-                <div>
-                  <span className="mobile-device-meta-label">Disconnected</span>
-                  <span className="mobile-device-meta-value">{formatTimestamp(device.last_disconnected_at)}</span>
-                </div>
-              </div>
 
-              <div className="mobile-device-session">
-                <span className="mobile-device-meta-label">Session</span>
-                <span className="mobile-device-session-id" title={sessionId || '—'}>
-                  {sessionId || '—'}
-                </span>
-              </div>
-
-              <div className="mobile-device-session">
-                <span className="mobile-device-meta-label">App</span>
-                <span className="mobile-device-session-id" title={compactParts([device.app_version, device.app_build ? `build ${device.app_build}` : null]) || '—'}>
-                  {compactParts([device.app_version, device.app_build ? `build ${device.app_build}` : null]) || '—'}
-                </span>
+                <div className="mobile-device-code-rows">
+                  <div className="mobile-device-code-row">
+                    <span className="mobile-device-meta-label">Session</span>
+                    <span className="mobile-device-session-id" title={sessionId || '—'}>
+                      {sessionId || '—'}
+                    </span>
+                  </div>
+                  <div className="mobile-device-code-row">
+                    <span className="mobile-device-meta-label">App</span>
+                    <span
+                      className="mobile-device-session-id"
+                      title={
+                        compactParts([device.app_version, device.app_build ? `build ${device.app_build}` : null]) || '—'
+                      }
+                    >
+                      {compactParts([device.app_version, device.app_build ? `build ${device.app_build}` : null]) || '—'}
+                    </span>
+                  </div>
+                </div>
               </div>
 
               {device.revoked_at ? (
@@ -236,7 +306,8 @@ export default function MobileDevicesSettings({ active }: MobileDevicesSettingsP
 
               <div className="mobile-device-card-actions">
                 <button
-                  className="mobile-devices-danger-btn"
+                  type="button"
+                  className="mobile-devices-btn mobile-devices-btn--danger mobile-devices-btn--compact"
                   onClick={() => void handleRevokeDevice(device.device_id)}
                   disabled={removingThis || !!device.revoked}
                 >

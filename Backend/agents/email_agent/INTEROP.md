@@ -17,7 +17,8 @@ Gateway inbound behavior:
 ## Primary intents
 
 - `email.process_inbound`
-- `email.reason`
+- `email.handle`
+- `email.reason` (legacy alias)
 - `email.manage_instruction`
 - `email.recall_session`
 
@@ -29,9 +30,11 @@ Inbound email attachments stay inside the email agent artifact area by default. 
 
 Opus should typically delegate with:
 
+- `intent = email.handle`
 - `goal`
 - optional `context_brief`
 - optional `draft_seed`
+- optional `draft_id` when continuing a previously created draft
 - optional `thread_id`
 - optional `to_recipients` / `cc_recipients` / `bcc_recipients`
 - optional `subject` / `send` flag

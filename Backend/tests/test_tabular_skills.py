@@ -9,6 +9,7 @@ import pytest
 
 from agents.tabular_agent.skills import (
     SkillMetadata,
+    build_active_skill_context,
     build_skills_context,
     discover_skills,
     format_skills_index,
@@ -135,6 +136,16 @@ def test_build_skills_context_with_index() -> None:
     assert "## Available Skills" in result
     assert "### variance" in result
     assert "Use when:" in result
+
+
+def test_build_active_skill_context() -> None:
+    result = build_active_skill_context(
+        "ratio-analysis",
+        "Use ROE and ROA formulas from this skill.",
+    )
+    assert "## Active Skill" in result
+    assert "Name: ratio-analysis" in result
+    assert "ROE and ROA" in result
 
 
 def test_skills_survives_non_skill_subdirs() -> None:

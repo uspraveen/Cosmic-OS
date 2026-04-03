@@ -22,7 +22,7 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL
   ? path.join(process.env.APP_ROOT, 'public')
   : RENDERER_DIST
 
-const APP_ICON_FILENAME = 'cosmic-glassy-thunder-logo.png'
+const APP_ICON_FILENAME = 'cosmic-ball-logo-v1.1.png'
 
 /** Resolves the window/taskbar icon for dev (public/), production build (dist/), or packaged app (same paths inside asar). */
 function resolveAppIconPath(): string | undefined {
@@ -40,6 +40,24 @@ function resolveAppIconPath(): string | undefined {
 
 /** Windows taskbar squares are tight; nudge raster artwork slightly right inside the canvas. */
 const WINDOWS_TASKBAR_ICON_NUDGE_PX = 3
+
+/**
+ * Center-crop then scale back to the original pixel size so the subject fills more of the icon.
+ * Use `1` to disable (e.g. hand-cropped artwork); values above 1 zoom in (tighter crop).
+ */
+const WINDOWS_TASKBAR_ICON_CENTER_ZOOM = 1
+
+function zoomCenterCropPngToOriginalSize(img: Electron.NativeImage, zoom: number): Electron.NativeImage {
+  if (zoom <= 1) return img
+  const { width, height } = img.getSize()
+  if (width < 4 || height < 4) return img
+  const cropW = Math.max(1, Math.round(width / zoom))
+  const cropH = Math.max(1, Math.round(height / zoom))
+  const x = Math.floor((width - cropW) / 2)
+  const y = Math.floor((height - cropH) / 2)
+  const cropped = img.crop({ x, y, width: cropW, height: cropH })
+  return cropped.resize({ width, height, quality: 'best' })
+}
 
 function shiftPngContentRight(pngBuffer: Buffer, dx: number): Buffer | null {
   if (dx <= 0) return null
@@ -71,10 +89,15 @@ function loadBrowserWindowIcon(iconPath: string): Electron.NativeImage | undefin
   if (process.platform === 'win32') {
     try {
       const raw = readFileSync(iconPath)
-      const shifted = shiftPngContentRight(raw, WINDOWS_TASKBAR_ICON_NUDGE_PX)
-      if (shifted) {
-        const image = nativeImage.createFromBuffer(shifted)
-        if (!image.isEmpty()) return image
+      let image = nativeImage.createFromBuffer(raw)
+      if (!image.isEmpty()) {
+        image = zoomCenterCropPngToOriginalSize(image, WINDOWS_TASKBAR_ICON_CENTER_ZOOM)
+        const zoomedPng = image.toPNG()
+        const shifted = shiftPngContentRight(zoomedPng, WINDOWS_TASKBAR_ICON_NUDGE_PX)
+        if (shifted) {
+          image = nativeImage.createFromBuffer(shifted)
+          if (!image.isEmpty()) return image
+        }
       }
     } catch {
       // fall through to path-based load
@@ -1852,6 +1875,8 @@ app.whenReady().then(() => {
         }
       }
 
+      const bytes = Buffer.from(await response.arrayBuffer())
+
       const saveTarget = win
         ? await dialog.showSaveDialog(win, {
             defaultPath: filename,
@@ -1863,7 +1888,7 @@ app.whenReady().then(() => {
         return { cancelled: true }
       }
 
-      const bytes = Buffer.from(await response.arrayBuffer())
+      await fs.mkdir(path.dirname(saveTarget.filePath), { recursive: true })
       await fs.writeFile(saveTarget.filePath, bytes)
       return {
         cancelled: false,

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -59,6 +60,33 @@ def explain_render_error(error: RenderError) -> str:
     if detail.startswith(base):
         return detail
     return f"{base}: {detail}"
+
+
+_D2_DIRECTION_ALIASES = {
+    "lr": "right",
+    "rl": "left",
+    "tb": "down",
+    "td": "down",
+    "bt": "up",
+}
+
+
+def normalize_d2_definition(definition: str) -> str:
+    """Normalize common non-D2 direction aliases that LLMs may leak from Graphviz/Mermaid."""
+
+    def _replace(match: re.Match[str]) -> str:
+        indent = match.group("indent")
+        raw_value = match.group("value").strip()
+        mapped = _D2_DIRECTION_ALIASES.get(raw_value.lower())
+        if mapped is None:
+            return match.group(0)
+        return f"{indent}direction: {mapped}"
+
+    return re.sub(
+        r"(?im)^(?P<indent>\s*)direction\s*:\s*(?P<value>LR|RL|TB|TD|BT)\s*$",
+        _replace,
+        definition,
+    )
 
 
 async def render_mermaid(
@@ -166,6 +194,7 @@ async def render_d2(
     with tempfile.TemporaryDirectory(prefix="diagram_d2_") as tmpdir:
         tmpdir_path = Path(tmpdir)
         input_path = tmpdir_path / "input.d2"
+        definition = normalize_d2_definition(definition)
         input_path.write_text(definition, encoding="utf-8")
 
         if output_path is None:
@@ -177,8 +206,6 @@ async def render_d2(
             cmd.append("--sketch")
         if pad:
             cmd.extend(["--pad", str(pad)])
-        if output_format == "png":
-            cmd.append("--png")
         cmd.extend([str(input_path), str(output_path)])
 
         try:

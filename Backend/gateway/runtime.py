@@ -129,6 +129,7 @@ MEMORY_WRITE_PREVIEW_CHARS = 400
 SYSTEM_CRON_DAILY_ROLLOVER = "system.daily_rollover"
 TURN_LEDGER_WINDOW_SIZE = 10
 TASK_NOTEBOOK_WINDOW_SIZE = 5
+TASK_ACTIVITY_LOG_LIMIT = 64
 RECENT_MEMORY_TOOL_RECEIPT_LIMIT = 4
 RECENT_RESEARCH_RECEIPT_LIMIT = 3
 RECENT_SPECIALIST_RECEIPT_LIMIT = 4
@@ -5007,7 +5008,7 @@ class GatewayRuntime:
                     *self._normalize_activity_log(notebook.get("activity_log")),
                     activity_entry,
                 ],
-                limit=16,
+                limit=TASK_ACTIVITY_LOG_LIMIT,
             )
 
         if turn_entry is not None:
@@ -5020,7 +5021,7 @@ class GatewayRuntime:
                         turn_entry.get("artifact_refs"), limit=16
                     ),
                 ],
-                limit=16,
+                limit=TASK_ACTIVITY_LOG_LIMIT,
             )
             notebook["files_touched"] = self._normalize_entity_list(
                 [
@@ -5146,7 +5147,7 @@ class GatewayRuntime:
         self,
         entries: Any,
         *,
-        limit: int = 16,
+        limit: int = TASK_ACTIVITY_LOG_LIMIT,
     ) -> list[dict[str, Any]]:
         normalized: list[dict[str, Any]] = []
         if not isinstance(entries, list):
@@ -6751,6 +6752,14 @@ class GatewayRuntime:
                 "event_type": event_type,
                 "status": self._safe_text(payload.get("status")),
                 "message": self._safe_text(payload.get("message")) or message,
+                "payload_type": self._safe_text(payload.get("type")),
+                "step": payload.get("step"),
+                "text": self._safe_text(payload.get("text")),
+                "note": self._safe_text(payload.get("note")),
+                "completed": payload.get("completed"),
+                "total": payload.get("total"),
+                "percent": payload.get("percent"),
+                "node": self._safe_text(payload.get("node")),
             },
         }
         return forwarded
@@ -6855,8 +6864,48 @@ class GatewayRuntime:
         intent: str,
     ) -> str:
         payload_message = self._safe_text(payload.get("message"))
+        payload_type = self._safe_text(payload.get("type"))
         intent_label = intent.replace("_", " ")
         prefix = agent_label[0].upper() + agent_label[1:] if agent_label else "Specialist"
+        if event_type == "task.progress":
+            if payload_type == "agent_plan_created":
+                total_steps = payload.get("total_steps")
+                try:
+                    step_count = max(0, int(total_steps))
+                except (TypeError, ValueError):
+                    step_count = 0
+                if step_count > 0:
+                    return f"{prefix} planned {step_count} step{'s' if step_count != 1 else ''}."
+            if payload_type == "agent_step_update":
+                step = payload.get("step")
+                total = payload.get("total")
+                step_text = self._safe_text(payload.get("text"))
+                note = self._safe_text(payload.get("note"))
+                step_status = self._safe_text(payload.get("status")) or "in_progress"
+                try:
+                    step_label = str(max(1, int(step))) if step is not None else "?"
+                except (TypeError, ValueError):
+                    step_label = "?"
+                try:
+                    total_label = str(max(1, int(total))) if total is not None else "?"
+                except (TypeError, ValueError):
+                    total_label = "?"
+                primary = note or step_text or "Working"
+                if step_status == "completed":
+                    return f"{prefix} step {step_label}/{total_label} completed: {primary}"
+                if step_status == "skipped":
+                    return f"{prefix} step {step_label}/{total_label} skipped: {primary}"
+                return f"{prefix} step {step_label}/{total_label}: {primary}"
+            if payload_type == "agent_node_progress":
+                node = self._safe_text(payload.get("node"))
+                if payload_message:
+                    return (
+                        payload_message
+                        if payload_message.lower().startswith(prefix.lower())
+                        else f"{prefix}: {payload_message}"
+                    )
+                if node:
+                    return f"{prefix} is running {node.replace('_', ' ')}."
         if payload_message:
             if payload_message.lower().startswith(prefix.lower()):
                 return payload_message
@@ -10492,7 +10541,7 @@ class GatewayRuntime:
                 task_notebook.get("activity_log")
                 if isinstance(task_notebook, dict)
                 else None,
-                limit=16,
+                limit=TASK_ACTIVITY_LOG_LIMIT,
             )
             assistant_message_id = store_assistant_message(
                 str(event.get("content") or ""),

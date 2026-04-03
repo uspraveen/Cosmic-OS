@@ -292,6 +292,71 @@ class CalendarAgent(AgentRuntime):
             return time_min, time_max
         return self._default_lookup_window()
 
+    def _coerce_list_search_query(
+        self,
+        *,
+        raw_query: Any,
+        explicit_search_query: Any = None,
+        llm_params: dict[str, Any] | None = None,
+    ) -> str | None:
+        if explicit_search_query is not None:
+            explicit = str(explicit_search_query or "").strip()
+            if explicit:
+                return explicit
+
+        if isinstance(llm_params, dict):
+            llm_search = str(llm_params.get("search_query") or "").strip()
+            if llm_search:
+                return llm_search
+
+        candidate = str(raw_query or "").strip()
+        if not candidate:
+            return None
+        lowered = candidate.lower()
+        agenda_markers = (
+            "calendar",
+            "schedule",
+            "events",
+            "what's on",
+            "what is on",
+            "what do i have",
+            "show my",
+            "check my",
+            "today",
+            "tomorrow",
+            "this week",
+            "next week",
+            "this month",
+            "free slot",
+            "availability",
+            "available",
+        )
+        if any(marker in lowered for marker in agenda_markers):
+            return None
+        if any(symbol in candidate for symbol in "?!."):
+            return None
+        if len(candidate.split()) > 6:
+            return None
+        return candidate
+
+    def _resolved_account_output(self) -> dict[str, Any] | None:
+        if not isinstance(self.auth, dict):
+            return None
+        account_id = str(self.auth.get("account_id") or "").strip()
+        account_email = str(self.auth.get("account_email") or "").strip()
+        account_display_name = str(self.auth.get("account_display_name") or "").strip()
+        account_label = str(self.auth.get("account_label") or "").strip()
+        account_is_primary = bool(self.auth.get("account_is_primary"))
+        if not any((account_id, account_email, account_display_name, account_label)):
+            return None
+        return {
+            "account_id": account_id,
+            "email": account_email,
+            "display_name": account_display_name,
+            "account_label": account_label,
+            "is_primary": account_is_primary,
+        }
+
     def _merge_patch_from_params(
         self,
         patch: dict[str, Any],
@@ -361,6 +426,19 @@ class CalendarAgent(AgentRuntime):
                 "useDefault": False,
                 "overrides": overrides,
             }
+
+        if "add_google_meet" in normalized:
+            value = normalized.get("add_google_meet")
+            if isinstance(value, str):
+                normalized["add_google_meet"] = value.strip().lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "y",
+                    "on",
+                }
+            else:
+                normalized["add_google_meet"] = bool(value)
 
         for field in ("start", "end"):
             if field in normalized:
@@ -545,7 +623,11 @@ class CalendarAgent(AgentRuntime):
         # Extract parameters
         time_min = task.input.get("time_min")
         time_max = task.input.get("time_max")
-        query = task.input.get("query")
+        raw_query = task.input.get("query")
+        search_query = self._coerce_list_search_query(
+            raw_query=raw_query,
+            explicit_search_query=task.input.get("search_query"),
+        )
         calendar_id = task.input.get("calendar_id", "primary")
         max_results = min(
             task.input.get("max_results", self._cfg.max_events_per_list),
@@ -567,7 +649,7 @@ class CalendarAgent(AgentRuntime):
         # If natural language query without structured params, try internal LLM
         if (
             not task.input.get("time_min")
-            and query
+            and raw_query
             and not task.input.get("calendar_id")
         ):
             llm_result = await self._parse_natural_language(task)
@@ -575,7 +657,11 @@ class CalendarAgent(AgentRuntime):
                 params = llm_result.get("params", {})
                 time_min = params.get("time_range", {}).get("start", time_min)
                 time_max = params.get("time_range", {}).get("end", time_max)
-                query = params.get("search_query", query)
+                search_query = self._coerce_list_search_query(
+                    raw_query=raw_query,
+                    explicit_search_query=task.input.get("search_query"),
+                    llm_params=params,
+                )
                 calendar_id = params.get("calendar_id", calendar_id)
 
         events = await client.list_events(
@@ -583,12 +669,15 @@ class CalendarAgent(AgentRuntime):
             time_min=time_min,
             time_max=time_max,
             max_results=max_results,
-            query=query,
+            query=search_query,
         )
 
         # Save session
         self._save_session(
-            task, "list", query=query, event_ids=[e["event_id"] for e in events]
+            task,
+            "list",
+            query=search_query or str(raw_query or ""),
+            event_ids=[e["event_id"] for e in events],
         )
 
         return AgentResult(
@@ -599,6 +688,8 @@ class CalendarAgent(AgentRuntime):
                 "calendar_id": calendar_id,
                 "time_min": time_min,
                 "time_max": time_max,
+                "search_query": search_query,
+                "resolved_account": self._resolved_account_output(),
             },
             artifacts=[],
             error=None,
@@ -619,6 +710,7 @@ class CalendarAgent(AgentRuntime):
         location = task.input.get("location", "")
         attendees = task.input.get("attendees", [])
         reminders = task.input.get("reminders")
+        add_google_meet = bool(task.input.get("add_google_meet", False))
 
         # If natural language input, parse with internal LLM
         if not summary or not start or task.input.get("query"):
@@ -635,6 +727,8 @@ class CalendarAgent(AgentRuntime):
                 reminders = (
                     reminders if reminders is not None else params.get("reminders")
                 )
+                if "add_google_meet" in params:
+                    add_google_meet = bool(params.get("add_google_meet"))
                 tz = params.get("timezone", tz)
                 calendar_id = params.get("calendar_id", calendar_id)
 
@@ -719,6 +813,7 @@ class CalendarAgent(AgentRuntime):
             location=location,
             attendees=attendees,
             reminders=reminders,
+            add_google_meet=add_google_meet,
         )
 
         self._save_session(
@@ -906,6 +1001,8 @@ class CalendarAgent(AgentRuntime):
                     "useDefault": False,
                     "overrides": [{"method": "popup", "minutes": m} for m in reminders],
                 }
+        if "add_google_meet" in task.input:
+            patch["add_google_meet"] = bool(task.input.get("add_google_meet"))
 
         patch = self._merge_patch_from_params(patch, llm_params)
         patch = self._normalize_patch(
@@ -948,7 +1045,7 @@ class CalendarAgent(AgentRuntime):
                 error=AgentError(
                     code="INVALID_INPUT",
                     retryable=False,
-                    message="No fields to update. Provide at least one of: summary, description, location, start, end, attendees, reminders.",
+                    message="No fields to update. Provide at least one of: summary, description, location, start, end, attendees, reminders, add_google_meet.",
                     next_action="escalate",
                 ),
             )

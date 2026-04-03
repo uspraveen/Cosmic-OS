@@ -861,6 +861,14 @@ export class GatewayConnectionManager {
     return next
   }
 
+  private getForegroundStreamSnapshot(payload: any) {
+    const key = this.resolveForegroundStreamKey(payload)
+    if (!key) {
+      return null
+    }
+    return this.foregroundStreams.get(key) || null
+  }
+
   private removeForegroundStream(payload: any) {
     const key = this.resolveForegroundStreamKey(payload)
     if (!key) {
@@ -1201,6 +1209,16 @@ export class GatewayConnectionManager {
     }
 
     this.captureForegroundStreamEvent(payload, eventType)
+    const foregroundSnapshot = this.getForegroundStreamSnapshot(payload)
+    if (foregroundSnapshot) {
+      payload = {
+        ...payload,
+        activity_log:
+          Array.isArray(foregroundSnapshot.activity_log) && foregroundSnapshot.activity_log.length > 0
+            ? foregroundSnapshot.activity_log
+            : payload.activity_log,
+      }
+    }
     this.applyEventToHistory(payload, eventType)
     this.pruneForegroundStreamsFromHistory()
     if (eventType === 'response.complete') {

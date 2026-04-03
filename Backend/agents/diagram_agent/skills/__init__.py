@@ -110,6 +110,51 @@ def format_skills_index(skills: list[SkillMetadata]) -> str:
 
 
 def build_skills_context(skills: list[SkillMetadata]) -> str:
-    """Build skills context block for system prompt."""
+    """Build a compact renderer index for the analysis phase."""
     idx = format_skills_index(skills)
     return idx if idx else ""
+
+
+def find_skill(skills: list[SkillMetadata], name: str | None) -> SkillMetadata | None:
+    """Return the skill metadata for a renderer/skill name."""
+    if not name:
+        return None
+    normalized = str(name).strip().lower()
+    for skill in skills:
+        if skill["name"].strip().lower() == normalized:
+            return skill
+    return None
+
+
+def build_selected_skill_context(skill: SkillMetadata | None) -> str:
+    """Build the full skill context for the selected renderer only.
+
+    This is the progressive-disclosure phase: once analysis picks a renderer,
+    load only that renderer's detailed skill body instead of a mixed all-renderer
+    context that can leak syntax from sibling renderers.
+    """
+    if skill is None:
+        return ""
+    body = load_skill_content(skill["path"])
+    if not body:
+        return ""
+
+    tags = ", ".join(skill.get("tags") or [])
+    lines = [
+        "## Selected Renderer Skill",
+        "",
+        f"Renderer: {skill['name']}",
+        f"Description: {skill['description']}",
+    ]
+    if tags:
+        lines.append(f"Tags: {tags}")
+    lines.extend(
+        [
+            "",
+            "Use ONLY this renderer's syntax for the next generation/modification step.",
+            "Do not borrow syntax, direction aliases, or node conventions from other renderers.",
+            "",
+            body,
+        ]
+    )
+    return "\n".join(lines).strip()

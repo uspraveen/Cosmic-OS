@@ -27,9 +27,10 @@ from shared.contracts import (
 )
 from shared.sqlite_client import connect_sync
 
-from .config import AGENT_ROOT, BACKEND_ROOT, DiagramAgentConfig
+from .config import AGENT_ROOT, DiagramAgentConfig
 from .internal_llm import (
     analyze_diagram_request,
+    generate_diagram_definition,
     modify_diagram,
     regenerate_diagram_with_feedback,
     validate_diagram_render,
@@ -41,7 +42,12 @@ from .renderers import (
     render_excalidraw,
     render_mermaid,
 )
-from .skills import discover_skills
+from .skills import (
+    build_selected_skill_context,
+    build_skills_context,
+    discover_skills,
+    find_skill,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -210,19 +216,20 @@ class DiagramAgent(AgentRuntime):
         preferred = task.input.get("preferred_renderer")
         output_format = self._normalize_output_format(task.input.get("output_format"))
 
-        # Skills context for LLM
+        # Progressive disclosure:
+        # 1. analysis sees only the compact renderer index
+        # 2. generation sees only the selected renderer skill body
         skills = discover_skills()
-        from .skills import build_skills_context
-
-        skills_ctx = build_skills_context(skills)
+        skills_index = build_skills_context(skills)
 
         # Analyze with LLM
-        llm_result = await analyze_diagram_request(
+        analysis = await analyze_diagram_request(
             cfg=self._cfg,
             http_client=self._http(),
             description=desc,
             preferred_renderer=preferred,
-            skills_context=skills_ctx,
+            skills_index=skills_index,
+            allow_planning=False,
             task_id=task.task_id,
             session_id=task.session_id,
             source=task.source,
@@ -230,7 +237,7 @@ class DiagramAgent(AgentRuntime):
             channel=task.channel,
         )
 
-        if not llm_result:
+        if not analysis:
             return AgentResult(
                 status="failed",
                 output={},
@@ -243,18 +250,46 @@ class DiagramAgent(AgentRuntime):
                 ),
             )
 
-        renderer = llm_result.get("renderer", "mermaid")
-        definition = llm_result.get("definition", "")
-        diagram_type = llm_result.get("diagram_type", "other")
-        title = llm_result.get("reasoning", "")[:100]
+        renderer = analysis.get("renderer", "mermaid")
+        selected_skill_context = build_selected_skill_context(
+            find_skill(skills, renderer)
+        )
+        generation = await generate_diagram_definition(
+            cfg=self._cfg,
+            http_client=self._http(),
+            description=desc,
+            renderer=renderer,
+            diagram_type=analysis.get("diagram_type", "other"),
+            title=analysis.get("title", task.input.get("title", "")),
+            renderer_skill_context=selected_skill_context,
+            task_id=task.task_id,
+            session_id=task.session_id,
+            source=task.source,
+            source_id=task.source_id,
+            channel=task.channel,
+        )
+
+        if not generation:
+            return AgentResult(
+                status="failed",
+                output={},
+                artifacts=[],
+                error=AgentError(
+                    code="INTERNAL_ERROR",
+                    retryable=True,
+                    message="Internal LLM failed to generate the diagram definition.",
+                    next_action="retry",
+                ),
+            )
 
         return await self._render_and_build_result(
             task=task,
-            renderer=renderer,
-            definition=definition,
-            diagram_type=diagram_type,
-            title=title,
+            renderer=generation.get("renderer", renderer),
+            definition=generation.get("definition", ""),
+            diagram_type=generation.get("diagram_type", analysis.get("diagram_type", "other")),
+            title=generation.get("title", analysis.get("title", "")),
             output_format=output_format,
+            renderer_skill_context=selected_skill_context,
         )
 
     async def handle_diagram_modify(self, task: TaskEnvelope) -> AgentResult:
@@ -276,11 +311,11 @@ class DiagramAgent(AgentRuntime):
                 ),
             )
 
-        # Skills context for LLM
+        # Modification should see only the existing renderer skill body.
         skills = discover_skills()
-        from .skills import build_skills_context
-
-        skills_ctx = build_skills_context(skills)
+        renderer_skill_context = build_selected_skill_context(
+            find_skill(skills, renderer)
+        )
 
         llm_result = await modify_diagram(
             cfg=self._cfg,
@@ -288,7 +323,7 @@ class DiagramAgent(AgentRuntime):
             renderer=renderer,
             existing_definition=existing,
             modification_request=mod_request,
-            skills_context=skills_ctx,
+            renderer_skill_context=renderer_skill_context,
             task_id=task.task_id,
             session_id=task.session_id,
             source=task.source,
@@ -318,6 +353,7 @@ class DiagramAgent(AgentRuntime):
             output_format=self._normalize_output_format(
                 task.input.get("output_format")
             ),
+            renderer_skill_context=renderer_skill_context,
         )
 
     async def handle_diagram_recall_session(self, task: TaskEnvelope) -> AgentResult:
@@ -353,6 +389,7 @@ class DiagramAgent(AgentRuntime):
         diagram_type: str,
         title: str,
         output_format: str,
+        renderer_skill_context: str = "",
     ) -> AgentResult:
         """Render a definition and build the AgentResult with artifacts.
 
@@ -468,6 +505,7 @@ class DiagramAgent(AgentRuntime):
                     validation_issues=validation_issues,
                     validation_suggestion=validation_suggestion,
                     diagram_type=diagram_type,
+                    renderer_skill_context=renderer_skill_context,
                     task_id=task.task_id,
                     session_id=task.session_id,
                     source=task.source,

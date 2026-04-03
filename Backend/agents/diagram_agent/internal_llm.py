@@ -30,7 +30,6 @@ Output ONLY valid JSON:
   "renderer": "mermaid" | "d2" | "excalidraw" — only for "generate"
   "diagram_type": "flowchart" | "sequence" | "er" | "gantt" | "class" | "state" | "architecture" | "schema" | "network" | "whiteboard" | "other" — only for "generate"
   "title": "descriptive title for the diagram" — only for "generate"
-  "definition": "the diagram source code in the chosen renderer's syntax" — only for "generate"
   "confidence": 0.0-1.0,
   "reasoning": "brief explanation"
 }
@@ -57,12 +56,19 @@ After creating a plan, the system will re-call you to execute step 1.
 ## When to use generate
 
 Use **"generate"** for straightforward single-diagram requests. Provide:
-- renderer, diagram_type, title, definition, confidence, reasoning
+- renderer, diagram_type, title, confidence, reasoning
+- DO NOT generate the final diagram source code in this phase.
+- Your job here is renderer selection and request normalization only.
 
 ## Renderer selection rules
 - **Mermaid**: sequence diagrams, flowcharts, ER diagrams, Gantt charts, state diagrams, class diagrams, git graphs, pie charts, quadrant charts, timeline diagrams. Best for inline markdown/GitHub-compatible diagrams.
 - **D2**: architecture diagrams, system schemas, network topologies, database schemas, API flows with nested containers. Best for structured, layered diagrams with clear hierarchy. Supports dark mode, sketch style.
 - **Excalidraw**: hand-drawn whiteboard style, brainstorming, early-stage sketches, informal diagrams, wireframes. Best when user wants a casual/whiteboard feel.
+
+## D2 syntax guardrails
+- D2 direction values are words: `right`, `left`, `down`, `up`.
+- NEVER use Graphviz/Mermaid direction aliases like `LR`, `RL`, `TB`, `TD`, or `BT` in D2 output.
+- Keep D2 definitions idiomatic D2, not Mermaid or Graphviz syntax.
 
 Diagram type mapping:
 - "how X talks to Y", "flow", "process", "steps" → flowchart or sequence
@@ -74,6 +80,27 @@ Diagram type mapping:
 - "architecture", "system design", "infrastructure", "microservice" → architecture or d2
 - "sketch", "whiteboard", "draw", "rough" → excalidraw
 - "network", "topology", "VPC", "subnet" → d2
+"""
+
+_GENERATE_SYSTEM = """\
+You are a diagram generation assistant. You have already been given the correct renderer.
+Generate the final diagram source code using ONLY that renderer's syntax.
+
+Output ONLY valid JSON:
+{
+  "renderer": "mermaid" | "d2" | "excalidraw",
+  "diagram_type": "flowchart" | "sequence" | "er" | "gantt" | "class" | "state" | "architecture" | "schema" | "network" | "whiteboard" | "other",
+  "title": "descriptive title for the diagram",
+  "definition": "the final diagram source code",
+  "confidence": 0.0-1.0,
+  "reasoning": "brief explanation of the chosen structure"
+}
+
+Rules:
+- Use ONLY the selected renderer's syntax and conventions.
+- Do not mix syntax from Mermaid, D2, Excalidraw, Graphviz, or PlantUML.
+- The selected renderer skill is provided in the context below. Follow it closely.
+- Generate complete, valid source with no placeholders.
 """
 
 _MODIFY_SYSTEM = """\
@@ -231,15 +258,16 @@ async def analyze_diagram_request(
     description: str,
     preferred_renderer: str | None = None,
     existing_definition: str | None = None,
-    skills_context: str = "",
+    skills_index: str = "",
     plan_step_text: str = "",
+    allow_planning: bool = True,
     task_id: str | None = None,
     session_id: str | None = None,
     source: str | None = None,
     source_id: str | None = None,
     channel: str | None = None,
 ) -> dict[str, Any] | None:
-    """Analyze a diagram request and produce a structured result with definition."""
+    """Analyze a diagram request and normalize it to renderer + plan metadata."""
     context = f"Description: {description}\n"
     if preferred_renderer:
         context += f"Preferred renderer: {preferred_renderer}\n"
@@ -249,8 +277,12 @@ async def analyze_diagram_request(
         )
     if plan_step_text:
         context += f"\n---\nEXECUTING PLAN STEP: {plan_step_text}\nGenerate the diagram for this specific step. Use action: generate.\n"
-    if skills_context:
-        context += f"\n---\n{skills_context}\n"
+    if not allow_planning:
+        context += (
+            "\n---\nPlanning is disabled for this call. Return action: generate.\n"
+        )
+    if skills_index:
+        context += f"\n---\n{skills_index}\n"
 
     return await invoke_diagram_mimo(
         cfg=cfg,
@@ -264,10 +296,39 @@ async def analyze_diagram_request(
         channel=channel,
     )
 
+
+async def generate_diagram_definition(
+    *,
+    cfg: DiagramAgentConfig,
+    http_client: httpx.AsyncClient,
+    description: str,
+    renderer: str,
+    diagram_type: str,
+    title: str,
+    renderer_skill_context: str = "",
+    plan_step_text: str = "",
+    task_id: str | None = None,
+    session_id: str | None = None,
+    source: str | None = None,
+    source_id: str | None = None,
+    channel: str | None = None,
+) -> dict[str, Any] | None:
+    """Generate the final diagram definition using the selected renderer skill only."""
+    context = (
+        f"Description: {description}\n"
+        f"Selected renderer: {renderer}\n"
+        f"Diagram type: {diagram_type}\n"
+        f"Title: {title}\n"
+    )
+    if plan_step_text:
+        context += f"Plan step focus: {plan_step_text}\n"
+    if renderer_skill_context:
+        context += f"\n---\n{renderer_skill_context}\n"
+
     return await invoke_diagram_mimo(
         cfg=cfg,
         http_client=http_client,
-        system_content=_ANALYZE_SYSTEM,
+        system_content=_GENERATE_SYSTEM,
         user_message=context,
         task_id=task_id,
         session_id=session_id,
@@ -284,7 +345,7 @@ async def modify_diagram(
     renderer: str,
     existing_definition: str,
     modification_request: str,
-    skills_context: str = "",
+    renderer_skill_context: str = "",
     task_id: str | None = None,
     session_id: str | None = None,
     source: str | None = None,
@@ -297,8 +358,8 @@ async def modify_diagram(
         f"Existing definition:\n```\n{existing_definition}\n```\n"
         f"Modification request: {modification_request}\n"
     )
-    if skills_context:
-        context += f"\n---\n{skills_context}\n"
+    if renderer_skill_context:
+        context += f"\n---\n{renderer_skill_context}\n"
 
     return await invoke_diagram_mimo(
         cfg=cfg,
@@ -512,6 +573,7 @@ async def regenerate_diagram_with_feedback(
     validation_issues: list[str],
     validation_suggestion: str,
     diagram_type: str = "",
+    renderer_skill_context: str = "",
     task_id: str | None = None,
     session_id: str | None = None,
     source: str | None = None,
@@ -537,6 +599,8 @@ async def regenerate_diagram_with_feedback(
         f"Suggestion: {validation_suggestion}\n"
         f"Regenerate a corrected definition that fixes these issues while keeping the same content."
     )
+    if renderer_skill_context:
+        context += f"\n---\n{renderer_skill_context}\n"
 
     return await invoke_diagram_mimo(
         cfg=cfg,

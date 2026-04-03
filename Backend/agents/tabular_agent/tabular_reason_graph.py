@@ -192,6 +192,7 @@ class TabularReasonState(TypedDict, total=False):
     analysis_step_started: bool
     # Skills system fields (progressive disclosure)
     available_skills: list[dict[str, Any]]
+    active_skill_name: str
     active_skill_content: str
     # Dynamic step plan fields (LLM-driven planning per §32.2)
     plan_active: bool
@@ -219,6 +220,8 @@ def _build_resume_state(state: TabularReasonState) -> dict[str, Any]:
         "delegate_used": bool(state.get("delegate_used", False)),
         "steps_log": list(state.get("steps_log") or []),
         "bundle_root": state.get("bundle_root"),
+        "active_skill_name": state.get("active_skill_name"),
+        "active_skill_content": state.get("active_skill_content") or "",
         "plan_active": bool(state.get("plan_active")),
         "plan_total_steps": int(state.get("plan_total_steps") or 0),
     }
@@ -744,6 +747,20 @@ def _build_graph(ctx: _GraphCtx) -> Any:
                     system_parts.append(skills_ctx)
             except Exception as e:  # noqa: BLE001
                 logger.debug("tabular.graph.skills_context_failed: %s", e)
+        active_skill_name = str(state.get("active_skill_name") or "").strip()
+        active_skill_content = str(state.get("active_skill_content") or "").strip()
+        if active_skill_name and active_skill_content:
+            try:
+                from .skills import build_active_skill_context
+
+                active_ctx = build_active_skill_context(
+                    active_skill_name,
+                    active_skill_content,
+                )
+                if active_ctx:
+                    system_parts.append(active_ctx)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("tabular.graph.active_skill_context_failed: %s", e)
         system = "\n\n".join(system_parts)
         rid = (
             ctx.agent._safe(ctx.task.input.get("request_id"))
@@ -868,11 +885,12 @@ def _build_graph(ctx: _GraphCtx) -> Any:
                 skill_content = result.get("content") or ""
             tr = (
                 (state.get("transcript") or "")
-                + f"\n\n--- skill activated: {pending.get('skill_name', 'unknown')} ---\n{skill_content}\n"
+                + f"\n\n--- skill activated: {pending.get('skill_name', 'unknown')} ---\n"
             )
             out = {
                 "transcript": tr,
                 "last_tool_result": result,
+                "active_skill_name": str(pending.get("skill_name") or ""),
                 "active_skill_content": skill_content,
                 "steps_log": _append_step(
                     state,
@@ -952,6 +970,8 @@ def _build_graph(ctx: _GraphCtx) -> Any:
                 "response": waiting_response,
                 "finish_reason": state.get("finish_reason"),
                 "suspended": True,
+                "clarify_used": bool(state.get("clarify_used")),
+                "delegate_used": bool(state.get("delegate_used")),
                 "input_request_id": last.get("input_request_id"),
                 "resume_state": _build_resume_state(state),
                 "steps_log": _append_step(
@@ -1116,6 +1136,8 @@ async def run_tabular_reason_langgraph(
             "steps_log",
             "bundle_root",
             "analysis_step_started",
+            "active_skill_name",
+            "active_skill_content",
             "plan_active",
             "plan_total_steps",
         ):
@@ -1191,6 +1213,7 @@ async def run_tabular_reason_langgraph(
         "finish_reason": out.get("finish_reason"),
         "last_tool_result": out.get("last_tool_result"),
         "clarify_used": bool(out.get("clarify_used")),
+        "delegate_used": bool(out.get("delegate_used")),
         "suspended": bool(out.get("suspended")),
         "input_request_id": out.get("input_request_id"),
         "resume_state": out.get("resume_state"),

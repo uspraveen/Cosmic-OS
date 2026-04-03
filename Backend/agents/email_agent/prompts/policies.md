@@ -8,6 +8,8 @@
 - If the mailbox, thread, or message cannot be found, fail clearly instead of guessing.
 - If multiple attachment candidates are plausible, fail clearly and ask for a more specific attachment reference instead of guessing.
 - When composing from a long-running discussion, prefer the compact context_brief and draft_seed over replaying raw chat.
+- Stabilize one normalized execution plan before touching Cosmic Mail: merge explicit fields with any plain-language routing hints from goal, context_brief, and structured draft_seed headers, then execute that frozen plan instead of re-interpreting the task mid-flight.
+- If `draft_id` is provided with an explicit send request, treat it as a direct draft-send continuation and call the send path without recomposing or re-resolving recipients from scratch.
 - Never leak API tokens or credential material into artifacts, outputs, or logs.
 - Preserve explicit To / CC / BCC roles exactly; do not silently rewrite recipient roles.
 - Do not copy recipient routing instructions into the body unless the user explicitly wants that text in the email itself.

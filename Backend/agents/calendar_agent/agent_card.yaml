@@ -18,6 +18,7 @@ intents:
     usage_hints:
       - Use this for agenda lookups, title searches, and "what do I have" questions.
       - Human-friendly account/calendar hints are fine; the user should not need internal account ids.
+      - Pass natural-language agenda requests in `query`; use `search_query` only for explicit title/keyword filtering.
 
   - name: calendar.create_event
     description: Create a new calendar event with attendees, time, location, description, and reminders
@@ -28,6 +29,7 @@ intents:
       - Use this for meeting scheduling and explicit calendar creation requests.
       - Plain-language requests are acceptable; the specialist will normalize them internally before calling Google Calendar.
       - Expect conflict warnings when the requested slot overlaps existing events.
+      - If the user asks for a Google Meet / Meet link, include `add_google_meet=true`.
 
   - name: calendar.find_free_slots
     description: Find available time slots considering existing events, timezone, working hours, and buffers
@@ -47,6 +49,7 @@ intents:
       - Use this when the user wants to move, rename, or otherwise change an existing event.
       - The user does not need a raw event_id. A human event description plus a bounded time window is sufficient when available.
       - Pass only the fields the user wants changed; let the specialist preserve the rest.
+      - Use this to add a Google Meet link to an existing event by setting `add_google_meet=true`.
 
   - name: calendar.cancel_event
     description: Cancel a calendar event, optionally notifying attendees

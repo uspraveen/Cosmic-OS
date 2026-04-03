@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "response": { "type": "string" },
+    "action": { "type": "string" },
+    "sent": { "type": "boolean" },
+    "thread_id": { "type": ["string", "null"] },
+    "message_id": { "type": ["string", "null"] },
+    "draft_id": { "type": ["string", "null"] },
+    "summary": { "type": ["string", "null"] },
+    "to_recipients": { "type": "array", "items": { "type": "object" } },
+    "cc_recipients": { "type": "array", "items": { "type": "object" } },
+    "bcc_recipients": { "type": "array", "items": { "type": "object" } },
+    "search_results": { "type": "array", "items": { "type": "object" } },
+    "bundle_id": { "type": ["string", "null"] },
+    "docs_tools": { "type": "array", "items": { "type": "string" } },
+    "resolved_attachment": { "type": ["object", "null"] },
+    "attachment_resolution_status": { "type": ["string", "null"] },
+    "attached_input_artifact_count": { "type": ["integer", "null"] },
+    "attached_input_artifacts": { "type": ["array", "null"], "items": { "type": "object" } },
+    "failed_input_artifact_count": { "type": ["integer", "null"] },
+    "failed_input_artifacts": { "type": ["array", "null"], "items": { "type": "object" } },
+    "delivery_status": { "type": ["string", "null"] },
+    "queued_for_approval": { "type": ["boolean", "null"] },
+    "approval_id": { "type": ["string", "null"] }
+  },
+  "required": ["response", "action"]
+}

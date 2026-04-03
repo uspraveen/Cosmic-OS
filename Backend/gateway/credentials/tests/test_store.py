@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -229,6 +230,41 @@ class TestAudit:
         store.delete_account(account["account_id"])
         assert store.get_account(account["account_id"]) is None
         assert store.get_active_credential(account["account_id"]) is None
+
+
+@pytest.mark.asyncio
+async def test_manager_resolve_credential_returns_account_metadata(store):
+    from gateway.credentials.manager import CredentialManager
+
+    account = store.create_account(
+        provider="google",
+        email="usp.upenn@gmail.com",
+        display_name="Praveen Raj U S",
+        account_label="Google account",
+        is_primary=True,
+    )
+    store.store_credential(
+        account_id=account["account_id"],
+        granted_scopes=["calendar"],
+        access_token="tok_live",
+        refresh_token="ref_live",
+        expires_at_ts=time.time() + 3600,
+    )
+    mgr = CredentialManager(store)
+
+    resolved = await mgr.resolve_credential(
+        provider="google",
+        required_scopes=["calendar"],
+        allow_primary_fallback=True,
+        operation_mode="read",
+    )
+
+    assert resolved is not None
+    assert resolved["account_id"] == account["account_id"]
+    assert resolved["account_email"] == "usp.upenn@gmail.com"
+    assert resolved["account_display_name"] == "Praveen Raj U S"
+    assert resolved["account_label"] == "Google account"
+    assert resolved["account_is_primary"] is True
 
 
 # ── Resource binding tests ────────────────────────────────────────────────────

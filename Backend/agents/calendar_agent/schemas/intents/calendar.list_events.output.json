@@ -6,7 +6,21 @@
     "count": { "type": "integer", "description": "Number of events returned" },
     "calendar_id": { "type": "string" },
     "time_min": { "type": "string" },
-    "time_max": { "type": "string" }
+    "time_max": { "type": "string" },
+    "search_query": { "type": ["string", "null"] },
+    "workflow": { "type": "string" },
+    "rounds_used": { "type": "integer" },
+    "resolved_account": {
+      "type": ["object", "null"],
+      "properties": {
+        "account_id": { "type": "string" },
+        "email": { "type": "string" },
+        "display_name": { "type": "string" },
+        "account_label": { "type": "string" },
+        "is_primary": { "type": "boolean" }
+      },
+      "required": ["account_id", "email", "display_name", "account_label", "is_primary"]
+    }
   },
   "required": ["events", "count"]
 }
