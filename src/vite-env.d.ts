@@ -15,6 +15,7 @@ interface GatewaySocketState {
   sessionId?: string | null
   historyTail?: any[]
   knownTaskIds?: string[]
+  foregroundStreams?: any[]
 }
 
 interface GatewayPendingDocumentAttachment {

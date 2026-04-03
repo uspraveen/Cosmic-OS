@@ -11,7 +11,7 @@ import CosmicLoginModal from './CosmicLoginModal'
 import LiquidGlassLoader from './LiquidGlassLoader'
 import MeetingMode from './MeetingMode'
 import SpacesControlCenter from './SpacesControlCenter'
-import cosmicGlassyThunderLogo from './assets/cosmic-glassy-thunder-logo.png'
+import cosmicBallLogo from './assets/cosmic-ball-logo-v1.1.png'
 import moveToBackgroundIcon from './assets/move-to-background.png'
 import bringToForegroundIcon from './assets/bring-to-foreground.png'
 import './spotlight.css'
@@ -99,6 +99,30 @@ interface GatewayStatus {
   connected: boolean
   detail?: string
   sessionId?: string | null
+}
+
+interface GatewayForegroundStreamSnapshot {
+  requestId?: string | null
+  taskId?: string | null
+  sessionId?: string | null
+  route?: string | null
+  messageId?: string | null
+  content: string
+  thinking?: string
+  activity?: string
+  activityLog?: ActivityLogEntry[]
+  progress?: DocsProgressState | TabularProgressState
+  producedArtifacts?: ProducedArtifact[]
+  responseBlocks?: ResponseBlock[]
+  sources?: Array<{ url: string; title?: string; domain?: string } | string>
+  channel?: string | null
+  source?: string | null
+  sourceId?: string | null
+  awaitingReply?: boolean
+  completed: boolean
+  failed: boolean
+  error?: string | null
+  updatedAt?: string | null
 }
 
 interface PendingDocumentAttachment {
@@ -539,7 +563,99 @@ const historyToMessages = (history: any[] = []): Message[] => {
       source: typeof item?.metadata?.source === 'string' ? item.metadata.source : null,
       sourceId: typeof item?.metadata?.source_id === 'string' ? item.metadata.source_id : null,
       createdAt: typeof item?.created_at === 'string' ? item.created_at : null,
+      activity: typeof item?.metadata?.activity === 'string' ? item.metadata.activity : undefined,
+      progress: normalizeTabularProgress(item?.metadata?.tabular_progress) ?? normalizeDocsProgress(item?.metadata?.docs_progress),
     }))
+}
+
+const normalizeForegroundStreamSnapshot = (value: unknown): GatewayForegroundStreamSnapshot | null => {
+  if (!value || typeof value !== 'object') {
+    return null
+  }
+  const requestId = typeof (value as any).request_id === 'string'
+    ? (value as any).request_id.trim()
+    : typeof (value as any).requestId === 'string'
+      ? (value as any).requestId.trim()
+      : ''
+  const taskId = typeof (value as any).task_id === 'string'
+    ? (value as any).task_id.trim()
+    : typeof (value as any).taskId === 'string'
+      ? (value as any).taskId.trim()
+      : ''
+  if (!requestId && !taskId) {
+    return null
+  }
+  const progress =
+    normalizeTabularProgress((value as any).tabular_progress ?? (value as any).tabularProgress) ??
+    normalizeDocsProgress((value as any).docs_progress ?? (value as any).docsProgress)
+  const failed = Boolean((value as any).failed)
+  const error = typeof (value as any).error === 'string' && (value as any).error.trim()
+    ? (value as any).error.trim()
+    : null
+  return {
+    requestId: requestId || null,
+    taskId: taskId || null,
+    sessionId: typeof (value as any).session_id === 'string'
+      ? (value as any).session_id.trim()
+      : typeof (value as any).sessionId === 'string'
+        ? (value as any).sessionId.trim()
+        : null,
+    route: typeof (value as any).route === 'string' ? (value as any).route.trim() || null : null,
+    messageId: typeof (value as any).message_id === 'string'
+      ? (value as any).message_id.trim() || null
+      : typeof (value as any).messageId === 'string'
+        ? (value as any).messageId.trim() || null
+        : null,
+    content: failed
+      ? (error || String((value as any).content || ''))
+      : String((value as any).content || ''),
+    thinking: typeof (value as any).thinking_text === 'string'
+      ? (value as any).thinking_text
+      : typeof (value as any).thinking === 'string'
+        ? (value as any).thinking
+        : undefined,
+    activity: typeof (value as any).activity === 'string' && (value as any).activity.trim()
+      ? (value as any).activity.trim()
+      : undefined,
+    activityLog: normalizeActivityLog((value as any).activity_log ?? (value as any).activityLog),
+    progress,
+    producedArtifacts: normalizeProducedArtifacts((value as any).produced_artifacts ?? (value as any).producedArtifacts),
+    responseBlocks: normalizeResponseBlocks((value as any).response_blocks ?? (value as any).responseBlocks),
+    sources: Array.isArray((value as any).sources) ? (value as any).sources : undefined,
+    channel: typeof (value as any).channel === 'string' ? (value as any).channel : null,
+    source: typeof (value as any).source === 'string' ? (value as any).source : null,
+    sourceId: typeof (value as any).source_id === 'string'
+      ? (value as any).source_id.trim() || null
+      : typeof (value as any).sourceId === 'string'
+        ? (value as any).sourceId.trim() || null
+        : taskId || null,
+    awaitingReply: (value as any).awaiting_reply === true || (value as any).awaitingReply === true,
+    completed: Boolean((value as any).completed),
+    failed,
+    error,
+    updatedAt: typeof (value as any).updated_at === 'string'
+      ? (value as any).updated_at
+      : typeof (value as any).updatedAt === 'string'
+        ? (value as any).updatedAt
+        : null,
+  }
+}
+
+const normalizeForegroundStreamSnapshots = (value: unknown): GatewayForegroundStreamSnapshot[] => {
+  if (!Array.isArray(value)) {
+    return []
+  }
+  return value
+    .map(normalizeForegroundStreamSnapshot)
+    .filter((item): item is GatewayForegroundStreamSnapshot => Boolean(item))
+    .sort((left, right) => {
+      const leftTs = Date.parse(left.updatedAt || '')
+      const rightTs = Date.parse(right.updatedAt || '')
+      if (Number.isFinite(leftTs) && Number.isFinite(rightTs) && leftTs !== rightTs) {
+        return leftTs - rightTs
+      }
+      return String(left.requestId || left.taskId || '').localeCompare(String(right.requestId || right.taskId || ''))
+    })
 }
 
 const mergeHydratedMessages = (current: Message[], hydrated: Message[]): Message[] => {
@@ -976,13 +1092,98 @@ const formatProducedArtifactNotificationSummary = (artifacts: ProducedArtifact[]
   return listed || `${artifacts.length} files are ready to download.`
 }
 
+const GATEWAY_OUTPUT_ARTIFACT_PATH_RE = /^\/desktop\/messages\/([^/]+)\/artifacts\/([^/]+)\/download\/?$/
+
+const extractMarkdownLinkText = (children: any): string => {
+  if (typeof children === 'string' || typeof children === 'number') {
+    return String(children)
+  }
+  if (Array.isArray(children)) {
+    return children.map((child) => extractMarkdownLinkText(child)).join('')
+  }
+  if (children && typeof children === 'object' && 'props' in children) {
+    return extractMarkdownLinkText((children as any).props?.children)
+  }
+  return ''
+}
+
+const parseGatewayOutputArtifactHref = (href: string) => {
+  const rawHref = String(href || '').trim()
+  if (!rawHref) {
+    return null
+  }
+  try {
+    const parsed = new URL(rawHref, 'http://cosmic.local')
+    const match = parsed.pathname.match(GATEWAY_OUTPUT_ARTIFACT_PATH_RE)
+    if (!match) {
+      return null
+    }
+    return {
+      messageId: decodeURIComponent(match[1] || ''),
+      artifactId: decodeURIComponent(match[2] || ''),
+    }
+  } catch {
+    return null
+  }
+}
+
+const isExternalMarkdownHref = (href: string) => /^(https?:|mailto:|tel:)/i.test(String(href || '').trim())
+
+const AssistantMarkdownLink = ({
+  node,
+  href,
+  children,
+  onClick,
+  target,
+  rel,
+  ...props
+}: any) => {
+  const rawHref = String(href || '').trim()
+  const artifactDownload = parseGatewayOutputArtifactHref(rawHref)
+  const textLabel = extractMarkdownLinkText(children).trim()
+
+  const handleClick = (event: React.MouseEvent<HTMLAnchorElement>) => {
+    onClick?.(event)
+    if (event.defaultPrevented || !rawHref) {
+      return
+    }
+    if (artifactDownload && window.cosmic?.downloadGatewayOutputArtifact) {
+      event.preventDefault()
+      void window.cosmic.downloadGatewayOutputArtifact({
+        messageId: artifactDownload.messageId,
+        artifactId: artifactDownload.artifactId,
+        suggestedFilename: textLabel || undefined,
+      }).catch((error) => {
+        console.error('Failed to download gateway output artifact from markdown link:', error)
+      })
+      return
+    }
+    if (isExternalMarkdownHref(rawHref) && window.cosmic?.openExternal) {
+      event.preventDefault()
+      window.cosmic.openExternal(rawHref)
+    }
+  }
+
+  return (
+    <a
+      href={rawHref || href}
+      onClick={handleClick}
+      target={artifactDownload ? undefined : target ?? '_blank'}
+      rel={artifactDownload ? undefined : rel ?? 'noopener noreferrer'}
+      {...props}
+    >
+      {children}
+    </a>
+  )
+}
+
 const assistantMarkdownComponents = {
   table: ({ node, ...props }: any) => <div className="table-wrapper"><table {...props} /></div>,
   code: ({ node, inline, className, children, ...props }: any) => {
     if (inline) return <code className="inline-code" {...props}>{children}</code>
     return <div className="code-block"><code {...props}>{children}</code></div>
   },
-  a: ({ node, ...props }: any) => <a target="_blank" rel="noopener noreferrer" {...props} />,
+  a: AssistantMarkdownLink,
 }
 
 const AssistantMarkdownBlock = ({ content }: { content: string }) => (
@@ -1836,6 +2037,142 @@ export default function App() {
     activeStreamingTaskIdRef.current = null
   }
 
+  const findAssistantMessageIdForForegroundStream = (messages: Message[], stream: GatewayForegroundStreamSnapshot) => {
+    const targetMessageId = String(stream.messageId || '').trim()
+    if (targetMessageId) {
+      const match = messages.find((message) => message.id === targetMessageId)
+      if (match) {
+        return match.id
+      }
+    }
+    const requestId = String(stream.requestId || '').trim()
+    if (requestId) {
+      const match = messages.find((message) => message.role === 'assistant' && message.requestId === requestId)
+      if (match) {
+        return match.id
+      }
+    }
+    const taskId = String(stream.taskId || '').trim()
+    if (taskId) {
+      const match = messages.find((message) => message.role === 'assistant' && message.sourceId === taskId)
+      if (match) {
+        return match.id
+      }
+    }
+    return null
+  }
+
+  const restoreForegroundStreamsFromState = (
+    streamsRaw: unknown,
+    options: { historyTail?: any[] | null; clearIfNone?: boolean } = {},
+  ) => {
+    const streams = normalizeForegroundStreamSnapshots(streamsRaw)
+    const usingHistoryTail = Array.isArray(options.historyTail)
+    if (!usingHistoryTail && streams.length <= 0) {
+      if (options.clearIfNone) {
+        clearActiveStreamingRefs()
+        setStreamingProgress('')
+        setIsStreaming(false)
+      }
+      return
+    }
+
+    const baseMessages = usingHistoryTail
+      ? historyToMessages(options.historyTail || [])
+      : messagesRef.current
+    let nextMessages = [...baseMessages]
+
+    if (usingHistoryTail) {
+      resetInFlightAssistantMaps()
+    }
+
+    for (const stream of streams) {
+      const requestId = String(stream.requestId || '').trim()
+      const taskId = String(stream.taskId || '').trim()
+      const fallbackMessageId =
+        String(stream.messageId || '').trim() ||
+        (requestId ? `pending_assistant_${requestId}` : taskId ? `pending_assistant_task_${taskId}` : createAssistantMessageId())
+      const existingMessageId = findAssistantMessageIdForForegroundStream(nextMessages, stream)
+      const existingIndex = existingMessageId
+        ? nextMessages.findIndex((message) => message.id === existingMessageId)
+        : -1
+      const existingMessage = existingIndex >= 0 ? nextMessages[existingIndex] : null
+      const nextMessage: Message = {
+        ...(existingMessage || createAssistantMessage({ id: fallbackMessageId })),
+        id: existingMessage?.id || fallbackMessageId,
+        role: 'assistant',
+        content: String(stream.content || existingMessage?.content || ''),
+        thinking: typeof stream.thinking === 'string' ? stream.thinking : existingMessage?.thinking,
+        activity: typeof stream.activity === 'string' ? stream.activity : existingMessage?.activity,
+        activityLog: stream.activityLog ?? existingMessage?.activityLog,
+        progress: stream.progress ?? existingMessage?.progress,
+        producedArtifacts: stream.producedArtifacts ?? existingMessage?.producedArtifacts,
+        responseBlocks: stream.responseBlocks ?? existingMessage?.responseBlocks,
+        sources: stream.sources ?? existingMessage?.sources,
+        requestId: requestId || existingMessage?.requestId || null,
+        source: stream.source ?? existingMessage?.source ?? null,
+        sourceId: taskId || String(stream.sourceId || '').trim() || existingMessage?.sourceId || null,
+        channel: stream.channel ?? existingMessage?.channel ?? null,
+        createdAt: stream.updatedAt || existingMessage?.createdAt || new Date().toISOString(),
+        stopped: false,
+      }
+      if (existingIndex >= 0) {
+        nextMessages = nextMessages.map((message, index) => (
+          index === existingIndex ? nextMessage : message
+        ))
+      } else {
+        nextMessages = [...nextMessages, nextMessage]
+      }
+      if (requestId) {
+        activeAssistantMessageByRequestRef.current.set(requestId, nextMessage.id)
+      }
+      if (taskId) {
+        activeAssistantMessageByTaskRef.current.set(taskId, nextMessage.id)
+      }
+      if (requestId && (nextMessage.content || nextMessage.thinking || nextMessage.activity || nextMessage.activityLog?.length)) {
+        streamedResponseRequestIdsRef.current.add(requestId)
+      }
+      if (taskId && (nextMessage.content || nextMessage.thinking || nextMessage.activity || nextMessage.activityLog?.length)) {
+        streamedResponseTaskIdsRef.current.add(taskId)
+      }
+    }
+
+    setMessages(nextMessages)
+    messagesRef.current = nextMessages
+
+    const activeStream = [...streams].reverse().find((stream) => !stream.completed && !stream.failed) || null
+    if (activeStream) {
+      activeStreamingRequestIdRef.current = String(activeStream.requestId || '').trim() || null
+      activeStreamingTaskIdRef.current = String(activeStream.taskId || '').trim() || null
+      setStreamingProgress(String(activeStream.activity || activeStream.progress?.label || '').trim())
+      setIsStreaming(true)
+      return
+    }
+
+    if (options.clearIfNone) {
+      clearActiveStreamingRefs()
+      setStreamingProgress('')
+      setIsStreaming(false)
+    }
+  }
+
+  const syncForegroundStreamsFromGatewayState = async () => {
+    if (!window.cosmic?.getGatewayState) {
+      return
+    }
+    try {
+      const state = await window.cosmic.getGatewayState()
+      if (!state) {
+        return
+      }
+      restoreForegroundStreamsFromState((state as any).foregroundStreams ?? (state as any).foreground_streams, {
+        clearIfNone: false,
+      })
+    } catch {
+      return
+    }
+  }
+
   const removePendingTaskInput = (inputRequestId: string) => {
     setPendingTaskInputs((prev) => prev.filter((item) => item.inputRequestId !== inputRequestId))
     setTaskInputDrafts((prev) => {
@@ -2307,9 +2644,10 @@ export default function App() {
           if (typeof state.sessionId === 'string') {
             setActiveSessionId(state.sessionId)
           }
-          if (Array.isArray(state.historyTail) && state.historyTail.length > 0) {
-            setMessages(historyToMessages(state.historyTail))
-          }
+          restoreForegroundStreamsFromState((state as any).foregroundStreams ?? (state as any).foreground_streams, {
+            historyTail: Array.isArray(state.historyTail) ? state.historyTail : [],
+            clearIfNone: true,
+          })
         })
         .catch(() => { })
     }
@@ -2372,6 +2710,7 @@ export default function App() {
       } else {
         showChatComposer()
       }
+      void syncForegroundStreamsFromGatewayState()
       maybeRequestGatewayResumeOnShow()
       // Scroll to bottom (or streaming point) on every reopen
       shouldAutoScrollRef.current = true
@@ -2429,21 +2768,20 @@ export default function App() {
         const oldSessionId = activeSessionIdRef.current
         const sessionRolledOver = oldSessionId && newSessionId && oldSessionId !== newSessionId
         setActiveSessionId(newSessionId)
-        resetInFlightAssistantMaps()
-        const historyMessages = historyToMessages(event.history_tail)
         // If session rolled over (e.g. 4 AM boundary), prepend a rollover divider
         if (sessionRolledOver) {
-          setMessages([
-            {
-              id: `session-rollover-${newSessionId}`,
-              role: 'assistant' as const,
-              content: '',
-              channel: '__session_rollover__',
-            },
-            ...historyMessages,
-          ])
-        } else {
-          setMessages(historyMessages)
+          restoreForegroundStreamsFromState((event as any).foreground_streams, {
+            historyTail: [
+              {
+                message_id: `session-rollover-${newSessionId}`,
+                role: 'assistant',
+                content: '',
+                channel: '__session_rollover__',
+              },
+              ...(Array.isArray(event.history_tail) ? event.history_tail : []),
+            ],
+            clearIfNone: true,
+          })
         }
         setPendingTaskInputs(
           mergePendingTaskInputs(
@@ -2476,7 +2814,12 @@ export default function App() {
         setDismissedTaskInterruptIds([])
         setSelectedTaskInputId(null)
         setSelectedBackgroundRequestId(null)
-        setIsStreaming(false)
+        if (!sessionRolledOver) {
+          restoreForegroundStreamsFromState((event as any).foreground_streams, {
+            historyTail: Array.isArray(event.history_tail) ? event.history_tail : [],
+            clearIfNone: true,
+          })
+        }
         return
       }
 
@@ -3957,7 +4300,7 @@ export default function App() {
                     <div className="task-interrupt-title-cluster">
                       <div className="task-interrupt-logo-shell" aria-hidden="true">
                         <img
-                          src={cosmicGlassyThunderLogo}
+                          src={cosmicBallLogo}
                           alt=""
                           className="task-interrupt-logo"
                           draggable={false}
@@ -4046,7 +4389,7 @@ export default function App() {
                       <div className="task-interrupt-title-cluster">
                         <div className="task-interrupt-logo-shell" aria-hidden="true">
                           <img
-                            src={cosmicGlassyThunderLogo}
+                            src={cosmicBallLogo}
                             alt=""
                             className="task-interrupt-logo"
                             draggable={false}
@@ -4181,7 +4524,7 @@ export default function App() {
                       <div className="task-interrupt-title-cluster">
                         <div className="task-interrupt-logo-shell" aria-hidden="true">
                           <img
-                            src={cosmicGlassyThunderLogo}
+                            src={cosmicBallLogo}
                             alt=""
                             className="task-interrupt-logo"
                             draggable={false}
@@ -4426,14 +4769,7 @@ export default function App() {
                                             <ReactMarkdown
                                               remarkPlugins={[remarkGfm, remarkMath]}
                                               rehypePlugins={[rehypeKatex]}
-                                              components={{
-                                                table: ({ node, ...props }) => <div className="table-wrapper"><table {...props} /></div>,
-                                                code: ({ node, inline, className, children, ...props }: any) => {
-                                                  if (inline) return <code className="inline-code" {...props}>{children}</code>
-                                                  return <div className="code-block"><code {...props}>{children}</code></div>
-                                                },
-                                                a: ({ node, ...props }) => <a target="_blank" rel="noopener noreferrer" {...props} />,
-                                              }}
+                                              components={assistantMarkdownComponents}
                                             >
                                               {task.partialContent}
                                             </ReactMarkdown>
