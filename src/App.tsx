@@ -206,6 +206,12 @@ interface ActivityLogEntry {
   specialistEventType?: string | null
 }
 
+type ActivityLogEntryInput = Partial<ActivityLogEntry> & {
+  label: string
+}
+
+type ActivityLogEntryLike = ActivityLogEntry | ActivityLogEntryInput
+
 interface DocsProgressState {
   kind: 'docs_parse'
   stage: 'prepare' | 'parse' | 'enhance' | 'ready'
@@ -474,27 +480,55 @@ const mergeCompletedStreamText = (current: string | undefined, completed: unknow
 
 const appendActivityLogEntry = (
   current: ActivityLogEntry[] | undefined,
-  entry: Omit<ActivityLogEntry, 'id' | 'createdAt'>,
+  entry: ActivityLogEntryLike,
 ): ActivityLogEntry[] => {
+  const label = String(entry.label || '').trim()
+  if (!label) {
+    return Array.isArray(current) ? current : []
+  }
   const nextEntry: ActivityLogEntry = {
-    id: `activity_${crypto.randomUUID()}`,
-    createdAt: new Date().toISOString(),
     ...entry,
+    id: typeof entry.id === 'string' && entry.id.trim() ? entry.id.trim() : `activity_${crypto.randomUUID()}`,
+    createdAt: typeof entry.createdAt === 'string' && entry.createdAt.trim() ? entry.createdAt.trim() : new Date().toISOString(),
+    label,
   }
   const existing = Array.isArray(current) ? current : []
-  const last = existing[existing.length - 1]
-  if (
-    last &&
-    last.label === nextEntry.label &&
-    (last.detail || '') === (nextEntry.detail || '') &&
-    (last.status || '') === (nextEntry.status || '') &&
-    (last.stage || '') === (nextEntry.stage || '') &&
-    (last.kind || '') === (nextEntry.kind || '') &&
-    (last.flowRole || '') === (nextEntry.flowRole || '') &&
-    (last.delegatedTaskId || '') === (nextEntry.delegatedTaskId || '') &&
-    (last.parentDelegatedTaskId || '') === (nextEntry.parentDelegatedTaskId || '') &&
-    (last.specialistTaskId || '') === (nextEntry.specialistTaskId || '')
-  ) {
+  const nextSignature = [
+    nextEntry.label,
+    nextEntry.detail || '',
+    nextEntry.status || '',
+    nextEntry.stage || '',
+    nextEntry.kind || '',
+    nextEntry.flowRole || '',
+    nextEntry.delegatedTaskId || '',
+    nextEntry.parentDelegatedTaskId || '',
+    nextEntry.specialistTaskId || '',
+    nextEntry.agentId || '',
+    nextEntry.intent || '',
+    nextEntry.specialistEventType || '',
+  ].join('\u241f')
+  const hasDuplicate = existing.some((item) => {
+    const itemId = String(item.id || '').trim()
+    if (itemId && itemId === nextEntry.id) {
+      return true
+    }
+    const itemSignature = [
+      item.label,
+      item.detail || '',
+      item.status || '',
+      item.stage || '',
+      item.kind || '',
+      item.flowRole || '',
+      item.delegatedTaskId || '',
+      item.parentDelegatedTaskId || '',
+      item.specialistTaskId || '',
+      item.agentId || '',
+      item.intent || '',
+      item.specialistEventType || '',
+    ].join('\u241f')
+    return itemSignature === nextSignature
+  })
+  if (hasDuplicate) {
     return existing
   }
   return [...existing, nextEntry]
@@ -574,34 +608,19 @@ const normalizeActivityLog = (value: unknown): ActivityLogEntry[] | undefined =>
           ? (item as any).specialistEventType.trim()
           : null,
     }
-    const last = normalized[normalized.length - 1]
-    if (
-      last &&
-      last.label === entry.label &&
-      (last.detail || '') === (entry.detail || '') &&
-      (last.status || '') === (entry.status || '') &&
-      (last.stage || '') === (entry.stage || '') &&
-      (last.kind || '') === (entry.kind || '') &&
-      (last.flowRole || '') === (entry.flowRole || '') &&
-      (last.delegatedTaskId || '') === (entry.delegatedTaskId || '') &&
-      (last.parentDelegatedTaskId || '') === (entry.parentDelegatedTaskId || '') &&
-      (last.specialistTaskId || '') === (entry.specialistTaskId || '')
-    ) {
-      continue
-    }
-    normalized.push(entry)
+    const deduped = appendActivityLogEntry(normalized, entry)
+    normalized.splice(0, normalized.length, ...deduped)
   }
   return normalized.length > 0 ? normalized : undefined
 }
 
 const mergeActivityLogEntries = (
   current: ActivityLogEntry[] | undefined,
-  incoming: ActivityLogEntry[] | undefined,
+  incoming: ActivityLogEntryLike[] | undefined,
 ): ActivityLogEntry[] | undefined => {
   let merged = Array.isArray(current) ? current : undefined
   for (const entry of incoming || []) {
-    const { id: _id, createdAt: _createdAt, ...rest } = entry
-    merged = appendActivityLogEntry(merged, rest)
+    merged = appendActivityLogEntry(merged, entry)
   }
   return merged
 }
@@ -1147,12 +1166,7 @@ const AssistantFlowTimeline = ({ entries }: { entries?: ActivityLogEntry[] }) =>
                         <span>{`${index + 1}.${childIndex + 1}`}</span>
                       </div>
                       <div className="assistant-flow-copy">
-                        <div className="assistant-flow-title">
-                          {child.label}
-                          {child.agentLabel && (
-                            <span className="assistant-flow-agent-chip">{child.agentLabel}</span>
-                          )}
-                        </div>
+                        <div className="assistant-flow-title">{child.label}</div>
                         {child.detail && child.detail !== child.label && (
                           <div className="assistant-flow-detail">{child.detail}</div>
                         )}
@@ -3198,11 +3212,7 @@ export default function App() {
             activity: activityText,
             activityLog: mergeActivityLogEntries(
               activityLog,
-              activityEntries.map((entry) => ({
-                id: `activity_${crypto.randomUUID()}`,
-                createdAt: new Date().toISOString(),
-                ...entry,
-              })),
+              activityEntries,
             ),
             progress: progressState,
           })
@@ -3214,11 +3224,7 @@ export default function App() {
             activity: activityText,
             activityLog: mergeActivityLogEntries(
               mergeActivityLogEntries(current.activityLog, activityLog),
-              activityEntries.map((entry) => ({
-                id: `activity_${crypto.randomUUID()}`,
-                createdAt: new Date().toISOString(),
-                ...entry,
-              })),
+              activityEntries,
             ),
             progress: progressState,
             completed: false,
@@ -3409,11 +3415,7 @@ export default function App() {
               activity: activityText,
               activityLog: mergeActivityLogEntries(
                 mergeActivityLogEntries(message.activityLog, activityLog),
-                activityEntries.map((entry) => ({
-                  id: `activity_${crypto.randomUUID()}`,
-                  createdAt: new Date().toISOString(),
-                  ...entry,
-                })),
+                activityEntries,
               ),
               progress: progressState,
               stopped: false,

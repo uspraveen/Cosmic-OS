@@ -112,11 +112,14 @@ function mergeCachedCompletedText(current: string | undefined, completed: unknow
 function appendCachedActivityLog(
   current: any[] | undefined,
   entry: {
+    id?: string
     label: string
     detail?: string
     status?: string | null
     stage?: string | null
     kind?: string | null
+    createdAt?: string
+    created_at?: string
     flow_role?: string | null
     delegated_task_id?: string | null
     parent_delegated_task_id?: string | null
@@ -133,8 +136,14 @@ function appendCachedActivityLog(
   }
   const existing = Array.isArray(current) ? current : []
   const nextEntry = {
-    id: `activity_${crypto.randomUUID()}`,
-    createdAt: new Date().toISOString(),
+    ...entry,
+    id: typeof entry.id === 'string' && entry.id.trim() ? entry.id.trim() : `activity_${crypto.randomUUID()}`,
+    createdAt:
+      typeof entry.createdAt === 'string' && entry.createdAt.trim()
+        ? entry.createdAt.trim()
+        : typeof entry.created_at === 'string' && entry.created_at.trim()
+          ? entry.created_at.trim()
+          : new Date().toISOString(),
     label,
     detail: typeof entry.detail === 'string' && entry.detail.trim() ? entry.detail.trim() : undefined,
     status: typeof entry.status === 'string' && entry.status.trim() ? entry.status.trim() : null,
@@ -149,19 +158,42 @@ function appendCachedActivityLog(
     intent: typeof entry.intent === 'string' && entry.intent.trim() ? entry.intent.trim() : null,
     specialist_event_type: typeof entry.specialist_event_type === 'string' && entry.specialist_event_type.trim() ? entry.specialist_event_type.trim() : null,
   }
-  const last = existing[existing.length - 1]
-  if (
-    last &&
-    String(last.label || '') === nextEntry.label &&
-    String(last.detail || '') === String(nextEntry.detail || '') &&
-    String(last.status || '') === String(nextEntry.status || '') &&
-    String(last.stage || '') === String(nextEntry.stage || '') &&
-    String(last.kind || '') === String(nextEntry.kind || '') &&
-    String((last as any).flow_role || '') === String(nextEntry.flow_role || '') &&
-    String((last as any).delegated_task_id || '') === String(nextEntry.delegated_task_id || '') &&
-    String((last as any).parent_delegated_task_id || '') === String(nextEntry.parent_delegated_task_id || '') &&
-    String((last as any).specialist_task_id || '') === String(nextEntry.specialist_task_id || '')
-  ) {
+  const nextSignature = [
+    nextEntry.label,
+    String(nextEntry.detail || ''),
+    String(nextEntry.status || ''),
+    String(nextEntry.stage || ''),
+    String(nextEntry.kind || ''),
+    String(nextEntry.flow_role || ''),
+    String(nextEntry.delegated_task_id || ''),
+    String(nextEntry.parent_delegated_task_id || ''),
+    String(nextEntry.specialist_task_id || ''),
+    String(nextEntry.agent_id || ''),
+    String(nextEntry.intent || ''),
+    String(nextEntry.specialist_event_type || ''),
+  ].join('\u241f')
+  const hasDuplicate = existing.some((item) => {
+    const itemId = String((item as any)?.id || '').trim()
+    if (itemId && itemId === nextEntry.id) {
+      return true
+    }
+    const itemSignature = [
+      String((item as any)?.label || ''),
+      String((item as any)?.detail || ''),
+      String((item as any)?.status || ''),
+      String((item as any)?.stage || ''),
+      String((item as any)?.kind || ''),
+      String((item as any)?.flow_role || ''),
+      String((item as any)?.delegated_task_id || ''),
+      String((item as any)?.parent_delegated_task_id || ''),
+      String((item as any)?.specialist_task_id || ''),
+      String((item as any)?.agent_id || ''),
+      String((item as any)?.intent || ''),
+      String((item as any)?.specialist_event_type || ''),
+    ].join('\u241f')
+    return itemSignature === nextSignature
+  })
+  if (hasDuplicate) {
     return existing
   }
   return [...existing, nextEntry]
@@ -1021,13 +1053,14 @@ export class GatewayConnectionManager {
         session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
         route: typeof payload.route === 'string' ? payload.route : undefined,
       })
+      const snapshotActivityLog = Array.isArray(payload.activity_log) ? payload.activity_log : undefined
       this.upsertForegroundStream(payload, {
         session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
         route: typeof payload.route === 'string' ? payload.route : undefined,
         activity: activityText,
         activity_log: mergeCachedActivityLogs(
-          Array.isArray(payload.activity_log) ? payload.activity_log : existing?.activity_log,
-          activityEntries,
+          existing?.activity_log,
+          snapshotActivityLog && snapshotActivityLog.length > 0 ? snapshotActivityLog : activityEntries,
         ),
         docs_progress: payload.docs_progress,
         tabular_progress: payload.tabular_progress,
