@@ -2696,6 +2696,8 @@ class OrchestratorRuntime:
                 continue
             raw_artifacts = payload.get("artifacts")
             if not isinstance(raw_artifacts, list):
+                raw_artifacts = payload.get("results")
+            if not isinstance(raw_artifacts, list):
                 continue
             for item in raw_artifacts:
                 if not isinstance(item, dict):
