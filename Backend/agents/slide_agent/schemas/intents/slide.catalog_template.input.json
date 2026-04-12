@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "slide.catalog_template input",
+  "type": "object",
+  "description": "Catalog a PPTX template for future template-mode deck generation.",
+  "properties": {
+    "template_path": {
+      "type": "string",
+      "description": "Path to a PPTX template."
+    },
+    "template": {
+      "type": "string",
+      "description": "Alias for template_path."
+    },
+    "force": {
+      "type": "boolean",
+      "description": "Re-catalog even if a matching cached catalog exists."
+    },
+    "force_catalog": {
+      "type": "boolean",
+      "description": "Alias for force."
+    },
+    "source_artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  "additionalProperties": true
+}

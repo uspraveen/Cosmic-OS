@@ -1917,155 +1917,79 @@ def build_slide_agent_env_rendered(
         source_data.get("GATEWAY_URL"),
         "http://127.0.0.1:8080",
     )
-    mimo_api_key = first_meaningful_value(
-        external_env.get("SLIDE_AGENT_MIMO_API_KEY"),
-        external_env.get("FIREWORKS_API_KEY"),
-        external_env.get("MIMO_API_KEY"),
-        external_env.get("OPENROUTER_API_KEY"),
-        existing_env.get("SLIDE_AGENT_MIMO_API_KEY"),
-        existing_env.get("FIREWORKS_API_KEY"),
-        existing_env.get("MIMO_API_KEY"),
-        existing_env.get("OPENROUTER_API_KEY"),
-        source_data.get("SLIDE_AGENT_MIMO_API_KEY"),
-        source_data.get("FIREWORKS_API_KEY"),
-        source_data.get("MIMO_API_KEY"),
-        source_data.get("OPENROUTER_API_KEY"),
+    def pick_env(names: Sequence[str], default: Optional[str] = None) -> Optional[str]:
+        return first_meaningful_value(
+            *(external_env.get(name) for name in names),
+            *(existing_env.get(name) for name in names),
+            *(source_data.get(name) for name in names),
+            default,
+        )
+
+    mimo_api_key = pick_env(
+        (
+            "MODEL_API_KEY",
+            "SLIDE_AGENT_MIMO_API_KEY",
+            "FIREWORKS_API_KEY",
+            "MIMO_API_KEY",
+            "OPENROUTER_API_KEY",
+        )
     )
-    mimo_base_url = first_meaningful_value(
-        external_env.get("SLIDE_AGENT_MIMO_BASE_URL"),
-        external_env.get("FIREWORKS_BASE_URL"),
-        external_env.get("MIMO_OPENAI_BASE_URL"),
-        external_env.get("OPENROUTER_BASE_URL"),
-        existing_env.get("SLIDE_AGENT_MIMO_BASE_URL"),
-        existing_env.get("FIREWORKS_BASE_URL"),
-        existing_env.get("MIMO_OPENAI_BASE_URL"),
-        existing_env.get("OPENROUTER_BASE_URL"),
-        source_data.get("SLIDE_AGENT_MIMO_BASE_URL"),
-        source_data.get("FIREWORKS_BASE_URL"),
-        source_data.get("MIMO_OPENAI_BASE_URL"),
-        source_data.get("OPENROUTER_BASE_URL"),
+    mimo_base_url = pick_env(
+        (
+            "MODEL_BASE_URL",
+            "SLIDE_AGENT_MIMO_BASE_URL",
+            "FIREWORKS_BASE_URL",
+            "MIMO_OPENAI_BASE_URL",
+            "OPENROUTER_BASE_URL",
+        ),
         "https://api.fireworks.ai/inference/v1",
     )
-    mimo_model = first_meaningful_value(
-        external_env.get("SLIDE_AGENT_MIMO_MODEL"),
-        external_env.get("FIREWORKS_KIMI_MODEL"),
-        existing_env.get("SLIDE_AGENT_MIMO_MODEL"),
-        existing_env.get("FIREWORKS_KIMI_MODEL"),
-        source_data.get("SLIDE_AGENT_MIMO_MODEL"),
-        source_data.get("FIREWORKS_KIMI_MODEL"),
-        "accounts/fireworks/models/kimi-k2p5",
+    mimo_model = pick_env(
+        ("MODEL_NAME", "SLIDE_AGENT_MIMO_MODEL", "FIREWORKS_KIMI_MODEL"),
+        "accounts/fireworks/models/qwen3p6-plus",
     )
-    mimo_timeout_sec = first_meaningful_value(
-        external_env.get("SLIDE_AGENT_MIMO_TIMEOUT_SEC"),
-        existing_env.get("SLIDE_AGENT_MIMO_TIMEOUT_SEC"),
-        source_data.get("SLIDE_AGENT_MIMO_TIMEOUT_SEC"),
-        "120.0",
+    model_timeout_sec = pick_env(
+        ("MODEL_TIMEOUT_SEC", "SLIDE_AGENT_MIMO_TIMEOUT_SEC"),
+        "300",
     )
-    mimo_temperature = first_meaningful_value(
-        external_env.get("SLIDE_AGENT_MIMO_TEMPERATURE"),
-        existing_env.get("SLIDE_AGENT_MIMO_TEMPERATURE"),
-        source_data.get("SLIDE_AGENT_MIMO_TEMPERATURE"),
-        "0.6",
-    )
-    mimo_reasoning_enabled = first_meaningful_value(
-        external_env.get("SLIDE_AGENT_MIMO_REASONING_ENABLED"),
-        existing_env.get("SLIDE_AGENT_MIMO_REASONING_ENABLED"),
-        source_data.get("SLIDE_AGENT_MIMO_REASONING_ENABLED"),
-        "true",
-    )
-    mimo_reasoning_max_tokens = first_meaningful_value(
-        external_env.get("SLIDE_AGENT_MIMO_REASONING_MAX_TOKENS"),
-        existing_env.get("SLIDE_AGENT_MIMO_REASONING_MAX_TOKENS"),
-        source_data.get("SLIDE_AGENT_MIMO_REASONING_MAX_TOKENS"),
-        "256",
-    )
-    mimo_app_name = first_meaningful_value(
-        external_env.get("SLIDE_AGENT_MIMO_APP_NAME"),
-        existing_env.get("SLIDE_AGENT_MIMO_APP_NAME"),
-        source_data.get("SLIDE_AGENT_MIMO_APP_NAME"),
-        "COSMIC Slide Agent",
-    )
-    mimo_site_url = first_meaningful_value(
-        external_env.get("SLIDE_AGENT_MIMO_SITE_URL"),
-        external_env.get("OPENROUTER_SITE_URL"),
-        existing_env.get("SLIDE_AGENT_MIMO_SITE_URL"),
-        existing_env.get("OPENROUTER_SITE_URL"),
-        source_data.get("SLIDE_AGENT_MIMO_SITE_URL"),
-        source_data.get("OPENROUTER_SITE_URL"),
-        "",
-    )
-    enable_internal_llm = first_meaningful_value(
-        external_env.get("SLIDE_AGENT_ENABLE_INTERNAL_LLM"),
-        existing_env.get("SLIDE_AGENT_ENABLE_INTERNAL_LLM"),
-        source_data.get("SLIDE_AGENT_ENABLE_INTERNAL_LLM"),
-        "true",
-    )
-    use_langgraph = first_meaningful_value(
-        external_env.get("SLIDE_AGENT_USE_LANGGRAPH"),
-        existing_env.get("SLIDE_AGENT_USE_LANGGRAPH"),
-        source_data.get("SLIDE_AGENT_USE_LANGGRAPH"),
-        "true",
-    )
-    max_tool_rounds = first_meaningful_value(
-        external_env.get("SLIDE_AGENT_MAX_TOOL_ROUNDS"),
-        existing_env.get("SLIDE_AGENT_MAX_TOOL_ROUNDS"),
-        source_data.get("SLIDE_AGENT_MAX_TOOL_ROUNDS"),
-        "10",
-    )
-    max_doc_context_requests = first_meaningful_value(
-        external_env.get("SLIDE_AGENT_MAX_DOC_CONTEXT_REQUESTS"),
-        existing_env.get("SLIDE_AGENT_MAX_DOC_CONTEXT_REQUESTS"),
-        source_data.get("SLIDE_AGENT_MAX_DOC_CONTEXT_REQUESTS"),
-        "2",
-    )
-    default_template = first_meaningful_value(
-        external_env.get("SLIDE_AGENT_DEFAULT_TEMPLATE"),
-        existing_env.get("SLIDE_AGENT_DEFAULT_TEMPLATE"),
-        source_data.get("SLIDE_AGENT_DEFAULT_TEMPLATE"),
-        "business-meeting",
-    )
-    libreoffice_path = first_meaningful_value(
-        external_env.get("SLIDE_AGENT_LIBREOFFICE_PATH"),
-        existing_env.get("SLIDE_AGENT_LIBREOFFICE_PATH"),
-        source_data.get("SLIDE_AGENT_LIBREOFFICE_PATH"),
+    model_http_retries = pick_env(("MODEL_HTTP_RETRIES",), "3")
+    model_max_tokens = pick_env(("MODEL_MAX_TOKENS",), "16384")
+    html_model_max_tokens = pick_env(("HTML_MODEL_MAX_TOKENS",), "4096")
+    vision_model_name = pick_env(("VISION_MODEL_NAME",), mimo_model)
+    libreoffice_path = pick_env(
+        ("LIBREOFFICE_PATH", "SLIDE_AGENT_LIBREOFFICE_PATH"),
         "soffice",
     )
-    pdftoppm_path = first_meaningful_value(
-        external_env.get("SLIDE_AGENT_PDFTOPPM_PATH"),
-        existing_env.get("SLIDE_AGENT_PDFTOPPM_PATH"),
-        source_data.get("SLIDE_AGENT_PDFTOPPM_PATH"),
+    pdftoppm_path = pick_env(
+        ("PDFTOPPM_PATH", "SLIDE_AGENT_PDFTOPPM_PATH"),
         "pdftoppm",
     )
-    render_dpi = first_meaningful_value(
-        external_env.get("SLIDE_AGENT_RENDER_DPI"),
-        existing_env.get("SLIDE_AGENT_RENDER_DPI"),
-        source_data.get("SLIDE_AGENT_RENDER_DPI"),
-        "200",
-    )
-    export_pdf = first_meaningful_value(
-        external_env.get("SLIDE_AGENT_EXPORT_PDF"),
-        existing_env.get("SLIDE_AGENT_EXPORT_PDF"),
-        source_data.get("SLIDE_AGENT_EXPORT_PDF"),
-        "true",
-    )
-    max_slides = first_meaningful_value(
-        external_env.get("SLIDE_AGENT_MAX_SLIDES"),
-        existing_env.get("SLIDE_AGENT_MAX_SLIDES"),
-        source_data.get("SLIDE_AGENT_MAX_SLIDES"),
-        "50",
-    )
-    max_validation_attempts = first_meaningful_value(
-        external_env.get("SLIDE_AGENT_MAX_VALIDATION_ATTEMPTS"),
-        existing_env.get("SLIDE_AGENT_MAX_VALIDATION_ATTEMPTS"),
-        source_data.get("SLIDE_AGENT_MAX_VALIDATION_ATTEMPTS"),
-        "4",
-    )
-    docs_parser_agent_id = first_meaningful_value(
-        external_env.get("SLIDE_AGENT_DOCS_PARSER_AGENT_ID"),
-        existing_env.get("SLIDE_AGENT_DOCS_PARSER_AGENT_ID"),
-        source_data.get("SLIDE_AGENT_DOCS_PARSER_AGENT_ID"),
+    max_slides = pick_env(("SLIDE_AGENT_MAX_SLIDES", "MAX_SLIDES"), "50")
+    max_slides_per_deck = pick_env(("SLIDE_AGENT_MAX_SLIDES_PER_DECK",), "50")
+    validate_outputs = pick_env(("SLIDE_AGENT_VALIDATE_OUTPUTS",), "true")
+    force_catalog_default = pick_env(("SLIDE_AGENT_FORCE_CATALOG_DEFAULT",), "false")
+    catalog_parallelism = pick_env(("CATALOG_PARALLELISM",), "5")
+    builder_parallelism = pick_env(("BUILDER_PARALLELISM",), "2")
+    builder_max_repair_rounds = pick_env(("BUILDER_MAX_REPAIR_ROUNDS",), "2")
+    html_max_repair_rounds = pick_env(("HTML_MAX_REPAIR_ROUNDS",), "1")
+    html_render_timeout_ms = pick_env(("HTML_RENDER_TIMEOUT_MS",), "45000")
+    html_viewport_width = pick_env(("HTML_VIEWPORT_WIDTH",), "1440")
+    html_viewport_height = pick_env(("HTML_VIEWPORT_HEIGHT",), "900")
+    html_device_scale = pick_env(("HTML_DEVICE_SCALE",), "1.5")
+    docs_parser_agent_id = pick_env(
+        ("SLIDE_AGENT_DOCS_PARSER_AGENT_ID",),
         DOCS_PARSER_AGENT_ID,
     )
+    default_workflow = pick_env(("SLIDE_AGENT_DEFAULT_WORKFLOW",), "")
+    enable_python_sandbox_tool = pick_env(("ENABLE_PYTHON_SANDBOX_TOOL",), "true")
+    python_sandbox_timeout_sec = pick_env(("PYTHON_SANDBOX_TIMEOUT_SEC",), "25")
+    python_sandbox_max_files = pick_env(("PYTHON_SANDBOX_MAX_FILES",), "8")
+    python_sandbox_max_bytes_per_file = pick_env(("PYTHON_SANDBOX_MAX_BYTES_PER_FILE",), "10000000")
+    python_sandbox_max_script_bytes = pick_env(("PYTHON_SANDBOX_MAX_SCRIPT_BYTES",), "256000")
+    python_sandbox_allow_network = pick_env(("PYTHON_SANDBOX_ALLOW_NETWORK",), "false")
+    python_sandbox_allow_pip = pick_env(("PYTHON_SANDBOX_ALLOW_PIP",), "false")
+    python_sandbox_pip_timeout_sec = pick_env(("PYTHON_SANDBOX_PIP_TIMEOUT_SEC",), "120")
+    python_sandbox_venv_cache_root = pick_env(("PYTHON_SANDBOX_VENV_CACHE_ROOT",), "")
     instance_id = first_meaningful_value(
         external_env.get("INSTANCE_ID"),
         existing_env.get("INSTANCE_ID"),
@@ -2079,31 +2003,48 @@ def build_slide_agent_env_rendered(
         "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
         "AGENT_SECRET": signing_secret,
         "INSTANCE_ID": instance_id or SLIDE_AGENT_DEFAULT_INSTANCE_ID,
-        "SLIDE_AGENT_MIMO_MODEL": mimo_model or "accounts/fireworks/models/kimi-k2p5",
-        "SLIDE_AGENT_MIMO_TIMEOUT_SEC": mimo_timeout_sec or "120.0",
-        "SLIDE_AGENT_MIMO_TEMPERATURE": mimo_temperature or "0.6",
-        "SLIDE_AGENT_MIMO_REASONING_ENABLED": mimo_reasoning_enabled or "true",
-        "SLIDE_AGENT_MIMO_REASONING_MAX_TOKENS": mimo_reasoning_max_tokens or "256",
-        "SLIDE_AGENT_MIMO_APP_NAME": mimo_app_name or "COSMIC Slide Agent",
-        "SLIDE_AGENT_MIMO_SITE_URL": mimo_site_url or "",
-        "SLIDE_AGENT_ENABLE_INTERNAL_LLM": enable_internal_llm or "true",
-        "SLIDE_AGENT_USE_LANGGRAPH": use_langgraph or "true",
-        "SLIDE_AGENT_MAX_TOOL_ROUNDS": max_tool_rounds or "10",
-        "SLIDE_AGENT_MAX_DOC_CONTEXT_REQUESTS": max_doc_context_requests or "2",
-        "SLIDE_AGENT_DEFAULT_TEMPLATE": default_template or "business-meeting",
+        "SLIDE_AGENT_MIMO_BASE_URL": mimo_base_url
+        or "https://api.fireworks.ai/inference/v1",
+        "SLIDE_AGENT_MIMO_MODEL": mimo_model
+        or "accounts/fireworks/models/qwen3p6-plus",
+        "VISION_MODEL_NAME": vision_model_name
+        or mimo_model
+        or "accounts/fireworks/models/qwen3p6-plus",
+        "MODEL_TIMEOUT_SEC": model_timeout_sec or "300",
+        "MODEL_HTTP_RETRIES": model_http_retries or "3",
+        "MODEL_MAX_TOKENS": model_max_tokens or "16384",
+        "HTML_MODEL_MAX_TOKENS": html_model_max_tokens or "4096",
         "SLIDE_AGENT_LIBREOFFICE_PATH": libreoffice_path or "soffice",
         "SLIDE_AGENT_PDFTOPPM_PATH": pdftoppm_path or "pdftoppm",
-        "SLIDE_AGENT_RENDER_DPI": render_dpi or "200",
-        "SLIDE_AGENT_EXPORT_PDF": export_pdf or "true",
         "SLIDE_AGENT_MAX_SLIDES": max_slides or "50",
-        "SLIDE_AGENT_MAX_VALIDATION_ATTEMPTS": max_validation_attempts or "4",
+        "SLIDE_AGENT_MAX_SLIDES_PER_DECK": max_slides_per_deck or "50",
+        "SLIDE_AGENT_VALIDATE_OUTPUTS": validate_outputs or "true",
+        "SLIDE_AGENT_FORCE_CATALOG_DEFAULT": force_catalog_default or "false",
+        "CATALOG_PARALLELISM": catalog_parallelism or "5",
+        "BUILDER_PARALLELISM": builder_parallelism or "2",
+        "BUILDER_MAX_REPAIR_ROUNDS": builder_max_repair_rounds or "2",
+        "HTML_MAX_REPAIR_ROUNDS": html_max_repair_rounds or "1",
+        "HTML_RENDER_TIMEOUT_MS": html_render_timeout_ms or "45000",
+        "HTML_VIEWPORT_WIDTH": html_viewport_width or "1440",
+        "HTML_VIEWPORT_HEIGHT": html_viewport_height or "900",
+        "HTML_DEVICE_SCALE": html_device_scale or "1.5",
         "SLIDE_AGENT_DOCS_PARSER_AGENT_ID": docs_parser_agent_id
         or DOCS_PARSER_AGENT_ID,
+        "SLIDE_AGENT_DEFAULT_WORKFLOW": default_workflow or "",
+        "ENABLE_PYTHON_SANDBOX_TOOL": enable_python_sandbox_tool or "true",
+        "PYTHON_SANDBOX_TIMEOUT_SEC": python_sandbox_timeout_sec or "25",
+        "PYTHON_SANDBOX_MAX_FILES": python_sandbox_max_files or "8",
+        "PYTHON_SANDBOX_MAX_BYTES_PER_FILE": python_sandbox_max_bytes_per_file
+        or "10000000",
+        "PYTHON_SANDBOX_MAX_SCRIPT_BYTES": python_sandbox_max_script_bytes
+        or "256000",
+        "PYTHON_SANDBOX_ALLOW_NETWORK": python_sandbox_allow_network or "false",
+        "PYTHON_SANDBOX_ALLOW_PIP": python_sandbox_allow_pip or "false",
+        "PYTHON_SANDBOX_PIP_TIMEOUT_SEC": python_sandbox_pip_timeout_sec or "120",
+        "PYTHON_SANDBOX_VENV_CACHE_ROOT": python_sandbox_venv_cache_root or "",
     }
     if mimo_api_key is not None:
         overrides["SLIDE_AGENT_MIMO_API_KEY"] = mimo_api_key
-    if mimo_base_url is not None:
-        overrides["SLIDE_AGENT_MIMO_BASE_URL"] = mimo_base_url
 
     rendered = render_env_with_overrides(source_raw, overrides)
     rendered_data = parse_env_text(rendered)

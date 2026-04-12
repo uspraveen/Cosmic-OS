@@ -1,1 +1,1 @@
-"""Slide Agent — Presentation creation and editing specialist for COSMIC."""
+"""COSMIC Slide Agent adapter over the copied cosmic-slides-2 core."""

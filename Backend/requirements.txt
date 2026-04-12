@@ -19,5 +19,8 @@ pyyaml
 redis
 python-dotenv
 python-pptx
+playwright
+reportlab
+svglib
 xai-sdk
 uvicorn[standard]

@@ -1,0 +1,26 @@
+# cosmic-slides-2 dependencies
+
+# HTTP client
+httpx
+
+# Environment variables
+python-dotenv
+
+# Presentation building
+python-pptx
+
+# Image processing (collage, thumbnails)
+Pillow
+
+# HTML rendering backend
+playwright
+
+# SVG → PNG conversion (icons)
+svglib
+reportlab
+
+# LangGraph (slide builder pipeline)
+langgraph
+
+# Type hints backport
+typing_extensions

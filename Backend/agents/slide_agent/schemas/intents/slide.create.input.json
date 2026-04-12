@@ -1,11 +1,67 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "slide.create input",
   "type": "object",
+  "description": "Create a deck from a natural-language brief.",
+  "required": ["description"],
   "properties": {
-    "description": { "type": "string", "description": "Natural language description of the slide deck to create" },
-    "template": { "type": "string", "description": "Template name (business-meeting, tech-trends, science-lesson, tech-infographics, blank)" },
-    "data": { "type": "object", "description": "Structured data to include in the deck (tables, chart data, etc.)" },
-    "source_artifacts": { "type": "array", "items": { "type": "object" }, "description": "Input artifacts (PDFs, images) to incorporate" }
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Deck brief or source content."
+    },
+    "query": {
+      "type": "string",
+      "description": "Alias for description."
+    },
+    "workflow": {
+      "type": "string",
+      "enum": ["html", "template", "auto"],
+      "description": "html is fast/non-editable; template is slower/editable; auto routes from template presence."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["html", "template", "auto"]
+    },
+    "template_path": {
+      "type": "string",
+      "description": "Optional PPTX template path."
+    },
+    "template": {
+      "type": "string",
+      "description": "Optional template path or template name."
+    },
+    "max_slides": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Requested total slide count. Requests above the per-file deck limit are split into multiple PPTX outputs."
+    },
+    "slides": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "validate": {
+      "type": "boolean",
+      "description": "Run visual validation when supported."
+    },
+    "force_catalog": {
+      "type": "boolean",
+      "description": "Force template re-cataloging."
+    },
+    "source_artifacts": {
+      "type": "array",
+      "description": "Optional artifacts forwarded by the orchestrator, including raw PDF/DOC/DOCX/PPT/PPTX source documents or docs.parse_bundle outputs used as deck source material.",
+      "items": {
+        "type": "object"
+      }
+    },
+    "source_documents": {
+      "type": "array",
+      "description": "Optional parsed document summaries from docs.parse_bundle.",
+      "items": {
+        "type": "object"
+      }
+    }
   },
-  "required": ["description"]
+  "additionalProperties": true
 }

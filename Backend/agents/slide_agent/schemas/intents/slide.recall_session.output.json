@@ -1,9 +1,18 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "slide.recall_session output",
   "type": "object",
+  "required": ["history", "count"],
   "properties": {
-    "history": { "type": "array", "items": { "type": "object" } },
-    "count": { "type": "integer" }
+    "history": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "count": {
+      "type": "integer"
+    }
   },
-  "required": ["history", "count"]
+  "additionalProperties": true
 }

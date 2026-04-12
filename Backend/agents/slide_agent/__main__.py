@@ -1,26 +1,25 @@
+"""Run the COSMIC Slide Agent."""
+
 from __future__ import annotations
 
 import asyncio
 
-from shared.redis_client import create_redis_client
+import redis.asyncio as redis
 
 from .agent import SlideAgent
 from .config import SlideAgentConfig
 
 
 async def main() -> None:
-    config = SlideAgentConfig.from_env()
-    if not config.redis_url:
-        raise RuntimeError("REDIS_URL is not configured for slide_agent.")
-
-    redis_client = create_redis_client(config.redis_url)
-    agent = SlideAgent(redis_client=redis_client, config=config)
+    cfg = SlideAgentConfig.from_env()
+    client = redis.from_url(cfg.redis_url, decode_responses=True)
+    agent = SlideAgent(client, config=cfg)
     try:
         await agent.register()
         await agent.run()
     finally:
         await agent.stop()
-        await redis_client.aclose()
+        await client.aclose()
 
 
 if __name__ == "__main__":

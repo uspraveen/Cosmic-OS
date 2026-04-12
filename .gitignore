@@ -24,6 +24,8 @@ Backend/bridges/*/runtime/
 auth_info_baileys/
 Backend/agents/*/runtime/
 Backend/agents/*/store/
+Backend/agents/slide_agent/assets/cache/
+Backend/agents/slide_agent/catalogs/
 Backend/runs/artifacts/
 
 # Editor directories and files

@@ -1,10 +1,51 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "slide.edit input",
   "type": "object",
+  "description": "Revise an existing PPTX deck.",
+  "required": ["edit_request"],
   "properties": {
-    "source_pptx_path": { "type": "string", "description": "Path to the existing PPTX to edit" },
-    "edit_request": { "type": "string", "description": "Natural language description of the edits to make" },
-    "source_artifacts": { "type": "array", "items": { "type": "object" }, "description": "Optional source artifacts (PDFs, images, docs-parser bundles) to reuse during edits" }
+    "edit_request": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Requested changes to apply."
+    },
+    "description": {
+      "type": "string",
+      "description": "Alias for edit_request."
+    },
+    "source_pptx_path": {
+      "type": "string",
+      "description": "Path to the existing PPTX deck."
+    },
+    "pptx_path": {
+      "type": "string",
+      "description": "Alias for source_pptx_path."
+    },
+    "max_slides": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "validate": {
+      "type": "boolean"
+    },
+    "force_catalog": {
+      "type": "boolean"
+    },
+    "source_artifacts": {
+      "type": "array",
+      "description": "Optional artifacts forwarded by the orchestrator, including supporting PDF/DOC/DOCX/PPT source documents or docs.parse_bundle outputs for the requested edit.",
+      "items": {
+        "type": "object"
+      }
+    },
+    "source_documents": {
+      "type": "array",
+      "description": "Optional parsed document summaries from docs.parse_bundle.",
+      "items": {
+        "type": "object"
+      }
+    }
   },
-  "required": ["source_pptx_path", "edit_request"]
+  "additionalProperties": true
 }

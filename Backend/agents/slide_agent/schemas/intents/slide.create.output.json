@@ -1,14 +1,60 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "slide.create output",
   "type": "object",
+  "required": ["pptx_path", "slide_count", "workflow", "editable"],
   "properties": {
-    "pptx_path": { "type": "string" },
-    "pdf_path": { "type": "string" },
-    "slide_count": { "type": "integer" },
-    "template": { "type": "string" },
-    "title": { "type": "string" },
-    "validation_pass": { "type": "boolean" },
-    "validation_issues": { "type": "array", "items": { "type": "string" } }
+    "response": {
+      "type": "string"
+    },
+    "workflow": {
+      "type": "string",
+      "enum": ["html", "template"]
+    },
+    "editable": {
+      "type": "boolean"
+    },
+    "pptx_path": {
+      "type": "string"
+    },
+    "pdf_path": {
+      "type": "string"
+    },
+    "slide_count": {
+      "type": "integer"
+    },
+    "split": {
+      "type": "boolean",
+      "description": "True when the requested deck was split into multiple PPTX files."
+    },
+    "max_slides_per_deck": {
+      "type": "integer"
+    },
+    "deck_parts": {
+      "type": "array",
+      "description": "Produced deck parts when split=true.",
+      "items": {
+        "type": "object"
+      }
+    },
+    "template": {
+      "type": ["string", "null"]
+    },
+    "template_path": {
+      "type": ["string", "null"]
+    },
+    "title": {
+      "type": "string"
+    },
+    "validation_pass": {
+      "type": "boolean"
+    },
+    "validation_issues": {
+      "type": "array"
+    },
+    "edit_mode": {
+      "type": ["string", "null"]
+    }
   },
-  "required": ["pptx_path", "slide_count"]
+  "additionalProperties": true
 }

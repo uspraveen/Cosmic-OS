@@ -1,73 +1,88 @@
-# agents/slide_agent/agent_card.yaml
-
 agent_id: cosmic/slide-agent:1.0.0
 display_name: Slide Agent
 description: >
-  Specialist agent for creating and editing PowerPoint presentations.
-  Plans full slide decks in JSON, builds them with python-pptx using professional
-  templates, reads parsed document bundles locally, delegates image/diagram generation,
-  and uses orchestrator-mediated docs lookups only when deeper source retrieval is needed.
+  Specialist agent for creating, editing, and cataloging presentation decks using the
+  copied cosmic-slides-2 core. Supports a fast HTML/image-backed workflow and a
+  slower template-backed editable PowerPoint workflow.
 
 intents:
   - name: slide.create
-    description: Create a new slide deck from a description, document, or structured data
+    description: Create a new slide deck using either HTML mode or template mode.
     input_schema: schemas/intents/slide.create.input.json
     output_schema: schemas/intents/slide.create.output.json
-    timeout_sec: 300
+    timeout_sec: 900
     usage_hints:
-      - Use this for new decks from a brief, parsed document bundle, uploaded source artifact, or structured data payload.
-      - Prefer passing compact bundle refs and `source_artifacts`; do not inline whole documents, full image bytes, or long extracted text into the payload.
-      - Parsed document bundles are the canonical source for uploaded PDFs/DOCX/PPTX. The slide agent reads those bundles locally and only asks the docs specialist for deeper retrieval through orchestrator when needed.
-      - If the user wants generated visuals, let the slide agent delegate image or diagram creation internally; do not pre-generate every asset unless the request explicitly calls for that.
+      - Do not delegate a new deck request here until the user has chosen workflow=html or workflow=template, unless the user explicitly passed workflow=auto or provided a template.
+      - HTML mode is fast and produces an image-backed, non-editable PPTX.
+      - Template mode is slower and produces an editable PPTX from an uploaded template or an auto-selected template from the agent templates folder.
+      - If multiple templates exist and no template is specified, the agent plans the deck then selects the best matching template internally.
+      - If the user uploads PDF/DOC/DOCX/PPT/PPTX source material for deck content, pass it through input_artifacts or source_artifacts; the agent delegates raw documents to docs.parse_bundle and injects parsed context before generation.
+      - For large parsed source documents, the agent retrieves source pages/slides in bounded windows internally; do not inline the full PDF/doc text in the orchestrator prompt.
+      - Each produced PPTX is capped at 50 slides by default. If a request needs more slides, the agent splits it into multiple deck parts and returns all produced decks.
+      - "'One slide per page/slide' requests are handled by segmented source retrieval, preserving source order across split deck parts."
 
   - name: slide.edit
-    description: Edit an existing PPTX (add/remove/reorder slides, restyle, modify content)
+    description: Revise an existing PPTX using the uploaded/source deck as the editable template backbone.
     input_schema: schemas/intents/slide.edit.input.json
-    output_schema: schemas/intents/slide.edit.output.json
-    timeout_sec: 300
+    output_schema: schemas/intents/slide.create.output.json
+    timeout_sec: 900
     usage_hints:
-      - Use this when the user already has a PPTX and wants bounded edits, restyling, content replacement, or new slides added into the deck.
-      - Pass the existing PPTX as an input artifact plus a compact edit brief; do not expand the whole deck into prompt text.
-      - If edits depend on uploaded documents, pass their parsed bundle artifacts or source artifacts and let the slide agent read them locally before requesting deeper docs retrieval through orchestrator.
-      - If an edit needs a replacement visual, the slide agent can orchestrator-delegate image or diagram generation and then apply the returned artifact to the deck.
+      - Use this when the user uploads an existing slide deck and asks to edit it.
+      - Pass source_pptx_path or attach the PPTX as an input artifact.
+      - Current edit mode is template-backed regeneration, not low-level in-place shape patching.
+      - Supporting PDF/DOC/DOCX/PPT source material can also be attached; the agent parses it through docs.parse_bundle and uses the parsed context in the regeneration brief.
+
+  - name: slide.catalog_template
+    description: Catalog a PPTX template so the template workflow can use it later.
+    input_schema: schemas/intents/slide.catalog_template.input.json
+    output_schema: schemas/intents/slide.catalog_template.output.json
+    timeout_sec: 900
+    usage_hints:
+      - Use this when the user uploads a PPTX template and asks to catalog it.
+      - Uploaded templates are copied into the Slide Agent templates folder before cataloging.
 
   - name: slide.recall_session
-    description: Recall prior slide operations from the session ledger
+    description: Recall recent Slide Agent outputs for a session.
     input_schema: schemas/intents/slide.recall_session.input.json
     output_schema: schemas/intents/slide.recall_session.output.json
     timeout_sec: 30
     usage_hints:
-      - Recall prior slide-agent work when you want to reuse an earlier deck/edit result instead of replanning from scratch.
+      - Use this to find recent slide outputs or workflow/template choices from the current session.
 
 artifact_types:
-  - slide_pptx
-  - slide_pdf
-  - slide_preview_png
-  - slide_source_json
+  - pptx_deck
+  - pdf_preview
+  - slide_contact_sheet
+  - slide_build_report
+  - template_catalog
+  - parsed_document_bundle
 
 policies:
   network_access: true
   writable_paths:
     - runs/artifacts
-    - agents/slide_agent/store
-    - agents/slide_agent/runtime
     - agents/slide_agent/templates
+    - agents/slide_agent/catalogs
+    - agents/slide_agent/assets
+    - agents/slide_agent/runtime
+    - agents/slide_agent/store
   tool_access: []
   allowed_senders:
     - cosmic/orchestrator:1.0.0
   intent_authorization:
     slide.create: [cosmic/orchestrator:1.0.0]
     slide.edit: [cosmic/orchestrator:1.0.0]
+    slide.catalog_template: [cosmic/orchestrator:1.0.0]
     slide.recall_session: [cosmic/orchestrator:1.0.0]
 
 sla:
-  max_concurrency: 2
+  max_concurrency: 1
   heartbeat_interval_sec: 10
   heartbeat_ttl_sec: 30
-  max_task_duration_sec: 600
+  max_task_duration_sec: 900
   health_endpoint: /health
   retry_policy:
-    max_attempts: 3
+    max_attempts: 1
     backoff: exponential
     backoff_base_sec: 2
     backoff_max_sec: 60
@@ -77,15 +92,15 @@ sla:
       - RATE_LIMITED
     non_retryable_codes:
       - INVALID_INPUT
-      - AUTH_ERROR
-      - SCHEMA_VIOLATION
+      - MISSING_ARTIFACT
+      - NEEDS_WORKFLOW_CHOICE
       - INTERNAL_ERROR
 
 stream_key: streams:cosmic/slide-agent:1.0.0
 
 version_info:
   semver: 1.0.0
-  released_at: "2026-04-01"
+  released_at: "2026-04-11"
   deprecated_at: null
   remove_after: null
   changelog: CHANGELOG.md
