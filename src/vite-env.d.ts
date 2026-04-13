@@ -142,6 +142,7 @@ interface Window {
       messageId: string
       artifactId: string
       suggestedFilename?: string
+      mimeType?: string
     }) => Promise<{ cancelled: true } | { cancelled: false; filePath: string; filename: string }>
 
     // Local key status APIs

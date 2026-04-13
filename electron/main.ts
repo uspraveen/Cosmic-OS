@@ -225,11 +225,83 @@ function inferDesktopAttachmentMimeType(filename: string) {
   if (extension === '.pdf') return 'application/pdf'
   if (extension === '.docx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
   if (extension === '.pptx') return 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+  if (extension === '.xlsx') return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  if (extension === '.csv') return 'text/csv'
+  if (extension === '.txt') return 'text/plain'
+  if (extension === '.md') return 'text/markdown'
+  if (extension === '.json') return 'application/json'
+  if (extension === '.zip') return 'application/zip'
+  if (extension === '.svg') return 'image/svg+xml'
   if (extension === '.jpg' || extension === '.jpeg') return 'image/jpeg'
   if (extension === '.png') return 'image/png'
   if (extension === '.gif') return 'image/gif'
   if (extension === '.webp') return 'image/webp'
   return 'application/octet-stream'
+}
+
+function inferExtensionFromMimeType(mimeType: string | undefined | null): string {
+  const normalized = String(mimeType || '').trim().toLowerCase().split(';', 1)[0]
+  if (!normalized) return ''
+  if (normalized === 'application/pdf') return 'pdf'
+  if (normalized === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') return 'docx'
+  if (normalized === 'application/vnd.openxmlformats-officedocument.presentationml.presentation') return 'pptx'
+  if (normalized === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') return 'xlsx'
+  if (normalized === 'text/csv') return 'csv'
+  if (normalized === 'text/plain') return 'txt'
+  if (normalized === 'text/markdown') return 'md'
+  if (normalized === 'application/json') return 'json'
+  if (normalized === 'application/zip') return 'zip'
+  if (normalized === 'image/svg+xml') return 'svg'
+  if (normalized === 'image/jpeg') return 'jpg'
+  if (normalized === 'image/png') return 'png'
+  if (normalized === 'image/gif') return 'gif'
+  if (normalized === 'image/webp') return 'webp'
+  return ''
+}
+
+function resolveDownloadFilename(filename: string, mimeType?: string | null) {
+  const trimmed = String(filename || '').trim() || 'download'
+  const existingExtension = path.extname(trimmed).replace(/^\./, '').toLowerCase()
+  const inferredExtension = existingExtension || inferExtensionFromMimeType(mimeType)
+  const normalizedFilename = existingExtension || !inferredExtension
+    ? trimmed
+    : `${trimmed}.${inferredExtension}`
+  return {
+    filename: normalizedFilename,
+    extension: inferredExtension,
+  }
+}
+
+function buildSaveDialogOptions(title: string, filename: string, mimeType?: string | null): Electron.SaveDialogOptions {
+  const resolved = resolveDownloadFilename(filename, mimeType)
+  const options: Electron.SaveDialogOptions = {
+    title,
+    defaultPath: resolved.filename,
+  }
+  if (resolved.extension) {
+    options.filters = [
+      {
+        name: resolved.extension.toUpperCase(),
+        extensions: [resolved.extension],
+      },
+      {
+        name: 'All files',
+        extensions: ['*'],
+      },
+    ]
+  }
+  return options
+}
+
+function ensureFilePathExtension(filePath: string, mimeType?: string | null) {
+  if (path.extname(String(filePath || '').trim())) {
+    return filePath
+  }
+  const extension = inferExtensionFromMimeType(mimeType)
+  if (!extension) {
+    return filePath
+  }
+  return `${filePath}.${extension}`
 }
 
 async function pickGatewayDocuments() {
@@ -1814,6 +1886,7 @@ app.whenReady().then(() => {
     messageId?: string
     artifactId?: string
     suggestedFilename?: string
+    mimeType?: string
     timeoutMs?: number
   }) => {
     const config = getStoredGatewayTransportConfig()
@@ -1862,6 +1935,7 @@ app.whenReady().then(() => {
       }
 
       const cd = response.headers.get('content-disposition')
+      const responseMimeType = String(response.headers.get('content-type') || '').trim().split(';', 1)[0]
       let filename = (payload?.suggestedFilename && String(payload.suggestedFilename).trim()) || 'artifact'
       if (cd) {
         const m = /filename\*=UTF-8''([^;]+)|filename=\"([^\"]+)\"/i.exec(cd)
@@ -1874,26 +1948,28 @@ app.whenReady().then(() => {
           }
         }
       }
+      const effectiveMimeType =
+        (payload?.mimeType && String(payload.mimeType).trim()) ||
+        responseMimeType ||
+        inferDesktopAttachmentMimeType(filename)
+      const saveDialogOpts = buildSaveDialogOptions('Save file', filename, effectiveMimeType)
 
       const bytes = Buffer.from(await response.arrayBuffer())
 
       const saveTarget = win
-        ? await dialog.showSaveDialog(win, {
-            defaultPath: filename,
-          })
-        : await dialog.showSaveDialog({
-            defaultPath: filename,
-          })
+        ? await dialog.showSaveDialog(win, saveDialogOpts)
+        : await dialog.showSaveDialog(saveDialogOpts)
       if (saveTarget.canceled || !saveTarget.filePath) {
         return { cancelled: true }
       }
 
-      await fs.mkdir(path.dirname(saveTarget.filePath), { recursive: true })
-      await fs.writeFile(saveTarget.filePath, bytes)
+      const outputFilePath = ensureFilePathExtension(saveTarget.filePath, effectiveMimeType)
+      await fs.mkdir(path.dirname(outputFilePath), { recursive: true })
+      await fs.writeFile(outputFilePath, bytes)
       return {
         cancelled: false,
-        filePath: saveTarget.filePath,
-        filename: path.basename(saveTarget.filePath),
+        filePath: outputFilePath,
+        filename: path.basename(outputFilePath),
       }
     } catch (error: any) {
       throw new Error(formatTransportError('Gateway artifact download', normalizeGatewayBaseUrl(config.baseUrl), error))
@@ -2187,6 +2263,7 @@ app.whenReady().then(() => {
       }
 
       const cd = response.headers.get('content-disposition')
+      const responseMimeType = String(response.headers.get('content-type') || '').trim().split(';', 1)[0]
       let filename = (payload.suggestedFilename && String(payload.suggestedFilename).trim()) || 'attachment'
       if (cd) {
         const m = /filename\*=UTF-8''([^;]+)|filename="([^"]+)"/i.exec(cd)
@@ -2199,15 +2276,13 @@ app.whenReady().then(() => {
           }
         }
       }
+      const effectiveMimeType = responseMimeType || inferDesktopAttachmentMimeType(filename)
 
       const arrayBuffer = await response.arrayBuffer()
       const buffer = Buffer.from(arrayBuffer)
 
       const parentWindow = (win && !win.isDestroyed() ? win : null) ?? BrowserWindow.fromWebContents(event.sender)
-      const saveDialogOpts = {
-        title: 'Save attachment',
-        defaultPath: filename,
-      }
+      const saveDialogOpts = buildSaveDialogOptions('Save attachment', filename, effectiveMimeType)
       const { canceled, filePath } = parentWindow
         ? await dialog.showSaveDialog(parentWindow, saveDialogOpts)
         : await dialog.showSaveDialog(saveDialogOpts)
@@ -2215,8 +2290,9 @@ app.whenReady().then(() => {
         return { cancelled: true as const }
       }
 
-      await fs.writeFile(filePath, buffer)
-      return { cancelled: false as const, path: filePath }
+      const outputFilePath = ensureFilePathExtension(filePath, effectiveMimeType)
+      await fs.writeFile(outputFilePath, buffer)
+      return { cancelled: false as const, path: outputFilePath }
     } catch (error: any) {
       throw new Error(formatTransportError('Cosmic Mail', baseUrl, error))
     } finally {

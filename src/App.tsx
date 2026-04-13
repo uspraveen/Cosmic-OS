@@ -178,16 +178,6 @@ interface ResponseArtifactBlock {
 
 type ResponseBlock = ResponseMarkdownBlock | ResponseCodeBlock | ResponseArtifactBlock
 
-const isStableAssistantMessageId = (value: unknown): value is string => {
-  const text = String(value || '').trim()
-  if (!text) return false
-  return !(
-    text.startsWith('pending_assistant_') ||
-    text.startsWith('artifact_ready_') ||
-    text.startsWith('xchan_')
-  )
-}
-
 interface ActivityLogEntry {
   id: string
   label: string
@@ -1982,6 +1972,7 @@ export default function App() {
   const openChatFromCronNotification = () => {
     shouldAutoScrollRef.current = true
     clearCronResultNotifications()
+    modeRef.current = 'chat'
     setMode('chat')
     setShowLauncherTray(false)
     if (searchStateRef.current !== 'visible') {
@@ -1997,6 +1988,7 @@ export default function App() {
   const openChatFromArtifactNotification = () => {
     shouldAutoScrollRef.current = true
     clearArtifactReadyNotifications()
+    modeRef.current = 'chat'
     setMode('chat')
     setShowLauncherTray(false)
     if (searchStateRef.current !== 'visible') {
@@ -2267,6 +2259,40 @@ export default function App() {
         setIsStreaming(false)
       }
       return
+    }
+
+    if (
+      usingHistoryTail &&
+      streams.length <= 0 &&
+      (isStreamingRef.current || activeStreamingRequestIdRef.current || activeStreamingTaskIdRef.current)
+    ) {
+      const historyMessages = historyToMessages(options.historyTail || [])
+      const activeRequestId = String(activeStreamingRequestIdRef.current || '').trim()
+      const activeTaskId = String(activeStreamingTaskIdRef.current || '').trim()
+      const historyHasActiveAssistant = historyMessages.some((message) => (
+        message.role === 'assistant' &&
+        (
+          (activeRequestId && message.requestId === activeRequestId) ||
+          (activeTaskId && message.sourceId === activeTaskId)
+        )
+      ))
+      const activeInFlightMessages = messagesRef.current.filter((message) => (
+        message.role === 'assistant' &&
+        (
+          (activeRequestId && message.requestId === activeRequestId) ||
+          (activeTaskId && message.sourceId === activeTaskId)
+        )
+      ))
+      if (!historyHasActiveAssistant && activeInFlightMessages.length > 0) {
+        const historyMessageIds = new Set(historyMessages.map((message) => message.id))
+        const nextMessages = [
+          ...historyMessages,
+          ...activeInFlightMessages.filter((message) => !historyMessageIds.has(message.id)),
+        ]
+        setMessages(nextMessages)
+        messagesRef.current = nextMessages
+        return
+      }
     }
 
     const baseMessages = usingHistoryTail
@@ -2695,6 +2721,7 @@ export default function App() {
   const showChatComposer = () => {
     hideHoverTooltip()
     clearCronResultNotifications()
+    modeRef.current = 'chat'
     setMode('chat')
     setShowLauncherTray(false)
     setSearchState('visible')
@@ -2708,13 +2735,6 @@ export default function App() {
 
   const maybeRequestGatewayResumeOnShow = () => {
     if (authStateRef.current !== 'authenticated' || !window.cosmic?.requestGatewayResume) {
-      return
-    }
-    if (
-      isStreamingRef.current ||
-      activeStreamingRequestIdRef.current ||
-      activeStreamingTaskIdRef.current
-    ) {
       return
     }
     const now = Date.now()
@@ -2733,6 +2753,7 @@ export default function App() {
       setSelectedTaskInputId(focusInputRequestId)
     }
     setSearchState('visible')
+    modeRef.current = 'task'
     setMode('task')
     setShowLauncherTray(false)
     setIsInputFocused(focusComposer)
@@ -2751,6 +2772,7 @@ export default function App() {
   const showMeetingSurface = () => {
     hideHoverTooltip()
     setSearchState('visible')
+    modeRef.current = 'meeting'
     setMode('meeting')
     setShowLauncherTray(false)
     setIsInputFocused(false)
@@ -2759,6 +2781,7 @@ export default function App() {
   const showSpacesSurface = () => {
     hideHoverTooltip()
     setSearchState('visible')
+    modeRef.current = 'spaces'
     setMode('spaces')
     setShowLauncherTray(false)
     setIsInputFocused(false)
@@ -4192,6 +4215,7 @@ export default function App() {
         messageId,
         artifactId: artifact.artifactId,
         suggestedFilename: artifact.filename,
+        mimeType: artifact.mimeType || undefined,
       })
     } catch (err) {
       console.error('Failed to download produced artifact:', err)
@@ -4201,54 +4225,6 @@ export default function App() {
       }
     } finally {
       setDownloadingArtifactId((current) => (current === artifact.artifactId ? null : current))
-    }
-  }
-
-  const resolveArtifactNotificationMessageId = (notification: ProducedArtifactNotification) => {
-    if (isStableAssistantMessageId(notification.messageId)) {
-      return notification.messageId
-    }
-    const artifactIds = new Set(
-      notification.artifacts
-        .map((item) => String(item?.artifactId || '').trim())
-        .filter(Boolean),
-    )
-    if (artifactIds.size <= 0) {
-      return notification.messageId
-    }
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index]
-      if (message.role !== 'assistant' || !isStableAssistantMessageId(message.id)) {
-        continue
-      }
-      if (notification.requestId && message.requestId && notification.requestId !== message.requestId) {
-        continue
-      }
-      const producedArtifacts = Array.isArray(message.producedArtifacts) ? message.producedArtifacts : []
-      if (producedArtifacts.some((item) => artifactIds.has(String(item?.artifactId || '').trim()))) {
-        return message.id
-      }
-    }
-    return notification.messageId
-  }
-
-  const handleDownloadArtifactNotification = async (notification: ProducedArtifactNotification) => {
-    const primaryArtifact = notification.artifacts[0]
-    if (!primaryArtifact) {
-      return
-    }
-    const resolvedMessageId = resolveArtifactNotificationMessageId(notification)
-    if (!isStableAssistantMessageId(resolvedMessageId)) {
-      openChatFromArtifactNotification()
-      return
-    }
-    const result = await handleDownloadProducedArtifact(resolvedMessageId, primaryArtifact)
-    if (result && !(result as any).cancelled) {
-      if (!(result as any).error) {
-        dismissArtifactReadyNotification(notification.id)
-        return
-      }
-      openChatFromArtifactNotification()
     }
   }
 
@@ -4561,8 +4537,6 @@ export default function App() {
         <div className="artifact-ready-shell" style={artifactReadyShellStyle}>
           <div className="artifact-ready-stack" role="list" aria-label={`${orderedArtifactReadyNotifications.length} file result${orderedArtifactReadyNotifications.length === 1 ? '' : 's'} ready`}>
             {orderedArtifactReadyNotifications.map((notification) => {
-              const primaryArtifact = notification.artifacts[0] || null
-              const canDirectDownload = notification.artifacts.length === 1 && !!primaryArtifact?.downloadable
               return (
                 <LiquidGlass
                   key={notification.id}
@@ -4625,23 +4599,13 @@ export default function App() {
                       >
                         Later
                       </button>
-                      {canDirectDownload && primaryArtifact ? (
-                        <button
-                          type="button"
-                          className="task-interrupt-btn primary"
-                          onClick={() => handleDownloadArtifactNotification(notification)}
-                        >
-                          Download now
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          className="task-interrupt-btn primary"
-                          onClick={openChatFromArtifactNotification}
-                        >
-                          Open chat
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        className="task-interrupt-btn primary"
+                        onClick={openChatFromArtifactNotification}
+                      >
+                        Open chat
+                      </button>
                     </div>
                   </div>
                 </LiquidGlass>

@@ -273,6 +273,7 @@ class SlideAgent(AgentRuntime):
         if not edit_request:
             return self._failed("INVALID_INPUT", "slide.edit requires edit_request.")
 
+        await self._emit_progress(task.task_id, "Preparing the slide edit.")
         source_deck = self._resolve_source_deck(task)
         if source_deck is None:
             return self._failed(
@@ -298,7 +299,37 @@ class SlideAgent(AgentRuntime):
         )
         description = self._augment_description_with_source_context(description, source_context)
 
-        result = await asyncio.to_thread(
+        source_profile = self._source_deck_profile(source_deck)
+        if self._should_regenerate_html_for_edit(source_deck, source_profile):
+            html_description = self._html_edit_regeneration_description(
+                source_deck=source_deck,
+                edit_request=edit_request,
+                source_profile=source_profile,
+            )
+            html_description = self._augment_description_with_source_context(html_description, source_context)
+            result = await self._run_blocking_stage(
+                task,
+                "Regenerating the non-editable HTML deck with the requested changes.",
+                self._run_html,
+                html_description,
+                output_dir,
+                max_slides,
+                validate,
+                None,
+            )
+            await self._emit_progress(task.task_id, "Packaging the regenerated HTML deck.")
+            return self._result_from_pipeline(
+                task=task,
+                result=result,
+                workflow="html",
+                editable=False,
+                template_path=None,
+                edit_mode="html_regeneration_from_non_editable_source",
+            )
+
+        result = await self._run_blocking_stage(
+            task,
+            "Running template-backed deck regeneration.",
             self._run_template,
             description,
             source_deck,
@@ -308,6 +339,7 @@ class SlideAgent(AgentRuntime):
             force_catalog,
             None,
         )
+        await self._emit_progress(task.task_id, "Packaging the regenerated template deck.")
         return self._result_from_pipeline(
             task=task,
             result=result,
@@ -514,6 +546,38 @@ class SlideAgent(AgentRuntime):
             )
         except Exception as exc:
             logger.warning("slide_agent.suspension_event_failed task_id=%s error=%s", task.task_id, exc)
+
+    async def _emit_progress(self, task_id: str, message: str, **payload: Any) -> None:
+        body = {"message": message, **payload}
+        try:
+            await self.emit_event(task_id, "task.progress", body)
+        except Exception as exc:
+            logger.warning("slide_agent.progress_emit_failed task_id=%s error=%s", task_id, exc)
+
+    async def _run_blocking_stage(
+        self,
+        task: TaskEnvelope,
+        message: str,
+        func: Any,
+        *args: Any,
+    ) -> dict[str, Any]:
+        await self._emit_progress(task.task_id, message)
+        worker = asyncio.create_task(asyncio.to_thread(func, *args))
+        elapsed_sec = 0
+        heartbeat_sec = 20
+        while not worker.done():
+            done, _pending = await asyncio.wait({worker}, timeout=heartbeat_sec)
+            if done:
+                break
+            elapsed_sec += heartbeat_sec
+            await self._emit_progress(
+                task.task_id,
+                f"{message} Still working after {elapsed_sec}s.",
+                stage="running",
+                elapsed_sec=elapsed_sec,
+            )
+        result = await worker
+        return result if isinstance(result, dict) else {}
 
     def _apply_docs_parse_reverse_result(
         self,
@@ -890,6 +954,114 @@ class SlideAgent(AgentRuntime):
                 if slide_number:
                     slide["thumbnail_path"] = str((catalog_dir / "thumbnails" / f"slide-{slide_number:02d}.png").resolve())
         return normalized
+
+    def _source_deck_profile(self, source_deck: Path) -> dict[str, Any]:
+        profile: dict[str, Any] = {}
+        report = self._safe_json_load(source_deck.parent / "build_report.json")
+        if report:
+            profile["workflow"] = self._text(report.get("workflow")).lower()
+            profile["description"] = self._text(report.get("description"))
+            profile["report"] = report
+        plan = self._safe_json_load(source_deck.parent / "plan.json")
+        if plan:
+            profile["plan"] = plan
+            profile["title"] = self._text(plan.get("deck_title"))
+
+        db_profile = self._source_deck_profile_from_db(source_deck)
+        for key, value in db_profile.items():
+            if self._emptyish(profile.get(key)) and not self._emptyish(value):
+                profile[key] = value
+        return profile
+
+    def _source_deck_profile_from_db(self, source_deck: Path) -> dict[str, Any]:
+        if self.db is None:
+            return {}
+        try:
+            source_resolved = source_deck.resolve()
+            row = self.db.execute(
+                """SELECT workflow, editable, title
+                   FROM slide_sessions
+                   WHERE pptx_path = ?
+                   ORDER BY created_at DESC
+                   LIMIT 1""",
+                [str(source_resolved)],
+            ).fetchone()
+            if row is None:
+                return {}
+            return {
+                "workflow": self._text(row["workflow"]).lower(),
+                "editable": bool(row["editable"]),
+                "title": self._text(row["title"]),
+            }
+        except Exception:
+            return {}
+
+    def _should_regenerate_html_for_edit(self, source_deck: Path, source_profile: dict[str, Any]) -> bool:
+        workflow = self._text(source_profile.get("workflow")).lower()
+        if workflow == "html":
+            return True
+        if source_profile.get("editable") is False:
+            return True
+        return self._looks_like_image_backed_deck(source_deck)
+
+    def _html_edit_regeneration_description(
+        self,
+        *,
+        source_deck: Path,
+        edit_request: str,
+        source_profile: dict[str, Any],
+    ) -> str:
+        parts = [
+            "Regenerate the existing presentation as a new HTML-mode, image-backed deck.",
+            "Preserve the prior deck's subject, slide count, and core content unless the edit request overrides them.",
+            "",
+            f"Source deck: {source_deck.name}",
+        ]
+        title = self._text(source_profile.get("title"))
+        if title:
+            parts.append(f"Previous deck title: {title}")
+        previous_description = self._text(source_profile.get("description"))
+        if previous_description:
+            parts.extend(["", "Previous deck brief:", previous_description])
+        previous_plan = source_profile.get("plan")
+        if isinstance(previous_plan, dict) and previous_plan:
+            parts.extend(
+                [
+                    "",
+                    "Previous deck content plan JSON:",
+                    self._compact_json(previous_plan, limit=12000),
+                ]
+            )
+        parts.extend(["", "Requested edit:", edit_request])
+        return "\n".join(parts)
+
+    @staticmethod
+    def _compact_json(value: Any, *, limit: int) -> str:
+        text = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+        if limit <= 0 or len(text) <= limit:
+            return text
+        return text[: max(0, limit - 1)].rstrip() + "..."
+
+    def _looks_like_image_backed_deck(self, source_deck: Path) -> bool:
+        try:
+            from pptx import Presentation
+            from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+            presentation = Presentation(str(source_deck))
+            if not presentation.slides:
+                return False
+            for slide in presentation.slides:
+                has_text = any(
+                    bool(getattr(shape, "has_text_frame", False))
+                    and bool(getattr(shape.text_frame, "text", "").strip())
+                    for shape in slide.shapes
+                )
+                picture_count = sum(1 for shape in slide.shapes if shape.shape_type == MSO_SHAPE_TYPE.PICTURE)
+                if has_text or picture_count != 1:
+                    return False
+            return True
+        except Exception:
+            return False
 
     def _copy_catalog_artifacts(
         self,

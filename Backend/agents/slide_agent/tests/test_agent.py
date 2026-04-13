@@ -26,6 +26,7 @@ def _task(
     task_id: str,
     input_payload: dict[str, Any],
     input_artifacts: list[dict[str, Any]] | None = None,
+    intent: str = "slide.create",
 ) -> TaskEnvelope:
     return TaskEnvelope(
         task_id=task_id,
@@ -33,7 +34,7 @@ def _task(
         session_id="sess_slide_tests",
         sender="cosmic/orchestrator:1.0.0",
         recipient="cosmic/slide-agent:1.0.0",
-        intent="slide.create",
+        intent=intent,
         input=input_payload,
         input_artifacts=input_artifacts or [],
         idempotency_key=f"idem_{task_id}",
@@ -123,6 +124,185 @@ def test_normalize_workflow_requires_known_values() -> None:
 
 def test_mime_for_pptx() -> None:
     assert SlideAgent._mime_for_path(Path("deck.pptx")) == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+
+
+def test_slide_edit_regenerates_html_for_noneditable_source(monkeypatch: Any) -> None:
+    runtime_dir = _runtime_dir()
+    try:
+        agent = _agent(runtime_dir)
+        source_dir = runtime_dir / "html_source"
+        source_dir.mkdir()
+        source_deck = source_dir / "deck.pptx"
+        source_deck.write_bytes(b"html deck")
+        (source_dir / "build_report.json").write_text(
+            json.dumps(
+                {
+                    "workflow": "html",
+                    "description": "A 2-slide deck on COSMIC.",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (source_dir / "plan.json").write_text(
+            json.dumps(
+                {
+                    "deck_title": "COSMIC",
+                    "slides": [
+                        {"slide_number": 1, "title": "Intro to COSMIC"},
+                        {"slide_number": 2, "title": "Capabilities"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        emitted: list[tuple[str, str, dict[str, Any]]] = []
+        captured: dict[str, Any] = {}
+
+        async def fake_emit(task_id: str, event_type: str, payload: dict[str, Any]) -> str:
+            emitted.append((task_id, event_type, payload))
+            return f"evt_{len(emitted)}"
+
+        async def fake_source_context(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {"source_artifacts": [], "documents": [], "visual_assets": []}
+
+        def fake_run_html(
+            description: str,
+            output_dir: Path,
+            max_slides: int | None,
+            validate: bool,
+            content_plan: dict[str, Any] | None,
+        ) -> dict[str, Any]:
+            captured["description"] = description
+            captured["max_slides"] = max_slides
+            captured["validate"] = validate
+            captured["content_plan"] = content_plan
+            output_dir.mkdir(parents=True, exist_ok=True)
+            pptx_path = output_dir / "deck.pptx"
+            plan_path = output_dir / "plan.json"
+            theme_path = output_dir / "theme.json"
+            report_path = output_dir / "build_report.json"
+            pptx_path.write_bytes(b"new html deck")
+            plan_path.write_text(json.dumps({"deck_title": "COSMIC", "slides": [1, 2]}), encoding="utf-8")
+            theme_path.write_text(json.dumps({"theme_name": "dark"}), encoding="utf-8")
+            report_path.write_text(json.dumps({"workflow": "html"}), encoding="utf-8")
+            return {
+                "workflow": "html",
+                "pptx_path": str(pptx_path),
+                "plan_path": str(plan_path),
+                "theme_path": str(theme_path),
+                "content_plan": {"deck_title": "COSMIC", "slides": [1, 2]},
+            }
+
+        def fail_run_template(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("html-backed edits must not use template regeneration")
+
+        monkeypatch.setattr(agent, "emit_event", fake_emit)
+        monkeypatch.setattr(agent, "_prepare_source_materials_for_generation", fake_source_context)
+        monkeypatch.setattr(agent, "_count_pptx_slides", lambda _path: 2)
+        monkeypatch.setattr(agent, "_run_html", fake_run_html)
+        monkeypatch.setattr(agent, "_run_template", fail_run_template)
+
+        result = asyncio.run(
+            agent.handle_slide_edit(
+                _task(
+                    task_id="tsk_edit_html",
+                    intent="slide.edit",
+                    input_payload={
+                        "edit_request": "Make slide 2 dark with a full-bleed image background.",
+                        "source_pptx_path": str(source_deck),
+                        "validate": False,
+                    },
+                )
+            )
+        )
+
+        assert result.status == "completed"
+        assert result.output["workflow"] == "html"
+        assert result.output["editable"] is False
+        assert result.output["edit_mode"] == "html_regeneration_from_non_editable_source"
+        assert captured["max_slides"] == 2
+        assert captured["content_plan"] is None
+        assert "COSMIC" in captured["description"]
+        assert "full-bleed image background" in captured["description"]
+        assert any(payload["message"] == "Preparing the slide edit." for _, event_type, payload in emitted if event_type == "task.progress")
+        assert any("Regenerating the non-editable HTML deck" in payload["message"] for _, event_type, payload in emitted if event_type == "task.progress")
+    finally:
+        shutil.rmtree(runtime_dir, ignore_errors=True)
+
+
+def test_slide_edit_uses_template_path_for_editable_source(monkeypatch: Any) -> None:
+    runtime_dir = _runtime_dir()
+    try:
+        agent = _agent(runtime_dir)
+        source_deck = runtime_dir / "editable_source.pptx"
+        source_deck.write_bytes(b"editable deck")
+
+        emitted: list[tuple[str, str, dict[str, Any]]] = []
+        captured: dict[str, Any] = {}
+
+        async def fake_emit(task_id: str, event_type: str, payload: dict[str, Any]) -> str:
+            emitted.append((task_id, event_type, payload))
+            return f"evt_{len(emitted)}"
+
+        async def fake_source_context(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {"source_artifacts": [], "documents": [], "visual_assets": []}
+
+        def fake_run_template(
+            description: str,
+            template_path: Path,
+            output_dir: Path,
+            max_slides: int | None,
+            validate: bool,
+            force_catalog: bool,
+            content_plan: dict[str, Any] | None,
+        ) -> dict[str, Any]:
+            captured["description"] = description
+            captured["template_path"] = template_path
+            captured["max_slides"] = max_slides
+            captured["validate"] = validate
+            captured["force_catalog"] = force_catalog
+            captured["content_plan"] = content_plan
+            output_dir.mkdir(parents=True, exist_ok=True)
+            pptx_path = output_dir / "deck.pptx"
+            plan_path = output_dir / "plan.json"
+            pptx_path.write_bytes(b"new template deck")
+            plan_path.write_text(json.dumps({"deck_title": "Editable", "slides": [1, 2]}), encoding="utf-8")
+            return {
+                "workflow": "template",
+                "pptx_path": str(pptx_path),
+                "plan_path": str(plan_path),
+                "content_plan": {"deck_title": "Editable", "slides": [1, 2]},
+            }
+
+        monkeypatch.setattr(agent, "emit_event", fake_emit)
+        monkeypatch.setattr(agent, "_prepare_source_materials_for_generation", fake_source_context)
+        monkeypatch.setattr(agent, "_count_pptx_slides", lambda _path: 2)
+        monkeypatch.setattr(agent, "_looks_like_image_backed_deck", lambda _path: False)
+        monkeypatch.setattr(agent, "_run_template", fake_run_template)
+
+        result = asyncio.run(
+            agent.handle_slide_edit(
+                _task(
+                    task_id="tsk_edit_template",
+                    intent="slide.edit",
+                    input_payload={
+                        "edit_request": "Make the deck darker.",
+                        "source_pptx_path": str(source_deck),
+                        "validate": False,
+                    },
+                )
+            )
+        )
+
+        assert result.status == "completed"
+        assert result.output["workflow"] == "template"
+        assert result.output["editable"] is True
+        assert result.output["edit_mode"] == "template_backed_regeneration"
+        assert captured["template_path"] == source_deck.resolve()
+        assert any("template-backed deck regeneration" in payload["message"] for _, event_type, payload in emitted if event_type == "task.progress")
+    finally:
+        shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
 def test_slide_create_keeps_workflow_choice_before_document_parse(monkeypatch: Any) -> None:

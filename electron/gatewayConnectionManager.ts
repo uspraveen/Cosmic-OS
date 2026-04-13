@@ -629,7 +629,10 @@ export class GatewayConnectionManager {
     }
 
     const content = String(message.content || '')
-    if (!content.trim()) {
+    const metadata = message?.metadata && typeof message.metadata === 'object' ? message.metadata : undefined
+    const hasMetadataArtifacts = Array.isArray(metadata?.produced_artifacts) && metadata.produced_artifacts.length > 0
+    const hasMetadataBlocks = Array.isArray(metadata?.response_blocks) && metadata.response_blocks.length > 0
+    if (!content.trim() && !(role === 'assistant' && (hasMetadataArtifacts || hasMetadataBlocks))) {
       return
     }
 
@@ -646,7 +649,7 @@ export class GatewayConnectionManager {
       content,
       request_id: requestId || undefined,
       message_id: messageId || message.message_id,
-      metadata: message?.metadata && typeof message.metadata === 'object' ? message.metadata : undefined,
+      metadata,
     }
 
     let replaceIndex = -1
@@ -730,7 +733,8 @@ export class GatewayConnectionManager {
     if (eventType === 'response.complete') {
       const content = String(payload.content || '')
       const hasBlocks = Array.isArray(payload.response_blocks) && payload.response_blocks.length > 0
-      if (!content.trim() && !hasBlocks) {
+      const hasArtifacts = Array.isArray(payload.produced_artifacts) && payload.produced_artifacts.length > 0
+      if (!content.trim() && !hasBlocks && !hasArtifacts) {
         return
       }
       const requestId = String(payload.request_id || '').trim()
@@ -741,7 +745,7 @@ export class GatewayConnectionManager {
       if (Array.isArray(payload.sources) && payload.sources.length > 0) {
         metadata.sources = payload.sources
       }
-      if (Array.isArray(payload.produced_artifacts) && payload.produced_artifacts.length > 0) {
+      if (hasArtifacts) {
         metadata.produced_artifacts = payload.produced_artifacts
       }
       if (hasBlocks) {
@@ -774,7 +778,8 @@ export class GatewayConnectionManager {
       const role = String(payload.role || '').trim()
       const content = String(payload.content || '')
       const hasBlocks = Array.isArray(payload.response_blocks) && payload.response_blocks.length > 0
-      if ((role !== 'user' && role !== 'assistant') || (!content.trim() && !hasBlocks)) {
+      const hasArtifacts = Array.isArray(payload.produced_artifacts) && payload.produced_artifacts.length > 0
+      if ((role !== 'user' && role !== 'assistant') || (!content.trim() && !hasBlocks && !hasArtifacts)) {
         return
       }
       const lastItem = this.historyTail[this.historyTail.length - 1]
@@ -782,7 +787,9 @@ export class GatewayConnectionManager {
         lastItem &&
         String(lastItem.role || '').trim() === role &&
         String(lastItem.content || '') === content &&
-        String(lastItem.channel || '') === String(payload.channel || '')
+        String(lastItem.channel || '') === String(payload.channel || '') &&
+        !hasBlocks &&
+        !hasArtifacts
       ) {
         return
       }
@@ -972,6 +979,45 @@ export class GatewayConnectionManager {
         return !requestId || !this.backgroundedRequestIds.has(requestId)
       })
       .sort((left, right) => Date.parse(String(left.updated_at || '')) - Date.parse(String(right.updated_at || '')))
+  }
+
+  private mergeForegroundStreamsFromResume(streams: unknown) {
+    if (!Array.isArray(streams)) {
+      return
+    }
+    for (const stream of streams) {
+      if (!stream || typeof stream !== 'object') {
+        continue
+      }
+      const payload = stream as any
+      this.upsertForegroundStream(payload, {
+        request_id: typeof payload.request_id === 'string' ? payload.request_id : undefined,
+        task_id: typeof payload.task_id === 'string' ? payload.task_id : undefined,
+        session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
+        route: typeof payload.route === 'string' ? payload.route : undefined,
+        message_id: typeof payload.message_id === 'string' ? payload.message_id : undefined,
+        content: typeof payload.content === 'string' ? payload.content : undefined,
+        thinking_text: typeof payload.thinking_text === 'string'
+          ? payload.thinking_text
+          : typeof payload.thinking === 'string'
+            ? payload.thinking
+            : undefined,
+        activity: typeof payload.activity === 'string' ? payload.activity : undefined,
+        activity_log: Array.isArray(payload.activity_log) ? payload.activity_log : undefined,
+        docs_progress: payload.docs_progress,
+        tabular_progress: payload.tabular_progress,
+        produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : undefined,
+        response_blocks: Array.isArray(payload.response_blocks) ? payload.response_blocks : undefined,
+        sources: Array.isArray(payload.sources) ? payload.sources : undefined,
+        channel: typeof payload.channel === 'string' ? payload.channel : undefined,
+        source: typeof payload.source === 'string' ? payload.source : undefined,
+        source_id: typeof payload.source_id === 'string' ? payload.source_id : undefined,
+        awaiting_reply: payload.awaiting_reply === true,
+        completed: payload.completed === true,
+        failed: payload.failed === true,
+        error: typeof payload.error === 'string' ? payload.error : undefined,
+      })
+    }
   }
 
   private captureForegroundStreamEvent(payload: any, eventType: string) {
@@ -1258,6 +1304,7 @@ export class GatewayConnectionManager {
       this.removeForegroundStream(payload)
     }
     if (eventType === 'resume.ok') {
+      this.mergeForegroundStreamsFromResume(payload.foreground_streams)
       payload = {
         ...payload,
         foreground_streams: this.getForegroundStreams(),

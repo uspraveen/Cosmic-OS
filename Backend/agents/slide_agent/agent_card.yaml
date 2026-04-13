@@ -22,14 +22,16 @@ intents:
       - "'One slide per page/slide' requests are handled by segmented source retrieval, preserving source order across split deck parts."
 
   - name: slide.edit
-    description: Revise an existing PPTX using the uploaded/source deck as the editable template backbone.
+    description: Revise an existing PPTX; editable decks use template-backed regeneration and HTML/image-backed decks are regenerated through HTML mode.
     input_schema: schemas/intents/slide.edit.input.json
     output_schema: schemas/intents/slide.create.output.json
     timeout_sec: 900
     usage_hints:
       - Use this when the user uploads an existing slide deck and asks to edit it.
       - Pass source_pptx_path or attach the PPTX as an input artifact.
-      - Current edit mode is template-backed regeneration, not low-level in-place shape patching.
+      - Current edit mode is regeneration, not low-level in-place shape patching.
+      - If the source deck was produced by workflow=html or is image-backed/non-editable, the agent regenerates it through the fast HTML workflow instead of treating it as an editable template.
+      - For follow-up edits to a just-created non-editable HTML deck, include the produced PPTX artifact plus any prior plan/build_report artifacts if available so the agent can preserve the original subject and slide content.
       - Supporting PDF/DOC/DOCX/PPT source material can also be attached; the agent parses it through docs.parse_bundle and uses the parsed context in the regeneration brief.
 
   - name: slide.catalog_template

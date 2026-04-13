@@ -184,6 +184,7 @@ class ActiveRequest:
     foreground: bool = True
     backgrounded_at: str | None = None
     user_query_excerpt: str = ""
+    activity: str = ""
 
 
 @dataclass(slots=True)
@@ -3844,6 +3845,16 @@ class GatewayRuntime:
         in_reply_to_request_id: str | None = None,
     ) -> str | None:
         if not content:
+            renderable_payload = False
+            if isinstance(metadata, dict):
+                renderable_payload = any(
+                    isinstance(metadata.get(key), list) and bool(metadata.get(key))
+                    for key in ("produced_artifacts", "response_blocks")
+                )
+            if not renderable_payload:
+                return None
+            content = ""
+        if not content and role != "assistant":
             return None
         return self.session_store.append_message(
             session_id,
@@ -3855,6 +3866,19 @@ class GatewayRuntime:
             metadata=metadata,
             in_reply_to_request_id=in_reply_to_request_id,
         )
+
+    def _track_forwarded_foreground_event(self, event: dict[str, Any]) -> None:
+        request_id = self._safe_text(event.get("request_id"))
+        if not request_id:
+            return
+        state = self.active_requests.get(request_id)
+        if state is None or state.completed:
+            return
+        task_id = self._safe_text(event.get("task_id"))
+        if task_id:
+            state.task_id = task_id
+            self.active_requests_by_task[task_id] = request_id
+        self._track_partial_stream(state, event)
 
     def _ensure_session_state_seeded(self, session_id: str) -> dict[str, Any]:
         metadata = self.session_store.get_session_metadata(session_id)
@@ -6340,6 +6364,26 @@ class GatewayRuntime:
             for state in self.active_requests.values()
             if not state.foreground and state.channel == channel
         ]
+        foreground_streams = [
+            {
+                "request_id": state.request_id,
+                "task_id": state.task_id,
+                "session_id": state.session_id,
+                "channel": state.channel,
+                "route": state.route,
+                "content": state.partial_content,
+                "thinking_text": state.partial_thinking,
+                "activity": state.activity or "Working on your request...",
+                "completed": False,
+                "failed": False,
+                "updated_at": utcnow_iso(),
+            }
+            for state in self.active_requests.values()
+            if state.foreground
+            and state.channel == channel
+            and state.session_id == session_id
+            and not state.completed
+        ]
         # Completed background tasks reconstructed from session history
         running_request_ids = {t["request_id"] for t in background_tasks}
         for msg in history:
@@ -6388,6 +6432,7 @@ class GatewayRuntime:
             "active_tasks": active_tasks,
             "pending_inputs": pending_inputs,
             "background_tasks": background_tasks,
+            "foreground_streams": foreground_streams,
         }
 
     def notify_channel_active(self, channel: str | None) -> None:
@@ -6676,6 +6721,7 @@ class GatewayRuntime:
                 )
                 self.session_store.upsert_task_notebook(root_task_id, session_id, notebook)
                 self._refresh_active_working_set(session_id)
+            self._track_forwarded_foreground_event(forwarded)
             await self._deliver_or_queue_channel_event(
                 forwarded,
                 channel=self._safe_text(forwarded.get("channel")),
@@ -11438,6 +11484,15 @@ class GatewayRuntime:
         self, state: ActiveRequest, event: dict[str, Any]
     ) -> None:
         event_type = self._safe_text(event.get("type")) or ""
+        if event_type == "task.progress":
+            progress_state = event.get("tabular_progress") or event.get("docs_progress")
+            progress_label = (
+                self._safe_text(progress_state.get("label"))
+                if isinstance(progress_state, dict)
+                else None
+            )
+            state.activity = progress_label or self._safe_text(event.get("message")) or state.activity
+            return
         if event_type == "response.thinking.chunk":
             state.partial_thinking += str(event.get("content") or "")
             return

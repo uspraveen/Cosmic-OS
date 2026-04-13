@@ -23,7 +23,7 @@ from gateway.channels.routes import router as channel_router
 from gateway.config import GatewayConfig
 from gateway.memory_client import MemoryClientHTTPError, MemoryPromptContext
 from gateway.scheduler import CronExpressionError, compute_next_fire_at
-from gateway.runtime import SYSTEM_CRON_DAILY_ROLLOVER, GatewayRuntime
+from gateway.runtime import ActiveRequest, SYSTEM_CRON_DAILY_ROLLOVER, GatewayRuntime
 from gateway.session_store import utcnow_iso
 from shared import AgentEmailIntegrationStore
 
@@ -3320,6 +3320,106 @@ def test_desktop_websocket_supports_ping_query_and_resume(test_client: TestClien
         assert resume["channel"] == "desktop:desk_a1b2"
         assert resume["user_timezone"] == "America/Chicago"
         assert resume["history_tail"][-1]["content"] == "Hello from fake adapter"
+
+
+def test_desktop_resume_includes_foreground_active_request(test_client: TestClient) -> None:
+    runtime = test_client.app.state.gateway_runtime
+    session_id = runtime._current_session_id()
+    runtime.active_requests["req_running_resume"] = ActiveRequest(
+        request_id="req_running_resume",
+        session_id=session_id,
+        channel="desktop:desk_running_resume",
+        route="opus",
+        task_id="task_running_resume",
+        partial_content="Partial streamed answer",
+        partial_thinking="Partial streamed thinking",
+        activity="",
+    )
+    runtime._track_forwarded_foreground_event(
+        {
+            "type": "task.progress",
+            "request_id": "req_running_resume",
+            "task_id": "task_running_resume",
+            "message": "Slide agent accepted slide.edit.",
+        }
+    )
+
+    with test_client.websocket_connect("/ws?token=test-token&device_id=desk_running_resume") as websocket:
+        websocket.send_json(
+            {
+                "type": "resume",
+                "request_id": "resume_running_001",
+                "session_id": session_id,
+                "known_task_ids": [],
+            }
+        )
+        resume = websocket.receive_json()
+
+    assert resume["type"] == "resume.ok"
+    foreground_streams = resume["foreground_streams"]
+    assert len(foreground_streams) == 1
+    assert foreground_streams[0]["request_id"] == "req_running_resume"
+    assert foreground_streams[0]["task_id"] == "task_running_resume"
+    assert foreground_streams[0]["session_id"] == session_id
+    assert foreground_streams[0]["route"] == "opus"
+    assert foreground_streams[0]["content"] == "Partial streamed answer"
+    assert foreground_streams[0]["thinking_text"] == "Partial streamed thinking"
+    assert foreground_streams[0]["channel"] == "desktop:desk_running_resume"
+    assert foreground_streams[0]["activity"] == "Slide agent accepted slide.edit."
+    assert foreground_streams[0]["completed"] is False
+    assert foreground_streams[0]["failed"] is False
+    assert foreground_streams[0]["updated_at"]
+
+
+def test_desktop_resume_includes_artifact_only_assistant_message(test_client: TestClient) -> None:
+    runtime = test_client.app.state.gateway_runtime
+    session_id = runtime._current_session_id()
+    artifact = {
+        "artifact_id": "artifact_deck_resume",
+        "filename": "deck.pptx",
+        "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "kind": "presentation",
+    }
+    message_id = runtime._append_session_message(
+        session_id,
+        role="assistant",
+        content="",
+        route="opus",
+        channel="desktop:desk_artifact_resume",
+        metadata={
+            "request_id": "req_artifact_resume",
+            "produced_artifacts": [artifact],
+            "response_blocks": [
+                {
+                    "type": "file_artifact",
+                    "artifact_id": "artifact_deck_resume",
+                    "filename": "deck.pptx",
+                }
+            ],
+        },
+    )
+    assert message_id
+
+    with test_client.websocket_connect("/ws?token=test-token&device_id=desk_artifact_resume") as websocket:
+        websocket.send_json(
+            {
+                "type": "resume",
+                "request_id": "resume_artifact_001",
+                "session_id": session_id,
+                "known_task_ids": [],
+            }
+        )
+        resume = websocket.receive_json()
+
+    assert resume["type"] == "resume.ok"
+    stored_message = next(
+        item for item in resume["history_tail"] if item["message_id"] == message_id
+    )
+    assert stored_message["role"] == "assistant"
+    assert stored_message["content"] == ""
+    metadata = stored_message["metadata"]
+    assert metadata["produced_artifacts"][0]["artifact_id"] == "artifact_deck_resume"
+    assert metadata["response_blocks"][0]["type"] == "file_artifact"
 
 
 def test_mobile_websocket_supports_ping_query_and_resume(test_client: TestClient) -> None:

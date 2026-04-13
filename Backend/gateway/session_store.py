@@ -23,6 +23,16 @@ class SessionStore:
         self.db_path = db_path
         self._lock = threading.RLock()
 
+    @staticmethod
+    def _metadata_has_renderable_payload(metadata: dict[str, Any] | None) -> bool:
+        if not isinstance(metadata, dict):
+            return False
+        for key in ("produced_artifacts", "response_blocks"):
+            value = metadata.get(key)
+            if isinstance(value, list) and value:
+                return True
+        return False
+
     def initialize(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock, self._connect() as connection:
@@ -221,7 +231,9 @@ class SessionStore:
         metadata: dict[str, Any] | None = None,
         in_reply_to_request_id: str | None = None,
     ) -> str:
-        if not content:
+        if not content and (
+            role != "assistant" or not self._metadata_has_renderable_payload(metadata)
+        ):
             raise ValueError("Message content cannot be empty")
 
         created_at = utcnow_iso()
