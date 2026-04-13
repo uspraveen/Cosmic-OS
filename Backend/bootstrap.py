@@ -1919,6 +1919,26 @@ def build_slide_agent_env_rendered(
     source_data = parse_env_text(source_raw)
     existing_env = (existing_env_by_name or {}).get(SLIDE_AGENT_ENV_NAME, {})
     external_env = (external_env_by_name or {}).get(SLIDE_AGENT_ENV_NAME, {})
+    firecrawl_external_env = (external_env_by_name or {}).get(FIRECRAWL_AGENT_ENV_NAME, {})
+    image_external_env = (external_env_by_name or {}).get(IMAGE_GENERATOR_AGENT_ENV_NAME, {})
+    firecrawl_existing_env = (existing_env_by_name or {}).get(FIRECRAWL_AGENT_ENV_NAME, {})
+    image_existing_env = (existing_env_by_name or {}).get(IMAGE_GENERATOR_AGENT_ENV_NAME, {})
+
+    def read_peer_env(env_name: str) -> Dict[str, str]:
+        path = ((system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "agents" / env_name)
+        if not path.exists():
+            return {}
+        try:
+            if is_linux():
+                return parse_env_text(read_text_file(path, use_sudo=True))
+            return parse_env_text(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    if not firecrawl_existing_env:
+        firecrawl_existing_env = read_peer_env(FIRECRAWL_AGENT_ENV_NAME)
+    if not image_existing_env:
+        image_existing_env = read_peer_env(IMAGE_GENERATOR_AGENT_ENV_NAME)
 
     redis_url = first_meaningful_value(
         external_env.get("REDIS_URL"),
@@ -1996,6 +2016,143 @@ def build_slide_agent_env_rendered(
         DOCS_PARSER_AGENT_ID,
     )
     default_workflow = pick_env(("SLIDE_AGENT_DEFAULT_WORKFLOW",), "")
+    pexels_api_key = pick_env(("PEXELS_API_KEY",), "")
+    assets_cache_dir = pick_env(("ASSETS_CACHE_DIR",), "assets/cache")
+    firecrawl_api_key = first_meaningful_value(
+        external_env.get("FIRECRAWL_API_KEY"),
+        firecrawl_external_env.get("FIRECRAWL_API_KEY"),
+        existing_env.get("FIRECRAWL_API_KEY"),
+        firecrawl_existing_env.get("FIRECRAWL_API_KEY"),
+        source_data.get("FIRECRAWL_API_KEY"),
+    )
+    firecrawl_api_base_url = first_meaningful_value(
+        external_env.get("FIRECRAWL_API_BASE_URL"),
+        firecrawl_external_env.get("FIRECRAWL_API_BASE_URL"),
+        existing_env.get("FIRECRAWL_API_BASE_URL"),
+        firecrawl_existing_env.get("FIRECRAWL_API_BASE_URL"),
+        source_data.get("FIRECRAWL_API_BASE_URL"),
+        "https://api.firecrawl.dev",
+    )
+    firecrawl_request_timeout_sec = first_meaningful_value(
+        external_env.get("FIRECRAWL_REQUEST_TIMEOUT_SEC"),
+        firecrawl_external_env.get("FIRECRAWL_REQUEST_TIMEOUT_SEC"),
+        existing_env.get("FIRECRAWL_REQUEST_TIMEOUT_SEC"),
+        firecrawl_existing_env.get("FIRECRAWL_REQUEST_TIMEOUT_SEC"),
+        source_data.get("FIRECRAWL_REQUEST_TIMEOUT_SEC"),
+        "120",
+    )
+    firecrawl_extract_poll_interval_sec = first_meaningful_value(
+        external_env.get("FIRECRAWL_EXTRACT_POLL_INTERVAL_SEC"),
+        firecrawl_external_env.get("FIRECRAWL_EXTRACT_POLL_INTERVAL_SEC"),
+        existing_env.get("FIRECRAWL_EXTRACT_POLL_INTERVAL_SEC"),
+        firecrawl_existing_env.get("FIRECRAWL_EXTRACT_POLL_INTERVAL_SEC"),
+        source_data.get("FIRECRAWL_EXTRACT_POLL_INTERVAL_SEC"),
+        "2",
+    )
+    firecrawl_extract_max_wait_sec = first_meaningful_value(
+        external_env.get("FIRECRAWL_EXTRACT_MAX_WAIT_SEC"),
+        firecrawl_external_env.get("FIRECRAWL_EXTRACT_MAX_WAIT_SEC"),
+        existing_env.get("FIRECRAWL_EXTRACT_MAX_WAIT_SEC"),
+        firecrawl_existing_env.get("FIRECRAWL_EXTRACT_MAX_WAIT_SEC"),
+        source_data.get("FIRECRAWL_EXTRACT_MAX_WAIT_SEC"),
+        "120",
+    )
+    firecrawl_agent_poll_interval_sec = first_meaningful_value(
+        external_env.get("FIRECRAWL_AGENT_POLL_INTERVAL_SEC"),
+        firecrawl_external_env.get("FIRECRAWL_AGENT_POLL_INTERVAL_SEC"),
+        existing_env.get("FIRECRAWL_AGENT_POLL_INTERVAL_SEC"),
+        firecrawl_existing_env.get("FIRECRAWL_AGENT_POLL_INTERVAL_SEC"),
+        source_data.get("FIRECRAWL_AGENT_POLL_INTERVAL_SEC"),
+        "3",
+    )
+    firecrawl_agent_max_wait_sec = first_meaningful_value(
+        external_env.get("FIRECRAWL_AGENT_MAX_WAIT_SEC"),
+        firecrawl_external_env.get("FIRECRAWL_AGENT_MAX_WAIT_SEC"),
+        existing_env.get("FIRECRAWL_AGENT_MAX_WAIT_SEC"),
+        firecrawl_existing_env.get("FIRECRAWL_AGENT_MAX_WAIT_SEC"),
+        source_data.get("FIRECRAWL_AGENT_MAX_WAIT_SEC"),
+        "240",
+    )
+    xai_api_key = first_meaningful_value(
+        external_env.get("XAI_API_KEY"),
+        external_env.get("IMAGE_AGENT_XAI_API_KEY"),
+        image_external_env.get("IMAGE_AGENT_XAI_API_KEY"),
+        image_external_env.get("XAI_API_KEY"),
+        existing_env.get("XAI_API_KEY"),
+        existing_env.get("IMAGE_AGENT_XAI_API_KEY"),
+        image_existing_env.get("IMAGE_AGENT_XAI_API_KEY"),
+        image_existing_env.get("XAI_API_KEY"),
+        source_data.get("XAI_API_KEY"),
+        source_data.get("IMAGE_AGENT_XAI_API_KEY"),
+    )
+    xai_base_url = first_meaningful_value(
+        external_env.get("XAI_BASE_URL"),
+        external_env.get("IMAGE_AGENT_XAI_BASE_URL"),
+        image_external_env.get("IMAGE_AGENT_XAI_BASE_URL"),
+        existing_env.get("XAI_BASE_URL"),
+        existing_env.get("IMAGE_AGENT_XAI_BASE_URL"),
+        image_existing_env.get("IMAGE_AGENT_XAI_BASE_URL"),
+        image_existing_env.get("XAI_BASE_URL"),
+        source_data.get("XAI_BASE_URL"),
+        source_data.get("IMAGE_AGENT_XAI_BASE_URL"),
+        "https://api.x.ai/v1",
+    )
+    xai_model = first_meaningful_value(
+        external_env.get("XAI_MODEL"),
+        external_env.get("IMAGE_AGENT_XAI_MODEL"),
+        image_external_env.get("IMAGE_AGENT_XAI_MODEL"),
+        existing_env.get("XAI_MODEL"),
+        existing_env.get("IMAGE_AGENT_XAI_MODEL"),
+        image_existing_env.get("IMAGE_AGENT_XAI_MODEL"),
+        image_existing_env.get("XAI_MODEL"),
+        source_data.get("XAI_MODEL"),
+        source_data.get("IMAGE_AGENT_XAI_MODEL"),
+        "grok-imagine-image-pro",
+    )
+    xai_timeout_sec = first_meaningful_value(
+        external_env.get("XAI_TIMEOUT_SEC"),
+        external_env.get("IMAGE_AGENT_XAI_TIMEOUT_SEC"),
+        image_external_env.get("IMAGE_AGENT_XAI_TIMEOUT_SEC"),
+        existing_env.get("XAI_TIMEOUT_SEC"),
+        existing_env.get("IMAGE_AGENT_XAI_TIMEOUT_SEC"),
+        image_existing_env.get("IMAGE_AGENT_XAI_TIMEOUT_SEC"),
+        image_existing_env.get("XAI_TIMEOUT_SEC"),
+        source_data.get("XAI_TIMEOUT_SEC"),
+        source_data.get("IMAGE_AGENT_XAI_TIMEOUT_SEC"),
+        "180",
+    )
+    image_agent_default_size = first_meaningful_value(
+        external_env.get("IMAGE_AGENT_DEFAULT_SIZE"),
+        image_external_env.get("IMAGE_AGENT_DEFAULT_SIZE"),
+        existing_env.get("IMAGE_AGENT_DEFAULT_SIZE"),
+        image_existing_env.get("IMAGE_AGENT_DEFAULT_SIZE"),
+        source_data.get("IMAGE_AGENT_DEFAULT_SIZE"),
+        "1536x1024",
+    )
+    image_agent_default_quality = first_meaningful_value(
+        external_env.get("IMAGE_AGENT_DEFAULT_QUALITY"),
+        image_external_env.get("IMAGE_AGENT_DEFAULT_QUALITY"),
+        existing_env.get("IMAGE_AGENT_DEFAULT_QUALITY"),
+        image_existing_env.get("IMAGE_AGENT_DEFAULT_QUALITY"),
+        source_data.get("IMAGE_AGENT_DEFAULT_QUALITY"),
+        "high",
+    )
+    image_agent_max_images_per_request = first_meaningful_value(
+        external_env.get("IMAGE_AGENT_MAX_IMAGES_PER_REQUEST"),
+        image_external_env.get("IMAGE_AGENT_MAX_IMAGES_PER_REQUEST"),
+        existing_env.get("IMAGE_AGENT_MAX_IMAGES_PER_REQUEST"),
+        image_existing_env.get("IMAGE_AGENT_MAX_IMAGES_PER_REQUEST"),
+        source_data.get("IMAGE_AGENT_MAX_IMAGES_PER_REQUEST"),
+        "4",
+    )
+    image_agent_max_prompt_chars = first_meaningful_value(
+        external_env.get("IMAGE_AGENT_MAX_PROMPT_CHARS"),
+        image_external_env.get("IMAGE_AGENT_MAX_PROMPT_CHARS"),
+        existing_env.get("IMAGE_AGENT_MAX_PROMPT_CHARS"),
+        image_existing_env.get("IMAGE_AGENT_MAX_PROMPT_CHARS"),
+        source_data.get("IMAGE_AGENT_MAX_PROMPT_CHARS"),
+        "6000",
+    )
     enable_python_sandbox_tool = pick_env(("ENABLE_PYTHON_SANDBOX_TOOL",), "true")
     python_sandbox_timeout_sec = pick_env(("PYTHON_SANDBOX_TIMEOUT_SEC",), "25")
     python_sandbox_max_files = pick_env(("PYTHON_SANDBOX_MAX_FILES",), "8")
@@ -2046,6 +2203,20 @@ def build_slide_agent_env_rendered(
         "SLIDE_AGENT_DOCS_PARSER_AGENT_ID": docs_parser_agent_id
         or DOCS_PARSER_AGENT_ID,
         "SLIDE_AGENT_DEFAULT_WORKFLOW": default_workflow or "",
+        "ASSETS_CACHE_DIR": assets_cache_dir or "assets/cache",
+        "FIRECRAWL_API_BASE_URL": firecrawl_api_base_url or "https://api.firecrawl.dev",
+        "FIRECRAWL_REQUEST_TIMEOUT_SEC": firecrawl_request_timeout_sec or "120",
+        "FIRECRAWL_EXTRACT_POLL_INTERVAL_SEC": firecrawl_extract_poll_interval_sec or "2",
+        "FIRECRAWL_EXTRACT_MAX_WAIT_SEC": firecrawl_extract_max_wait_sec or "120",
+        "FIRECRAWL_AGENT_POLL_INTERVAL_SEC": firecrawl_agent_poll_interval_sec or "3",
+        "FIRECRAWL_AGENT_MAX_WAIT_SEC": firecrawl_agent_max_wait_sec or "240",
+        "XAI_BASE_URL": xai_base_url or "https://api.x.ai/v1",
+        "XAI_MODEL": xai_model or "grok-imagine-image-pro",
+        "XAI_TIMEOUT_SEC": xai_timeout_sec or "180",
+        "IMAGE_AGENT_DEFAULT_SIZE": image_agent_default_size or "1536x1024",
+        "IMAGE_AGENT_DEFAULT_QUALITY": image_agent_default_quality or "high",
+        "IMAGE_AGENT_MAX_IMAGES_PER_REQUEST": image_agent_max_images_per_request or "4",
+        "IMAGE_AGENT_MAX_PROMPT_CHARS": image_agent_max_prompt_chars or "6000",
         "ENABLE_PYTHON_SANDBOX_TOOL": enable_python_sandbox_tool or "true",
         "PYTHON_SANDBOX_TIMEOUT_SEC": python_sandbox_timeout_sec or "25",
         "PYTHON_SANDBOX_MAX_FILES": python_sandbox_max_files or "8",
@@ -2060,6 +2231,12 @@ def build_slide_agent_env_rendered(
     }
     if mimo_api_key is not None:
         overrides["SLIDE_AGENT_MIMO_API_KEY"] = mimo_api_key
+    if pexels_api_key is not None:
+        overrides["PEXELS_API_KEY"] = pexels_api_key
+    if firecrawl_api_key is not None:
+        overrides["FIRECRAWL_API_KEY"] = firecrawl_api_key
+    if xai_api_key is not None:
+        overrides["XAI_API_KEY"] = xai_api_key
 
     rendered = render_env_with_overrides(source_raw, overrides)
     rendered_data = parse_env_text(rendered)

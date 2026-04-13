@@ -15,6 +15,8 @@ intents:
       - Do not delegate a new deck request here until the user has chosen workflow=html or workflow=template, unless the user explicitly passed workflow=auto or provided a template.
       - HTML mode is fast and produces an image-backed, non-editable PPTX.
       - Template mode is slower and produces an editable PPTX from an uploaded template or an auto-selected template from the agent templates folder.
+      - The Slide Agent has internal visual sourcing tools for stock photos, web research, generated images, and bounded local Python asset generation. When the user asks for visuals inside the deck, let the Slide Agent source them internally instead of pre-generating them in the orchestrator.
+      - If the user asks for generated images, custom backgrounds, or web-sourced visuals on slides, delegate directly to Slide Agent and do not route those visuals through the standalone image agent first unless the user explicitly wants separate image artifacts outside the deck.
       - If multiple templates exist and no template is specified, the agent plans the deck then selects the best matching template internally.
       - If the user uploads PDF/DOC/DOCX/PPT/PPTX source material for deck content, pass it through input_artifacts or source_artifacts; the agent delegates raw documents to docs.parse_bundle and injects parsed context before generation.
       - For large parsed source documents, the agent retrieves source pages/slides in bounded windows internally; do not inline the full PDF/doc text in the orchestrator prompt.
@@ -30,6 +32,7 @@ intents:
       - Use this when the user uploads an existing slide deck and asks to edit it.
       - Pass source_pptx_path or attach the PPTX as an input artifact.
       - Current edit mode is regeneration, not low-level in-place shape patching.
+      - The Slide Agent can internally re-source stock photos, web references, generated visuals, and local synthetic assets during regeneration. Do not pre-fetch those assets in the orchestrator unless the user explicitly asks for standalone outputs.
       - If the source deck was produced by workflow=html or is image-backed/non-editable, the agent regenerates it through the fast HTML workflow instead of treating it as an editable template.
       - For follow-up edits to a just-created non-editable HTML deck, include the produced PPTX artifact plus any prior plan/build_report artifacts if available so the agent can preserve the original subject and slide content.
       - Supporting PDF/DOC/DOCX/PPT source material can also be attached; the agent parses it through docs.parse_bundle and uses the parsed context in the regeneration brief.

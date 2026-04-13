@@ -198,11 +198,12 @@ CHARTS — use only when ALL of these are true:
   DO NOT invent vague round numbers (10, 20, 30) — use realistic figures.
   A 10-slide deck should have at most 2–3 chart slides.
 
-IMAGES — use only when the visual itself carries meaning:
+IMAGES - use only when the visual itself carries meaning:
   • content_role is "visual", "opening", "closing", or "highlight"
   • The concept is emotional, spatial, or physical (a city, a product, a person)
   • A strong image would genuinely replace 50 words of explanation
-  DO NOT add image_prompt to every slide — narrative and data slides rarely need one.
+  • If the user explicitly asks for an image-led slide, full-bleed background, hero background, generated visual, or photo background on a specific slide, include an image_prompt for that slide unless the slide is primarily a dense chart/data slide.
+  DO NOT add image_prompt to every slide - narrative and data slides rarely need one.
   DO NOT use images on slides that already have a chart.
   The description must be specific and detailed enough to generate the image
   (subject, environment, style, lighting, perspective).

@@ -693,6 +693,75 @@ def test_build_image_generator_agent_env_rendered_prefers_external_values(tmp_pa
     assert parsed["GATEWAY_INTERNAL_TOKEN"] == "internal-token"
 
 
+def test_build_slide_agent_env_rendered_inherits_visual_keys_from_peer_agents(
+    tmp_path, monkeypatch
+) -> None:
+    backend_root = tmp_path / "Backend"
+    slide_dir = backend_root / "agents" / "slide_agent"
+    system_env_dir = tmp_path / "etc" / "cosmic"
+    agents_env_dir = system_env_dir / "agents"
+    slide_dir.mkdir(parents=True)
+    agents_env_dir.mkdir(parents=True)
+    (slide_dir / "agent.env.example").write_text(
+        "REDIS_URL=redis://127.0.0.1:6379/0\n"
+        "GATEWAY_URL=http://127.0.0.1:8080\n"
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "AGENT_SECRET=<agent-shared-secret>\n"
+        "INSTANCE_ID=slide-agent-1\n"
+        "SLIDE_AGENT_MIMO_API_KEY=\n"
+        "PEXELS_API_KEY=\n"
+        "FIRECRAWL_API_KEY=\n"
+        "FIRECRAWL_API_BASE_URL=https://api.firecrawl.dev\n"
+        "XAI_API_KEY=\n"
+        "XAI_BASE_URL=https://api.x.ai/v1\n"
+        "XAI_MODEL=grok-imagine-image-pro\n"
+        "IMAGE_AGENT_DEFAULT_SIZE=1536x1024\n",
+        encoding="utf-8",
+    )
+    (agents_env_dir / bootstrap.FIRECRAWL_AGENT_ENV_NAME).write_text(
+        "FIRECRAWL_API_KEY=fc-key\n"
+        "FIRECRAWL_API_BASE_URL=https://api.firecrawl.dev\n"
+        "FIRECRAWL_REQUEST_TIMEOUT_SEC=120\n",
+        encoding="utf-8",
+    )
+    (agents_env_dir / bootstrap.IMAGE_GENERATOR_AGENT_ENV_NAME).write_text(
+        "IMAGE_AGENT_XAI_API_KEY=xai-key\n"
+        "IMAGE_AGENT_XAI_BASE_URL=https://api.x.ai/v1\n"
+        "IMAGE_AGENT_XAI_MODEL=grok-imagine-image-pro\n"
+        "IMAGE_AGENT_DEFAULT_SIZE=1536x1024\n"
+        "IMAGE_AGENT_DEFAULT_QUALITY=high\n"
+        "IMAGE_AGENT_MAX_IMAGES_PER_REQUEST=4\n"
+        "IMAGE_AGENT_MAX_PROMPT_CHARS=6000\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bootstrap, "BACKEND_ROOT", backend_root)
+
+    dest_path, rendered, parsed = bootstrap.build_slide_agent_env_rendered(
+        signing_secret="signing-secret",
+        shared_internal_token="internal-token",
+        system_env_dir=system_env_dir,
+        external_env_by_name={
+            bootstrap.SLIDE_AGENT_ENV_NAME: {
+                "SLIDE_AGENT_MIMO_API_KEY": "mimo-key",
+                "PEXELS_API_KEY": "pexels-key",
+            }
+        },
+    )
+
+    assert dest_path.name == bootstrap.SLIDE_AGENT_ENV_NAME
+    assert "PEXELS_API_KEY=pexels-key" in rendered
+    assert "FIRECRAWL_API_KEY=fc-key" in rendered
+    assert "XAI_API_KEY=xai-key" in rendered
+    assert parsed["SLIDE_AGENT_MIMO_API_KEY"] == "mimo-key"
+    assert parsed["PEXELS_API_KEY"] == "pexels-key"
+    assert parsed["FIRECRAWL_API_KEY"] == "fc-key"
+    assert parsed["XAI_API_KEY"] == "xai-key"
+    assert parsed["IMAGE_AGENT_DEFAULT_SIZE"] == "1536x1024"
+    assert parsed["IMAGE_AGENT_DEFAULT_QUALITY"] == "high"
+    assert parsed["AGENT_SECRET"] == "signing-secret"
+    assert parsed["GATEWAY_INTERNAL_TOKEN"] == "internal-token"
+
+
 def test_materialize_bootstrap_env_files_can_render_memory_env(monkeypatch, tmp_path) -> None:
     backend_root = tmp_path / "Backend"
     bridge_dir = backend_root / "bridges" / "whatsapp_bridge"
