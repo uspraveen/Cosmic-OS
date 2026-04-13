@@ -1061,7 +1061,12 @@ def test_verify_critical_backend_dependencies_checks_required_imports(monkeypatc
     bootstrap.verify_critical_backend_dependencies(venv_path)
 
     assert commands == [
-        [str(python_path), "-c", "import importlib; importlib.import_module('docling')"],
+        [
+            str(python_path),
+            "-c",
+            "import importlib; importlib.import_module('{0}')".format(module_name),
+        ]
+        for module_name, _label in bootstrap.CRITICAL_VENV_IMPORT_CHECKS
     ]
 
 
@@ -1111,11 +1116,47 @@ def test_ensure_office_renderer_installs_and_verifies(monkeypatch) -> None:
     assert install_calls == [("apt-get", ["libreoffice"])]
 
 
+def test_ensure_pdf_renderer_installs_and_verifies(monkeypatch) -> None:
+    install_calls: list[tuple[str, list[str]]] = []
+    versions = [None, "pdftoppm version 24.02.0"]
+
+    monkeypatch.setattr(bootstrap, "is_linux", lambda: True)
+    monkeypatch.setattr(bootstrap, "detect_package_manager", lambda: "apt-get")
+    monkeypatch.setattr(
+        bootstrap,
+        "install_system_packages",
+        lambda manager, packages: install_calls.append((manager, list(packages))),
+    )
+    monkeypatch.setattr(bootstrap, "pdf_renderer_version", lambda: versions.pop(0))
+
+    bootstrap.ensure_pdf_renderer()
+
+    assert install_calls == [("apt-get", ["poppler-utils"])]
+
+
+def test_ensure_slide_python_build_dependencies_installs_cairo_deps(monkeypatch) -> None:
+    install_calls: list[tuple[str, list[str]]] = []
+
+    monkeypatch.setattr(bootstrap, "is_linux", lambda: True)
+    monkeypatch.setattr(bootstrap, "detect_package_manager", lambda: "apt-get")
+    monkeypatch.setattr(
+        bootstrap,
+        "install_system_packages",
+        lambda manager, packages: install_calls.append((manager, list(packages))),
+    )
+
+    bootstrap.ensure_slide_python_build_dependencies()
+
+    assert install_calls == [("apt-get", ["pkg-config", "libcairo2-dev"])]
+
+
 def test_setup_python_verifies_critical_backend_dependencies(monkeypatch, tmp_path) -> None:
     calls: list[str] = []
 
     monkeypatch.setattr(bootstrap, "is_linux", lambda: True)
     monkeypatch.setattr(bootstrap, "ensure_office_renderer", lambda: calls.append("ensure_office_renderer"))
+    monkeypatch.setattr(bootstrap, "ensure_pdf_renderer", lambda: calls.append("ensure_pdf_renderer"))
+    monkeypatch.setattr(bootstrap, "ensure_slide_python_build_dependencies", lambda: calls.append("ensure_slide_python_build_dependencies"))
     monkeypatch.setattr(bootstrap, "ensure_python3_available", lambda: calls.append("ensure_python3_available"))
     monkeypatch.setattr(bootstrap, "ensure_pip", lambda: calls.append("ensure_pip"))
     monkeypatch.setattr(bootstrap, "ensure_venv_support", lambda: calls.append("ensure_venv_support"))
@@ -1123,11 +1164,14 @@ def test_setup_python_verifies_critical_backend_dependencies(monkeypatch, tmp_pa
     monkeypatch.setattr(bootstrap, "upgrade_venv_pip", lambda path: calls.append("upgrade_venv_pip"))
     monkeypatch.setattr(bootstrap, "install_python_requirements", lambda venv, reqs: calls.append("install_python_requirements"))
     monkeypatch.setattr(bootstrap, "verify_critical_backend_dependencies", lambda path: calls.append("verify_critical_backend_dependencies"))
+    monkeypatch.setattr(bootstrap, "ensure_playwright_chromium", lambda path: calls.append("ensure_playwright_chromium"))
 
     bootstrap.setup_python(tmp_path / ".venv", tmp_path / "requirements.txt")
 
     assert calls == [
         "ensure_office_renderer",
+        "ensure_pdf_renderer",
+        "ensure_slide_python_build_dependencies",
         "ensure_python3_available",
         "ensure_pip",
         "ensure_venv_support",
@@ -1135,6 +1179,7 @@ def test_setup_python_verifies_critical_backend_dependencies(monkeypatch, tmp_pa
         "upgrade_venv_pip",
         "install_python_requirements",
         "verify_critical_backend_dependencies",
+        "ensure_playwright_chromium",
     ]
 
 

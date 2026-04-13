@@ -116,6 +116,9 @@ SLIDE_AGENT_ID = "cosmic/slide-agent:1.0.0"
 SLIDE_AGENT_DEFAULT_INSTANCE_ID = "slide-agent-1"
 CRITICAL_VENV_IMPORT_CHECKS: Tuple[Tuple[str, str], ...] = (
     ("docling", "docs parser runtime"),
+    ("playwright", "slide HTML renderer"),
+    ("reportlab", "slide PDF/vector renderer"),
+    ("svglib", "slide SVG renderer"),
 )
 DEFAULT_POST_PROVISION_TIMEOUT_SEC = 120.0
 DEFAULT_POST_PROVISION_POLL_INTERVAL_SEC = 2.0
@@ -189,6 +192,18 @@ PACKAGE_NAMES: Dict[str, Dict[str, str]] = {
         "yum": "redis",
         "apk": "redis",
     },
+    "poppler": {
+        "apt-get": "poppler-utils",
+        "dnf": "poppler-utils",
+        "yum": "poppler-utils",
+        "apk": "poppler-utils",
+    },
+}
+SLIDE_PYTHON_BUILD_PACKAGE_NAMES: Dict[str, Tuple[str, ...]] = {
+    "apt-get": ("pkg-config", "libcairo2-dev"),
+    "dnf": ("pkgconf-pkg-config", "cairo-devel"),
+    "yum": ("pkgconfig", "cairo-devel"),
+    "apk": ("pkgconf", "cairo-dev"),
 }
 
 
@@ -377,7 +392,7 @@ def executable_version(command: Sequence[str]) -> Optional[str]:
         result = run(command, capture_output=True)
     except (BootstrapError, subprocess.CalledProcessError, FileNotFoundError):
         return None
-    return (result.stdout or "").strip() or None
+    return (result.stdout or "").strip() or (result.stderr or "").strip() or None
 
 
 def node_major_version(version_text: Optional[str]) -> Optional[int]:
@@ -2188,6 +2203,62 @@ def ensure_office_renderer() -> None:
     log("Office renderer available: {0}".format(version))
 
 
+def pdf_renderer_version() -> Optional[str]:
+    return executable_version(["pdftoppm", "-v"])
+
+
+def ensure_pdf_renderer() -> None:
+    version = pdf_renderer_version()
+    if version:
+        log("PDF renderer available: {0}".format(version))
+        return
+
+    manager = detect_package_manager()
+    if not is_linux() or not manager:
+        raise BootstrapError(
+            "PDF renderer/pdftoppm missing and no supported Linux package manager was found."
+        )
+
+    package_name = PACKAGE_NAMES["poppler"].get(manager)
+    if not package_name:
+        raise BootstrapError(
+            "No poppler package mapping for package manager: {0}".format(manager)
+        )
+
+    log("Installing PDF renderer via {0}: {1}".format(manager, package_name))
+    install_system_packages(manager, [package_name])
+
+    version = pdf_renderer_version()
+    if not version:
+        raise BootstrapError(
+            "PDF renderer/pdftoppm is still unavailable after installation."
+        )
+    log("PDF renderer available: {0}".format(version))
+
+
+def ensure_slide_python_build_dependencies() -> None:
+    manager = detect_package_manager()
+    if not is_linux() or not manager:
+        raise BootstrapError(
+            "Slide Python build dependencies need a supported Linux package manager."
+        )
+
+    packages = SLIDE_PYTHON_BUILD_PACKAGE_NAMES.get(manager)
+    if not packages:
+        raise BootstrapError(
+            "No slide Python build dependency package mapping for package manager: {0}".format(
+                manager
+            )
+        )
+
+    log(
+        "Installing slide Python build dependencies via {0}: {1}".format(
+            manager, ", ".join(packages)
+        )
+    )
+    install_system_packages(manager, packages)
+
+
 def missing_required_env_keys(
     env_path: Path, required_keys: Sequence[str]
 ) -> List[str]:
@@ -2736,6 +2807,80 @@ def verify_critical_backend_dependencies(venv_path: Path) -> None:
                 )
             ) from exc
         log("Verified {0} import for {1}".format(module_name, check_label))
+
+
+def playwright_chromium_launchable(venv_path: Path) -> bool:
+    python_path = venv_python_path(venv_path)
+    if not python_path.exists():
+        return False
+
+    check_script = """
+import sys
+from playwright.sync_api import sync_playwright
+
+errors = []
+pw = sync_playwright().start()
+try:
+    for kwargs in (
+        {"headless": True},
+        {"headless": True, "channel": "msedge"},
+        {"headless": True, "channel": "chrome"},
+    ):
+        browser = None
+        try:
+            browser = pw.chromium.launch(**kwargs)
+        except Exception as exc:
+            errors.append(str(exc))
+            continue
+        finally:
+            if browser is not None:
+                browser.close()
+        sys.exit(0)
+finally:
+    pw.stop()
+
+print(" | ".join(errors), file=sys.stderr)
+sys.exit(1)
+""".strip()
+    try:
+        run([str(python_path), "-c", check_script], capture_output=True)
+        return True
+    except (BootstrapError, subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def ensure_playwright_chromium(venv_path: Path) -> None:
+    python_path = venv_python_path(venv_path)
+    if not python_path.exists():
+        raise BootstrapError(
+            "Missing venv python executable at {0}".format(python_path)
+        )
+
+    if playwright_chromium_launchable(venv_path):
+        log("Playwright Chromium browser is launchable.")
+        return
+
+    log("Installing Playwright Chromium browser dependencies.")
+    try:
+        run_with_retry(
+            [str(python_path), "-m", "playwright", "install-deps", "chromium"],
+            use_sudo=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        log(
+            "Playwright install-deps failed; continuing with browser install and final launch check: {0}".format(
+                exc
+            )
+        )
+
+    log("Installing Playwright Chromium browser.")
+    run_with_retry([str(python_path), "-m", "playwright", "install", "chromium"])
+
+    if not playwright_chromium_launchable(venv_path):
+        raise BootstrapError(
+            "Playwright Chromium is still unavailable or not launchable after installation."
+        )
+    log("Playwright Chromium browser is launchable.")
 
 
 def has_node() -> bool:
@@ -4052,6 +4197,14 @@ def doctor(
         docs_parser_dependency_status = "venv missing pip"
     print("  docs parser deps   : {0}".format(docs_parser_dependency_status))
     print("  office renderer    : {0}".format(office_renderer_version() or "missing"))
+    print("  pdf renderer       : {0}".format(pdf_renderer_version() or "missing"))
+    if venv_has_pip(venv_path):
+        playwright_status = (
+            "ok" if playwright_chromium_launchable(venv_path) else "missing"
+        )
+    else:
+        playwright_status = "venv missing"
+    print("  playwright chromium: {0}".format(playwright_status))
     print(
         "  requirements file  : {0}".format(
             requirements_path if requirements_path.exists() else "missing"
@@ -4681,6 +4834,8 @@ def setup_python(venv_path: Path, requirements_path: Path) -> None:
         raise BootstrapError("This bootstrap flow currently targets Linux VMs only.")
 
     ensure_office_renderer()
+    ensure_pdf_renderer()
+    ensure_slide_python_build_dependencies()
     ensure_python3_available()
     ensure_pip()
     ensure_venv_support()
@@ -4688,6 +4843,7 @@ def setup_python(venv_path: Path, requirements_path: Path) -> None:
     upgrade_venv_pip(venv_path)
     install_python_requirements(venv_path, requirements_path)
     verify_critical_backend_dependencies(venv_path)
+    ensure_playwright_chromium(venv_path)
 
 
 def setup_whatsapp_bridge(bridge_dir: Path) -> None:
