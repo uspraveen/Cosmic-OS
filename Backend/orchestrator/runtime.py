@@ -870,6 +870,11 @@ class OrchestratorRuntime:
                 self.task_ledger.mark_cancelled(task.task_id, message=message)
                 yield {**ev, "type": "task.cancelled", "route": "opus", "status": "cancelled", "message": message}
                 return
+            self.task_ledger.mark_failed(
+                task.task_id,
+                code="STREAM_DISCONNECTED",
+                message="The upstream stream ended before the task completed.",
+            )
             raise
         except Exception as exc:
             if isinstance(exc, OrchestratorTaskError):

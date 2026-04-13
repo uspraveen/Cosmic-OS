@@ -681,6 +681,66 @@ def test_one_slide_per_page_html_splits_at_deck_limit(monkeypatch: Any) -> None:
         shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
+def test_slide_create_html_uses_blocking_stage(monkeypatch: Any) -> None:
+    runtime_dir = _runtime_dir()
+    try:
+        agent = _agent(runtime_dir)
+        captured: dict[str, Any] = {}
+
+        def fake_run_html(
+            description: str,
+            output_dir: Path,
+            max_slides: int | None,
+            _validate: bool,
+            content_plan: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            captured["description"] = description
+            captured["max_slides"] = max_slides
+            captured["content_plan"] = content_plan
+            output_dir.mkdir(parents=True, exist_ok=True)
+            pptx_path = output_dir / "deck.pptx"
+            plan_path = output_dir / "plan.json"
+            pptx_path.write_bytes(b"fake-pptx")
+            plan_path.write_text(json.dumps({"slides": []}), encoding="utf-8")
+            return {
+                "pptx_path": str(pptx_path),
+                "plan_path": str(plan_path),
+                "content_plan": {"deck_title": "Cosmic", "slides": []},
+            }
+
+        async def fake_run_blocking_stage(
+            task: TaskEnvelope,
+            message: str,
+            func: Any,
+            *args: Any,
+        ) -> dict[str, Any]:
+            captured["task_id"] = task.task_id
+            captured["message"] = message
+            return func(*args)
+
+        monkeypatch.setattr(agent, "_run_html", fake_run_html)
+        monkeypatch.setattr(agent, "_run_blocking_stage", fake_run_blocking_stage)
+
+        result = asyncio.run(
+            agent.handle_slide_create(
+                _task(
+                    task_id="tsk_create_heartbeat",
+                    input_payload={
+                        "description": "Create a short deck about Cosmic.",
+                        "workflow": "html",
+                    },
+                )
+            )
+        )
+
+        assert result.status == "completed"
+        assert captured["task_id"] == "tsk_create_heartbeat"
+        assert captured["message"] == "Building the slide deck."
+        assert captured["description"] == "Create a short deck about Cosmic."
+    finally:
+        shutil.rmtree(runtime_dir, ignore_errors=True)
+
+
 def test_one_slide_per_page_template_splits_with_content_plans(monkeypatch: Any) -> None:
     runtime_dir = _runtime_dir()
     try:

@@ -180,7 +180,9 @@ class SlideAgent(AgentRuntime):
             results = []
             for part in parts:
                 results.append(
-                    await asyncio.to_thread(
+                    await self._run_blocking_stage(
+                        task,
+                        self._create_generation_stage_message(part),
                         self._run_html,
                         part.description,
                         part.output_dir,
@@ -240,7 +242,9 @@ class SlideAgent(AgentRuntime):
         results = []
         for part in parts:
             results.append(
-                await asyncio.to_thread(
+                await self._run_blocking_stage(
+                    task,
+                    self._create_generation_stage_message(part),
                     self._run_template,
                     part.description,
                     selected_template,
@@ -578,6 +582,19 @@ class SlideAgent(AgentRuntime):
             )
         result = await worker
         return result if isinstance(result, dict) else {}
+
+    def _create_generation_stage_message(
+        self,
+        part: _DeckPart,
+        *,
+        prefix: str = "Building the slide deck",
+    ) -> str:
+        if part.total_parts <= 1:
+            return f"{prefix}."
+        return (
+            f"{prefix}. Working on part {part.index} of {part.total_parts} "
+            f"(slides {part.start_slide}-{part.end_slide})."
+        )
 
     def _apply_docs_parse_reverse_result(
         self,

@@ -20,8 +20,15 @@ class OrchestratorClient:
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.internal_token = internal_token.strip()
-        timeout = httpx.Timeout(timeout_sec, connect=min(timeout_sec, 10.0))
-        self._client = httpx.AsyncClient(timeout=timeout, http2=True)
+        connect_timeout = min(timeout_sec, 10.0)
+        self._request_timeout = httpx.Timeout(timeout_sec, connect=connect_timeout)
+        self._stream_timeout = httpx.Timeout(
+            connect=connect_timeout,
+            read=None,
+            write=timeout_sec,
+            pool=timeout_sec,
+        )
+        self._client = httpx.AsyncClient(timeout=self._request_timeout, http2=True)
 
     async def start(self) -> None:
         return
@@ -40,6 +47,7 @@ class OrchestratorClient:
             url,
             headers=headers,
             json=task.model_dump(mode="json"),
+            timeout=self._stream_timeout,
         ) as response:
             if response.status_code >= 400:
                 body = await response.aread()
