@@ -666,10 +666,7 @@ class OrchestratorRuntime:
                     messages.append({"role": "assistant", "content": assistant_content})
                     loop_message = self._build_server_tool_loop_message(turn_server_blocks)
                     if dropped_server_blocks:
-                        loop_message = loop_message.rstrip()
-                        if loop_message and loop_message[-1] not in ".!?":
-                            loop_message += "."
-                        loop_message += " Some incomplete server-side tool blocks were skipped to keep the continuation valid."
+                        loop_message = self._append_server_tool_skip_note(loop_message)
                     yield {
                         **ev, "type": "task.progress",
                         "status": "tool_loop",
@@ -681,8 +678,9 @@ class OrchestratorRuntime:
                 # ── Tool use → execute and loop ─────────────────
                 if turn_stop_reason == "tool_use" and turn_tool_blocks:
                     saw_tool_loop = True
-                    # Reconstruct the full assistant message (thinking + text + tool_use)
-                    assistant_content = [blocks[idx].to_api_dict() for idx in sorted(blocks)]
+                    # Reconstruct the assistant message, stripping any incomplete
+                    # server-side tool blocks before the next Anthropic request.
+                    assistant_content, dropped_server_blocks = self._sanitize_server_tool_replay_blocks(blocks)
                     messages.append({"role": "assistant", "content": assistant_content})
 
                     # Parse inputs and emit progress events for all tool calls
@@ -779,17 +777,20 @@ class OrchestratorRuntime:
                         user_content.extend(followup_blocks)
                     messages.append({"role": "user", "content": user_content})
 
+                    loop_message = self._build_local_tool_loop_message(
+                        turn_tool_blocks,
+                        parsed_inputs,
+                        result_strs,
+                        parallel=all_read_only and len(turn_tool_blocks) > 1,
+                    )
+                    if dropped_server_blocks:
+                        loop_message = self._append_server_tool_skip_note(loop_message)
                     yield {
                         **ev, "type": "task.progress",
                         "status": "tool_loop",
                         "iteration": iteration,
                         "tools_called": [tb.tool_name for tb in turn_tool_blocks],
-                        "message": self._build_local_tool_loop_message(
-                            turn_tool_blocks,
-                            parsed_inputs,
-                            result_strs,
-                            parallel=all_read_only and len(turn_tool_blocks) > 1,
-                        ),
+                        "message": loop_message,
                         "specialist_delegations": self._extract_specialist_delegations(
                             turn_tool_blocks,
                             parsed_inputs,
@@ -2937,6 +2938,44 @@ class OrchestratorRuntime:
             return None
         return f"{normalized}_tool_result"
 
+    @staticmethod
+    def _server_tool_result_has_replay_payload(
+        block: dict[str, Any],
+        *,
+        tool_name: str | None = None,
+    ) -> bool:
+        """
+        Require enough payload for a replayed server tool result to be valid.
+
+        A partially streamed *_tool_result block can include only bookkeeping
+        keys like `type` and `tool_use_id`. Replaying that malformed result on
+        the next Anthropic request can cause the continuation to fail hard.
+        """
+        if not isinstance(block, dict):
+            return False
+
+        normalized_tool = str(tool_name or "").strip()
+        if normalized_tool in {"code_execution", "web_search", "web_fetch"}:
+            return "content" in block
+        if normalized_tool == "bash_code_execution":
+            return any(key in block for key in ("content", "stdout", "stderr", "exit_code", "return_code"))
+
+        for key, value in block.items():
+            if key in {"type", "tool_use_id", "cache_control"}:
+                continue
+            if value is not None:
+                return True
+        return False
+
+    @staticmethod
+    def _append_server_tool_skip_note(message: str) -> str:
+        message = str(message or "").rstrip()
+        if message:
+            if message[-1] not in ".!?":
+                message += "."
+            message += " "
+        return message + "Some incomplete server-side tool blocks were skipped to keep the continuation valid."
+
     def _sanitize_server_tool_replay_content_blocks(
         self,
         content_blocks: list[dict[str, Any]],
@@ -2975,7 +3014,11 @@ class OrchestratorRuntime:
                 tool_name = str(block.get("name") or "").strip()
                 match = server_result_by_tool_use_id.get(tool_id)
                 expected_type = self._expected_server_tool_result_type(tool_name)
-                if not match or (expected_type and str(match.get("type") or "").strip() != expected_type):
+                if (
+                    not match
+                    or (expected_type and str(match.get("type") or "").strip() != expected_type)
+                    or not self._server_tool_result_has_replay_payload(match, tool_name=tool_name)
+                ):
                     dropped_any = True
                     continue
                 sanitized.append(dict(block))
@@ -2984,10 +3027,13 @@ class OrchestratorRuntime:
             if ContentBlock._is_server_tool_result_block(block_type):
                 tool_use_id = str(block.get("tool_use_id") or "").strip()
                 matched_use = server_use_by_id.get(tool_use_id)
-                expected_type = self._expected_server_tool_result_type(
-                    str(matched_use.get("name") or "").strip()
-                ) if matched_use else None
-                if not matched_use or (expected_type and block_type != expected_type):
+                tool_name = str(matched_use.get("name") or "").strip() if matched_use else ""
+                expected_type = self._expected_server_tool_result_type(tool_name) if matched_use else None
+                if (
+                    not matched_use
+                    or (expected_type and block_type != expected_type)
+                    or not self._server_tool_result_has_replay_payload(block, tool_name=tool_name)
+                ):
                     dropped_any = True
                     continue
                 sanitized.append(dict(block))

@@ -712,8 +712,10 @@ async def test_orchestrator_runtime_emits_progress_for_memory_fetch_tool(tmp_pat
         messages: list[dict[str, object]],
         tools: list[dict[str, object]] | None = None,
         container_id: str | None = None,
+        usage_context: dict[str, object] | None = None,
+        model_override: str | None = None,
     ):
-        del system_prompt, messages, tools, container_id
+        del system_prompt, messages, tools, container_id, usage_context, model_override
         nonlocal stream_call_count
         stream_call_count += 1
         if stream_call_count == 1:
@@ -790,8 +792,10 @@ async def test_orchestrator_runtime_summarizes_parallel_local_tool_work_with_det
         messages: list[dict[str, object]],
         tools: list[dict[str, object]] | None = None,
         container_id: str | None = None,
+        usage_context: dict[str, object] | None = None,
+        model_override: str | None = None,
     ):
-        del system_prompt, messages, tools, container_id
+        del system_prompt, messages, tools, container_id, usage_context, model_override
         nonlocal stream_call_count
         stream_call_count += 1
         if stream_call_count == 1:
@@ -877,8 +881,10 @@ async def test_orchestrator_runtime_summarizes_server_side_web_search_results(tm
         messages: list[dict[str, object]],
         tools: list[dict[str, object]] | None = None,
         container_id: str | None = None,
+        usage_context: dict[str, object] | None = None,
+        model_override: str | None = None,
     ):
-        del system_prompt, messages, tools, container_id
+        del system_prompt, messages, tools, container_id, usage_context, model_override
         nonlocal stream_call_count
         stream_call_count += 1
         if stream_call_count == 1:
@@ -985,8 +991,10 @@ async def test_orchestrator_runtime_replays_bash_code_execution_result_blocks(tm
         messages: list[dict[str, object]],
         tools: list[dict[str, object]] | None = None,
         container_id: str | None = None,
+        usage_context: dict[str, object] | None = None,
+        model_override: str | None = None,
     ):
-        del system_prompt, tools, container_id
+        del system_prompt, tools, container_id, usage_context, model_override
         nonlocal stream_call_count
         stream_call_count += 1
         if stream_call_count == 1:
@@ -1076,8 +1084,10 @@ async def test_orchestrator_runtime_replays_code_execution_result_blocks(tmp_pat
         messages: list[dict[str, object]],
         tools: list[dict[str, object]] | None = None,
         container_id: str | None = None,
+        usage_context: dict[str, object] | None = None,
+        model_override: str | None = None,
     ):
-        del system_prompt, tools, container_id
+        del system_prompt, tools, container_id, usage_context, model_override
         nonlocal stream_call_count
         stream_call_count += 1
         if stream_call_count == 1:
@@ -1163,8 +1173,10 @@ async def test_orchestrator_runtime_skips_unmatched_server_tool_use_blocks_on_pa
         messages: list[dict[str, object]],
         tools: list[dict[str, object]] | None = None,
         container_id: str | None = None,
+        usage_context: dict[str, object] | None = None,
+        model_override: str | None = None,
     ):
-        del system_prompt, tools, container_id
+        del system_prompt, tools, container_id, usage_context, model_override
         nonlocal stream_call_count
         stream_call_count += 1
         if stream_call_count == 1:
@@ -1213,7 +1225,214 @@ async def test_orchestrator_runtime_skips_unmatched_server_tool_use_blocks_on_pa
     )
     assert "skipped" in progress_event["message"].lower()
     complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
-    assert complete_event["content"] == "Recovered."
+    assert complete_event["content"] == "Working...Recovered."
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_runtime_skips_incomplete_code_execution_result_blocks_on_pause_turn(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_code_exec_incomplete.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    task = _signed_task("signing-secret")
+    stream_call_count = 0
+
+    async def scripted_stream(
+        *,
+        system_prompt: str,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]] | None = None,
+        container_id: str | None = None,
+        usage_context: dict[str, object] | None = None,
+        model_override: str | None = None,
+    ):
+        del system_prompt, tools, container_id, usage_context, model_override
+        nonlocal stream_call_count
+        stream_call_count += 1
+        if stream_call_count == 1:
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 9}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Working..."}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("content_block_start", {"type": "content_block_start", "index": 1, "content_block": {"type": "server_tool_use", "id": "srv_code_3", "name": "code_execution"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"code\":\"print(3)\"}"}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 1}),
+                (
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": 2,
+                        "content_block": {
+                            "type": "code_execution_tool_result",
+                            "tool_use_id": "srv_code_3",
+                        },
+                    },
+                ),
+                ("content_block_stop", {"type": "content_block_stop", "index": 2}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "pause_turn"}, "usage": {"output_tokens": 4}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        else:
+            assistant_message = messages[-1]
+            assert assistant_message == {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Working..."},
+                ],
+            }
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 11}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Recovered."}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 6}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        for event_name, payload in events:
+            yield type("SSE", (), {"event": event_name, "data": json.dumps(payload)})()
+
+    runtime._stream_anthropic_events = scripted_stream  # type: ignore[method-assign]
+
+    await runtime.start()
+    try:
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+
+    progress_event = next(
+        event
+        for event in streamed_events
+        if event["type"] == "task.progress" and event["status"] == "tool_loop"
+    )
+    assert "skipped" in progress_event["message"].lower()
+    complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert complete_event["content"] == "Working...Recovered."
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_runtime_sanitizes_incomplete_server_tool_blocks_before_local_tool_replay(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_code_exec_incomplete_local_tool.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    task = _signed_task("signing-secret")
+    stream_call_count = 0
+
+    async def scripted_stream(
+        *,
+        system_prompt: str,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]] | None = None,
+        container_id: str | None = None,
+        usage_context: dict[str, object] | None = None,
+        model_override: str | None = None,
+    ):
+        del system_prompt, tools, container_id, usage_context, model_override
+        nonlocal stream_call_count
+        stream_call_count += 1
+        if stream_call_count == 1:
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 10}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Researching..."}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("content_block_start", {"type": "content_block_start", "index": 1, "content_block": {"type": "server_tool_use", "id": "srv_code_mix", "name": "code_execution"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"code\":\"print(7)\"}"}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 1}),
+                (
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": 2,
+                        "content_block": {
+                            "type": "code_execution_tool_result",
+                            "tool_use_id": "srv_code_mix",
+                        },
+                    },
+                ),
+                ("content_block_stop", {"type": "content_block_stop", "index": 2}),
+                ("content_block_start", {"type": "content_block_start", "index": 3, "content_block": {"type": "tool_use", "id": "tool_mem_1", "name": "memory_search"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 3, "delta": {"type": "input_json_delta", "partial_json": "{\"query\":\"tn election\",\"max_results\":1}"}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 3}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 5}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        else:
+            assistant_message = messages[-2]
+            assert assistant_message == {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Researching..."},
+                    {
+                        "type": "tool_use",
+                        "id": "tool_mem_1",
+                        "name": "memory_search",
+                        "input": {"query": "tn election", "max_results": 1},
+                    },
+                ],
+            }
+            tool_result_message = messages[-1]
+            assert tool_result_message == {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tool_mem_1",
+                        "content": json.dumps({"items": [{"memory_id": "mem_tn_1", "title": "Tamil Nadu note"}]}),
+                    }
+                ],
+            }
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 12}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Recovered after local tool."}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 6}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        for event_name, payload in events:
+            yield type("SSE", (), {"event": event_name, "data": json.dumps(payload)})()
+
+    async def fake_execute(
+        tool_name: str,
+        tool_input: dict[str, object],
+        *,
+        context=None,
+    ) -> str:
+        del context
+        assert tool_name == "memory_search"
+        assert tool_input == {"query": "tn election", "max_results": 1}
+        return json.dumps({"items": [{"memory_id": "mem_tn_1", "title": "Tamil Nadu note"}]})
+
+    runtime._stream_anthropic_events = scripted_stream  # type: ignore[method-assign]
+
+    await runtime.start()
+    assert runtime._tool_executor is not None
+    runtime._tool_executor.execute = fake_execute  # type: ignore[method-assign]
+    try:
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+
+    progress_event = next(
+        event
+        for event in streamed_events
+        if event["type"] == "task.progress" and event["status"] == "tool_loop"
+    )
+    assert "skipped" in progress_event["message"].lower()
+    complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert complete_event["content"] == "Researching...Recovered after local tool."
 
 
 @pytest.mark.asyncio
@@ -1250,6 +1469,7 @@ async def test_orchestrator_runtime_sanitizes_prior_assistant_server_tool_blocks
             }
         }
     )
+    task = task.model_copy(update={"signature": sign_task_envelope(task, "signing-secret")})
 
     async def scripted_stream(
         *,
@@ -1257,8 +1477,10 @@ async def test_orchestrator_runtime_sanitizes_prior_assistant_server_tool_blocks
         messages: list[dict[str, object]],
         tools: list[dict[str, object]] | None = None,
         container_id: str | None = None,
+        usage_context: dict[str, object] | None = None,
+        model_override: str | None = None,
     ):
-        del system_prompt, tools, container_id
+        del system_prompt, tools, container_id, usage_context, model_override
         assert messages == [
             {"role": "user", "content": "Earlier question"},
             {
@@ -1311,8 +1533,10 @@ async def test_orchestrator_runtime_emits_local_research_provenance_for_perplexi
         messages: list[dict[str, object]],
         tools: list[dict[str, object]] | None = None,
         container_id: str | None = None,
+        usage_context: dict[str, object] | None = None,
+        model_override: str | None = None,
     ):
-        del system_prompt, messages, tools, container_id
+        del system_prompt, messages, tools, container_id, usage_context, model_override
         nonlocal stream_call_count
         stream_call_count += 1
         if stream_call_count == 1:
