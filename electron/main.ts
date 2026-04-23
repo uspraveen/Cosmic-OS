@@ -132,10 +132,13 @@ let voiceActive = false
 let searchVisible = false
 let lastWeatherData: any = null
 let gatewayConnectionManager: GatewayConnectionManager | null = null
+let lastAppliedDisplayId: number | null = null
+let lastAppliedScaleFactor: number | null = null
 
 interface GatewayConnectionConfig {
   baseUrl: string
   apiToken: string
+  deviceId?: string
 }
 
 interface PickedGatewayDocument {
@@ -653,6 +656,7 @@ async function callGatewayJson(
       headers: {
         Accept: 'application/json',
         Authorization: `Bearer ${apiToken}`,
+        ...(config?.deviceId ? { 'X-Device-Id': String(config.deviceId).trim() } : {}),
         ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       },
       body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
@@ -1431,13 +1435,18 @@ function sendToVoiceBridge(command: string) {
   }
 }
 
+function getPreferredDisplayId() {
+  const preferredId = store.get('preferredDisplayId')
+  return typeof preferredId === 'number' && Number.isFinite(preferredId) ? preferredId : null
+}
+
 // Get the preferred display or fallback to cursor display
 function getTargetDisplay() {
-  const preferredId = store.get('preferredDisplayId') as number | null
+  const preferredId = getPreferredDisplayId()
   const displays = screen.getAllDisplays()
 
   // Try to use preferred display
-  if (preferredId) {
+  if (preferredId !== null) {
     const found = displays.find(d => d.id === preferredId)
     if (found) {
       console.log(`📺 Using preferred display: ${found.id}`)
@@ -1452,10 +1461,94 @@ function getTargetDisplay() {
   return cursorDisplay
 }
 
-function sizeToDisplay() {
+type SizeToDisplayReason =
+  | 'startup'
+  | 'show'
+  | 'meeting-show'
+  | 'preferred-display-change'
+  | 'display-added'
+  | 'display-removed'
+  | 'display-metrics-changed'
+
+function applyDisplayBounds(
+  target: Electron.Display,
+  reason: SizeToDisplayReason,
+  onSettled?: () => void,
+) {
+  if (!win || win.isDestroyed()) {
+    onSettled?.()
+    return
+  }
+  const { x, y, width, height } = target.workArea
+  const prevId = lastAppliedDisplayId
+  const prevScale = lastAppliedScaleFactor
+  const crossingDisplay = prevId !== null && prevId !== target.id
+  const scaleChanged = prevScale !== null && prevScale !== target.scaleFactor
+
+  lastAppliedDisplayId = target.id
+  lastAppliedScaleFactor = target.scaleFactor
+  console.log(`📺 Applying display target (${reason}): ${target.id} @${target.scaleFactor}x`)
+
+  const settle = () => {
+    if (!win || win.isDestroyed()) {
+      onSettled?.()
+      return
+    }
+    win.webContents.send('cosmic:display-changed', {
+      displayId: target.id,
+      scaleFactor: target.scaleFactor,
+      workArea: target.workArea,
+      reason,
+    })
+    onSettled?.()
+  }
+
+  // On Windows, a single atomic setBounds across displays with different DPI scale factors
+  // gets sized in the *source* display's DPI context — the new bounds arrive mis-scaled.
+  // Reposition first so Windows fires WM_DPICHANGED, then size at the new DPI.
+  const needsTwoStep =
+    process.platform === 'win32' && (crossingDisplay || scaleChanged)
+
+  if (needsTwoStep) {
+    // Drive window opacity to 0 at the OS level so the user never sees the window
+    // at an intermediate size during the multi-tick bounds transition. Without this,
+    // the transparent shell picks up DWM shadow/repaint artifacts mid-move — that's
+    // the "shaky" effect. We restore opacity only after bounds are fully settled.
+    const priorOpacity = win.getOpacity()
+    win.setOpacity(0)
+    win.setPosition(x, y, false)
+    setImmediate(() => {
+      if (!win || win.isDestroyed()) { onSettled?.(); return }
+      win.setBounds({ x, y, width, height }, false)
+      // Second pass on the next tick guarantees the final bounds are computed
+      // in the destination DPI context even if the first setBounds raced WM_DPICHANGED.
+      setImmediate(() => {
+        if (!win || win.isDestroyed()) { onSettled?.(); return }
+        win.setBounds({ x, y, width, height }, false)
+        // One more tick to let the compositor commit the final bounds before we
+        // restore opacity — eliminates the last trace of visible motion.
+        setImmediate(() => {
+          if (!win || win.isDestroyed()) { onSettled?.(); return }
+          win.setOpacity(priorOpacity)
+          settle()
+        })
+      })
+    })
+  } else {
+    win.setBounds({ x, y, width, height }, false)
+    settle()
+  }
+}
+
+function sizeToDisplay(reason: SizeToDisplayReason = 'show', onSettled?: () => void) {
+  if (!win) { onSettled?.(); return }
+  applyDisplayBounds(getTargetDisplay(), reason, onSettled)
+}
+
+function loadMainWindow() {
   if (!win) return
-  const d = getTargetDisplay()
-  win.setBounds(d.workArea, false)
+  if (VITE_DEV_SERVER_URL) win.loadURL(VITE_DEV_SERVER_URL)
+  else win.loadFile(path.join(RENDERER_DIST, 'index.html'))
 }
 
 function toggleSearch() {
@@ -1465,11 +1558,16 @@ function toggleSearch() {
     win.webContents.send('cosmic:hiding')
     win.setIgnoreMouseEvents(true, { forward: true })
   } else {
-    sizeToDisplay()
     searchVisible = true
-    win.setIgnoreMouseEvents(false)
-    win.webContents.send('cosmic:shown')
-    win.focus()
+    // Defer the reveal until bounds have fully settled on the target display.
+    // On cross-display/cross-DPI toggles the bounds apply across multiple ticks;
+    // firing `cosmic:shown` too early makes the fade-in animate at intermediate sizes.
+    sizeToDisplay('show', () => {
+      if (!win || win.isDestroyed() || !searchVisible) return
+      win.setIgnoreMouseEvents(false)
+      win.webContents.send('cosmic:shown')
+      win.focus()
+    })
   }
 }
 
@@ -1477,22 +1575,31 @@ function invokeMeetingMode() {
   if (!win) return
 
   if (!searchVisible) {
-    sizeToDisplay()
     searchVisible = true
-    win.setIgnoreMouseEvents(false)
-    win.webContents.send('cosmic:shown')
+    sizeToDisplay('meeting-show', () => {
+      if (!win || win.isDestroyed() || !searchVisible) return
+      win.setIgnoreMouseEvents(false)
+      win.webContents.send('cosmic:shown')
+      win.webContents.send('meeting:invoke')
+      win.focus()
+    })
   } else {
     win.setIgnoreMouseEvents(false)
+    win.webContents.send('meeting:invoke')
+    win.focus()
   }
-
-  win.webContents.send('meeting:invoke')
-  win.focus()
 }
 
 function createWindow() {
   const iconPath = resolveAppIconPath()
   const browserIcon = iconPath ? loadBrowserWindowIcon(iconPath) : undefined
+  const initialDisplay = getTargetDisplay()
+  const initialBounds = initialDisplay.workArea
   win = new BrowserWindow({
+    x: initialBounds.x,
+    y: initialBounds.y,
+    width: initialBounds.width,
+    height: initialBounds.height,
     show: false,
     frame: false,
     transparent: true,
@@ -1511,8 +1618,6 @@ function createWindow() {
   })
 
   win.setIgnoreMouseEvents(true, { forward: true })
-  if (VITE_DEV_SERVER_URL) win.loadURL(VITE_DEV_SERVER_URL)
-  else win.loadFile(path.join(RENDERER_DIST, 'index.html'))
 }
 
 // Cleanup function to kill all child processes
@@ -1544,11 +1649,48 @@ function cleanupProcesses() {
 }
 
 // Monitor change detection
-function handleDisplayChange(_event: any, display: Electron.Display) {
-  console.log('📺 Display changed:', display.id)
-  if (store.get('autoRepositionOnChange')) {
-    sizeToDisplay()
+function handleDisplayAdded(_event: any, display: Electron.Display) {
+  console.log('📺 Display added:', display.id)
+  if (!store.get('autoRepositionOnChange') || searchVisible) {
+    return
   }
+
+  if (getPreferredDisplayId() === display.id) {
+    sizeToDisplay('display-added')
+  }
+}
+
+function handleDisplayRemoved(_event: any, display: Electron.Display) {
+  console.log('📺 Display removed:', display.id)
+  if (!store.get('autoRepositionOnChange')) {
+    return
+  }
+
+  const preferredId = getPreferredDisplayId()
+  if (preferredId === display.id || lastAppliedDisplayId === display.id) {
+    // Active display vanished — clear so the next apply treats it as a fresh placement.
+    if (lastAppliedDisplayId === display.id) {
+      lastAppliedDisplayId = null
+      lastAppliedScaleFactor = null
+    }
+    sizeToDisplay('display-removed')
+  }
+}
+
+function handleDisplayMetricsChanged(
+  _event: any,
+  display: Electron.Display,
+  changedMetrics: string[],
+) {
+  // Re-apply bounds if the display we're currently on had its scale factor or work area change
+  // (e.g., user changed Windows display scaling, taskbar resized, rotation).
+  if (display.id !== lastAppliedDisplayId) return
+  const relevant = changedMetrics.some(m =>
+    m === 'scaleFactor' || m === 'bounds' || m === 'workArea' || m === 'rotation',
+  )
+  if (!relevant) return
+  console.log(`📺 Display metrics changed on active display ${display.id}: ${changedMetrics.join(', ')}`)
+  applyDisplayBounds(display, 'display-metrics-changed')
 }
 
 app.on('before-quit', () => {
@@ -1561,6 +1703,21 @@ app.whenReady().then(() => {
   }
   createWindow()
   if (win) {
+    let initialWindowShown = false
+    const revealStartupWindow = () => {
+      if (!win || win.isDestroyed() || initialWindowShown) return
+      initialWindowShown = true
+      sizeToDisplay('startup')
+      win.show()
+    }
+
+    win.once('ready-to-show', revealStartupWindow)
+    win.webContents.once('did-finish-load', () => {
+      sizeToDisplay('startup')
+      revealStartupWindow()
+    })
+    loadMainWindow()
+
     startMediaBridge(win)
     startWindowBridge(win)
     startWeatherBridge(win)
@@ -1574,14 +1731,13 @@ app.whenReady().then(() => {
     gatewayConnectionManager = new GatewayConnectionManager(win)
     getDesktopDeviceId()
     configureGatewayConnection()
-    sizeToDisplay()
-    win.show()
+    sizeToDisplay('startup')
   }
 
   // Listen for display changes
-  screen.on('display-added', handleDisplayChange)
-  screen.on('display-removed', handleDisplayChange)
-  screen.on('display-metrics-changed', handleDisplayChange)
+  screen.on('display-added', handleDisplayAdded)
+  screen.on('display-removed', handleDisplayRemoved)
+  screen.on('display-metrics-changed', handleDisplayMetricsChanged)
 
   ipcMain.on('cosmic:hide', () => { if (searchVisible) toggleSearch() })
   ipcMain.on('cosmic:toggle', toggleSearch)
@@ -1880,6 +2036,30 @@ app.whenReady().then(() => {
       throw new Error(String(gatewayState.detail || 'The desktop app is not connected to your VM yet.'))
     }
     return callGatewayJson(config, '/desktop/registry-agents', { timeoutMs: 25000 })
+  })
+
+  ipcMain.handle('gateway:get-preferences', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/preferences', { timeoutMs: 15000 })
+  })
+
+  ipcMain.handle('gateway:save-preferences', async (_, payload: {
+    visualResponseEnhancementEnabled?: boolean
+  }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/preferences', {
+      method: 'PATCH',
+      body: {
+        visual_response_enhancement_enabled: payload?.visualResponseEnhancementEnabled !== false,
+      },
+      timeoutMs: 15000,
+    })
   })
 
   ipcMain.handle('gateway:download-output-artifact', async (_, payload: {
@@ -2389,7 +2569,7 @@ app.whenReady().then(() => {
   ipcMain.handle('get-all-displays', () => {
     const displays = screen.getAllDisplays()
     const primary = screen.getPrimaryDisplay()
-    const preferredId = store.get('preferredDisplayId') as number | null
+    const preferredId = getPreferredDisplayId()
 
     return displays.map(d => ({
       id: d.id,
@@ -2403,11 +2583,13 @@ app.whenReady().then(() => {
     }))
   })
 
-  ipcMain.on('set-preferred-display', (event, displayId: number) => {
-    console.log(`📺 Setting preferred display to: ${displayId}`)
-    store.set('preferredDisplayId', displayId)
-    sizeToDisplay()
-    event.sender.send('display-preferences-updated', displayId)
+  ipcMain.on('set-preferred-display', (event, displayId: number | null) => {
+    const normalizedDisplayId =
+      typeof displayId === 'number' && Number.isFinite(displayId) ? displayId : null
+    console.log(`📺 Setting preferred display to: ${normalizedDisplayId ?? 'auto'}`)
+    store.set('preferredDisplayId', normalizedDisplayId)
+    sizeToDisplay('preferred-display-change')
+    event.sender.send('display-preferences-updated', normalizedDisplayId)
   })
 
   globalShortcut.register('CommandOrControl+Shift+Space', toggleSearch)

@@ -20,8 +20,8 @@ export default function MonitorSelector() {
         loadDisplays()
 
         // Listen for display preference updates
-        const handler = (newId: number) => {
-            setSelectedId(newId)
+        const handler = (_event: unknown, newId: number | null) => {
+            setSelectedId(typeof newId === 'number' ? newId : null)
         }
             ; (window as any).ipcRenderer.on('display-preferences-updated', handler)
 
@@ -36,13 +36,13 @@ export default function MonitorSelector() {
             setDisplays(list)
             const preferred = list.find((d: DisplayInfo) => d.isPreferred)
             if (preferred) setSelectedId(preferred.id)
-            else if (list.length > 0) setSelectedId(list[0].id)
+            else setSelectedId(null)
         } catch (error) {
             console.error('Failed to load displays:', error)
         }
     }
 
-    const selectDisplay = (id: number) => {
+    const selectDisplay = (id: number | null) => {
         setSelectedId(id)
             ; (window as any).ipcRenderer.send('set-preferred-display', id)
     }
@@ -57,6 +57,10 @@ export default function MonitorSelector() {
 
     return (
         <div className="monitor-selector">
+            <AutoMonitorCard
+                isSelected={selectedId === null}
+                onSelect={() => selectDisplay(null)}
+            />
             {displays.map(display => (
                 <MonitorCard
                     key={display.id}
@@ -71,6 +75,55 @@ export default function MonitorSelector() {
                 </svg>
                 Refresh Displays
             </button>
+        </div>
+    )
+}
+
+function AutoMonitorCard({ isSelected, onSelect }: { isSelected: boolean; onSelect: () => void }) {
+    return (
+        <div
+            className={`monitor-card auto-option ${isSelected ? 'selected' : ''}`}
+            onMouseDown={onSelect}
+        >
+            <div className="monitor-viz">
+                <svg width="64" height="50" viewBox="0 0 64 50" fill="none" aria-hidden="true">
+                    <rect
+                        x="4"
+                        y="5"
+                        width="56"
+                        height="32"
+                        rx="8"
+                        fill="rgba(26, 30, 38, 0.9)"
+                        stroke="rgba(125, 170, 255, 0.4)"
+                        strokeWidth="1.5"
+                    />
+                    <path
+                        d="M18 25C22 19 42 19 46 25"
+                        stroke="rgba(125, 170, 255, 0.85)"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                    />
+                    <circle cx="18" cy="25" r="4" fill="rgba(125, 170, 255, 0.95)" />
+                    <circle cx="46" cy="25" r="4" fill="rgba(125, 170, 255, 0.65)" />
+                    <path
+                        d="M26 41H38"
+                        stroke="rgba(255,255,255,0.28)"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                    />
+                </svg>
+            </div>
+
+            <div className="monitor-info">
+                <div className="monitor-name">Automatic</div>
+                <div className="monitor-res">Follow the display nearest your cursor each time Cosmic opens.</div>
+                <div className="monitor-badges">
+                    <span className="badge auto">AUTO</span>
+                    {isSelected && (
+                        <span className="badge selected">SELECTED</span>
+                    )}
+                </div>
+            </div>
         </div>
     )
 }

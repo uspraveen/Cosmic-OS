@@ -6,6 +6,7 @@ import GoogleIntegrationsSettings from './GoogleIntegrationsSettings'
 import WhatsAppIntegrationSettings from './WhatsAppIntegrationSettings'
 import TelegramIntegrationSettings from './TelegramIntegrationSettings'
 import MobileDevicesSettings from './MobileDevicesSettings'
+import GatewayPreferencesSettings from './GatewayPreferencesSettings'
 import { GOOGLE_TOOL_DEFINITIONS } from './integrations'
 import type { SearchPosition } from './App'
 import './settings.css'
@@ -39,6 +40,7 @@ type SettingsView =
   | 'main'
   | 'monitors'
   | 'api'
+  | 'preferences'
   | 'ui'
   | 'devices'
   | 'integrations'
@@ -81,8 +83,10 @@ export default function Settings({
       ? 'Settings'
       : currentView === 'api'
         ? 'API Configuration'
-        : currentView === 'monitors'
+      : currentView === 'monitors'
           ? 'Display Preferences'
+          : currentView === 'preferences'
+            ? 'Preferences'
           : currentView === 'ui'
             ? 'UI Settings'
             : currentView === 'devices'
@@ -226,7 +230,7 @@ export default function Settings({
                 <button className="setting-nav-btn" onClick={() => setCurrentView('monitors')}>
                   <div className="setting-nav-copy">
                     <span style={{ fontWeight: 600 }}>Display Preferences</span>
-                    <span className="setting-nav-subcopy">Choose which monitor Cosmic should target.</span>
+                    <span className="setting-nav-subcopy">Pin Cosmic to one monitor or leave it on Automatic.</span>
                   </div>
                   <span style={{ opacity: 0.5 }}>›</span>
                 </button>
@@ -235,6 +239,14 @@ export default function Settings({
                   <div className="setting-nav-copy">
                     <span style={{ fontWeight: 600 }}>UI Settings</span>
                     <span className="setting-nav-subcopy">Position, linger timing, and island transparency.</span>
+                  </div>
+                  <span style={{ opacity: 0.5 }}>›</span>
+                </button>
+
+                <button className="setting-nav-btn" onClick={() => setCurrentView('preferences')}>
+                  <div className="setting-nav-copy">
+                    <span style={{ fontWeight: 600 }}>Preferences</span>
+                    <span className="setting-nav-subcopy">VM-wide response behavior and future backend-backed product preferences.</span>
                   </div>
                   <span style={{ opacity: 0.5 }}>›</span>
                 </button>
@@ -322,8 +334,8 @@ export default function Settings({
             {currentView === 'monitors' && (
               <div className="setting-subpage">
                 <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.6)', marginBottom: 16, lineHeight: '1.5' }}>
-                  Select which monitor the app should appear on when triggered. If the monitor is disconnected, Cosmic
-                  will fall back to a suitable display.
+                  Select which monitor the app should appear on when triggered, or keep it on Automatic to follow the
+                  display nearest your cursor. If a saved monitor is disconnected, Cosmic falls back to a suitable display.
                 </div>
                 <MonitorSelector />
               </div>
@@ -397,6 +409,14 @@ export default function Settings({
                   </div>
                 </div>
               </div>
+            )}
+
+            {currentView === 'preferences' && (
+              <GatewayPreferencesSettings
+                active={currentView === 'preferences'}
+                isAuthenticated={Boolean(authData)}
+                gatewayConnection={gatewayConnection}
+              />
             )}
 
             {currentView === 'api' && <ApiConfiguration keyStatus={keyStatus} />}

@@ -924,6 +924,7 @@ def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
             model_router_url="http://127.0.0.1:9999",
             orchestrator_url="http://127.0.0.1:8743",
             enable_whatsapp=False,
+            preferences_db_path=tmp_path / "preferences.db",
             sessions_db_path=tmp_path / "sessions.db",
             routing_audit_db_path=tmp_path / "routing_audit.db",
             artifacts_db_path=tmp_path / "artifacts.db",

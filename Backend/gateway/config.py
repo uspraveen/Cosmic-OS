@@ -76,6 +76,7 @@ class GatewayConfig:
     agent_email_integrations_db_path: Path = (
         BACKEND_ROOT / "gateway" / "agent_email_integrations.db"
     )
+    preferences_db_path: Path = BACKEND_ROOT / "gateway" / "preferences.db"
     sessions_db_path: Path = BACKEND_ROOT / "gateway" / "sessions.db"
     mobile_devices_db_path: Path = BACKEND_ROOT / "gateway" / "mobile_devices.db"
     usage_db_path: Path = BACKEND_ROOT / "gateway" / "usage.db"
@@ -234,6 +235,12 @@ class GatewayConfig:
                 os.getenv(
                     "GATEWAY_AGENT_EMAIL_INTEGRATIONS_DB_PATH",
                     str(BACKEND_ROOT / "gateway" / "agent_email_integrations.db"),
+                )
+            ).expanduser(),
+            preferences_db_path=Path(
+                os.getenv(
+                    "GATEWAY_PREFERENCES_DB_PATH",
+                    str(BACKEND_ROOT / "gateway" / "preferences.db"),
                 )
             ).expanduser(),
             sessions_db_path=Path(

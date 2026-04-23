@@ -115,6 +115,10 @@ interface Window {
     // Gateway chat APIs
     getGatewayState: () => Promise<GatewaySocketState | null>
     requestGatewayResume: () => Promise<{ ok: boolean }>
+    getGatewayPreferences: () => Promise<any>
+    saveGatewayPreferences: (payload: {
+      visualResponseEnhancementEnabled: boolean
+    }) => Promise<any>
     pickGatewayDocuments: () => Promise<{ documents: GatewayPendingDocumentAttachment[] }>
     sendGatewayQuery: (payload: {
       content: string

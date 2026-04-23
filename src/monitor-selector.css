@@ -41,6 +41,12 @@
     box-shadow: 0 0 0 1px rgba(77, 138, 240, 0.3);
 }
 
+.monitor-card.auto-option {
+    background: linear-gradient(to bottom,
+            rgba(125, 170, 255, 0.12),
+            rgba(255, 255, 255, 0.04));
+}
+
 .monitor-viz {
     flex-shrink: 0;
 }
@@ -64,6 +70,7 @@
     color: rgba(255, 255, 255, 0.6);
     font-size: 12px;
     font-weight: 500;
+    line-height: 1.45;
 }
 
 .monitor-badges {
@@ -87,6 +94,12 @@
     background: rgba(255, 193, 7, 0.2);
     color: #FFC107;
     border: 1px solid rgba(255, 193, 7, 0.4);
+}
+
+.badge.auto {
+    background: rgba(125, 170, 255, 0.16);
+    color: #9fc1ff;
+    border: 1px solid rgba(125, 170, 255, 0.32);
 }
 
 .badge.selected {

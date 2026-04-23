@@ -9,6 +9,7 @@ from .channels.routes import router as channel_router
 from .config import GatewayConfig
 from .credentials.routes import router as credential_router
 from .memory.routes import router as memory_router
+from .preferences.routes import router as preferences_router
 from .runtime import GatewayRuntime
 from .usage.routes import router as usage_router
 from .wishlist.routes import router as wishlist_router
@@ -34,6 +35,7 @@ app = FastAPI(
 app.include_router(channel_router)
 app.include_router(credential_router)
 app.include_router(memory_router)
+app.include_router(preferences_router)
 app.include_router(usage_router)
 app.include_router(wishlist_router)
 

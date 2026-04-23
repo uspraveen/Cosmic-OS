@@ -1,0 +1,2 @@
+"""Gateway-backed app preferences."""
+

@@ -19,6 +19,7 @@ def _build_runtime(tmp_path: Path, *, owner_user_id: str = "user_supabase_123") 
             enable_whatsapp=False,
             enable_telegram=False,
             owner_user_id=owner_user_id,
+            preferences_db_path=tmp_path / "preferences.db",
             sessions_db_path=tmp_path / "sessions.db",
             usage_db_path=tmp_path / "usage.db",
             routing_audit_db_path=tmp_path / "routing_audit.db",

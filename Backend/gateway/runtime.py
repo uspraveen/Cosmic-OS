@@ -47,6 +47,7 @@ from .memory.client import (
 )
 from .mobile_device_store import MobileDeviceStore
 from .orchestrator_client import OrchestratorClient
+from .preferences.store import GatewayPreferenceStore
 from .request_trace_store import RequestTraceStore
 from .routing.router_client import ModelRouterClient
 from .routing.audit_store import RoutingAuditStore
@@ -253,6 +254,7 @@ class GatewayRuntime:
         self.usage_store = UsageStore(config.usage_db_path)
         self.request_trace_store = RequestTraceStore(config.request_trace_db_path)
         self.routing_audit_store = RoutingAuditStore(config.routing_audit_db_path)
+        self.preference_store = GatewayPreferenceStore(config.preferences_db_path)
         self.memory_write_audit_store = MemoryWriteAuditStore(
             config.memory_write_audit_db_path
         )
@@ -357,6 +359,7 @@ class GatewayRuntime:
         self.usage_store.initialize()
         self.request_trace_store.initialize()
         self.routing_audit_store.initialize()
+        self.preference_store.initialize()
         self.memory_write_audit_store.initialize()
         self.artifact_store.initialize()
         self.delivery_queue_store.initialize()
@@ -2148,8 +2151,23 @@ class GatewayRuntime:
             raise ValueError("Incoming message is missing channel")
         if not isinstance(metadata, dict):
             metadata = {}
+        else:
+            metadata = dict(metadata)
         if not isinstance(conversation_context, list):
             conversation_context = []
+        gateway_preferences = self.get_desktop_preferences_snapshot()
+        visual_response_preference = (
+            gateway_preferences.get("visual_response_enhancement")
+            if isinstance(gateway_preferences.get("visual_response_enhancement"), dict)
+            else {}
+        )
+        visual_response_enhancement_enabled = bool(
+            visual_response_preference.get("enabled", True)
+        )
+        metadata["gateway_preferences"] = gateway_preferences
+        metadata["visual_response_enhancement_enabled"] = (
+            visual_response_enhancement_enabled
+        )
         route_override = self._normalize_route_override(
             message.get("route_override")
             if message.get("route_override") is not None
@@ -2173,6 +2191,10 @@ class GatewayRuntime:
             "metadata": metadata,
             "channel": channel,
             "conversation_context": conversation_context,
+            "gateway_preferences": gateway_preferences,
+            "visual_response_enhancement_enabled": (
+                visual_response_enhancement_enabled
+            ),
         }
         if self._channel_platform(
             channel
@@ -2248,6 +2270,10 @@ class GatewayRuntime:
             "message_type": metadata.get("message_type"),
             "attachments": metadata.get("attachments"),
             "input_artifacts": input_artifacts,
+            "gateway_preferences": gateway_preferences,
+            "visual_response_enhancement_enabled": (
+                visual_response_enhancement_enabled
+            ),
         }
         if self._channel_platform(channel) == "agent-email":
             for key in (
@@ -2319,6 +2345,10 @@ class GatewayRuntime:
             },
             "routing_decision_source": routing_decision.decision_source,
             "input_artifacts": input_artifacts,
+            "gateway_preferences": gateway_preferences,
+            "visual_response_enhancement_enabled": (
+                visual_response_enhancement_enabled
+            ),
             "accepted_at": utcnow_iso(),
         }
         if routing_decision.decision_source == "model_router":
@@ -2463,6 +2493,14 @@ class GatewayRuntime:
         ) -> str | None:
             assistant_metadata = dict(metadata or {})
             assistant_metadata.setdefault("request_id", request_id)
+            gateway_preferences = request_record.get("gateway_preferences")
+            if isinstance(gateway_preferences, dict):
+                assistant_metadata.setdefault("gateway_preferences", gateway_preferences)
+            if "visual_response_enhancement_enabled" in request_record:
+                assistant_metadata.setdefault(
+                    "visual_response_enhancement_enabled",
+                    bool(request_record.get("visual_response_enhancement_enabled")),
+                )
             if active_request is not None and not active_request.foreground:
                 assistant_metadata["background"] = True
             return self._append_session_message(
@@ -2781,6 +2819,12 @@ class GatewayRuntime:
             source=self._safe_text(request_record.get("source")) or None,
             source_id=self._safe_text(request_record.get("source_id")) or None,
             user_query_excerpt=query_text[:240].strip() or None,
+            metadata={
+                "gateway_preferences": request_record.get("gateway_preferences"),
+                "visual_response_enhancement_enabled": bool(
+                    request_record.get("visual_response_enhancement_enabled", True)
+                ),
+            },
         )
         state.worker = asyncio.create_task(
             self._run_request_fulfillment(state, request_record)
@@ -8351,6 +8395,9 @@ class GatewayRuntime:
                 )
                 or [],
                 "memory_context": self._safe_text(request_record.get("memory_context")),
+                "visual_response_enhancement_enabled": bool(
+                    request_record.get("visual_response_enhancement_enabled", True)
+                ),
                 "user_timezone": self._safe_text(request_record.get("cron_timezone"))
                 or self.current_user_timezone(),
             },
@@ -11061,6 +11108,64 @@ class GatewayRuntime:
         return self._hydrate_response_blocks_for_client(
             stable_blocks, produced_artifacts=client_artifacts
         )
+
+    def get_desktop_preferences_snapshot(self) -> dict[str, Any]:
+        try:
+            visual_response_enhancement = (
+                self.preference_store.get_visual_response_enhancement()
+            )
+        except Exception:
+            logger.exception(
+                "gateway.preference_snapshot_failed; using runtime fallback defaults"
+            )
+            visual_response_enhancement = {
+                "enabled": True,
+                "revision": 1,
+                "updated_at": utcnow_iso(),
+                "updated_source": "runtime_fallback",
+                "updated_device_id": None,
+            }
+        return {
+            "visual_response_enhancement": visual_response_enhancement
+        }
+
+    async def save_visual_response_enhancement_preference(
+        self,
+        *,
+        enabled: bool,
+        source: str | None = None,
+        device_id: str | None = None,
+    ) -> dict[str, Any]:
+        snapshot = {
+            "visual_response_enhancement": (
+                self.preference_store.set_visual_response_enhancement(
+                    enabled,
+                    source=source,
+                    device_id=device_id,
+                )
+            )
+        }
+        await self._broadcast_desktop_preferences_updated(snapshot)
+        return snapshot
+
+    async def _broadcast_desktop_preferences_updated(
+        self, snapshot: dict[str, Any]
+    ) -> None:
+        adapter = self.registry.adapters.get("desktop")
+        if not isinstance(adapter, DesktopAdapter):
+            return
+        payload = {
+            "type": "preferences.updated",
+            "preferences": snapshot,
+        }
+        for connection in await adapter.list_connections():
+            channel = self._safe_text(connection.get("channel"))
+            if not channel:
+                continue
+            try:
+                await adapter.send(payload, channel=channel)
+            except ChannelUnavailableError:
+                continue
 
     def _hydrate_message_metadata_for_client(self, metadata: Any) -> dict[str, Any]:
         if not isinstance(metadata, dict):

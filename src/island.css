@@ -16,7 +16,14 @@
     0 0 0 0.5px rgba(255, 255, 255, 0.1),
     0 8px 24px rgba(0, 0, 0, 0.7);
   overflow: hidden;
-  transition: all 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
+  /* Scoped to the expand/contract properties only. `transition: all` animated `left: 50%`
+     whenever the viewport width changed (e.g. cross-display move), causing a visible slide. */
+  transition:
+    width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1),
+    height 0.4s cubic-bezier(0.2, 0.8, 0.2, 1),
+    border-radius 0.4s cubic-bezier(0.2, 0.8, 0.2, 1),
+    background 0.4s cubic-bezier(0.2, 0.8, 0.2, 1),
+    box-shadow 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .island.expanded {
