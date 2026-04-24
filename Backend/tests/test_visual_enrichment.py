@@ -247,6 +247,50 @@ def _build_delayed_image_transport(delay_sec: float = 0.45) -> httpx.MockTranspo
     return httpx.MockTransport(handler)
 
 
+def _build_svg_noise_transport() -> httpx.MockTransport:
+    image_bytes = _solid_png_bytes(1280, 720)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.endswith("/v2/scrape"):
+            payload = json.loads(request.content.decode("utf-8"))
+            if payload.get("url") != "https://example.com/strategy":
+                raise AssertionError(f"unexpected scrape url {payload.get('url')!r}")
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {
+                        "images": [
+                            {
+                                "src": "https://www.klover.ai/wp-content/plugins/wpforms-lite/assets/images/submit-spin.svg",
+                                "alt": "submit spinner",
+                                "width": 160,
+                                "height": 160,
+                            },
+                            {
+                                "src": "https://cdn.example.test/colossus-strategy.png",
+                                "alt": "Executives planning around Colossus and developer tooling",
+                                "width": 1280,
+                                "height": 720,
+                            },
+                        ],
+                        "metadata": {"title": "Strategy and AI infrastructure"},
+                    },
+                },
+            )
+        if request.method == "GET" and str(request.url) == "https://cdn.example.test/colossus-strategy.png":
+            return httpx.Response(
+                200,
+                content=image_bytes,
+                headers={"Content-Type": "image/png"},
+            )
+        if "submit-spin.svg" in str(request.url):
+            raise AssertionError("decorative SVG candidate should have been filtered before download")
+        raise AssertionError(f"unexpected request {request.method} {request.url!s}")
+
+    return httpx.MockTransport(handler)
+
+
 def _note_three_generic_sources(coordinator: VisualEnrichmentCoordinator) -> None:
     coordinator.note_sources(
         [
@@ -263,6 +307,18 @@ def _note_colossus_source(coordinator: VisualEnrichmentCoordinator) -> None:
             {
                 "url": "https://example.com/colossus",
                 "title": "Colossus overview",
+                "domain": "example.com",
+            }
+        ]
+    )
+
+
+def _note_strategy_source(coordinator: VisualEnrichmentCoordinator) -> None:
+    coordinator.note_sources(
+        [
+            {
+                "url": "https://example.com/strategy",
+                "title": "Strategy and AI infrastructure",
                 "domain": "example.com",
             }
         ]
@@ -827,6 +883,56 @@ async def test_visual_enrichment_finalize_waits_for_slot_timeout_budget() -> Non
         )
         assert image_block["provenance"]["source_image_url"] == "https://cdn.example.test/colossus-facility.png"
         assert elapsed >= 0.35
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_visual_enrichment_filters_svg_ui_noise_before_ranking() -> None:
+    root = _make_test_dir("visual-image-svg-noise-")
+    try:
+        config = OrchestratorConfig(
+            artifacts_root=root / "artifacts",
+            internal_token="internal-token",
+            signing_secret="signing-secret",
+            anthropic_api_key="anthropic-key",
+            anthropic_model="claude-opus-4-6",
+            task_ledger_db_path=root / "task_ledger.db",
+            visual_enhancement_enabled=True,
+            visual_finalization_grace_ms=1200,
+            visual_max_concurrent_sidecars=1,
+            visual_max_image_slots_per_turn=1,
+            visual_firecrawl_api_key="firecrawl-key",
+        )
+        transport = _build_svg_noise_transport()
+
+        async with httpx.AsyncClient(transport=transport) as client:
+            coordinator = VisualEnrichmentCoordinator(
+                config=config,
+                task_id="tsk_visual_image_svg_noise_1",
+                request_id="req_visual_image_svg_noise_1",
+                session_id="sess_visual_image_svg_noise_1",
+                channel="desktop:desk_visual_image_svg_noise_1",
+                user_query="How do companies think like this? Include inline images.",
+                http_client=client,
+            )
+            _note_strategy_source(coordinator)
+
+            coordinator.consume_text(
+                (
+                    "The best companies think in systems.\n\n"
+                    "[[visual_slot {\"id\":\"img_1\",\"kind\":\"image\",\"query\":\"company strategy and AI infrastructure\","
+                    "\"caption\":\"Infrastructure and strategy\"}]]\n\n"
+                    "They optimize for strategic control, not just immediate revenue."
+                )
+            )
+
+            final_payload = await coordinator.finalize()
+
+        image_block = next(
+            block for block in final_payload["response_blocks"] if block["type"] == "image_artifact"
+        )
+        assert image_block["provenance"]["source_image_url"] == "https://cdn.example.test/colossus-strategy.png"
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

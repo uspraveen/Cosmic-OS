@@ -124,6 +124,24 @@ def _is_probably_decorative(candidate_url: str, text: str) -> bool:
     return any(marker in corpus for marker in markers)
 
 
+def _is_probably_ui_asset(candidate_url: str, text: str) -> bool:
+    corpus = f"{candidate_url} {text}".lower()
+    markers = (
+        "spinner",
+        "submit-spin",
+        "loading",
+        "loader",
+        "favicon",
+        "siteicon",
+        "apple-touch-icon",
+        "wpforms",
+        "wp-content/plugins",
+        "plugin",
+        "sprite",
+    )
+    return any(marker in corpus for marker in markers)
+
+
 def _is_probably_text_art(candidate_url: str, filename: str, text: str) -> bool:
     file_corpus = f"{Path(urlparse(candidate_url).path).name} {filename}".lower()
     text_corpus = str(text or "").lower()
@@ -1038,6 +1056,26 @@ class VisualEnrichmentCoordinator:
                 width=width,
                 height=height,
             )
+            prefilter_corpus = " ".join(
+                filter(
+                    None,
+                    [
+                        alt_text,
+                        title,
+                        nearby_text,
+                        source_title,
+                        source_domain,
+                    ],
+                )
+            )
+            if candidate.image_url.lower().endswith(".svg"):
+                continue
+            if _is_probably_ui_asset(candidate.image_url, prefilter_corpus):
+                continue
+            if _is_probably_decorative(candidate.image_url, prefilter_corpus):
+                continue
+            if _is_low_information_image_size(candidate.width, candidate.height):
+                continue
             candidate.score = self._score_candidate(slot, candidate, corpus)
             if candidate.score <= 0:
                 continue
