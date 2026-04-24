@@ -1495,6 +1495,63 @@ const formatInlineVisualAttribution = (block: ResponseArtifactBlock) => {
   return ''
 }
 
+const humanizeArtifactFilename = (filename?: string | null) => {
+  const raw = String(filename || '').trim()
+  if (!raw) {
+    return ''
+  }
+  return raw
+    .replace(/\.[a-z0-9]+$/i, '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+const formatInlineVisualBadge = (block: ResponseArtifactBlock) => {
+  const kind = formatArtifactKind(block)
+  if (kind === 'chart') return 'Generated chart'
+  if (kind === 'reference image') return 'Reference image'
+  if (kind === 'image') return 'Inline image'
+  return kind
+}
+
+const formatInlineVisualSourceChip = (block: ResponseArtifactBlock) => {
+  const sourceDomain = String(block.provenance?.sourceDomain || '').trim()
+  if (sourceDomain) {
+    return sourceDomain.replace(/^www\./i, '')
+  }
+  if (formatArtifactKind(block) === 'chart') {
+    return 'Cosmic'
+  }
+  return ''
+}
+
+const formatInlineVisualTitle = (block: ResponseArtifactBlock) => {
+  const caption = String(block.caption || '').trim()
+  if (caption) return caption
+  const sourceTitle = String(block.provenance?.sourceTitle || '').trim()
+  if (sourceTitle) return sourceTitle
+  const filename = humanizeArtifactFilename(block.filename)
+  if (filename) return filename
+  return formatArtifactKind(block) === 'chart' ? 'Inline chart' : 'Inline visual'
+}
+
+const formatInlineVisualSubtitle = (block: ResponseArtifactBlock, title: string) => {
+  const kind = formatArtifactKind(block)
+  if (kind === 'chart') {
+    return 'Generated from structured data in this response.'
+  }
+  const sourceTitle = String(block.provenance?.sourceTitle || '').trim()
+  if (sourceTitle && sourceTitle !== title) {
+    return sourceTitle
+  }
+  const attribution = formatInlineVisualAttribution(block)
+  if (attribution && attribution !== title) {
+    return attribution
+  }
+  return ''
+}
+
 const AssistantResponseBlocks = ({
   blocks,
 }: {
@@ -1553,32 +1610,41 @@ const AssistantResponseBlocks = ({
         }
         if (block.type === 'image_artifact') {
           const attribution = formatInlineVisualAttribution(block)
+          const badge = formatInlineVisualBadge(block)
+          const sourceChip = formatInlineVisualSourceChip(block)
+          const visualTitle = formatInlineVisualTitle(block)
+          const visualSubtitle = formatInlineVisualSubtitle(block, visualTitle)
+          const isChart = formatArtifactKind(block) === 'chart'
           return (
-            <div key={block.id} className="assistant-inline-image-card">
-              {block.previewUrl ? (
-                <img
-                  src={block.previewUrl}
-                  alt={block.provenance?.altText || block.caption || block.filename}
-                  className="assistant-inline-image"
-                  loading="lazy"
-                />
-              ) : (
-                <div className="assistant-inline-image-placeholder">Preview unavailable</div>
-              )}
-              <div className="assistant-inline-image-meta">
-                <div className="assistant-inline-image-name">{block.filename}</div>
-                <div className="assistant-inline-image-subtitle">
-                  {formatArtifactKind(block)}
-                  {block.sizeBytes ? ` · ${formatAttachmentSize(block.sizeBytes)}` : ''}
-                </div>
-                {block.caption && (
-                  <div className="assistant-inline-image-caption">{block.caption}</div>
-                )}
-                {attribution && (
-                  <div className="assistant-inline-image-provenance">{attribution}</div>
+            <figure key={block.id} className={['assistant-inline-image-card', isChart ? 'is-chart' : 'is-image'].join(' ')}>
+              <div className="assistant-inline-image-frame">
+                {block.previewUrl ? (
+                  <img
+                    src={block.previewUrl}
+                    alt={block.provenance?.altText || block.caption || block.filename}
+                    className="assistant-inline-image"
+                    loading="lazy"
+                  />
+                ) : (
+                  <div className="assistant-inline-image-placeholder">Preview unavailable</div>
                 )}
               </div>
-            </div>
+              <figcaption className="assistant-inline-image-meta">
+                <div className="assistant-inline-image-topline">
+                  <div className="assistant-inline-image-badge">{badge}</div>
+                  {sourceChip && (
+                    <div className="assistant-inline-image-source-chip">{sourceChip}</div>
+                  )}
+                </div>
+                <div className="assistant-inline-image-name">{visualTitle}</div>
+                {visualSubtitle && (
+                  <div className="assistant-inline-image-subtitle">{visualSubtitle}</div>
+                )}
+                {attribution && attribution !== visualTitle && attribution !== visualSubtitle && (
+                  <div className="assistant-inline-image-provenance">{attribution}</div>
+                )}
+              </figcaption>
+            </figure>
           )
         }
         if (block.type === 'file_artifact') {

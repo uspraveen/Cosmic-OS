@@ -2218,10 +2218,12 @@ kbd {
 }
 
 .assistant-response-blocks {
-  width: 100%;
+  --assistant-inline-visual-max-width: 860px;
+  width: min(100%, 960px);
+  margin-inline: auto;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 18px;
 }
 
 .assistant-response-markdown {
@@ -2229,26 +2231,31 @@ kbd {
 }
 
 .assistant-inline-visual-slot {
-  width: min(100%, 760px);
+  width: min(100%, var(--assistant-inline-visual-max-width));
+  margin-inline: auto;
   position: relative;
   overflow: hidden;
   display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 16px;
-  border-radius: 18px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  flex-direction: column;
+  align-items: stretch;
+  gap: 14px;
+  padding: 14px;
+  border-radius: 26px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
   background:
-    radial-gradient(circle at top left, rgba(121, 201, 255, 0.12), transparent 42%),
-    radial-gradient(circle at bottom right, rgba(255, 214, 122, 0.09), transparent 40%),
-    rgba(9, 11, 20, 0.9);
+    radial-gradient(circle at top left, rgba(93, 170, 255, 0.18), transparent 40%),
+    radial-gradient(circle at bottom right, rgba(92, 232, 173, 0.12), transparent 44%),
+    linear-gradient(180deg, rgba(14, 17, 28, 0.96), rgba(7, 9, 16, 0.96));
+  box-shadow:
+    0 24px 64px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 .assistant-inline-visual-slot::before {
   content: '';
   position: absolute;
   inset: -40% -15%;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.06), transparent);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.05), transparent);
   transform: translateX(-70%);
   animation: assistantVisualSlotShimmer 2.8s linear infinite;
 }
@@ -2260,59 +2267,70 @@ kbd {
 }
 
 .assistant-inline-visual-slot-shell {
-  flex: 0 0 172px;
-  min-height: 132px;
-  border-radius: 14px;
-  padding: 16px;
+  width: 100%;
+  min-height: clamp(228px, 34vw, 320px);
+  border-radius: 22px;
+  padding: 18px;
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
-  gap: 12px;
+  gap: 14px;
   background:
-    linear-gradient(160deg, rgba(255,255,255,0.1), rgba(255,255,255,0.02)),
-    rgba(14, 17, 29, 0.88);
+    radial-gradient(circle at top right, rgba(85, 132, 255, 0.16), transparent 34%),
+    linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01)),
+    rgba(9, 11, 18, 0.92);
   border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    inset 0 -24px 48px rgba(0, 0, 0, 0.28);
 }
 
 .assistant-inline-visual-slot.is-chart .assistant-inline-visual-slot-shell {
-  min-height: 116px;
+  min-height: clamp(240px, 36vw, 332px);
 }
 
 .assistant-inline-visual-slot-band {
-  height: 14px;
+  height: 16px;
   width: 100%;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px 999px 18px 18px;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.06));
 }
 
 .assistant-inline-visual-slot-band.short {
-  width: 58%;
+  width: 42%;
 }
 
 .assistant-inline-visual-slot-copy {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
+  padding: 0 6px 4px;
 }
 
 .assistant-inline-visual-slot-badge {
+  align-self: flex-start;
   font-size: 10px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.48);
+  color: rgba(255, 255, 255, 0.62);
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .assistant-inline-visual-slot-label {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
   color: #fff;
-  line-height: 1.45;
+  line-height: 1.48;
+  letter-spacing: -0.01em;
 }
 
 .assistant-inline-visual-slot-subtle {
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.58);
-  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.63);
+  line-height: 1.55;
 }
 
 @keyframes assistantVisualSlotShimmer {
@@ -2348,69 +2366,143 @@ kbd {
 }
 
 .assistant-inline-image-card {
-  width: min(100%, 760px);
-  border-radius: 18px;
+  width: min(100%, var(--assistant-inline-visual-max-width));
+  margin-inline: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px;
+  border-radius: 26px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background:
+    radial-gradient(circle at top left, rgba(91, 163, 255, 0.15), transparent 38%),
+    radial-gradient(circle at bottom right, rgba(77, 234, 178, 0.1), transparent 42%),
+    linear-gradient(180deg, rgba(14, 17, 28, 0.96), rgba(7, 9, 16, 0.96));
+  box-shadow:
+    0 24px 64px rgba(0, 0, 0, 0.36),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.assistant-inline-image-frame {
+  position: relative;
   overflow: hidden;
+  border-radius: 22px;
+  padding: 12px;
   border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.04);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  background:
+    radial-gradient(circle at top right, rgba(87, 140, 255, 0.14), transparent 34%),
+    linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.015)),
+    rgba(8, 10, 17, 0.94);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    inset 0 -26px 52px rgba(0, 0, 0, 0.28);
+}
+
+.assistant-inline-image-frame::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), transparent 26%),
+    linear-gradient(135deg, transparent 58%, rgba(255, 255, 255, 0.035) 100%);
 }
 
 .assistant-inline-image {
   display: block;
   width: 100%;
-  max-height: 520px;
+  max-height: min(68vh, 560px);
+  height: auto;
   object-fit: contain;
-  background:
-    radial-gradient(circle at top left, rgba(121, 201, 255, 0.12), transparent 42%),
-    radial-gradient(circle at bottom right, rgba(255, 214, 122, 0.1), transparent 40%),
-    rgba(8, 10, 18, 0.92);
+  border-radius: 16px;
+  background: rgba(5, 7, 12, 0.96);
+  box-shadow:
+    0 16px 40px rgba(0, 0, 0, 0.28),
+    0 0 0 1px rgba(255, 255, 255, 0.03);
+}
+
+.assistant-inline-image-card.is-chart .assistant-inline-image {
+  max-height: min(62vh, 520px);
 }
 
 .assistant-inline-image-placeholder {
-  min-height: 220px;
+  min-height: clamp(228px, 34vw, 320px);
   display: flex;
   align-items: center;
   justify-content: center;
-  color: rgba(255, 255, 255, 0.55);
+  color: rgba(255, 255, 255, 0.6);
   font-size: 13px;
+  border-radius: 16px;
   background:
-    linear-gradient(135deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02)),
+    linear-gradient(135deg, rgba(255,255,255,0.045), rgba(255,255,255,0.02)),
     rgba(8, 10, 18, 0.9);
 }
 
 .assistant-inline-image-meta {
-  padding: 12px 14px 14px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 7px;
+  padding: 0 6px 4px;
+}
+
+.assistant-inline-image-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.assistant-inline-image-badge,
+.assistant-inline-image-source-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.assistant-inline-image-badge {
+  color: rgba(255, 255, 255, 0.66);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.assistant-inline-image-source-chip {
+  color: rgba(173, 219, 255, 0.9);
+  background: rgba(89, 132, 255, 0.12);
 }
 
 .assistant-inline-image-name,
 .assistant-inline-file-name {
-  font-size: 13px;
+  font-size: 16px;
   font-weight: 600;
   color: #fff;
-  line-height: 1.4;
+  line-height: 1.38;
+  letter-spacing: -0.015em;
 }
 
 .assistant-inline-image-subtitle,
 .assistant-inline-file-meta {
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.58);
+  font-size: 13px;
+  line-height: 1.55;
+  color: rgba(255, 255, 255, 0.67);
 }
 
 .assistant-inline-image-caption {
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.5;
-  color: rgba(255, 255, 255, 0.74);
+  color: rgba(255, 255, 255, 0.76);
 }
 
 .assistant-inline-image-provenance {
-  font-size: 10px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.42);
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.5);
 }
 
 .assistant-inline-file-card {
@@ -2446,13 +2538,19 @@ kbd {
 
 @media (max-width: 640px) {
   .assistant-inline-visual-slot {
-    flex-direction: column;
-    align-items: stretch;
+    padding: 12px;
   }
 
   .assistant-inline-visual-slot-shell {
-    flex-basis: auto;
-    width: 100%;
+    min-height: 220px;
+  }
+
+  .assistant-inline-image-card {
+    padding: 12px;
+  }
+
+  .assistant-inline-image-frame {
+    padding: 10px;
   }
 }
 
