@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 from uuid import uuid4
 
 import httpx
@@ -131,6 +131,31 @@ def _guess_filename_from_url(url: str, *, default_prefix: str) -> str:
     if "." not in filename:
         filename = f"{filename}.png"
     return filename
+
+
+def _normalize_scraped_image_url(source_url: str, image_url: str) -> str:
+    absolute = urljoin(source_url, _safe_text(image_url))
+    if not absolute.startswith(("http://", "https://")):
+        return ""
+    parsed = urlparse(absolute)
+    if parsed.path.rstrip("/").endswith("/_next/image"):
+        proxied_target = _extract_proxy_target_url(parsed)
+        if proxied_target:
+            return proxied_target
+    return absolute
+
+
+def _extract_proxy_target_url(parsed_url: Any) -> str:
+    query = parse_qs(str(getattr(parsed_url, "query", "") or ""))
+    for key in ("url", "src", "image_url", "imageUrl"):
+        raw_target = _safe_text((query.get(key) or [None])[0])
+        if not raw_target:
+            continue
+        if raw_target.startswith(("http://", "https://")):
+            return raw_target
+        origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        return urljoin(origin, raw_target)
+    return ""
 
 
 @dataclass(slots=True)
@@ -667,8 +692,15 @@ class VisualEnrichmentCoordinator:
                 key=lambda item: item.score,
                 reverse=True,
             )[: self.config.visual_image_candidate_limit]
-            selected_candidate: ImageCandidate | None = None
-            selected_verdict: dict[str, Any] | None = None
+            attempt_candidates: list[tuple[ImageCandidate, dict[str, Any]]] = []
+            planned_urls: set[str] = set()
+
+            def add_attempt(candidate: ImageCandidate, verdict: dict[str, Any]) -> None:
+                if candidate.image_url in planned_urls:
+                    return
+                planned_urls.add(candidate.image_url)
+                attempt_candidates.append((candidate, dict(verdict)))
+
             top_k = min(self.config.visual_image_verify_top_k, len(ranked))
             if self._fireworks.available and top_k > 0:
                 for candidate in ranked[:top_k]:
@@ -693,44 +725,78 @@ class VisualEnrichmentCoordinator:
                         _parse_float(verdict.get("confidence"), default=candidate.score),
                     )
                     if bool(verdict.get("accept")) and confidence >= self.config.visual_image_min_confidence:
-                        selected_candidate = candidate
-                        selected_verdict = dict(verdict)
-                        selected_verdict["confidence"] = confidence
-                        break
-            if selected_candidate is None:
-                fallback = ranked[0]
-                if fallback.score >= self.config.visual_image_min_confidence:
-                    selected_candidate = fallback
-                    selected_verdict = {
-                        "confidence": fallback.score,
-                        "selection_reason": "Best metadata-ranked image from a trusted source page.",
-                        "alt_text": fallback.alt_text,
-                        "caption": slot.caption or "",
-                    }
-                elif self._should_allow_explicit_request_fallback(slot, fallback):
-                    logger.info(
-                        "visual_enrichment.image_relaxed_fallback slot_id=%s score=%.3f source=%s",
-                        slot.id,
-                        fallback.score,
-                        fallback.source_url,
+                        enriched_verdict = dict(verdict)
+                        enriched_verdict["confidence"] = confidence
+                        add_attempt(candidate, enriched_verdict)
+            relaxed_fallback_logged = False
+            for candidate in ranked:
+                if candidate.score >= self.config.visual_image_min_confidence:
+                    add_attempt(
+                        candidate,
+                        {
+                            "confidence": candidate.score,
+                            "selection_reason": "Best metadata-ranked image from a trusted source page.",
+                            "alt_text": candidate.alt_text,
+                            "caption": slot.caption or "",
+                        },
                     )
-                    selected_candidate = fallback
-                    selected_verdict = {
-                        "confidence": fallback.score,
-                        "selection_reason": (
-                            "Best available trusted-source image selected because the user "
-                            "explicitly requested inline imagery, even though it did not meet "
-                            "the normal confidence threshold."
-                        ),
-                        "alt_text": fallback.alt_text,
-                        "caption": slot.caption or "",
-                    }
-                else:
-                    raise ValueError("No image candidate passed the confidence threshold.")
+                    continue
+                if self._should_allow_explicit_request_fallback(slot, candidate):
+                    if not relaxed_fallback_logged:
+                        logger.info(
+                            "visual_enrichment.image_relaxed_fallback slot_id=%s score=%.3f source=%s",
+                            slot.id,
+                            candidate.score,
+                            candidate.source_url,
+                        )
+                        relaxed_fallback_logged = True
+                    add_attempt(
+                        candidate,
+                        {
+                            "confidence": candidate.score,
+                            "selection_reason": (
+                                "Best available trusted-source image selected because the user "
+                                "explicitly requested inline imagery, even though it did not meet "
+                                "the normal confidence threshold."
+                            ),
+                            "alt_text": candidate.alt_text,
+                            "caption": slot.caption or "",
+                        },
+                    )
 
-            image_bytes, detected_mime, width, height = await self._download_image_bytes(
-                selected_candidate.image_url
-            )
+            if not attempt_candidates:
+                raise ValueError("No image candidate passed the confidence threshold.")
+
+            selected_candidate: ImageCandidate | None = None
+            selected_verdict: dict[str, Any] | None = None
+            last_attempt_error: Exception | None = None
+            image_bytes: bytes | None = None
+            detected_mime: str | None = None
+            width: int | None = None
+            height: int | None = None
+            for candidate, verdict in attempt_candidates:
+                try:
+                    image_bytes, detected_mime, width, height = await self._download_image_bytes(
+                        candidate.image_url
+                    )
+                except Exception as exc:
+                    last_attempt_error = exc
+                    logger.warning(
+                        "visual_enrichment.image_candidate_failed slot_id=%s image_url=%s error=%s",
+                        slot.id,
+                        candidate.image_url,
+                        exc,
+                    )
+                    continue
+                selected_candidate = candidate
+                selected_verdict = verdict
+                break
+
+            if selected_candidate is None or selected_verdict is None or image_bytes is None:
+                if last_attempt_error is not None:
+                    raise ValueError(f"All image candidates failed: {last_attempt_error}") from last_attempt_error
+                raise ValueError("No image candidate passed the confidence threshold.")
+
             artifact = self._write_image_artifact_bytes(
                 image_bytes=image_bytes,
                 slot=slot,
@@ -825,7 +891,7 @@ class VisualEnrichmentCoordinator:
 
             if not image_url:
                 continue
-            image_url = urljoin(source_url, image_url)
+            image_url = _normalize_scraped_image_url(source_url, image_url)
             if not image_url.startswith(("http://", "https://")):
                 continue
             corpus = " ".join(filter(None, [alt_text, title, nearby_text]))
