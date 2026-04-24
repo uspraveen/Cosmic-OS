@@ -400,6 +400,32 @@ def _build_source_title_query_transport() -> httpx.MockTransport:
     return httpx.MockTransport(handler)
 
 
+def _build_auto_slot_query_transport() -> httpx.MockTransport:
+    image_bytes = _solid_png_bytes(1600, 900)
+    useful_image_url = "https://cdn.example.test/xai-macrohard-campus.jpg"
+    bing_html = f"""
+    <html><body>
+      <a class="iusc" m='{{&quot;murl&quot;:&quot;{useful_image_url}&quot;,&quot;purl&quot;:&quot;https://x.ai/memphis&quot;,&quot;t&quot;:&quot;xAI Colossus 2 data center campus&quot;,&quot;desc&quot;:&quot;Exterior view of xAI&#39;s Colossus 2 data center campus in the Memphis area&quot;,&quot;imgw&quot;:1600,&quot;imgh&quot;:900}}'></a>
+    </body></html>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/images/search":
+            query = (request.url.params.get("q") or "").lower()
+            if "xai colossus 2 data center campus" in query:
+                return httpx.Response(200, text=bing_html, headers={"Content-Type": "text/html"})
+            return httpx.Response(200, text="<html><body></body></html>")
+        if request.method == "GET" and str(request.url) == useful_image_url:
+            return httpx.Response(
+                200,
+                content=image_bytes,
+                headers={"Content-Type": "image/png"},
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url!s}")
+
+    return httpx.MockTransport(handler)
+
+
 def _note_three_generic_sources(coordinator: VisualEnrichmentCoordinator) -> None:
     coordinator.note_sources(
         [
@@ -453,6 +479,18 @@ def _note_bus_complaint_source(coordinator: VisualEnrichmentCoordinator) -> None
                 "url": "https://timesofindia.indiatimes.com/city/chennai/tamil-nadu-elections-tvk-vijay-urges-eci-to-extend-voting-hours-amid-transport-chaos/articleshow/130456936.cms",
                 "title": "Tamil Nadu elections: TVK chief Vijay urges ECI to extend voting hours amid transport chaos",
                 "domain": "timesofindia.indiatimes.com",
+            }
+        ]
+    )
+
+
+def _note_macrohard_source(coordinator: VisualEnrichmentCoordinator) -> None:
+    coordinator.note_sources(
+        [
+            {
+                "url": "https://x.ai/memphis",
+                "title": "xAI Colossus 2 Data Center Campus",
+                "domain": "x.ai",
             }
         ]
     )
@@ -801,6 +839,11 @@ async def test_visual_enrichment_non_explicit_image_request_keeps_strict_thresho
         assert not any(
             block["type"] == "image_artifact" for block in final_payload["response_blocks"]
         )
+        failed_slot = next(
+            block for block in final_payload["response_blocks"] if block["type"] == "image_slot"
+        )
+        assert failed_slot["status"] == "failed"
+        assert "reliable inline image" in failed_slot["loading_label"].lower()
         assert final_payload["supporting_artifacts"] == []
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -1215,6 +1258,62 @@ async def test_visual_enrichment_uses_source_title_queries_for_vague_image_reque
         )
         assert image_block["provenance"]["source_image_url"] == "https://cdn.example.test/vijay-bus-complaint.jpg"
         assert "direct image-search results" in image_block["provenance"]["selection_reason"]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_visual_enrichment_auto_injects_image_slot_for_concrete_follow_up() -> None:
+    root = _make_test_dir("visual-image-auto-slot-")
+    try:
+        config = OrchestratorConfig(
+            internal_token="internal-token",
+            signing_secret="signing-secret",
+            anthropic_api_key="anthropic-key",
+            anthropic_model="claude-opus-4-6",
+            task_ledger_db_path=root / "task_ledger.db",
+            visual_enhancement_enabled=True,
+            visual_finalization_grace_ms=1200,
+            visual_max_concurrent_sidecars=1,
+            visual_max_image_slots_per_turn=1,
+            visual_firecrawl_api_key="",
+            visual_image_search_enabled=True,
+            visual_image_search_base_url="https://www.bing.com/images/search",
+        )
+        transport = _build_auto_slot_query_transport()
+
+        async with httpx.AsyncClient(transport=transport) as client:
+            coordinator = VisualEnrichmentCoordinator(
+                config=config,
+                task_id="tsk_visual_image_auto_slot_1",
+                request_id="req_visual_image_auto_slot_1",
+                session_id="sess_visual_image_auto_slot_1",
+                channel="desktop:desk_visual_image_auto_slot_1",
+                user_query="complete it",
+                http_client=client,
+            )
+            _note_macrohard_source(coordinator)
+
+            visible_delta, snapshot_events = coordinator.consume_text(
+                (
+                    "My bad — I answered about the wrong company entirely. Macrohard = xAI. "
+                    "The real story is that xAI is clustering multiple Memphis-area buildings, "
+                    "using the Tennessee-Mississippi border as an execution advantage, and tying "
+                    "that infrastructure expansion directly to the company’s broader software and "
+                    "model ambitions."
+                )
+            )
+
+            assert visible_delta
+            assert snapshot_events
+
+            final_payload = await coordinator.finalize()
+
+        image_block = next(
+            block for block in final_payload["response_blocks"] if block["type"] == "image_artifact"
+        )
+        assert image_block["provenance"]["source_image_url"] == "https://cdn.example.test/xai-macrohard-campus.jpg"
+        assert len(final_payload["supporting_artifacts"]) == 1
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

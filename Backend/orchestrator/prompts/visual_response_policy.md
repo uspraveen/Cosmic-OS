@@ -13,6 +13,7 @@ Hard rules:
 - When this mode is enabled, proactively emit one inline visual when it would clearly anchor the answer:
   a concrete person, company, product, place, event, interface, or scene usually benefits from one image;
   a quantitative comparison with at least 3 values usually benefits from one chart.
+- If the user sends a short follow-up like "continue", "complete it", or "tell me more", use the concrete topic from the current answer and sources when deciding whether to place a visual slot. Do not treat the short follow-up wording alone as the topic.
 - Prefer charts for quantitative comparisons.
 - Prefer images for appearance, reference screenshots, or concrete real-world examples.
 - If the user explicitly asks for inline images and you already have concrete trusted source pages or a clearly identifiable entity/topic, prefer emitting one relevant image slot instead of skipping visuals entirely.

@@ -84,6 +84,10 @@ _IMAGE_QUERY_NOISE_PATTERNS = tuple(
     re.compile(rf"\b{re.escape(marker)}\b", flags=re.IGNORECASE)
     for marker in _EXPLICIT_IMAGE_REQUEST_MARKERS
 )
+_FAILED_INLINE_IMAGE_LABEL = "Couldn't find a reliable inline image for this answer."
+_FAILED_INLINE_CHART_LABEL = "Couldn't generate a clear inline chart for this answer."
+_TIMED_OUT_INLINE_IMAGE_LABEL = "This inline image took too long to finish."
+_TIMED_OUT_INLINE_CHART_LABEL = "This inline chart took too long to finish."
 
 
 def _utcnow_iso() -> str:
@@ -384,6 +388,12 @@ class VisualDirectiveStreamParser:
     def export_blocks(self) -> list[dict[str, Any]]:
         return copy.deepcopy(self._blocks)
 
+    def append_slot(self, slot: VisualSlotDirective) -> None:
+        normalized_slot_id = _safe_text(slot.id)
+        if normalized_slot_id:
+            self._seen_slot_ids.add(normalized_slot_id)
+        self._append_slot_block(slot)
+
     def consume_text(self, chunk: str) -> tuple[str, list[VisualSlotDirective], bool]:
         raw_chunk = str(chunk or "")
         if not raw_chunk:
@@ -460,6 +470,46 @@ class VisualDirectiveStreamParser:
             if _safe_text(item.get("id")) != normalized_slot_id
         ]
         return len(self._blocks) != before
+
+    def fail_slot(self, slot_id: str, *, label: str, detail: str | None = None) -> bool:
+        normalized_slot_id = _safe_text(slot_id)
+        if not normalized_slot_id:
+            return False
+        for item in self._blocks:
+            if _safe_text(item.get("id")) != normalized_slot_id:
+                continue
+            if str(item.get("type")) not in {"image_slot", "chart_slot"}:
+                return False
+            item["status"] = "failed"
+            if label:
+                item["loading_label"] = label
+            if detail:
+                item["failure_detail"] = detail
+            else:
+                item.pop("failure_detail", None)
+            return True
+        return False
+
+    def fail_all_pending_slots(
+        self,
+        *,
+        image_label: str,
+        chart_label: str,
+    ) -> bool:
+        changed = False
+        for item in self._blocks:
+            block_type = str(item.get("type"))
+            if block_type not in {"image_slot", "chart_slot"}:
+                continue
+            if _safe_text(item.get("status")).lower() == "failed":
+                continue
+            item["status"] = "failed"
+            item["loading_label"] = (
+                chart_label if block_type == "chart_slot" else image_label
+            )
+            item.pop("failure_detail", None)
+            changed = True
+        return changed
 
     def drop_all_pending_slots(self) -> bool:
         before = len(self._blocks)
@@ -705,6 +755,100 @@ class VisualEnrichmentCoordinator:
             return base_sec
         return max(base_sec, max_slot_timeout_ms / 1000.0)
 
+    def _failure_label_for_slot(
+        self,
+        slot: VisualSlotDirective | None,
+        *,
+        timed_out: bool = False,
+    ) -> str:
+        kind = _safe_text(getattr(slot, "kind", "")).lower()
+        if kind == "chart":
+            return (
+                _TIMED_OUT_INLINE_CHART_LABEL
+                if timed_out
+                else _FAILED_INLINE_CHART_LABEL
+            )
+        return (
+            _TIMED_OUT_INLINE_IMAGE_LABEL
+            if timed_out
+            else _FAILED_INLINE_IMAGE_LABEL
+        )
+
+    def _has_any_visual_blocks(self) -> bool:
+        return any(
+            str(block.get("type")) in {"image_slot", "chart_slot", "image_artifact"}
+            for block in self._parser.export_blocks()
+        ) or bool(self._supporting_artifacts)
+
+    def _build_implicit_image_slot(self) -> VisualSlotDirective | None:
+        if self._has_any_visual_blocks():
+            return None
+        if self._image_slot_count >= self.config.visual_max_image_slots_per_turn:
+            return None
+        if not (self._firecrawl.available or self._image_search.available):
+            return None
+
+        visible_text = _safe_text(self._parser.visible_text)
+        if len(visible_text) < 180:
+            return None
+
+        source_infos = list(self._sources_by_url.values())
+        source_titles = [
+            _normalize_image_search_query(source.get("title"))
+            for source in source_infos[:3]
+            if isinstance(source, dict)
+            and _normalize_image_search_query(source.get("title"))
+        ]
+        explicit_image_request = _text_explicitly_requests_image(self.user_query)
+        specificity = max(
+            _query_specificity_score(self.user_query),
+            _query_specificity_score(" ".join(source_titles[:2])),
+            _query_specificity_score(_clip_text(visible_text, limit=260)),
+        )
+        if not explicit_image_request and not source_infos:
+            return None
+        if not explicit_image_request and specificity < 3:
+            return None
+
+        query = _normalize_image_search_query(self.user_query)
+        if _looks_generic_for_image_search(query):
+            query = source_titles[0] if source_titles else query
+        if not query and source_titles:
+            query = source_titles[0]
+        if not query:
+            query = _normalize_image_search_query(_clip_text(visible_text, limit=160))
+        if not query:
+            return None
+
+        source_urls = [
+            _safe_text(source.get("url"))
+            for source in source_infos[: self.config.visual_image_source_page_limit]
+            if isinstance(source, dict) and _safe_text(source.get("url"))
+        ]
+        return VisualSlotDirective(
+            id=f"img_auto_{uuid4().hex[:10]}",
+            kind="image",
+            query=query,
+            caption=None,
+            loading_label="Finding a relevant image",
+            source_urls=source_urls,
+            context_excerpt=visible_text[-1200:].strip(),
+        )
+
+    def _maybe_schedule_implicit_image_slot(self) -> bool:
+        slot = self._build_implicit_image_slot()
+        if slot is None:
+            return False
+        self._parser.append_slot(slot)
+        self._register_slots([slot])
+        logger.info(
+            "visual_enrichment.auto_slot_injected slot_id=%s query=%s source_count=%s",
+            slot.id,
+            slot.query,
+            len(slot.source_urls),
+        )
+        return True
+
     async def finalize(
         self,
         *,
@@ -713,6 +857,8 @@ class VisualEnrichmentCoordinator:
         events: list[dict[str, Any]] = []
         _, dirty = self._parser.finalize_pending_text()
         if dirty:
+            events.append(self._build_snapshot_event())
+        if self._maybe_schedule_implicit_image_slot():
             events.append(self._build_snapshot_event())
 
         deadline = asyncio.get_running_loop().time() + max(
@@ -735,8 +881,12 @@ class VisualEnrichmentCoordinator:
         if self._active_sidecars:
             await asyncio.gather(*self._active_sidecars.values(), return_exceptions=True)
         self._active_sidecars.clear()
+        events.extend(self._drain_ready_updates())
 
-        if self._parser.drop_all_pending_slots():
+        if self._parser.fail_all_pending_slots(
+            image_label=_TIMED_OUT_INLINE_IMAGE_LABEL,
+            chart_label=_TIMED_OUT_INLINE_CHART_LABEL,
+        ):
             events.append(self._build_snapshot_event())
 
         final_blocks = self._parser.export_blocks()
@@ -1147,7 +1297,7 @@ class VisualEnrichmentCoordinator:
             raise
         except Exception as exc:
             logger.warning("visual_enrichment.chart_failed slot_id=%s error=%s", slot.id, exc)
-            await self._event_queue.put({"action": "drop_slot", "slot_id": slot.id, "error": str(exc)})
+            await self._event_queue.put({"action": "fail_slot", "slot_id": slot.id, "error": str(exc)})
         finally:
             self._active_sidecars.pop(slot.id, None)
             self._drain_slot_queue()
@@ -1291,7 +1441,7 @@ class VisualEnrichmentCoordinator:
             raise
         except Exception as exc:
             logger.warning("visual_enrichment.image_failed slot_id=%s error=%s", slot.id, exc)
-            await self._event_queue.put({"action": "drop_slot", "slot_id": slot.id, "error": str(exc)})
+            await self._event_queue.put({"action": "fail_slot", "slot_id": slot.id, "error": str(exc)})
         finally:
             self._active_sidecars.pop(slot.id, None)
             self._drain_slot_queue()
@@ -1649,8 +1799,22 @@ class VisualEnrichmentCoordinator:
             if isinstance(block, dict):
                 return self._parser.replace_slot(slot_id, dict(block))
             return False
+        if action == "fail_slot":
+            slot = self._slots.get(slot_id)
+            detail = _clip_text(update.get("error"), limit=240) or None
+            return self._parser.fail_slot(
+                slot_id,
+                label=self._failure_label_for_slot(slot, timed_out=False),
+                detail=detail,
+            )
         if action == "drop_slot":
-            return self._parser.drop_slot(slot_id)
+            slot = self._slots.get(slot_id)
+            detail = _clip_text(update.get("error"), limit=240) or None
+            return self._parser.fail_slot(
+                slot_id,
+                label=self._failure_label_for_slot(slot, timed_out=False),
+                detail=detail,
+            )
         return False
 
     def _candidate_source_infos(self, slot: VisualSlotDirective | None) -> list[dict[str, str]]:
