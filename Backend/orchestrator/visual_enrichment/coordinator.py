@@ -576,6 +576,33 @@ class VisualEnrichmentCoordinator:
             self._schedule_waiting_image_slots()
         return self._drain_ready_updates()
 
+    def _slot_timeout_ms(self, slot: VisualSlotDirective | None) -> int:
+        if slot is None:
+            return 0
+        if slot.timeout_ms:
+            return max(250, int(slot.timeout_ms))
+        if slot.kind == "chart":
+            return max(250, int(self.config.visual_chart_slot_timeout_ms))
+        return max(250, int(self.config.visual_image_slot_timeout_ms))
+
+    def _finalization_wait_timeout_sec(self) -> float:
+        base_sec = max(
+            0.0,
+            self.config.visual_finalization_grace_ms / 1000.0,
+        )
+        if not self._active_sidecars:
+            return base_sec
+        max_slot_timeout_ms = max(
+            (
+                self._slot_timeout_ms(self._slots.get(slot_id))
+                for slot_id in self._active_sidecars.keys()
+            ),
+            default=0,
+        )
+        if max_slot_timeout_ms <= 0:
+            return base_sec
+        return max(base_sec, max_slot_timeout_ms / 1000.0)
+
     async def finalize(
         self,
         *,
@@ -588,7 +615,7 @@ class VisualEnrichmentCoordinator:
 
         deadline = asyncio.get_running_loop().time() + max(
             0.0,
-            self.config.visual_finalization_grace_ms / 1000.0,
+            self._finalization_wait_timeout_sec(),
         )
         while self._active_sidecars:
             remaining = deadline - asyncio.get_running_loop().time()

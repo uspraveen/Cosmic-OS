@@ -4,6 +4,7 @@ import httpx
 import pytest
 import shutil
 import tempfile
+import time
 from io import BytesIO
 from pathlib import Path
 
@@ -202,6 +203,43 @@ def _build_tiny_image_retry_transport() -> httpx.MockTransport:
             return httpx.Response(
                 200,
                 content=large_bytes,
+                headers={"Content-Type": "image/png"},
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url!s}")
+
+    return httpx.MockTransport(handler)
+
+
+def _build_delayed_image_transport(delay_sec: float = 0.45) -> httpx.MockTransport:
+    image_bytes = _solid_png_bytes(1280, 720)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.endswith("/v2/scrape"):
+            payload = json.loads(request.content.decode("utf-8"))
+            if payload.get("url") != "https://example.com/colossus":
+                raise AssertionError(f"unexpected scrape url {payload.get('url')!r}")
+            time.sleep(delay_sec)
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {
+                        "images": [
+                            {
+                                "src": "https://cdn.example.test/colossus-facility.png",
+                                "alt": "Inside the Colossus GPU facility in Memphis",
+                                "width": 1280,
+                                "height": 720,
+                            }
+                        ],
+                        "metadata": {"title": "Colossus facility"},
+                    },
+                },
+            )
+        if request.method == "GET" and str(request.url) == "https://cdn.example.test/colossus-facility.png":
+            return httpx.Response(
+                200,
+                content=image_bytes,
                 headers={"Content-Type": "image/png"},
             )
         raise AssertionError(f"unexpected request {request.method} {request.url!s}")
@@ -735,6 +773,60 @@ async def test_visual_enrichment_skips_tiny_image_and_uses_larger_candidate() ->
             block for block in final_payload["response_blocks"] if block["type"] == "image_artifact"
         )
         assert image_block["provenance"]["source_image_url"] == "https://cdn.example.test/colossus-racks.png"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_visual_enrichment_finalize_waits_for_slot_timeout_budget() -> None:
+    root = _make_test_dir("visual-image-finalize-")
+    try:
+        config = OrchestratorConfig(
+            artifacts_root=root / "artifacts",
+            internal_token="internal-token",
+            signing_secret="signing-secret",
+            anthropic_api_key="anthropic-key",
+            anthropic_model="claude-opus-4-6",
+            task_ledger_db_path=root / "task_ledger.db",
+            visual_enhancement_enabled=True,
+            visual_finalization_grace_ms=100,
+            visual_image_slot_timeout_ms=1200,
+            visual_max_concurrent_sidecars=1,
+            visual_max_image_slots_per_turn=1,
+            visual_firecrawl_api_key="firecrawl-key",
+        )
+        transport = _build_delayed_image_transport()
+
+        async with httpx.AsyncClient(transport=transport) as client:
+            coordinator = VisualEnrichmentCoordinator(
+                config=config,
+                task_id="tsk_visual_image_finalize_1",
+                request_id="req_visual_image_finalize_1",
+                session_id="sess_visual_image_finalize_1",
+                channel="desktop:desk_visual_image_finalize_1",
+                user_query="Why didn't OpenAI buy Cursor? Include inline images.",
+                http_client=client,
+            )
+            _note_colossus_source(coordinator)
+
+            coordinator.consume_text(
+                (
+                    "OpenAI had strategic conflicts here.\n\n"
+                    "[[visual_slot {\"id\":\"img_1\",\"kind\":\"image\",\"query\":\"Colossus facility image\","
+                    "\"caption\":\"Colossus facility\"}]]\n\n"
+                    "SpaceX could offer both capital and compute."
+                )
+            )
+
+            started = time.perf_counter()
+            final_payload = await coordinator.finalize()
+            elapsed = time.perf_counter() - started
+
+        image_block = next(
+            block for block in final_payload["response_blocks"] if block["type"] == "image_artifact"
+        )
+        assert image_block["provenance"]["source_image_url"] == "https://cdn.example.test/colossus-facility.png"
+        assert elapsed >= 0.35
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
