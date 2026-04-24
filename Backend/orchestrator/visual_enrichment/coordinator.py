@@ -124,6 +124,63 @@ def _is_probably_decorative(candidate_url: str, text: str) -> bool:
     return any(marker in corpus for marker in markers)
 
 
+def _is_probably_text_art(candidate_url: str, filename: str, text: str) -> bool:
+    file_corpus = f"{Path(urlparse(candidate_url).path).name} {filename}".lower()
+    text_corpus = str(text or "").lower()
+    strong_file_markers = (
+        "-text",
+        "_text",
+        "text.",
+        "wordmark",
+        "title-card",
+        "titlecard",
+        "masthead",
+    )
+    if any(marker in file_corpus for marker in strong_file_markers):
+        return True
+    photographic_markers = (
+        "gpu",
+        "gpus",
+        "rack",
+        "racks",
+        "server",
+        "servers",
+        "cluster",
+        "facility",
+        "warehouse",
+        "building",
+        "buildings",
+        "datacenter",
+        "data center",
+        "data-center",
+        "chip",
+        "chips",
+        "turbine",
+        "battery",
+        "cooling",
+        "supercomputer",
+    )
+    photographic_hits = sum(1 for marker in photographic_markers if marker in text_corpus)
+    weaker_markers = (
+        "banner",
+        "headline",
+        "header",
+        "cover",
+        "poster",
+    )
+    text_markers = (
+        "wordmark",
+        "title card",
+        "headline graphic",
+        "text graphic",
+    )
+    if any(marker in file_corpus for marker in weaker_markers) and photographic_hits < 2:
+        return True
+    if any(marker in text_corpus for marker in text_markers) and photographic_hits < 2:
+        return True
+    return False
+
+
 def _guess_filename_from_url(url: str, *, default_prefix: str) -> str:
     parsed = urlparse(str(url or "").strip())
     raw_name = Path(parsed.path).name
@@ -694,6 +751,8 @@ class VisualEnrichmentCoordinator:
             )[: self.config.visual_image_candidate_limit]
             attempt_candidates: list[tuple[ImageCandidate, dict[str, Any]]] = []
             planned_urls: set[str] = set()
+            explicit_image_request = self._slot_explicitly_requests_image(slot)
+            verifier_rejected_urls: set[str] = set()
 
             def add_attempt(candidate: ImageCandidate, verdict: dict[str, Any]) -> None:
                 if candidate.image_url in planned_urls:
@@ -701,7 +760,10 @@ class VisualEnrichmentCoordinator:
                 planned_urls.add(candidate.image_url)
                 attempt_candidates.append((candidate, dict(verdict)))
 
-            top_k = min(self.config.visual_image_verify_top_k, len(ranked))
+            top_k = min(
+                max(self.config.visual_image_verify_top_k, 2 if explicit_image_request else 1),
+                len(ranked),
+            )
             if self._fireworks.available and top_k > 0:
                 for candidate in ranked[:top_k]:
                     try:
@@ -728,8 +790,12 @@ class VisualEnrichmentCoordinator:
                         enriched_verdict = dict(verdict)
                         enriched_verdict["confidence"] = confidence
                         add_attempt(candidate, enriched_verdict)
+                    elif verdict:
+                        verifier_rejected_urls.add(candidate.image_url)
             relaxed_fallback_logged = False
             for candidate in ranked:
+                if candidate.image_url in verifier_rejected_urls:
+                    continue
                 if candidate.score >= self.config.visual_image_min_confidence:
                     add_attempt(
                         candidate,
@@ -944,6 +1010,12 @@ class VisualEnrichmentCoordinator:
                 score += 0.1
         if candidate.alt_text and len(candidate.alt_text.split()) >= 3:
             score += 0.1
+        if _is_probably_text_art(
+            candidate.image_url,
+            candidate.filename,
+            " ".join(filter(None, [candidate.alt_text, candidate.title, candidate.nearby_text])),
+        ):
+            score -= 0.35
         if _is_probably_decorative(candidate.image_url, corpus):
             score -= 0.45
         if candidate.image_url.lower().endswith(".svg"):

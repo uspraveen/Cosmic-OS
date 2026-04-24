@@ -4,12 +4,16 @@ import httpx
 import pytest
 import shutil
 import tempfile
+from io import BytesIO
 from pathlib import Path
 
 from gateway.config import GatewayConfig
 from gateway.runtime import GatewayRuntime
 from orchestrator.config import OrchestratorConfig
+from orchestrator.visual_enrichment.charting import normalize_chart_spec, render_chart_png
+from orchestrator.visual_enrichment.coordinator import _is_probably_text_art
 from orchestrator.visual_enrichment import VisualEnrichmentCoordinator
+from PIL import Image
 
 
 def _make_test_dir(prefix: str) -> Path:
@@ -629,3 +633,42 @@ async def test_visual_enrichment_retries_next_candidate_after_download_failure()
         )
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_visual_enrichment_flags_text_dominant_word_art() -> None:
+    assert _is_probably_text_art(
+        "https://x.ai/_next/static/media/colossus-text.8af37456.webp",
+        "colossus-text.8af37456.webp",
+        "Inside xAI's Colossus supercomputer GPU racks in Memphis",
+    )
+    assert not _is_probably_text_art(
+        "https://x.ai/_next/static/media/colossus-racks.8af37456.webp",
+        "colossus-racks.8af37456.webp",
+        "Inside xAI's Colossus supercomputer GPU racks in Memphis",
+    )
+
+
+def test_render_chart_png_uses_high_resolution_dark_theme() -> None:
+    spec = normalize_chart_spec(
+        {
+            "chart_type": "line",
+            "title": "Single-site AI clusters",
+            "x_label": "Cluster",
+            "y_label": "GPUs",
+            "series": [
+                {
+                    "label": "GPU count",
+                    "points": [
+                        {"x": "El Capitan", "y": 44544},
+                        {"x": "Oracle", "y": 131072},
+                        {"x": "Colossus", "y": 555000},
+                    ],
+                }
+            ],
+        },
+        max_points=20,
+    )
+    image_bytes = render_chart_png(spec)
+    assert len(image_bytes) > 10_000
+    with Image.open(BytesIO(image_bytes)) as image:
+        assert image.size == (1600, 900)
