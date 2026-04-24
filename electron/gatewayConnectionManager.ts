@@ -47,6 +47,7 @@ interface ForegroundStreamSnapshot {
   tabular_progress?: unknown
   produced_artifacts?: any[]
   response_blocks?: any[]
+  snapshot_seq?: number | null
   sources?: any[]
   channel?: string | null
   source?: string | null
@@ -1008,6 +1009,10 @@ export class GatewayConnectionManager {
         tabular_progress: payload.tabular_progress,
         produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : undefined,
         response_blocks: Array.isArray(payload.response_blocks) ? payload.response_blocks : undefined,
+        snapshot_seq:
+          Number.isFinite(Number(payload.snapshot_seq)) && Number(payload.snapshot_seq) > 0
+            ? Number(payload.snapshot_seq)
+            : undefined,
         sources: Array.isArray(payload.sources) ? payload.sources : undefined,
         channel: typeof payload.channel === 'string' ? payload.channel : undefined,
         source: typeof payload.source === 'string' ? payload.source : undefined,
@@ -1051,6 +1056,11 @@ export class GatewayConnectionManager {
         docs_progress: payload.docs_progress,
         tabular_progress: payload.tabular_progress,
         produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : undefined,
+        response_blocks: Array.isArray(payload.response_blocks) ? payload.response_blocks : undefined,
+        snapshot_seq:
+          Number.isFinite(Number(payload.snapshot_seq)) && Number(payload.snapshot_seq) > 0
+            ? Number(payload.snapshot_seq)
+            : undefined,
         sources: Array.isArray(payload.sources) ? payload.sources : undefined,
         completed: Boolean(payload.completed),
         failed: Boolean(payload.failed),
@@ -1146,6 +1156,40 @@ export class GatewayConnectionManager {
       return
     }
 
+    if (eventType === 'response.blocks.snapshot') {
+      const snapshotSeq =
+        Number.isFinite(Number(payload.snapshot_seq)) && Number(payload.snapshot_seq) > 0
+          ? Number(payload.snapshot_seq)
+          : null
+      const existing = this.upsertForegroundStream(payload, {
+        session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
+        route: typeof payload.route === 'string' ? payload.route : undefined,
+        completed: false,
+        failed: false,
+      })
+      const existingSeq =
+        existing && Number.isFinite(Number(existing.snapshot_seq)) && Number(existing.snapshot_seq) > 0
+          ? Number(existing.snapshot_seq)
+          : 0
+      if (snapshotSeq && existingSeq && snapshotSeq < existingSeq) {
+        return
+      }
+      this.upsertForegroundStream(payload, {
+        session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
+        route: typeof payload.route === 'string' ? payload.route : undefined,
+        produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : undefined,
+        response_blocks: Array.isArray(payload.response_blocks)
+          ? payload.response_blocks
+          : Array.isArray(payload.blocks)
+            ? payload.blocks
+            : undefined,
+        snapshot_seq: snapshotSeq ?? existing?.snapshot_seq ?? undefined,
+        completed: false,
+        failed: false,
+      })
+      return
+    }
+
     if (eventType === 'response.complete') {
       const existing = this.upsertForegroundStream(payload, {
         session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
@@ -1161,6 +1205,10 @@ export class GatewayConnectionManager {
         ),
         produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : undefined,
         response_blocks: Array.isArray(payload.response_blocks) ? payload.response_blocks : undefined,
+        snapshot_seq:
+          Number.isFinite(Number(payload.snapshot_seq)) && Number(payload.snapshot_seq) > 0
+            ? Number(payload.snapshot_seq)
+            : existing?.snapshot_seq,
         sources: Array.isArray(payload.sources) ? payload.sources : undefined,
         channel: typeof payload.channel === 'string' ? payload.channel : undefined,
         source: typeof payload.source === 'string' ? payload.source : undefined,

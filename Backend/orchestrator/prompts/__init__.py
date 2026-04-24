@@ -14,6 +14,7 @@ _PROMPT_ASSETS = (
     "thin_system.md",
     "system.md",
     "policies.md",
+    "visual_response_policy.md",
     "memory_authority.md",
 )
 
@@ -26,6 +27,9 @@ def _load_prompt_asset(name: str) -> str:
 THIN_ORCHESTRATOR_SYSTEM_PROMPT = _load_prompt_asset("thin_system.md")
 AGENTIC_ORCHESTRATOR_SYSTEM_PROMPT = _load_prompt_asset("system.md")
 ORCHESTRATOR_POLICIES_PROMPT = _load_prompt_asset("policies.md")
+ORCHESTRATOR_VISUAL_RESPONSE_POLICY_PROMPT = _load_prompt_asset(
+    "visual_response_policy.md"
+)
 ORCHESTRATOR_MEMORY_AUTHORITY_INSTRUCTION = _load_prompt_asset("memory_authority.md")
 
 
@@ -49,6 +53,8 @@ def build_agentic_system_prompt(
     *,
     user_timezone: str | None = None,
     featured_specialists: list[dict[str, object]] | None = None,
+    visual_response_enhancement_enabled: bool = False,
+    visual_supported_slot_kinds: list[str] | None = None,
 ) -> str:
     now_utc = datetime.now(timezone.utc)
     date_line = f"Current date and time (UTC): {now_utc.strftime('%A, %B %d, %Y at %H:%M UTC')}."
@@ -73,6 +79,10 @@ def build_agentic_system_prompt(
         build_featured_specialists_prompt(featured_specialists),
         build_tool_prompt_catalog(featured_agent_ids),
         ORCHESTRATOR_POLICIES_PROMPT,
+        build_visual_response_policy_prompt(
+            enabled=visual_response_enhancement_enabled,
+            supported_slot_kinds=visual_supported_slot_kinds,
+        ),
         date_line,
     ]
     prompt = "\n\n".join(section.strip() for section in sections if section.strip())
@@ -80,6 +90,29 @@ def build_agentic_system_prompt(
     if not context:
         return prompt
     return f"{prompt}\n\n{ORCHESTRATOR_MEMORY_AUTHORITY_INSTRUCTION}\n\n{context}"
+
+
+def build_visual_response_policy_prompt(
+    *,
+    enabled: bool = False,
+    supported_slot_kinds: list[str] | None = None,
+) -> str:
+    if not enabled:
+        return ""
+    supported = [
+        str(item).strip().lower()
+        for item in (supported_slot_kinds or [])
+        if str(item).strip()
+    ]
+    if not supported:
+        return ORCHESTRATOR_VISUAL_RESPONSE_POLICY_PROMPT
+    capability_line = "Supported runtime slot kinds for this turn: {0}.".format(
+        ", ".join(f"`{item}`" for item in supported)
+    )
+    return "{0}\n\n{1}".format(
+        ORCHESTRATOR_VISUAL_RESPONSE_POLICY_PROMPT,
+        capability_line,
+    )
 
 
 def build_featured_specialists_prompt(featured_specialists: list[dict[str, object]] | None = None) -> str:

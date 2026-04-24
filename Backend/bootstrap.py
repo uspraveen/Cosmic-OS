@@ -819,6 +819,270 @@ def read_firecrawl_agent_system_env(
     return parse_env_text(read_text_file(env_path, use_sudo=True))
 
 
+def visual_enhancement_repo_env_path() -> Path:
+    return BACKEND_ROOT / "visual_enhancement.env"
+
+
+def visual_enhancement_repo_env_example_path() -> Path:
+    return BACKEND_ROOT / "visual_enhancement.env.example"
+
+
+def visual_enhancement_system_env_path(
+    system_env_dir: Optional[Path] = None,
+) -> Path:
+    return (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "visual_enhancement.env"
+
+
+def resolve_visual_enhancement_env_source() -> Path:
+    repo_env = visual_enhancement_repo_env_path()
+    if repo_env.exists():
+        return repo_env
+    return visual_enhancement_repo_env_example_path()
+
+
+def build_visual_enhancement_env_rendered(
+    *,
+    system_env_dir: Optional[Path] = None,
+    existing_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+    external_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Tuple[Path, str, Dict[str, str]]:
+    source_path = resolve_visual_enhancement_env_source()
+    source_raw = source_path.read_text(encoding="utf-8")
+    source_data = parse_env_text(source_raw)
+    env_name = "visual_enhancement.env"
+    existing_env = (existing_env_by_name or {}).get(env_name, {})
+    external_env = (external_env_by_name or {}).get(env_name, {})
+    firecrawl_external_env = (external_env_by_name or {}).get(FIRECRAWL_AGENT_ENV_NAME, {})
+    slide_external_env = (external_env_by_name or {}).get(SLIDE_AGENT_ENV_NAME, {})
+    orchestrator_external_env = (external_env_by_name or {}).get("orchestrator.env", {})
+    firecrawl_existing_env = (existing_env_by_name or {}).get(FIRECRAWL_AGENT_ENV_NAME, {})
+    slide_existing_env = (existing_env_by_name or {}).get(SLIDE_AGENT_ENV_NAME, {})
+    orchestrator_existing_env = (existing_env_by_name or {}).get("orchestrator.env", {})
+
+    def read_optional_env(path: Path) -> Dict[str, str]:
+        if not path.exists():
+            return {}
+        try:
+            if is_linux():
+                return parse_env_text(read_text_file(path, use_sudo=True))
+            return parse_env_text(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    if not firecrawl_existing_env:
+        firecrawl_existing_env = read_optional_env(
+            firecrawl_agent_system_env_path(system_env_dir)
+        )
+    if not slide_existing_env:
+        slide_existing_env = read_optional_env(slide_agent_system_env_path(system_env_dir))
+    if not orchestrator_existing_env:
+        orchestrator_existing_env = read_optional_env(
+            (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "orchestrator.env"
+        )
+
+    def pick_visual(names: Sequence[str], default: Optional[str] = None) -> Optional[str]:
+        return first_meaningful_value(
+            *(external_env.get(name) for name in names),
+            *(existing_env.get(name) for name in names),
+            *(source_data.get(name) for name in names),
+            default,
+        )
+
+    enabled = pick_visual(("VISUAL_ENHANCEMENT_ENABLED",), "true")
+    max_visuals = pick_visual(("VISUAL_ENHANCEMENT_MAX_VISUALS_PER_TURN",), "2")
+    max_image_slots = pick_visual(
+        ("VISUAL_ENHANCEMENT_MAX_IMAGE_SLOTS_PER_TURN",), "1"
+    )
+    max_chart_slots = pick_visual(
+        ("VISUAL_ENHANCEMENT_MAX_CHART_SLOTS_PER_TURN",), "1"
+    )
+    max_concurrent_sidecars = pick_visual(
+        ("VISUAL_ENHANCEMENT_MAX_CONCURRENT_SIDECARS",), "2"
+    )
+    image_slot_timeout_ms = pick_visual(
+        ("VISUAL_ENHANCEMENT_IMAGE_SLOT_TIMEOUT_MS",), "3500"
+    )
+    chart_slot_timeout_ms = pick_visual(
+        ("VISUAL_ENHANCEMENT_CHART_SLOT_TIMEOUT_MS",), "4000"
+    )
+    finalization_grace_ms = pick_visual(
+        ("VISUAL_ENHANCEMENT_FINALIZATION_GRACE_MS",), "750"
+    )
+    image_source_page_limit = pick_visual(
+        ("VISUAL_ENHANCEMENT_IMAGE_SOURCE_PAGE_LIMIT",), "3"
+    )
+    image_candidate_limit = pick_visual(
+        ("VISUAL_ENHANCEMENT_IMAGE_CANDIDATE_LIMIT",), "12"
+    )
+    image_max_bytes = pick_visual(
+        ("VISUAL_ENHANCEMENT_IMAGE_MAX_BYTES",), "8388608"
+    )
+    image_verify_top_k = pick_visual(
+        ("VISUAL_ENHANCEMENT_IMAGE_VERIFY_TOP_K",), "1"
+    )
+    image_min_confidence = pick_visual(
+        ("VISUAL_ENHANCEMENT_IMAGE_MIN_CONFIDENCE",), "0.58"
+    )
+    chart_max_points = pick_visual(
+        ("VISUAL_ENHANCEMENT_CHART_MAX_POINTS",), "200"
+    )
+    chart_max_bytes = pick_visual(
+        ("VISUAL_ENHANCEMENT_CHART_MAX_BYTES",), "4194304"
+    )
+    download_timeout_sec = pick_visual(
+        ("VISUAL_ENHANCEMENT_DOWNLOAD_TIMEOUT_SEC",), "20"
+    )
+
+    firecrawl_api_key = first_meaningful_value(
+        external_env.get("VISUAL_ENHANCEMENT_FIRECRAWL_API_KEY"),
+        existing_env.get("VISUAL_ENHANCEMENT_FIRECRAWL_API_KEY"),
+        source_data.get("VISUAL_ENHANCEMENT_FIRECRAWL_API_KEY"),
+        orchestrator_external_env.get("FIRECRAWL_API_KEY"),
+        orchestrator_existing_env.get("FIRECRAWL_API_KEY"),
+        firecrawl_external_env.get("FIRECRAWL_API_KEY"),
+        firecrawl_existing_env.get("FIRECRAWL_API_KEY"),
+    )
+    firecrawl_base_url = first_meaningful_value(
+        external_env.get("VISUAL_ENHANCEMENT_FIRECRAWL_BASE_URL"),
+        existing_env.get("VISUAL_ENHANCEMENT_FIRECRAWL_BASE_URL"),
+        orchestrator_external_env.get("FIRECRAWL_API_BASE_URL"),
+        orchestrator_existing_env.get("FIRECRAWL_API_BASE_URL"),
+        firecrawl_external_env.get("FIRECRAWL_API_BASE_URL"),
+        firecrawl_existing_env.get("FIRECRAWL_API_BASE_URL"),
+        source_data.get("VISUAL_ENHANCEMENT_FIRECRAWL_BASE_URL"),
+        "https://api.firecrawl.dev",
+    )
+    firecrawl_request_timeout_sec = first_meaningful_value(
+        external_env.get("VISUAL_ENHANCEMENT_FIRECRAWL_REQUEST_TIMEOUT_SEC"),
+        existing_env.get("VISUAL_ENHANCEMENT_FIRECRAWL_REQUEST_TIMEOUT_SEC"),
+        firecrawl_external_env.get("FIRECRAWL_REQUEST_TIMEOUT_SEC"),
+        firecrawl_existing_env.get("FIRECRAWL_REQUEST_TIMEOUT_SEC"),
+        source_data.get("VISUAL_ENHANCEMENT_FIRECRAWL_REQUEST_TIMEOUT_SEC"),
+        "20",
+    )
+
+    fireworks_api_key = first_meaningful_value(
+        external_env.get("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY"),
+        existing_env.get("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY"),
+        source_data.get("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY"),
+        orchestrator_external_env.get("MODEL_API_KEY"),
+        orchestrator_external_env.get("FIREWORKS_API_KEY"),
+        orchestrator_external_env.get("MIMO_API_KEY"),
+        orchestrator_existing_env.get("MODEL_API_KEY"),
+        orchestrator_existing_env.get("FIREWORKS_API_KEY"),
+        orchestrator_existing_env.get("MIMO_API_KEY"),
+        slide_external_env.get("MODEL_API_KEY"),
+        slide_external_env.get("SLIDE_AGENT_MIMO_API_KEY"),
+        slide_external_env.get("FIREWORKS_API_KEY"),
+        slide_external_env.get("MIMO_API_KEY"),
+        slide_existing_env.get("MODEL_API_KEY"),
+        slide_existing_env.get("SLIDE_AGENT_MIMO_API_KEY"),
+        slide_existing_env.get("FIREWORKS_API_KEY"),
+        slide_existing_env.get("MIMO_API_KEY"),
+    )
+    fireworks_base_url = first_meaningful_value(
+        external_env.get("VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL"),
+        existing_env.get("VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL"),
+        orchestrator_external_env.get("MODEL_BASE_URL"),
+        orchestrator_external_env.get("FIREWORKS_BASE_URL"),
+        orchestrator_external_env.get("MIMO_OPENAI_BASE_URL"),
+        orchestrator_existing_env.get("MODEL_BASE_URL"),
+        orchestrator_existing_env.get("FIREWORKS_BASE_URL"),
+        orchestrator_existing_env.get("MIMO_OPENAI_BASE_URL"),
+        slide_external_env.get("MODEL_BASE_URL"),
+        slide_external_env.get("SLIDE_AGENT_MIMO_BASE_URL"),
+        slide_external_env.get("FIREWORKS_BASE_URL"),
+        slide_external_env.get("MIMO_OPENAI_BASE_URL"),
+        slide_existing_env.get("MODEL_BASE_URL"),
+        slide_existing_env.get("SLIDE_AGENT_MIMO_BASE_URL"),
+        slide_existing_env.get("FIREWORKS_BASE_URL"),
+        slide_existing_env.get("MIMO_OPENAI_BASE_URL"),
+        source_data.get("VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL"),
+        "https://api.fireworks.ai/inference/v1",
+    )
+    fireworks_model = first_meaningful_value(
+        external_env.get("VISUAL_ENHANCEMENT_FIREWORKS_MODEL"),
+        existing_env.get("VISUAL_ENHANCEMENT_FIREWORKS_MODEL"),
+        orchestrator_external_env.get("FIREWORKS_KIMI_MODEL"),
+        orchestrator_external_env.get("MODEL_NAME"),
+        orchestrator_existing_env.get("FIREWORKS_KIMI_MODEL"),
+        orchestrator_existing_env.get("MODEL_NAME"),
+        slide_external_env.get("FIREWORKS_KIMI_MODEL"),
+        slide_external_env.get("MODEL_NAME"),
+        slide_external_env.get("SLIDE_AGENT_MIMO_MODEL"),
+        slide_existing_env.get("FIREWORKS_KIMI_MODEL"),
+        slide_existing_env.get("MODEL_NAME"),
+        slide_existing_env.get("SLIDE_AGENT_MIMO_MODEL"),
+        source_data.get("VISUAL_ENHANCEMENT_FIREWORKS_MODEL"),
+        "accounts/fireworks/models/kimi-k2p6",
+    )
+    fireworks_vision_model = first_meaningful_value(
+        external_env.get("VISUAL_ENHANCEMENT_FIREWORKS_VISION_MODEL"),
+        existing_env.get("VISUAL_ENHANCEMENT_FIREWORKS_VISION_MODEL"),
+        source_data.get("VISUAL_ENHANCEMENT_FIREWORKS_VISION_MODEL"),
+        fireworks_model,
+    )
+    fireworks_reasoning_effort = first_meaningful_value(
+        external_env.get("VISUAL_ENHANCEMENT_FIREWORKS_REASONING_EFFORT"),
+        existing_env.get("VISUAL_ENHANCEMENT_FIREWORKS_REASONING_EFFORT"),
+        source_data.get("VISUAL_ENHANCEMENT_FIREWORKS_REASONING_EFFORT"),
+        "low",
+    )
+    fireworks_timeout_sec = first_meaningful_value(
+        external_env.get("VISUAL_ENHANCEMENT_FIREWORKS_TIMEOUT_SEC"),
+        existing_env.get("VISUAL_ENHANCEMENT_FIREWORKS_TIMEOUT_SEC"),
+        orchestrator_external_env.get("MODEL_TIMEOUT_SEC"),
+        orchestrator_existing_env.get("MODEL_TIMEOUT_SEC"),
+        slide_external_env.get("MODEL_TIMEOUT_SEC"),
+        slide_external_env.get("SLIDE_AGENT_MIMO_TIMEOUT_SEC"),
+        slide_existing_env.get("MODEL_TIMEOUT_SEC"),
+        slide_existing_env.get("SLIDE_AGENT_MIMO_TIMEOUT_SEC"),
+        source_data.get("VISUAL_ENHANCEMENT_FIREWORKS_TIMEOUT_SEC"),
+        "20",
+    )
+
+    overrides = {
+        "VISUAL_ENHANCEMENT_ENABLED": enabled or "true",
+        "VISUAL_ENHANCEMENT_MAX_VISUALS_PER_TURN": max_visuals or "2",
+        "VISUAL_ENHANCEMENT_MAX_IMAGE_SLOTS_PER_TURN": max_image_slots or "1",
+        "VISUAL_ENHANCEMENT_MAX_CHART_SLOTS_PER_TURN": max_chart_slots or "1",
+        "VISUAL_ENHANCEMENT_MAX_CONCURRENT_SIDECARS": max_concurrent_sidecars or "2",
+        "VISUAL_ENHANCEMENT_IMAGE_SLOT_TIMEOUT_MS": image_slot_timeout_ms or "3500",
+        "VISUAL_ENHANCEMENT_CHART_SLOT_TIMEOUT_MS": chart_slot_timeout_ms or "4000",
+        "VISUAL_ENHANCEMENT_FINALIZATION_GRACE_MS": finalization_grace_ms or "750",
+        "VISUAL_ENHANCEMENT_IMAGE_SOURCE_PAGE_LIMIT": image_source_page_limit or "3",
+        "VISUAL_ENHANCEMENT_IMAGE_CANDIDATE_LIMIT": image_candidate_limit or "12",
+        "VISUAL_ENHANCEMENT_IMAGE_MAX_BYTES": image_max_bytes or "8388608",
+        "VISUAL_ENHANCEMENT_IMAGE_VERIFY_TOP_K": image_verify_top_k or "1",
+        "VISUAL_ENHANCEMENT_IMAGE_MIN_CONFIDENCE": image_min_confidence or "0.58",
+        "VISUAL_ENHANCEMENT_CHART_MAX_POINTS": chart_max_points or "200",
+        "VISUAL_ENHANCEMENT_CHART_MAX_BYTES": chart_max_bytes or "4194304",
+        "VISUAL_ENHANCEMENT_DOWNLOAD_TIMEOUT_SEC": download_timeout_sec or "20",
+        "VISUAL_ENHANCEMENT_FIRECRAWL_BASE_URL": firecrawl_base_url
+        or "https://api.firecrawl.dev",
+        "VISUAL_ENHANCEMENT_FIRECRAWL_REQUEST_TIMEOUT_SEC": firecrawl_request_timeout_sec
+        or "20",
+        "VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL": fireworks_base_url
+        or "https://api.fireworks.ai/inference/v1",
+        "VISUAL_ENHANCEMENT_FIREWORKS_MODEL": fireworks_model
+        or "accounts/fireworks/models/kimi-k2p6",
+        "VISUAL_ENHANCEMENT_FIREWORKS_VISION_MODEL": fireworks_vision_model
+        or fireworks_model
+        or "accounts/fireworks/models/kimi-k2p6",
+        "VISUAL_ENHANCEMENT_FIREWORKS_REASONING_EFFORT": fireworks_reasoning_effort
+        or "low",
+        "VISUAL_ENHANCEMENT_FIREWORKS_TIMEOUT_SEC": fireworks_timeout_sec or "20",
+    }
+    if firecrawl_api_key is not None:
+        overrides["VISUAL_ENHANCEMENT_FIRECRAWL_API_KEY"] = firecrawl_api_key
+    if fireworks_api_key is not None:
+        overrides["VISUAL_ENHANCEMENT_FIREWORKS_API_KEY"] = fireworks_api_key
+
+    rendered = render_env_with_overrides(source_raw, overrides)
+    rendered_data = parse_env_text(rendered)
+    return visual_enhancement_system_env_path(system_env_dir), rendered, rendered_data
+
+
 def docs_parser_agent_repo_dir() -> Path:
     return BACKEND_ROOT / "agents" / "docs_parser"
 
@@ -2532,6 +2796,11 @@ def normalize_bootstrap_env_payload(
     image_generator_agent_env = {}
     if isinstance(payload.get("image_generator_agent_env"), dict):
         image_generator_agent_env = dict(payload.get("image_generator_agent_env") or {})
+    visual_enhancement_env = (
+        dict(payload.get("visual_enhancement_env") or {})
+        if isinstance(payload.get("visual_enhancement_env"), dict)
+        else {}
+    )
     meeting_env = (
         dict(payload.get("meeting_env") or {})
         if isinstance(payload.get("meeting_env"), dict)
@@ -2582,6 +2851,8 @@ def normalize_bootstrap_env_payload(
         "model-router.env": model_router_env,
         "orchestrator.env": orchestrator_env,
     }
+    if visual_enhancement_env:
+        normalized["visual_enhancement.env"] = visual_enhancement_env
     if memory_env:
         normalized["memory.env"] = memory_env
     if firecrawl_agent_env:
@@ -3193,6 +3464,10 @@ def service_env_specs(
         (BACKEND_ROOT / "gateway.env", system_env_dir / "gateway.env"),
         (BACKEND_ROOT / "model_router.env", system_env_dir / "model-router.env"),
         (BACKEND_ROOT / "orchestrator.env", system_env_dir / "orchestrator.env"),
+        (
+            visual_enhancement_repo_env_path(),
+            system_env_dir / "visual_enhancement.env",
+        ),
         (DEFAULT_BRIDGE_DIR / ".env", system_env_dir / "whatsapp-bridge.env"),
     ]
     if include_memory:
@@ -3215,6 +3490,10 @@ def fallback_service_env_specs(
         (
             BACKEND_ROOT / "orchestrator.env.example",
             system_env_dir / "orchestrator.env",
+        ),
+        (
+            BACKEND_ROOT / "visual_enhancement.env.example",
+            system_env_dir / "visual_enhancement.env",
         ),
         (DEFAULT_BRIDGE_DIR / ".env.example", system_env_dir / "whatsapp-bridge.env"),
     ]
@@ -3615,9 +3894,13 @@ def materialize_bootstrap_env_files(
     for source_path, dest_path in effective_sources:
         repo_path = repo_source_by_name[dest_path.name]
         raw_source_path = repo_path if repo_path.exists() else source_path
+        overrides = overrides_by_dest.get(
+            dest_path.name,
+            external_env_by_name.get(dest_path.name, {}),
+        )
         rendered = render_env_with_overrides(
             raw_source_path.read_text(encoding="utf-8"),
-            overrides_by_dest.get(dest_path.name, {}),
+            overrides,
         )
         repo_path.write_text(rendered, encoding="utf-8")
         written.append(repo_path)
@@ -3744,6 +4027,23 @@ def materialize_bootstrap_env_files(
     log(
         "Materialized repo env file from bootstrap inputs: {0}".format(
             image_generator_repo_path
+        )
+    )
+
+    visual_repo_path = visual_enhancement_repo_env_path()
+    _visual_dest_path, visual_rendered, _visual_env = (
+        build_visual_enhancement_env_rendered(
+            system_env_dir=system_env_dir,
+            existing_env_by_name=existing_env_by_name,
+            external_env_by_name=external_env_by_name,
+        )
+    )
+    visual_repo_path.parent.mkdir(parents=True, exist_ok=True)
+    visual_repo_path.write_text(visual_rendered, encoding="utf-8")
+    written.append(visual_repo_path)
+    log(
+        "Materialized repo env file from bootstrap inputs: {0}".format(
+            visual_repo_path
         )
     )
 
@@ -4756,6 +5056,20 @@ def sync_service_env_files(
         )
         if changed_keys:
             synced.append(dest_path)
+
+    visual_dest_path, visual_rendered, _visual_env = build_visual_enhancement_env_rendered(
+        system_env_dir=system_env_dir,
+        existing_env_by_name=existing_env_by_name,
+    )
+    changed_keys = sync_env_file(
+        visual_dest_path,
+        source_raw=visual_rendered,
+        create_missing=True,
+        use_sudo=True,
+        mode="600",
+    )
+    if changed_keys:
+        synced.append(visual_dest_path)
 
     firecrawl_dest_path = firecrawl_agent_system_env_path(system_env_dir)
     if firecrawl_dest_path.exists():

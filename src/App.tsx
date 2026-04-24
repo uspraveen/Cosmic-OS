@@ -114,6 +114,7 @@ interface GatewayForegroundStreamSnapshot {
   progress?: DocsProgressState | TabularProgressState
   producedArtifacts?: ProducedArtifact[]
   responseBlocks?: ResponseBlock[]
+  snapshotSeq?: number | null
   sources?: Array<{ url: string; title?: string; domain?: string } | string>
   channel?: string | null
   source?: string | null
@@ -174,9 +175,34 @@ interface ResponseArtifactBlock {
   kind?: string | null
   downloadable?: boolean
   previewUrl?: string | null
+  caption?: string | null
+  provenance?: ResponseBlockProvenance
 }
 
-type ResponseBlock = ResponseMarkdownBlock | ResponseCodeBlock | ResponseArtifactBlock
+interface ResponseBlockProvenance {
+  sourceUrl?: string | null
+  sourceTitle?: string | null
+  sourceDomain?: string | null
+  sourceImageUrl?: string | null
+  attributionLabel?: string | null
+  selectionReason?: string | null
+  altText?: string | null
+  confidence?: number | null
+}
+
+interface ResponseSlotBlock {
+  id: string
+  type: 'image_slot' | 'chart_slot'
+  status?: string | null
+  loadingLabel?: string | null
+  timeoutMs?: number | null
+}
+
+type ResponseBlock =
+  | ResponseMarkdownBlock
+  | ResponseCodeBlock
+  | ResponseArtifactBlock
+  | ResponseSlotBlock
 
 interface ActivityLogEntry {
   id: string
@@ -357,6 +383,54 @@ const normalizeProducedArtifacts = (value: unknown): ProducedArtifact[] | undefi
   return normalized.length > 0 ? normalized : undefined
 }
 
+const normalizeResponseBlockProvenance = (value: unknown): ResponseBlockProvenance | undefined => {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+  const rawConfidence = Number((value as any).confidence)
+  const normalized: ResponseBlockProvenance = {
+    sourceUrl: typeof (value as any).source_url === 'string'
+      ? (value as any).source_url.trim()
+      : typeof (value as any).sourceUrl === 'string'
+        ? (value as any).sourceUrl.trim()
+        : null,
+    sourceTitle: typeof (value as any).source_title === 'string'
+      ? (value as any).source_title.trim()
+      : typeof (value as any).sourceTitle === 'string'
+        ? (value as any).sourceTitle.trim()
+        : null,
+    sourceDomain: typeof (value as any).source_domain === 'string'
+      ? (value as any).source_domain.trim()
+      : typeof (value as any).sourceDomain === 'string'
+        ? (value as any).sourceDomain.trim()
+        : null,
+    sourceImageUrl: typeof (value as any).source_image_url === 'string'
+      ? (value as any).source_image_url.trim()
+      : typeof (value as any).sourceImageUrl === 'string'
+        ? (value as any).sourceImageUrl.trim()
+        : null,
+    attributionLabel: typeof (value as any).attribution_label === 'string'
+      ? (value as any).attribution_label.trim()
+      : typeof (value as any).attributionLabel === 'string'
+        ? (value as any).attributionLabel.trim()
+        : null,
+    selectionReason: typeof (value as any).selection_reason === 'string'
+      ? (value as any).selection_reason.trim()
+      : typeof (value as any).selectionReason === 'string'
+        ? (value as any).selectionReason.trim()
+        : null,
+    altText: typeof (value as any).alt_text === 'string'
+      ? (value as any).alt_text.trim()
+      : typeof (value as any).altText === 'string'
+        ? (value as any).altText.trim()
+        : null,
+    confidence: Number.isFinite(rawConfidence) ? rawConfidence : null,
+  }
+  return Object.values(normalized).some((item) => item !== null && item !== undefined && item !== '')
+    ? normalized
+    : undefined
+}
+
 const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined => {
   if (!Array.isArray(value)) {
     return undefined
@@ -389,6 +463,23 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
       })
       continue
     }
+    if (type === 'image_slot' || type === 'chart_slot') {
+      const rawTimeout = Number((item as any).timeout_ms ?? (item as any).timeoutMs ?? 0)
+      normalized.push({
+        id,
+        type,
+        status: typeof (item as any).status === 'string' && (item as any).status.trim()
+          ? (item as any).status.trim()
+          : null,
+        loadingLabel: typeof (item as any).loading_label === 'string'
+          ? (item as any).loading_label.trim()
+          : typeof (item as any).loadingLabel === 'string'
+            ? (item as any).loadingLabel.trim()
+            : null,
+        timeoutMs: Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : null,
+      })
+      continue
+    }
     if (type === 'image_artifact' || type === 'file_artifact') {
       const artifactId = typeof (item as any).artifact_id === 'string' && (item as any).artifact_id.trim()
         ? (item as any).artifact_id.trim()
@@ -418,6 +509,10 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
           : typeof (item as any).previewUrl === 'string' && (item as any).previewUrl.trim()
             ? (item as any).previewUrl.trim()
             : null,
+        caption: typeof (item as any).caption === 'string' && (item as any).caption.trim()
+          ? (item as any).caption.trim()
+          : null,
+        provenance: normalizeResponseBlockProvenance((item as any).provenance),
       })
     }
   }
@@ -762,7 +857,10 @@ const normalizeForegroundStreamSnapshot = (value: unknown): GatewayForegroundStr
     activityLog: normalizeActivityLog((value as any).activity_log ?? (value as any).activityLog),
     progress,
     producedArtifacts: normalizeProducedArtifacts((value as any).produced_artifacts ?? (value as any).producedArtifacts),
-    responseBlocks: normalizeResponseBlocks((value as any).response_blocks ?? (value as any).responseBlocks),
+    responseBlocks: normalizeResponseBlocks((value as any).response_blocks ?? (value as any).responseBlocks ?? (value as any).blocks),
+    snapshotSeq: Number.isFinite(Number((value as any).snapshot_seq ?? (value as any).snapshotSeq))
+      ? Number((value as any).snapshot_seq ?? (value as any).snapshotSeq)
+      : null,
     sources: Array.isArray((value as any).sources) ? (value as any).sources : undefined,
     channel: typeof (value as any).channel === 'string' ? (value as any).channel : null,
     source: typeof (value as any).source === 'string' ? (value as any).source : null,
@@ -1361,9 +1459,12 @@ const AssistantMarkdownLink = ({
 
 const assistantMarkdownComponents = {
   table: ({ node, ...props }: any) => <div className="table-wrapper"><table {...props} /></div>,
+  pre: ({ node, className, ...props }: any) => (
+    <pre className={['code-block', className].filter(Boolean).join(' ')} {...props} />
+  ),
   code: ({ node, inline, className, children, ...props }: any) => {
     if (inline) return <code className="inline-code" {...props}>{children}</code>
-    return <div className="code-block"><code {...props}>{children}</code></div>
+    return <code className={className} {...props}>{children}</code>
   },
   a: AssistantMarkdownLink,
 }
@@ -1377,6 +1478,22 @@ const AssistantMarkdownBlock = ({ content }: { content: string }) => (
     {content}
   </ReactMarkdown>
 )
+
+const formatInlineVisualAttribution = (block: ResponseArtifactBlock) => {
+  const attribution = block.provenance?.attributionLabel?.trim()
+  if (attribution) {
+    return attribution
+  }
+  const sourceTitle = block.provenance?.sourceTitle?.trim()
+  if (sourceTitle) {
+    return sourceTitle
+  }
+  const sourceDomain = block.provenance?.sourceDomain?.trim()
+  if (sourceDomain) {
+    return sourceDomain
+  }
+  return ''
+}
 
 const AssistantResponseBlocks = ({
   blocks,
@@ -1402,19 +1519,46 @@ const AssistantResponseBlocks = ({
               {block.language && (
                 <div className="assistant-response-code-language">{block.language}</div>
               )}
-              <div className="code-block assistant-response-code-block">
-                <code>{block.code}</code>
+              <pre className="code-block assistant-response-code-block">
+                <code className={block.language ? `language-${block.language}` : undefined}>{block.code}</code>
+              </pre>
+            </div>
+          )
+        }
+        if (block.type === 'image_slot' || block.type === 'chart_slot') {
+          const slotLabel = block.loadingLabel || (block.type === 'chart_slot' ? 'Generating a chart' : 'Finding a relevant image')
+          return (
+            <div
+              key={block.id}
+              className={[
+                'assistant-inline-visual-slot',
+                block.type === 'chart_slot' ? 'is-chart' : 'is-image',
+              ].join(' ')}
+            >
+              <div className="assistant-inline-visual-slot-shell" aria-hidden="true">
+                <div className="assistant-inline-visual-slot-band" />
+                <div className="assistant-inline-visual-slot-band short" />
+              </div>
+              <div className="assistant-inline-visual-slot-copy">
+                <div className="assistant-inline-visual-slot-badge">
+                  {block.type === 'chart_slot' ? 'INLINE CHART' : 'INLINE IMAGE'}
+                </div>
+                <div className="assistant-inline-visual-slot-label">{slotLabel}</div>
+                <div className="assistant-inline-visual-slot-subtle">
+                  Cosmic is preparing this visual without stopping the response.
+                </div>
               </div>
             </div>
           )
         }
         if (block.type === 'image_artifact') {
+          const attribution = formatInlineVisualAttribution(block)
           return (
             <div key={block.id} className="assistant-inline-image-card">
               {block.previewUrl ? (
                 <img
                   src={block.previewUrl}
-                  alt={block.filename}
+                  alt={block.provenance?.altText || block.caption || block.filename}
                   className="assistant-inline-image"
                   loading="lazy"
                 />
@@ -1427,26 +1571,35 @@ const AssistantResponseBlocks = ({
                   {formatArtifactKind(block)}
                   {block.sizeBytes ? ` · ${formatAttachmentSize(block.sizeBytes)}` : ''}
                 </div>
+                {block.caption && (
+                  <div className="assistant-inline-image-caption">{block.caption}</div>
+                )}
+                {attribution && (
+                  <div className="assistant-inline-image-provenance">{attribution}</div>
+                )}
               </div>
             </div>
           )
         }
-        return (
-          <div key={block.id} className="assistant-inline-file-card">
-            <div className="assistant-inline-file-icon" aria-hidden="true">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm0 2.5L18.5 9H14V4.5zM12 17l-4-4h2.5v-3h3v3H16l-4 4z" />
-              </svg>
-            </div>
-            <div className="assistant-inline-file-copy">
-              <div className="assistant-inline-file-name">{block.filename}</div>
-              <div className="assistant-inline-file-meta">
-                {formatArtifactKind(block)}
-                {block.sizeBytes ? ` · ${formatAttachmentSize(block.sizeBytes)}` : ''}
+        if (block.type === 'file_artifact') {
+          return (
+            <div key={block.id} className="assistant-inline-file-card">
+              <div className="assistant-inline-file-icon" aria-hidden="true">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm0 2.5L18.5 9H14V4.5zM12 17l-4-4h2.5v-3h3v3H16l-4 4z" />
+                </svg>
+              </div>
+              <div className="assistant-inline-file-copy">
+                <div className="assistant-inline-file-name">{block.filename}</div>
+                <div className="assistant-inline-file-meta">
+                  {formatArtifactKind(block)}
+                  {block.sizeBytes ? ` · ${formatAttachmentSize(block.sizeBytes)}` : ''}
+                </div>
               </div>
             </div>
-          </div>
-        )
+          )
+        }
+        return null
       })}
     </div>
   )
@@ -2092,6 +2245,9 @@ export default function App() {
     element: HTMLElement,
     tone: HoverTooltipTone,
   ) => {
+    if (searchStateRef.current !== 'visible' || !element?.isConnected) {
+      return
+    }
     const rect = element.getBoundingClientRect()
     setHoverTooltip({
       label,
@@ -2568,6 +2724,12 @@ export default function App() {
 
   useEffect(() => {
     searchStateRef.current = searchState
+  }, [searchState])
+
+  useEffect(() => {
+    if (searchState !== 'visible') {
+      hideHoverTooltip()
+    }
   }, [searchState])
 
   useEffect(() => {
@@ -3487,12 +3649,36 @@ export default function App() {
         return
       }
 
+      if (eventType === 'response.blocks.snapshot') {
+        markResponseStreamSeen(event)
+        setActiveSessionId((prev) => typeof event.session_id === 'string' ? event.session_id : prev)
+        const responseBlocks = normalizeResponseBlocks((event as any).response_blocks ?? (event as any).blocks)
+        if (!responseBlocks || responseBlocks.length <= 0) {
+          return
+        }
+        setMessages((prev) => {
+          const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
+          return nextMessages.map((message) => {
+            if (message.id !== messageId) {
+              return message
+            }
+            return {
+              ...message,
+              responseBlocks,
+              progress: undefined,
+              stopped: false,
+            }
+          })
+        })
+        return
+      }
+
       if (eventType === 'response.complete') {
         markResponseStreamSeen(event)
         setStreamingProgress('')
         setActiveSessionId((prev) => typeof event.session_id === 'string' ? event.session_id : prev)
         const producedArtifacts = normalizeProducedArtifacts((event as any).produced_artifacts)
-        const responseBlocks = normalizeResponseBlocks((event as any).response_blocks)
+        const responseBlocks = normalizeResponseBlocks((event as any).response_blocks ?? (event as any).blocks)
         const activityLog = normalizeActivityLog((event as any).activity_log)
         setMessages((prev) => {
           const sources = Array.isArray(event.sources) ? event.sources : undefined
@@ -4270,6 +4456,24 @@ export default function App() {
     return () => window.removeEventListener('resize', handleResize)
   }, [])
 
+  // When the OS window moves between displays (different DPI / workArea), the `resize`
+  // event alone is unreliable — CSS pixel dimensions can match while scaleFactor differs.
+  // The main process emits `cosmic:display-changed` after bounds settle in the new DPI
+  // context; we force a viewport re-read and fire a synthetic resize so ResizeObservers
+  // and other resize listeners re-measure.
+  useEffect(() => {
+    const ipc = (window as any).ipcRenderer
+    if (!ipc?.on) return
+    const handler = () => {
+      requestAnimationFrame(() => {
+        setViewportSize({ width: window.innerWidth, height: window.innerHeight })
+        window.dispatchEvent(new Event('resize'))
+      })
+    }
+    ipc.on('cosmic:display-changed', handler)
+    return () => { ipc.off?.('cosmic:display-changed', handler) }
+  }, [])
+
   const activeDocsProgressMessage = useMemo(() => {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       const message = messages[index]
@@ -4384,6 +4588,8 @@ export default function App() {
     pointerEvents: searchState === 'visible' ? 'auto' : 'none',
     ['--task-rail-reserve' as string]: taskRailLayout ? `${taskRailLayout.reserve}px` : '0px',
   } as React.CSSProperties
+  const isMeetingSurfaceActive = mode === 'meeting' && searchState !== 'hidden'
+  const isSpacesSurfaceActive = mode === 'spaces' && searchState !== 'hidden'
   const taskInterruptStyle = taskRailLayout
     ? ({
       ['--task-rail-width' as string]: `${taskRailLayout.railWidth}px`,
@@ -4623,7 +4829,7 @@ export default function App() {
         style={overlayStyle}
       >
         <MeetingMode
-          active={mode === 'meeting'}
+          active={isMeetingSurfaceActive}
           keyStatus={keyStatus}
           onBackToChat={showChatComposer}
           containerRef={meetingSurfaceRef}
@@ -4632,7 +4838,7 @@ export default function App() {
         />
 
         <SpacesControlCenter
-          active={mode === 'spaces'}
+          active={isSpacesSurfaceActive}
           gatewayState={gatewayStatus.state}
           gatewayConnected={gatewayStatus.connected}
           gatewayDetail={gatewayStatus.detail}

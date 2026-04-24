@@ -8,6 +8,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(BACKEND_ROOT / "visual_enhancement.env")
 load_dotenv(BACKEND_ROOT / "orchestrator.env")
 load_dotenv(BACKEND_ROOT / ".env")
 
@@ -63,6 +64,24 @@ def _env_json_map(name: str) -> dict[str, str]:
     return result
 
 
+def _normalize_openai_like_base_url(raw: str, *, default: str = "") -> str:
+    value = str(raw or "").strip().rstrip("/")
+    if not value:
+        return default
+    for suffix in (
+        "/v1/chat/completions",
+        "/chat/completions",
+        "/v1/responses",
+        "/responses",
+    ):
+        if value.endswith(suffix):
+            value = value[: -len(suffix)].rstrip("/")
+            break
+    if not value.endswith("/v1"):
+        value = f"{value}/v1"
+    return value
+
+
 @dataclass(slots=True)
 class OrchestratorConfig:
     artifacts_root: Path = BACKEND_ROOT / "runs" / "artifacts"
@@ -105,6 +124,31 @@ class OrchestratorConfig:
     cosmic_memory_url: str = "http://127.0.0.1:8090"
     gateway_url: str = "http://127.0.0.1:8080"
     max_tool_iterations: int = 25
+    visual_enhancement_enabled: bool = True
+    visual_max_visuals_per_turn: int = 2
+    visual_max_image_slots_per_turn: int = 1
+    visual_max_chart_slots_per_turn: int = 1
+    visual_max_concurrent_sidecars: int = 2
+    visual_image_slot_timeout_ms: int = 3500
+    visual_chart_slot_timeout_ms: int = 4000
+    visual_finalization_grace_ms: int = 750
+    visual_image_source_page_limit: int = 3
+    visual_image_candidate_limit: int = 12
+    visual_image_max_bytes: int = 8 * 1024 * 1024
+    visual_image_verify_top_k: int = 1
+    visual_image_min_confidence: float = 0.58
+    visual_chart_max_points: int = 200
+    visual_chart_max_bytes: int = 4 * 1024 * 1024
+    visual_download_timeout_sec: float = 20.0
+    visual_firecrawl_api_key: str = ""
+    visual_firecrawl_base_url: str = "https://api.firecrawl.dev"
+    visual_firecrawl_request_timeout_sec: float = 20.0
+    visual_fireworks_api_key: str = ""
+    visual_fireworks_base_url: str = "https://api.fireworks.ai/inference/v1"
+    visual_fireworks_model: str = "accounts/fireworks/models/kimi-k2p6"
+    visual_fireworks_vision_model: str = "accounts/fireworks/models/kimi-k2p6"
+    visual_fireworks_reasoning_effort: str = "low"
+    visual_fireworks_timeout_sec: float = 20.0
 
     @classmethod
     def from_env(cls) -> "OrchestratorConfig":
@@ -170,4 +214,80 @@ class OrchestratorConfig:
             cosmic_memory_url=os.getenv("COSMIC_MEMORY_URL", "http://127.0.0.1:8090").strip(),
             gateway_url=os.getenv("GATEWAY_URL", "http://127.0.0.1:8080").strip(),
             max_tool_iterations=max(1, _env_int("ORCHESTRATOR_MAX_TOOL_ITERATIONS", 25)),
+            visual_enhancement_enabled=_env_bool("VISUAL_ENHANCEMENT_ENABLED", True),
+            visual_max_visuals_per_turn=max(0, _env_int("VISUAL_ENHANCEMENT_MAX_VISUALS_PER_TURN", 2)),
+            visual_max_image_slots_per_turn=max(0, _env_int("VISUAL_ENHANCEMENT_MAX_IMAGE_SLOTS_PER_TURN", 1)),
+            visual_max_chart_slots_per_turn=max(0, _env_int("VISUAL_ENHANCEMENT_MAX_CHART_SLOTS_PER_TURN", 1)),
+            visual_max_concurrent_sidecars=max(1, _env_int("VISUAL_ENHANCEMENT_MAX_CONCURRENT_SIDECARS", 2)),
+            visual_image_slot_timeout_ms=max(250, _env_int("VISUAL_ENHANCEMENT_IMAGE_SLOT_TIMEOUT_MS", 3500)),
+            visual_chart_slot_timeout_ms=max(250, _env_int("VISUAL_ENHANCEMENT_CHART_SLOT_TIMEOUT_MS", 4000)),
+            visual_finalization_grace_ms=max(0, _env_int("VISUAL_ENHANCEMENT_FINALIZATION_GRACE_MS", 750)),
+            visual_image_source_page_limit=max(1, _env_int("VISUAL_ENHANCEMENT_IMAGE_SOURCE_PAGE_LIMIT", 3)),
+            visual_image_candidate_limit=max(1, _env_int("VISUAL_ENHANCEMENT_IMAGE_CANDIDATE_LIMIT", 12)),
+            visual_image_max_bytes=max(1024, _env_int("VISUAL_ENHANCEMENT_IMAGE_MAX_BYTES", 8 * 1024 * 1024)),
+            visual_image_verify_top_k=max(1, _env_int("VISUAL_ENHANCEMENT_IMAGE_VERIFY_TOP_K", 1)),
+            visual_image_min_confidence=max(
+                0.0,
+                min(1.0, _env_float("VISUAL_ENHANCEMENT_IMAGE_MIN_CONFIDENCE", 0.58)),
+            ),
+            visual_chart_max_points=max(2, _env_int("VISUAL_ENHANCEMENT_CHART_MAX_POINTS", 200)),
+            visual_chart_max_bytes=max(1024, _env_int("VISUAL_ENHANCEMENT_CHART_MAX_BYTES", 4 * 1024 * 1024)),
+            visual_download_timeout_sec=max(5.0, _env_float("VISUAL_ENHANCEMENT_DOWNLOAD_TIMEOUT_SEC", 20.0)),
+            visual_firecrawl_api_key=(
+                os.getenv("VISUAL_ENHANCEMENT_FIRECRAWL_API_KEY")
+                or os.getenv("FIRECRAWL_API_KEY")
+                or ""
+            ).strip(),
+            visual_firecrawl_base_url=(
+                os.getenv("VISUAL_ENHANCEMENT_FIRECRAWL_BASE_URL")
+                or os.getenv("FIRECRAWL_API_BASE_URL")
+                or "https://api.firecrawl.dev"
+            ).strip()
+            or "https://api.firecrawl.dev",
+            visual_firecrawl_request_timeout_sec=max(
+                5.0,
+                _env_float(
+                    "VISUAL_ENHANCEMENT_FIRECRAWL_REQUEST_TIMEOUT_SEC",
+                    _env_float("FIRECRAWL_REQUEST_TIMEOUT_SEC", 20.0),
+                ),
+            ),
+            visual_fireworks_api_key=(
+                os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY")
+                or os.getenv("MODEL_API_KEY")
+                or os.getenv("FIREWORKS_API_KEY")
+                or os.getenv("MIMO_API_KEY")
+                or ""
+            ).strip(),
+            visual_fireworks_base_url=_normalize_openai_like_base_url(
+                (
+                    os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL")
+                    or os.getenv("MODEL_BASE_URL")
+                    or os.getenv("FIREWORKS_BASE_URL")
+                    or os.getenv("MIMO_OPENAI_BASE_URL")
+                    or "https://api.fireworks.ai/inference/v1"
+                ).strip(),
+                default="https://api.fireworks.ai/inference/v1",
+            ),
+            visual_fireworks_model=(
+                os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_MODEL")
+                or os.getenv("FIREWORKS_KIMI_MODEL")
+                or "accounts/fireworks/models/kimi-k2p6"
+            ).strip()
+            or "accounts/fireworks/models/kimi-k2p6",
+            visual_fireworks_vision_model=(
+                os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_VISION_MODEL")
+                or os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_MODEL")
+                or os.getenv("FIREWORKS_KIMI_MODEL")
+                or "accounts/fireworks/models/kimi-k2p6"
+            ).strip()
+            or "accounts/fireworks/models/kimi-k2p6",
+            visual_fireworks_reasoning_effort=(
+                os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_REASONING_EFFORT")
+                or "low"
+            ).strip()
+            or "low",
+            visual_fireworks_timeout_sec=max(
+                5.0,
+                _env_float("VISUAL_ENHANCEMENT_FIREWORKS_TIMEOUT_SEC", 20.0),
+            ),
         )

@@ -9,6 +9,7 @@ User=<SERVICE_USER>
 Group=<SERVICE_GROUP>
 WorkingDirectory=<BACKEND_ROOT>
 EnvironmentFile=/etc/cosmic/orchestrator.env
+EnvironmentFile=-/etc/cosmic/visual_enhancement.env
 ExecStart=<BACKEND_ROOT>/.venv/bin/python -m orchestrator.main
 Restart=always
 RestartSec=5

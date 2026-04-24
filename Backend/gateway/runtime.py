@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import hmac
 import hashlib
@@ -151,6 +151,7 @@ MEMORY_CONTEST_PHRASES = (
 EPHEMERAL_CHANNEL_EVENT_TYPES = {
     "route_result",
     "response.chunk",
+    "response.blocks.snapshot",
     "response.thinking.chunk",
     "task.created",
     "task.progress",
@@ -159,6 +160,7 @@ EPHEMERAL_CHANNEL_EVENT_TYPES = {
     # Background-namespaced equivalents (streamed to task panel)
     "task.background.route_result",
     "task.background.response.chunk",
+    "task.background.response.blocks.snapshot",
     "task.background.response.thinking.chunk",
     "task.background.task.created",
     "task.background.task.progress",
@@ -181,6 +183,9 @@ class ActiveRequest:
     cancel_requested: bool = False
     partial_content: str = ""
     partial_thinking: str = ""
+    response_blocks_snapshot: list[dict[str, Any]] = field(default_factory=list)
+    snapshot_seq: int = 0
+    supporting_artifacts: list[dict[str, Any]] = field(default_factory=list)
     completed: bool = False
     foreground: bool = True
     backgrounded_at: str | None = None
@@ -2163,6 +2168,7 @@ class GatewayRuntime:
         )
         visual_response_enhancement_enabled = bool(
             visual_response_preference.get("enabled", True)
+            and self._channel_platform(channel) == "desktop"
         )
         metadata["gateway_preferences"] = gateway_preferences
         metadata["visual_response_enhancement_enabled"] = (
@@ -2921,6 +2927,8 @@ class GatewayRuntime:
                 "partial_content": state.partial_content[:500]
                 if state.partial_content
                 else "",
+                "response_blocks": state.response_blocks_snapshot,
+                "snapshot_seq": state.snapshot_seq or None,
             },
             channel=channel,
         )
@@ -2959,6 +2967,8 @@ class GatewayRuntime:
                     "channel": channel,
                     "partial_content": state.partial_content,
                     "partial_thinking": state.partial_thinking,
+                    "response_blocks": state.response_blocks_snapshot,
+                    "snapshot_seq": state.snapshot_seq or None,
                     "completed": state.completed,
                 },
                 channel=channel,
@@ -3002,6 +3012,7 @@ class GatewayRuntime:
                 "activity_log": meta.get("activity_log"),
                 "sources": meta.get("sources"),
                 "produced_artifacts": meta.get("produced_artifacts"),
+                "response_blocks": meta.get("response_blocks"),
                 "completed": True,
             },
             channel=channel,
@@ -6402,6 +6413,8 @@ class GatewayRuntime:
                 "user_query_excerpt": state.user_query_excerpt,
                 "partial_content": state.partial_content,
                 "partial_thinking": state.partial_thinking,
+                "response_blocks": state.response_blocks_snapshot,
+                "snapshot_seq": state.snapshot_seq or None,
                 "backgrounded_at": state.backgrounded_at,
                 "completed": False,
             }
@@ -6417,6 +6430,8 @@ class GatewayRuntime:
                 "route": state.route,
                 "content": state.partial_content,
                 "thinking_text": state.partial_thinking,
+                "response_blocks": state.response_blocks_snapshot,
+                "snapshot_seq": state.snapshot_seq or None,
                 "activity": state.activity or "Working on your request...",
                 "completed": False,
                 "failed": False,
@@ -6506,6 +6521,7 @@ class GatewayRuntime:
         attachments: list[dict[str, Any]] | None = None,
         input_artifacts: list[dict[str, Any]] | None = None,
         produced_artifacts: list[dict[str, Any]] | None = None,
+        supporting_artifacts: list[dict[str, Any]] | None = None,
         activity_log: list[dict[str, Any]] | None = None,
         response_blocks: list[dict[str, Any]] | None = None,
     ) -> None:
@@ -6513,12 +6529,13 @@ class GatewayRuntime:
         if not session_id or not channel:
             return
         origin_platform = self._channel_platform(channel)
-        client_artifacts = self._hydrate_produced_artifact_list_for_client(
+        client_artifacts = self._hydrate_artifact_list_for_client(
             produced_artifacts or []
         )
         client_response_blocks = self._build_client_response_blocks(
             content=content,
             produced_artifacts=produced_artifacts,
+            supporting_artifacts=supporting_artifacts,
             stored_blocks=response_blocks,
         )
 
@@ -6569,6 +6586,7 @@ class GatewayRuntime:
         attachments: list[dict[str, Any]] | None = None,
         input_artifacts: list[dict[str, Any]] | None = None,
         produced_artifacts: list[dict[str, Any]] | None = None,
+        supporting_artifacts: list[dict[str, Any]] | None = None,
         activity_log: list[dict[str, Any]] | None = None,
         response_blocks: list[dict[str, Any]] | None = None,
     ) -> None:
@@ -6592,6 +6610,7 @@ class GatewayRuntime:
             attachments=attachments,
             input_artifacts=input_artifacts,
             produced_artifacts=produced_artifacts,
+            supporting_artifacts=supporting_artifacts,
             activity_log=activity_log,
             response_blocks=response_blocks,
         )
@@ -9605,14 +9624,14 @@ class GatewayRuntime:
         artifact["source_message_id"] = self._safe_text(message.get("message_id"))
         return artifact
 
-    def _cache_output_artifacts(
+    def _cache_artifact_list(
         self,
         *,
         request_id: str,
         session_id: str,
         source_channel: str,
         source_message_id: str | None,
-        produced_artifacts: list[dict[str, Any]],
+        artifacts: list[dict[str, Any]],
     ) -> None:
         normalized_request_id = self._safe_text(request_id)
         normalized_session_id = self._safe_text(session_id)
@@ -9623,7 +9642,7 @@ class GatewayRuntime:
             or not normalized_source_channel
         ):
             return
-        if not isinstance(produced_artifacts, list) or not produced_artifacts:
+        if not isinstance(artifacts, list) or not artifacts:
             return
         try:
             self.artifact_store.persist_output_artifacts(
@@ -9632,7 +9651,7 @@ class GatewayRuntime:
                 source_channel=normalized_source_channel,
                 source_platform=self._channel_platform(normalized_source_channel),
                 source_message_id=self._safe_text(source_message_id),
-                artifacts=produced_artifacts,
+                artifacts=artifacts,
             )
         except Exception:
             logger.exception(
@@ -9640,8 +9659,25 @@ class GatewayRuntime:
                 normalized_request_id,
                 normalized_session_id,
                 normalized_source_channel,
-                len(produced_artifacts),
+                len(artifacts),
             )
+
+    def _cache_output_artifacts(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        source_channel: str,
+        source_message_id: str | None,
+        produced_artifacts: list[dict[str, Any]],
+    ) -> None:
+        self._cache_artifact_list(
+            request_id=request_id,
+            session_id=session_id,
+            source_channel=source_channel,
+            source_message_id=source_message_id,
+            artifacts=produced_artifacts,
+        )
 
     async def _ensure_request_documents_parsed(
         self, request_record: dict[str, Any], *, send=None
@@ -10597,7 +10633,56 @@ class GatewayRuntime:
                     detail=task_id,
                     task_id=task_id,
                 )
-        if event_type == "response.complete":
+        if event_type == "response.blocks.snapshot":
+            event_channel = self._safe_text(event.get("channel")) or ""
+            produced_artifacts = self._normalize_produced_artifact_list(
+                event.get("produced_artifacts")
+            )
+            supporting_artifacts = self._normalize_produced_artifact_list(
+                event.get("supporting_artifacts")
+            )
+            raw_response_blocks = (
+                event.get("response_blocks")
+                if isinstance(event.get("response_blocks"), list)
+                else event.get("blocks")
+                if isinstance(event.get("blocks"), list)
+                else []
+            )
+            if produced_artifacts and request_id and session_id and event_channel:
+                self._cache_artifact_list(
+                    request_id=request_id,
+                    session_id=session_id,
+                    source_channel=event_channel,
+                    source_message_id=None,
+                    artifacts=produced_artifacts,
+                )
+            if supporting_artifacts and request_id and session_id and event_channel:
+                self._cache_artifact_list(
+                    request_id=request_id,
+                    session_id=session_id,
+                    source_channel=event_channel,
+                    source_message_id=None,
+                    artifacts=supporting_artifacts,
+                )
+            client_produced_artifacts = self._hydrate_artifact_list_for_client(
+                produced_artifacts
+            )
+            client_supporting_artifacts = self._hydrate_artifact_list_for_client(
+                supporting_artifacts
+            )
+            client_response_blocks = self._hydrate_response_blocks_for_client(
+                raw_response_blocks,
+                produced_artifacts=client_produced_artifacts,
+                supporting_artifacts=client_supporting_artifacts,
+            )
+            if client_produced_artifacts:
+                event["produced_artifacts"] = client_produced_artifacts
+            if client_supporting_artifacts:
+                event["supporting_artifacts"] = client_supporting_artifacts
+            if client_response_blocks:
+                event["response_blocks"] = client_response_blocks
+                event["blocks"] = client_response_blocks
+        elif event_type == "response.complete":
             event_channel = self._safe_text(event.get("channel")) or ""
             research_provenance = self._normalize_research_provenance(
                 event.get("research_provenance"),
@@ -10608,24 +10693,43 @@ class GatewayRuntime:
             produced_artifacts = self._normalize_produced_artifact_list(
                 event.get("produced_artifacts")
             )
+            supporting_artifacts = self._normalize_produced_artifact_list(
+                event.get("supporting_artifacts")
+            )
             if produced_artifacts and request_id and session_id and event_channel:
-                self._cache_output_artifacts(
+                self._cache_artifact_list(
                     request_id=request_id,
                     session_id=session_id,
                     source_channel=event_channel,
                     source_message_id=None,
+                    artifacts=produced_artifacts,
+                )
+            if supporting_artifacts and request_id and session_id and event_channel:
+                self._cache_artifact_list(
+                    request_id=request_id,
+                    session_id=session_id,
+                    source_channel=event_channel,
+                    source_message_id=None,
+                    artifacts=supporting_artifacts,
+                )
+            response_blocks = (
+                [dict(item) for item in event.get("response_blocks") if isinstance(item, dict)]
+                if isinstance(event.get("response_blocks"), list)
+                else self._build_stable_response_blocks(
+                    content=self._safe_text(event.get("content")),
                     produced_artifacts=produced_artifacts,
                 )
-            response_blocks = self._build_stable_response_blocks(
-                content=self._safe_text(event.get("content")),
-                produced_artifacts=produced_artifacts,
             )
-            client_produced_artifacts = self._hydrate_produced_artifact_list_for_client(
+            client_produced_artifacts = self._hydrate_artifact_list_for_client(
                 produced_artifacts
+            )
+            client_supporting_artifacts = self._hydrate_artifact_list_for_client(
+                supporting_artifacts
             )
             client_response_blocks = self._hydrate_response_blocks_for_client(
                 response_blocks,
                 produced_artifacts=client_produced_artifacts,
+                supporting_artifacts=client_supporting_artifacts,
             )
             task_notebook = (
                 self.session_store.get_task_notebook(task_id) if task_id else None
@@ -10656,6 +10760,7 @@ class GatewayRuntime:
                         event.get("specialist_receipts")
                     ),
                     "produced_artifacts": produced_artifacts,
+                    "supporting_artifacts": supporting_artifacts,
                     "response_blocks": response_blocks,
                     "activity_log": activity_log,
                 },
@@ -10676,10 +10781,26 @@ class GatewayRuntime:
                     source_message_id=assistant_message_id,
                     produced_artifacts=produced_artifacts,
                 )
+            if (
+                assistant_message_id
+                and supporting_artifacts
+                and request_id
+                and session_id
+                and event_channel
+            ):
+                self._cache_artifact_list(
+                    request_id=request_id,
+                    session_id=session_id,
+                    source_channel=event_channel,
+                    source_message_id=assistant_message_id,
+                    artifacts=supporting_artifacts,
+                )
             if assistant_message_id:
                 event["message_id"] = assistant_message_id
             if client_produced_artifacts:
                 event["produced_artifacts"] = client_produced_artifacts
+            if client_supporting_artifacts:
+                event["supporting_artifacts"] = client_supporting_artifacts
             if client_response_blocks:
                 event["response_blocks"] = client_response_blocks
             if activity_log:
@@ -10700,6 +10821,7 @@ class GatewayRuntime:
                 ),
                 metadata={
                     "produced_artifact_count": len(produced_artifacts),
+                    "supporting_artifact_count": len(supporting_artifacts),
                     "response_block_count": len(response_blocks),
                 },
             )
@@ -10718,6 +10840,7 @@ class GatewayRuntime:
                         else None,
                         thinking_text=self._safe_text(event.get("thinking_text")),
                         produced_artifacts=produced_artifacts,
+                        supporting_artifacts=supporting_artifacts,
                         activity_log=activity_log,
                         response_blocks=response_blocks,
                     )
@@ -10971,7 +11094,9 @@ class GatewayRuntime:
                 or (Path(logical_path).name if logical_path else None)
                 or artifact_id
             )
-            size_bytes: int | None = None
+            size_bytes: int | None = self._coerce_int(
+                item.get("size_bytes") if item.get("size_bytes") is not None else item.get("sizeBytes")
+            )
             if (
                 resolved_path is not None
                 and resolved_path.exists()
@@ -10980,7 +11105,17 @@ class GatewayRuntime:
                 try:
                     size_bytes = int(resolved_path.stat().st_size)
                 except OSError:
-                    size_bytes = None
+                    pass
+            explicit_downloadable = item.get("downloadable")
+            downloadable = (
+                bool(explicit_downloadable)
+                if explicit_downloadable is not None
+                else bool(
+                    resolved_path is not None
+                    and resolved_path.exists()
+                    and resolved_path.is_file()
+                )
+            )
             normalized.append(
                 {
                     key: val
@@ -10998,12 +11133,15 @@ class GatewayRuntime:
                         "created_at": self._safe_text(item.get("created_at")),
                         "path": logical_path,
                         "sha256": self._safe_text(item.get("sha256")),
+                        "caption": self._safe_text(item.get("caption")),
+                        "audience": self._safe_text(item.get("audience")),
                         "source_url": self._safe_text(item.get("source_url")),
-                        "downloadable": bool(
-                            resolved_path is not None
-                            and resolved_path.exists()
-                            and resolved_path.is_file()
-                        ),
+                        "source_title": self._safe_text(item.get("source_title")),
+                        "source_domain": self._safe_text(item.get("source_domain")),
+                        "source_image_url": self._safe_text(item.get("source_image_url")),
+                        "width": self._coerce_int(item.get("width")),
+                        "height": self._coerce_int(item.get("height")),
+                        "downloadable": downloadable,
                     }.items()
                     if val not in (None, "", [], {})
                 }
@@ -11012,7 +11150,7 @@ class GatewayRuntime:
                 break
         return normalized
 
-    def _hydrate_produced_artifact_list_for_client(
+    def _hydrate_artifact_list_for_client(
         self, value: Any
     ) -> list[dict[str, Any]]:
         normalized = self._normalize_produced_artifact_list(value)
@@ -11030,22 +11168,35 @@ class GatewayRuntime:
             hydrated.append(enriched)
         return hydrated
 
+    def _hydrate_produced_artifact_list_for_client(
+        self, value: Any
+    ) -> list[dict[str, Any]]:
+        return self._hydrate_artifact_list_for_client(value)
+
     def _hydrate_response_blocks_for_client(
         self,
         value: Any,
         *,
         produced_artifacts: list[dict[str, Any]] | None = None,
+        supporting_artifacts: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         if not isinstance(value, list):
             return []
+        all_artifacts: list[dict[str, Any]] = []
+        for artifact in (supporting_artifacts or []):
+            if isinstance(artifact, dict):
+                all_artifacts.append(artifact)
+        for artifact in (produced_artifacts or []):
+            if isinstance(artifact, dict):
+                all_artifacts.append(artifact)
         artifact_by_id = {
             self._safe_text(item.get("artifact_id")): item
-            for item in (produced_artifacts or [])
+            for item in all_artifacts
             if isinstance(item, dict) and self._safe_text(item.get("artifact_id"))
         }
         artifact_by_name = {
             self._safe_text(item.get("filename")).lower(): item
-            for item in (produced_artifacts or [])
+            for item in all_artifacts
             if isinstance(item, dict) and self._safe_text(item.get("filename"))
         }
         hydrated: list[dict[str, Any]] = []
@@ -11067,6 +11218,7 @@ class GatewayRuntime:
                         "kind",
                         "downloadable",
                         "preview_url",
+                        "caption",
                     ):
                         if artifact.get(key) not in (None, "", [], {}):
                             block[key] = artifact.get(key)
@@ -11092,10 +11244,14 @@ class GatewayRuntime:
         *,
         content: str | None,
         produced_artifacts: list[dict[str, Any]] | None = None,
+        supporting_artifacts: list[dict[str, Any]] | None = None,
         stored_blocks: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        client_artifacts = self._hydrate_produced_artifact_list_for_client(
+        client_produced_artifacts = self._hydrate_artifact_list_for_client(
             produced_artifacts or []
+        )
+        client_supporting_artifacts = self._hydrate_artifact_list_for_client(
+            supporting_artifacts or []
         )
         stable_blocks = (
             stored_blocks
@@ -11106,7 +11262,9 @@ class GatewayRuntime:
             )
         )
         return self._hydrate_response_blocks_for_client(
-            stable_blocks, produced_artifacts=client_artifacts
+            stable_blocks,
+            produced_artifacts=client_produced_artifacts,
+            supporting_artifacts=client_supporting_artifacts,
         )
 
     def get_desktop_preferences_snapshot(self) -> dict[str, Any]:
@@ -11176,10 +11334,18 @@ class GatewayRuntime:
         )
         if produced_artifacts:
             hydrated["produced_artifacts"] = produced_artifacts
+        supporting_artifacts = self._hydrate_artifact_list_for_client(
+            metadata.get("supporting_artifacts")
+        )
+        if supporting_artifacts:
+            hydrated["supporting_artifacts"] = supporting_artifacts
         response_blocks = self._build_client_response_blocks(
             content=None,
             produced_artifacts=self._normalize_produced_artifact_list(
                 metadata.get("produced_artifacts")
+            ),
+            supporting_artifacts=self._normalize_produced_artifact_list(
+                metadata.get("supporting_artifacts")
             ),
             stored_blocks=metadata.get("response_blocks")
             if isinstance(metadata.get("response_blocks"), list)
@@ -11206,9 +11372,13 @@ class GatewayRuntime:
                 produced_artifacts = self._normalize_produced_artifact_list(
                     metadata.get("produced_artifacts")
                 )
+                supporting_artifacts = self._normalize_produced_artifact_list(
+                    metadata.get("supporting_artifacts")
+                )
                 response_blocks = self._build_client_response_blocks(
                     content=self._safe_text(message.get("content")),
                     produced_artifacts=produced_artifacts,
+                    supporting_artifacts=supporting_artifacts,
                     stored_blocks=metadata.get("response_blocks")
                     if isinstance(metadata.get("response_blocks"), list)
                     else None,
@@ -11546,6 +11716,14 @@ class GatewayRuntime:
                     "thinking_text": state.partial_thinking or None,
                     "interrupted": True,
                 }
+                if state.supporting_artifacts:
+                    interrupted_metadata["supporting_artifacts"] = list(
+                        state.supporting_artifacts
+                    )
+                if state.response_blocks_snapshot:
+                    interrupted_metadata["response_blocks"] = list(
+                        state.response_blocks_snapshot
+                    )
                 if not state.foreground:
                     interrupted_metadata["background"] = True
                 self._append_session_message(
@@ -11604,12 +11782,60 @@ class GatewayRuntime:
         if event_type == "response.chunk":
             state.partial_content += str(event.get("content") or "")
             return
+        if event_type == "response.blocks.snapshot":
+            snapshot_seq = 0
+            try:
+                snapshot_seq = int(event.get("snapshot_seq") or 0)
+            except (TypeError, ValueError):
+                snapshot_seq = 0
+            if snapshot_seq > 0 and snapshot_seq < state.snapshot_seq:
+                return
+            state.snapshot_seq = max(state.snapshot_seq, snapshot_seq)
+            raw_blocks = (
+                event.get("response_blocks")
+                if isinstance(event.get("response_blocks"), list)
+                else event.get("blocks")
+                if isinstance(event.get("blocks"), list)
+                else []
+            )
+            state.response_blocks_snapshot = [
+                dict(item) for item in raw_blocks if isinstance(item, dict)
+            ]
+            raw_supporting = (
+                event.get("supporting_artifacts")
+                if isinstance(event.get("supporting_artifacts"), list)
+                else []
+            )
+            state.supporting_artifacts = [
+                dict(item) for item in raw_supporting if isinstance(item, dict)
+            ]
+            return
         if event_type == "response.complete":
             state.completed = True
             state.partial_content = str(event.get("content") or state.partial_content)
             thinking_text = self._safe_text(event.get("thinking_text"))
             if thinking_text is not None:
                 state.partial_thinking = thinking_text
+            response_blocks = (
+                event.get("response_blocks")
+                if isinstance(event.get("response_blocks"), list)
+                else []
+            )
+            if response_blocks:
+                state.response_blocks_snapshot = [
+                    dict(item) for item in response_blocks if isinstance(item, dict)
+                ]
+            supporting_artifacts = (
+                event.get("supporting_artifacts")
+                if isinstance(event.get("supporting_artifacts"), list)
+                else []
+            )
+            if supporting_artifacts:
+                state.supporting_artifacts = [
+                    dict(item)
+                    for item in supporting_artifacts
+                    if isinstance(item, dict)
+                ]
 
     def _health_status_from_memory(self, memory: dict[str, Any]) -> str:
         if not self.started:

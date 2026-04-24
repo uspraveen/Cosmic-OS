@@ -762,6 +762,66 @@ def test_build_slide_agent_env_rendered_inherits_visual_keys_from_peer_agents(
     assert parsed["GATEWAY_INTERNAL_TOKEN"] == "internal-token"
 
 
+def test_build_visual_enhancement_env_rendered_inherits_shared_keys_from_peer_envs(
+    tmp_path, monkeypatch
+) -> None:
+    backend_root = tmp_path / "Backend"
+    system_env_dir = tmp_path / "etc" / "cosmic"
+    agents_env_dir = system_env_dir / "agents"
+    backend_root.mkdir(parents=True)
+    agents_env_dir.mkdir(parents=True)
+    (backend_root / "visual_enhancement.env.example").write_text(
+        "VISUAL_ENHANCEMENT_ENABLED=true\n"
+        "VISUAL_ENHANCEMENT_FIREWORKS_API_KEY=\n"
+        "VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL=https://api.fireworks.ai/inference/v1\n"
+        "VISUAL_ENHANCEMENT_FIREWORKS_MODEL=accounts/fireworks/models/kimi-k2p6\n"
+        "VISUAL_ENHANCEMENT_FIREWORKS_VISION_MODEL=accounts/fireworks/models/kimi-k2p6\n"
+        "VISUAL_ENHANCEMENT_FIREWORKS_REASONING_EFFORT=low\n"
+        "VISUAL_ENHANCEMENT_FIREWORKS_TIMEOUT_SEC=20\n"
+        "VISUAL_ENHANCEMENT_FIRECRAWL_API_KEY=\n"
+        "VISUAL_ENHANCEMENT_FIRECRAWL_BASE_URL=https://api.firecrawl.dev\n"
+        "VISUAL_ENHANCEMENT_FIRECRAWL_REQUEST_TIMEOUT_SEC=20\n",
+        encoding="utf-8",
+    )
+    (agents_env_dir / bootstrap.FIRECRAWL_AGENT_ENV_NAME).write_text(
+        "FIRECRAWL_API_KEY=fc-key\n"
+        "FIRECRAWL_API_BASE_URL=https://api.firecrawl.dev\n"
+        "FIRECRAWL_REQUEST_TIMEOUT_SEC=120\n",
+        encoding="utf-8",
+    )
+    (agents_env_dir / bootstrap.SLIDE_AGENT_ENV_NAME).write_text(
+        "MODEL_API_KEY=fw-slide-key\n"
+        "MODEL_BASE_URL=https://api.fireworks.ai/inference/v1\n"
+        "MODEL_NAME=accounts/fireworks/models/kimi-k2p6\n"
+        "MODEL_TIMEOUT_SEC=90\n",
+        encoding="utf-8",
+    )
+    (system_env_dir / "orchestrator.env").write_text(
+        "ANTHROPIC_API_KEY=anthropic-key\n"
+        "MODEL_API_KEY=fw-orch-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bootstrap, "BACKEND_ROOT", backend_root)
+
+    dest_path, rendered, parsed = bootstrap.build_visual_enhancement_env_rendered(
+        system_env_dir=system_env_dir
+    )
+
+    assert dest_path.name == "visual_enhancement.env"
+    assert "VISUAL_ENHANCEMENT_FIRECRAWL_API_KEY=fc-key" in rendered
+    assert parsed["VISUAL_ENHANCEMENT_FIRECRAWL_API_KEY"] == "fc-key"
+    assert parsed["VISUAL_ENHANCEMENT_FIREWORKS_API_KEY"] == "fw-orch-key"
+    assert (
+        parsed["VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL"]
+        == "https://api.fireworks.ai/inference/v1"
+    )
+    assert (
+        parsed["VISUAL_ENHANCEMENT_FIREWORKS_MODEL"]
+        == "accounts/fireworks/models/kimi-k2p6"
+    )
+    assert parsed["VISUAL_ENHANCEMENT_FIREWORKS_TIMEOUT_SEC"] == "90"
+
+
 def test_materialize_bootstrap_env_files_can_render_memory_env(monkeypatch, tmp_path) -> None:
     backend_root = tmp_path / "Backend"
     bridge_dir = backend_root / "bridges" / "whatsapp_bridge"

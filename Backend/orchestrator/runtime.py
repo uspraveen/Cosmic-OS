@@ -67,6 +67,7 @@ from .tools.registry import (
     get_model_tool_definitions,
     get_parallel_safe_local_tool_names,
 )
+from .visual_enrichment import VisualEnrichmentCoordinator
 
 logger = logging.getLogger(__name__)
 
@@ -383,10 +384,20 @@ class OrchestratorRuntime:
                 task.input_artifacts if isinstance(task.input_artifacts, list) else [],
             )
             self._refresh_featured_specialists()
+            visual_mode_enabled = VisualEnrichmentCoordinator.is_enabled_for_task(
+                config=self.config,
+                task_input=task.input if isinstance(task.input, dict) else {},
+            )
             system_prompt = build_agentic_system_prompt(
                 str(task.input.get("memory_context") or "").strip() or None,
                 user_timezone=str(task.input.get("user_timezone") or "").strip() or None,
                 featured_specialists=self._featured_specialists_cache,
+                visual_response_enhancement_enabled=visual_mode_enabled,
+                visual_supported_slot_kinds=VisualEnrichmentCoordinator.supported_slot_kinds(
+                    config=self.config
+                )
+                if visual_mode_enabled
+                else None,
             )
             tools = get_model_tool_definitions(self._featured_specialist_agent_ids())
             max_iterations = self.config.max_tool_iterations
@@ -396,6 +407,7 @@ class OrchestratorRuntime:
             full_reasoning_text = ""
             collected_sources: list[dict[str, str]] = []
             produced_artifacts: list[dict[str, Any]] = []
+            supporting_artifacts: list[dict[str, Any]] = []
             research_paths: set[str] = set()
             specialist_receipts: list[dict[str, Any]] = []
             container_id: str | None = None
@@ -405,6 +417,19 @@ class OrchestratorRuntime:
             max_request_context_chars = 0
             max_request_message_count = 0
             saw_tool_loop = False
+            visual_coordinator = (
+                VisualEnrichmentCoordinator(
+                    config=self.config,
+                    task_id=task.task_id,
+                    request_id=request_id,
+                    session_id=session_id,
+                    channel=channel,
+                    user_query=query,
+                    http_client=self._client,
+                )
+                if visual_mode_enabled
+                else None
+            )
 
             while iteration < max_iterations:
                 iteration += 1
@@ -558,7 +583,14 @@ class OrchestratorRuntime:
                                     if not responding_announced:
                                         responding_announced = True
                                         yield {**ev, "type": "task.progress", "status": "responding", "message": "Opus is writing the response."}
-                                    yield {**ev, "type": "response.chunk", "content": chunk, "done": False}
+                                    if visual_coordinator is not None:
+                                        visible_chunk, visual_events = visual_coordinator.consume_text(chunk)
+                                        for visual_event in visual_events:
+                                            yield {**ev, **visual_event}
+                                        if visible_chunk:
+                                            yield {**ev, "type": "response.chunk", "content": visible_chunk, "done": False}
+                                    else:
+                                        yield {**ev, "type": "response.chunk", "content": chunk, "done": False}
 
                                 elif dtype == "input_json_delta":
                                     partial = str(delta.get("partial_json") or "")
@@ -653,6 +685,9 @@ class OrchestratorRuntime:
                         task=task,
                         produced_artifacts=produced_artifacts,
                     )
+                if visual_coordinator is not None and collected_sources:
+                    for visual_event in visual_coordinator.note_sources(collected_sources):
+                        yield {**ev, **visual_event}
 
                 turn_text = "".join(turn_text_parts)
                 turn_reasoning = "".join(turn_reasoning_parts)
@@ -770,6 +805,9 @@ class OrchestratorRuntime:
                             "tool_use_id": tb.tool_id,
                             "content": result_str,
                         })
+                    if visual_coordinator is not None and collected_sources:
+                        for visual_event in visual_coordinator.note_sources(collected_sources):
+                            yield {**ev, **visual_event}
 
                     followup_blocks = await self._build_tool_result_followup_blocks(result_strs)
                     user_content: list[dict[str, Any]] = list(tool_results)
@@ -806,10 +844,38 @@ class OrchestratorRuntime:
             hit_max_iterations = iteration >= max_iterations and stop_reason in ("tool_use", "pause_turn")
             result_type = "max_iterations" if hit_max_iterations else "success"
 
-            display_text = full_response_text.rstrip()
+            final_response_blocks: list[dict[str, Any]] | None = None
+            if visual_coordinator is not None:
+                final_visual = await visual_coordinator.finalize(
+                    produced_artifacts=produced_artifacts,
+                )
+                for visual_event in final_visual.get("events") or []:
+                    if isinstance(visual_event, dict):
+                        yield {**ev, **visual_event}
+                supporting_artifacts = [
+                    item
+                    for item in (final_visual.get("supporting_artifacts") or [])
+                    if isinstance(item, dict)
+                ]
+                display_text = str(final_visual.get("content") or "").rstrip()
+                final_response_blocks = (
+                    final_visual.get("response_blocks")
+                    if isinstance(final_visual.get("response_blocks"), list)
+                    else None
+                )
+            else:
+                display_text = full_response_text.rstrip()
             awaiting_reply = display_text.endswith(AWAITING_REPLY_TAG)
             if awaiting_reply:
                 display_text = display_text.removesuffix(AWAITING_REPLY_TAG).rstrip()
+                if final_response_blocks:
+                    for block in reversed(final_response_blocks):
+                        if str(block.get("type")) != "markdown":
+                            continue
+                        text = str(block.get("text") or "")
+                        if text.endswith(AWAITING_REPLY_TAG):
+                            block["text"] = text.removesuffix(AWAITING_REPLY_TAG).rstrip()
+                        break
 
             result_payload = {
                 "content": display_text,
@@ -861,6 +927,10 @@ class OrchestratorRuntime:
                 complete_event["specialist_receipts"] = specialist_receipts
             if produced_artifacts:
                 complete_event["produced_artifacts"] = produced_artifacts
+            if supporting_artifacts:
+                complete_event["supporting_artifacts"] = supporting_artifacts
+            if final_response_blocks:
+                complete_event["response_blocks"] = final_response_blocks
             yield complete_event
             yield {**ev, "type": "task.completed", "route": "opus", "status": "completed"}
 

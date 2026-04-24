@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from orchestrator.config import OrchestratorConfig
-from orchestrator.prompts import build_agentic_system_prompt
+from orchestrator.prompts import build_agentic_system_prompt, get_prompt_asset_hashes
 from orchestrator.runtime import ActiveTaskRun, OrchestratorRuntime
 from shared import TaskEnvelope, sign_task_envelope, utcnow
 
@@ -1990,6 +1990,28 @@ def test_build_agentic_system_prompt_includes_dynamic_specialist_shortlist() -> 
     assert "Docs Parser Agent" in prompt
     assert "docs.parse_bundle" in prompt
     assert "docs_browse" in prompt
+
+
+def test_build_agentic_system_prompt_gates_visual_response_policy() -> None:
+    disabled_prompt = build_agentic_system_prompt()
+    enabled_prompt = build_agentic_system_prompt(
+        visual_response_enhancement_enabled=True
+    )
+
+    assert "## Visual Response Preference" not in disabled_prompt
+    assert "## Visual Response Preference" in enabled_prompt
+    assert "Do not mention the preference setting itself to the user." in enabled_prompt
+    assert (
+        "Do not proactively search for, generate, or request visuals solely because this preference is enabled"
+        in enabled_prompt
+    )
+
+
+def test_get_prompt_asset_hashes_includes_visual_response_policy_asset() -> None:
+    hashes = get_prompt_asset_hashes()
+
+    assert "visual_response_policy.md" in hashes
+    assert hashes["visual_response_policy.md"]
 
 
 @pytest.mark.asyncio

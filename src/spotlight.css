@@ -86,8 +86,10 @@ body,
 
 /* ========== RESPONSE CONTAINER ========== */
 .response-container {
-  width: min(620px, calc(100vw - var(--task-rail-reserve, 0px) - 72px));
-  max-width: min(88vw, calc(100vw - var(--task-rail-reserve, 0px) - 72px));
+  /* Width scales proportionally with viewport across displays — the previous hard 960px cap
+     made this container look narrower on high-resolution monitors and wider on low-res ones. */
+  width: min(max(520px, 44vw), calc(100vw - var(--task-rail-reserve, 0px) - 72px));
+  max-width: min(max(520px, 44vw), calc(100vw - var(--task-rail-reserve, 0px) - 72px));
   max-height: calc(100vh - 280px);
   flex: 1 1 auto;
   min-height: 0;
@@ -311,6 +313,7 @@ body,
   margin: 20px 0;
   overflow-x: auto;
   border: 1px solid rgba(255, 255, 255, 0.08);
+  white-space: pre;
 }
 
 .response-content code {
@@ -318,6 +321,19 @@ body,
   font-size: 13px;
   color: #E0E0E0 !important;
   line-height: 1.5;
+}
+
+.response-content pre.code-block code,
+.response-content .assistant-response-code-block code {
+  display: block;
+  min-width: max-content;
+  white-space: inherit;
+  overflow-wrap: normal;
+  word-break: normal;
+  tab-size: 2;
+  background: transparent;
+  border: 0;
+  padding: 0;
 }
 
 .response-content .inline-code {
@@ -453,8 +469,10 @@ body,
 
 /* ========== SEARCH BAR (Unified Glass) ========== */
 .cosmic {
-  width: min(560px, calc(100vw - var(--task-rail-reserve, 0px) - 72px));
-  max-width: min(88vw, calc(100vw - var(--task-rail-reserve, 0px) - 72px));
+  /* Proportional viewport sizing; no hard px cap so the bar keeps the same relative width
+     across displays with different DPI scale factors. */
+  width: min(max(460px, 38vw), calc(100vw - var(--task-rail-reserve, 0px) - 72px));
+  max-width: min(max(460px, 38vw), calc(100vw - var(--task-rail-reserve, 0px) - 72px));
   display: flex;
   flex-direction: column;
   opacity: 0;
@@ -694,7 +712,7 @@ body,
   border: none;
   background: transparent;
   outline: none;
-  font-size: 17px;
+  font-size: clamp(17px, 0.9vw, 18px);
   color: var(--text);
   caret-color: var(--accent);
   resize: none;
@@ -2210,6 +2228,102 @@ kbd {
   width: 100%;
 }
 
+.assistant-inline-visual-slot {
+  width: min(100%, 760px);
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    radial-gradient(circle at top left, rgba(121, 201, 255, 0.12), transparent 42%),
+    radial-gradient(circle at bottom right, rgba(255, 214, 122, 0.09), transparent 40%),
+    rgba(9, 11, 20, 0.9);
+}
+
+.assistant-inline-visual-slot::before {
+  content: '';
+  position: absolute;
+  inset: -40% -15%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.06), transparent);
+  transform: translateX(-70%);
+  animation: assistantVisualSlotShimmer 2.8s linear infinite;
+}
+
+.assistant-inline-visual-slot-shell,
+.assistant-inline-visual-slot-copy {
+  position: relative;
+  z-index: 1;
+}
+
+.assistant-inline-visual-slot-shell {
+  flex: 0 0 172px;
+  min-height: 132px;
+  border-radius: 14px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 12px;
+  background:
+    linear-gradient(160deg, rgba(255,255,255,0.1), rgba(255,255,255,0.02)),
+    rgba(14, 17, 29, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.assistant-inline-visual-slot.is-chart .assistant-inline-visual-slot-shell {
+  min-height: 116px;
+}
+
+.assistant-inline-visual-slot-band {
+  height: 14px;
+  width: 100%;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.assistant-inline-visual-slot-band.short {
+  width: 58%;
+}
+
+.assistant-inline-visual-slot-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.assistant-inline-visual-slot-badge {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.48);
+}
+
+.assistant-inline-visual-slot-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  line-height: 1.45;
+}
+
+.assistant-inline-visual-slot-subtle {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.58);
+  line-height: 1.5;
+}
+
+@keyframes assistantVisualSlotShimmer {
+  from {
+    transform: translateX(-70%);
+  }
+  to {
+    transform: translateX(70%);
+  }
+}
+
 .assistant-response-code-shell {
   width: 100%;
   display: flex;
@@ -2286,6 +2400,19 @@ kbd {
   color: rgba(255, 255, 255, 0.58);
 }
 
+.assistant-inline-image-caption {
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.74);
+}
+
+.assistant-inline-image-provenance {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.42);
+}
+
 .assistant-inline-file-card {
   width: min(100%, 520px);
   display: flex;
@@ -2315,6 +2442,18 @@ kbd {
   display: flex;
   flex-direction: column;
   gap: 3px;
+}
+
+@media (max-width: 640px) {
+  .assistant-inline-visual-slot {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .assistant-inline-visual-slot-shell {
+    flex-basis: auto;
+    width: 100%;
+  }
 }
 
 .produced-artifact-snippet {
@@ -3328,8 +3467,7 @@ kbd {
 
 .cosmic.history-open {
   transform: scale(1);
-  width: 600px;
-  /* Slightly wider for list */
+  width: min(clamp(600px, 52vw, 840px), calc(100vw - var(--task-rail-reserve, 0px) - 72px));
 }
 
 .history-container {
