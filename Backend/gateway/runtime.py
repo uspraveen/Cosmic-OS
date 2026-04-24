@@ -138,6 +138,7 @@ RECENT_MEMORY_TOOL_RECEIPT_SCAN_LIMIT = 12
 CONTESTED_MEMORY_RECENT_WRITE_LIMIT = 3
 CONTESTED_MEMORY_AUDIT_SCAN_LIMIT = 40
 LLM_IMAGE_VARIANT_DIR_NAME = "llm_input"
+FAILED_FOREGROUND_STREAM_RETENTION_SEC = 300.0
 MEMORY_CONTEST_PHRASES = (
     "i didn't confirm",
     "i did not confirm",
@@ -187,10 +188,12 @@ class ActiveRequest:
     snapshot_seq: int = 0
     supporting_artifacts: list[dict[str, Any]] = field(default_factory=list)
     completed: bool = False
+    failed: bool = False
     foreground: bool = True
     backgrounded_at: str | None = None
     user_query_excerpt: str = ""
     activity: str = ""
+    error_message: str = ""
 
 
 @dataclass(slots=True)
@@ -320,6 +323,7 @@ class GatewayRuntime:
         self._orchestrator_task_ledger = TaskLedger(
             config.orchestrator_task_ledger_db_path
         )
+        self._recent_foreground_terminal_streams: dict[str, dict[str, Any]] = {}
         self.started = False
         self.adapter_errors: dict[str, str] = {}
         self.active_task_channels: dict[str, str] = {}
@@ -3935,6 +3939,46 @@ class GatewayRuntime:
             self.active_requests_by_task[task_id] = request_id
         self._track_partial_stream(state, event)
 
+    def _prune_recent_foreground_terminal_streams(self) -> None:
+        now = time.monotonic()
+        stale_request_ids = [
+            request_id
+            for request_id, snapshot in self._recent_foreground_terminal_streams.items()
+            if now >= float(snapshot.get("expires_at_monotonic") or 0.0)
+        ]
+        for request_id in stale_request_ids:
+            self._recent_foreground_terminal_streams.pop(request_id, None)
+
+    def _cache_recent_foreground_terminal_stream(self, state: ActiveRequest) -> None:
+        if not state.foreground or not state.failed:
+            return
+        visible_content = state.partial_content or state.error_message
+        if not (
+            visible_content
+            or state.partial_thinking
+            or state.response_blocks_snapshot
+            or state.activity
+        ):
+            return
+        self._recent_foreground_terminal_streams[state.request_id] = {
+            "request_id": state.request_id,
+            "task_id": state.task_id,
+            "session_id": state.session_id,
+            "channel": state.channel,
+            "route": state.route,
+            "content": visible_content,
+            "thinking_text": state.partial_thinking,
+            "response_blocks": [dict(item) for item in state.response_blocks_snapshot],
+            "supporting_artifacts": [dict(item) for item in state.supporting_artifacts],
+            "activity": state.activity or "Request failed.",
+            "completed": True,
+            "failed": True,
+            "error": state.error_message or None,
+            "updated_at": utcnow_iso(),
+            "expires_at_monotonic": time.monotonic()
+            + FAILED_FOREGROUND_STREAM_RETENTION_SEC,
+        }
+
     def _ensure_session_state_seeded(self, session_id: str) -> dict[str, Any]:
         metadata = self.session_store.get_session_metadata(session_id)
         active_working_set = metadata.get("active_working_set")
@@ -6397,6 +6441,7 @@ class GatewayRuntime:
             self._hydrate_history_message_for_client(item)
             for item in self.session_store.get_history(session_id)
         ]
+        self._prune_recent_foreground_terminal_streams()
         pending_inputs = self._pending_inputs_for_channel(
             channel, session_id=session_id
         )
@@ -6433,16 +6478,60 @@ class GatewayRuntime:
                 "response_blocks": state.response_blocks_snapshot,
                 "snapshot_seq": state.snapshot_seq or None,
                 "activity": state.activity or "Working on your request...",
-                "completed": False,
-                "failed": False,
+                "completed": state.completed,
+                "failed": state.failed,
+                "error": state.error_message or None,
                 "updated_at": utcnow_iso(),
             }
             for state in self.active_requests.values()
             if state.foreground
             and state.channel == channel
             and state.session_id == session_id
-            and not state.completed
+            and (not state.completed or state.failed)
         ]
+        assistant_request_ids_in_history = {
+            self._safe_text(item.get("request_id"))
+            or self._safe_text(
+                (item.get("metadata") or {}).get("request_id")
+                if isinstance(item.get("metadata"), dict)
+                else None
+            )
+            for item in history
+            if item.get("role") == "assistant"
+        }
+        for snapshot in self._recent_foreground_terminal_streams.values():
+            if (
+                self._safe_text(snapshot.get("channel")) != channel
+                or self._safe_text(snapshot.get("session_id")) != session_id
+            ):
+                continue
+            request_id_value = self._safe_text(snapshot.get("request_id"))
+            if request_id_value and request_id_value in assistant_request_ids_in_history:
+                continue
+            foreground_streams.append(
+                {
+                    "request_id": request_id_value,
+                    "task_id": self._safe_text(snapshot.get("task_id")) or None,
+                    "session_id": session_id,
+                    "channel": channel,
+                    "route": self._safe_text(snapshot.get("route")) or "opus",
+                    "content": self._safe_text(snapshot.get("content")) or "",
+                    "thinking_text": self._safe_text(snapshot.get("thinking_text")) or "",
+                    "response_blocks": [
+                        dict(item)
+                        for item in snapshot.get("response_blocks", [])
+                        if isinstance(item, dict)
+                    ],
+                    "snapshot_seq": None,
+                    "activity": self._safe_text(snapshot.get("activity"))
+                    or "Request failed.",
+                    "completed": True,
+                    "failed": True,
+                    "error": self._safe_text(snapshot.get("error")) or None,
+                    "updated_at": self._safe_text(snapshot.get("updated_at"))
+                    or utcnow_iso(),
+                }
+            )
         # Completed background tasks reconstructed from session history
         running_request_ids = {t["request_id"] for t in background_tasks}
         for msg in history:
@@ -11735,6 +11824,8 @@ class GatewayRuntime:
                     metadata=interrupted_metadata,
                     in_reply_to_request_id=state.request_id,
                 )
+            elif state.failed:
+                self._cache_recent_foreground_terminal_stream(state)
             self._finalize_active_request(state)
 
     async def _emit_cancelled_event(self, state: ActiveRequest) -> None:
@@ -11836,6 +11927,17 @@ class GatewayRuntime:
                     for item in supporting_artifacts
                     if isinstance(item, dict)
                 ]
+            return
+        if event_type == "task.failed":
+            state.completed = True
+            state.failed = True
+            error_message = (
+                self._safe_text((event.get("error") or {}).get("message"))
+                if isinstance(event.get("error"), dict)
+                else None
+            ) or self._safe_text(event.get("message")) or "Opus task failed."
+            state.error_message = error_message
+            state.activity = error_message or state.activity
 
     def _health_status_from_memory(self, memory: dict[str, Any]) -> str:
         if not self.started:

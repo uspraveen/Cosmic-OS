@@ -3372,6 +3372,60 @@ def test_desktop_resume_includes_foreground_active_request(test_client: TestClie
     assert foreground_streams[0]["updated_at"]
 
 
+def test_desktop_resume_includes_recent_failed_foreground_stream(test_client: TestClient) -> None:
+    runtime = test_client.app.state.gateway_runtime
+    session_id = runtime._current_session_id()
+    runtime._append_session_message(
+        session_id,
+        role="user",
+        content="Why did the stream fail?",
+        route="opus",
+        channel="desktop:desk_failed_resume",
+        metadata={"request_id": "req_failed_resume"},
+    )
+    failed_state = ActiveRequest(
+        request_id="req_failed_resume",
+        session_id=session_id,
+        channel="desktop:desk_failed_resume",
+        route="opus",
+        task_id="task_failed_resume",
+        partial_content="Partial streamed answer",
+        partial_thinking="Partial streamed thinking",
+        response_blocks_snapshot=[{"type": "markdown", "text": "Partial streamed answer"}],
+        completed=True,
+        failed=True,
+        activity="Still recovering...",
+        error_message="Anthropic API error: upstream failed",
+    )
+    runtime._cache_recent_foreground_terminal_stream(failed_state)
+
+    with test_client.websocket_connect("/ws?token=test-token&device_id=desk_failed_resume") as websocket:
+        websocket.send_json(
+            {
+                "type": "resume",
+                "request_id": "resume_failed_001",
+                "session_id": session_id,
+                "known_task_ids": [],
+            }
+        )
+        resume = websocket.receive_json()
+
+    assert resume["type"] == "resume.ok"
+    foreground_streams = resume["foreground_streams"]
+    assert len(foreground_streams) == 1
+    assert foreground_streams[0]["request_id"] == "req_failed_resume"
+    assert foreground_streams[0]["task_id"] == "task_failed_resume"
+    assert foreground_streams[0]["session_id"] == session_id
+    assert foreground_streams[0]["route"] == "opus"
+    assert foreground_streams[0]["content"] == "Partial streamed answer"
+    assert foreground_streams[0]["thinking_text"] == "Partial streamed thinking"
+    assert foreground_streams[0]["channel"] == "desktop:desk_failed_resume"
+    assert foreground_streams[0]["completed"] is True
+    assert foreground_streams[0]["failed"] is True
+    assert foreground_streams[0]["error"] == "Anthropic API error: upstream failed"
+    assert foreground_streams[0]["updated_at"]
+
+
 def test_desktop_resume_includes_artifact_only_assistant_message(test_client: TestClient) -> None:
     runtime = test_client.app.state.gateway_runtime
     session_id = runtime._current_session_id()
