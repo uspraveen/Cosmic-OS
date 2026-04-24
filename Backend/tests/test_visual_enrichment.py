@@ -372,6 +372,34 @@ def _build_cross_promo_with_search_transport() -> httpx.MockTransport:
     return httpx.MockTransport(handler)
 
 
+def _build_source_title_query_transport() -> httpx.MockTransport:
+    image_bytes = _solid_png_bytes(1600, 900)
+    useful_image_url = "https://cdn.example.test/vijay-bus-complaint.jpg"
+    title_led_bing_html = f"""
+    <html><body>
+      <a class="iusc" m='{{&quot;murl&quot;:&quot;{useful_image_url}&quot;,&quot;purl&quot;:&quot;https://example.com/vijay-bus-story&quot;,&quot;t&quot;:&quot;Vijay flags voters stranded at bus terminals in Tamil Nadu&quot;,&quot;desc&quot;:&quot;Coverage of Vijay&#39;s bus-terminal complaint during the Tamil Nadu election&quot;,&quot;imgw&quot;:1600,&quot;imgh&quot;:900}}'></a>
+    </body></html>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/images/search":
+            query = request.url.params.get("q") or ""
+            if "what is this bus complaint" in query.lower():
+                return httpx.Response(200, text="<html><body></body></html>")
+            if "vijay urges eci to extend voting hours amid transport chaos" in query.lower():
+                return httpx.Response(200, text=title_led_bing_html)
+            return httpx.Response(200, text="<html><body></body></html>")
+        if request.method == "GET" and str(request.url) == useful_image_url:
+            return httpx.Response(
+                200,
+                content=image_bytes,
+                headers={"Content-Type": "image/png"},
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url!s}")
+
+    return httpx.MockTransport(handler)
+
+
 def _note_three_generic_sources(coordinator: VisualEnrichmentCoordinator) -> None:
     coordinator.note_sources(
         [
@@ -413,6 +441,18 @@ def _note_black_flag_source(coordinator: VisualEnrichmentCoordinator) -> None:
                 "url": "https://news.ubisoft.com/en-us/article/black-flag-resynced",
                 "title": "Assassin's Creed Black Flag Resynced out July 9: everything you need to know",
                 "domain": "news.ubisoft.com",
+            }
+        ]
+    )
+
+
+def _note_bus_complaint_source(coordinator: VisualEnrichmentCoordinator) -> None:
+    coordinator.note_sources(
+        [
+            {
+                "url": "https://timesofindia.indiatimes.com/city/chennai/tamil-nadu-elections-tvk-vijay-urges-eci-to-extend-voting-hours-amid-transport-chaos/articleshow/130456936.cms",
+                "title": "Tamil Nadu elections: TVK chief Vijay urges ECI to extend voting hours amid transport chaos",
+                "domain": "timesofindia.indiatimes.com",
             }
         ]
     )
@@ -1123,6 +1163,58 @@ async def test_visual_enrichment_explicit_request_uses_direct_image_search_when_
         assert image_block["provenance"]["selection_reason"] == (
             "Best metadata-ranked image from direct image-search results."
         )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_visual_enrichment_uses_source_title_queries_for_vague_image_requests() -> None:
+    root = _make_test_dir("visual-image-query-enrichment-")
+    try:
+        config = OrchestratorConfig(
+            internal_token="internal-token",
+            signing_secret="signing-secret",
+            anthropic_api_key="anthropic-key",
+            anthropic_model="claude-opus-4-6",
+            task_ledger_db_path=root / "task_ledger.db",
+            visual_enhancement_enabled=True,
+            visual_finalization_grace_ms=1200,
+            visual_max_concurrent_sidecars=1,
+            visual_max_image_slots_per_turn=1,
+            visual_firecrawl_api_key="",
+            visual_image_search_enabled=True,
+            visual_image_search_base_url="https://www.bing.com/images/search",
+        )
+        transport = _build_source_title_query_transport()
+
+        async with httpx.AsyncClient(transport=transport) as client:
+            coordinator = VisualEnrichmentCoordinator(
+                config=config,
+                task_id="tsk_visual_image_query_enrichment_1",
+                request_id="req_visual_image_query_enrichment_1",
+                session_id="sess_visual_image_query_enrichment_1",
+                channel="desktop:desk_visual_image_query_enrichment_1",
+                user_query="What is this bus complaint!? include inline images!",
+                http_client=client,
+            )
+            _note_bus_complaint_source(coordinator)
+
+            coordinator.consume_text(
+                (
+                    "Here's the full story.\n\n"
+                    "[[visual_slot {\"id\":\"img_1\",\"kind\":\"image\",\"query\":\"What is this bus complaint?\","
+                    "\"caption\":\"Vijay's bus-terminal complaint\"}]]\n\n"
+                    "Vijay said stranded voters could miss polling because of transport chaos."
+                )
+            )
+
+            final_payload = await coordinator.finalize()
+
+        image_block = next(
+            block for block in final_payload["response_blocks"] if block["type"] == "image_artifact"
+        )
+        assert image_block["provenance"]["source_image_url"] == "https://cdn.example.test/vijay-bus-complaint.jpg"
+        assert "direct image-search results" in image_block["provenance"]["selection_reason"]
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

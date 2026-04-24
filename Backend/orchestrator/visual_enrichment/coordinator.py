@@ -60,6 +60,30 @@ _EXPLICIT_IMAGE_REQUEST_MARKERS = (
     "screenshot",
     "screenshots",
 )
+_GENERIC_VISUAL_QUERY_TOKENS = {
+    "about",
+    "complaint",
+    "controversy",
+    "deal",
+    "details",
+    "explain",
+    "issue",
+    "more",
+    "problem",
+    "situation",
+    "story",
+    "tell",
+    "that",
+    "them",
+    "this",
+    "thing",
+    "what",
+    "why",
+}
+_IMAGE_QUERY_NOISE_PATTERNS = tuple(
+    re.compile(rf"\b{re.escape(marker)}\b", flags=re.IGNORECASE)
+    for marker in _EXPLICIT_IMAGE_REQUEST_MARKERS
+)
 
 
 def _utcnow_iso() -> str:
@@ -107,6 +131,32 @@ def _text_explicitly_requests_image(value: Any) -> bool:
     if not text:
         return False
     return any(marker in text for marker in _EXPLICIT_IMAGE_REQUEST_MARKERS)
+
+
+def _normalize_image_search_query(value: Any, *, max_words: int = 18) -> str:
+    text = _safe_text(value)
+    if not text:
+        return ""
+    for pattern in _IMAGE_QUERY_NOISE_PATTERNS:
+        text = pattern.sub(" ", text)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"[^\w\s:'/-]+", " ", text)
+    words = [word for word in text.split() if word]
+    if max_words > 0:
+        words = words[:max_words]
+    return " ".join(words).strip(" -:|")
+
+
+def _query_specificity_score(value: Any) -> int:
+    tokens = _tokenize(value)
+    return sum(1 for token in tokens if token not in _GENERIC_VISUAL_QUERY_TOKENS and len(token) >= 3)
+
+
+def _looks_generic_for_image_search(value: Any) -> bool:
+    text = _normalize_image_search_query(value)
+    if not text:
+        return True
+    return _query_specificity_score(text) < 3
 
 
 def _is_probably_decorative(candidate_url: str, text: str) -> bool:
@@ -910,9 +960,9 @@ class VisualEnrichmentCoordinator:
         slot: VisualSlotDirective,
         trusted_candidates: list[ImageCandidate],
     ) -> bool:
-        if not self._slot_explicitly_requests_image(slot):
-            return False
         if not self._image_search.available:
+            return False
+        if not self._build_image_search_queries(slot):
             return False
         if not trusted_candidates:
             return True
@@ -944,53 +994,113 @@ class VisualEnrichmentCoordinator:
             return True
         return False
 
+    def _build_image_search_queries(self, slot: VisualSlotDirective) -> list[str]:
+        source_infos = self._candidate_source_infos(slot)
+        source_titles = [
+            _normalize_image_search_query(source.get("title"))
+            for source in source_infos[:3]
+            if isinstance(source, dict) and _normalize_image_search_query(source.get("title"))
+        ]
+        base_query = _normalize_image_search_query(_safe_text(slot.query) or self.user_query)
+        context_hint = _normalize_image_search_query(_clip_text(slot.context_excerpt, limit=220))
+
+        ordered_raw_queries: list[str] = []
+        if _looks_generic_for_image_search(base_query):
+            if source_titles:
+                ordered_raw_queries.append(source_titles[0])
+                if base_query:
+                    ordered_raw_queries.append(f"{source_titles[0]} {base_query}")
+            if base_query:
+                ordered_raw_queries.append(base_query)
+        else:
+            if base_query:
+                ordered_raw_queries.append(base_query)
+            if source_titles:
+                ordered_raw_queries.append(f"{base_query} {source_titles[0]}")
+                ordered_raw_queries.append(source_titles[0])
+
+        if len(source_titles) > 1:
+            ordered_raw_queries.append(" ".join(source_titles[:2]))
+        if context_hint and _query_specificity_score(context_hint) >= 4:
+            if source_titles:
+                ordered_raw_queries.append(f"{source_titles[0]} {context_hint}")
+            ordered_raw_queries.append(context_hint)
+
+        queries: list[str] = []
+        seen_queries: set[str] = set()
+        for raw_query in ordered_raw_queries:
+            normalized = _normalize_image_search_query(raw_query)
+            if not normalized or len(_tokenize(normalized)) < 2:
+                continue
+            key = normalized.lower()
+            if key in seen_queries:
+                continue
+            seen_queries.add(key)
+            queries.append(normalized)
+        return queries[:4]
+
     async def _search_image_candidates(self, slot: VisualSlotDirective) -> list[ImageCandidate]:
-        query = _safe_text(slot.query) or self.user_query
-        raw_results = await self._image_search.search_images(query)
+        queries = self._build_image_search_queries(slot)
+        if not queries:
+            return []
+
         candidates: list[ImageCandidate] = []
         seen_urls: set[str] = set()
-        for index, item in enumerate(raw_results, start=1):
-            if not isinstance(item, dict):
-                continue
-            image_url = _safe_text(item.get("image_url"))
-            if not image_url.startswith(("http://", "https://")) or image_url in seen_urls:
-                continue
-            seen_urls.add(image_url)
-            source_url = _safe_text(item.get("source_url")) or image_url
-            source_domain = _safe_text(item.get("source_domain")) or _safe_text(urlparse(source_url).netloc)
-            title = _safe_text(item.get("title"))
-            nearby_text = _safe_text(item.get("snippet") or item.get("nearby_text"))
-            width = item.get("width") if isinstance(item.get("width"), int) else None
-            height = item.get("height") if isinstance(item.get("height"), int) else None
-            candidate = ImageCandidate(
-                image_url=image_url,
-                source_url=source_url,
-                source_title=title or source_domain,
-                source_domain=source_domain,
-                source_rank=index,
-                alt_text=title,
-                title=title,
-                nearby_text=nearby_text,
-                filename=_guess_filename_from_url(image_url, default_prefix=slot.id),
-                width=width,
-                height=height,
-                retrieval_kind="image_search",
-            )
-            prefilter_corpus = " ".join(
-                filter(None, [candidate.alt_text, candidate.title, candidate.nearby_text, candidate.filename, source_domain])
-            )
-            if candidate.image_url.lower().endswith(".svg"):
-                continue
-            if _is_probably_ui_asset(candidate.image_url, prefilter_corpus):
-                continue
-            if _is_probably_decorative(candidate.image_url, prefilter_corpus):
-                continue
-            if _is_low_information_image_size(candidate.width, candidate.height):
-                continue
-            candidate.score = self._score_candidate(slot, candidate, prefilter_corpus)
-            if candidate.score <= 0:
-                continue
-            candidates.append(candidate)
+        logger.info("visual_enrichment.image_search_queries slot_id=%s queries=%s", slot.id, queries)
+
+        for query_index, query in enumerate(queries, start=1):
+            raw_results = await self._image_search.search_images(query)
+            for index, item in enumerate(raw_results, start=1):
+                if not isinstance(item, dict):
+                    continue
+                image_url = _safe_text(item.get("image_url"))
+                if not image_url.startswith(("http://", "https://")) or image_url in seen_urls:
+                    continue
+                seen_urls.add(image_url)
+                source_url = _safe_text(item.get("source_url")) or image_url
+                source_domain = _safe_text(item.get("source_domain")) or _safe_text(urlparse(source_url).netloc)
+                title = _safe_text(item.get("title"))
+                nearby_text = _safe_text(item.get("snippet") or item.get("nearby_text"))
+                width = item.get("width") if isinstance(item.get("width"), int) else None
+                height = item.get("height") if isinstance(item.get("height"), int) else None
+                candidate = ImageCandidate(
+                    image_url=image_url,
+                    source_url=source_url,
+                    source_title=title or source_domain,
+                    source_domain=source_domain,
+                    source_rank=((query_index - 1) * self.config.visual_image_search_result_limit) + index,
+                    alt_text=title,
+                    title=title,
+                    nearby_text=nearby_text,
+                    filename=_guess_filename_from_url(image_url, default_prefix=slot.id),
+                    width=width,
+                    height=height,
+                    retrieval_kind="image_search",
+                )
+                prefilter_corpus = " ".join(
+                    filter(
+                        None,
+                        [
+                            candidate.alt_text,
+                            candidate.title,
+                            candidate.nearby_text,
+                            candidate.filename,
+                            source_domain,
+                        ],
+                    )
+                )
+                if candidate.image_url.lower().endswith(".svg"):
+                    continue
+                if _is_probably_ui_asset(candidate.image_url, prefilter_corpus):
+                    continue
+                if _is_probably_decorative(candidate.image_url, prefilter_corpus):
+                    continue
+                if _is_low_information_image_size(candidate.width, candidate.height):
+                    continue
+                candidate.score = self._score_candidate(slot, candidate, prefilter_corpus)
+                if candidate.score <= 0:
+                    continue
+                candidates.append(candidate)
         return candidates
 
     async def _run_chart_sidecar(self, slot: VisualSlotDirective) -> None:
@@ -1044,13 +1154,15 @@ class VisualEnrichmentCoordinator:
 
     async def _run_image_sidecar(self, slot: VisualSlotDirective) -> None:
         try:
-            explicit_image_request = self._slot_explicitly_requests_image(slot)
-            if not self._firecrawl.available and not (explicit_image_request and self._image_search.available):
+            image_search_allowed = self._image_search.available and bool(
+                self._build_image_search_queries(slot)
+            )
+            if not self._firecrawl.available and not image_search_allowed:
                 raise ValueError(
                     "Image enrichment is unavailable because neither trusted-source scraping nor direct image search is configured."
                 )
             source_infos = self._candidate_source_infos(slot)
-            if not source_infos and not (explicit_image_request and self._image_search.available):
+            if not source_infos and not image_search_allowed:
                 raise ValueError("No trusted source URLs were available for this image slot.")
 
             trusted_candidates: list[ImageCandidate] = []

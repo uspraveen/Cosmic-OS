@@ -2002,7 +2002,7 @@ def test_build_agentic_system_prompt_gates_visual_response_policy() -> None:
     assert "## Visual Response Preference" in enabled_prompt
     assert "Do not mention the preference setting itself to the user." in enabled_prompt
     assert (
-        "Do not proactively search for, generate, or request visuals solely because this preference is enabled"
+        "When this mode is enabled, proactively emit one inline visual when it would clearly anchor the answer"
         in enabled_prompt
     )
 
