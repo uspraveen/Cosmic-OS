@@ -923,6 +923,18 @@ def build_visual_enhancement_env_rendered(
     image_min_confidence = pick_visual(
         ("VISUAL_ENHANCEMENT_IMAGE_MIN_CONFIDENCE",), "0.58"
     )
+    image_search_enabled = pick_visual(
+        ("VISUAL_ENHANCEMENT_IMAGE_SEARCH_ENABLED",), "true"
+    )
+    image_search_base_url = pick_visual(
+        ("VISUAL_ENHANCEMENT_IMAGE_SEARCH_BASE_URL",), "https://www.bing.com/images/search"
+    )
+    image_search_timeout_sec = pick_visual(
+        ("VISUAL_ENHANCEMENT_IMAGE_SEARCH_TIMEOUT_SEC",), "12"
+    )
+    image_search_result_limit = pick_visual(
+        ("VISUAL_ENHANCEMENT_IMAGE_SEARCH_RESULT_LIMIT",), "8"
+    )
     chart_max_points = pick_visual(
         ("VISUAL_ENHANCEMENT_CHART_MAX_POINTS",), "200"
     )
@@ -1055,6 +1067,11 @@ def build_visual_enhancement_env_rendered(
         "VISUAL_ENHANCEMENT_IMAGE_MAX_BYTES": image_max_bytes or "8388608",
         "VISUAL_ENHANCEMENT_IMAGE_VERIFY_TOP_K": image_verify_top_k or "1",
         "VISUAL_ENHANCEMENT_IMAGE_MIN_CONFIDENCE": image_min_confidence or "0.58",
+        "VISUAL_ENHANCEMENT_IMAGE_SEARCH_ENABLED": image_search_enabled or "true",
+        "VISUAL_ENHANCEMENT_IMAGE_SEARCH_BASE_URL": image_search_base_url
+        or "https://www.bing.com/images/search",
+        "VISUAL_ENHANCEMENT_IMAGE_SEARCH_TIMEOUT_SEC": image_search_timeout_sec or "12",
+        "VISUAL_ENHANCEMENT_IMAGE_SEARCH_RESULT_LIMIT": image_search_result_limit or "8",
         "VISUAL_ENHANCEMENT_CHART_MAX_POINTS": chart_max_points or "200",
         "VISUAL_ENHANCEMENT_CHART_MAX_BYTES": chart_max_bytes or "4194304",
         "VISUAL_ENHANCEMENT_DOWNLOAD_TIMEOUT_SEC": download_timeout_sec or "20",

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import html
 import json
 import logging
 import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -30,6 +32,14 @@ class FireworksVisualConfig:
     vision_model: str
     reasoning_effort: str
     timeout_sec: float
+
+
+@dataclass(frozen=True, slots=True)
+class DirectImageSearchConfig:
+    enabled: bool
+    base_url: str
+    timeout_sec: float
+    result_limit: int
 
 
 def _strip_markdown_json_fences(raw: str) -> str:
@@ -125,6 +135,128 @@ class FirecrawlVisualClient:
                 if isinstance(value, str) and value.strip():
                     return value.strip()[:500]
         return f"Firecrawl request failed ({response.status_code})."
+
+
+class DirectImageSearchClient:
+    def __init__(
+        self,
+        config: DirectImageSearchConfig,
+        *,
+        http_client: httpx.AsyncClient,
+    ) -> None:
+        self.config = config
+        self._client = http_client
+
+    @property
+    def available(self) -> bool:
+        return bool(self.config.enabled and self.config.base_url)
+
+    async def search_images(self, query: str) -> list[dict[str, Any]]:
+        normalized_query = str(query or "").strip()
+        if len(normalized_query) < 3:
+            raise VisualEnrichmentError("Direct image search requires a non-empty query.")
+        if not self.available:
+            raise VisualEnrichmentError("Direct image search is not configured.")
+        response = await self._client.get(
+            self.config.base_url,
+            params={
+                "q": normalized_query,
+                "form": "HDRSC2",
+                "first": "1",
+            },
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; COSMIC-OS/1.0; +https://cosmic.os)",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+            follow_redirects=True,
+            timeout=httpx.Timeout(
+                self.config.timeout_sec,
+                connect=min(self.config.timeout_sec, 10.0),
+            ),
+        )
+        if response.status_code >= 400:
+            raise VisualEnrichmentError(self._extract_http_error(response))
+        return self._parse_bing_image_results(response.text)[: self.config.result_limit]
+
+    @staticmethod
+    def _parse_bing_image_results(raw_html: str) -> list[dict[str, Any]]:
+        text = str(raw_html or "")
+        results: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+        payload_pattern = re.compile(
+            r"(?:\bm|\bdata-m)\s*=\s*(?P<quote>['\"])(?P<payload>.*?)(?P=quote)",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        for match in payload_pattern.finditer(text):
+            raw_payload = match.group("payload")
+            if "murl" not in raw_payload and "imgurl" not in raw_payload:
+                continue
+            decoded_payload = html.unescape(raw_payload).strip()
+            if not decoded_payload.startswith("{"):
+                continue
+            try:
+                payload = json.loads(decoded_payload)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            image_url = str(
+                payload.get("murl")
+                or payload.get("imgurl")
+                or payload.get("image_url")
+                or ""
+            ).strip()
+            if not image_url.startswith(("http://", "https://")) or image_url in seen_urls:
+                continue
+            source_url = str(
+                payload.get("purl")
+                or payload.get("hostPageUrl")
+                or payload.get("source_url")
+                or ""
+            ).strip()
+            title = str(payload.get("t") or payload.get("title") or "").strip()
+            snippet = str(
+                payload.get("desc")
+                or payload.get("caption")
+                or payload.get("s")
+                or payload.get("snippet")
+                or ""
+            ).strip()
+            width = DirectImageSearchClient._to_int(
+                payload.get("imgw") or payload.get("width") or payload.get("w")
+            )
+            height = DirectImageSearchClient._to_int(
+                payload.get("imgh") or payload.get("height") or payload.get("h")
+            )
+            source_domain = str(urlparse(source_url or image_url).netloc).strip()
+            seen_urls.add(image_url)
+            results.append(
+                {
+                    "image_url": image_url,
+                    "source_url": source_url or image_url,
+                    "title": title,
+                    "snippet": snippet,
+                    "source_domain": source_domain,
+                    "width": width,
+                    "height": height,
+                }
+            )
+        return results
+
+    @staticmethod
+    def _to_int(value: Any) -> int | None:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    @staticmethod
+    def _extract_http_error(response: httpx.Response) -> str:
+        body = (response.text or "").strip()
+        if body:
+            return body[:500]
+        return f"Direct image search request failed ({response.status_code})."
 
 
 class FireworksVisualClient:

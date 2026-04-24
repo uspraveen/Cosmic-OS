@@ -780,7 +780,11 @@ def test_build_visual_enhancement_env_rendered_inherits_shared_keys_from_peer_en
         "VISUAL_ENHANCEMENT_FIREWORKS_TIMEOUT_SEC=20\n"
         "VISUAL_ENHANCEMENT_FIRECRAWL_API_KEY=\n"
         "VISUAL_ENHANCEMENT_FIRECRAWL_BASE_URL=https://api.firecrawl.dev\n"
-        "VISUAL_ENHANCEMENT_FIRECRAWL_REQUEST_TIMEOUT_SEC=20\n",
+        "VISUAL_ENHANCEMENT_FIRECRAWL_REQUEST_TIMEOUT_SEC=20\n"
+        "VISUAL_ENHANCEMENT_IMAGE_SEARCH_ENABLED=true\n"
+        "VISUAL_ENHANCEMENT_IMAGE_SEARCH_BASE_URL=https://www.bing.com/images/search\n"
+        "VISUAL_ENHANCEMENT_IMAGE_SEARCH_TIMEOUT_SEC=12\n"
+        "VISUAL_ENHANCEMENT_IMAGE_SEARCH_RESULT_LIMIT=8\n",
         encoding="utf-8",
     )
     (agents_env_dir / bootstrap.FIRECRAWL_AGENT_ENV_NAME).write_text(
@@ -820,6 +824,13 @@ def test_build_visual_enhancement_env_rendered_inherits_shared_keys_from_peer_en
         == "accounts/fireworks/models/kimi-k2p6"
     )
     assert parsed["VISUAL_ENHANCEMENT_FIREWORKS_TIMEOUT_SEC"] == "90"
+    assert parsed["VISUAL_ENHANCEMENT_IMAGE_SEARCH_ENABLED"] == "true"
+    assert (
+        parsed["VISUAL_ENHANCEMENT_IMAGE_SEARCH_BASE_URL"]
+        == "https://www.bing.com/images/search"
+    )
+    assert parsed["VISUAL_ENHANCEMENT_IMAGE_SEARCH_TIMEOUT_SEC"] == "12"
+    assert parsed["VISUAL_ENHANCEMENT_IMAGE_SEARCH_RESULT_LIMIT"] == "8"
 
 
 def test_materialize_bootstrap_env_files_can_render_memory_env(monkeypatch, tmp_path) -> None:

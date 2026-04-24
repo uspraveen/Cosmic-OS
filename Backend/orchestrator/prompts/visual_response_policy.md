@@ -12,7 +12,7 @@ Hard rules:
 - Use visuals only when they materially improve clarity.
 - Prefer charts for quantitative comparisons.
 - Prefer images for appearance, reference screenshots, or concrete real-world examples.
-- If the user explicitly asks for inline images and you already have concrete trusted source pages, prefer emitting one relevant image slot instead of skipping visuals entirely.
+- If the user explicitly asks for inline images and you already have concrete trusted source pages or a clearly identifiable entity/topic, prefer emitting one relevant image slot instead of skipping visuals entirely.
 - Skip decorative, generic, logo-only, or low-confidence visuals.
 - Use at most 2 visuals total in a turn.
 - Do not wait for a visual before continuing the answer.
@@ -60,7 +60,7 @@ Chart slot JSON:
 
 Additional instructions:
 
-- For image slots, emit them mainly when the answer already used or trusted concrete source pages.
+- For image slots, emit them mainly when the answer already used or trusted concrete source pages, or when the entity/topic is specific enough that a direct image-search fallback can stay relevant.
 - For chart slots, emit them only when you already have the numeric values and labels needed to draw the chart.
 - The directive must be valid JSON inside the wrapper. Do not add prose inside the directive.
 - After emitting a visual slot, continue the answer naturally. Do not refer to the directive itself.

@@ -3,22 +3,30 @@ import json
 import httpx
 import pytest
 import shutil
-import tempfile
 import time
 from io import BytesIO
 from pathlib import Path
+from uuid import uuid4
 
 from gateway.config import GatewayConfig
 from gateway.runtime import GatewayRuntime
 from orchestrator.config import OrchestratorConfig
 from orchestrator.visual_enrichment.charting import normalize_chart_spec, render_chart_png
+from orchestrator.visual_enrichment.clients import (
+    DirectImageSearchClient,
+    DirectImageSearchConfig,
+)
 from orchestrator.visual_enrichment.coordinator import _is_probably_text_art
 from orchestrator.visual_enrichment import VisualEnrichmentCoordinator
 from PIL import Image
 
 
 def _make_test_dir(prefix: str) -> Path:
-    return Path(tempfile.mkdtemp(prefix=prefix))
+    root = Path.cwd() / ".codex_test_tmp"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"{prefix}{uuid4().hex[:8]}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _tiny_png_bytes() -> bytes:
@@ -57,7 +65,12 @@ def _build_low_confidence_image_transport() -> httpx.MockTransport:
                     json={
                         "success": True,
                         "data": {
-                            "images": ["https://cdn.example.test/source-3-hero.png"],
+                            "images": [
+                                {
+                                    "src": "https://cdn.example.test/source-3-hero.png",
+                                    "alt": "Deal",
+                                }
+                            ],
                             "metadata": {"title": "Source three"},
                         },
                     },
@@ -291,6 +304,74 @@ def _build_svg_noise_transport() -> httpx.MockTransport:
     return httpx.MockTransport(handler)
 
 
+def _build_cross_promo_with_search_transport() -> httpx.MockTransport:
+    promo_bytes = _solid_png_bytes(960, 540)
+    keyart_bytes = _solid_png_bytes(1600, 900)
+    promo_url = (
+        "https://staticctf.ubisoft.com/J3yJr34U2pZ2Ieem48Dwy9uqj5PNUQTn/6JtJ2ErqVsdI0j4S8GhhRN/"
+        "e072686be0016a374562c3d7d9c998c2/POP_35_ANNIVERSARY_All_Pixel_Princes_960.jpg"
+    )
+    keyart_url = (
+        "https://staticctf.ubisoft.com/J3yJr34U2pZ2Ieem48Dwy9uqj5PNUQTn/6JtJ2ErqVsdI0j4S8GhhRN/"
+        "e072686be0016a374562c3d7d9c998c2/ACBFR_KeyArt_StandardEdition_960x540_23.04.26_615PMCEST.jpg"
+    )
+    bing_html = f"""
+    <html><body>
+      <a class="iusc" m='{{&quot;murl&quot;:&quot;{keyart_url}&quot;,&quot;purl&quot;:&quot;https://news.ubisoft.com/en-us/article/black-flag-resynced&quot;,&quot;t&quot;:&quot;Assassin&#39;s Creed Black Flag Resynced key art&quot;,&quot;desc&quot;:&quot;Official reveal artwork for Assassin&#39;s Creed Black Flag Resynced&quot;,&quot;imgw&quot;:1600,&quot;imgh&quot;:900}}'></a>
+      <a class="iusc" m='{{&quot;murl&quot;:&quot;https://cdn.example.test/unrelated-pirate-collage.jpg&quot;,&quot;purl&quot;:&quot;https://example.com/unrelated&quot;,&quot;t&quot;:&quot;Pirate collage&quot;,&quot;desc&quot;:&quot;Generic pirate art&quot;,&quot;imgw&quot;:1280,&quot;imgh&quot;:720}}'></a>
+    </body></html>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.endswith("/v2/scrape"):
+            payload = json.loads(request.content.decode("utf-8"))
+            if payload.get("url") != "https://news.ubisoft.com/en-us/article/black-flag-resynced":
+                raise AssertionError(f"unexpected scrape url {payload.get('url')!r}")
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {
+                        "images": [
+                            {
+                                "src": promo_url,
+                                "alt": "Ubisoft anniversary promo art",
+                                "title": "Ubisoft anniversary lineup",
+                                "width": 960,
+                                "height": 540,
+                            }
+                        ],
+                        "metadata": {
+                            "title": "Assassin's Creed Black Flag Resynced out July 9: everything you need to know"
+                        },
+                    },
+                },
+            )
+        if request.method == "GET" and str(request.url).startswith("https://www.bing.com/images/search"):
+            return httpx.Response(200, text=bing_html, headers={"Content-Type": "text/html"})
+        if request.method == "GET" and str(request.url) == promo_url:
+            return httpx.Response(
+                200,
+                content=promo_bytes,
+                headers={"Content-Type": "image/jpeg"},
+            )
+        if request.method == "GET" and str(request.url) == keyart_url:
+            return httpx.Response(
+                200,
+                content=keyart_bytes,
+                headers={"Content-Type": "image/jpeg"},
+            )
+        if request.method == "GET" and str(request.url) == "https://cdn.example.test/unrelated-pirate-collage.jpg":
+            return httpx.Response(
+                200,
+                content=_solid_png_bytes(1280, 720),
+                headers={"Content-Type": "image/jpeg"},
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url!s}")
+
+    return httpx.MockTransport(handler)
+
+
 def _note_three_generic_sources(coordinator: VisualEnrichmentCoordinator) -> None:
     coordinator.note_sources(
         [
@@ -320,6 +401,18 @@ def _note_strategy_source(coordinator: VisualEnrichmentCoordinator) -> None:
                 "url": "https://example.com/strategy",
                 "title": "Strategy and AI infrastructure",
                 "domain": "example.com",
+            }
+        ]
+    )
+
+
+def _note_black_flag_source(coordinator: VisualEnrichmentCoordinator) -> None:
+    coordinator.note_sources(
+        [
+            {
+                "url": "https://news.ubisoft.com/en-us/article/black-flag-resynced",
+                "title": "Assassin's Creed Black Flag Resynced out July 9: everything you need to know",
+                "domain": "news.ubisoft.com",
             }
         ]
     )
@@ -575,8 +668,9 @@ async def test_visual_enrichment_explicit_image_request_uses_relaxed_trusted_fal
             visual_finalization_grace_ms=1200,
             visual_max_concurrent_sidecars=1,
             visual_max_image_slots_per_turn=1,
-            visual_image_min_confidence=0.58,
+            visual_image_min_confidence=0.60,
             visual_firecrawl_api_key="firecrawl-key",
+            visual_image_search_enabled=False,
         )
         transport = _build_low_confidence_image_transport()
 
@@ -636,7 +730,7 @@ async def test_visual_enrichment_non_explicit_image_request_keeps_strict_thresho
             visual_finalization_grace_ms=1200,
             visual_max_concurrent_sidecars=1,
             visual_max_image_slots_per_turn=1,
-            visual_image_min_confidence=0.58,
+            visual_image_min_confidence=0.60,
             visual_firecrawl_api_key="firecrawl-key",
         )
         transport = _build_low_confidence_image_transport()
@@ -688,6 +782,7 @@ async def test_visual_enrichment_normalizes_next_image_proxy_urls() -> None:
             visual_max_concurrent_sidecars=1,
             visual_max_image_slots_per_turn=1,
             visual_firecrawl_api_key="firecrawl-key",
+            visual_image_search_enabled=False,
         )
         transport = _build_next_image_proxy_transport()
 
@@ -745,6 +840,7 @@ async def test_visual_enrichment_retries_next_candidate_after_download_failure()
             visual_max_image_slots_per_turn=1,
             visual_image_min_confidence=0.45,
             visual_firecrawl_api_key="firecrawl-key",
+            visual_image_search_enabled=False,
         )
         transport = _build_retrying_image_transport()
 
@@ -799,6 +895,7 @@ async def test_visual_enrichment_skips_tiny_image_and_uses_larger_candidate() ->
             visual_max_concurrent_sidecars=1,
             visual_max_image_slots_per_turn=1,
             visual_firecrawl_api_key="firecrawl-key",
+            visual_image_search_enabled=False,
         )
         transport = _build_tiny_image_retry_transport()
 
@@ -850,6 +947,7 @@ async def test_visual_enrichment_finalize_waits_for_slot_timeout_budget() -> Non
             visual_max_concurrent_sidecars=1,
             visual_max_image_slots_per_turn=1,
             visual_firecrawl_api_key="firecrawl-key",
+            visual_image_search_enabled=False,
         )
         transport = _build_delayed_image_transport()
 
@@ -903,6 +1001,7 @@ async def test_visual_enrichment_filters_svg_ui_noise_before_ranking() -> None:
             visual_max_concurrent_sidecars=1,
             visual_max_image_slots_per_turn=1,
             visual_firecrawl_api_key="firecrawl-key",
+            visual_image_search_enabled=False,
         )
         transport = _build_svg_noise_transport()
 
@@ -933,6 +1032,97 @@ async def test_visual_enrichment_filters_svg_ui_noise_before_ranking() -> None:
             block for block in final_payload["response_blocks"] if block["type"] == "image_artifact"
         )
         assert image_block["provenance"]["source_image_url"] == "https://cdn.example.test/colossus-strategy.png"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_direct_image_search_client_parses_bing_result_payloads() -> None:
+    html_payload = """
+    <html><body>
+      <a class="iusc" m='{"murl":"https://cdn.example.test/black-flag-keyart.jpg","purl":"https://news.ubisoft.com/en-us/article/black-flag-resynced","t":"Assassin\\u0027s Creed Black Flag Resynced key art","desc":"Official reveal artwork","imgw":1600,"imgh":900}'></a>
+    </body></html>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and str(request.url).startswith("https://www.bing.com/images/search"):
+            return httpx.Response(200, text=html_payload, headers={"Content-Type": "text/html"})
+        raise AssertionError(f"unexpected request {request.method} {request.url!s}")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        search_client = DirectImageSearchClient(
+            DirectImageSearchConfig(
+                enabled=True,
+                base_url="https://www.bing.com/images/search",
+                timeout_sec=12.0,
+                result_limit=8,
+            ),
+            http_client=client,
+        )
+        results = await search_client.search_images("Assassin's Creed Black Flag Resynced key art")
+
+    assert len(results) == 1
+    assert results[0]["image_url"] == "https://cdn.example.test/black-flag-keyart.jpg"
+    assert results[0]["source_url"] == "https://news.ubisoft.com/en-us/article/black-flag-resynced"
+    assert results[0]["title"] == "Assassin's Creed Black Flag Resynced key art"
+    assert results[0]["width"] == 1600
+    assert results[0]["height"] == 900
+
+
+@pytest.mark.asyncio
+async def test_visual_enrichment_explicit_request_uses_direct_image_search_when_trusted_image_is_cross_promo() -> None:
+    root = _make_test_dir("visual-image-search-fallback-")
+    try:
+        config = OrchestratorConfig(
+            artifacts_root=root / "artifacts",
+            internal_token="internal-token",
+            signing_secret="signing-secret",
+            anthropic_api_key="anthropic-key",
+            anthropic_model="claude-opus-4-6",
+            task_ledger_db_path=root / "task_ledger.db",
+            visual_enhancement_enabled=True,
+            visual_finalization_grace_ms=1200,
+            visual_max_concurrent_sidecars=1,
+            visual_max_image_slots_per_turn=1,
+            visual_firecrawl_api_key="firecrawl-key",
+            visual_image_search_enabled=True,
+            visual_image_search_base_url="https://www.bing.com/images/search",
+        )
+        transport = _build_cross_promo_with_search_transport()
+
+        async with httpx.AsyncClient(transport=transport) as client:
+            coordinator = VisualEnrichmentCoordinator(
+                config=config,
+                task_id="tsk_visual_image_search_fallback_1",
+                request_id="req_visual_image_search_fallback_1",
+                session_id="sess_visual_image_search_fallback_1",
+                channel="desktop:desk_visual_image_search_fallback_1",
+                user_query="Tell me more about Assassin's Creed Black Flag Resynced. Include inline images.",
+                http_client=client,
+            )
+            _note_black_flag_source(coordinator)
+
+            coordinator.consume_text(
+                (
+                    "Here's the full deep dive on the remake.\n\n"
+                    "[[visual_slot {\"id\":\"img_1\",\"kind\":\"image\",\"query\":\"Assassin's Creed Black Flag Resynced official key art\","
+                    "\"caption\":\"Official key art\"}]]\n\n"
+                    "The remake modernizes combat, stealth, and naval systems."
+                )
+            )
+
+            final_payload = await coordinator.finalize()
+
+        image_block = next(
+            block for block in final_payload["response_blocks"] if block["type"] == "image_artifact"
+        )
+        assert image_block["provenance"]["source_image_url"].endswith(
+            "/ACBFR_KeyArt_StandardEdition_960x540_23.04.26_615PMCEST.jpg"
+        )
+        assert image_block["provenance"]["selection_reason"] == (
+            "Best metadata-ranked image from direct image-search results."
+        )
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

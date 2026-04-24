@@ -143,6 +143,10 @@ class OrchestratorConfig:
     visual_firecrawl_api_key: str = ""
     visual_firecrawl_base_url: str = "https://api.firecrawl.dev"
     visual_firecrawl_request_timeout_sec: float = 20.0
+    visual_image_search_enabled: bool = True
+    visual_image_search_base_url: str = "https://www.bing.com/images/search"
+    visual_image_search_timeout_sec: float = 12.0
+    visual_image_search_result_limit: int = 8
     visual_fireworks_api_key: str = ""
     visual_fireworks_base_url: str = "https://api.fireworks.ai/inference/v1"
     visual_fireworks_model: str = "accounts/fireworks/models/kimi-k2p6"
@@ -250,6 +254,20 @@ class OrchestratorConfig:
                     "VISUAL_ENHANCEMENT_FIRECRAWL_REQUEST_TIMEOUT_SEC",
                     _env_float("FIRECRAWL_REQUEST_TIMEOUT_SEC", 20.0),
                 ),
+            ),
+            visual_image_search_enabled=_env_bool("VISUAL_ENHANCEMENT_IMAGE_SEARCH_ENABLED", True),
+            visual_image_search_base_url=(
+                os.getenv("VISUAL_ENHANCEMENT_IMAGE_SEARCH_BASE_URL")
+                or "https://www.bing.com/images/search"
+            ).strip()
+            or "https://www.bing.com/images/search",
+            visual_image_search_timeout_sec=max(
+                3.0,
+                _env_float("VISUAL_ENHANCEMENT_IMAGE_SEARCH_TIMEOUT_SEC", 12.0),
+            ),
+            visual_image_search_result_limit=max(
+                1,
+                _env_int("VISUAL_ENHANCEMENT_IMAGE_SEARCH_RESULT_LIMIT", 8),
             ),
             visual_fireworks_api_key=(
                 os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY")
