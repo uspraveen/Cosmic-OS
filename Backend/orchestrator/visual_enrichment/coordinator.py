@@ -34,6 +34,30 @@ logger = logging.getLogger(__name__)
 _VISUAL_SLOT_START = "[[visual_slot"
 _VISUAL_SLOT_END = "]]"
 _WORD_RE = re.compile(r"[a-z0-9]{2,}", re.IGNORECASE)
+_EXPLICIT_IMAGE_REQUEST_MARKERS = (
+    "inline image",
+    "inline images",
+    "show image",
+    "show images",
+    "show me an image",
+    "show me images",
+    "use your inline image",
+    "use the inline image",
+    "add image",
+    "add images",
+    "include image",
+    "include images",
+    "relevant image",
+    "relevant images",
+    "with images",
+    "with an image",
+    "photo",
+    "photos",
+    "picture",
+    "pictures",
+    "screenshot",
+    "screenshots",
+)
 
 
 def _utcnow_iso() -> str:
@@ -74,6 +98,13 @@ def _clip_text(value: Any, *, limit: int = 800) -> str:
 
 def _tokenize(value: Any) -> set[str]:
     return {match.group(0).lower() for match in _WORD_RE.finditer(str(value or "").lower())}
+
+
+def _text_explicitly_requests_image(value: Any) -> bool:
+    text = _safe_text(value).lower()
+    if not text:
+        return False
+    return any(marker in text for marker in _EXPLICIT_IMAGE_REQUEST_MARKERS)
 
 
 def _is_probably_decorative(candidate_url: str, text: str) -> bool:
@@ -668,15 +699,34 @@ class VisualEnrichmentCoordinator:
                         break
             if selected_candidate is None:
                 fallback = ranked[0]
-                if fallback.score < self.config.visual_image_min_confidence:
+                if fallback.score >= self.config.visual_image_min_confidence:
+                    selected_candidate = fallback
+                    selected_verdict = {
+                        "confidence": fallback.score,
+                        "selection_reason": "Best metadata-ranked image from a trusted source page.",
+                        "alt_text": fallback.alt_text,
+                        "caption": slot.caption or "",
+                    }
+                elif self._should_allow_explicit_request_fallback(slot, fallback):
+                    logger.info(
+                        "visual_enrichment.image_relaxed_fallback slot_id=%s score=%.3f source=%s",
+                        slot.id,
+                        fallback.score,
+                        fallback.source_url,
+                    )
+                    selected_candidate = fallback
+                    selected_verdict = {
+                        "confidence": fallback.score,
+                        "selection_reason": (
+                            "Best available trusted-source image selected because the user "
+                            "explicitly requested inline imagery, even though it did not meet "
+                            "the normal confidence threshold."
+                        ),
+                        "alt_text": fallback.alt_text,
+                        "caption": slot.caption or "",
+                    }
+                else:
                     raise ValueError("No image candidate passed the confidence threshold.")
-                selected_candidate = fallback
-                selected_verdict = {
-                    "confidence": fallback.score,
-                    "selection_reason": "Best metadata-ranked image from a trusted source page.",
-                    "alt_text": fallback.alt_text,
-                    "caption": slot.caption or "",
-                }
 
             image_bytes, detected_mime, width, height = await self._download_image_bytes(
                 selected_candidate.image_url
@@ -833,6 +883,42 @@ class VisualEnrichmentCoordinator:
         if candidate.image_url.lower().endswith(".svg"):
             score -= 0.3
         return max(0.0, min(1.0, score))
+
+    def _slot_explicitly_requests_image(self, slot: VisualSlotDirective) -> bool:
+        return any(
+            _text_explicitly_requests_image(text)
+            for text in (
+                self.user_query,
+                slot.query,
+            )
+        )
+
+    def _should_allow_explicit_request_fallback(
+        self,
+        slot: VisualSlotDirective,
+        candidate: ImageCandidate,
+    ) -> bool:
+        if not self._slot_explicitly_requests_image(slot):
+            return False
+        corpus = " ".join(
+            filter(
+                None,
+                [
+                    candidate.alt_text,
+                    candidate.title,
+                    candidate.nearby_text,
+                    candidate.filename,
+                    candidate.source_title,
+                    candidate.source_domain,
+                ],
+            )
+        )
+        if _is_probably_decorative(candidate.image_url, corpus):
+            return False
+        if candidate.image_url.lower().endswith(".svg"):
+            return False
+        relaxed_floor = max(0.50, self.config.visual_image_min_confidence - 0.08)
+        return candidate.score >= relaxed_floor
 
     async def _download_image_bytes(
         self,

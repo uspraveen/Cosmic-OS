@@ -12,6 +12,7 @@ Hard rules:
 - Use visuals only when they materially improve clarity.
 - Prefer charts for quantitative comparisons.
 - Prefer images for appearance, reference screenshots, or concrete real-world examples.
+- If the user explicitly asks for inline images and you already have concrete trusted source pages, prefer emitting one relevant image slot instead of skipping visuals entirely.
 - Skip decorative, generic, logo-only, or low-confidence visuals.
 - Use at most 2 visuals total in a turn.
 - Do not wait for a visual before continuing the answer.
