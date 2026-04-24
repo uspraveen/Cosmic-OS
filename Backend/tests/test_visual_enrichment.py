@@ -17,9 +17,7 @@ from PIL import Image
 
 
 def _make_test_dir(prefix: str) -> Path:
-    root = Path.cwd() / ".codex_test_tmp"
-    root.mkdir(parents=True, exist_ok=True)
-    return Path(tempfile.mkdtemp(prefix=prefix, dir=root))
+    return Path(tempfile.mkdtemp(prefix=prefix))
 
 
 def _tiny_png_bytes() -> bytes:
@@ -28,8 +26,15 @@ def _tiny_png_bytes() -> bytes:
     )
 
 
+def _solid_png_bytes(width: int, height: int) -> bytes:
+    image = Image.new("RGBA", (width, height), (12, 18, 28, 255))
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 def _build_low_confidence_image_transport() -> httpx.MockTransport:
-    image_bytes = _tiny_png_bytes()
+    image_bytes = _solid_png_bytes(1280, 720)
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST" and request.url.path.endswith("/v2/scrape"):
@@ -69,10 +74,10 @@ def _build_low_confidence_image_transport() -> httpx.MockTransport:
 
 
 def _build_next_image_proxy_transport() -> httpx.MockTransport:
-    image_bytes = _tiny_png_bytes()
-    normalized_asset_url = "https://x.ai/_next/static/media/colossus-text.8af37456.webp"
+    image_bytes = _solid_png_bytes(1280, 720)
+    normalized_asset_url = "https://x.ai/_next/static/media/colossus-racks.8af37456.webp"
     proxied_image_url = (
-        "https://x.ai/_next/image?url=%2F_next%2Fstatic%2Fmedia%2Fcolossus-text.8af37456.webp"
+        "https://x.ai/_next/image?url=%2F_next%2Fstatic%2Fmedia%2Fcolossus-racks.8af37456.webp"
         "&w=3840&q=75"
     )
 
@@ -89,7 +94,7 @@ def _build_next_image_proxy_transport() -> httpx.MockTransport:
                         "images": [
                             {
                                 "src": proxied_image_url,
-                                "alt": "Colossus supercomputer GPU racks",
+                                "alt": "Colossus supercomputer GPU racks in Memphis",
                                 "width": 3840,
                                 "height": 2160,
                             }
@@ -102,7 +107,7 @@ def _build_next_image_proxy_transport() -> httpx.MockTransport:
             return httpx.Response(
                 200,
                 content=image_bytes,
-                headers={"Content-Type": "image/webp"},
+                headers={"Content-Type": "image/png"},
             )
         if request.method == "GET" and str(request.url) == proxied_image_url:
             raise AssertionError("proxy image URL should have been normalized before download")
@@ -112,7 +117,7 @@ def _build_next_image_proxy_transport() -> httpx.MockTransport:
 
 
 def _build_retrying_image_transport() -> httpx.MockTransport:
-    image_bytes = _tiny_png_bytes()
+    image_bytes = _solid_png_bytes(1280, 720)
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST" and request.url.path.endswith("/v2/scrape"):
@@ -148,6 +153,55 @@ def _build_retrying_image_transport() -> httpx.MockTransport:
             return httpx.Response(
                 200,
                 content=image_bytes,
+                headers={"Content-Type": "image/png"},
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url!s}")
+
+    return httpx.MockTransport(handler)
+
+
+def _build_tiny_image_retry_transport() -> httpx.MockTransport:
+    tiny_bytes = _solid_png_bytes(52, 52)
+    large_bytes = _solid_png_bytes(1280, 720)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.endswith("/v2/scrape"):
+            payload = json.loads(request.content.decode("utf-8"))
+            if payload.get("url") != "https://example.com/colossus":
+                raise AssertionError(f"unexpected scrape url {payload.get('url')!r}")
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {
+                        "images": [
+                            {
+                                "src": "https://cdn.example.test/cursor-interface-icon.png",
+                                "alt": "Cursor AI coding interface",
+                                "width": 52,
+                                "height": 52,
+                            },
+                            {
+                                "src": "https://cdn.example.test/colossus-racks.png",
+                                "alt": "Colossus GPU racks used for frontier model training",
+                                "width": 1280,
+                                "height": 720,
+                            },
+                        ],
+                        "metadata": {"title": "Cursor and Colossus overview"},
+                    },
+                },
+            )
+        if request.method == "GET" and str(request.url) == "https://cdn.example.test/cursor-interface-icon.png":
+            return httpx.Response(
+                200,
+                content=tiny_bytes,
+                headers={"Content-Type": "image/png"},
+            )
+        if request.method == "GET" and str(request.url) == "https://cdn.example.test/colossus-racks.png":
+            return httpx.Response(
+                200,
+                content=large_bytes,
                 headers={"Content-Type": "image/png"},
             )
         raise AssertionError(f"unexpected request {request.method} {request.url!s}")
@@ -570,11 +624,11 @@ async def test_visual_enrichment_normalizes_next_image_proxy_urls() -> None:
             block for block in final_payload["response_blocks"] if block["type"] == "image_artifact"
         )
         assert image_block["provenance"]["source_image_url"] == (
-            "https://x.ai/_next/static/media/colossus-text.8af37456.webp"
+            "https://x.ai/_next/static/media/colossus-racks.8af37456.webp"
         )
         assert len(final_payload["supporting_artifacts"]) == 1
         assert final_payload["supporting_artifacts"][0]["source_image_url"] == (
-            "https://x.ai/_next/static/media/colossus-text.8af37456.webp"
+            "https://x.ai/_next/static/media/colossus-racks.8af37456.webp"
         )
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -631,6 +685,56 @@ async def test_visual_enrichment_retries_next_candidate_after_download_failure()
         assert final_payload["supporting_artifacts"][0]["source_image_url"] == (
             "https://cdn.example.test/usable-colossus.png"
         )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_visual_enrichment_skips_tiny_image_and_uses_larger_candidate() -> None:
+    root = _make_test_dir("visual-image-small-")
+    try:
+        config = OrchestratorConfig(
+            artifacts_root=root / "artifacts",
+            internal_token="internal-token",
+            signing_secret="signing-secret",
+            anthropic_api_key="anthropic-key",
+            anthropic_model="claude-opus-4-6",
+            task_ledger_db_path=root / "task_ledger.db",
+            visual_enhancement_enabled=True,
+            visual_finalization_grace_ms=1200,
+            visual_max_concurrent_sidecars=1,
+            visual_max_image_slots_per_turn=1,
+            visual_firecrawl_api_key="firecrawl-key",
+        )
+        transport = _build_tiny_image_retry_transport()
+
+        async with httpx.AsyncClient(transport=transport) as client:
+            coordinator = VisualEnrichmentCoordinator(
+                config=config,
+                task_id="tsk_visual_image_small_1",
+                request_id="req_visual_image_small_1",
+                session_id="sess_visual_image_small_1",
+                channel="desktop:desk_visual_image_small_1",
+                user_query="Tell me why Cursor benefits from Colossus. Include inline images.",
+                http_client=client,
+            )
+            _note_colossus_source(coordinator)
+
+            coordinator.consume_text(
+                (
+                    "Cursor benefits because Colossus removes its training bottleneck.\n\n"
+                    "[[visual_slot {\"id\":\"img_1\",\"kind\":\"image\",\"query\":\"Cursor compute bottleneck and Colossus training\","
+                    "\"caption\":\"Infrastructure that removes Cursor's compute bottleneck\"}]]\n\n"
+                    "That shifts Cursor from being compute-constrained to compute-rich."
+                )
+            )
+
+            final_payload = await coordinator.finalize()
+
+        image_block = next(
+            block for block in final_payload["response_blocks"] if block["type"] == "image_artifact"
+        )
+        assert image_block["provenance"]["source_image_url"] == "https://cdn.example.test/colossus-racks.png"
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

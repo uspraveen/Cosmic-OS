@@ -181,6 +181,39 @@ def _is_probably_text_art(candidate_url: str, filename: str, text: str) -> bool:
     return False
 
 
+def _dimension_quality_penalty(width: int | None, height: int | None) -> float:
+    if not width or not height:
+        return 0.0
+    pixels = width * height
+    min_dim = min(width, height)
+    penalty = 0.0
+    if pixels < 40_000:
+        penalty += 0.70
+    elif pixels < 120_000:
+        penalty += 0.40
+    elif pixels < 220_000:
+        penalty += 0.18
+    if min_dim < 100:
+        penalty += 0.30
+    elif min_dim < 180:
+        penalty += 0.14
+    if abs(width - height) <= max(width, height) * 0.08 and pixels < 180_000:
+        penalty += 0.10
+    return penalty
+
+
+def _is_low_information_image_size(width: int | None, height: int | None) -> bool:
+    if not width or not height:
+        return False
+    pixels = width * height
+    min_dim = min(width, height)
+    if pixels < 40_000:
+        return True
+    if min_dim < 100:
+        return True
+    return False
+
+
 def _guess_filename_from_url(url: str, *, default_prefix: str) -> str:
     parsed = urlparse(str(url or "").strip())
     raw_name = Path(parsed.path).name
@@ -845,6 +878,10 @@ class VisualEnrichmentCoordinator:
                     image_bytes, detected_mime, width, height = await self._download_image_bytes(
                         candidate.image_url
                     )
+                    if _is_low_information_image_size(width, height):
+                        raise ValueError(
+                            f"Downloaded image was too small to be useful ({width}x{height})."
+                        )
                 except Exception as exc:
                     last_attempt_error = exc
                     logger.warning(
@@ -981,7 +1018,18 @@ class VisualEnrichmentCoordinator:
         return candidates
 
     def _score_candidate(self, slot: VisualSlotDirective, candidate: ImageCandidate, corpus: str) -> float:
-        query_tokens = _tokenize(_safe_text(slot.query) or self.user_query)
+        query_tokens = _tokenize(
+            " ".join(
+                filter(
+                    None,
+                    [
+                        self.user_query,
+                        slot.query,
+                        _clip_text(slot.context_excerpt, limit=500),
+                    ],
+                )
+            )
+        )
         meta_tokens = _tokenize(
             " ".join(
                 filter(
@@ -1010,6 +1058,7 @@ class VisualEnrichmentCoordinator:
                 score += 0.1
         if candidate.alt_text and len(candidate.alt_text.split()) >= 3:
             score += 0.1
+        score -= _dimension_quality_penalty(candidate.width, candidate.height)
         if _is_probably_text_art(
             candidate.image_url,
             candidate.filename,
