@@ -831,6 +831,7 @@ class VisualEnrichmentCoordinator:
             query=query,
             caption=None,
             loading_label="Finding a relevant image",
+            timeout_ms=min(7000, max(250, int(self.config.visual_image_slot_timeout_ms))),
             source_urls=source_urls,
             context_excerpt=visible_text[-1200:].strip(),
         )
@@ -875,6 +876,13 @@ class VisualEnrichmentCoordinator:
                 break
             if self._apply_sidecar_update(update):
                 events.append(self._build_snapshot_event())
+
+        if self._active_sidecars:
+            logger.warning(
+                "visual_enrichment.finalization_timeout active_slots=%s timeout_sec=%.3f",
+                sorted(self._active_sidecars.keys()),
+                self._finalization_wait_timeout_sec(),
+            )
 
         for task in list(self._active_sidecars.values()):
             task.cancel()

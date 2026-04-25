@@ -129,7 +129,7 @@ class OrchestratorConfig:
     visual_max_image_slots_per_turn: int = 1
     visual_max_chart_slots_per_turn: int = 1
     visual_max_concurrent_sidecars: int = 2
-    visual_image_slot_timeout_ms: int = 3500
+    visual_image_slot_timeout_ms: int = 30000
     visual_chart_slot_timeout_ms: int = 4000
     visual_finalization_grace_ms: int = 750
     visual_image_source_page_limit: int = 3
@@ -223,7 +223,7 @@ class OrchestratorConfig:
             visual_max_image_slots_per_turn=max(0, _env_int("VISUAL_ENHANCEMENT_MAX_IMAGE_SLOTS_PER_TURN", 1)),
             visual_max_chart_slots_per_turn=max(0, _env_int("VISUAL_ENHANCEMENT_MAX_CHART_SLOTS_PER_TURN", 1)),
             visual_max_concurrent_sidecars=max(1, _env_int("VISUAL_ENHANCEMENT_MAX_CONCURRENT_SIDECARS", 2)),
-            visual_image_slot_timeout_ms=max(250, _env_int("VISUAL_ENHANCEMENT_IMAGE_SLOT_TIMEOUT_MS", 3500)),
+            visual_image_slot_timeout_ms=max(250, _env_int("VISUAL_ENHANCEMENT_IMAGE_SLOT_TIMEOUT_MS", 30000)),
             visual_chart_slot_timeout_ms=max(250, _env_int("VISUAL_ENHANCEMENT_CHART_SLOT_TIMEOUT_MS", 4000)),
             visual_finalization_grace_ms=max(0, _env_int("VISUAL_ENHANCEMENT_FINALIZATION_GRACE_MS", 750)),
             visual_image_source_page_limit=max(1, _env_int("VISUAL_ENHANCEMENT_IMAGE_SOURCE_PAGE_LIMIT", 3)),

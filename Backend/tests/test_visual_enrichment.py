@@ -833,6 +833,11 @@ def test_visual_enrichment_final_blocks_keep_failed_explicit_image_slot_without_
     assert cleaned == blocks
 
 
+def test_visual_enrichment_default_image_timeout_allows_real_image_retrieval_budget(
+) -> None:
+    assert OrchestratorConfig().visual_image_slot_timeout_ms == 30000
+
+
 @pytest.mark.asyncio
 async def test_visual_enrichment_non_explicit_image_request_keeps_strict_threshold(
 ) -> None:
