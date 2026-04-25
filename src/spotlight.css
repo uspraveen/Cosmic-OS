@@ -2260,6 +2260,22 @@ kbd {
   animation: assistantVisualSlotShimmer 2.8s linear infinite;
 }
 
+.assistant-inline-visual-slot.is-failed {
+  gap: 0;
+  padding: 14px 16px;
+  border-color: rgba(255, 255, 255, 0.08);
+  background:
+    radial-gradient(circle at top left, rgba(255, 255, 255, 0.06), transparent 44%),
+    linear-gradient(180deg, rgba(15, 17, 24, 0.94), rgba(8, 10, 15, 0.94));
+  box-shadow:
+    0 16px 42px rgba(0, 0, 0, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.assistant-inline-visual-slot.is-failed::before {
+  content: none;
+}
+
 .assistant-inline-visual-slot-shell,
 .assistant-inline-visual-slot-copy {
   position: relative;

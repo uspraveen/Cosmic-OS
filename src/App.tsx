@@ -1583,26 +1583,35 @@ const AssistantResponseBlocks = ({
           )
         }
         if (block.type === 'image_slot' || block.type === 'chart_slot') {
-          const slotLabel = block.loadingLabel || (block.type === 'chart_slot' ? 'Generating a chart' : 'Finding a relevant image')
+          const slotStatus = typeof block.status === 'string' ? block.status.toLowerCase() : ''
+          const slotFailed = slotStatus === 'failed'
+          const slotLabel = slotFailed
+            ? (block.type === 'chart_slot' ? 'Inline chart unavailable' : 'Inline image unavailable')
+            : block.loadingLabel || (block.type === 'chart_slot' ? 'Generating a chart' : 'Finding a relevant image')
           return (
             <div
               key={block.id}
               className={[
                 'assistant-inline-visual-slot',
                 block.type === 'chart_slot' ? 'is-chart' : 'is-image',
+                slotFailed ? 'is-failed' : '',
               ].join(' ')}
             >
-              <div className="assistant-inline-visual-slot-shell" aria-hidden="true">
-                <div className="assistant-inline-visual-slot-band" />
-                <div className="assistant-inline-visual-slot-band short" />
-              </div>
+              {!slotFailed && (
+                <div className="assistant-inline-visual-slot-shell" aria-hidden="true">
+                  <div className="assistant-inline-visual-slot-band" />
+                  <div className="assistant-inline-visual-slot-band short" />
+                </div>
+              )}
               <div className="assistant-inline-visual-slot-copy">
                 <div className="assistant-inline-visual-slot-badge">
                   {block.type === 'chart_slot' ? 'INLINE CHART' : 'INLINE IMAGE'}
                 </div>
                 <div className="assistant-inline-visual-slot-label">{slotLabel}</div>
                 <div className="assistant-inline-visual-slot-subtle">
-                  Cosmic is preparing this visual without stopping the response.
+                  {slotFailed
+                    ? 'Cosmic could not attach a reliable visual for this response.'
+                    : 'Cosmic is preparing this visual without stopping the response.'}
                 </div>
               </div>
             </div>

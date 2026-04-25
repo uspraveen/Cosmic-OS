@@ -896,6 +896,7 @@ class VisualEnrichmentCoordinator:
         )
         if deliverable_blocks:
             final_blocks.extend(deliverable_blocks)
+        final_blocks = self._clean_final_visual_blocks(final_blocks)
 
         return {
             "events": events,
@@ -903,6 +904,32 @@ class VisualEnrichmentCoordinator:
             "response_blocks": final_blocks,
             "supporting_artifacts": copy.deepcopy(self._supporting_artifacts),
         }
+
+    @staticmethod
+    def _clean_final_visual_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Remove stale automatic visual placeholders from completed responses."""
+        has_image_artifact = any(
+            str(block.get("type")) == "image_artifact"
+            for block in blocks
+            if isinstance(block, dict)
+        )
+        if not has_image_artifact:
+            return blocks
+        cleaned: list[dict[str, Any]] = []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            block_type = str(block.get("type"))
+            block_id = _safe_text(block.get("id"))
+            status = _safe_text(block.get("status")).lower()
+            if (
+                block_type == "image_slot"
+                and block_id.startswith("img_auto_")
+                and status == "failed"
+            ):
+                continue
+            cleaned.append(block)
+        return cleaned
 
     def _register_slots(self, slots: list[VisualSlotDirective]) -> bool:
         dirty = False

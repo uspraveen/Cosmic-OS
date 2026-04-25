@@ -792,6 +792,47 @@ async def test_visual_enrichment_explicit_image_request_uses_relaxed_trusted_fal
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_visual_enrichment_final_blocks_drop_failed_auto_image_slot_when_visual_artifacts_exist(
+) -> None:
+    blocks = [
+        {"id": "markdown_1", "type": "markdown", "text": "Here is the analysis."},
+        {
+            "id": "img_auto_abc123",
+            "type": "image_slot",
+            "status": "failed",
+            "loading_label": "This inline image took too long to finish.",
+        },
+        {
+            "id": "artifact_1",
+            "type": "image_artifact",
+            "artifact_id": "anthropic_file_1",
+            "filename": "chart.png",
+            "mime_type": "image/png",
+        },
+    ]
+
+    cleaned = VisualEnrichmentCoordinator._clean_final_visual_blocks(blocks)
+
+    assert [block["id"] for block in cleaned] == ["markdown_1", "artifact_1"]
+
+
+def test_visual_enrichment_final_blocks_keep_failed_explicit_image_slot_without_artifact(
+) -> None:
+    blocks = [
+        {"id": "markdown_1", "type": "markdown", "text": "Here is the analysis."},
+        {
+            "id": "img_1",
+            "type": "image_slot",
+            "status": "failed",
+            "loading_label": "No reliable inline image was found.",
+        },
+    ]
+
+    cleaned = VisualEnrichmentCoordinator._clean_final_visual_blocks(blocks)
+
+    assert cleaned == blocks
+
+
 @pytest.mark.asyncio
 async def test_visual_enrichment_non_explicit_image_request_keeps_strict_threshold(
 ) -> None:
