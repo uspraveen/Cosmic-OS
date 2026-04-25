@@ -125,17 +125,17 @@ class OrchestratorConfig:
     gateway_url: str = "http://127.0.0.1:8080"
     max_tool_iterations: int = 25
     visual_enhancement_enabled: bool = True
-    visual_max_visuals_per_turn: int = 2
-    visual_max_image_slots_per_turn: int = 1
+    visual_max_visuals_per_turn: int = 5
+    visual_max_image_slots_per_turn: int = 5
     visual_max_chart_slots_per_turn: int = 1
     visual_max_concurrent_sidecars: int = 2
     visual_image_slot_timeout_ms: int = 30000
     visual_chart_slot_timeout_ms: int = 4000
     visual_finalization_grace_ms: int = 750
     visual_image_source_page_limit: int = 3
-    visual_image_candidate_limit: int = 12
+    visual_image_candidate_limit: int = 24
     visual_image_max_bytes: int = 8 * 1024 * 1024
-    visual_image_verify_top_k: int = 1
+    visual_image_verify_top_k: int = 3
     visual_image_min_confidence: float = 0.58
     visual_chart_max_points: int = 200
     visual_chart_max_bytes: int = 4 * 1024 * 1024
@@ -146,7 +146,7 @@ class OrchestratorConfig:
     visual_image_search_enabled: bool = True
     visual_image_search_base_url: str = "https://www.bing.com/images/search"
     visual_image_search_timeout_sec: float = 12.0
-    visual_image_search_result_limit: int = 8
+    visual_image_search_result_limit: int = 12
     visual_fireworks_api_key: str = ""
     visual_fireworks_base_url: str = "https://api.fireworks.ai/inference/v1"
     visual_fireworks_model: str = "accounts/fireworks/models/kimi-k2p6"
@@ -219,17 +219,17 @@ class OrchestratorConfig:
             gateway_url=os.getenv("GATEWAY_URL", "http://127.0.0.1:8080").strip(),
             max_tool_iterations=max(1, _env_int("ORCHESTRATOR_MAX_TOOL_ITERATIONS", 25)),
             visual_enhancement_enabled=_env_bool("VISUAL_ENHANCEMENT_ENABLED", True),
-            visual_max_visuals_per_turn=max(0, _env_int("VISUAL_ENHANCEMENT_MAX_VISUALS_PER_TURN", 2)),
-            visual_max_image_slots_per_turn=max(0, _env_int("VISUAL_ENHANCEMENT_MAX_IMAGE_SLOTS_PER_TURN", 1)),
+            visual_max_visuals_per_turn=max(0, _env_int("VISUAL_ENHANCEMENT_MAX_VISUALS_PER_TURN", 5)),
+            visual_max_image_slots_per_turn=max(0, _env_int("VISUAL_ENHANCEMENT_MAX_IMAGE_SLOTS_PER_TURN", 5)),
             visual_max_chart_slots_per_turn=max(0, _env_int("VISUAL_ENHANCEMENT_MAX_CHART_SLOTS_PER_TURN", 1)),
             visual_max_concurrent_sidecars=max(1, _env_int("VISUAL_ENHANCEMENT_MAX_CONCURRENT_SIDECARS", 2)),
             visual_image_slot_timeout_ms=max(250, _env_int("VISUAL_ENHANCEMENT_IMAGE_SLOT_TIMEOUT_MS", 30000)),
             visual_chart_slot_timeout_ms=max(250, _env_int("VISUAL_ENHANCEMENT_CHART_SLOT_TIMEOUT_MS", 4000)),
             visual_finalization_grace_ms=max(0, _env_int("VISUAL_ENHANCEMENT_FINALIZATION_GRACE_MS", 750)),
             visual_image_source_page_limit=max(1, _env_int("VISUAL_ENHANCEMENT_IMAGE_SOURCE_PAGE_LIMIT", 3)),
-            visual_image_candidate_limit=max(1, _env_int("VISUAL_ENHANCEMENT_IMAGE_CANDIDATE_LIMIT", 12)),
+            visual_image_candidate_limit=max(1, _env_int("VISUAL_ENHANCEMENT_IMAGE_CANDIDATE_LIMIT", 24)),
             visual_image_max_bytes=max(1024, _env_int("VISUAL_ENHANCEMENT_IMAGE_MAX_BYTES", 8 * 1024 * 1024)),
-            visual_image_verify_top_k=max(1, _env_int("VISUAL_ENHANCEMENT_IMAGE_VERIFY_TOP_K", 1)),
+            visual_image_verify_top_k=max(1, _env_int("VISUAL_ENHANCEMENT_IMAGE_VERIFY_TOP_K", 3)),
             visual_image_min_confidence=max(
                 0.0,
                 min(1.0, _env_float("VISUAL_ENHANCEMENT_IMAGE_MIN_CONFIDENCE", 0.58)),
@@ -267,7 +267,7 @@ class OrchestratorConfig:
             ),
             visual_image_search_result_limit=max(
                 1,
-                _env_int("VISUAL_ENHANCEMENT_IMAGE_SEARCH_RESULT_LIMIT", 8),
+                _env_int("VISUAL_ENHANCEMENT_IMAGE_SEARCH_RESULT_LIMIT", 12),
             ),
             visual_fireworks_api_key=(
                 os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY")

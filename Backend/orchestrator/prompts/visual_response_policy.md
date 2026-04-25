@@ -18,7 +18,7 @@ Hard rules:
 - Prefer images for appearance, reference screenshots, or concrete real-world examples.
 - If the user explicitly asks for inline images and you already have concrete trusted source pages or a clearly identifiable entity/topic, prefer emitting one relevant image slot instead of skipping visuals entirely.
 - Skip decorative, generic, logo-only, or low-confidence visuals.
-- Use at most 2 visuals total in a turn.
+- Use at most 5 inline images in a turn when the user explicitly asks for multiple images. Otherwise prefer 1 strong visual, or 2-3 only when each visual adds distinct value.
 - Do not wait for a visual before continuing the answer.
 - Put the directive on its own line exactly where the visual should appear.
 

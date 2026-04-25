@@ -426,6 +426,32 @@ def _build_auto_slot_query_transport() -> httpx.MockTransport:
     return httpx.MockTransport(handler)
 
 
+def _build_mha_direct_image_search_transport() -> httpx.MockTransport:
+    image_bytes = _solid_png_bytes(1600, 900)
+    useful_image_url = "https://cdn.example.test/yoichi-one-for-all.jpg"
+    bing_html = f"""
+    <html><body>
+      <a class="iusc" m='{{&quot;murl&quot;:&quot;{useful_image_url}&quot;,&quot;purl&quot;:&quot;https://example.com/mha-ofa&quot;,&quot;t&quot;:&quot;My Hero Academia Yoichi Shigaraki One For All first user&quot;,&quot;desc&quot;:&quot;Reference image for Yoichi, the first One For All wielder&quot;,&quot;imgw&quot;:1600,&quot;imgh&quot;:900}}'></a>
+    </body></html>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/images/search":
+            query = (request.url.params.get("q") or "").lower()
+            if "my hero academia" in query and "one for all" in query:
+                return httpx.Response(200, text=bing_html, headers={"Content-Type": "text/html"})
+            return httpx.Response(200, text="<html><body></body></html>")
+        if request.method == "GET" and str(request.url) == useful_image_url:
+            return httpx.Response(
+                200,
+                content=image_bytes,
+                headers={"Content-Type": "image/jpeg"},
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url!s}")
+
+    return httpx.MockTransport(handler)
+
+
 def _note_three_generic_sources(coordinator: VisualEnrichmentCoordinator) -> None:
     coordinator.note_sources(
         [
@@ -835,7 +861,13 @@ def test_visual_enrichment_final_blocks_keep_failed_explicit_image_slot_without_
 
 def test_visual_enrichment_default_image_timeout_allows_real_image_retrieval_budget(
 ) -> None:
-    assert OrchestratorConfig().visual_image_slot_timeout_ms == 30000
+    config = OrchestratorConfig()
+    assert config.visual_max_visuals_per_turn == 5
+    assert config.visual_max_image_slots_per_turn == 5
+    assert config.visual_image_candidate_limit == 24
+    assert config.visual_image_verify_top_k == 3
+    assert config.visual_image_search_result_limit == 12
+    assert config.visual_image_slot_timeout_ms == 30000
 
 
 @pytest.mark.asyncio
@@ -1304,6 +1336,58 @@ async def test_visual_enrichment_uses_source_title_queries_for_vague_image_reque
         )
         assert image_block["provenance"]["source_image_url"] == "https://cdn.example.test/vijay-bus-complaint.jpg"
         assert "direct image-search results" in image_block["provenance"]["selection_reason"]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_visual_enrichment_direct_search_expands_mha_and_ofa_aliases() -> None:
+    root = _make_test_dir("visual-image-mha-alias-")
+    try:
+        config = OrchestratorConfig(
+            artifacts_root=root / "artifacts",
+            internal_token="internal-token",
+            signing_secret="signing-secret",
+            anthropic_api_key="anthropic-key",
+            anthropic_model="claude-opus-4-6",
+            task_ledger_db_path=root / "task_ledger.db",
+            visual_enhancement_enabled=True,
+            visual_finalization_grace_ms=1200,
+            visual_max_concurrent_sidecars=1,
+            visual_max_image_slots_per_turn=5,
+            visual_firecrawl_api_key="",
+            visual_image_search_enabled=True,
+            visual_image_search_base_url="https://www.bing.com/images/search",
+        )
+        transport = _build_mha_direct_image_search_transport()
+
+        async with httpx.AsyncClient(transport=transport) as client:
+            coordinator = VisualEnrichmentCoordinator(
+                config=config,
+                task_id="tsk_visual_image_mha_alias_1",
+                request_id="req_visual_image_mha_alias_1",
+                session_id="sess_visual_image_mha_alias_1",
+                channel="desktop:desk_visual_image_mha_alias_1",
+                user_query="MHA OFA wielders. Include inline images.",
+                http_client=client,
+            )
+
+            coordinator.consume_text(
+                (
+                    "Here are the One For All wielders.\n\n"
+                    "[[visual_slot {\"id\":\"img_yoichi\",\"kind\":\"image\",\"query\":\"MHA OFA Yoichi first user image\","
+                    "\"caption\":\"Yoichi, the first One For All wielder\"}]]\n\n"
+                    "Yoichi is the origin point of the power transfer lineage."
+                )
+            )
+
+            final_payload = await coordinator.finalize()
+
+        image_block = next(
+            block for block in final_payload["response_blocks"] if block["type"] == "image_artifact"
+        )
+        assert image_block["id"] == "img_yoichi"
+        assert image_block["provenance"]["source_image_url"] == "https://cdn.example.test/yoichi-one-for-all.jpg"
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

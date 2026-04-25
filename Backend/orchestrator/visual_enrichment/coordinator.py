@@ -66,6 +66,10 @@ _GENERIC_VISUAL_QUERY_TOKENS = {
     "controversy",
     "deal",
     "details",
+    "image",
+    "images",
+    "include",
+    "inline",
     "explain",
     "issue",
     "more",
@@ -127,7 +131,10 @@ def _clip_text(value: Any, *, limit: int = 800) -> str:
 
 
 def _tokenize(value: Any) -> set[str]:
-    return {match.group(0).lower() for match in _WORD_RE.finditer(str(value or "").lower())}
+    text = str(value or "").lower()
+    text = re.sub(r"\bmha\b", "my hero academia", text)
+    text = re.sub(r"\bofa\b", "one for all", text)
+    return {match.group(0).lower() for match in _WORD_RE.finditer(text)}
 
 
 def _text_explicitly_requests_image(value: Any) -> bool:
@@ -141,6 +148,8 @@ def _normalize_image_search_query(value: Any, *, max_words: int = 18) -> str:
     text = _safe_text(value)
     if not text:
         return ""
+    text = re.sub(r"\bmha\b", "My Hero Academia", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bofa\b", "One For All", text, flags=re.IGNORECASE)
     for pattern in _IMAGE_QUERY_NOISE_PATTERNS:
         text = pattern.sub(" ", text)
     text = re.sub(r"\s+", " ", text)
@@ -964,7 +973,9 @@ class VisualEnrichmentCoordinator:
             self._start_chart_sidecar(slot)
             return
         candidate_sources = self._candidate_source_infos(slot)
-        if candidate_sources:
+        if candidate_sources or (
+            self._image_search.available and bool(self._build_image_search_queries(slot))
+        ):
             self._start_image_sidecar(slot)
             return
         self._waiting_for_sources.add(slot.id)
@@ -992,7 +1003,14 @@ class VisualEnrichmentCoordinator:
             slot = self._slots.get(slot_id)
             if slot is None:
                 continue
-            if slot.kind == "image" and not self._candidate_source_infos(slot):
+            if (
+                slot.kind == "image"
+                and not self._candidate_source_infos(slot)
+                and not (
+                    self._image_search.available
+                    and bool(self._build_image_search_queries(slot))
+                )
+            ):
                 self._waiting_for_sources.add(slot.id)
                 continue
             if slot.kind == "chart":
@@ -1095,12 +1113,12 @@ class VisualEnrichmentCoordinator:
                     enriched_verdict = dict(verdict)
                     enriched_verdict["confidence"] = confidence
                     add_attempt(candidate, enriched_verdict)
-                elif verdict:
+                elif verdict and not explicit_image_request:
                     verifier_rejected_urls.add(candidate.image_url)
 
         relaxed_fallback_logged = False
         for candidate in ranked:
-            if candidate.image_url in verifier_rejected_urls:
+            if candidate.image_url in verifier_rejected_urls and not explicit_image_request:
                 continue
             if candidate.score >= self.config.visual_image_min_confidence:
                 add_attempt(
@@ -1138,6 +1156,32 @@ class VisualEnrichmentCoordinator:
                         "caption": slot.caption or "",
                     },
                 )
+        if explicit_image_request and not attempt_candidates:
+            for candidate in ranked:
+                if candidate.image_url in planned_urls:
+                    continue
+                if not self._should_allow_explicit_request_fallback(slot, candidate):
+                    continue
+                logger.info(
+                    "visual_enrichment.image_confidence_retry slot_id=%s score=%.3f source=%s kind=%s",
+                    slot.id,
+                    candidate.score,
+                    candidate.source_url,
+                    candidate.retrieval_kind,
+                )
+                add_attempt(
+                    candidate,
+                    {
+                        "confidence": candidate.score,
+                        "selection_reason": self._selection_reason_for_candidate(
+                            candidate=candidate,
+                            explicit_fallback=True,
+                        ),
+                        "alt_text": candidate.alt_text,
+                        "caption": slot.caption or "",
+                    },
+                )
+                break
         return attempt_candidates
 
     def _should_use_image_search_fallback(
@@ -1233,8 +1277,24 @@ class VisualEnrichmentCoordinator:
         seen_urls: set[str] = set()
         logger.info("visual_enrichment.image_search_queries slot_id=%s queries=%s", slot.id, queries)
 
-        for query_index, query in enumerate(queries, start=1):
-            raw_results = await self._image_search.search_images(query)
+        async def run_query(query_index: int, query: str) -> tuple[int, str, list[dict[str, Any]]]:
+            try:
+                raw_results = await self._image_search.search_images(query)
+            except Exception as exc:
+                logger.warning(
+                    "visual_enrichment.image_search_query_failed slot_id=%s query=%s error=%s",
+                    slot.id,
+                    query,
+                    exc,
+                )
+                return query_index, query, []
+            return query_index, query, raw_results
+
+        query_results = await asyncio.gather(
+            *(run_query(query_index, query) for query_index, query in enumerate(queries, start=1))
+        )
+
+        for query_index, _query, raw_results in query_results:
             for index, item in enumerate(raw_results, start=1):
                 if not isinstance(item, dict):
                     continue
@@ -1286,6 +1346,69 @@ class VisualEnrichmentCoordinator:
                 if candidate.score <= 0:
                     continue
                 candidates.append(candidate)
+        logger.info(
+            "visual_enrichment.image_search_candidates slot_id=%s count=%s",
+            slot.id,
+            len(candidates),
+        )
+        return candidates
+
+    async def _collect_trusted_image_candidates(
+        self,
+        *,
+        slot: VisualSlotDirective,
+        source_infos: list[dict[str, str]],
+    ) -> list[ImageCandidate]:
+        if not self._firecrawl.available or not source_infos:
+            return []
+
+        async def scrape_source(source_rank: int, source: dict[str, str]) -> list[ImageCandidate]:
+            try:
+                scraped = await self._firecrawl.scrape_images(source["url"])
+            except Exception as exc:
+                logger.warning(
+                    "visual_enrichment.firecrawl_source_failed slot_id=%s source=%s error=%s",
+                    slot.id,
+                    source.get("url"),
+                    exc,
+                )
+                return []
+            source_title = (
+                _safe_text(scraped.get("metadata", {}).get("title"))
+                if isinstance(scraped.get("metadata"), dict)
+                else ""
+            )
+            return self._extract_candidates_from_scrape(
+                slot=slot,
+                source_url=source["url"],
+                source_title=source_title or _safe_text(source.get("title")),
+                source_domain=_safe_text(source.get("domain")) or _safe_text(urlparse(source["url"]).netloc),
+                source_rank=source_rank,
+                raw_images=scraped.get("images"),
+            )
+
+        results = await asyncio.gather(
+            *(
+                scrape_source(source_rank, source)
+                for source_rank, source in enumerate(
+                    source_infos[: self.config.visual_image_source_page_limit],
+                    start=1,
+                )
+            )
+        )
+        candidates: list[ImageCandidate] = []
+        seen_urls: set[str] = set()
+        for source_candidates in results:
+            for candidate in source_candidates:
+                if candidate.image_url in seen_urls:
+                    continue
+                seen_urls.add(candidate.image_url)
+                candidates.append(candidate)
+        logger.info(
+            "visual_enrichment.trusted_image_candidates slot_id=%s count=%s",
+            slot.id,
+            len(candidates),
+        )
         return candidates
 
     async def _run_chart_sidecar(self, slot: VisualSlotDirective) -> None:
@@ -1350,37 +1473,41 @@ class VisualEnrichmentCoordinator:
             if not source_infos and not image_search_allowed:
                 raise ValueError("No trusted source URLs were available for this image slot.")
 
+            explicit_image_request = self._slot_explicitly_requests_image(slot)
             trusted_candidates: list[ImageCandidate] = []
-            seen_urls: set[str] = set()
-            if self._firecrawl.available:
-                for source_rank, source in enumerate(source_infos[: self.config.visual_image_source_page_limit], start=1):
-                    scraped = await self._firecrawl.scrape_images(source["url"])
-                    source_title = _safe_text(scraped.get("metadata", {}).get("title")) if isinstance(scraped.get("metadata"), dict) else ""
-                    for candidate in self._extract_candidates_from_scrape(
-                        slot=slot,
-                        source_url=source["url"],
-                        source_title=source_title or _safe_text(source.get("title")),
-                        source_domain=_safe_text(source.get("domain")) or _safe_text(urlparse(source["url"]).netloc),
-                        source_rank=source_rank,
-                        raw_images=scraped.get("images"),
-                    ):
-                        if candidate.image_url in seen_urls:
-                            continue
-                        seen_urls.add(candidate.image_url)
-                        trusted_candidates.append(candidate)
-
             search_candidates: list[ImageCandidate] = []
-            if self._should_use_image_search_fallback(slot, trusted_candidates):
-                try:
-                    search_candidates = await self._search_image_candidates(slot)
-                except Exception as exc:
-                    logger.warning("visual_enrichment.image_search_failed slot_id=%s error=%s", slot.id, exc)
 
+            if explicit_image_request and image_search_allowed:
+                trusted_result, search_result = await asyncio.gather(
+                    self._collect_trusted_image_candidates(slot=slot, source_infos=source_infos),
+                    self._search_image_candidates(slot),
+                    return_exceptions=True,
+                )
+                if isinstance(trusted_result, Exception):
+                    logger.warning("visual_enrichment.trusted_image_collection_failed slot_id=%s error=%s", slot.id, trusted_result)
+                else:
+                    trusted_candidates = trusted_result
+                if isinstance(search_result, Exception):
+                    logger.warning("visual_enrichment.image_search_failed slot_id=%s error=%s", slot.id, search_result)
+                else:
+                    search_candidates = search_result
+            else:
+                trusted_candidates = await self._collect_trusted_image_candidates(
+                    slot=slot,
+                    source_infos=source_infos,
+                )
+                if self._should_use_image_search_fallback(slot, trusted_candidates):
+                    try:
+                        search_candidates = await self._search_image_candidates(slot)
+                    except Exception as exc:
+                        logger.warning("visual_enrichment.image_search_failed slot_id=%s error=%s", slot.id, exc)
+
+            trusted_urls = {item.image_url for item in trusted_candidates}
             all_candidates = list(trusted_candidates)
             all_candidates.extend(
                 candidate
                 for candidate in search_candidates
-                if candidate.image_url not in seen_urls
+                if candidate.image_url not in trusted_urls
             )
 
             if not all_candidates:
@@ -1680,7 +1807,9 @@ class VisualEnrichmentCoordinator:
             return False
         if _is_probably_cross_promo(candidate.image_url, candidate.filename, corpus):
             return False
-        relaxed_floor = max(0.50, self.config.visual_image_min_confidence - 0.08)
+        relaxed_floor = max(0.28, self.config.visual_image_min_confidence - 0.25)
+        if candidate.retrieval_kind == "image_search":
+            relaxed_floor = max(0.24, relaxed_floor - 0.05)
         return candidate.score >= relaxed_floor
 
     async def _download_image_bytes(
