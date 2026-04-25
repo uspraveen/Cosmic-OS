@@ -7,9 +7,9 @@ from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont
 
 _OUTPUT_WIDTH = 1600
 _OUTPUT_HEIGHT = 900
-_RENDER_SCALE = 2
+_RENDER_SCALE = 1
 _LANCZOS = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
-_SERIES_PALETTE = ("#2f80ff", "#39e7a7", "#eef3ff", "#8f9bb0")
+_SERIES_PALETTE = ("#0A84FF", "#30D158", "#E8EDF7", "#BF5AF2", "#FF9F0A")
 
 
 def normalize_chart_spec(spec: dict[str, Any], *, max_points: int) -> dict[str, Any]:
@@ -114,6 +114,12 @@ def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) 
     return right - left, bottom - top
 
 
+def _blur_overlay(overlay: Image.Image, blur_radius: int) -> Image.Image:
+    if blur_radius <= 0:
+        return overlay
+    return overlay.filter(ImageFilter.GaussianBlur(blur_radius))
+
+
 def _add_glow(
     image: Image.Image,
     *,
@@ -126,8 +132,40 @@ def _add_glow(
     draw = ImageDraw.Draw(overlay, "RGBA")
     rgba = ImageColor.getrgb(color) + (alpha,)
     draw.ellipse(bounds, fill=rgba)
-    softened = overlay.filter(ImageFilter.GaussianBlur(blur_radius))
+    softened = _blur_overlay(overlay, blur_radius)
     return Image.alpha_composite(image, softened)
+
+
+def _add_vertical_gradient(
+    image: Image.Image,
+    *,
+    top_color: str,
+    bottom_color: str,
+    alpha: int,
+) -> Image.Image:
+    width, height = image.size
+    top = ImageColor.getrgb(top_color)
+    bottom = ImageColor.getrgb(bottom_color)
+    gradient = Image.new("RGBA", image.size)
+    draw = ImageDraw.Draw(gradient, "RGBA")
+    for y in range(height):
+        ratio = y / max(height - 1, 1)
+        row = tuple(int(top[channel] + ((bottom[channel] - top[channel]) * ratio)) for channel in range(3))
+        draw.line((0, y, width, y), fill=row + (alpha,))
+    return Image.alpha_composite(image, gradient)
+
+
+def _draw_glass_band(
+    image: Image.Image,
+    *,
+    points: list[tuple[int, int]],
+    fill: tuple[int, int, int, int],
+    blur_radius: int,
+) -> Image.Image:
+    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay, "RGBA")
+    draw.polygon(points, fill=fill)
+    return Image.alpha_composite(image, overlay)
 
 
 def _draw_chip(
@@ -187,12 +225,63 @@ def _draw_panel(
     outline: tuple[int, int, int, int],
     highlight_alpha: int,
 ) -> Image.Image:
+    shadow = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    shadow_draw = ImageDraw.Draw(shadow, "RGBA")
+    shadow_offset = max(10, radius // 2)
+    shadow_bounds = (
+        bounds[0],
+        bounds[1] + shadow_offset,
+        bounds[2],
+        bounds[3] + shadow_offset,
+    )
+    shadow_draw.rounded_rectangle(shadow_bounds, radius=radius, fill=(0, 0, 0, 58))
+    image = Image.alpha_composite(image, shadow)
+
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay, "RGBA")
     draw.rounded_rectangle(bounds, radius=radius, fill=fill, outline=outline, width=max(1, radius // 14))
-    top_strip = (bounds[0], bounds[1], bounds[2], bounds[1] + max(10, radius // 2))
-    draw.rounded_rectangle(top_strip, radius=radius, fill=(255, 255, 255, highlight_alpha))
-    overlay = overlay.filter(ImageFilter.GaussianBlur(max(1, radius // 8)))
+    top_strip = (bounds[0] + radius // 3, bounds[1] + radius // 3, bounds[2] - radius // 3, bounds[1] + radius)
+    draw.rounded_rectangle(top_strip, radius=radius // 2, fill=(255, 255, 255, highlight_alpha))
+    draw.arc(
+        (bounds[0] + radius // 3, bounds[1] + radius // 4, bounds[2] - radius // 3, bounds[3] - radius // 4),
+        start=205,
+        end=335,
+        fill=(255, 255, 255, max(12, highlight_alpha)),
+        width=max(1, radius // 18),
+    )
+    return Image.alpha_composite(image, overlay)
+
+
+def _draw_gradient_rounded_rect(
+    image: Image.Image,
+    *,
+    bounds: tuple[int, int, int, int],
+    radius: int,
+    top_color: str,
+    bottom_color: str,
+    alpha: int,
+    outline: tuple[int, int, int, int] | None = None,
+    width: int = 1,
+) -> Image.Image:
+    left, top, right, bottom = bounds
+    rect_width = max(1, right - left)
+    rect_height = max(1, bottom - top)
+    top_rgb = ImageColor.getrgb(top_color)
+    bottom_rgb = ImageColor.getrgb(bottom_color)
+    gradient = Image.new("RGBA", (rect_width, rect_height), (0, 0, 0, 0))
+    gradient_draw = ImageDraw.Draw(gradient, "RGBA")
+    for y in range(rect_height):
+        ratio = y / max(rect_height - 1, 1)
+        color = tuple(int(top_rgb[channel] + ((bottom_rgb[channel] - top_rgb[channel]) * ratio)) for channel in range(3))
+        gradient_draw.line((0, y, rect_width, y), fill=color + (alpha,))
+    mask = Image.new("L", (rect_width, rect_height), 0)
+    mask_draw = ImageDraw.Draw(mask)
+    mask_draw.rounded_rectangle((0, 0, rect_width - 1, rect_height - 1), radius=radius, fill=255)
+    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    overlay.paste(gradient, (left, top), mask)
+    if outline:
+        outline_draw = ImageDraw.Draw(overlay, "RGBA")
+        outline_draw.rounded_rectangle(bounds, radius=radius, outline=outline, width=max(1, width))
     return Image.alpha_composite(image, overlay)
 
 
@@ -212,16 +301,16 @@ def _draw_callout(
     bubble_y = int(anchor_y - bubble_height - (22 * scale))
     draw.rounded_rectangle(
         (bubble_x, bubble_y, bubble_x + bubble_width, bubble_y + bubble_height),
-        radius=14 * scale,
-        fill=(246, 248, 255, 244),
-        outline=(255, 255, 255, 60),
+        radius=16 * scale,
+        fill=(238, 244, 255, 238),
+        outline=(255, 255, 255, 84),
         width=max(1, scale),
     )
     draw.text(
         (bubble_x + (bubble_width - text_width) // 2, bubble_y + (bubble_height - text_height) // 2 - (1 * scale)),
         text,
         font=font,
-        fill="#10141d",
+        fill="#070A10",
     )
     draw.line(
         (
@@ -236,36 +325,63 @@ def _draw_callout(
 
 
 def _build_background(width: int, height: int, scale: int) -> Image.Image:
-    image = Image.new("RGBA", (width, height), ImageColor.getrgb("#05070c"))
-    image = _add_glow(
+    image = Image.new("RGBA", (width, height), ImageColor.getrgb("#03050a"))
+    image = _add_vertical_gradient(
         image,
-        bounds=(-int(width * 0.14), -int(height * 0.1), int(width * 0.42), int(height * 0.48)),
-        color="#245cff",
-        alpha=76,
-        blur_radius=180 * scale,
+        top_color="#121722",
+        bottom_color="#04060b",
+        alpha=225,
     )
     image = _add_glow(
         image,
-        bounds=(int(width * 0.52), -int(height * 0.06), int(width * 1.08), int(height * 0.44)),
-        color="#1b6fff",
-        alpha=62,
-        blur_radius=190 * scale,
+        bounds=(-int(width * 0.18), -int(height * 0.16), int(width * 0.48), int(height * 0.5)),
+        color="#0A84FF",
+        alpha=88,
+        blur_radius=210 * scale,
     )
     image = _add_glow(
         image,
-        bounds=(int(width * 0.24), int(height * 0.5), int(width * 0.82), int(height * 1.04)),
-        color="#1fc58b",
-        alpha=42,
-        blur_radius=160 * scale,
+        bounds=(int(width * 0.52), -int(height * 0.14), int(width * 1.1), int(height * 0.5)),
+        color="#30D158",
+        alpha=52,
+        blur_radius=230 * scale,
+    )
+    image = _add_glow(
+        image,
+        bounds=(int(width * 0.26), int(height * 0.46), int(width * 0.86), int(height * 1.08)),
+        color="#BF5AF2",
+        alpha=38,
+        blur_radius=210 * scale,
+    )
+    image = _draw_glass_band(
+        image,
+        points=[
+            (int(width * -0.1), int(height * 0.18)),
+            (int(width * 1.06), int(height * -0.08)),
+            (int(width * 1.15), int(height * 0.04)),
+            (int(width * 0.0), int(height * 0.31)),
+        ],
+        fill=(255, 255, 255, 17),
+        blur_radius=18 * scale,
+    )
+    image = _draw_glass_band(
+        image,
+        points=[
+            (int(width * 0.04), int(height * 0.96)),
+            (int(width * 1.08), int(height * 0.56)),
+            (int(width * 1.14), int(height * 0.76)),
+            (int(width * 0.22), int(height * 1.08)),
+        ],
+        fill=(255, 255, 255, 11),
+        blur_radius=24 * scale,
     )
     shadow = Image.new("RGBA", image.size, (0, 0, 0, 0))
     shadow_draw = ImageDraw.Draw(shadow, "RGBA")
     shadow_draw.rounded_rectangle(
         (int(width * 0.06), int(height * 0.08), int(width * 0.94), int(height * 0.92)),
         radius=64 * scale,
-        fill=(0, 0, 0, 70),
+        fill=(0, 0, 0, 78),
     )
-    shadow = shadow.filter(ImageFilter.GaussianBlur(70 * scale))
     return Image.alpha_composite(image, shadow)
 
 
@@ -280,28 +396,28 @@ def render_chart_png(spec: dict[str, Any]) -> bytes:
     image = _draw_panel(
         image,
         bounds=(48 * scale, 42 * scale, width - (48 * scale), height - (42 * scale)),
-        radius=34 * scale,
-        fill=(10, 13, 20, 240),
-        outline=(255, 255, 255, 22),
-        highlight_alpha=18,
+        radius=40 * scale,
+        fill=(9, 12, 18, 226),
+        outline=(255, 255, 255, 34),
+        highlight_alpha=28,
     )
     image = _draw_panel(
         image,
         bounds=(92 * scale, 196 * scale, width - (92 * scale), height - (84 * scale)),
-        radius=26 * scale,
-        fill=(16, 19, 28, 214),
-        outline=(255, 255, 255, 16),
-        highlight_alpha=12,
+        radius=30 * scale,
+        fill=(14, 17, 25, 204),
+        outline=(255, 255, 255, 24),
+        highlight_alpha=18,
     )
     draw = ImageDraw.Draw(image, "RGBA")
 
     eyebrow_font = _load_font(13 * scale, bold=True)
-    title_font = _load_font(32 * scale, bold=True)
+    title_font = _load_font(35 * scale, bold=True)
     subtitle_font = _load_font(16 * scale)
     label_font = _load_font(14 * scale, bold=True)
     tick_font = _load_font(15 * scale)
     chip_font = _load_font(13 * scale, bold=True)
-    callout_font = _load_font(14 * scale, bold=True)
+    callout_font = _load_font(15 * scale, bold=True)
 
     outer = (
         48 * scale,
@@ -317,7 +433,7 @@ def render_chart_png(spec: dict[str, Any]) -> bytes:
     )
     plot_left = panel[0] + (124 * scale)
     plot_right = panel[2] - (70 * scale)
-    plot_top = panel[1] + (78 * scale)
+    plot_top = panel[1] + (82 * scale)
     plot_bottom = panel[3] - (120 * scale)
     plot_width = plot_right - plot_left
     plot_height = plot_bottom - plot_top
@@ -357,11 +473,25 @@ def render_chart_png(spec: dict[str, Any]) -> bytes:
         for idx, category in enumerate(ordered_categories)
     }
 
+    plot_shell = (
+        plot_left - (34 * scale),
+        plot_top - (38 * scale),
+        plot_right + (24 * scale),
+        plot_bottom + (64 * scale),
+    )
+    draw.rounded_rectangle(
+        plot_shell,
+        radius=28 * scale,
+        fill=(255, 255, 255, 8),
+        outline=(255, 255, 255, 16),
+        width=max(1, scale),
+    )
+
     draw.text(
         (outer[0] + (44 * scale), outer[1] + (34 * scale)),
-        "INLINE CHART",
+        "COSMIC VISUAL",
         font=eyebrow_font,
-        fill="#8fa6d5",
+        fill="#8EA0B8",
     )
     draw.text(
         (outer[0] + (44 * scale), outer[1] + (64 * scale)),
@@ -369,12 +499,23 @@ def render_chart_png(spec: dict[str, Any]) -> bytes:
         font=title_font,
         fill="#f6f8ff",
     )
+    accent_y = outer[1] + (110 * scale)
+    accent_left = outer[0] + (44 * scale)
+    accent_right = accent_left + (210 * scale)
+    for offset in range(5 * scale):
+        ratio = offset / max((5 * scale) - 1, 1)
+        alpha = int(110 * (1 - ratio))
+        draw.line(
+            (accent_left, accent_y + offset, accent_right, accent_y + offset),
+            fill=ImageColor.getrgb("#30D158") + (alpha,),
+            width=max(1, scale),
+        )
     subtitle = str(spec.get("caption") or "").strip() or "Generated from structured data in this response."
     draw.text(
         (outer[0] + (44 * scale), outer[1] + (116 * scale)),
         subtitle,
         font=subtitle_font,
-        fill="#98a5bc",
+        fill="#A2ADBE",
     )
 
     chip_x = outer[2] - (46 * scale)
@@ -405,7 +546,7 @@ def render_chart_png(spec: dict[str, Any]) -> bytes:
         is_zero = abs(value) <= max(abs(max_y - min_y) * 0.02, 1e-9)
         draw.line(
             (plot_left, y, plot_right, y),
-            fill=(255, 255, 255, 26 if is_zero else 14),
+            fill=(255, 255, 255, 34 if is_zero else 15),
             width=max(1, 2 * scale if is_zero else scale),
         )
         tick_text = _format_tick(value)
@@ -414,28 +555,28 @@ def render_chart_png(spec: dict[str, Any]) -> bytes:
             (plot_left - tick_width - (20 * scale), y - (tick_height // 2)),
             tick_text,
             font=tick_font,
-            fill="#8895aa",
+            fill="#8F9BAE",
         )
 
     for idx in range(category_count):
         x = plot_left + (idx * category_step)
         draw.line(
             (x, plot_top, x, plot_bottom),
-            fill=(255, 255, 255, 10),
+            fill=(255, 255, 255, 8),
             width=max(1, scale),
         )
 
-    draw.line((plot_left, plot_top, plot_left, plot_bottom), fill=(255, 255, 255, 18), width=max(1, scale))
-    draw.line((plot_left, plot_bottom, plot_right, plot_bottom), fill=(255, 255, 255, 18), width=max(1, scale))
+    draw.line((plot_left, plot_top, plot_left, plot_bottom), fill=(255, 255, 255, 22), width=max(1, scale))
+    draw.line((plot_left, plot_bottom, plot_right, plot_bottom), fill=(255, 255, 255, 22), width=max(1, scale))
 
     if spec["chart_type"] == "bar":
         series_count = len(spec["series"])
         group_width = category_step * 0.68
         bar_width = group_width / max(series_count, 1)
-        palette = ("#dfe6f1", "#2f80ff", "#39e7a7", "#7f8aa0")
+        palette = ("#E8EDF7", "#0A84FF", "#30D158", "#BF5AF2", "#FF9F0A")
         for series_index, series in enumerate(spec["series"]):
             color = palette[series_index % len(palette)]
-            rgba = ImageColor.getrgb(color)
+            base_rgb = ImageColor.getrgb(color)
             for category in ordered_categories:
                 point = next((item for item in series["points"] if item["x"] == category), None)
                 if point is None:
@@ -447,17 +588,30 @@ def render_chart_png(spec: dict[str, Any]) -> bytes:
                 bottom = int(axis_zero_y)
                 if top > bottom:
                     top, bottom = bottom, top
-                draw.rounded_rectangle(
-                    (left, top, right, bottom),
+                glow = Image.new("RGBA", image.size, (0, 0, 0, 0))
+                glow_draw = ImageDraw.Draw(glow, "RGBA")
+                glow_draw.rounded_rectangle(
+                    (left - (4 * scale), top - (4 * scale), right + (4 * scale), bottom + (4 * scale)),
+                    radius=13 * scale,
+                    fill=base_rgb + (48,),
+                )
+                image = Image.alpha_composite(image, _blur_overlay(glow, 12 * scale))
+                draw = ImageDraw.Draw(image, "RGBA")
+                image = _draw_gradient_rounded_rect(
+                    image,
+                    bounds=(left, top, right, bottom),
                     radius=10 * scale,
-                    fill=rgba + (218,),
-                    outline=(255, 255, 255, 16),
+                    top_color="#F8FBFF" if series_index == 0 else color,
+                    bottom_color=color if series_index == 0 else "#0A1020",
+                    alpha=232,
+                    outline=(255, 255, 255, 32),
                     width=max(1, scale),
                 )
+                draw = ImageDraw.Draw(image, "RGBA")
                 draw.rounded_rectangle(
-                    (left, top, right, min(bottom, top + (18 * scale))),
-                    radius=10 * scale,
-                    fill=(255, 255, 255, 36),
+                    (left + (3 * scale), top + (3 * scale), right - (3 * scale), min(bottom, top + (15 * scale))),
+                    radius=8 * scale,
+                    fill=(255, 255, 255, 42),
                 )
     else:
         primary_peak: tuple[float, float, str] | None = None
@@ -470,15 +624,21 @@ def render_chart_png(spec: dict[str, Any]) -> bytes:
             if len(polyline) >= 2:
                 if series_index == 0:
                     polygon = [(polyline[0][0], plot_bottom)] + polyline + [(polyline[-1][0], plot_bottom)]
-                    draw.polygon(polygon, fill=rgba + (48,))
-                draw.line(polyline, fill=rgba + (250,), width=max(7 * scale, 8), joint="curve")
+                    draw.polygon(polygon, fill=rgba + (34,))
+                glow = Image.new("RGBA", image.size, (0, 0, 0, 0))
+                glow_draw = ImageDraw.Draw(glow, "RGBA")
+                glow_draw.line(polyline, fill=rgba + (118,), width=max(18 * scale, 18), joint="curve")
+                image = Image.alpha_composite(image, _blur_overlay(glow, 9 * scale))
+                draw = ImageDraw.Draw(image, "RGBA")
+                draw.line(polyline, fill=rgba + (248,), width=max(6 * scale, 7), joint="curve")
+                draw.line(polyline, fill=(255, 255, 255, 72), width=max(2 * scale, 2), joint="curve")
             for point_index, (x, y) in enumerate(polyline):
                 halo = 10 * scale
-                draw.ellipse((x - halo, y - halo, x + halo, y + halo), fill=rgba + (56,))
+                draw.ellipse((x - halo, y - halo, x + halo, y + halo), fill=rgba + (62,))
                 dot = 5 * scale
                 draw.ellipse(
                     (x - dot, y - dot, x + dot, y + dot),
-                    fill=rgba + (255,),
+                    fill=(245, 249, 255, 255),
                     outline=(10, 12, 18, 255),
                     width=max(2 * scale, 2),
                 )
@@ -523,7 +683,7 @@ def render_chart_png(spec: dict[str, Any]) -> bytes:
             fill="#e7edf8",
         )
 
-    final_image = image.resize((output_width, output_height), _LANCZOS)
+    final_image = image.resize((output_width, output_height), _LANCZOS).convert("RGB")
     buffer = BytesIO()
-    final_image.save(buffer, format="PNG", optimize=True)
+    final_image.save(buffer, format="PNG", compress_level=3)
     return buffer.getvalue()
