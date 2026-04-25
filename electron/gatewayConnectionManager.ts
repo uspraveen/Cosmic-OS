@@ -1184,7 +1184,7 @@ export class GatewayConnectionManager {
             ? payload.blocks
             : undefined,
         snapshot_seq: snapshotSeq ?? existing?.snapshot_seq ?? undefined,
-        completed: false,
+        completed: existing?.completed === true,
         failed: false,
       })
       return

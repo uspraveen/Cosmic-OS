@@ -2741,7 +2741,7 @@ export default function App() {
 
   const ensureAssistantMessageForEvent = (messages: Message[], event: any) => {
     const boundId = findAssistantMessageIdForEvent(event)
-    if (boundId) {
+    if (boundId && messages.some((message) => message.id === boundId)) {
       bindAssistantMessageToEvent(event, boundId)
       return {
         messages,
@@ -3752,6 +3752,9 @@ export default function App() {
             ? (event as any).message_id.trim()
             : ''
           const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
+          if (persistedMessageId) {
+            bindAssistantMessageToEvent(event, persistedMessageId)
+          }
           const updatedMessages = nextMessages.map((message) => {
             if (message.id !== messageId) {
               return message
