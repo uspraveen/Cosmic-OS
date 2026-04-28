@@ -455,5 +455,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 100%;
-  /* Removed pulse animation for a cleaner static grey look */
+.weather-alert-badge--advisory {
+  color: rgba(255, 200, 140, 0.85);
+  font-weight: 600;
 }

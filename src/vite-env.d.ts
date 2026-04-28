@@ -40,6 +40,7 @@ interface Window {
 
     // Auth
     login: (apiKey: string) => Promise<{ success: boolean; error?: string; message?: string; [key: string]: any }>
+    loginWithGoogle: () => Promise<{ success: boolean; error?: string; message?: string; [key: string]: any }>
     logout: () => Promise<{
       success: boolean
       scopes?: {
@@ -166,6 +167,8 @@ interface Window {
     saveCalendarUrl: (url: string) => void
     calendarAuth: (action: 'LOGOUT' | 'CONNECT') => void
     quitApp: () => void
+    minimizeApp: () => void
+    restoreApp: () => void
     restartApp: () => void
     openExternal: (url: string) => void
 

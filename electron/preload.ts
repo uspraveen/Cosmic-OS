@@ -183,9 +183,12 @@ contextBridge.exposeInMainWorld('cosmic', {
 
   // AUTH
   login: (apiKey: string) => ipcRenderer.invoke('auth:login', apiKey),
+  loginWithGoogle: () => ipcRenderer.invoke('auth:loginWithGoogle'),
   logout: () => ipcRenderer.invoke('auth:logout'),
 
   quitApp: () => ipcRenderer.send('app:quit'),
+  minimizeApp: () => ipcRenderer.send('app:minimize'),
+  restoreApp: () => ipcRenderer.send('app:restore'),
   restartApp: () => ipcRenderer.send('app:restart'),
 
   controlMedia: (action: string) => ipcRenderer.send('media:control', action),

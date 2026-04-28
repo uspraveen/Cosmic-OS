@@ -142,6 +142,21 @@ class ExpoPushDispatcher:
             return False
 
         channel_id = _notification_channel(notification)
+        color = _notification_color(notification)
+        tag = _notification_tag(notification)
+        android_notification = {
+            "channel_id": channel_id,
+            "color": color,
+            "sound": "default",
+            "visibility": "PUBLIC",
+            "notification_priority": (
+                "PRIORITY_MAX"
+                if notification.priority == "high"
+                else "PRIORITY_HIGH"
+            ),
+        }
+        if tag:
+            android_notification["tag"] = tag
         payload = {
             "message": {
                 "token": notification.fcm_token,
@@ -158,17 +173,7 @@ class ExpoPushDispatcher:
                 "android": {
                     "priority": "HIGH" if notification.priority == "high" else "NORMAL",
                     "ttl": "3600s",
-                    "notification": {
-                        "channel_id": channel_id,
-                        "color": "#79c9ff",
-                        "sound": "default",
-                        "visibility": "PUBLIC",
-                        "notification_priority": (
-                            "PRIORITY_MAX"
-                            if notification.priority == "high"
-                            else "PRIORITY_HIGH"
-                        ),
-                    },
+                    "notification": android_notification,
                 },
             }
         }
@@ -290,6 +295,30 @@ def _notification_channel(notification: PushNotification) -> str:
     if event_type == "response.complete":
         return "cosmic-chat"
     return "default"
+
+
+def _notification_color(notification: PushNotification) -> str:
+    event_type = str(notification.data.get("type") or "").strip()
+    if event_type.startswith("agent_email.") or event_type.startswith("email."):
+        return "#8ff5dc"
+    if event_type in {"task.failed", "task.cancelled"}:
+        return "#ff8a8a"
+    if event_type == "task.input_required":
+        return "#ffd67a"
+    if event_type == "task.completed":
+        return "#9af7b3"
+    if event_type == "response.complete":
+        return "#9bdcff"
+    return "#9bdcff"
+
+
+def _notification_tag(notification: PushNotification) -> str:
+    event_type = str(notification.data.get("type") or "").strip()
+    for key in ("approval_id", "task_id", "request_id", "message_id", "session_id"):
+        value = str(notification.data.get(key) or "").strip()
+        if value:
+            return _truncate(f"cosmic:{event_type or 'notification'}:{value}", 64)
+    return _truncate(f"cosmic:{event_type or 'notification'}", 64)
 
 
 def _extract_expo_error(body: Any) -> str | None:

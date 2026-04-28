@@ -108,6 +108,104 @@
   transform: scale(1.05);
 }
 
+/* Login modal — wordmark row (below top-right window controls) */
+.cosmic-login-header {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 52px 22px 12px;
+}
+
+/* Wordmark: same type / tracking / weight as brand spec; light ink for dark glass (near-black is for light backgrounds only) */
+.cosmic-login-wordmark {
+  margin: 0;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0 32px;
+  text-align: center;
+  color: #eef2f9;
+  font-family:
+    Bahnschrift,
+    "Avenir Next Condensed",
+    "Segoe UI Variable Display",
+    "Helvetica Neue",
+    Arial,
+    sans-serif;
+  font-weight: 600;
+  font-size: clamp(15px, 2.35vw, 19px);
+  letter-spacing: 0.56em;
+  text-transform: uppercase;
+  line-height: 1.2;
+  text-shadow:
+    0 1px 12px rgba(0, 0, 0, 0.45),
+    0 0 1px rgba(255, 255, 255, 0.12);
+}
+
+/* Login modal — window controls: own row, top-right of card (above wordmark) */
+.cosmic-login-window-controls {
+  position: absolute;
+  top: 18px;
+  right: 22px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cosmic-login-window-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  border: none;
+  padding: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.72);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform 0.18s ease, background 0.18s ease, color 0.18s ease;
+}
+
+.cosmic-login-window-btn:hover {
+  transform: translateY(-1px);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.cosmic-login-window-btn:active {
+  transform: translateY(0);
+}
+
+.cosmic-login-window-btn.minimize:hover {
+  color: rgba(214, 228, 255, 0.98);
+}
+
+.cosmic-login-window-btn.close:hover {
+  color: rgba(255, 218, 218, 0.98);
+  background: rgba(255, 120, 120, 0.14);
+}
+
+/* Login modal — form body: match default settings vertical rhythm (width still 420px inline on panel) */
+.cosmic-login-settings-content.settings-content {
+  padding: 32px;
+  gap: 24px;
+}
+
+.cosmic-login-intro {
+  text-align: center;
+  margin-top: 2px;
+  margin-bottom: 0;
+}
+
+.cosmic-login-intro p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
 .setting-row {
   display: flex;
   justify-content: space-between;

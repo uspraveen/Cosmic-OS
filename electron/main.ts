@@ -1,7 +1,10 @@
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, nativeImage, screen, shell } from 'electron'
 import { existsSync, promises as fs, readFileSync } from 'node:fs'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { PNG } from 'pngjs'
 import { fileURLToPath } from 'node:url'
+import { createClient } from '@supabase/supabase-js'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import Store from 'electron-store'
@@ -1706,6 +1709,12 @@ app.commandLine.appendSwitch('enable-gpu-rasterization')
 app.commandLine.appendSwitch('enable-zero-copy')
 
 app.whenReady().then(() => {
+  // Register Google login before createWindow() so the channel exists as soon as the
+  // renderer can call it (avoids races with fast loads / stale partial main bundles).
+  ipcMain.handle('auth:loginWithGoogle', async () => {
+    return loginWithGoogleOAuth()
+  })
+
   if (process.platform === 'win32') {
     app.setAppUserModelId('com.cosmic.spotlight')
   }
@@ -1756,6 +1765,17 @@ app.whenReady().then(() => {
   })
 
   ipcMain.on('app:quit', () => { app.quit() })
+  ipcMain.on('app:minimize', (event) => {
+    const w = BrowserWindow.fromWebContents(event.sender)
+    if (w && !w.isDestroyed()) w.minimize()
+  })
+  ipcMain.on('app:restore', (event) => {
+    const w = BrowserWindow.fromWebContents(event.sender)
+    if (!w || w.isDestroyed()) return
+    if (w.isMinimized()) w.restore()
+    w.show()
+    w.focus()
+  })
   ipcMain.on('app:restart', () => {
     cleanupProcesses()
     if (win && !win.isDestroyed()) {
@@ -2488,6 +2508,430 @@ app.whenReady().then(() => {
     }
   })
 
+
+  /**
+   * Google sign-in for desktop: opens the **system default browser** for Supabase Google OAuth,
+   * then `authenticate_with_google_identity` RPC (same VM payload as API-key login).
+   * A short-lived localhost server receives the redirect: the browser POSTs `location.href`
+   * (including hash or query) back so tokens work with an external browser.
+   * Add loopback redirect patterns in Supabase (same project as mobile). API-key login is unchanged.
+   */
+  async function loginWithGoogleOAuth(): Promise<
+    | {
+        success: true
+        apiKey: string
+        userId: string
+        fullName: string
+        isPrivileged: boolean
+        gatewayUrl: string
+        gatewayApiToken: string
+        vmIp: string
+        vmDns: string
+        authenticatedAt: number
+      }
+    | { success: false; error: string; message?: string }
+  > {
+    type OAuthOutcome = { type: 'href'; href: string } | { type: 'err'; error: Error }
+
+    let settled = false
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
+    let resolveOutcome!: (v: OAuthOutcome) => void
+    const outcomePromise = new Promise<OAuthOutcome>((resolve) => {
+      resolveOutcome = resolve
+    })
+
+    const finish = (v: OAuthOutcome) => {
+      if (settled) return
+      settled = true
+      if (timeoutId !== undefined) clearTimeout(timeoutId)
+      resolveOutcome(v)
+    }
+
+    const server = createServer((req, res) => {
+      const addr = server.address() as AddressInfo | null
+      const listenPort = addr?.port ?? 0
+      const raw = req.url ?? '/'
+      const q = raw.indexOf('?')
+      const pathOnly = q >= 0 ? raw.slice(0, q) : raw
+
+      if (req.method === 'GET' && pathOnly === '/cosmic-oauth') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+        res.end(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cosmic</title>
+<style>
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #fff;
+    color: #0f172a;
+    -webkit-font-smoothing: antialiased;
+  }
+  #oauth-root {
+    min-height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 24px;
+    box-sizing: border-box;
+    text-align: center;
+  }
+  /* Matches Spaces header wordmark: .spaces-header-brand (spaces-control.css) */
+  .cosmic-brand {
+    font-family: "Bahnschrift", "Avenir Next Condensed", "Segoe UI Variable Display", "Helvetica Neue", Arial, sans-serif;
+    font-size: clamp(20px, 5vw, 28px);
+    font-weight: 600;
+    letter-spacing: 0.56em;
+    text-transform: uppercase;
+    margin: 0 0 22px 0;
+    padding-left: 0.56em;
+    color: #0b1220;
+    line-height: 1.2;
+    text-shadow: 0 1px 12px rgba(15, 23, 42, 0.06);
+  }
+  .oauth-lede {
+    font-size: 15px;
+    font-weight: 500;
+    color: #334155;
+    margin: 0 0 8px 0;
+    letter-spacing: -0.01em;
+  }
+  .oauth-sub {
+    font-size: 13px;
+    line-height: 1.55;
+    color: #64748b;
+    max-width: 22rem;
+    margin: 0;
+  }
+  .oauth-dots {
+    display: inline-flex;
+    gap: 6px;
+    margin-top: 22px;
+    align-items: center;
+    justify-content: center;
+  }
+  .oauth-dots span {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: #cbd5e1;
+    animation: oauthPulse 1.2s ease-in-out infinite;
+  }
+  .oauth-dots span:nth-child(2) { animation-delay: 0.15s; }
+  .oauth-dots span:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes oauthPulse {
+    0%, 80%, 100% { opacity: 0.35; transform: scale(0.92); }
+    40% { opacity: 1; transform: scale(1); }
+  }
+</style>
+</head>
+<body>
+<main id="oauth-root">
+  <p class="cosmic-brand" aria-label="COSMIC">COSMIC</p>
+  <p class="oauth-lede">Finishing sign-in</p>
+  <p class="oauth-sub">Confirming your session with Cosmic. This only takes a moment.</p>
+  <div class="oauth-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+</main>
+<script>
+(function(){
+  function esc(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+  fetch("/cosmic-oauth/done", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ href: String(location.href || "") }),
+  })
+    .then(function () {
+      var el = document.getElementById("oauth-root");
+      if (!el) return;
+      el.innerHTML =
+        '<p class="cosmic-brand" aria-label="COSMIC">COSMIC</p>' +
+        '<p class="oauth-lede">You are signed in</p>' +
+        '<p class="oauth-sub">Close this tab and return to the Cosmic desktop app.</p>';
+    })
+    .catch(function (e) {
+      var el = document.getElementById("oauth-root");
+      var msg = (e && e.message) || e || "Unknown error";
+      if (el) {
+        el.innerHTML =
+          '<p class="cosmic-brand" aria-label="COSMIC">COSMIC</p>' +
+          '<p class="oauth-lede">Sign-in could not finish</p>' +
+          '<p class="oauth-sub">' +
+          esc(msg) +
+          "</p>";
+      }
+    });
+})();
+</script>
+</body>
+</html>`)
+        return
+      }
+
+      if (req.method === 'POST' && pathOnly === '/cosmic-oauth/done') {
+        const chunks: Buffer[] = []
+        let total = 0
+        let tooLarge = false
+        req.on('data', (chunk: Buffer) => {
+          total += chunk.length
+          if (total > 65536) {
+            tooLarge = true
+            req.destroy()
+            return
+          }
+          chunks.push(chunk)
+        })
+        req.on('end', () => {
+          if (tooLarge) {
+            res.writeHead(413).end()
+            return
+          }
+          let parsed: { href?: string } = {}
+          try {
+            parsed = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as { href?: string }
+          } catch {
+            res.writeHead(400).end()
+            return
+          }
+          const href = typeof parsed.href === 'string' ? parsed.href : ''
+          if (!listenPort || !href.startsWith(`http://127.0.0.1:${listenPort}/cosmic-oauth`)) {
+            res.writeHead(400).end('invalid href')
+            return
+          }
+          res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
+          res.end('OK')
+          finish({ type: 'href', href })
+        })
+        req.on('error', () => {
+          try {
+            res.destroy()
+          } catch {
+            /* ignore */
+          }
+        })
+        return
+      }
+
+      res.writeHead(404).end()
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once('error', rejectListen)
+        server.listen(0, '127.0.0.1', () => resolveListen())
+      })
+    } catch (e: any) {
+      try {
+        server.close()
+      } catch {
+        /* ignore */
+      }
+      return {
+        success: false,
+        error: 'oauth_server_failed',
+        message: e?.message || 'Could not start local OAuth receiver.',
+      }
+    }
+
+    const addr = server.address() as AddressInfo | string | null
+    const port = typeof addr === 'object' && addr?.port ? addr.port : 0
+    if (!port) {
+      try {
+        server.close()
+      } catch {
+        /* ignore */
+      }
+      return { success: false, error: 'oauth_server_failed', message: 'No free localhost port for OAuth.' }
+    }
+
+    const redirectTo = `http://127.0.0.1:${port}/cosmic-oauth`
+    const oauthSupabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
+      },
+    })
+
+    const { data: oauthPayload, error: oauthInitError } = await oauthSupabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo,
+        skipBrowserRedirect: true,
+        queryParams: { prompt: 'select_account' },
+      },
+    })
+
+    if (oauthInitError || !oauthPayload?.url) {
+      await new Promise<void>((r) => server.close(() => r()))
+      return {
+        success: false,
+        error: 'oauth_init_failed',
+        message: oauthInitError?.message || 'Could not start Google sign-in.',
+      }
+    }
+
+    timeoutId = setTimeout(() => {
+      finish({ type: 'err', error: new Error('Google sign-in timed out.') })
+    }, 240_000)
+
+    try {
+      await shell.openExternal(oauthPayload.url)
+    } catch (e) {
+      finish({
+        type: 'err',
+        error: e instanceof Error ? e : new Error('Could not open the system browser.'),
+      })
+    }
+
+    const outcome = await outcomePromise
+
+    await new Promise<void>((r) => {
+      server.close(() => r())
+    })
+
+    if (outcome.type === 'err') {
+      const msg = outcome.error.message || 'Google sign-in failed.'
+      if (msg.includes('timed out')) {
+        return { success: false, error: 'oauth_timeout', message: msg }
+      }
+      if (msg.includes('system browser')) {
+        return { success: false, error: 'oauth_open_failed', message: msg }
+      }
+      return { success: false, error: 'network_error', message: msg }
+    }
+
+    const finalUrl = outcome.href
+
+    try {
+      const callbackUrl = new URL(finalUrl)
+      if (callbackUrl.searchParams.has('code')) {
+        const { error: exchangeError } = await oauthSupabase.auth.exchangeCodeForSession(finalUrl)
+        if (exchangeError) {
+          return {
+            success: false,
+            error: 'oauth_session_failed',
+            message: exchangeError.message,
+          }
+        }
+      } else {
+        const hash = new URL(finalUrl).hash.replace(/^#/, '')
+        const params = new URLSearchParams(hash)
+        const oauthErr = params.get('error')
+        if (oauthErr) {
+          return {
+            success: false,
+            error: oauthErr,
+            message: params.get('error_description') || oauthErr,
+          }
+        }
+        const accessToken = params.get('access_token')
+        const refreshToken = params.get('refresh_token')
+        if (!accessToken || !refreshToken) {
+          return {
+            success: false,
+            error: 'oauth_no_tokens',
+            message: 'Google sign-in did not return a session.',
+          }
+        }
+        const { error: setErr } = await oauthSupabase.auth.setSession({
+          access_token: accessToken,
+          refresh_token: refreshToken,
+        })
+        if (setErr) {
+          return {
+            success: false,
+            error: 'oauth_session_failed',
+            message: setErr.message,
+          }
+        }
+      }
+
+      const { data: rpcData, error: rpcError } = await oauthSupabase.rpc('authenticate_with_google_identity')
+
+      try {
+        await oauthSupabase.auth.signOut({ scope: 'local' })
+      } catch {
+        /* best-effort */
+      }
+
+      if (rpcError) {
+        return {
+          success: false,
+          error: 'rpc_error',
+          message: rpcError.message || 'Could not look up your Cosmic account.',
+        }
+      }
+
+      const result = rpcData as {
+        success?: boolean
+        error?: string
+        message?: string
+        api_key?: string
+        user?: { id: string; full_name: string; is_privileged: boolean }
+        vm?: { gateway_url: string; api_token: string; vm_ip: string; vm_dns: string }
+      }
+
+      if (!result || typeof result !== 'object' || result.success !== true || !result.user || !result.vm) {
+        return {
+          success: false,
+          error: result?.error || 'rpc_invalid',
+          message: result?.message || 'Unexpected response from authentication server.',
+        }
+      }
+
+      const apiKey = String(result.api_key ?? '').trim()
+      if (!apiKey) {
+        return {
+          success: false,
+          error: 'no_api_key',
+          message: 'No API key on file for this account.',
+        }
+      }
+
+      const authData = {
+        apiKey,
+        userId: result.user.id,
+        fullName: result.user.full_name,
+        isPrivileged: result.user.is_privileged,
+        gatewayUrl: result.vm.gateway_url,
+        gatewayApiToken: result.vm.api_token,
+        vmIp: result.vm.vm_ip,
+        vmDns: result.vm.vm_dns,
+        authenticatedAt: Date.now(),
+      }
+      const deviceId = getDesktopDeviceId()
+
+      const authJson = JSON.stringify(authData)
+      settingsProcess?.stdin.write(`SAVE_SETTING:cosmicAuth:${authJson}\n`)
+      settingsProcess?.stdin.write(`SAVE_SETTING:gatewayBaseUrl:${result.vm.gateway_url}\n`)
+      settingsProcess?.stdin.write(`SAVE_SETTING:gatewayApiToken:${result.vm.api_token}\n`)
+      settingsProcess?.stdin.write(`SAVE_SETTING:desktopDeviceId:${deviceId}\n`)
+      store.set('cosmicAuth', authData)
+      store.set('gatewayBaseUrl', result.vm.gateway_url)
+      store.set('gatewayApiToken', result.vm.api_token)
+      store.set('desktopDeviceId', deviceId)
+      configureGatewayConnection()
+      gatewayConnectionManager?.requestResume()
+
+      return { success: true, ...authData }
+    } catch (e: any) {
+      return {
+        success: false,
+        error: 'network_error',
+        message: e?.message || 'Google sign-in failed.',
+      }
+    }
+  }
 
   // --- AUTH IPC HANDLERS ---
   ipcMain.handle('auth:login', async (_, apiKey: string) => {

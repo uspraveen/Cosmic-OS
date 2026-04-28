@@ -195,6 +195,51 @@ const DOT_PROGRESS_ROWS = 3
 const CALENDAR_REFRESH_MS = 5 * 60 * 1000
 const CALENDAR_STALE_AFTER_MS = 2 * 60 * 1000
 
+/** Severe + advisory island alerts; used by weather slide and auto-peek scheduling. */
+const WEATHER_ALERT_PEEK_MS = 5000
+const WEATHER_SLIDE_INDEX = 2
+/** After auto-peek ends, ignore parent/inner hover briefly so the island can collapse (cursor often sits on the expanded hit area). */
+const WEATHER_PEEK_HOVER_SUPPRESS_MS = 450
+/** Ignore hover-based peek cancel until this long after peek starts (avoids killing the timer when the island expands under the cursor). */
+const WEATHER_PEEK_USER_CANCEL_ARM_MS = 420
+
+/** Open-Meteo / bridge payload is always °C. */
+const HEAT_ADVISORY_CURRENT_C = 30
+const HEAT_ADVISORY_HIGH_C = 32
+
+type WeatherAlertTier = 'severe' | 'advisory'
+
+interface WeatherAlertInfo {
+  tier: WeatherAlertTier | null
+  alertMessage: string
+}
+
+function getWeatherAlertInfo(weather: Pick<WeatherState, 'wmo' | 'temp' | 'high'>): WeatherAlertInfo {
+  const wmo = weather.wmo ?? 0
+  const t = Number(weather.temp)
+  const hi = weather.high !== undefined && weather.high !== null ? Number(weather.high) : Number.NaN
+
+  if ([95, 96, 99].includes(wmo)) return { tier: 'severe', alertMessage: 'Thunderstorm Alert' }
+  if ([71, 73, 75, 85, 86].includes(wmo)) return { tier: 'severe', alertMessage: 'Heavy Snow Alert' }
+
+  if ([80, 81, 82].includes(wmo)) return { tier: 'advisory', alertMessage: 'Shower activity' }
+  if (wmo === 65) return { tier: 'advisory', alertMessage: 'Heavy rain' }
+  if ([61, 63].includes(wmo)) return { tier: 'advisory', alertMessage: 'Rain expected' }
+  if ([53, 55].includes(wmo)) return { tier: 'advisory', alertMessage: 'Steady drizzle' }
+  if ([66, 67].includes(wmo)) return { tier: 'advisory', alertMessage: 'Icy / freezing rain' }
+  if ([56, 57].includes(wmo)) return { tier: 'advisory', alertMessage: 'Freezing drizzle' }
+  if ([45, 48].includes(wmo)) return { tier: 'advisory', alertMessage: 'Low visibility (fog)' }
+
+  if (Number.isFinite(t) && t >= HEAT_ADVISORY_CURRENT_C) {
+    return { tier: 'advisory', alertMessage: 'Hot conditions' }
+  }
+  if (Number.isFinite(hi) && hi >= HEAT_ADVISORY_HIGH_C) {
+    return { tier: 'advisory', alertMessage: 'Hot day ahead' }
+  }
+
+  return { tier: null, alertMessage: '' }
+}
+
 function getEventDurationLabel(event: CalendarAgendaEvent) {
   if (event.isAllDay) return 'All day'
   const start = getCalendarEventStart(event)
@@ -389,10 +434,83 @@ export default function DynamicIsland({
   }, [])
 
 
+  const [weatherAlertPeek, setWeatherAlertPeek] = useState(false)
+  const [suppressIslandHoverExpand, setSuppressIslandHoverExpand] = useState(false)
+  const weatherAlertPeekRef = useRef(false)
+  const weatherAlertPeekTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const peekHoverSuppressClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastCompletedWeatherAlertSignatureRef = useRef<string | null>(null)
+  const prevHadWeatherAlertRef = useRef(false)
+  /** Signature for the in-flight auto-peek (used when user cancels via hover so we do not immediately re-peek). */
+  const peekActiveSignatureRef = useRef<string | null>(null)
+  const peekUserCancelArmTimestampRef = useRef(0)
+  const prevHoveredDuringPeekRef = useRef(false)
+
+  weatherAlertPeekRef.current = weatherAlertPeek
+
+  const clearWeatherAlertPeekTimer = useCallback(() => {
+    if (weatherAlertPeekTimerRef.current) {
+      clearTimeout(weatherAlertPeekTimerRef.current)
+      weatherAlertPeekTimerRef.current = null
+    }
+  }, [])
+
+  const clearPeekHoverSuppressTimer = useCallback(() => {
+    if (peekHoverSuppressClearTimerRef.current) {
+      clearTimeout(peekHoverSuppressClearTimerRef.current)
+      peekHoverSuppressClearTimerRef.current = null
+    }
+  }, [])
+
+  const schedulePeekHoverSuppressRelease = useCallback(() => {
+    clearPeekHoverSuppressTimer()
+    peekHoverSuppressClearTimerRef.current = setTimeout(() => {
+      peekHoverSuppressClearTimerRef.current = null
+      setSuppressIslandHoverExpand(false)
+    }, WEATHER_PEEK_HOVER_SUPPRESS_MS)
+  }, [clearPeekHoverSuppressTimer])
+
+  /** User engaged the island during auto-peek: stop the timer; stayback applies when they leave (no hover suppress). */
+  const cancelWeatherPeekForUserHover = useCallback(() => {
+    if (!weatherAlertPeekRef.current) return
+    clearWeatherAlertPeekTimer()
+    weatherAlertPeekRef.current = false
+    setWeatherAlertPeek(false)
+    const sig = peekActiveSignatureRef.current
+    if (sig) {
+      lastCompletedWeatherAlertSignatureRef.current = sig
+      peekActiveSignatureRef.current = null
+    }
+    peekUserCancelArmTimestampRef.current = Number.MAX_SAFE_INTEGER
+  }, [clearWeatherAlertPeekTimer])
+
+  const weatherAlertPeekBlocked = useMemo(
+    () =>
+      searchActive ||
+      showSettings ||
+      voiceActive ||
+      !!notificationEvent ||
+      !!mailInboundNotification ||
+      !!approvalRequestNotification ||
+      !!integrationToast ||
+      !!selectedCalendarEvent ||
+      showMonthView,
+    [
+      searchActive,
+      showSettings,
+      voiceActive,
+      notificationEvent,
+      mailInboundNotification,
+      approvalRequestNotification,
+      integrationToast,
+      selectedCalendarEvent,
+      showMonthView,
+    ],
+  )
+
   const shouldExpand =
     searchActive ||
-    hovered ||
-    internalHover ||
+    (!suppressIslandHoverExpand && (hovered || internalHover)) ||
     showSettings ||
     isAnchored ||
     !!notificationEvent ||
@@ -400,7 +518,8 @@ export default function DynamicIsland({
     !!approvalRequestNotification ||
     !!integrationToast ||
     !!selectedCalendarEvent ||
-    voiceActive
+    voiceActive ||
+    weatherAlertPeek
   const [expanded, setExpanded] = useState(shouldExpand)
 
   useEffect(() => {
@@ -433,9 +552,16 @@ export default function DynamicIsland({
         clearTimeout(integrationToastTimerRef.current)
         integrationToastTimerRef.current = null
       }
+      clearWeatherAlertPeekTimer()
+      setWeatherAlertPeek(false)
+      weatherAlertPeekRef.current = false
+      peekActiveSignatureRef.current = null
+      peekUserCancelArmTimestampRef.current = Number.MAX_SAFE_INTEGER
+      clearPeekHoverSuppressTimer()
+      setSuppressIslandHoverExpand(false)
     }
     wasExpanded.current = expanded
-  }, [expanded])
+  }, [expanded, clearWeatherAlertPeekTimer, clearPeekHoverSuppressTimer])
 
   const [now, setNow] = useState(() => new Date())
   useEffect(() => {
@@ -589,6 +715,107 @@ export default function DynamicIsland({
     window.cosmic?.requestWeather()
     return () => unsub?.()
   }, [])
+
+  useEffect(() => () => {
+    clearWeatherAlertPeekTimer()
+    clearPeekHoverSuppressTimer()
+  }, [clearWeatherAlertPeekTimer, clearPeekHoverSuppressTimer])
+
+  /** Higher-priority island UI: cancel peek without marking the alert as "shown". */
+  useEffect(() => {
+    if (!weatherAlertPeek || !weatherAlertPeekBlocked) return
+    clearWeatherAlertPeekTimer()
+    weatherAlertPeekRef.current = false
+    setWeatherAlertPeek(false)
+    peekActiveSignatureRef.current = null
+    setInternalHover(false)
+    setSuppressIslandHoverExpand(true)
+    schedulePeekHoverSuppressRelease()
+  }, [weatherAlertPeek, weatherAlertPeekBlocked, clearWeatherAlertPeekTimer, schedulePeekHoverSuppressRelease])
+
+  /**
+   * Severe or advisory weather → expand island on the weather slide for WEATHER_ALERT_PEEK_MS.
+   * Waits while mail / approvals / calendar notify / Google integration / settings / voice / search / month view / event detail are active.
+   * Dedupes repeated refreshes: only re-shows after the alert clears, or the message changes (e.g. heat vs showers).
+   */
+  useEffect(() => {
+    if (!weather) {
+      prevHadWeatherAlertRef.current = false
+      return
+    }
+
+    const { alertMessage } = getWeatherAlertInfo({
+      wmo: weather.wmo,
+      temp: weather.temp,
+      high: weather.high,
+    })
+    const signature = alertMessage || null
+
+    const hadAlert = prevHadWeatherAlertRef.current
+    if (hadAlert && !signature) {
+      lastCompletedWeatherAlertSignatureRef.current = null
+      if (weatherAlertPeekRef.current) {
+        clearWeatherAlertPeekTimer()
+        weatherAlertPeekRef.current = false
+        setWeatherAlertPeek(false)
+        peekActiveSignatureRef.current = null
+        setInternalHover(false)
+        setSuppressIslandHoverExpand(true)
+        schedulePeekHoverSuppressRelease()
+      }
+    }
+    prevHadWeatherAlertRef.current = !!signature
+
+    if (!signature) return
+
+    if (signature === lastCompletedWeatherAlertSignatureRef.current) return
+
+    if (weatherAlertPeekBlocked) return
+
+    if (weatherAlertPeekRef.current) return
+
+    clearWeatherAlertPeekTimer()
+    clearPeekHoverSuppressTimer()
+    setSuppressIslandHoverExpand(false)
+    peekActiveSignatureRef.current = signature
+    peekUserCancelArmTimestampRef.current = Date.now() + WEATHER_PEEK_USER_CANCEL_ARM_MS
+    prevHoveredDuringPeekRef.current = hovered
+    weatherAlertPeekRef.current = true
+    setWeatherAlertPeek(true)
+    setActiveSlide(WEATHER_SLIDE_INDEX)
+
+    weatherAlertPeekTimerRef.current = setTimeout(() => {
+      weatherAlertPeekTimerRef.current = null
+      lastCompletedWeatherAlertSignatureRef.current = signature
+      peekActiveSignatureRef.current = null
+      weatherAlertPeekRef.current = false
+      setWeatherAlertPeek(false)
+      setInternalHover(false)
+      setSuppressIslandHoverExpand(true)
+      schedulePeekHoverSuppressRelease()
+      peekUserCancelArmTimestampRef.current = Number.MAX_SAFE_INTEGER
+    }, WEATHER_ALERT_PEEK_MS)
+  }, [
+    weather,
+    weatherAlertPeekBlocked,
+    hovered,
+    clearWeatherAlertPeekTimer,
+    clearPeekHoverSuppressTimer,
+    schedulePeekHoverSuppressRelease,
+  ])
+
+  /** Parent hover becomes true during auto-peek (after arm): user took over — kill peek timer. */
+  useEffect(() => {
+    if (!weatherAlertPeek) {
+      prevHoveredDuringPeekRef.current = hovered
+      return
+    }
+    const armed = Date.now() >= peekUserCancelArmTimestampRef.current
+    if (armed && hovered && !prevHoveredDuringPeekRef.current) {
+      cancelWeatherPeekForUserHover()
+    }
+    prevHoveredDuringPeekRef.current = hovered
+  }, [hovered, weatherAlertPeek, cancelWeatherPeekForUserHover])
 
   useEffect(() => {
     if (!window.cosmic?.onCalendarAgendaUpdate) return
@@ -1042,10 +1269,9 @@ export default function DynamicIsland({
     const precip = weather?.precip_prob ?? 0
     const snowfall = weather?.snowfall ?? 0
 
-    const wmo = weather?.wmo ?? 0
-    const isSevere = [95, 96, 99, 71, 73, 75, 85, 86].includes(wmo)
-    const alertMessage = [95, 96, 99].includes(wmo) ? "Thunderstorm Alert" :
-      [71, 73, 75, 85, 86].includes(wmo) ? "Heavy Snow Alert" : ""
+    const { tier, alertMessage } = weather
+      ? getWeatherAlertInfo({ wmo: weather.wmo, temp: weather.temp, high: weather.high })
+      : { tier: null, alertMessage: '' }
 
     return (
       <div className="slide slide-weather-clean">
@@ -1064,11 +1290,13 @@ export default function DynamicIsland({
               <span className="weather-dot-sep">•</span>
               <span className="weather-cond-clean">{condition}</span>
             </div>
-            {isSevere && (
-              <div className="weather-alert-badge">
+            {alertMessage ? (
+              <div
+                className={`weather-alert-badge ${tier === 'advisory' ? 'weather-alert-badge--advisory' : ''}`}
+              >
                 ⚠️ {alertMessage}
               </div>
-            )}
+            ) : null}
           </div>
 
           <div className="weather-col-right">
@@ -1926,7 +2154,12 @@ export default function DynamicIsland({
     <>
       <div
         className={`island ${expanded ? 'expanded' : ''} ${integrationToast ? `integration-open tone-${integrationToast.tone}` : ''} ${expanded && notificationIslandActive ? 'island-notification-slide' : ''}`}
-        onMouseEnter={() => setInternalHover(true)}
+        onMouseEnter={() => {
+          if (weatherAlertPeekRef.current && Date.now() >= peekUserCancelArmTimestampRef.current) {
+            cancelWeatherPeekForUserHover()
+          }
+          setInternalHover(true)
+        }}
         onMouseLeave={() => setInternalHover(false)}
         onWheel={onWheel}
         style={{
