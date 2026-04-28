@@ -1697,6 +1697,14 @@ app.on('before-quit', () => {
   cleanupProcesses()
 })
 
+// Compositor tuning for a full-workArea transparent window with backdrop-filter surfaces.
+// Default tile memory budget (~128MB) overflows at high DPI + blurred full-screen layers,
+// producing `tile_manager.cc` warnings and per-keystroke input latency. These switches
+// must be applied before app.whenReady().
+app.commandLine.appendSwitch('force-gpu-mem-available-mb', '1024')
+app.commandLine.appendSwitch('enable-gpu-rasterization')
+app.commandLine.appendSwitch('enable-zero-copy')
+
 app.whenReady().then(() => {
   if (process.platform === 'win32') {
     app.setAppUserModelId('com.cosmic.spotlight')

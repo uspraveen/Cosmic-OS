@@ -1226,16 +1226,26 @@ export class GatewayConnectionManager {
     }
 
     if (eventType === 'task.failed') {
+      const existing = this.getForegroundStreamSnapshot(payload)
       const errorMessage =
         typeof payload?.error?.message === 'string' && payload.error.message.trim()
           ? payload.error.message.trim()
           : typeof payload.message === 'string' && payload.message.trim()
             ? payload.message.trim()
             : 'Opus task failed.'
+      const existingContent = typeof existing?.content === 'string' ? existing.content.trim() : ''
       this.upsertForegroundStream(payload, {
         session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
         route: typeof payload.route === 'string' ? payload.route : undefined,
-        content: errorMessage,
+        content: existingContent ? String(existing?.content) : errorMessage,
+        thinking_text: typeof existing?.thinking_text === 'string' ? existing.thinking_text : undefined,
+        activity_log: Array.isArray(existing?.activity_log) ? existing.activity_log : undefined,
+        produced_artifacts: Array.isArray(existing?.produced_artifacts) ? existing.produced_artifacts : undefined,
+        response_blocks: Array.isArray(existing?.response_blocks) ? existing.response_blocks : undefined,
+        snapshot_seq:
+          Number.isFinite(Number(existing?.snapshot_seq)) && Number(existing?.snapshot_seq) > 0
+            ? Number(existing?.snapshot_seq)
+            : undefined,
         completed: true,
         failed: true,
         error: errorMessage,

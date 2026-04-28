@@ -951,6 +951,9 @@ function SessionMessageMarkdown({ source }: { source: string }) {
               <table {...props} />
             </div>
           ),
+          pre: ({ node: _node, className, ...props }: any) => (
+            <pre className={['code-block', className].filter(Boolean).join(' ')} {...props} />
+          ),
           code: ({ node: _node, inline, className, children, ...props }: any) => {
             if (inline) {
               return (
@@ -959,11 +962,7 @@ function SessionMessageMarkdown({ source }: { source: string }) {
                 </code>
               )
             }
-            return (
-              <div className="code-block">
-                <code {...props}>{children}</code>
-              </div>
-            )
+            return <code className={className} {...props}>{children}</code>
           },
           a: ({ node: _node, ...props }) => <a target="_blank" rel="noopener noreferrer" {...props} />,
         }}
@@ -6574,8 +6573,8 @@ export default function SpacesControlCenter({
                       className={`spaces-rail-button ${item.accent} ${page === item.id ? 'active' : ''}`}
                       onClick={() => setPage(item.id)}
                       aria-current={page === item.id ? 'page' : undefined}
-                      onMouseEnter={railCollapsed && onShowTooltip ? (e) => onShowTooltip(item.label, e.currentTarget) : undefined}
-                      onMouseLeave={railCollapsed && onHideTooltip ? onHideTooltip : undefined}
+                      onMouseEnter={active && railCollapsed && onShowTooltip ? (e) => onShowTooltip(item.label, e.currentTarget) : undefined}
+                      onMouseLeave={active && railCollapsed && onHideTooltip ? onHideTooltip : undefined}
                     >
                       <span className="spaces-rail-icon">
                         <SpacesNavIcon page={item.id} />

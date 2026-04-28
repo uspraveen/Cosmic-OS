@@ -1815,7 +1815,11 @@ export default function App() {
   const seenCronResultKeysRef = useRef<Set<string>>(new Set())
   const seenArtifactReadyKeysRef = useRef<Set<string>>(new Set())
 
-  const [query, setQuery] = useState('')
+  // Composer input is uncontrolled — browser holds the value natively via `inputRef`.
+  // React only re-renders on the empty↔non-empty transition (via `hasText`), so individual
+  // keystrokes don't trigger a 5910-line App re-render. Submit reads inputRef.current.value.
+  const [hasText, setHasText] = useState(false)
+  const inputHasTextRef = useRef(false)
   const [pendingAttachments, setPendingAttachments] = useState<PendingDocumentAttachment[]>([])
   const [searchState, setSearchState] = useState<'hidden' | 'visible' | 'hiding'>('hidden')
   const [isIslandHovered, setIsIslandHovered] = useState(false)
@@ -2738,14 +2742,11 @@ export default function App() {
     setGatewayStatus({ state: 'idle', connected: false, detail, sessionId: null })
     setShowLauncherTray(false)
     setMode('chat')
-    setQuery('')
+    clearComposerInput()
     setPendingAttachments([])
     setIsInputFocused(false)
     shouldAutoScrollRef.current = true
-    if (inputRef.current) {
-      inputRef.current.style.height = '24px'
-      inputRef.current.blur()
-    }
+    if (inputRef.current) inputRef.current.blur()
   }
 
   const ensureAssistantMessageForEvent = (messages: Message[], event: any) => {
@@ -3907,7 +3908,12 @@ export default function App() {
             if (item.id !== messageId) {
               return item
             }
-            return { ...item, content: message, progress: undefined }
+            const existingContent = String(item.content || '').trim()
+            return {
+              ...item,
+              content: existingContent ? item.content : message,
+              progress: undefined,
+            }
           })
         })
         forgetAssistantMessageBindings(event)
@@ -3966,10 +3972,20 @@ export default function App() {
         clearActiveStreamingRefs()
         setStreamingProgress('')
         if (event.message) {
-          setMessages((prev) => [...prev, {
-            ...createAssistantMessage(),
-            content: String(event.message),
-          }])
+          setMessages((prev) => {
+            const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
+            return nextMessages.map((item) => {
+              if (item.id !== messageId) {
+                return item
+              }
+              const existingContent = String(item.content || '').trim()
+              return {
+                ...item,
+                content: existingContent ? item.content : String(event.message),
+                progress: undefined,
+              }
+            })
+          })
         }
       }
     })
@@ -4032,11 +4048,25 @@ export default function App() {
 
   // --- ACTIONS ---
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setQuery(e.target.value)
     const target = e.target
+    const next = target.value.trim().length > 0
+    if (next !== inputHasTextRef.current) {
+      inputHasTextRef.current = next
+      setHasText(next)
+    }
     target.style.height = 'auto'
-    const newHeight = Math.min(target.scrollHeight, 120)
-    target.style.height = `${newHeight}px`
+    target.style.height = `${Math.min(target.scrollHeight, 120)}px`
+  }
+
+  const clearComposerInput = () => {
+    if (inputRef.current) {
+      inputRef.current.value = ''
+      inputRef.current.style.height = '24px'
+    }
+    if (inputHasTextRef.current) {
+      inputHasTextRef.current = false
+      setHasText(false)
+    }
   }
 
   const handlePickDocuments = async () => {
@@ -4089,15 +4119,14 @@ export default function App() {
     setIsInputFocused(false)
     if (inputRef.current) inputRef.current.blur()
 
-    if ((!query.trim() && pendingAttachments.length === 0) || isStreaming) return
+    const textToSend = (inputRef.current?.value ?? '').trim()
+    if ((!textToSend && pendingAttachments.length === 0) || isStreaming) return
 
-    const textToSend = query.trim()
     const messageAttachments = normalizeMessageAttachments(pendingAttachments)
     const displayText = textToSend || buildPendingAttachmentSummary(pendingAttachments)
     const requestId = `req_${crypto.randomUUID()}`
     const userMessage = createUserMessage(displayText, messageAttachments, { requestId })
-    setQuery('')
-    if (inputRef.current) inputRef.current.style.height = '24px'
+    clearComposerInput()
     shouldAutoScrollRef.current = true
 
     setMessages(prev => [...prev, userMessage])
@@ -5810,7 +5839,7 @@ export default function App() {
                       ref={inputRef}
                       className="input"
                       rows={1}
-                      value={query}
+                      defaultValue=""
                       onChange={handleInput}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' && !e.shiftKey) {
@@ -5826,15 +5855,12 @@ export default function App() {
                       disabled={isStreaming || authState !== 'authenticated'}
                     />
 
-                    {query && (
+                    {hasText && (
                       <button
                         className="clear-btn"
                         onClick={() => {
-                          setQuery('')
-                          if (inputRef.current) {
-                            inputRef.current.style.height = '24px'
-                            inputRef.current.focus()
-                          }
+                          clearComposerInput()
+                          inputRef.current?.focus()
                         }}
                         type="button"
                       >
@@ -5907,9 +5933,9 @@ export default function App() {
                       </button>
                     ) : (
                       <button
-                        className={`send-btn ${(query.trim() || pendingAttachments.length > 0) ? 'active' : ''}`}
+                        className={`send-btn ${(hasText || pendingAttachments.length > 0) ? 'active' : ''}`}
                         onClick={handleSubmit}
-                        disabled={!query.trim() && pendingAttachments.length === 0}
+                        disabled={!hasText && pendingAttachments.length === 0}
                         type="button"
                       >
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">

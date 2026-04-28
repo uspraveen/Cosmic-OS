@@ -4035,6 +4035,47 @@ class GatewayRuntime:
             + FAILED_FOREGROUND_STREAM_RETENTION_SEC,
         }
 
+    def _persist_failed_foreground_response(self, state: ActiveRequest) -> bool:
+        if not state.foreground or not state.failed:
+            return False
+        visible_content = state.partial_content or state.error_message
+        if not (
+            visible_content
+            or state.partial_thinking
+            or state.response_blocks_snapshot
+            or state.supporting_artifacts
+        ):
+            return False
+
+        metadata: dict[str, Any] = {
+            "request_id": state.request_id,
+            "failed": True,
+        }
+        if state.task_id:
+            metadata["task_id"] = state.task_id
+        if state.partial_thinking:
+            metadata["thinking_text"] = state.partial_thinking
+        if state.error_message:
+            metadata["error"] = state.error_message
+        if state.partial_content:
+            metadata["partial_response"] = True
+        if state.supporting_artifacts:
+            metadata["supporting_artifacts"] = list(state.supporting_artifacts)
+        if state.response_blocks_snapshot:
+            metadata["response_blocks"] = list(state.response_blocks_snapshot)
+
+        return bool(
+            self._append_session_message(
+                state.session_id,
+                role="assistant",
+                content=visible_content,
+                route=state.route,
+                channel=state.channel,
+                metadata=metadata,
+                in_reply_to_request_id=state.request_id,
+            )
+        )
+
     def _ensure_session_state_seeded(self, session_id: str) -> dict[str, Any]:
         metadata = self.session_store.get_session_metadata(session_id)
         active_working_set = metadata.get("active_working_set")
@@ -12104,6 +12145,10 @@ class GatewayRuntime:
                 return
             raise
         except Exception as exc:
+            state.completed = True
+            state.failed = True
+            state.error_message = str(exc)
+            state.activity = str(exc)
             self._trace_request_event(
                 request_id=state.request_id,
                 session_id=state.session_id,
@@ -12156,7 +12201,8 @@ class GatewayRuntime:
                     in_reply_to_request_id=state.request_id,
                 )
             elif state.failed:
-                self._cache_recent_foreground_terminal_stream(state)
+                if not self._persist_failed_foreground_response(state):
+                    self._cache_recent_foreground_terminal_stream(state)
             self._finalize_active_request(state)
 
     async def _emit_cancelled_event(self, state: ActiveRequest) -> None:

@@ -3490,6 +3490,60 @@ def test_desktop_resume_includes_recent_failed_foreground_stream(test_client: Te
     assert foreground_streams[0]["updated_at"]
 
 
+def test_failed_foreground_response_persists_to_history(test_client: TestClient) -> None:
+    runtime = test_client.app.state.gateway_runtime
+    session_id = runtime._current_session_id()
+    runtime._append_session_message(
+        session_id,
+        role="user",
+        content="Market cap, P/E ratio, profit margin, dividend yield (%) for Apple, Microsoft, Google",
+        route="opus",
+        channel="desktop:desk_failed_history",
+        metadata={"request_id": "req_failed_history"},
+    )
+    failed_state = ActiveRequest(
+        request_id="req_failed_history",
+        session_id=session_id,
+        channel="desktop:desk_failed_history",
+        route="opus",
+        task_id="task_failed_history",
+        partial_content="Apple market cap is...",
+        partial_thinking="Fetching the latest financial metrics.",
+        response_blocks_snapshot=[{"type": "markdown", "text": "Apple market cap is..."}],
+        completed=True,
+        failed=True,
+        error_message="Anthropic API error: upstream failed",
+    )
+
+    assert runtime._persist_failed_foreground_response(failed_state) is True
+
+    with test_client.websocket_connect("/ws?token=test-token&device_id=desk_failed_history") as websocket:
+        websocket.send_json(
+            {
+                "type": "resume",
+                "request_id": "resume_failed_history_001",
+                "session_id": session_id,
+                "known_task_ids": [],
+            }
+        )
+        resume = websocket.receive_json()
+
+    assert resume["type"] == "resume.ok"
+    assert resume["foreground_streams"] == []
+    stored_message = next(
+        item
+        for item in resume["history_tail"]
+        if item["role"] == "assistant"
+        and item["metadata"]["request_id"] == "req_failed_history"
+    )
+    assert stored_message["content"] == "Apple market cap is..."
+    assert stored_message["metadata"]["failed"] is True
+    assert stored_message["metadata"]["partial_response"] is True
+    assert stored_message["metadata"]["error"] == "Anthropic API error: upstream failed"
+    assert stored_message["metadata"]["thinking_text"] == "Fetching the latest financial metrics."
+    assert stored_message["metadata"]["response_blocks"][0]["text"] == "Apple market cap is..."
+
+
 def test_desktop_resume_includes_artifact_only_assistant_message(test_client: TestClient) -> None:
     runtime = test_client.app.state.gateway_runtime
     session_id = runtime._current_session_id()
