@@ -73,8 +73,17 @@ client.connect(
 Known VM identity:
 
 - hostname: `ip-172-31-22-170`
+- current public Gateway DNS: `c2ece0ad-4b2d-4af4-ae65-1b07660550dc.thelearnchain.com`
+- current resolved public IP as of 2026-04-28: `3.21.236.10`
+- old/stale public IP previously documented: `3.137.194.119`
 - user: `ubuntu`
 - repo path: `/home/ubuntu/Cosmic-OS`
+
+Important:
+
+- Prefer SSH to `ubuntu@c2ece0ad-4b2d-4af4-ae65-1b07660550dc.thelearnchain.com`.
+- Do not trust the desktop config `vmIp` field blindly; it may be stale after DNS/IP changes.
+- The desktop connects through `gatewayBaseUrl`, so resolve that hostname before VM sync/debug.
 
 ### Important VM services
 
