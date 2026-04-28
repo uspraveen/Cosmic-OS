@@ -82,13 +82,15 @@ class MobileDeviceAuthorizeRequest(BaseModel):
 
 
 class MobilePushTokenRequest(BaseModel):
-    push_token: str = Field(..., min_length=1, max_length=512)
+    push_token: str | None = Field(default=None, max_length=512)
+    fcm_token: str | None = Field(default=None, max_length=4096)
     notifications_enabled: bool | None = None
     preferences: dict[str, Any] | None = None
 
 
 class MobilePushTokenPatchRequest(BaseModel):
     push_token: str | None = Field(default=None, max_length=512)
+    fcm_token: str | None = Field(default=None, max_length=4096)
     notifications_enabled: bool | None = None
     preferences: dict[str, Any] | None = None
 
@@ -976,6 +978,7 @@ async def register_mobile_push_token(
         device = runtime.update_mobile_push_token(
             _normalize_device_id(device_id) or "",
             push_token=payload.push_token,
+            fcm_token=payload.fcm_token,
             notifications_enabled=payload.notifications_enabled,
             preferences=payload.preferences,
         )
@@ -992,11 +995,12 @@ async def update_mobile_push_token(
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
     normalized_device_id = _normalize_device_id(device_id) or ""
-    if payload.push_token:
+    if payload.push_token or payload.fcm_token:
         try:
             device = runtime.update_mobile_push_token(
                 normalized_device_id,
                 push_token=payload.push_token,
+                fcm_token=payload.fcm_token,
                 notifications_enabled=payload.notifications_enabled,
                 preferences=payload.preferences,
             )
@@ -1007,12 +1011,17 @@ async def update_mobile_push_token(
     if current is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="device not found")
     token = str(current.get("push_token") or "").strip()
-    if not token:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="push_token is required")
+    fcm_token = str(current.get("fcm_token") or "").strip()
+    if not token and not fcm_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="push_token or fcm_token is required",
+        )
     try:
         device = runtime.update_mobile_push_token(
             normalized_device_id,
             push_token=token,
+            fcm_token=payload.fcm_token or fcm_token or None,
             notifications_enabled=payload.notifications_enabled,
             preferences=payload.preferences,
         )

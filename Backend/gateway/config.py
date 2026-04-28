@@ -83,6 +83,10 @@ class GatewayConfig:
     expo_access_token: str = ""
     expo_push_url: str = "https://exp.host/--/api/v2/push/send"
     expo_push_timeout_sec: float = 8.0
+    fcm_project_id: str = ""
+    fcm_service_account_file: Path | None = None
+    fcm_service_account_json: str = ""
+    fcm_timeout_sec: float = 8.0
     mobile_presence_stale_sec: int = 120
     usage_db_path: Path = BACKEND_ROOT / "gateway" / "usage.db"
     request_trace_db_path: Path = BACKEND_ROOT / "gateway" / "request_traces.db"
@@ -270,6 +274,14 @@ class GatewayConfig:
                 1.0,
                 _env_float("EXPO_PUSH_TIMEOUT_SEC", 8.0),
             ),
+            fcm_project_id=os.getenv("FCM_PROJECT_ID", "").strip(),
+            fcm_service_account_file=(
+                Path(os.getenv("FCM_SERVICE_ACCOUNT_FILE", "")).expanduser()
+                if os.getenv("FCM_SERVICE_ACCOUNT_FILE", "").strip()
+                else None
+            ),
+            fcm_service_account_json=os.getenv("FCM_SERVICE_ACCOUNT_JSON", "").strip(),
+            fcm_timeout_sec=max(1.0, _env_float("FCM_TIMEOUT_SEC", 8.0)),
             mobile_presence_stale_sec=max(
                 15,
                 _env_int("MOBILE_PRESENCE_STALE_SEC", 120),

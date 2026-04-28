@@ -323,7 +323,11 @@ class GatewayRuntime:
             access_token=config.expo_access_token,
             push_url=config.expo_push_url,
             timeout_sec=config.expo_push_timeout_sec,
+            fcm_project_id=config.fcm_project_id,
+            fcm_service_account_file=config.fcm_service_account_file,
+            fcm_service_account_json=config.fcm_service_account_json,
             unregister_token=self._clear_mobile_push_token_async,
+            unregister_fcm_token=self._clear_mobile_fcm_token_async,
         )
         self._redis = (
             create_redis_client(config.redis_url) if config.redis_url else None
@@ -3104,13 +3108,15 @@ class GatewayRuntime:
         self,
         device_id: str,
         *,
-        push_token: str,
+        push_token: str | None,
+        fcm_token: str | None = None,
         notifications_enabled: bool | None = None,
         preferences: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self.mobile_device_store.update_push_token(
             device_id,
             push_token=push_token,
+            fcm_token=fcm_token,
             notifications_enabled=notifications_enabled,
             preferences=preferences,
         )
@@ -3120,6 +3126,12 @@ class GatewayRuntime:
 
     async def _clear_mobile_push_token_async(self, device_id: str) -> None:
         self.clear_mobile_push_token(device_id)
+
+    def clear_mobile_fcm_token(self, device_id: str) -> dict[str, Any] | None:
+        return self.mobile_device_store.clear_fcm_token(device_id)
+
+    async def _clear_mobile_fcm_token_async(self, device_id: str) -> None:
+        self.clear_mobile_fcm_token(device_id)
 
     def update_mobile_device_presence(
         self,
@@ -6761,7 +6773,8 @@ class GatewayRuntime:
         for target in targets:
             device_id = self._safe_text(target.get("device_id"))
             push_token = self._safe_text(target.get("push_token"))
-            if not device_id or not push_token:
+            fcm_token = self._safe_text(target.get("fcm_token"))
+            if not device_id or not (push_token or fcm_token):
                 continue
             if self._should_suppress_mobile_push(
                 target,
@@ -6774,6 +6787,8 @@ class GatewayRuntime:
                 PushNotification(
                     device_id=device_id,
                     token=push_token,
+                    fcm_token=fcm_token,
+                    platform=self._safe_text(target.get("platform")),
                     title=title,
                     body=body,
                     data={

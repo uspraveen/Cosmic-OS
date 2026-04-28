@@ -3828,6 +3828,22 @@ def build_service_env_overrides(
             or gateway_existing.get("EXPO_PUSH_TIMEOUT_SEC")
             or gateway_data.get("EXPO_PUSH_TIMEOUT_SEC")
             or "8",
+            "FCM_PROJECT_ID": gateway_external.get("FCM_PROJECT_ID")
+            or gateway_existing.get("FCM_PROJECT_ID")
+            or gateway_data.get("FCM_PROJECT_ID")
+            or "",
+            "FCM_SERVICE_ACCOUNT_FILE": gateway_external.get("FCM_SERVICE_ACCOUNT_FILE")
+            or gateway_existing.get("FCM_SERVICE_ACCOUNT_FILE")
+            or gateway_data.get("FCM_SERVICE_ACCOUNT_FILE")
+            or "",
+            "FCM_SERVICE_ACCOUNT_JSON": gateway_external.get("FCM_SERVICE_ACCOUNT_JSON")
+            or gateway_existing.get("FCM_SERVICE_ACCOUNT_JSON")
+            or gateway_data.get("FCM_SERVICE_ACCOUNT_JSON")
+            or "",
+            "FCM_TIMEOUT_SEC": gateway_external.get("FCM_TIMEOUT_SEC")
+            or gateway_existing.get("FCM_TIMEOUT_SEC")
+            or gateway_data.get("FCM_TIMEOUT_SEC")
+            or "8",
             "MOBILE_PRESENCE_STALE_SEC": gateway_external.get("MOBILE_PRESENCE_STALE_SEC")
             or gateway_existing.get("MOBILE_PRESENCE_STALE_SEC")
             or gateway_data.get("MOBILE_PRESENCE_STALE_SEC")

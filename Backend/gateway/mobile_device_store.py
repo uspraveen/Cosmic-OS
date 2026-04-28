@@ -27,6 +27,8 @@ class MobileDeviceStore:
     _PUSH_COLUMNS: dict[str, str] = {
         "push_token": "TEXT",
         "push_token_updated_at": "TEXT",
+        "fcm_token": "TEXT",
+        "fcm_token_updated_at": "TEXT",
         "notifications_enabled": "INTEGER DEFAULT 1",
         "notification_preferences_json": "TEXT",
         "presence_state": "TEXT",
@@ -94,6 +96,13 @@ class MobileDeviceStore:
                 CREATE INDEX IF NOT EXISTS idx_mobile_devices_push
                     ON mobile_devices(push_token)
                     WHERE push_token IS NOT NULL;
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_mobile_devices_fcm
+                    ON mobile_devices(fcm_token)
+                    WHERE fcm_token IS NOT NULL;
                 """
             )
             connection.commit()
@@ -342,18 +351,22 @@ class MobileDeviceStore:
         self,
         device_id: str,
         *,
-        push_token: str,
+        push_token: str | None,
+        fcm_token: str | None = None,
         notifications_enabled: bool | None = None,
         preferences: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized_device_id = str(device_id or "").strip()
         normalized_token = str(push_token or "").strip()
+        normalized_fcm_token = str(fcm_token or "").strip() or None
         if not normalized_device_id:
             raise ValueError("device_id is required")
-        if not normalized_token:
-            raise ValueError("push_token is required")
-        if not normalized_token.startswith("ExponentPushToken["):
+        if not normalized_token and not normalized_fcm_token:
+            raise ValueError("push_token or fcm_token is required")
+        if normalized_token and not normalized_token.startswith("ExponentPushToken["):
             raise ValueError("push_token must be an Expo push token")
+        if normalized_fcm_token and len(normalized_fcm_token) < 20:
+            raise ValueError("fcm_token is invalid")
 
         now = utcnow_iso()
         preferences_json = (
@@ -372,16 +385,26 @@ class MobileDeviceStore:
                     last_seen_at,
                     push_token,
                     push_token_updated_at,
+                    fcm_token,
+                    fcm_token_updated_at,
                     notifications_enabled,
                     notification_preferences_json,
                     revoked_at,
                     revoke_reason
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
                 ON CONFLICT(device_id) DO UPDATE SET
                     last_seen_at = excluded.last_seen_at,
-                    push_token = excluded.push_token,
-                    push_token_updated_at = excluded.push_token_updated_at,
+                    push_token = COALESCE(excluded.push_token, mobile_devices.push_token),
+                    push_token_updated_at = CASE
+                        WHEN excluded.push_token IS NOT NULL THEN excluded.push_token_updated_at
+                        ELSE mobile_devices.push_token_updated_at
+                    END,
+                    fcm_token = COALESCE(excluded.fcm_token, mobile_devices.fcm_token),
+                    fcm_token_updated_at = CASE
+                        WHEN excluded.fcm_token IS NOT NULL THEN excluded.fcm_token_updated_at
+                        ELSE mobile_devices.fcm_token_updated_at
+                    END,
                     notifications_enabled = COALESCE(excluded.notifications_enabled, mobile_devices.notifications_enabled),
                     notification_preferences_json = COALESCE(excluded.notification_preferences_json, mobile_devices.notification_preferences_json),
                     revoked_at = NULL,
@@ -391,8 +414,10 @@ class MobileDeviceStore:
                     normalized_device_id,
                     now,
                     now,
-                    normalized_token,
-                    now,
+                    normalized_token or None,
+                    now if normalized_token else None,
+                    normalized_fcm_token,
+                    now if normalized_fcm_token else None,
                     None if notifications_enabled is None else 1 if notifications_enabled else 0,
                     preferences_json,
                 ),
@@ -416,7 +441,33 @@ class MobileDeviceStore:
                 UPDATE mobile_devices
                 SET last_seen_at = ?,
                     push_token = NULL,
-                    push_token_updated_at = NULL
+                    push_token_updated_at = NULL,
+                    fcm_token = NULL,
+                    fcm_token_updated_at = NULL
+                WHERE device_id = ?
+                """,
+                (now, normalized_device_id),
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM mobile_devices WHERE device_id = ? LIMIT 1",
+                (normalized_device_id,),
+            ).fetchone()
+        return self._row_to_record(row) if row else None
+
+    def clear_fcm_token(self, device_id: str) -> dict[str, Any] | None:
+        normalized_device_id = str(device_id or "").strip()
+        if not normalized_device_id:
+            raise ValueError("device_id is required")
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            self._ensure_push_columns(connection)
+            connection.execute(
+                """
+                UPDATE mobile_devices
+                SET last_seen_at = ?,
+                    fcm_token = NULL,
+                    fcm_token_updated_at = NULL
                 WHERE device_id = ?
                 """,
                 (now, normalized_device_id),
@@ -492,7 +543,7 @@ class MobileDeviceStore:
                     """
                     SELECT *
                     FROM mobile_devices
-                    WHERE push_token IS NOT NULL
+                    WHERE (push_token IS NOT NULL OR fcm_token IS NOT NULL)
                       AND COALESCE(notifications_enabled, 1) = 1
                       AND revoked_at IS NULL
                       AND last_session_id = ?
@@ -505,7 +556,7 @@ class MobileDeviceStore:
                     """
                     SELECT *
                     FROM mobile_devices
-                    WHERE push_token IS NOT NULL
+                    WHERE (push_token IS NOT NULL OR fcm_token IS NOT NULL)
                       AND COALESCE(notifications_enabled, 1) = 1
                       AND revoked_at IS NULL
                     ORDER BY last_seen_at DESC
@@ -624,6 +675,8 @@ class MobileDeviceStore:
             "revoked": bool(_row_value("revoked_at")),
             "push_token": _row_value("push_token"),
             "push_token_updated_at": _row_value("push_token_updated_at"),
+            "fcm_token": _row_value("fcm_token"),
+            "fcm_token_updated_at": _row_value("fcm_token_updated_at"),
             "notifications_enabled": (
                 bool(_row_value("notifications_enabled"))
                 if _row_value("notifications_enabled") is not None
