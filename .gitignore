@@ -103,12 +103,14 @@ test_artifact_bundle/
 Backend/.pytest-*/
 Backend/.pytest_cache/
 Backend/pytest-temp-*/
+Backend/pytest_tmp_*/
 Backend/pytest_one_*/
 Backend/smoke-temp-*/
 Backend/tmp_pytest_*/
 Backend/cosmic-tg-smoke-*/
 Backend/tmp*/
 Backend/tmp_phase1_manual/
+Backend/.codex_test_tmp/
 
 # OS files
 Thumbs.db
