@@ -58,6 +58,7 @@ class ExpoPushDispatcher:
             "data": _json_safe_dict(notification.data, max_items=24),
             "sound": "default",
             "priority": "high" if notification.priority == "high" else "default",
+            "channelId": _notification_channel(notification),
         }
         headers = {
             "Accept": "application/json",
@@ -124,6 +125,23 @@ def _json_safe_dict(value: dict[str, Any], *, max_items: int) -> dict[str, Any]:
         else:
             safe[key] = _truncate(raw, 500)
     return safe
+
+
+def _notification_channel(notification: PushNotification) -> str:
+    override = str(notification.data.get("channel_id") or "").strip()
+    if override:
+        return override
+    event_type = str(notification.data.get("type") or "").strip()
+    if event_type.startswith("agent_email.") or event_type.startswith("email."):
+        return "cosmic-email"
+    if event_type == "task.input_required" or event_type in {
+        "task.failed",
+        "task.cancelled",
+    }:
+        return "cosmic-actions"
+    if event_type == "response.complete":
+        return "cosmic-chat"
+    return "default"
 
 
 def _extract_expo_error(body: Any) -> str | None:

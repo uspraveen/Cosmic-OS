@@ -6753,6 +6753,8 @@ class GatewayRuntime:
         data: dict[str, Any],
     ) -> None:
         targets = self.mobile_device_store.list_push_targets(session_id=session_id)
+        if not targets and self._channel_platform(origin_channel) != "mobile":
+            targets = self.mobile_device_store.list_push_targets(session_id=None)
         if not targets:
             return
         live_mobile_devices = await self._live_mobile_device_ids()

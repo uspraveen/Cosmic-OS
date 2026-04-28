@@ -756,6 +756,31 @@ async def agent_email_incoming(
         normalized["request_id"] = request_id
         processed = await runtime.process_incoming_user_message(normalized)
         runtime.notify_channel_active(processed["channel"])
+        metadata = normalized.get("metadata") if isinstance(normalized.get("metadata"), dict) else {}
+        sender = (
+            str(metadata.get("from_name") or "").strip()
+            or str(metadata.get("from_address") or "").strip()
+            or "Agent Email"
+        )
+        subject = str(metadata.get("subject") or "").strip() or "New email received"
+        runtime._schedule_mobile_push(
+            session_id=str(processed.get("session_id") or normalized.get("session_id") or "").strip() or None,
+            origin_channel=str(processed.get("channel") or normalized.get("channel") or "").strip() or None,
+            event_type="email.inbound",
+            title="New agent email",
+            body=f"{sender}: {subject}",
+            screen="agent-email",
+            priority="high",
+            data={
+                "type": "email.inbound",
+                "tab": "inboxes",
+                "request_id": processed.get("request_id"),
+                "message_id": metadata.get("message_id"),
+                "thread_id": metadata.get("thread_id"),
+                "origin_channel": processed.get("channel"),
+                "channel_id": "cosmic-email",
+            },
+        )
         if processed.get("dispatch_target") == "redis":
             return {
                 "status": "accepted",
