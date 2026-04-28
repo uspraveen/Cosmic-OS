@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import threading
 from pathlib import Path
@@ -22,6 +23,25 @@ class MobileDeviceStore:
         "is_physical_device": "INTEGER",
         "app_version": "TEXT",
         "app_build": "TEXT",
+    }
+    _PUSH_COLUMNS: dict[str, str] = {
+        "push_token": "TEXT",
+        "push_token_updated_at": "TEXT",
+        "notifications_enabled": "INTEGER DEFAULT 1",
+        "notification_preferences_json": "TEXT",
+        "presence_state": "TEXT",
+        "visible_screen": "TEXT",
+        "last_presence_at": "TEXT",
+    }
+    _PRESENCE_STATES = {"foreground", "background", "inactive", "offline"}
+    _VISIBLE_SCREENS = {
+        "chat",
+        "tasks",
+        "meeting",
+        "spaces",
+        "manage",
+        "agents",
+        "agent-email",
     }
 
     def __init__(self, db_path: Path) -> None:
@@ -68,6 +88,14 @@ class MobileDeviceStore:
                 """
             )
             self._ensure_metadata_columns(connection)
+            self._ensure_push_columns(connection)
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_mobile_devices_push
+                    ON mobile_devices(push_token)
+                    WHERE push_token IS NOT NULL;
+                """
+            )
             connection.commit()
 
     def authorize_device(
@@ -259,13 +287,18 @@ class MobileDeviceStore:
         now = utcnow_iso()
         with self._lock, self._connect() as connection:
             self._ensure_metadata_columns(connection)
+            self._ensure_push_columns(connection)
             connection.execute(
                 """
                 UPDATE mobile_devices
-                SET last_seen_at = ?, last_disconnected_at = ?
+                SET last_seen_at = ?,
+                    last_disconnected_at = ?,
+                    presence_state = 'offline',
+                    last_presence_at = ?
                 WHERE device_id = ?
                 """,
                 (
+                    now,
                     now,
                     now,
                     normalized_device_id,
@@ -304,6 +337,181 @@ class MobileDeviceStore:
                 (normalized_device_id,),
             ).fetchone()
         return self._row_to_record(row) if row else None
+
+    def update_push_token(
+        self,
+        device_id: str,
+        *,
+        push_token: str,
+        notifications_enabled: bool | None = None,
+        preferences: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_device_id = str(device_id or "").strip()
+        normalized_token = str(push_token or "").strip()
+        if not normalized_device_id:
+            raise ValueError("device_id is required")
+        if not normalized_token:
+            raise ValueError("push_token is required")
+        if not normalized_token.startswith("ExponentPushToken["):
+            raise ValueError("push_token must be an Expo push token")
+
+        now = utcnow_iso()
+        preferences_json = (
+            self._serialize_preferences(preferences)
+            if preferences is not None
+            else None
+        )
+        with self._lock, self._connect() as connection:
+            self._ensure_metadata_columns(connection)
+            self._ensure_push_columns(connection)
+            connection.execute(
+                """
+                INSERT INTO mobile_devices (
+                    device_id,
+                    first_seen_at,
+                    last_seen_at,
+                    push_token,
+                    push_token_updated_at,
+                    notifications_enabled,
+                    notification_preferences_json,
+                    revoked_at,
+                    revoke_reason
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                ON CONFLICT(device_id) DO UPDATE SET
+                    last_seen_at = excluded.last_seen_at,
+                    push_token = excluded.push_token,
+                    push_token_updated_at = excluded.push_token_updated_at,
+                    notifications_enabled = COALESCE(excluded.notifications_enabled, mobile_devices.notifications_enabled),
+                    notification_preferences_json = COALESCE(excluded.notification_preferences_json, mobile_devices.notification_preferences_json),
+                    revoked_at = NULL,
+                    revoke_reason = NULL
+                """,
+                (
+                    normalized_device_id,
+                    now,
+                    now,
+                    normalized_token,
+                    now,
+                    None if notifications_enabled is None else 1 if notifications_enabled else 0,
+                    preferences_json,
+                ),
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM mobile_devices WHERE device_id = ? LIMIT 1",
+                (normalized_device_id,),
+            ).fetchone()
+        return self._row_to_record(row)
+
+    def clear_push_token(self, device_id: str) -> dict[str, Any] | None:
+        normalized_device_id = str(device_id or "").strip()
+        if not normalized_device_id:
+            raise ValueError("device_id is required")
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            self._ensure_push_columns(connection)
+            connection.execute(
+                """
+                UPDATE mobile_devices
+                SET last_seen_at = ?,
+                    push_token = NULL,
+                    push_token_updated_at = NULL
+                WHERE device_id = ?
+                """,
+                (now, normalized_device_id),
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM mobile_devices WHERE device_id = ? LIMIT 1",
+                (normalized_device_id,),
+            ).fetchone()
+        return self._row_to_record(row) if row else None
+
+    def update_presence(
+        self,
+        device_id: str,
+        *,
+        state: str,
+        visible_screen: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_device_id = str(device_id or "").strip()
+        normalized_state = str(state or "").strip().lower()
+        normalized_screen = str(visible_screen or "").strip().lower() or None
+        if not normalized_device_id:
+            raise ValueError("device_id is required")
+        if normalized_state not in self._PRESENCE_STATES:
+            raise ValueError("invalid presence state")
+        if normalized_screen and normalized_screen not in self._VISIBLE_SCREENS:
+            raise ValueError("invalid visible_screen")
+
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            self._ensure_push_columns(connection)
+            connection.execute(
+                """
+                INSERT INTO mobile_devices (
+                    device_id,
+                    first_seen_at,
+                    last_seen_at,
+                    presence_state,
+                    visible_screen,
+                    last_presence_at,
+                    revoked_at,
+                    revoke_reason
+                )
+                VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)
+                ON CONFLICT(device_id) DO UPDATE SET
+                    last_seen_at = excluded.last_seen_at,
+                    presence_state = excluded.presence_state,
+                    visible_screen = excluded.visible_screen,
+                    last_presence_at = excluded.last_presence_at
+                """,
+                (
+                    normalized_device_id,
+                    now,
+                    now,
+                    normalized_state,
+                    normalized_screen,
+                    now,
+                ),
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM mobile_devices WHERE device_id = ? LIMIT 1",
+                (normalized_device_id,),
+            ).fetchone()
+        return self._row_to_record(row)
+
+    def list_push_targets(self, *, session_id: str | None = None) -> list[dict[str, Any]]:
+        normalized_session_id = str(session_id or "").strip() or None
+        with self._lock, self._connect() as connection:
+            self._ensure_push_columns(connection)
+            if normalized_session_id:
+                rows = connection.execute(
+                    """
+                    SELECT *
+                    FROM mobile_devices
+                    WHERE push_token IS NOT NULL
+                      AND COALESCE(notifications_enabled, 1) = 1
+                      AND revoked_at IS NULL
+                      AND last_session_id = ?
+                    ORDER BY last_seen_at DESC
+                    """,
+                    (normalized_session_id,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT *
+                    FROM mobile_devices
+                    WHERE push_token IS NOT NULL
+                      AND COALESCE(notifications_enabled, 1) = 1
+                      AND revoked_at IS NULL
+                    ORDER BY last_seen_at DESC
+                    """
+                ).fetchall()
+        return [self._row_to_record(row) for row in rows]
 
     def is_revoked(self, device_id: str) -> bool:
         row = self.get_device(device_id)
@@ -414,6 +622,17 @@ class MobileDeviceStore:
             "revoked_at": _row_value("revoked_at"),
             "revoke_reason": _row_value("revoke_reason"),
             "revoked": bool(_row_value("revoked_at")),
+            "push_token": _row_value("push_token"),
+            "push_token_updated_at": _row_value("push_token_updated_at"),
+            "notifications_enabled": (
+                bool(_row_value("notifications_enabled"))
+                if _row_value("notifications_enabled") is not None
+                else True
+            ),
+            "notification_preferences_json": _row_value("notification_preferences_json"),
+            "presence_state": _row_value("presence_state"),
+            "visible_screen": _row_value("visible_screen"),
+            "last_presence_at": _row_value("last_presence_at"),
         }
 
     def _ensure_metadata_columns(self, connection: sqlite3.Connection) -> None:
@@ -425,6 +644,25 @@ class MobileDeviceStore:
             if column_name in existing:
                 continue
             connection.execute(f"ALTER TABLE mobile_devices ADD COLUMN {column_name} {column_type}")
+
+    def _ensure_push_columns(self, connection: sqlite3.Connection) -> None:
+        existing = {
+            str(row["name"]): str(row["type"] or "")
+            for row in connection.execute("PRAGMA table_info(mobile_devices)").fetchall()
+        }
+        for column_name, column_type in self._PUSH_COLUMNS.items():
+            if column_name in existing:
+                continue
+            connection.execute(f"ALTER TABLE mobile_devices ADD COLUMN {column_name} {column_type}")
+
+    def _serialize_preferences(self, preferences: dict[str, Any] | None) -> str | None:
+        if not preferences:
+            return None
+        allowed: dict[str, Any] = {}
+        for key in ("chat", "tasks", "approvals", "agent_email"):
+            if key in preferences:
+                allowed[key] = bool(preferences[key])
+        return json.dumps(allowed, sort_keys=True) if allowed else None
 
     def _normalize_metadata(self, metadata: dict[str, Any] | None) -> dict[str, Any]:
         payload = metadata or {}

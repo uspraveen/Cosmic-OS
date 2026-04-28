@@ -81,6 +81,18 @@ class MobileDeviceAuthorizeRequest(BaseModel):
     app_build: str | None = Field(default=None, max_length=64)
 
 
+class MobilePushTokenRequest(BaseModel):
+    push_token: str = Field(..., min_length=1, max_length=512)
+    notifications_enabled: bool | None = None
+    preferences: dict[str, Any] | None = None
+
+
+class MobilePushTokenPatchRequest(BaseModel):
+    push_token: str | None = Field(default=None, max_length=512)
+    notifications_enabled: bool | None = None
+    preferences: dict[str, Any] | None = None
+
+
 class PauseRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=200)
 
@@ -361,6 +373,19 @@ async def _handle_realtime_websocket_message(
             },
             channel=channel,
         )
+        return
+
+    if message_type == "device.presence":
+        if platform != "mobile":
+            return
+        try:
+            runtime.update_mobile_device_presence(
+                channel.split(":", 1)[1],
+                state=str(payload.get("state") or "").strip(),
+                visible_screen=str(payload.get("visible_screen") or "").strip() or None,
+            )
+        except ValueError:
+            logger.info("gateway.mobile_presence.invalid channel=%s payload=%s", channel, payload)
         return
 
     if message_type == "resume":
@@ -913,6 +938,75 @@ async def authorize_mobile_device(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return {"device": device}
+
+
+@router.post("/channels/mobile/devices/{device_id}/push-token")
+async def register_mobile_push_token(
+    device_id: str,
+    payload: MobilePushTokenRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        device = runtime.update_mobile_push_token(
+            _normalize_device_id(device_id) or "",
+            push_token=payload.push_token,
+            notifications_enabled=payload.notifications_enabled,
+            preferences=payload.preferences,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return {"device": device}
+
+
+@router.patch("/channels/mobile/devices/{device_id}/push-token")
+async def update_mobile_push_token(
+    device_id: str,
+    payload: MobilePushTokenPatchRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    normalized_device_id = _normalize_device_id(device_id) or ""
+    if payload.push_token:
+        try:
+            device = runtime.update_mobile_push_token(
+                normalized_device_id,
+                push_token=payload.push_token,
+                notifications_enabled=payload.notifications_enabled,
+                preferences=payload.preferences,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        return {"device": device}
+    current = runtime.mobile_device_store.get_device(normalized_device_id)
+    if current is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="device not found")
+    token = str(current.get("push_token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="push_token is required")
+    try:
+        device = runtime.update_mobile_push_token(
+            normalized_device_id,
+            push_token=token,
+            notifications_enabled=payload.notifications_enabled,
+            preferences=payload.preferences,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return {"device": device}
+
+
+@router.delete("/channels/mobile/devices/{device_id}/push-token")
+async def delete_mobile_push_token(
+    device_id: str,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        device = runtime.clear_mobile_push_token(_normalize_device_id(device_id) or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return {"device": device or {"device_id": _normalize_device_id(device_id)}}
 
 
 @router.post("/channels/mobile/devices/revoke-all")

@@ -926,6 +926,7 @@ def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
             enable_whatsapp=False,
             preferences_db_path=tmp_path / "preferences.db",
             sessions_db_path=tmp_path / "sessions.db",
+            mobile_devices_db_path=tmp_path / "mobile_devices.db",
             routing_audit_db_path=tmp_path / "routing_audit.db",
             artifacts_db_path=tmp_path / "artifacts.db",
             delivery_queue_db_path=tmp_path / "delivery_queue.db",
@@ -2109,6 +2110,48 @@ def test_mobile_device_routes_authorize_list_and_revoke(test_client: TestClient)
     assert reauthorized.json()["device"]["device_name"] == "Praveen's Pixel 8 Pro"
 
 
+def test_mobile_push_token_routes_register_update_and_delete(test_client: TestClient) -> None:
+    authorized = test_client.post(
+        "/channels/mobile/devices/authorize",
+        headers={"Authorization": "Bearer test-token"},
+        json={"device_id": "mob_push_1", "platform": "android"},
+    )
+    assert authorized.status_code == 200
+
+    registered = test_client.post(
+        "/channels/mobile/devices/mob_push_1/push-token",
+        headers={"Authorization": "Bearer test-token"},
+        json={
+            "push_token": "ExponentPushToken[test-token-1]",
+            "notifications_enabled": True,
+            "preferences": {"chat": True, "tasks": False, "unknown": True},
+        },
+    )
+    assert registered.status_code == 200
+    device = registered.json()["device"]
+    assert device["device_id"] == "mob_push_1"
+    assert device["push_token"] == "ExponentPushToken[test-token-1]"
+    assert device["notifications_enabled"] is True
+    assert '"chat": true' in device["notification_preferences_json"]
+    assert "unknown" not in device["notification_preferences_json"]
+
+    updated = test_client.patch(
+        "/channels/mobile/devices/mob_push_1/push-token",
+        headers={"Authorization": "Bearer test-token"},
+        json={"notifications_enabled": False},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["device"]["push_token"] == "ExponentPushToken[test-token-1]"
+    assert updated.json()["device"]["notifications_enabled"] is False
+
+    deleted = test_client.delete(
+        "/channels/mobile/devices/mob_push_1/push-token",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert deleted.status_code == 200
+    assert deleted.json()["device"]["push_token"] is None
+
+
 def test_mobile_device_list_marks_active_connections(test_client: TestClient) -> None:
     with test_client.websocket_connect("/ws?token=test-token&device_id=mob_manage_active") as websocket:
         websocket.send_json(
@@ -2131,6 +2174,27 @@ def test_mobile_device_list_marks_active_connections(test_client: TestClient) ->
         assert device["active"] is True
         assert device["current_channel"] == "mobile:mob_manage_active"
         assert device["current_session_id"] == resume["session_id"]
+
+        websocket.send_json(
+            {
+                "type": "device.presence",
+                "state": "foreground",
+                "visible_screen": "tasks",
+                "ts_unix_ms": 1234567890,
+            }
+        )
+        listed_after_presence = test_client.get(
+            "/channels/mobile/devices",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert listed_after_presence.status_code == 200
+        device_after_presence = next(
+            item
+            for item in listed_after_presence.json()["devices"]
+            if item["device_id"] == "mob_manage_active"
+        )
+        assert device_after_presence["presence_state"] == "foreground"
+        assert device_after_presence["visible_screen"] == "tasks"
 
 
 def test_revoked_mobile_device_upload_route_is_blocked(test_client: TestClient) -> None:

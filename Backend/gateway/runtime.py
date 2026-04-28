@@ -48,6 +48,7 @@ from .memory.client import (
 from .mobile_device_store import MobileDeviceStore
 from .orchestrator_client import OrchestratorClient
 from .preferences.store import GatewayPreferenceStore
+from .push_dispatcher import ExpoPushDispatcher, PushNotification
 from .request_trace_store import RequestTraceStore
 from .routing.router_client import ModelRouterClient
 from .routing.audit_store import RoutingAuditStore
@@ -317,6 +318,13 @@ class GatewayRuntime:
             connect=min(config.artifact_download_timeout_sec, 15.0),
         )
         self._artifact_client = httpx.AsyncClient(timeout=artifact_timeout, http2=True)
+        self.push_dispatcher = ExpoPushDispatcher(
+            enabled=config.enable_push_notifications,
+            access_token=config.expo_access_token,
+            push_url=config.expo_push_url,
+            timeout_sec=config.expo_push_timeout_sec,
+            unregister_token=self._clear_mobile_push_token_async,
+        )
         self._redis = (
             create_redis_client(config.redis_url) if config.redis_url else None
         )
@@ -361,6 +369,7 @@ class GatewayRuntime:
         self._system_metrics_snapshot_at = 0.0
         self._system_metrics_cpu_sample: tuple[int, int] | None = None
         self._system_metrics_network_sample: tuple[int, int, float] | None = None
+        self._recent_push_dedupe: dict[str, float] = {}
 
     async def start(self) -> None:
         self.session_store.initialize()
@@ -485,6 +494,7 @@ class GatewayRuntime:
         await self.capability_wishlist_service.close()
         await self.haiku_adapter.close()
         await self.perplexity_adapter.close()
+        await self.push_dispatcher.close()
         await self._artifact_client.aclose()
         if self._redis is not None:
             await self._redis.aclose()
@@ -3089,6 +3099,40 @@ class GatewayRuntime:
         self, device_id: str
     ) -> dict[str, Any] | None:
         return self.mobile_device_store.record_disconnected(device_id)
+
+    def update_mobile_push_token(
+        self,
+        device_id: str,
+        *,
+        push_token: str,
+        notifications_enabled: bool | None = None,
+        preferences: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self.mobile_device_store.update_push_token(
+            device_id,
+            push_token=push_token,
+            notifications_enabled=notifications_enabled,
+            preferences=preferences,
+        )
+
+    def clear_mobile_push_token(self, device_id: str) -> dict[str, Any] | None:
+        return self.mobile_device_store.clear_push_token(device_id)
+
+    async def _clear_mobile_push_token_async(self, device_id: str) -> None:
+        self.clear_mobile_push_token(device_id)
+
+    def update_mobile_device_presence(
+        self,
+        device_id: str,
+        *,
+        state: str,
+        visible_screen: str | None = None,
+    ) -> dict[str, Any]:
+        return self.mobile_device_store.update_presence(
+            device_id,
+            state=state,
+            visible_screen=visible_screen,
+        )
 
     async def revoke_mobile_device(
         self, device_id: str, *, reason: str | None = None
@@ -6660,6 +6704,177 @@ class GatewayRuntime:
             if adapter.platform == origin_platform:
                 continue
             await adapter.broadcast_to_session(session_id, event)
+
+    def _schedule_mobile_push(
+        self,
+        *,
+        session_id: str | None,
+        origin_channel: str | None,
+        event_type: str,
+        title: str,
+        body: str,
+        screen: str,
+        priority: str = "default",
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        if not self.config.enable_push_notifications:
+            return
+        if not title or not body:
+            return
+        dedupe_key = self._push_dedupe_key(
+            event_type=event_type,
+            session_id=session_id,
+            origin_channel=origin_channel,
+            data=data or {},
+        )
+        if self._push_recently_scheduled(dedupe_key):
+            return
+        self._track_background_task(
+            self._send_mobile_push_notifications(
+                session_id=session_id,
+                origin_channel=origin_channel,
+                title=title,
+                body=body,
+                screen=screen,
+                priority=priority,
+                data=data or {},
+            )
+        )
+
+    async def _send_mobile_push_notifications(
+        self,
+        *,
+        session_id: str | None,
+        origin_channel: str | None,
+        title: str,
+        body: str,
+        screen: str,
+        priority: str,
+        data: dict[str, Any],
+    ) -> None:
+        targets = self.mobile_device_store.list_push_targets(session_id=session_id)
+        if not targets:
+            return
+        live_mobile_devices = await self._live_mobile_device_ids()
+        for target in targets:
+            device_id = self._safe_text(target.get("device_id"))
+            push_token = self._safe_text(target.get("push_token"))
+            if not device_id or not push_token:
+                continue
+            if self._should_suppress_mobile_push(
+                target,
+                live_mobile_devices=live_mobile_devices,
+                screen=screen,
+                priority=priority,
+            ):
+                continue
+            await self.push_dispatcher.send(
+                PushNotification(
+                    device_id=device_id,
+                    token=push_token,
+                    title=title,
+                    body=body,
+                    data={
+                        **data,
+                        "screen": screen,
+                        "session_id": session_id,
+                    },
+                    priority=priority,
+                )
+            )
+
+    async def _live_mobile_device_ids(self) -> set[str]:
+        adapter = self.registry.adapters.get("mobile")
+        if not isinstance(adapter, MobileAdapter):
+            return set()
+        try:
+            connections = await adapter.list_connections()
+        except Exception:
+            return set()
+        return {
+            str(item.get("device_id") or "").strip()
+            for item in connections
+            if str(item.get("device_id") or "").strip()
+        }
+
+    def _should_suppress_mobile_push(
+        self,
+        device: dict[str, Any],
+        *,
+        live_mobile_devices: set[str],
+        screen: str,
+        priority: str,
+    ) -> bool:
+        if priority == "high":
+            return False
+        device_id = self._safe_text(device.get("device_id"))
+        if not device_id or device_id not in live_mobile_devices:
+            return False
+        if self._safe_text(device.get("presence_state")) != "foreground":
+            return False
+        if not self._mobile_presence_is_fresh(device):
+            return False
+        visible_screen = self._safe_text(device.get("visible_screen"))
+        return visible_screen == screen
+
+    def _mobile_presence_is_fresh(self, device: dict[str, Any]) -> bool:
+        raw = self._safe_text(device.get("last_presence_at"))
+        if not raw:
+            return False
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        age = datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)
+        return age.total_seconds() <= self.config.mobile_presence_stale_sec
+
+    def _push_recently_scheduled(self, dedupe_key: str) -> bool:
+        now = time.monotonic()
+        stale_before = now - 600.0
+        self._recent_push_dedupe = {
+            key: value
+            for key, value in self._recent_push_dedupe.items()
+            if value >= stale_before
+        }
+        if dedupe_key in self._recent_push_dedupe:
+            return True
+        self._recent_push_dedupe[dedupe_key] = now
+        return False
+
+    def _push_dedupe_key(
+        self,
+        *,
+        event_type: str,
+        session_id: str | None,
+        origin_channel: str | None,
+        data: dict[str, Any],
+    ) -> str:
+        identifier = (
+            self._safe_text(data.get("message_id"))
+            or self._safe_text(data.get("task_id"))
+            or self._safe_text(data.get("request_id"))
+            or self._safe_text(data.get("input_request_id"))
+            or self._event_fingerprint(data, origin_channel or "mobile-push")
+        )
+        return f"{event_type}:{session_id or ''}:{origin_channel or ''}:{identifier}"
+
+    def _channel_display_name(self, channel: str | None) -> str:
+        platform = self._channel_platform(channel) or "Cosmic"
+        if platform == "desktop":
+            return "Desktop"
+        if platform == "agent-email":
+            return "Email"
+        if platform == "mobile":
+            return "Mobile"
+        return platform.title()
+
+    def _response_push_body(self, content: Any) -> str:
+        text = str(content or "").strip()
+        if not text:
+            return "Cosmic has finished a response."
+        return text
 
     async def _broadcast_cross_channel_to_desktop(
         self,
@@ -10894,6 +11109,61 @@ class GatewayRuntime:
                 event["response_blocks"] = client_response_blocks
             if activity_log:
                 event["activity_log"] = activity_log
+            event_channel_platform = self._channel_platform(event_channel)
+            email_delivery = (
+                self._effective_email_delivery(event)
+                if event_channel_platform == "agent-email"
+                else {}
+            )
+            email_delivery_status = self._safe_text(email_delivery.get("status"))
+            email_queued_for_approval = (
+                email_delivery_status == "queued_for_approval"
+                or bool(email_delivery.get("queued_for_approval"))
+                or self._safe_text(event.get("email_auto_reply_status"))
+                == "queued_for_approval"
+            )
+            email_subject = (
+                self._safe_text(event.get("thread_subject"))
+                or self._safe_text(event.get("subject"))
+                or "Draft reply is waiting for approval"
+            )
+            email_sender = (
+                self._safe_text(event.get("from_name"))
+                or self._safe_text(event.get("from_address"))
+                or "Agent Email"
+            )
+            push_title = (
+                "Email approval needed"
+                if email_queued_for_approval
+                else "Response ready"
+                if event_channel_platform == "mobile"
+                else f"{self._channel_display_name(event_channel)} response ready"
+            )
+            push_body = (
+                f"{email_sender}: {email_subject}"
+                if email_queued_for_approval
+                else self._response_push_body(event.get("content"))
+            )
+            self._schedule_mobile_push(
+                session_id=session_id,
+                origin_channel=event_channel,
+                event_type="response.complete",
+                title=push_title,
+                body=push_body,
+                screen="agent-email" if email_queued_for_approval else "chat",
+                priority="high" if email_queued_for_approval else "default",
+                data={
+                    "type": (
+                        "agent_email.approval"
+                        if email_queued_for_approval
+                        else "response.complete"
+                    ),
+                    "request_id": request_id,
+                    "message_id": assistant_message_id,
+                    "origin_channel": event_channel,
+                    "approval_id": self._safe_text(email_delivery.get("approval_id")),
+                },
+            )
             self._trace_request_event(
                 request_id=request_id,
                 session_id=session_id,
@@ -10938,6 +11208,25 @@ class GatewayRuntime:
             channel = self._safe_text(event.get("channel"))
             if channel and task_id and session_id:
                 self._persist_task_input_request(event)
+            self._schedule_mobile_push(
+                session_id=session_id,
+                origin_channel=channel,
+                event_type="task.input_required",
+                title="Input needed",
+                body=(
+                    self._safe_text(event.get("prompt"))
+                    or self._safe_text(event.get("message"))
+                    or "Cosmic needs your input to continue."
+                ),
+                screen="tasks",
+                priority="high",
+                data={
+                    "type": "task.input_required",
+                    "request_id": request_id,
+                    "task_id": task_id,
+                    "input_request_id": self._safe_text(event.get("input_request_id")),
+                },
+            )
         elif event_type in {"task.completed", "task.failed", "task.cancelled"}:
             if task_id:
                 self.active_task_channels.pop(task_id, None)
@@ -10970,6 +11259,31 @@ class GatewayRuntime:
                 or None,
                 task_id=task_id,
                 completed=event_type in {"task.failed", "task.cancelled"},
+            )
+            push_title = (
+                "Task failed"
+                if event_type == "task.failed"
+                else "Task cancelled"
+                if event_type == "task.cancelled"
+                else "Task completed"
+            )
+            self._schedule_mobile_push(
+                session_id=session_id,
+                origin_channel=self._safe_text(event.get("channel")),
+                event_type=event_type,
+                title=push_title,
+                body=(
+                    self._safe_text(event.get("message"))
+                    or self._safe_text(event.get("content"))
+                    or push_title
+                ),
+                screen="tasks",
+                priority="default" if event_type == "task.completed" else "high",
+                data={
+                    "type": event_type,
+                    "request_id": request_id,
+                    "task_id": task_id,
+                },
             )
 
         if task_id and session_id and event_type.startswith("task."):

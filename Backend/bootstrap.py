@@ -3812,6 +3812,26 @@ def build_service_env_overrides(
             "XAI_API_KEY": gateway_xai_api_key or "",
             "GATEWAY_PUBLIC_HOST": gateway_public_host or "<gateway.user.example.com>",
             "HAIKU_MODEL": haiku_model or "claude-haiku-4-5",
+            "ENABLE_PUSH_NOTIFICATIONS": gateway_external.get("ENABLE_PUSH_NOTIFICATIONS")
+            or gateway_existing.get("ENABLE_PUSH_NOTIFICATIONS")
+            or gateway_data.get("ENABLE_PUSH_NOTIFICATIONS")
+            or "true",
+            "EXPO_ACCESS_TOKEN": gateway_external.get("EXPO_ACCESS_TOKEN")
+            or gateway_existing.get("EXPO_ACCESS_TOKEN")
+            or gateway_data.get("EXPO_ACCESS_TOKEN")
+            or "",
+            "EXPO_PUSH_URL": gateway_external.get("EXPO_PUSH_URL")
+            or gateway_existing.get("EXPO_PUSH_URL")
+            or gateway_data.get("EXPO_PUSH_URL")
+            or "https://exp.host/--/api/v2/push/send",
+            "EXPO_PUSH_TIMEOUT_SEC": gateway_external.get("EXPO_PUSH_TIMEOUT_SEC")
+            or gateway_existing.get("EXPO_PUSH_TIMEOUT_SEC")
+            or gateway_data.get("EXPO_PUSH_TIMEOUT_SEC")
+            or "8",
+            "MOBILE_PRESENCE_STALE_SEC": gateway_external.get("MOBILE_PRESENCE_STALE_SEC")
+            or gateway_existing.get("MOBILE_PRESENCE_STALE_SEC")
+            or gateway_data.get("MOBILE_PRESENCE_STALE_SEC")
+            or "120",
         },
         "model-router.env": {
             "GROQ_API_KEY": groq_api_key or "<groq-api-key>",

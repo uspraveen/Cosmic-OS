@@ -79,6 +79,11 @@ class GatewayConfig:
     preferences_db_path: Path = BACKEND_ROOT / "gateway" / "preferences.db"
     sessions_db_path: Path = BACKEND_ROOT / "gateway" / "sessions.db"
     mobile_devices_db_path: Path = BACKEND_ROOT / "gateway" / "mobile_devices.db"
+    enable_push_notifications: bool = True
+    expo_access_token: str = ""
+    expo_push_url: str = "https://exp.host/--/api/v2/push/send"
+    expo_push_timeout_sec: float = 8.0
+    mobile_presence_stale_sec: int = 120
     usage_db_path: Path = BACKEND_ROOT / "gateway" / "usage.db"
     request_trace_db_path: Path = BACKEND_ROOT / "gateway" / "request_traces.db"
     routing_audit_db_path: Path = BACKEND_ROOT / "gateway" / "routing_audit.db"
@@ -255,6 +260,20 @@ class GatewayConfig:
                     str(BACKEND_ROOT / "gateway" / "mobile_devices.db"),
                 )
             ).expanduser(),
+            enable_push_notifications=_env_bool("ENABLE_PUSH_NOTIFICATIONS", True),
+            expo_access_token=os.getenv("EXPO_ACCESS_TOKEN", "").strip(),
+            expo_push_url=(
+                os.getenv("EXPO_PUSH_URL", "https://exp.host/--/api/v2/push/send").strip()
+                or "https://exp.host/--/api/v2/push/send"
+            ),
+            expo_push_timeout_sec=max(
+                1.0,
+                _env_float("EXPO_PUSH_TIMEOUT_SEC", 8.0),
+            ),
+            mobile_presence_stale_sec=max(
+                15,
+                _env_int("MOBILE_PRESENCE_STALE_SEC", 120),
+            ),
             usage_db_path=Path(
                 os.getenv(
                     "GATEWAY_USAGE_DB_PATH",
