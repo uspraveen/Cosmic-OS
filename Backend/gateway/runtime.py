@@ -12140,18 +12140,27 @@ class GatewayRuntime:
 
     def _redact_codex_status(self, payload: dict[str, Any]) -> dict[str, Any]:
         payload.pop("api_key", None)
-        cli = payload.get("cli")
-        if isinstance(cli, dict):
-            stdout = self._safe_text(cli.get("stdout"))
-            stderr = self._safe_text(cli.get("stderr"))
-            cli["stdout"] = self._redact_secret_text(stdout)
-            cli["stderr"] = self._redact_secret_text(stderr)
+        for key in ("cli", "last_cli_status"):
+            cli = payload.get(key)
+            if isinstance(cli, dict):
+                stdout = self._safe_text(cli.get("stdout"))
+                stderr = self._safe_text(cli.get("stderr"))
+                cli["stdout"] = self._redact_secret_text(stdout)
+                cli["stderr"] = self._redact_secret_text(stderr)
+        login_session = payload.get("login_session")
+        if isinstance(login_session, dict):
+            for stream_name in ("stdout", "stderr"):
+                lines = login_session.get(stream_name)
+                if isinstance(lines, list):
+                    login_session[stream_name] = [
+                        self._redact_secret_text(self._safe_text(line)) for line in lines
+                    ]
         return payload
 
     def _redact_secret_text(self, value: str) -> str:
         if not value:
             return ""
-        return re.sub(r"sk-[A-Za-z0-9_\-]{12,}", "sk-...redacted", value)
+        return re.sub(r"sk-[^\s\"']{4,}", "sk-...redacted", value)
 
     def _normalize_codex_auth_mode(self, value: str | None) -> str:
         normalized = self._safe_text(value)
