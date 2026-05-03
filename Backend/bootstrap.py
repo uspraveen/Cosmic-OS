@@ -157,6 +157,7 @@ PYTHON_CANDIDATES = [
 ]
 MIN_NODE_MAJOR = 20
 MERMAID_CLI_PACKAGE = "@mermaid-js/mermaid-cli"
+OPENAI_CODEX_CLI_PACKAGE = "@openai/codex"
 DEFAULT_RETRY_ATTEMPTS = 4
 DEFAULT_RETRY_INITIAL_DELAY_SEC = 1.5
 PACKAGE_NAMES: Dict[str, Dict[str, str]] = {
@@ -3557,6 +3558,24 @@ def ensure_node_toolchain() -> None:
         )
 
 
+def ensure_openai_codex_cli() -> None:
+    ensure_node_toolchain()
+    codex_version = executable_version(["codex", "--version"])
+    if codex_version:
+        log("OpenAI Codex CLI available: {0}".format(codex_version))
+        return
+
+    log("Installing OpenAI Codex CLI globally for Alpha agent execution.")
+    run_with_retry(
+        ["npm", "install", "-g", OPENAI_CODEX_CLI_PACKAGE],
+        use_sudo=True,
+    )
+    codex_version = executable_version(["codex", "--version"])
+    if not codex_version:
+        raise BootstrapError("OpenAI Codex CLI is still unavailable after npm install.")
+    log("OpenAI Codex CLI available: {0}".format(codex_version))
+
+
 def load_package_json(package_json: Path) -> dict:
     try:
         return json.loads(package_json.read_text(encoding="utf-8"))
@@ -4880,6 +4899,11 @@ def doctor(
     print(
         "  npm available      : {0}".format(
             executable_version(["npm", "--version"]) or "no"
+        )
+    )
+    print(
+        "  codex cli          : {0}".format(
+            executable_version(["codex", "--version"]) or "no"
         )
     )
     print(
@@ -6302,6 +6326,7 @@ def bootstrap(
         )
     setup_whatsapp_bridge(bridge_dir)
     setup_diagram_renderers()
+    ensure_openai_codex_cli()
     if not skip_edge and edge_setup_script is not None and gateway_env_path is not None:
         setup_vm_edge(
             edge_setup_script,
@@ -6651,6 +6676,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Install Node.js bridge dependencies in bridges/whatsapp_bridge.",
     )
     subparsers.add_parser(
+        "setup-codex-cli",
+        help="Install the OpenAI Codex CLI used by the Alpha agent runner.",
+    )
+    subparsers.add_parser(
         "setup-env",
         help="Create missing env files from committed *.env.example templates.",
     )
@@ -6783,6 +6812,8 @@ def main() -> int:
                 )
         elif command == "setup-whatsapp-bridge":
             setup_whatsapp_bridge(bridge_dir)
+        elif command == "setup-codex-cli":
+            ensure_openai_codex_cli()
         elif command == "setup-edge":
             setup_vm_edge(
                 edge_setup_script,

@@ -11853,8 +11853,19 @@ class GatewayRuntime:
             login_required_reason=next_reason,
         )
 
-        if normalized_auth_mode == "api_key" and api_key_value and settings.get("vm_sync_enabled", True):
-            login_result = await self._codex_login_with_api_key(api_key_value)
+        login_api_key = api_key_value
+        if (
+            normalized_auth_mode == "api_key"
+            and not login_api_key
+            and (auth_mode is not None or api_key is not None)
+            and settings.get("has_api_key")
+        ):
+            login_api_key = self._safe_text(
+                self.agent_auth_store.get_codex(include_secret=True).get("api_key")
+            )
+
+        if normalized_auth_mode == "api_key" and login_api_key and settings.get("vm_sync_enabled", True):
+            login_result = await self._codex_login_with_api_key(login_api_key)
             status = "authenticated" if login_result["ok"] else "relogin_required"
             reason = "" if login_result["ok"] else "api_key_login_failed"
             settings = self.agent_auth_store.save_codex(
