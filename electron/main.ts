@@ -2090,6 +2090,60 @@ app.whenReady().then(() => {
     })
   })
 
+  ipcMain.handle('gateway:get-codex-status', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/agents/codex/status', { timeoutMs: 20000 })
+  })
+
+  ipcMain.handle('gateway:save-codex-config', async (_, payload: {
+    authMode?: string
+    apiKey?: string
+    preferredModel?: string
+    approvalMode?: string
+    vmSyncEnabled?: boolean
+  }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/agents/codex/config', {
+      method: 'POST',
+      body: {
+        auth_mode: payload?.authMode,
+        api_key: payload?.apiKey,
+        preferred_model: payload?.preferredModel,
+        approval_mode: payload?.approvalMode,
+        vm_sync_enabled: payload?.vmSyncEnabled,
+      },
+      timeoutMs: 45000,
+    })
+  })
+
+  ipcMain.handle('gateway:start-codex-login', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/agents/codex/login/start', {
+      method: 'POST',
+      timeoutMs: 30000,
+    })
+  })
+
+  ipcMain.handle('gateway:logout-codex', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/agents/codex/auth', {
+      method: 'DELETE',
+      timeoutMs: 25000,
+    })
+  })
+
   ipcMain.handle('gateway:download-output-artifact', async (_, payload: {
     messageId?: string
     artifactId?: string

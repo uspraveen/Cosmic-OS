@@ -741,6 +741,515 @@
   color: rgba(255, 255, 255, 0.8);
 }
 
+.cosmic-agent-provider-card {
+  border-radius: 14px;
+}
+
+.cosmic-agent-provider-icon {
+  background: rgba(255, 255, 255, 0.92);
+  color: #111;
+}
+
+.cosmic-agent-beta-pill {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: rgba(0, 122, 255, 0.16);
+  color: #7ab8ff;
+  font-size: 10px;
+  font-weight: 700;
+  vertical-align: middle;
+}
+
+.cosmic-agent-roadmap {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.cosmic-agent-roadmap>div {
+  min-width: 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.cosmic-agent-roadmap strong,
+.cosmic-agent-roadmap span {
+  display: block;
+}
+
+.cosmic-agent-roadmap strong {
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.cosmic-agent-roadmap span {
+  margin-top: 4px;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+/* ========== COSMIC CODEX AGENT SETTINGS ========== */
+.cosmic-codex-page {
+  gap: 12px;
+  animation: cosmicFadeIn 0.35s cubic-bezier(0.19, 1, 0.22, 1) forwards;
+}
+
+.cosmic-codex-hero,
+.cosmic-codex-section,
+.cosmic-codex-runtime {
+  width: 100%;
+  border-radius: 14px;
+  background: rgba(20, 20, 22, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.cosmic-codex-hero {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 14px;
+  align-items: center;
+  padding: 18px;
+}
+
+.cosmic-codex-hero-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #0c0c0d;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.22);
+}
+
+.cosmic-codex-hero-copy {
+  min-width: 0;
+}
+
+.cosmic-codex-hero-copy h3 {
+  margin: 0;
+  color: #fff;
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+.cosmic-codex-hero-copy p,
+.cosmic-codex-hero-copy span {
+  display: block;
+  margin: 4px 0 0;
+  line-height: 1.35;
+}
+
+.cosmic-codex-hero-copy p {
+  color: rgba(255, 255, 255, 0.68);
+  font-size: 13px;
+}
+
+.cosmic-codex-hero-copy span {
+  color: rgba(255, 255, 255, 0.43);
+  font-size: 11px;
+}
+
+.cosmic-codex-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 9px;
+  border-radius: 999px;
+  color: rgba(213, 255, 226, 0.95);
+  background: rgba(48, 209, 88, 0.13);
+  border: 1px solid rgba(48, 209, 88, 0.24);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.cosmic-codex-status.warn {
+  color: rgba(255, 231, 174, 0.96);
+  background: rgba(255, 193, 7, 0.13);
+  border-color: rgba(255, 193, 7, 0.26);
+}
+
+.cosmic-codex-status span {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 10px currentColor;
+}
+
+.cosmic-codex-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+}
+
+.cosmic-codex-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cosmic-codex-section-head h4 {
+  margin: 3px 0 0;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+.cosmic-codex-kicker {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.cosmic-codex-auth-grid,
+.cosmic-codex-select-grid,
+.cosmic-codex-mode-list {
+  display: grid;
+  gap: 10px;
+}
+
+.cosmic-codex-auth-grid {
+  grid-template-columns: 1fr 1fr;
+}
+
+.cosmic-codex-auth-card,
+.cosmic-codex-mode,
+.cosmic-codex-pill,
+.cosmic-codex-icon-btn,
+.cosmic-codex-primary,
+.cosmic-codex-sync {
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.cosmic-codex-auth-card {
+  position: relative;
+  min-height: 112px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  align-items: flex-start;
+  padding: 12px;
+  border-radius: 12px;
+  color: rgba(255, 255, 255, 0.74);
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  text-align: left;
+  transition: background 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+}
+
+.cosmic-codex-auth-card:hover {
+  transform: translateY(-1px);
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.cosmic-codex-auth-card.active {
+  color: #fff;
+  background: rgba(0, 122, 255, 0.12);
+  border-color: rgba(0, 122, 255, 0.32);
+}
+
+.cosmic-codex-auth-card strong,
+.cosmic-codex-mode span {
+  color: #fff;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.cosmic-codex-auth-card span {
+  color: rgba(255, 255, 255, 0.47);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.cosmic-codex-card-check {
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  color: #67b7ff;
+}
+
+.cosmic-codex-key-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+}
+
+.cosmic-codex-key-row input {
+  min-width: 0;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #fff;
+  font-size: 13px;
+  outline: none;
+}
+
+.cosmic-codex-key-row input:focus {
+  border-color: rgba(0, 122, 255, 0.55);
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.12);
+}
+
+.cosmic-codex-primary {
+  min-width: 74px;
+  padding: 10px 14px;
+  border-radius: 11px;
+  background: #fff;
+  color: #050505;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.cosmic-codex-primary:disabled,
+.cosmic-codex-auth-card:disabled,
+.cosmic-codex-mode:disabled,
+.cosmic-codex-pill:disabled,
+.cosmic-codex-sync:disabled,
+.cosmic-codex-icon-btn:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.cosmic-codex-icon-btn {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  color: rgba(255, 255, 255, 0.72);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.cosmic-codex-icon-btn.danger {
+  color: #ff7b7b;
+  background: rgba(255, 69, 58, 0.12);
+}
+
+.cosmic-codex-error {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 69, 58, 0.28);
+  border-radius: 11px;
+  color: rgba(255, 214, 214, 0.95);
+  background: rgba(255, 69, 58, 0.12);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.cosmic-codex-section-copy {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.cosmic-codex-login-output {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 132px;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 11px;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.cosmic-codex-login-output span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: rgba(255, 255, 255, 0.7);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.cosmic-codex-login-output a {
+  flex-shrink: 0;
+  color: #9cc7ff;
+  font-family: inherit;
+  font-size: 11px;
+  text-decoration: none;
+}
+
+.cosmic-codex-select-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.cosmic-codex-pill {
+  min-width: 0;
+  padding: 9px 8px;
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.56);
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.cosmic-codex-pill.active {
+  color: #fff;
+  background: rgba(0, 122, 255, 0.18);
+  border-color: rgba(0, 122, 255, 0.34);
+}
+
+.cosmic-codex-mode-list {
+  grid-template-columns: 1fr;
+}
+
+.cosmic-codex-mode {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 12px;
+  border-radius: 11px;
+  color: rgba(255, 255, 255, 0.58);
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  text-align: left;
+}
+
+.cosmic-codex-mode.active {
+  background: rgba(48, 209, 88, 0.11);
+  border-color: rgba(48, 209, 88, 0.24);
+}
+
+.cosmic-codex-mode small {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.cosmic-codex-runtime {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px;
+}
+
+.cosmic-codex-runtime-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cosmic-codex-runtime-icon {
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  color: rgba(255, 255, 255, 0.78);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.cosmic-codex-runtime-row strong,
+.cosmic-codex-runtime-row span {
+  display: block;
+}
+
+.cosmic-codex-runtime-row strong {
+  color: #fff;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.cosmic-codex-runtime-row span {
+  margin-top: 3px;
+  color: rgba(255, 255, 255, 0.43);
+  font-size: 11px;
+}
+
+.cosmic-codex-sync {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.58);
+  background: rgba(255, 255, 255, 0.055);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  font-size: 11px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.cosmic-codex-sync.active {
+  color: rgba(213, 255, 226, 0.95);
+  background: rgba(48, 209, 88, 0.12);
+  border-color: rgba(48, 209, 88, 0.23);
+}
+
+.cosmic-codex-footnote {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: rgba(255, 255, 255, 0.46);
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 0 2px 2px;
+}
+
+.cosmic-codex-footnote svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+@media (max-width: 460px) {
+  .cosmic-codex-hero {
+    grid-template-columns: auto 1fr;
+  }
+
+  .cosmic-codex-status {
+    grid-column: 1 / -1;
+    justify-self: flex-start;
+  }
+
+  .cosmic-codex-auth-grid,
+  .cosmic-agent-roadmap {
+    grid-template-columns: 1fr;
+  }
+
+  .cosmic-codex-select-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .cosmic-codex-runtime {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
 /* ========== COSMIC GOOGLE PAGE (App design language) ========== */
 .cosmic-google-page {
   display: flex;

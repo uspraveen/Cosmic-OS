@@ -120,6 +120,16 @@ interface Window {
     saveGatewayPreferences: (payload: {
       visualResponseEnhancementEnabled: boolean
     }) => Promise<any>
+    getGatewayCodexStatus: () => Promise<any>
+    saveGatewayCodexConfig: (payload: {
+      authMode?: string
+      apiKey?: string
+      preferredModel?: string
+      approvalMode?: string
+      vmSyncEnabled?: boolean
+    }) => Promise<any>
+    startGatewayCodexLogin: () => Promise<any>
+    logoutGatewayCodex: () => Promise<any>
     pickGatewayDocuments: () => Promise<{ documents: GatewayPendingDocumentAttachment[] }>
     sendGatewayQuery: (payload: {
       content: string

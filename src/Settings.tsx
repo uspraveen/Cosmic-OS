@@ -7,6 +7,7 @@ import WhatsAppIntegrationSettings from './WhatsAppIntegrationSettings'
 import TelegramIntegrationSettings from './TelegramIntegrationSettings'
 import MobileDevicesSettings from './MobileDevicesSettings'
 import GatewayPreferencesSettings from './GatewayPreferencesSettings'
+import CodexAgentSettings from './CodexAgentSettings'
 import { GOOGLE_TOOL_DEFINITIONS } from './integrations'
 import type { SearchPosition } from './App'
 import './settings.css'
@@ -27,7 +28,11 @@ interface SettingsProps {
   }
   islandOpacity: number
   onOpacityChange: (opacity: number) => void
-  authData?: any
+  authData?: {
+    fullName?: string
+    gatewayUrl?: string
+    gatewayApiToken?: string
+  }
   gatewayConnection?: {
     state: 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error'
     connected: boolean
@@ -43,6 +48,8 @@ type SettingsView =
   | 'preferences'
   | 'ui'
   | 'devices'
+  | 'agents'
+  | 'agents-codex'
   | 'integrations'
   | 'integrations-google'
   | 'integrations-whatsapp'
@@ -91,6 +98,10 @@ export default function Settings({
             ? 'UI Settings'
             : currentView === 'devices'
               ? 'Mobile Devices'
+            : currentView === 'agents'
+              ? 'Agents'
+            : currentView === 'agents-codex'
+              ? 'Codex'
             : currentView === 'integrations'
               ? 'Integrations'
               : currentView === 'integrations-whatsapp'
@@ -106,6 +117,10 @@ export default function Settings({
       currentView === 'integrations-telegram'
     ) {
       setCurrentView('integrations')
+      return
+    }
+    if (currentView === 'agents-codex') {
+      setCurrentView('agents')
       return
     }
     setCurrentView('main')
@@ -194,6 +209,14 @@ export default function Settings({
                     <span className="setting-nav-subcopy">
                       Google accounts, tool bundles, and future provider slots.
                     </span>
+                  </div>
+                  <span style={{ opacity: 0.5 }}>›</span>
+                </button>
+
+                <button className="setting-nav-btn" onClick={() => setCurrentView('agents')}>
+                  <div className="setting-nav-copy">
+                    <span style={{ fontWeight: 600 }}>Agents</span>
+                    <span className="setting-nav-subcopy">Configure Alpha agent providers and coding backends.</span>
                   </div>
                   <span style={{ opacity: 0.5 }}>›</span>
                 </button>
@@ -309,6 +332,45 @@ export default function Settings({
               </div>
             )}
 
+            {currentView === 'agents' && (
+              <div className="setting-subpage prx-integrations-page">
+                <div className="prx-intro">
+                  <p>Connect coding providers that Alpha can use for project-level work on your VM.</p>
+                </div>
+
+                <button className="prx-provider-card cosmic-agent-provider-card" onClick={() => setCurrentView('agents-codex')}>
+                  <div className="prx-provider-icon cosmic-agent-provider-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="m16 18 6-6-6-6" />
+                      <path d="m8 6-6 6 6 6" />
+                    </svg>
+                  </div>
+                  <div className="prx-provider-info">
+                    <strong>Codex <span className="cosmic-agent-beta-pill">Alpha</span></strong>
+                    <span>ChatGPT sign-in or OpenAI API key for the Alpha coding runner.</span>
+                  </div>
+                  <div className="prx-provider-arrow">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
+                  </div>
+                </button>
+
+                <div className="cosmic-agent-roadmap">
+                  <div>
+                    <strong>OpenCode</strong>
+                    <span>Provider slot reserved.</span>
+                  </div>
+                  <div>
+                    <strong>Cursor CLI</strong>
+                    <span>Provider slot reserved.</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {currentView === 'agents-codex' && (
+              <CodexAgentSettings active={currentView === 'agents-codex'} />
+            )}
+
             {currentView === 'integrations-google' && (
               <GoogleIntegrationsSettings active={currentView === 'integrations-google'} />
             )}
@@ -316,14 +378,14 @@ export default function Settings({
             {currentView === 'integrations-whatsapp' && (
               <WhatsAppIntegrationSettings
                 active={currentView === 'integrations-whatsapp'}
-                cosmicAuth={authData ? { gatewayUrl: authData.gatewayUrl, gatewayApiToken: authData.gatewayApiToken } : undefined}
+                cosmicAuth={authData ? { gatewayUrl: authData.gatewayUrl || '', gatewayApiToken: authData.gatewayApiToken || '' } : undefined}
               />
             )}
 
             {currentView === 'integrations-telegram' && (
               <TelegramIntegrationSettings
                 active={currentView === 'integrations-telegram'}
-                cosmicAuth={authData ? { gatewayUrl: authData.gatewayUrl, gatewayApiToken: authData.gatewayApiToken } : undefined}
+                cosmicAuth={authData ? { gatewayUrl: authData.gatewayUrl || '', gatewayApiToken: authData.gatewayApiToken || '' } : undefined}
               />
             )}
 

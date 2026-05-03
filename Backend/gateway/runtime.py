@@ -15,6 +15,7 @@ import platform
 import re
 import shutil
 import socket
+import subprocess
 import time
 from typing import Any
 from urllib.parse import urlencode
@@ -23,6 +24,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .adapters import HaikuAdapter, PerplexityAdapter
 from .adapters.response_processor import DirectRouteHandoff
+from .agent_auth_store import AgentAuthStore
 from .artifacts.store import ArtifactStore
 from .channels.base import (
     ChannelUnavailableError,
@@ -276,6 +278,7 @@ class GatewayRuntime:
         self.agent_email_integration_store = AgentEmailIntegrationStore(
             config.agent_email_integrations_db_path
         )
+        self.agent_auth_store = AgentAuthStore(config.credentials_db_path)
         self._credential_store = CredentialStore(config.credentials_db_path)
         self.credential_manager = CredentialManager(
             store=self._credential_store,
@@ -374,6 +377,7 @@ class GatewayRuntime:
         self._system_metrics_cpu_sample: tuple[int, int] | None = None
         self._system_metrics_network_sample: tuple[int, int, float] | None = None
         self._recent_push_dedupe: dict[str, float] = {}
+        self._codex_login_session: dict[str, Any] | None = None
 
     async def start(self) -> None:
         self.session_store.initialize()
@@ -389,6 +393,7 @@ class GatewayRuntime:
             default_timezone=self.config.user_timezone_fallback
         )
         self.agent_email_integration_store.initialize()
+        self.agent_auth_store.initialize()
         self._orchestrator_task_ledger.initialize()
         await self.capability_wishlist_service.initialize()
         self._usage_event_queue = asyncio.Queue(
@@ -492,6 +497,7 @@ class GatewayRuntime:
         self.active_requests.clear()
         self.active_requests_by_task.clear()
         await self.registry.stop_all()
+        await self._stop_codex_login_session()
         await self.model_router.stop()
         await self.orchestrator.stop()
         await self.memory_client.stop()
@@ -500,6 +506,7 @@ class GatewayRuntime:
         await self.perplexity_adapter.close()
         await self.push_dispatcher.close()
         await self._artifact_client.aclose()
+        self.agent_auth_store.close()
         if self._redis is not None:
             await self._redis.aclose()
         self._usage_event_queue = None
@@ -11785,6 +11792,359 @@ class GatewayRuntime:
                 await adapter.send(payload, channel=channel)
             except ChannelUnavailableError:
                 continue
+
+    async def get_desktop_codex_status(self) -> dict[str, Any]:
+        settings = self.agent_auth_store.get_codex(include_secret=False)
+        cli_status = await self._codex_cli_status()
+        pending_login = self._codex_login_session_snapshot()
+        effective_status = self._effective_codex_status(settings, cli_status, pending_login)
+        updated = self.agent_auth_store.save_codex(
+            status=effective_status["status"],
+            login_required_reason=effective_status["login_required_reason"],
+            last_cli_status=cli_status,
+        )
+        return self._redact_codex_status(
+            {
+                **updated,
+                "cli": cli_status,
+                "login_session": pending_login,
+                "codex_home": str(self.config.alpha_codex_home),
+            }
+        )
+
+    async def save_desktop_codex_config(
+        self,
+        *,
+        auth_mode: str | None = None,
+        api_key: str | None = None,
+        preferred_model: str | None = None,
+        approval_mode: str | None = None,
+        vm_sync_enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        current = self.agent_auth_store.get_codex(include_secret=False)
+        normalized_auth_mode = (
+            self._normalize_codex_auth_mode(auth_mode)
+            if auth_mode is not None
+            else self._normalize_codex_auth_mode(str(current.get("auth_mode") or "chatgpt"))
+        )
+        api_key_value = self._safe_text(api_key)
+        next_status: str | None = None
+        next_reason: str | None = None
+        if auth_mode is not None:
+            if normalized_auth_mode == "chatgpt":
+                next_status = "login_required"
+                next_reason = "chatgpt_login_required"
+            elif current.get("has_api_key") or api_key_value:
+                next_status = "stored"
+                next_reason = "api_key_login_pending" if api_key_value else "api_key_relogin_required"
+            else:
+                next_status = "login_required"
+                next_reason = "api_key_required"
+        if api_key is not None:
+            next_status = "stored" if api_key_value else "login_required"
+            next_reason = "api_key_login_pending" if api_key_value else "api_key_required"
+        settings = self.agent_auth_store.save_codex(
+            auth_mode=normalized_auth_mode,
+            api_key=api_key_value if api_key is not None else None,
+            preferred_model=preferred_model,
+            approval_mode=approval_mode,
+            vm_sync_enabled=vm_sync_enabled,
+            status=next_status,
+            login_required_reason=next_reason,
+        )
+
+        if normalized_auth_mode == "api_key" and api_key_value and settings.get("vm_sync_enabled", True):
+            login_result = await self._codex_login_with_api_key(api_key_value)
+            status = "authenticated" if login_result["ok"] else "relogin_required"
+            reason = "" if login_result["ok"] else "api_key_login_failed"
+            settings = self.agent_auth_store.save_codex(
+                auth_mode="api_key",
+                status=status,
+                login_required_reason=reason,
+                last_cli_status=login_result,
+            )
+
+        return await self.get_desktop_codex_status()
+
+    async def start_desktop_codex_login(self) -> dict[str, Any]:
+        self.agent_auth_store.save_codex(
+            auth_mode="chatgpt",
+            status="login_required",
+            login_required_reason="chatgpt_device_auth_required",
+        )
+        binary = shutil.which("codex")
+        if not binary:
+            settings = self.agent_auth_store.save_codex(
+                auth_mode="chatgpt",
+                status="relogin_required",
+                login_required_reason="codex_cli_missing",
+                last_cli_status={"ok": False, "reason": "codex_cli_missing"},
+            )
+            return self._redact_codex_status(
+                {
+                    **settings,
+                    "cli": {"available": False, "reason": "codex_cli_missing"},
+                    "login_session": None,
+                    "codex_home": str(self.config.alpha_codex_home),
+                }
+            )
+
+        session = self._codex_login_session_snapshot()
+        if session and session.get("state") == "running":
+            return await self.get_desktop_codex_status()
+
+        await self._stop_codex_login_session()
+        self.config.alpha_codex_home.mkdir(parents=True, exist_ok=True)
+        env = self._codex_env()
+        process = await asyncio.create_subprocess_exec(
+            binary,
+            "login",
+            "--device-auth",
+            stdin=subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        session_id = f"codex_login_{uuid4().hex[:12]}"
+        session_state: dict[str, Any] = {
+            "session_id": session_id,
+            "state": "running",
+            "started_at": utcnow_iso(),
+            "stdout": [],
+            "stderr": [],
+            "returncode": None,
+        }
+        session_state["stdout_task"] = asyncio.create_task(
+            self._capture_codex_stream(process.stdout, session_state["stdout"]),
+            name=f"{session_id}-stdout",
+        )
+        session_state["stderr_task"] = asyncio.create_task(
+            self._capture_codex_stream(process.stderr, session_state["stderr"]),
+            name=f"{session_id}-stderr",
+        )
+        session_state["watch_task"] = asyncio.create_task(
+            self._watch_codex_login_process(process, session_state),
+            name=f"{session_id}-watch",
+        )
+        session_state["process"] = process
+        self._codex_login_session = session_state
+        await asyncio.sleep(1.25)
+        return await self.get_desktop_codex_status()
+
+    async def logout_desktop_codex(self) -> dict[str, Any]:
+        await self._stop_codex_login_session()
+        logout_result = await self._run_codex_command(["logout"], timeout_sec=15.0)
+        settings = self.agent_auth_store.clear_codex_api_key(
+            status="logged_out",
+            login_required_reason="user_logged_out",
+            last_cli_status=logout_result,
+        )
+        cli_status = await self._codex_cli_status()
+        return self._redact_codex_status(
+            {
+                **settings,
+                "cli": cli_status,
+                "login_session": None,
+                "codex_home": str(self.config.alpha_codex_home),
+            }
+        )
+
+    async def _codex_login_with_api_key(self, api_key: str) -> dict[str, Any]:
+        return await self._run_codex_command(
+            ["login", "--with-api-key"],
+            stdin=(api_key.strip() + "\n"),
+            timeout_sec=30.0,
+        )
+
+    async def _codex_cli_status(self) -> dict[str, Any]:
+        result = await self._run_codex_command(["login", "status"], timeout_sec=10.0)
+        output = "\n".join(
+            item
+            for item in (self._safe_text(result.get("stdout")), self._safe_text(result.get("stderr")))
+            if item
+        )
+        authenticated = bool(result.get("ok")) and not re.search(
+            r"not\s+logged\s+in|not\s+authenticated|no\s+credentials",
+            output,
+            re.IGNORECASE,
+        )
+        return {
+            **result,
+            "authenticated": authenticated,
+            "codex_home": str(self.config.alpha_codex_home),
+        }
+
+    async def _run_codex_command(
+        self,
+        args: list[str],
+        *,
+        stdin: str | None = None,
+        timeout_sec: float,
+    ) -> dict[str, Any]:
+        binary = shutil.which("codex")
+        if not binary:
+            return {
+                "ok": False,
+                "available": False,
+                "returncode": None,
+                "stdout": "",
+                "stderr": "",
+                "reason": "codex_cli_missing",
+            }
+
+        self.config.alpha_codex_home.mkdir(parents=True, exist_ok=True)
+        process = await asyncio.create_subprocess_exec(
+            binary,
+            *args,
+            stdin=asyncio.subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=self._codex_env(),
+        )
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                process.communicate(stdin.encode("utf-8") if stdin is not None else None),
+                timeout=timeout_sec,
+            )
+            return {
+                "ok": process.returncode == 0,
+                "available": True,
+                "returncode": process.returncode,
+                "stdout": stdout_bytes.decode("utf-8", errors="replace").strip(),
+                "stderr": stderr_bytes.decode("utf-8", errors="replace").strip(),
+            }
+        except TimeoutError:
+            process.kill()
+            stdout_bytes, stderr_bytes = await process.communicate()
+            return {
+                "ok": False,
+                "available": True,
+                "returncode": process.returncode,
+                "stdout": stdout_bytes.decode("utf-8", errors="replace").strip(),
+                "stderr": stderr_bytes.decode("utf-8", errors="replace").strip(),
+                "reason": "timeout",
+            }
+
+    def _codex_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env["CODEX_HOME"] = str(self.config.alpha_codex_home)
+        env.setdefault("HOME", str(self.config.alpha_codex_home.parent))
+        return env
+
+    async def _capture_codex_stream(
+        self,
+        stream: asyncio.StreamReader | None,
+        lines: list[str],
+    ) -> None:
+        if stream is None:
+            return
+        while True:
+            chunk = await stream.readline()
+            if not chunk:
+                break
+            line = chunk.decode("utf-8", errors="replace").strip()
+            if line:
+                lines.append(line)
+                del lines[:-30]
+
+    async def _watch_codex_login_process(
+        self,
+        process: asyncio.subprocess.Process,
+        session_state: dict[str, Any],
+    ) -> None:
+        returncode = await process.wait()
+        session_state["returncode"] = returncode
+        session_state["state"] = "completed" if returncode == 0 else "failed"
+        session_state["completed_at"] = utcnow_iso()
+        self.agent_auth_store.save_codex(
+            auth_mode="chatgpt",
+            status="authenticated" if returncode == 0 else "relogin_required",
+            login_required_reason="" if returncode == 0 else "chatgpt_login_failed",
+            last_cli_status=self._codex_login_session_snapshot() or {},
+        )
+
+    def _codex_login_session_snapshot(self) -> dict[str, Any] | None:
+        session = self._codex_login_session
+        if not session:
+            return None
+        process = session.get("process")
+        returncode = process.returncode if process is not None else session.get("returncode")
+        state = session.get("state")
+        if returncode is not None and state == "running":
+            state = "completed" if returncode == 0 else "failed"
+        return {
+            "session_id": session.get("session_id"),
+            "state": state,
+            "started_at": session.get("started_at"),
+            "completed_at": session.get("completed_at"),
+            "returncode": returncode,
+            "stdout": list(session.get("stdout") or []),
+            "stderr": list(session.get("stderr") or []),
+        }
+
+    async def _stop_codex_login_session(self) -> None:
+        session = self._codex_login_session
+        if not session:
+            return
+        process = session.get("process")
+        if process is not None and process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=3.0)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+        tasks = [
+            task
+            for task in (
+                session.get("stdout_task"),
+                session.get("stderr_task"),
+                session.get("watch_task"),
+            )
+            if isinstance(task, asyncio.Task)
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._codex_login_session = None
+
+    def _effective_codex_status(
+        self,
+        settings: dict[str, Any],
+        cli_status: dict[str, Any],
+        pending_login: dict[str, Any] | None,
+    ) -> dict[str, str]:
+        if pending_login and pending_login.get("state") == "running":
+            return {"status": "login_pending", "login_required_reason": "chatgpt_login_pending"}
+        if cli_status.get("authenticated"):
+            return {"status": "authenticated", "login_required_reason": ""}
+        if not cli_status.get("available", True):
+            return {"status": "relogin_required", "login_required_reason": "codex_cli_missing"}
+        if settings.get("auth_mode") == "api_key" and settings.get("has_api_key"):
+            return {"status": "relogin_required", "login_required_reason": "api_key_relogin_required"}
+        if settings.get("auth_mode") == "chatgpt":
+            return {"status": "login_required", "login_required_reason": "chatgpt_login_required"}
+        return {"status": "not_configured", "login_required_reason": "auth_not_configured"}
+
+    def _redact_codex_status(self, payload: dict[str, Any]) -> dict[str, Any]:
+        payload.pop("api_key", None)
+        cli = payload.get("cli")
+        if isinstance(cli, dict):
+            stdout = self._safe_text(cli.get("stdout"))
+            stderr = self._safe_text(cli.get("stderr"))
+            cli["stdout"] = self._redact_secret_text(stdout)
+            cli["stderr"] = self._redact_secret_text(stderr)
+        return payload
+
+    def _redact_secret_text(self, value: str) -> str:
+        if not value:
+            return ""
+        return re.sub(r"sk-[A-Za-z0-9_\-]{12,}", "sk-...redacted", value)
+
+    def _normalize_codex_auth_mode(self, value: str | None) -> str:
+        normalized = self._safe_text(value)
+        return normalized if normalized in {"chatgpt", "api_key"} else "chatgpt"
 
     def _hydrate_message_metadata_for_client(self, metadata: Any) -> dict[str, Any]:
         if not isinstance(metadata, dict):

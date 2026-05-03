@@ -2607,6 +2607,8 @@ def build_alpha_agent_env_rendered(
         "ALPHA_AGENT_ENABLED": pick_env("ALPHA_AGENT_ENABLED", "false") or "false",
         "ALPHA_WORKSPACE_ROOT": pick_env("ALPHA_WORKSPACE_ROOT", "/var/lib/cosmic/alpha")
         or "/var/lib/cosmic/alpha",
+        "ALPHA_CODEX_HOME": pick_env("ALPHA_CODEX_HOME", "/var/lib/cosmic/alpha/homes/codex")
+        or "/var/lib/cosmic/alpha/homes/codex",
         "ALPHA_PROJECT_DB_PATH": pick_env("ALPHA_PROJECT_DB_PATH", "") or "",
         "ALPHA_DOCKER_IMAGE": pick_env("ALPHA_DOCKER_IMAGE", "ubuntu:24.04")
         or "ubuntu:24.04",

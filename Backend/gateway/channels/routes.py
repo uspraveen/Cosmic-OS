@@ -61,6 +61,14 @@ class AgentEmailTrustedSendersRequest(BaseModel):
     trusted_senders: list[str] = Field(default_factory=list)
 
 
+class CodexAgentConfigRequest(BaseModel):
+    auth_mode: str | None = Field(default=None, max_length=32)
+    api_key: str | None = Field(default=None, max_length=4096)
+    preferred_model: str | None = Field(default=None, max_length=80)
+    approval_mode: str | None = Field(default=None, max_length=32)
+    vm_sync_enabled: bool | None = None
+
+
 class TaskInputReplyRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=8000)
 
@@ -1392,6 +1400,45 @@ async def get_desktop_registry_agents(
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
     return await runtime.get_desktop_registry_agents()
+
+
+@router.get("/desktop/agents/codex/status")
+async def get_desktop_codex_status(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.get_desktop_codex_status()
+
+
+@router.post("/desktop/agents/codex/config")
+async def save_desktop_codex_config(
+    body: CodexAgentConfigRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.save_desktop_codex_config(
+        auth_mode=body.auth_mode,
+        api_key=body.api_key,
+        preferred_model=body.preferred_model,
+        approval_mode=body.approval_mode,
+        vm_sync_enabled=body.vm_sync_enabled,
+    )
+
+
+@router.post("/desktop/agents/codex/login/start")
+async def start_desktop_codex_login(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.start_desktop_codex_login()
+
+
+@router.delete("/desktop/agents/codex/auth")
+async def logout_desktop_codex(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.logout_desktop_codex()
 
 
 @router.get("/desktop/messages/{message_id}/artifacts/{artifact_id}/download")

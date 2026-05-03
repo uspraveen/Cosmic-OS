@@ -1,0 +1,419 @@
+import { useEffect, useMemo, useState } from 'react'
+import { Bot, CheckCircle2, Code2, KeyRound, LogIn, ShieldCheck, Terminal, Trash2 } from 'lucide-react'
+
+type CodexAuthMode = 'chatgpt' | 'api_key'
+type CodexApprovalMode = 'suggest' | 'auto_edit' | 'full_auto'
+
+const MODEL_OPTIONS = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'gpt-5.4', label: 'GPT-5.4' },
+  { value: 'gpt-5.3-codex', label: 'GPT-5.3-Codex' },
+  { value: 'gpt-5.1-codex', label: 'GPT-5.1-Codex' },
+]
+
+const APPROVAL_MODES: Array<{ value: CodexApprovalMode; label: string; note: string }> = [
+  { value: 'suggest', label: 'Suggest', note: 'Read and propose' },
+  { value: 'auto_edit', label: 'Auto Edit', note: 'Write after routing' },
+  { value: 'full_auto', label: 'Full Auto', note: 'Container scoped' },
+]
+
+interface CodexAgentSettingsProps {
+  active: boolean
+}
+
+interface CodexGatewayStatus {
+  auth_mode?: string
+  has_api_key?: boolean
+  preferred_model?: string
+  approval_mode?: string
+  vm_sync_enabled?: boolean
+  status?: string
+  login_required_reason?: string
+  codex_home?: string
+  cli?: {
+    available?: boolean
+    authenticated?: boolean
+    stdout?: string
+    stderr?: string
+    reason?: string
+  }
+  login_session?: {
+    state?: string
+    stdout?: string[]
+    stderr?: string[]
+  } | null
+}
+
+function normalizeAuthMode(value: unknown): CodexAuthMode {
+  return value === 'api_key' ? 'api_key' : 'chatgpt'
+}
+
+function normalizeApprovalMode(value: unknown): CodexApprovalMode {
+  if (value === 'auto_edit' || value === 'full_auto') return value
+  return 'suggest'
+}
+
+function extractFirstUrl(value: string) {
+  return value.match(/https?:\/\/\S+/)?.[0] || ''
+}
+
+export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) {
+  const [authMode, setAuthMode] = useState<CodexAuthMode>('chatgpt')
+  const [apiKeyDraft, setApiKeyDraft] = useState('')
+  const [hasApiKey, setHasApiKey] = useState(false)
+  const [preferredModel, setPreferredModel] = useState('auto')
+  const [approvalMode, setApprovalMode] = useState<CodexApprovalMode>('suggest')
+  const [vmSyncEnabled, setVmSyncEnabled] = useState(true)
+  const [gatewayStatus, setGatewayStatus] = useState<CodexGatewayStatus | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [banner, setBanner] = useState('')
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!banner) return
+    const timer = window.setTimeout(() => setBanner(''), 2600)
+    return () => window.clearTimeout(timer)
+  }, [banner])
+
+  useEffect(() => {
+    if (!active) return
+    let cancelled = false
+    const refresh = async () => {
+      setLoading(true)
+      setError('')
+      try {
+        const status = await window.cosmic?.getGatewayCodexStatus()
+        if (!cancelled) applyGatewayStatus(status)
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : 'Unable to load Codex status from the VM.')
+        }
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    void refresh()
+    return () => {
+      cancelled = true
+    }
+  }, [active])
+
+  useEffect(() => {
+    if (!active || gatewayStatus?.status !== 'login_pending') return
+    const timer = window.setInterval(async () => {
+      try {
+        const status = await window.cosmic?.getGatewayCodexStatus()
+        applyGatewayStatus(status)
+      } catch {
+        // keep the current pending session visible until a manual refresh/action succeeds
+      }
+    }, 2500)
+    return () => window.clearInterval(timer)
+  }, [active, gatewayStatus?.status])
+
+  const connectionLabel = useMemo(() => {
+    if (loading) return 'Checking VM status'
+    if (gatewayStatus?.status === 'authenticated') return 'Codex authenticated on VM'
+    if (gatewayStatus?.status === 'login_pending') return 'Login waiting for browser approval'
+    if (authMode === 'api_key') return hasApiKey ? 'API key saved on VM' : 'API key needed'
+    return 'ChatGPT sign-in selected'
+  }, [authMode, gatewayStatus?.status, hasApiKey, loading])
+
+  const applyGatewayStatus = (rawStatus: unknown) => {
+    const status = (rawStatus && typeof rawStatus === 'object' ? rawStatus : {}) as CodexGatewayStatus
+    const nextAuthMode = normalizeAuthMode(status.auth_mode)
+    const nextModel = String(status.preferred_model ?? 'auto').trim() || 'auto'
+
+    setGatewayStatus(status)
+    setAuthMode(nextAuthMode)
+    setHasApiKey(Boolean(status.has_api_key))
+    setPreferredModel(MODEL_OPTIONS.some((option) => option.value === nextModel) ? nextModel : 'auto')
+    setApprovalMode(normalizeApprovalMode(status.approval_mode))
+    setVmSyncEnabled(status.vm_sync_enabled !== false)
+  }
+
+  const saveRemoteConfig = async (payload: {
+    authMode?: CodexAuthMode
+    apiKey?: string
+    preferredModel?: string
+    approvalMode?: CodexApprovalMode
+    vmSyncEnabled?: boolean
+  }, successMessage?: string) => {
+    setSaving(true)
+    setError('')
+    try {
+      const status = await window.cosmic?.saveGatewayCodexConfig(payload)
+      applyGatewayStatus(status)
+      if (successMessage) setBanner(successMessage)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to save Codex settings to the VM.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const saveAuthMode = (nextMode: CodexAuthMode) => {
+    setAuthMode(nextMode)
+    void saveRemoteConfig(
+      { authMode: nextMode },
+      nextMode === 'chatgpt'
+        ? 'ChatGPT sign-in selected for Alpha Codex.'
+        : 'API key mode selected for Alpha Codex.',
+    )
+  }
+
+  const savePreferredModel = (nextModel: string) => {
+    setPreferredModel(nextModel)
+    void saveRemoteConfig({ preferredModel: nextModel })
+  }
+
+  const saveApprovalMode = (nextMode: CodexApprovalMode) => {
+    setApprovalMode(nextMode)
+    void saveRemoteConfig({ approvalMode: nextMode })
+  }
+
+  const saveVmSync = (enabled: boolean) => {
+    setVmSyncEnabled(enabled)
+    void saveRemoteConfig({ vmSyncEnabled: enabled })
+  }
+
+  const saveApiKey = () => {
+    const nextKey = apiKeyDraft.trim()
+    if (!nextKey) {
+      setBanner('Paste an OpenAI API key before saving.')
+      return
+    }
+    setApiKeyDraft('')
+    setAuthMode('api_key')
+    void saveRemoteConfig(
+      { authMode: 'api_key', apiKey: nextKey },
+      'Codex API key saved to the VM and synced to Codex.',
+    )
+  }
+
+  const logoutCodex = async () => {
+    setSaving(true)
+    setError('')
+    try {
+      const status = await window.cosmic?.logoutGatewayCodex()
+      applyGatewayStatus(status)
+      setBanner('Codex logged out on the VM.')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to log Codex out on the VM.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const startChatGptLogin = async () => {
+    setSaving(true)
+    setError('')
+    try {
+      const status = await window.cosmic?.startGatewayCodexLogin()
+      applyGatewayStatus(status)
+      setBanner('Codex ChatGPT login started on the VM.')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to start Codex login on the VM.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const clearApiKey = async () => {
+    await logoutCodex()
+    setApiKeyDraft('')
+  }
+
+  const loginOutput = [
+    ...(gatewayStatus?.login_session?.stdout || []),
+    ...(gatewayStatus?.login_session?.stderr || []),
+  ].slice(-6)
+
+  return (
+    <div className="setting-subpage cosmic-codex-page">
+      <section className="cosmic-codex-hero">
+        <div className="cosmic-codex-hero-icon" aria-hidden="true">
+          <Code2 size={28} />
+        </div>
+        <div className="cosmic-codex-hero-copy">
+          <h3>Codex for Alpha</h3>
+          <p>{connectionLabel}</p>
+          <span>Feeds the VM Alpha agent runner when backend handoff is enabled.</span>
+        </div>
+        <div className={`cosmic-codex-status ${authMode === 'api_key' && !hasApiKey ? 'warn' : 'ready'}`}>
+          <span aria-hidden />
+          {gatewayStatus?.status === 'login_pending'
+            ? 'Pending'
+            : authMode === 'api_key' && !hasApiKey
+              ? 'Setup'
+              : 'Ready'}
+        </div>
+      </section>
+
+      {banner ? <div className="cosmic-google-banner" role="status">{banner}</div> : null}
+      {error ? <div className="cosmic-codex-error" role="alert">{error}</div> : null}
+
+      <section className="cosmic-codex-section">
+        <div className="cosmic-codex-section-head">
+          <div>
+            <span className="cosmic-codex-kicker">Authentication</span>
+            <h4>Choose how Alpha will authenticate Codex</h4>
+          </div>
+        </div>
+
+        <div className="cosmic-codex-auth-grid">
+          <button
+            type="button"
+            className={`cosmic-codex-auth-card ${authMode === 'chatgpt' ? 'active' : ''}`}
+            onClick={() => saveAuthMode('chatgpt')}
+            disabled={saving}
+          >
+            <LogIn size={20} />
+            <strong>ChatGPT sign-in</strong>
+            <span>Uses Codex CLI OAuth/subscription access.</span>
+            {authMode === 'chatgpt' ? <CheckCircle2 size={17} className="cosmic-codex-card-check" /> : null}
+          </button>
+
+          <button
+            type="button"
+            className={`cosmic-codex-auth-card ${authMode === 'api_key' ? 'active' : ''}`}
+            onClick={() => saveAuthMode('api_key')}
+            disabled={saving}
+          >
+            <KeyRound size={20} />
+            <strong>OpenAI API key</strong>
+            <span>Uses platform billing through `OPENAI_API_KEY`.</span>
+            {authMode === 'api_key' ? <CheckCircle2 size={17} className="cosmic-codex-card-check" /> : null}
+          </button>
+        </div>
+      </section>
+
+      <section className="cosmic-codex-section">
+        <div className="cosmic-codex-section-head">
+            <div>
+              <span className="cosmic-codex-kicker">API key</span>
+              <h4>{hasApiKey ? 'Saved on VM' : 'No key saved'}</h4>
+            </div>
+          {hasApiKey ? (
+            <button type="button" className="cosmic-codex-icon-btn danger" onClick={clearApiKey} title="Clear saved API key" disabled={saving}>
+              <Trash2 size={16} />
+            </button>
+          ) : null}
+        </div>
+        <div className="cosmic-codex-key-row">
+          <input
+            type="password"
+            value={apiKeyDraft}
+            onChange={(event) => setApiKeyDraft(event.target.value)}
+            placeholder="sk-..."
+            spellCheck={false}
+            autoComplete="off"
+          />
+          <button type="button" className="cosmic-codex-primary" onClick={saveApiKey} disabled={saving}>
+            Save
+          </button>
+        </div>
+      </section>
+
+      {authMode === 'chatgpt' ? (
+        <section className="cosmic-codex-section">
+          <div className="cosmic-codex-section-head">
+            <div>
+              <span className="cosmic-codex-kicker">ChatGPT login</span>
+              <h4>{gatewayStatus?.status === 'authenticated' ? 'Signed in on VM' : 'VM sign-in session'}</h4>
+            </div>
+            <button type="button" className="cosmic-codex-primary" onClick={startChatGptLogin} disabled={saving}>
+              {gatewayStatus?.status === 'login_pending' ? 'Restart' : 'Login'}
+            </button>
+          </div>
+          {loginOutput.length ? (
+            <div className="cosmic-codex-login-output">
+              {loginOutput.map((line, index) => {
+                const url = extractFirstUrl(line)
+                return (
+                  <span key={`${line}-${index}`}>
+                    {line}
+                    {url ? (
+                      <a href={url} target="_blank" rel="noreferrer">
+                        Open
+                      </a>
+                    ) : null}
+                  </span>
+                )
+              })}
+            </div>
+          ) : (
+            <p className="cosmic-codex-section-copy">
+              Starts `codex login --device-auth` on the VM and keeps the session visible here for browser approval or re-login.
+            </p>
+          )}
+        </section>
+      ) : null}
+
+      <section className="cosmic-codex-section">
+        <div className="cosmic-codex-section-head">
+          <div>
+            <span className="cosmic-codex-kicker">Runner defaults</span>
+            <h4>Model and autonomy</h4>
+          </div>
+        </div>
+
+        <div className="cosmic-codex-select-grid">
+          {MODEL_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={`cosmic-codex-pill ${preferredModel === option.value ? 'active' : ''}`}
+              onClick={() => savePreferredModel(option.value)}
+              disabled={saving}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="cosmic-codex-mode-list">
+          {APPROVAL_MODES.map((mode) => (
+            <button
+              key={mode.value}
+              type="button"
+              className={`cosmic-codex-mode ${approvalMode === mode.value ? 'active' : ''}`}
+              onClick={() => saveApprovalMode(mode.value)}
+              disabled={saving}
+            >
+              <span>{mode.label}</span>
+              <small>{mode.note}</small>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="cosmic-codex-runtime">
+        <div className="cosmic-codex-runtime-row">
+          <div className="cosmic-codex-runtime-icon" aria-hidden="true">
+            <Terminal size={18} />
+          </div>
+          <div>
+            <strong>VM Alpha container</strong>
+            <span>Codex will run inside per-task Alpha workspaces.</span>
+          </div>
+        </div>
+        <button
+          type="button"
+          className={`cosmic-codex-sync ${vmSyncEnabled ? 'active' : ''}`}
+          onClick={() => saveVmSync(!vmSyncEnabled)}
+          disabled={saving}
+        >
+          <ShieldCheck size={15} />
+          {vmSyncEnabled ? 'Sync on' : 'Sync off'}
+        </button>
+      </section>
+
+      <div className="cosmic-codex-footnote">
+        <Bot size={14} />
+        <span>{gatewayStatus?.codex_home ? `CODEX_HOME: ${gatewayStatus.codex_home}` : 'Alpha Codex home is managed on the VM.'}</span>
+      </div>
+    </div>
+  )
+}
