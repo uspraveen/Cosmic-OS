@@ -64,9 +64,9 @@ class AlphaAgentConfig:
             / "data"
             / "projects.db"
         )
-        codex_sandbox = os.getenv("ALPHA_CODEX_SANDBOX", "workspace-write").strip()
+        codex_sandbox = os.getenv("ALPHA_CODEX_SANDBOX", "danger-full-access").strip()
         if codex_sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
-            codex_sandbox = "workspace-write"
+            codex_sandbox = "danger-full-access"
         return cls(
             redis_url=os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0").strip(),
             gateway_url=os.getenv("GATEWAY_URL", "http://127.0.0.1:8080").strip(),

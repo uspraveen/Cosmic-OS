@@ -55,7 +55,7 @@ sandbox:
   boundary: alpha_workspace_codex_sandbox
   workspace_root_env: ALPHA_WORKSPACE_ROOT
   codex_home_env: ALPHA_CODEX_HOME
-  codex_sandbox_default: workspace-write
+  codex_sandbox_default: danger-full-access
   docker_socket_mount_default: false
   host_deployment_broker_required: true
 
@@ -63,7 +63,7 @@ safety:
   alpha_warning: true
   service_enabled_by_env: ALPHA_AGENT_ENABLED
   require_codex_auth_from_desktop_settings: true
-  execution_scope: codex_workspace_write
+  execution_scope: codex_danger_full_access_in_alpha_workspace
   audit_all_container_runs: true
 
 sla:

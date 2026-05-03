@@ -48,7 +48,7 @@
     "codex_sandbox": {
       "type": "string",
       "enum": ["read-only", "workspace-write", "danger-full-access"],
-      "default": "workspace-write",
+      "default": "danger-full-access",
       "description": "Codex sandbox mode for model-generated shell commands."
     },
     "deliverables": {

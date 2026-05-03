@@ -224,3 +224,28 @@ COSMIC Orchestrator
 ```
 
 The container is the real host isolation boundary. Codex sandbox flags are the inner execution policy.
+
+## V2 Codex Wiring Update
+
+The Codex execution path is now implemented behind `alpha.execute`.
+
+Current flow:
+
+```text
+COSMIC Orchestrator
+  -> delegate_to_agent(alpha.execute)
+    -> Alpha project registry
+    -> /var/lib/cosmic/alpha/workspaces/prj_xxx
+    -> Gateway internal Codex status check
+    -> codex exec --cd <workspace> --sandbox <ALPHA_CODEX_SANDBOX>
+    -> /var/lib/cosmic/alpha/artifacts/tsk_xxx/codex-last-message.md
+    -> task.completed / task.failed
+```
+
+Runtime finding on the current VM: Codex `workspace-write` fails because the VM rejects the bubblewrap loopback setup with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`. `danger-full-access` works in the Alpha workspace. Docker is also not installed on the current VM, so V2 uses:
+
+```env
+ALPHA_CODEX_SANDBOX=danger-full-access
+```
+
+This is an explicit operational compromise, not the final isolation design. The service still confines project state to `/var/lib/cosmic/alpha` by convention and prompt policy, but host-level sandboxing is not complete until the container/LXD runner is added. The next hardening step is to install/build an Alpha task container image with Codex available inside it and run Codex with full freedom only inside that container.

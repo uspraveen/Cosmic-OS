@@ -2611,8 +2611,8 @@ def build_alpha_agent_env_rendered(
         "ALPHA_CODEX_HOME": pick_env("ALPHA_CODEX_HOME", "/var/lib/cosmic/alpha/homes/codex")
         or "/var/lib/cosmic/alpha/homes/codex",
         "ALPHA_CODEX_MODEL": pick_env("ALPHA_CODEX_MODEL", "") or "",
-        "ALPHA_CODEX_SANDBOX": pick_env("ALPHA_CODEX_SANDBOX", "workspace-write")
-        or "workspace-write",
+        "ALPHA_CODEX_SANDBOX": pick_env("ALPHA_CODEX_SANDBOX", "danger-full-access")
+        or "danger-full-access",
         "ALPHA_CODEX_TIMEOUT_SEC": pick_env("ALPHA_CODEX_TIMEOUT_SEC", "3600") or "3600",
         "ALPHA_PROJECT_DB_PATH": pick_env("ALPHA_PROJECT_DB_PATH", "") or "",
         "ALPHA_DOCKER_IMAGE": pick_env("ALPHA_DOCKER_IMAGE", "ubuntu:24.04")
