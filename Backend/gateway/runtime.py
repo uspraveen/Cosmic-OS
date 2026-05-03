@@ -5162,6 +5162,7 @@ class GatewayRuntime:
         notebook.setdefault("next_best_actions", [])
         notebook.setdefault("compact_history", [])
         notebook.setdefault("activity_log", [])
+        notebook.setdefault("alpha_terminal_log", [])
         notebook.setdefault("created_at", utcnow_iso())
 
         event_type = self._safe_text(event.get("type")) or ""
@@ -5242,6 +5243,39 @@ class GatewayRuntime:
                 ],
                 limit=TASK_ACTIVITY_LOG_LIMIT,
             )
+        terminal_entry = self._normalize_alpha_terminal_entry(
+            event.get("codex_terminal"),
+            task_id=self._safe_text(event.get("task_id")),
+        )
+        if terminal_entry:
+            existing_terminal = (
+                notebook.get("alpha_terminal_log")
+                if isinstance(notebook.get("alpha_terminal_log"), list)
+                else []
+            )
+            dedupe_key = (
+                terminal_entry.get("id"),
+                terminal_entry.get("task_id"),
+                terminal_entry.get("event_type"),
+                terminal_entry.get("text"),
+                terminal_entry.get("created_at"),
+            )
+            seen = {
+                (
+                    item.get("id"),
+                    item.get("task_id"),
+                    item.get("event_type"),
+                    item.get("text"),
+                    item.get("created_at"),
+                )
+                for item in existing_terminal
+                if isinstance(item, dict)
+            }
+            if dedupe_key not in seen:
+                notebook["alpha_terminal_log"] = [
+                    *[dict(item) for item in existing_terminal if isinstance(item, dict)],
+                    terminal_entry,
+                ][-120:]
 
         if turn_entry is not None:
             notebook["artifact_refs"] = self._normalize_string_list(
@@ -11165,6 +11199,9 @@ class GatewayRuntime:
             alpha_terminal_log = (
                 event.get("alpha_terminal_log")
                 if isinstance(event.get("alpha_terminal_log"), list)
+                else task_notebook.get("alpha_terminal_log")
+                if isinstance(task_notebook, dict)
+                and isinstance(task_notebook.get("alpha_terminal_log"), list)
                 else []
             )
             assistant_message_id = store_assistant_message(
