@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from shared.agent_runtime import AgentRuntime
 from shared.contracts import AgentError, AgentResult, TaskEnvelope
@@ -215,12 +216,44 @@ class AlphaAgent(AgentRuntime):
                 "workspace": str(paths.workspace),
             },
         )
+
+        async def emit_codex_terminal(entry: dict[str, Any]) -> None:
+            text = str(entry.get("text") or "").strip()
+            if not text:
+                return
+            await self.emit_event(
+                task.task_id,
+                "task.progress",
+                {
+                    "stage": "alpha.codex.terminal",
+                    "project_id": project.project_id,
+                    "workspace": str(paths.workspace),
+                    "codex_terminal": {
+                        "id": f"alpha_terminal_{uuid4().hex}",
+                        "task_id": task.task_id,
+                        "stream": str(entry.get("stream") or "stdout"),
+                        "event_type": str(entry.get("event_type") or "codex.event"),
+                        "text": text[:2000],
+                        "detail": str(entry.get("detail") or "").strip()[:2000] or None,
+                    },
+                },
+            )
+
+        await emit_codex_terminal(
+            {
+                "stream": "system",
+                "event_type": "codex.exec.started",
+                "text": "codex exec --json started",
+                "detail": str(paths.workspace),
+            }
+        )
         codex_result = await self.codex_runner.run(
             paths=paths,
             prompt=self._build_codex_prompt(task=task, project=project, workspace=str(paths.workspace)),
             model=self._select_codex_model(task, codex_status),
             sandbox=self._select_codex_sandbox(task),
             timeout_sec=self.config.codex_timeout_sec,
+            event_callback=emit_codex_terminal,
         )
         artifact = self.codex_runner.artifact_for_last_message(task_id=task.task_id, result=codex_result)
         artifacts = [artifact] if artifact is not None else []

@@ -32,6 +32,7 @@ interface Message {
   thinking?: string
   activity?: string
   activityLog?: ActivityLogEntry[]
+  alphaTerminalLog?: AlphaTerminalEntry[]
   sources?: Array<{ url: string; title?: string; domain?: string } | string>
   stopped?: boolean
   channel?: string | null
@@ -69,6 +70,7 @@ interface BackgroundTask {
   error?: string | null
   activity?: string
   activityLog?: ActivityLogEntry[]
+  alphaTerminalLog?: AlphaTerminalEntry[]
   progress?: DocsProgressState | TabularProgressState
   producedArtifacts?: ProducedArtifact[]
   sources?: Array<{ url: string; title?: string; domain?: string } | string>
@@ -112,6 +114,7 @@ interface GatewayForegroundStreamSnapshot {
   thinking?: string
   activity?: string
   activityLog?: ActivityLogEntry[]
+  alphaTerminalLog?: AlphaTerminalEntry[]
   progress?: DocsProgressState | TabularProgressState
   producedArtifacts?: ProducedArtifact[]
   responseBlocks?: ResponseBlock[]
@@ -221,6 +224,16 @@ interface ActivityLogEntry {
   agentLabel?: string | null
   intent?: string | null
   specialistEventType?: string | null
+}
+
+interface AlphaTerminalEntry {
+  id: string
+  taskId?: string | null
+  stream?: 'stdout' | 'stderr' | 'system'
+  eventType?: string | null
+  text: string
+  detail?: string | null
+  createdAt: string
 }
 
 type ActivityLogEntryInput = Partial<ActivityLogEntry> & {
@@ -711,6 +724,92 @@ const mergeActivityLogEntries = (
   return merged
 }
 
+const normalizeAlphaTerminalEntry = (value: unknown): AlphaTerminalEntry | null => {
+  if (!value || typeof value !== 'object') {
+    return null
+  }
+  const text = typeof (value as any).text === 'string' && (value as any).text.trim()
+    ? (value as any).text.trim()
+    : typeof (value as any).message === 'string' && (value as any).message.trim()
+      ? (value as any).message.trim()
+      : ''
+  if (!text) {
+    return null
+  }
+  const rawStream = typeof (value as any).stream === 'string' ? (value as any).stream.trim().toLowerCase() : ''
+  const stream = rawStream === 'stderr' || rawStream === 'system' ? rawStream : 'stdout'
+  return {
+    id: typeof (value as any).id === 'string' && (value as any).id.trim()
+      ? (value as any).id.trim()
+      : `alpha_terminal_${crypto.randomUUID()}`,
+    taskId: typeof (value as any).task_id === 'string' && (value as any).task_id.trim()
+      ? (value as any).task_id.trim()
+      : typeof (value as any).taskId === 'string' && (value as any).taskId.trim()
+        ? (value as any).taskId.trim()
+        : null,
+    stream,
+    eventType: typeof (value as any).event_type === 'string' && (value as any).event_type.trim()
+      ? (value as any).event_type.trim()
+      : typeof (value as any).eventType === 'string' && (value as any).eventType.trim()
+        ? (value as any).eventType.trim()
+        : null,
+    text,
+    detail: typeof (value as any).detail === 'string' && (value as any).detail.trim()
+      ? (value as any).detail.trim()
+      : null,
+    createdAt: typeof (value as any).created_at === 'string' && (value as any).created_at.trim()
+      ? (value as any).created_at.trim()
+      : typeof (value as any).createdAt === 'string' && (value as any).createdAt.trim()
+        ? (value as any).createdAt.trim()
+        : new Date().toISOString(),
+  }
+}
+
+const normalizeAlphaTerminalLog = (value: unknown): AlphaTerminalEntry[] | undefined => {
+  if (!Array.isArray(value)) {
+    return undefined
+  }
+  let entries: AlphaTerminalEntry[] | undefined
+  for (const item of value) {
+    entries = appendAlphaTerminalEntry(entries, normalizeAlphaTerminalEntry(item))
+  }
+  return entries
+}
+
+const appendAlphaTerminalEntry = (
+  current: AlphaTerminalEntry[] | undefined,
+  incoming: AlphaTerminalEntry | null | undefined,
+): AlphaTerminalEntry[] | undefined => {
+  if (!incoming) {
+    return current
+  }
+  const existing = Array.isArray(current) ? current : []
+  const hasDuplicate = existing.some((item) => (
+    item.id === incoming.id ||
+    (
+      item.taskId === incoming.taskId &&
+      item.eventType === incoming.eventType &&
+      item.text === incoming.text &&
+      item.createdAt === incoming.createdAt
+    )
+  ))
+  if (hasDuplicate) {
+    return existing
+  }
+  return [...existing, incoming].slice(-120)
+}
+
+const mergeAlphaTerminalLogs = (
+  current: AlphaTerminalEntry[] | undefined,
+  incoming: AlphaTerminalEntry[] | undefined,
+): AlphaTerminalEntry[] | undefined => {
+  let merged = Array.isArray(current) ? current : undefined
+  for (const entry of incoming || []) {
+    merged = appendAlphaTerminalEntry(merged, entry)
+  }
+  return merged
+}
+
 const formatSpecialistAgentLabel = (value: unknown) => {
   const raw = String(value || '').trim()
   if (!raw) {
@@ -790,6 +889,7 @@ const historyToMessages = (history: any[] = []): Message[] => {
       responseBlocks: normalizeResponseBlocks(item?.metadata?.response_blocks),
       thinking: typeof item?.metadata?.thinking_text === 'string' ? item.metadata.thinking_text : undefined,
       activityLog: normalizeActivityLog(item?.metadata?.activity_log),
+      alphaTerminalLog: normalizeAlphaTerminalLog(item?.metadata?.alpha_terminal_log),
       sources: Array.isArray(item?.metadata?.sources) ? item.metadata.sources : undefined,
       stopped: Boolean(item?.metadata?.interrupted),
       channel: typeof item?.channel === 'string' ? item.channel : null,
@@ -856,6 +956,7 @@ const normalizeForegroundStreamSnapshot = (value: unknown): GatewayForegroundStr
       ? (value as any).activity.trim()
       : undefined,
     activityLog: normalizeActivityLog((value as any).activity_log ?? (value as any).activityLog),
+    alphaTerminalLog: normalizeAlphaTerminalLog((value as any).alpha_terminal_log ?? (value as any).alphaTerminalLog),
     progress,
     producedArtifacts: normalizeProducedArtifacts((value as any).produced_artifacts ?? (value as any).producedArtifacts),
     responseBlocks: normalizeResponseBlocks((value as any).response_blocks ?? (value as any).responseBlocks ?? (value as any).blocks),
@@ -941,6 +1042,7 @@ const mergeHydratedMessages = (current: Message[], hydrated: Message[]): Message
         ? message.activity
         : existing.activity,
       activityLog: message.activityLog ?? existing.activityLog,
+      alphaTerminalLog: message.alphaTerminalLog ?? existing.alphaTerminalLog,
       sources: message.sources ?? existing.sources,
       requestId: message.requestId ?? existing.requestId,
       source: message.source ?? existing.source,
@@ -1101,6 +1203,7 @@ const normalizeBackgroundTask = (value: unknown): BackgroundTask | null => {
       ? (value as any).activity.trim()
       : undefined,
     activityLog: normalizeActivityLog((value as any).activity_log ?? (value as any).activityLog),
+    alphaTerminalLog: normalizeAlphaTerminalLog((value as any).alpha_terminal_log ?? (value as any).alphaTerminalLog),
     progress: normalizeTabularProgress((value as any).tabular_progress) ?? normalizeDocsProgress((value as any).docs_progress),
     producedArtifacts: normalizeProducedArtifacts((value as any).produced_artifacts ?? (value as any).producedArtifacts),
     sources: Array.isArray((value as any).sources) ? (value as any).sources : undefined,
@@ -1277,7 +1380,7 @@ type AlphaConsoleStatus = 'running' | 'completed' | 'failed' | 'stopped'
 interface AlphaConsoleView {
   taskId: string | null
   status: AlphaConsoleStatus
-  lines: ActivityLogEntry[]
+  lines: AlphaTerminalEntry[]
 }
 
 const isAlphaActivityEntry = (entry: ActivityLogEntry) => {
@@ -1303,41 +1406,72 @@ const getAlphaEntryTaskId = (entry: ActivityLogEntry) => {
 
 const buildAlphaConsoleView = (
   entries?: ActivityLogEntry[],
+  terminalLog?: AlphaTerminalEntry[],
   options: { stopped?: boolean } = {},
 ): AlphaConsoleView | null => {
-  const alphaEntries = (entries || []).filter(isAlphaActivityEntry)
-  if (alphaEntries.length <= 0) {
+  const terminalEntries = terminalLog || []
+  if (terminalEntries.length <= 0) {
     return null
   }
 
   let taskId: string | null = null
-  for (let index = alphaEntries.length - 1; index >= 0; index -= 1) {
-    const candidate = getAlphaEntryTaskId(alphaEntries[index])
+  for (let index = terminalEntries.length - 1; index >= 0; index -= 1) {
+    const candidate = String(terminalEntries[index].taskId || '').trim()
     if (candidate) {
       taskId = candidate
       break
     }
   }
+  const alphaEntries = (entries || []).filter((entry) => {
+    if (!isAlphaActivityEntry(entry)) {
+      return false
+    }
+    if (!taskId) {
+      return true
+    }
+    return getAlphaEntryTaskId(entry) === taskId
+  })
+  if (!taskId) {
+    for (let index = alphaEntries.length - 1; index >= 0; index -= 1) {
+      const candidate = getAlphaEntryTaskId(alphaEntries[index])
+      if (candidate) {
+        taskId = candidate
+        break
+      }
+    }
+  }
+  const visibleTerminalEntries = taskId
+    ? terminalEntries.filter((entry) => !entry.taskId || entry.taskId === taskId)
+    : terminalEntries
 
-  const hasFailed = alphaEntries.some((entry) => {
-    const value = `${entry.status || ''} ${entry.stage || ''} ${entry.specialistEventType || ''}`.toLowerCase()
-    return value.includes('failed') || value.includes('error')
-  })
-  const hasStopped = Boolean(options.stopped) || alphaEntries.some((entry) => {
-    const value = `${entry.status || ''} ${entry.stage || ''} ${entry.specialistEventType || ''}`.toLowerCase()
-    return value.includes('cancelled') || value.includes('canceled') || value.includes('stopped')
-  })
-  const hasCompleted = alphaEntries.some((entry) => {
-    const status = String(entry.status || '').toLowerCase()
-    const stage = String(entry.stage || '').toLowerCase()
+  const latestLifecycle = [...alphaEntries].reverse().find((entry) => {
     const eventType = String(entry.specialistEventType || '').toLowerCase()
-    return eventType === 'task.completed' || stage.includes('alpha.codex.completed') || status === 'task.completed'
+    const stage = String(entry.stage || '').toLowerCase()
+    const status = String(entry.status || '').toLowerCase()
+    return (
+      eventType === 'task.completed' ||
+      eventType === 'task.failed' ||
+      eventType === 'task.cancelled' ||
+      stage.includes('alpha.codex.completed') ||
+      stage.includes('alpha.codex.failed') ||
+      status === 'completed' ||
+      status === 'failed' ||
+      status === 'cancelled'
+    )
   })
+  const lifecycleText = `${latestLifecycle?.status || ''} ${latestLifecycle?.stage || ''} ${latestLifecycle?.specialistEventType || ''}`.toLowerCase()
+  const status: AlphaConsoleStatus = Boolean(options.stopped) || lifecycleText.includes('cancelled') || lifecycleText.includes('canceled')
+    ? 'stopped'
+    : lifecycleText.includes('failed') || lifecycleText.includes('error')
+      ? 'failed'
+      : lifecycleText.includes('completed')
+        ? 'completed'
+        : 'running'
 
   return {
     taskId,
-    status: hasStopped ? 'stopped' : hasFailed ? 'failed' : hasCompleted ? 'completed' : 'running',
-    lines: alphaEntries.slice(-14),
+    status,
+    lines: visibleTerminalEntries.slice(-80),
   }
 }
 
@@ -1352,37 +1486,35 @@ const formatAlphaConsoleTime = (value?: string | null) => {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
-const formatAlphaConsoleDetail = (entry: ActivityLogEntry) => {
-  const detail = String(entry.detail || '').trim()
-  const stage = String(entry.stage || '').trim()
-  if (detail && detail !== entry.label) {
-    return detail
-  }
-  if (stage) {
-    return stage
-  }
-  return String(entry.specialistEventType || entry.status || '').trim()
-}
-
 const AlphaAgentConsole = ({
   entries,
+  terminalLog,
   requestId,
   stopped,
   onStop,
 }: {
   entries?: ActivityLogEntry[]
+  terminalLog?: AlphaTerminalEntry[]
   requestId?: string | null
   stopped?: boolean
   onStop: (payload: { requestId?: string; taskId?: string }) => void
 }) => {
-  const view = buildAlphaConsoleView(entries, { stopped })
+  const view = buildAlphaConsoleView(entries, terminalLog, { stopped })
   const [expanded, setExpanded] = useState(() => view?.status === 'running')
+  const terminalRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     if (view?.status === 'running') {
       setExpanded(true)
     }
   }, [view?.status, view?.lines.length])
+
+  useEffect(() => {
+    if (!expanded || !terminalRef.current) {
+      return
+    }
+    terminalRef.current.scrollTop = terminalRef.current.scrollHeight
+  }, [expanded, view?.lines.length])
 
   if (!view) {
     return null
@@ -1417,7 +1549,7 @@ const AlphaAgentConsole = ({
           <span className="alpha-agent-console-icon" aria-hidden="true">
             <Terminal size={15} strokeWidth={2.1} />
           </span>
-          <span>Alpha Agent</span>
+          <span>Codex CLI</span>
         </div>
         <div className="alpha-agent-console-meta">
           <span className="alpha-agent-console-status">{statusLabel}</span>
@@ -1439,16 +1571,15 @@ const AlphaAgentConsole = ({
       </div>
 
       {expanded && (
-        <div className="alpha-agent-terminal" role="log" aria-live={isRunning ? 'polite' : 'off'}>
+        <div ref={terminalRef} className="alpha-agent-terminal" role="log" aria-live={isRunning ? 'polite' : 'off'}>
           {view.lines.map((entry) => {
-            const detail = formatAlphaConsoleDetail(entry)
             return (
-              <div key={entry.id} className="alpha-agent-terminal-line">
+              <div key={entry.id} className={`alpha-agent-terminal-line is-${entry.stream || 'stdout'}`}>
                 <span className="alpha-agent-terminal-time">{formatAlphaConsoleTime(entry.createdAt)}</span>
                 <span className="alpha-agent-terminal-prompt">$</span>
                 <span className="alpha-agent-terminal-copy">
-                  <span>{entry.label}</span>
-                  {detail && <span className="alpha-agent-terminal-detail">{detail}</span>}
+                  <span>{entry.text}</span>
+                  {entry.detail && <span className="alpha-agent-terminal-detail">{entry.detail}</span>}
                 </span>
               </div>
             )
@@ -1457,7 +1588,7 @@ const AlphaAgentConsole = ({
             <div className="alpha-agent-terminal-line is-live">
               <span className="alpha-agent-terminal-time">live</span>
               <span className="alpha-agent-terminal-prompt">$</span>
-              <span className="alpha-agent-terminal-copy">codex exec is still working</span>
+              <span className="alpha-agent-terminal-copy">streaming codex exec events</span>
             </div>
           )}
         </div>
@@ -2360,6 +2491,7 @@ export default function App() {
           ...item,
           ...nextTask,
           activityLog: nextTask.activityLog ?? item.activityLog,
+          alphaTerminalLog: mergeAlphaTerminalLogs(item.alphaTerminalLog, nextTask.alphaTerminalLog),
           producedArtifacts: nextTask.producedArtifacts ?? item.producedArtifacts,
           sources: nextTask.sources ?? item.sources,
         }
@@ -2753,6 +2885,7 @@ export default function App() {
         thinking: typeof stream.thinking === 'string' ? stream.thinking : existingMessage?.thinking,
         activity: typeof stream.activity === 'string' ? stream.activity : existingMessage?.activity,
         activityLog: stream.activityLog ?? existingMessage?.activityLog,
+        alphaTerminalLog: mergeAlphaTerminalLogs(existingMessage?.alphaTerminalLog, stream.alphaTerminalLog),
         progress: stream.progress ?? existingMessage?.progress,
         producedArtifacts: stream.producedArtifacts ?? existingMessage?.producedArtifacts,
         responseBlocks: stream.responseBlocks ?? existingMessage?.responseBlocks,
@@ -2777,10 +2910,10 @@ export default function App() {
       if (taskId) {
         activeAssistantMessageByTaskRef.current.set(taskId, nextMessage.id)
       }
-      if (requestId && (nextMessage.content || nextMessage.thinking || nextMessage.activity || nextMessage.activityLog?.length)) {
+      if (requestId && (nextMessage.content || nextMessage.thinking || nextMessage.activity || nextMessage.activityLog?.length || nextMessage.alphaTerminalLog?.length)) {
         streamedResponseRequestIdsRef.current.add(requestId)
       }
-      if (taskId && (nextMessage.content || nextMessage.thinking || nextMessage.activity || nextMessage.activityLog?.length)) {
+      if (taskId && (nextMessage.content || nextMessage.thinking || nextMessage.activity || nextMessage.activityLog?.length || nextMessage.alphaTerminalLog?.length)) {
         streamedResponseTaskIdsRef.current.add(taskId)
       }
     }
@@ -3562,6 +3695,7 @@ export default function App() {
             ? (event as any).partial_thinking
             : preservedTask?.partialThinking || '',
           activity_log: (event as any)?.activity_log ?? preservedTask?.activityLog,
+          alpha_terminal_log: (event as any)?.alpha_terminal_log ?? preservedTask?.alphaTerminalLog,
           docs_progress: (event as any)?.docs_progress ?? (preservedTask?.progress?.kind === 'docs_parse' ? preservedTask.progress : undefined),
           tabular_progress: (event as any)?.tabular_progress ?? (preservedTask?.progress?.kind === 'tabular_parse' ? preservedTask.progress : undefined),
           produced_artifacts: (event as any)?.produced_artifacts ?? preservedTask?.producedArtifacts,
@@ -3595,6 +3729,7 @@ export default function App() {
               thinking: foregroundTask?.partialThinking || '',
               activity: foregroundTask?.activity,
               activityLog: foregroundTask?.activityLog,
+              alphaTerminalLog: foregroundTask?.alphaTerminalLog,
               progress: foregroundTask?.progress,
               producedArtifacts: foregroundTask?.producedArtifacts,
               sources: foregroundTask?.sources,
@@ -3651,9 +3786,12 @@ export default function App() {
           const docsProgress = normalizeDocsProgress(event.docs_progress)
           const tabularProgress = normalizeTabularProgress((event as any).tabular_progress)
           const progressState = tabularProgress ?? docsProgress
+          const alphaTerminalEntry = normalizeAlphaTerminalEntry((event as any).codex_terminal)
           const fallbackMessage = eventStatus ? `Task ${eventStatus}...` : 'Working in the background...'
           const activityText = progressState?.label || statusMessage || fallbackMessage
-          const activityEntries = buildProgressActivityEntries(event, activityText, statusMessage, progressState)
+          const activityEntries = alphaTerminalEntry
+            ? undefined
+            : buildProgressActivityEntries(event, activityText, statusMessage, progressState)
           const activityLog = normalizeActivityLog((event as any).activity_log)
           upsertBackgroundTask({
             requestId,
@@ -3665,24 +3803,26 @@ export default function App() {
             partialThinking: '',
             backgroundedAt: null,
             completed: false,
-            activity: activityText,
+            activity: alphaTerminalEntry ? undefined : activityText,
             activityLog: mergeActivityLogEntries(
               activityLog,
               activityEntries,
             ),
-            progress: progressState,
+            alphaTerminalLog: appendAlphaTerminalEntry(undefined, alphaTerminalEntry),
+            progress: alphaTerminalEntry ? undefined : progressState,
           })
           patchBackgroundTask(requestId, (current) => ({
             ...current,
             taskId: taskId || current.taskId || null,
             sessionId: typeof event.session_id === 'string' ? event.session_id : current.sessionId,
             route: typeof event.route === 'string' ? event.route : current.route,
-            activity: activityText,
+            activity: alphaTerminalEntry ? current.activity : activityText,
             activityLog: mergeActivityLogEntries(
               mergeActivityLogEntries(current.activityLog, activityLog),
               activityEntries,
             ),
-            progress: progressState,
+            alphaTerminalLog: appendAlphaTerminalEntry(current.alphaTerminalLog, alphaTerminalEntry),
+            progress: alphaTerminalEntry ? current.progress : progressState,
             completed: false,
           }))
           return
@@ -3855,11 +3995,16 @@ export default function App() {
         const docsProgress = normalizeDocsProgress(event.docs_progress)
         const tabularProgress = normalizeTabularProgress((event as any).tabular_progress)
         const progressState = tabularProgress ?? docsProgress
+        const alphaTerminalEntry = normalizeAlphaTerminalEntry((event as any).codex_terminal)
         const fallbackMessage = eventStatus ? `Task ${eventStatus}...` : 'Working on your request...'
         const activityText = progressState?.label || statusMessage || fallbackMessage
-        const activityEntries = buildProgressActivityEntries(event, activityText, statusMessage, progressState)
+        const activityEntries = alphaTerminalEntry
+          ? undefined
+          : buildProgressActivityEntries(event, activityText, statusMessage, progressState)
         const activityLog = normalizeActivityLog((event as any).activity_log)
-        setStreamingProgress(activityText)
+        if (!alphaTerminalEntry) {
+          setStreamingProgress(activityText)
+        }
         setMessages((prev) => {
           const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
           return nextMessages.map((message) => {
@@ -3868,12 +4013,13 @@ export default function App() {
             }
             return {
               ...message,
-              activity: activityText,
+              activity: alphaTerminalEntry ? message.activity : activityText,
               activityLog: mergeActivityLogEntries(
                 mergeActivityLogEntries(message.activityLog, activityLog),
                 activityEntries,
               ),
-              progress: progressState,
+              alphaTerminalLog: appendAlphaTerminalEntry(message.alphaTerminalLog, alphaTerminalEntry),
+              progress: alphaTerminalEntry ? message.progress : progressState,
               stopped: false,
             }
           })
@@ -3951,6 +4097,7 @@ export default function App() {
         const producedArtifacts = normalizeProducedArtifacts((event as any).produced_artifacts)
         const responseBlocks = normalizeResponseBlocks((event as any).response_blocks ?? (event as any).blocks)
         const activityLog = normalizeActivityLog((event as any).activity_log)
+        const alphaTerminalLog = normalizeAlphaTerminalLog((event as any).alpha_terminal_log)
         setMessages((prev) => {
           const sources = Array.isArray(event.sources) ? event.sources : undefined
           const persistedMessageId = typeof (event as any).message_id === 'string'
@@ -3972,6 +4119,7 @@ export default function App() {
               producedArtifacts: producedArtifacts ?? message.producedArtifacts,
               responseBlocks: responseBlocks ?? message.responseBlocks,
               activityLog: mergeActivityLogEntries(message.activityLog, activityLog),
+              alphaTerminalLog: mergeAlphaTerminalLogs(message.alphaTerminalLog, alphaTerminalLog),
               requestId: typeof event.request_id === 'string' ? event.request_id : message.requestId,
               source: typeof event.source === 'string' ? event.source : message.source,
               sourceId: typeof event.source_id === 'string' ? event.source_id : message.sourceId,
@@ -4519,6 +4667,7 @@ export default function App() {
             thinking: task.partialThinking || '',
             activity: task.activity,
             activityLog: task.activityLog,
+            alphaTerminalLog: task.alphaTerminalLog,
             progress: task.progress,
             producedArtifacts: task.producedArtifacts,
             sources: task.sources,
@@ -4583,7 +4732,7 @@ export default function App() {
       if (!messageMatchesActiveStream) {
         continue
       }
-      const view = buildAlphaConsoleView(message.activityLog, { stopped: message.stopped })
+      const view = buildAlphaConsoleView(message.activityLog, message.alphaTerminalLog, { stopped: message.stopped })
       if (view?.status === 'running' && view.taskId) {
         return view.taskId
       }
@@ -5818,6 +5967,7 @@ export default function App() {
                           <AssistantFlowTimeline entries={msg.activityLog} />
                           <AlphaAgentConsole
                             entries={msg.activityLog}
+                            terminalLog={msg.alphaTerminalLog}
                             requestId={msg.requestId}
                             stopped={msg.stopped}
                             onStop={handleStopAlphaAgent}

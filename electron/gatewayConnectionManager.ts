@@ -43,6 +43,7 @@ interface ForegroundStreamSnapshot {
   thinking_text?: string
   activity?: string
   activity_log?: any[]
+  alpha_terminal_log?: any[]
   docs_progress?: unknown
   tabular_progress?: unknown
   produced_artifacts?: any[]
@@ -275,6 +276,75 @@ function mergeCachedActivityLogs(current: any[] | undefined, incoming: any[] | u
       continue
     }
     merged = appendCachedActivityLog(merged, item as any)
+  }
+  return merged
+}
+
+function normalizeCachedAlphaTerminalEntry(value: any) {
+  if (!value || typeof value !== 'object') {
+    return null
+  }
+  const text =
+    typeof value.text === 'string' && value.text.trim()
+      ? value.text.trim()
+      : typeof value.message === 'string' && value.message.trim()
+        ? value.message.trim()
+        : ''
+  if (!text) {
+    return null
+  }
+  const rawStream = typeof value.stream === 'string' ? value.stream.trim().toLowerCase() : ''
+  return {
+    id: typeof value.id === 'string' && value.id.trim() ? value.id.trim() : `alpha_terminal_${crypto.randomUUID()}`,
+    task_id:
+      typeof value.task_id === 'string' && value.task_id.trim()
+        ? value.task_id.trim()
+        : typeof value.taskId === 'string' && value.taskId.trim()
+          ? value.taskId.trim()
+          : null,
+    stream: rawStream === 'stderr' || rawStream === 'system' ? rawStream : 'stdout',
+    event_type:
+      typeof value.event_type === 'string' && value.event_type.trim()
+        ? value.event_type.trim()
+        : typeof value.eventType === 'string' && value.eventType.trim()
+          ? value.eventType.trim()
+          : null,
+    text,
+    detail: typeof value.detail === 'string' && value.detail.trim() ? value.detail.trim() : null,
+    created_at:
+      typeof value.created_at === 'string' && value.created_at.trim()
+        ? value.created_at.trim()
+        : typeof value.createdAt === 'string' && value.createdAt.trim()
+          ? value.createdAt.trim()
+          : new Date().toISOString(),
+  }
+}
+
+function appendCachedAlphaTerminalLog(current: any[] | undefined, incoming: any) {
+  const entry = normalizeCachedAlphaTerminalEntry(incoming)
+  if (!entry) {
+    return Array.isArray(current) ? current : undefined
+  }
+  const existing = Array.isArray(current) ? current : []
+  const hasDuplicate = existing.some((item) => (
+    String(item?.id || '') === entry.id ||
+    (
+      String(item?.task_id || '') === String(entry.task_id || '') &&
+      String(item?.event_type || '') === String(entry.event_type || '') &&
+      String(item?.text || '') === entry.text &&
+      String(item?.created_at || '') === entry.created_at
+    )
+  ))
+  if (hasDuplicate) {
+    return existing
+  }
+  return [...existing, entry].slice(-120)
+}
+
+function mergeCachedAlphaTerminalLogs(current: any[] | undefined, incoming: any[] | undefined) {
+  let merged = Array.isArray(current) ? current : undefined
+  for (const item of incoming || []) {
+    merged = appendCachedAlphaTerminalLog(merged, item)
   }
   return merged
 }
@@ -1005,6 +1075,7 @@ export class GatewayConnectionManager {
             : undefined,
         activity: typeof payload.activity === 'string' ? payload.activity : undefined,
         activity_log: Array.isArray(payload.activity_log) ? payload.activity_log : undefined,
+        alpha_terminal_log: Array.isArray(payload.alpha_terminal_log) ? payload.alpha_terminal_log : undefined,
         docs_progress: payload.docs_progress,
         tabular_progress: payload.tabular_progress,
         produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : undefined,
@@ -1110,6 +1181,7 @@ export class GatewayConnectionManager {
         route: typeof payload.route === 'string' ? payload.route : undefined,
       })
       const snapshotActivityLog = Array.isArray(payload.activity_log) ? payload.activity_log : undefined
+      const snapshotAlphaTerminalLog = Array.isArray(payload.alpha_terminal_log) ? payload.alpha_terminal_log : undefined
       this.upsertForegroundStream(payload, {
         session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
         route: typeof payload.route === 'string' ? payload.route : undefined,
@@ -1117,6 +1189,10 @@ export class GatewayConnectionManager {
         activity_log: mergeCachedActivityLogs(
           existing?.activity_log,
           snapshotActivityLog && snapshotActivityLog.length > 0 ? snapshotActivityLog : activityEntries,
+        ),
+        alpha_terminal_log: mergeCachedAlphaTerminalLogs(
+          appendCachedAlphaTerminalLog(existing?.alpha_terminal_log, payload.codex_terminal),
+          snapshotAlphaTerminalLog,
         ),
         docs_progress: payload.docs_progress,
         tabular_progress: payload.tabular_progress,
@@ -1202,6 +1278,10 @@ export class GatewayConnectionManager {
         activity_log: mergeCachedActivityLogs(
           existing?.activity_log,
           Array.isArray(payload.activity_log) ? payload.activity_log : undefined,
+        ),
+        alpha_terminal_log: mergeCachedAlphaTerminalLogs(
+          existing?.alpha_terminal_log,
+          Array.isArray(payload.alpha_terminal_log) ? payload.alpha_terminal_log : undefined,
         ),
         produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : undefined,
         response_blocks: Array.isArray(payload.response_blocks) ? payload.response_blocks : undefined,
@@ -1354,6 +1434,10 @@ export class GatewayConnectionManager {
           Array.isArray(foregroundSnapshot.activity_log) && foregroundSnapshot.activity_log.length > 0
             ? foregroundSnapshot.activity_log
             : payload.activity_log,
+        alpha_terminal_log:
+          Array.isArray(foregroundSnapshot.alpha_terminal_log) && foregroundSnapshot.alpha_terminal_log.length > 0
+            ? foregroundSnapshot.alpha_terminal_log
+            : payload.alpha_terminal_log,
       }
     }
     this.applyEventToHistory(payload, eventType)

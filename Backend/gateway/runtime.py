@@ -196,6 +196,8 @@ class ActiveRequest:
     backgrounded_at: str | None = None
     user_query_excerpt: str = ""
     activity: str = ""
+    activity_log: list[dict[str, Any]] = field(default_factory=list)
+    alpha_terminal_log: list[dict[str, Any]] = field(default_factory=list)
     error_message: str = ""
 
 
@@ -5428,6 +5430,34 @@ class GatewayRuntime:
             normalized = normalized[-limit:]
         return normalized
 
+    def _normalize_alpha_terminal_entry(
+        self,
+        value: Any,
+        *,
+        task_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        text = self._safe_text(value.get("text")) or self._safe_text(value.get("message"))
+        if not text:
+            return None
+        stream = (self._safe_text(value.get("stream")) or "stdout").lower()
+        if stream not in {"stdout", "stderr", "system"}:
+            stream = "stdout"
+        entry_task_id = self._safe_text(value.get("task_id")) or self._safe_text(value.get("taskId")) or task_id
+        return {
+            "id": self._safe_text(value.get("id")) or f"alpha_terminal_{uuid4().hex}",
+            "task_id": entry_task_id,
+            "stream": stream,
+            "event_type": self._safe_text(value.get("event_type"))
+            or self._safe_text(value.get("eventType")),
+            "text": text[:2000],
+            "detail": self._safe_text(value.get("detail")),
+            "created_at": self._safe_text(value.get("created_at"))
+            or self._safe_text(value.get("createdAt"))
+            or utcnow_iso(),
+        }
+
     def _refresh_active_working_set(self, session_id: str) -> dict[str, Any]:
         metadata = self.session_store.get_session_metadata(session_id)
         carry_forward = (
@@ -6582,6 +6612,8 @@ class GatewayRuntime:
                 "response_blocks": state.response_blocks_snapshot,
                 "snapshot_seq": state.snapshot_seq or None,
                 "activity": state.activity or "Working on your request...",
+                "activity_log": state.activity_log,
+                "alpha_terminal_log": state.alpha_terminal_log,
                 "completed": state.completed,
                 "failed": state.failed,
                 "error": state.error_message or None,
@@ -7204,11 +7236,20 @@ class GatewayRuntime:
             return None
         payload = getattr(event, "payload", None)
         payload = payload if isinstance(payload, dict) else {}
-        message = self._specialist_progress_message(
-            event_type=event_type,
-            payload=payload,
-            agent_label=context["agent_label"],
-            intent=context["intent"],
+        codex_terminal = (
+            dict(payload.get("codex_terminal"))
+            if isinstance(payload.get("codex_terminal"), dict)
+            else None
+        )
+        message = (
+            ""
+            if codex_terminal is not None
+            else self._specialist_progress_message(
+                event_type=event_type,
+                payload=payload,
+                agent_label=context["agent_label"],
+                intent=context["intent"],
+            )
         )
         forwarded = {
             "type": "task.progress",
@@ -7240,6 +7281,9 @@ class GatewayRuntime:
                 "node": self._safe_text(payload.get("node")),
             },
         }
+        if codex_terminal is not None:
+            forwarded["codex_terminal"] = codex_terminal
+            forwarded["message"] = ""
         return forwarded
 
     def _resolve_specialist_request_context(
@@ -12616,6 +12660,16 @@ class GatewayRuntime:
     ) -> None:
         event_type = self._safe_text(event.get("type")) or ""
         if event_type == "task.progress":
+            terminal_entry = self._normalize_alpha_terminal_entry(
+                event.get("codex_terminal"),
+                task_id=self._safe_text(event.get("task_id")),
+            )
+            if terminal_entry:
+                state.alpha_terminal_log = [
+                    *state.alpha_terminal_log,
+                    terminal_entry,
+                ][-120:]
+                return
             progress_state = event.get("tabular_progress") or event.get("docs_progress")
             progress_label = (
                 self._safe_text(progress_state.get("label"))
@@ -12623,6 +12677,12 @@ class GatewayRuntime:
                 else None
             )
             state.activity = progress_label or self._safe_text(event.get("message")) or state.activity
+            activity_entry = self._build_task_activity_entry(event)
+            if activity_entry:
+                state.activity_log = self._normalize_activity_log(
+                    [*state.activity_log, activity_entry],
+                    limit=TASK_ACTIVITY_LOG_LIMIT,
+                )
             return
         if event_type == "response.thinking.chunk":
             state.partial_thinking += str(event.get("content") or "")
