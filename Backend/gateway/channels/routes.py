@@ -1410,6 +1410,14 @@ async def get_desktop_codex_status(
     return await runtime.get_desktop_codex_status()
 
 
+@router.get("/internal/agents/codex/status")
+async def get_internal_codex_status(
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.get_desktop_codex_status()
+
+
 @router.post("/desktop/agents/codex/config")
 async def save_desktop_codex_config(
     body: CodexAgentConfigRequest,

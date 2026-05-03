@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agents.alpha_agent.codex_runner import CodexWorkspaceRunner
 from agents.alpha_agent.config import AlphaAgentConfig
 from agents.alpha_agent.docker_runner import DockerWorkspaceRunner
 from agents.alpha_agent.project_registry import ProjectRegistry
@@ -25,6 +26,10 @@ def _config(tmp_path: Path) -> AlphaAgentConfig:
         docker_pids_limit=512,
         docker_timeout_sec=300.0,
         allow_docker_smoke=False,
+        codex_home=tmp_path / "alpha" / "homes" / "codex",
+        codex_sandbox="workspace-write",
+        codex_timeout_sec=3600.0,
+        codex_default_model="",
     )
 
 
@@ -56,11 +61,13 @@ def test_project_registry_creates_and_resolves_project(tmp_path: Path) -> None:
 
 
 def test_workspace_manager_prepares_expected_layout(tmp_path: Path) -> None:
-    manager = WorkspaceManager(tmp_path / "alpha")
+    codex_home = tmp_path / "codex-home"
+    manager = WorkspaceManager(tmp_path / "alpha", codex_home=codex_home)
     paths = manager.prepare(project_id="prj_abc123", task_id="tsk_def456")
 
     assert paths.workspace.is_dir()
     assert paths.artifacts.is_dir()
+    assert paths.codex_home == codex_home
     assert paths.codex_home.is_dir()
     assert paths.opencode_home.is_dir()
     assert paths.cursor_home.is_dir()
@@ -85,3 +92,29 @@ def test_docker_runner_builds_isolated_command_without_docker_socket(tmp_path: P
     assert f"{paths.artifacts.resolve()}:/artifacts" in joined
     assert f"{paths.codex_home.resolve()}:/codex-home" in joined
     assert command[-4:] == ["ubuntu:24.04", "sh", "-lc", "pwd"]
+
+
+def test_codex_runner_builds_workspace_write_exec_command(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    paths = WorkspaceManager(cfg.alpha_root, codex_home=cfg.codex_home).prepare(
+        project_id="prj_abc123",
+        task_id="tsk_def456",
+    )
+    runner = CodexWorkspaceRunner(cfg)
+
+    command = runner.build_command(
+        paths=paths,
+        prompt="Build the app",
+        output_path=paths.artifacts / "codex-last-message.md",
+        model="gpt-5.1-codex",
+    )
+    joined = " ".join(command)
+
+    assert "exec" in command
+    assert "--cd" in command
+    assert str(paths.workspace) in command
+    assert "--sandbox workspace-write" in joined
+    assert "--skip-git-repo-check" in joined
+    assert "--output-last-message" in command
+    assert "gpt-5.1-codex" in command
+    assert command[-1] == "-"

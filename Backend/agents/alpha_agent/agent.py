@@ -7,6 +7,7 @@ from typing import Any
 from shared.agent_runtime import AgentRuntime
 from shared.contracts import AgentError, AgentResult, TaskEnvelope
 
+from .codex_runner import CodexRunResult, CodexWorkspaceRunner
 from .config import AGENT_ROOT, AlphaAgentConfig
 from .docker_runner import DockerWorkspaceRunner
 from .project_registry import ProjectRecord, ProjectRegistry
@@ -26,8 +27,12 @@ class AlphaAgent(AgentRuntime):
     ) -> None:
         self.config = config or AlphaAgentConfig.from_env()
         self.registry = ProjectRegistry(self.config.project_db_path)
-        self.workspace_manager = WorkspaceManager(self.config.alpha_root)
+        self.workspace_manager = WorkspaceManager(
+            self.config.alpha_root,
+            codex_home=self.config.codex_home,
+        )
         self.docker_runner = DockerWorkspaceRunner(self.config)
+        self.codex_runner = CodexWorkspaceRunner(self.config)
         super().__init__(
             agent_card_path=AGENT_ROOT / "agent_card.yaml",
             redis_client=redis_client,
@@ -88,7 +93,8 @@ class AlphaAgent(AgentRuntime):
                     "Resolve or create Alpha project",
                     "Prepare isolated workspace directories",
                     "Inspect Docker runner readiness",
-                    "Return V1 workspace preparation report",
+                    "Verify Codex auth and execution readiness",
+                    "Execute task with Codex",
                 ]
             )
 
@@ -150,19 +156,114 @@ class AlphaAgent(AgentRuntime):
                 "completed",
                 "Docker runner is available." if docker_available else "Docker executable not found.",
             )
-            await self.step_plan.update(4, "completed", "Returned V1 workspace preparation report.")
+
+        if bool(task.input.get("prepare_only")):
+            if self.step_plan is not None:
+                await self.step_plan.update(4, "completed", "Skipped Codex execution by request.")
+                await self.step_plan.update(5, "completed", "Returned workspace preparation report.")
+            return AgentResult(
+                status="completed",
+                output={
+                    "status": "workspace_prepared",
+                    "project": project.as_dict(),
+                    "workspace": paths.as_dict(),
+                    "docker": docker_report,
+                    "codex": {"skipped": True, "reason": "prepare_only"},
+                    "next_action": "Call alpha.execute again without prepare_only to execute with Codex.",
+                },
+                artifacts=[],
+                error=None,
+            )
+
+        preferred_harness = str(task.input.get("preferred_harness") or "codex").strip().lower()
+        if preferred_harness not in {"auto", "codex"}:
+            return self._fail(
+                code="UNSUPPORTED_OPERATION",
+                message="Alpha currently supports Codex execution. OpenCode and Cursor harnesses are planned but not wired.",
+                next_action="ask_user",
+            )
+
+        codex_status = await self._fetch_codex_status()
+        codex_ready = self._codex_status_is_ready(codex_status)
+        if self.step_plan is not None:
+            await self.step_plan.update(
+                4,
+                "completed" if codex_ready else "failed",
+                "Codex is authenticated." if codex_ready else "Codex is not authenticated.",
+            )
+        if not codex_ready:
+            project = self.registry.mark_task(
+                project.project_id,
+                task_id=task.task_id,
+                session_id=task.session_id,
+                local_path=str(paths.workspace),
+                summary=goal[:500],
+                status="codex_login_required",
+            )
+            return self._fail(
+                code="CODEX_LOGIN_REQUIRED",
+                message=self._codex_login_message(codex_status),
+                next_action="ask_user",
+            )
+
+        await self.emit_event(
+            task.task_id,
+            "task.progress",
+            {
+                "stage": "alpha.codex.started",
+                "project_id": project.project_id,
+                "workspace": str(paths.workspace),
+            },
+        )
+        codex_result = await self.codex_runner.run(
+            paths=paths,
+            prompt=self._build_codex_prompt(task=task, project=project, workspace=str(paths.workspace)),
+            model=self._select_codex_model(task, codex_status),
+            sandbox=self._select_codex_sandbox(task),
+            timeout_sec=self.config.codex_timeout_sec,
+        )
+        artifact = self.codex_runner.artifact_for_last_message(task_id=task.task_id, result=codex_result)
+        artifacts = [artifact] if artifact is not None else []
+        project = self.registry.mark_task(
+            project.project_id,
+            task_id=task.task_id,
+            session_id=task.session_id,
+            local_path=str(paths.workspace),
+            summary=(codex_result.last_message or goal)[:500],
+            status="completed" if codex_result.ok else "codex_failed",
+        )
+        await self.emit_event(
+            task.task_id,
+            "task.progress",
+            {
+                "stage": "alpha.codex.completed" if codex_result.ok else "alpha.codex.failed",
+                "project_id": project.project_id,
+                "returncode": codex_result.returncode,
+                "timed_out": codex_result.timed_out,
+                "artifact_ids": [item.artifact_id for item in artifacts],
+            },
+        )
+        if self.step_plan is not None:
+            await self.step_plan.update(
+                5,
+                "completed" if codex_result.ok else "failed",
+                "Codex completed the task." if codex_result.ok else "Codex execution failed.",
+            )
+
+        if not codex_result.ok:
+            return self._codex_failure(codex_result)
 
         return AgentResult(
             status="completed",
             output={
-                "status": "workspace_prepared",
-                "v1_scope": "workspace_prepare_only",
+                "status": "completed",
                 "project": project.as_dict(),
                 "workspace": paths.as_dict(),
                 "docker": docker_report,
-                "next_action": "Implement Codex/OpenCode/Cursor harness before executing project goals.",
+                "codex": codex_result.as_dict(),
+                "next_action": "Review Codex output and continue with the same project_ref for follow-up work.",
             },
-            artifacts=[],
+            artifacts=artifacts,
             error=None,
         )
 
@@ -203,6 +304,97 @@ class AlphaAgent(AgentRuntime):
             if path.exists():
                 path.read_text(encoding="utf-8")
 
+    async def _fetch_codex_status(self) -> dict[str, Any]:
+        if not self.gateway_internal_token:
+            return {
+                "status": "unknown",
+                "login_required_reason": "gateway_internal_token_missing",
+                "cli": {"authenticated": False},
+            }
+        response = await self._http_client.get(
+            f"{self.gateway_url.rstrip('/')}/internal/agents/codex/status",
+            headers={"Authorization": f"Bearer {self.gateway_internal_token}"},
+            timeout=15.0,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+
+    def _codex_status_is_ready(self, payload: dict[str, Any]) -> bool:
+        cli = payload.get("cli") if isinstance(payload.get("cli"), dict) else {}
+        return payload.get("status") == "authenticated" and bool(cli.get("authenticated"))
+
+    def _codex_login_message(self, payload: dict[str, Any]) -> str:
+        reason = self._optional_string(payload.get("login_required_reason")) or "codex_login_required"
+        return (
+            "Codex is not ready for Alpha execution. "
+            f"Open Settings > Agents > Codex and complete login or API-key sync. Reason: {reason}."
+        )
+
+    def _select_codex_model(self, task: TaskEnvelope, codex_status: dict[str, Any]) -> str | None:
+        for value in (
+            task.input.get("model"),
+            task.input.get("preferred_model"),
+            codex_status.get("preferred_model"),
+            self.config.codex_default_model,
+        ):
+            normalized = self._optional_string(value)
+            if normalized and normalized.lower() != "auto":
+                return normalized
+        return None
+
+    def _select_codex_sandbox(self, task: TaskEnvelope) -> str:
+        normalized = str(task.input.get("codex_sandbox") or self.config.codex_sandbox).strip()
+        if normalized in {"read-only", "workspace-write", "danger-full-access"}:
+            return normalized
+        return self.config.codex_sandbox
+
+    def _build_codex_prompt(
+        self,
+        *,
+        task: TaskEnvelope,
+        project: ProjectRecord,
+        workspace: str,
+    ) -> str:
+        deliverables = self._coerce_string_list(task.input.get("deliverables"))
+        constraints = task.input.get("constraints") if isinstance(task.input.get("constraints"), dict) else {}
+        lines = [
+            "You are the COSMIC Alpha Agent execution harness.",
+            "",
+            "Treat the COSMIC orchestrator as the human operator. Complete the user's high-level task end to end inside the provided workspace. Ask for clarification in your final message when the task cannot be completed safely or needs missing credentials.",
+            "",
+            "## User Goal",
+            str(task.input.get("goal") or "").strip(),
+            "",
+            "## Project Context",
+            f"- project_id: {project.project_id}",
+            f"- workspace: {workspace}",
+            f"- repo_url: {project.repo_url or self._optional_string(task.input.get('repo_url')) or ''}",
+            f"- deployment_url: {project.deployment_url or self._optional_string(task.input.get('deployment_url')) or ''}",
+            "",
+            "## Operating Rules",
+            "- Work only inside the workspace unless the task explicitly requires external setup.",
+            "- Do not alter the COSMIC production repo or services unless the user goal explicitly asks for that.",
+            "- Prefer small, verifiable changes and run relevant checks when the project provides them.",
+            "- Leave a concise final report with what changed, where it is, checks run, and any blocker.",
+        ]
+        if deliverables:
+            lines.extend(["", "## Requested Deliverables"])
+            lines.extend(f"- {item}" for item in deliverables)
+        if constraints:
+            lines.extend(["", "## Constraints"])
+            lines.extend(f"- {key}: {value}" for key, value in sorted(constraints.items()))
+        return "\n".join(lines)
+
+    def _codex_failure(self, result: CodexRunResult) -> AgentResult:
+        code = "TIMEOUT" if result.timed_out else "CODEX_EXECUTION_FAILED"
+        stderr = result.stderr.strip() or result.stdout.strip() or "Codex execution failed without output."
+        return self._fail(
+            code=code,
+            message=stderr[-1000:],
+            next_action="retry" if result.timed_out else "escalate",
+        )
+
     def _optional_string(self, value: Any) -> str | None:
         normalized = str(value or "").strip()
         return normalized or None
@@ -224,4 +416,3 @@ class AlphaAgent(AgentRuntime):
                 next_action=next_action,
             ),
         )
-

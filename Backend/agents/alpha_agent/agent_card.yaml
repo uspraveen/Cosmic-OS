@@ -2,20 +2,21 @@ agent_id: cosmic/alpha-agent:1.0.0
 display_name: Alpha Agent
 description: >
   Alpha-stage project operator for COSMIC. It prepares isolated project
-  workspaces and Docker task containers for high-level software, deployment,
-  and capability-bootstrap tasks. Full Codex/OpenCode/Cursor execution is gated
-  behind later harness work and service activation.
+  workspaces and executes high-level software, deployment, and
+  capability-bootstrap tasks through the Codex CLI harness when the desktop
+  Codex settings are authenticated.
 
 intents:
   - name: alpha.execute
-    description: Prepare or recall an Alpha project workspace for a high-level project task.
+    description: Execute or continue a high-level Alpha project task with Codex.
     input_schema: schemas/intents/alpha.execute.input.json
     output_schema: schemas/intents/alpha.execute.output.json
     timeout_sec: 3600
     usage_hints:
       - Use this only for high-level project work that requires capabilities outside the pre-packaged COSMIC specialists.
-      - In V1 this prepares project/workspace/container state only; it does not run Codex/OpenCode/Cursor task execution yet.
-      - Do not delegate destructive production changes here until the Alpha service is explicitly enabled and the user has approved the Alpha warning.
+      - Good fits include building or hosting a website, cloning a repo and extending it, creating a new app, running a research/code workflow, or completing a multi-step engineering task.
+      - Use prepare_only=true only for diagnostics or when the user explicitly asks to create/recall the workspace without execution.
+      - Do not delegate destructive production changes here unless the user goal explicitly asks for production changes.
       - Pass project_ref when the user is referring to an existing Alpha project, repo URL, deployment URL, local path, or prior project alias.
 
   - name: alpha.recall_project
@@ -32,6 +33,7 @@ artifact_types:
   - alpha_project_report
   - alpha_task_log
   - alpha_container_summary
+  - alpha_codex_report
 
 policies:
   network_access: true
@@ -42,6 +44,7 @@ policies:
     - /var/lib/cosmic/alpha
   tool_access:
     - docker_workspace_run
+    - codex_exec
   allowed_senders:
     - cosmic/orchestrator:1.0.0
   intent_authorization:
@@ -49,16 +52,18 @@ policies:
     alpha.recall_project: [cosmic/orchestrator:1.0.0]
 
 sandbox:
-  boundary: docker_task_container
+  boundary: alpha_workspace_codex_sandbox
   workspace_root_env: ALPHA_WORKSPACE_ROOT
+  codex_home_env: ALPHA_CODEX_HOME
+  codex_sandbox_default: workspace-write
   docker_socket_mount_default: false
   host_deployment_broker_required: true
 
 safety:
   alpha_warning: true
   service_enabled_by_env: ALPHA_AGENT_ENABLED
-  require_user_approval_before_full_execution: true
-  v1_execution_scope: workspace_prepare_only
+  require_codex_auth_from_desktop_settings: true
+  execution_scope: codex_workspace_write
   audit_all_container_runs: true
 
 sla:
@@ -90,4 +95,3 @@ version_info:
   deprecated_at: null
   remove_after: null
   changelog: CHANGELOG.md
-

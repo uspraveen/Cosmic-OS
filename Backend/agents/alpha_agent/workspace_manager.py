@@ -31,8 +31,9 @@ class WorkspacePaths:
 
 
 class WorkspaceManager:
-    def __init__(self, alpha_root: str | Path) -> None:
+    def __init__(self, alpha_root: str | Path, *, codex_home: str | Path | None = None) -> None:
         self.alpha_root = Path(alpha_root).expanduser()
+        self.codex_home = Path(codex_home).expanduser() if codex_home else self.alpha_root / "homes" / "codex"
 
     def ensure_base_layout(self) -> None:
         for child in (
@@ -55,7 +56,7 @@ class WorkspaceManager:
             task_id=normalized_task_id,
             workspace=self.alpha_root / "workspaces" / normalized_project_id,
             artifacts=self.alpha_root / "artifacts" / normalized_task_id,
-            codex_home=self.alpha_root / "homes" / "codex",
+            codex_home=self.codex_home,
             opencode_home=self.alpha_root / "homes" / "opencode",
             cursor_home=self.alpha_root / "homes" / "cursor",
             deployments=self.alpha_root / "deployments",
@@ -81,4 +82,3 @@ class WorkspaceManager:
         if any(char not in allowed for char in normalized):
             raise ValueError("Workspace ids may only contain letters, digits, underscore, and dash.")
         return normalized
-

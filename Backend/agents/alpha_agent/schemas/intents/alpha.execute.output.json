@@ -4,12 +4,11 @@
   "additionalProperties": true,
   "properties": {
     "status": { "type": "string" },
-    "v1_scope": { "type": "string" },
     "project": { "type": "object" },
     "workspace": { "type": "object" },
     "docker": { "type": "object" },
+    "codex": { "type": "object" },
     "next_action": { "type": "string" }
   },
-  "required": ["status", "project", "workspace", "docker", "next_action"]
+  "required": ["status", "project", "workspace", "codex", "next_action"]
 }
-

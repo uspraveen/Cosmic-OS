@@ -35,7 +35,21 @@
       "type": "string",
       "enum": ["codex", "opencode", "cursor", "auto"],
       "default": "codex",
-      "description": "Preferred future execution harness."
+      "description": "Preferred execution harness. Codex and auto are currently executable."
+    },
+    "preferred_model": {
+      "type": ["string", "null"],
+      "description": "Optional Codex model override for this task."
+    },
+    "model": {
+      "type": ["string", "null"],
+      "description": "Optional Codex model override for this task."
+    },
+    "codex_sandbox": {
+      "type": "string",
+      "enum": ["read-only", "workspace-write", "danger-full-access"],
+      "default": "workspace-write",
+      "description": "Codex sandbox mode for model-generated shell commands."
     },
     "deliverables": {
       "type": "array",
@@ -56,8 +70,12 @@
       "type": "boolean",
       "default": false,
       "description": "Run a harmless Docker workspace smoke test only when ALPHA_ALLOW_DOCKER_SMOKE=true."
+    },
+    "prepare_only": {
+      "type": "boolean",
+      "default": false,
+      "description": "Prepare or recall the Alpha workspace without running Codex."
     }
   },
   "required": ["goal"]
 }
-

@@ -49,6 +49,10 @@ class AlphaAgentConfig:
     docker_pids_limit: int
     docker_timeout_sec: float
     allow_docker_smoke: bool
+    codex_home: Path
+    codex_sandbox: str
+    codex_timeout_sec: float
+    codex_default_model: str
 
     @classmethod
     def from_env(cls) -> "AlphaAgentConfig":
@@ -60,6 +64,9 @@ class AlphaAgentConfig:
             / "data"
             / "projects.db"
         )
+        codex_sandbox = os.getenv("ALPHA_CODEX_SANDBOX", "workspace-write").strip()
+        if codex_sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
+            codex_sandbox = "workspace-write"
         return cls(
             redis_url=os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0").strip(),
             gateway_url=os.getenv("GATEWAY_URL", "http://127.0.0.1:8080").strip(),
@@ -84,5 +91,16 @@ class AlphaAgentConfig:
                 float(os.getenv("ALPHA_DOCKER_TIMEOUT_SEC", "300") or "300"),
             ),
             allow_docker_smoke=_truthy(os.getenv("ALPHA_ALLOW_DOCKER_SMOKE"), default=False),
+            codex_home=(
+                _optional_path(os.getenv("ALPHA_CODEX_HOME"))
+                or alpha_root
+                / "homes"
+                / "codex"
+            ),
+            codex_sandbox=codex_sandbox,
+            codex_timeout_sec=max(
+                30.0,
+                float(os.getenv("ALPHA_CODEX_TIMEOUT_SEC", "3600") or "3600"),
+            ),
+            codex_default_model=os.getenv("ALPHA_CODEX_MODEL", "").strip(),
         )
-
