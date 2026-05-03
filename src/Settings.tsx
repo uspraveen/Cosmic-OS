@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Bot, Code2, Sparkles, Terminal } from 'lucide-react'
 import LiquidGlass from './LiquidGlass'
 import MonitorSelector from './MonitorSelector'
 import ApiConfiguration from './ApiConfiguration'
@@ -333,35 +334,63 @@ export default function Settings({
             )}
 
             {currentView === 'agents' && (
-              <div className="setting-subpage prx-integrations-page">
-                <div className="prx-intro">
-                  <p>Connect coding providers that Alpha can use for project-level work on your VM.</p>
+              <div className="cosmic-agents-page">
+                <div className="cosmic-agents-hero">
+                  <div className="cosmic-agents-hero-top">
+                    <div className="cosmic-agents-hero-icon" aria-hidden="true">
+                      <Bot size={28} />
+                    </div>
+                    <div className="cosmic-agents-hero-text">
+                      <span className="cosmic-agents-kicker">Agent Providers</span>
+                      <h3>Alpha Agents</h3>
+                      <p>Connect coding providers that Alpha can use for project-level work on your VM.</p>
+                    </div>
+                  </div>
+                  <div className="cosmic-agents-hero-status">
+                    <span className="cosmic-agents-live-dot on" aria-hidden="true" />
+                    <span className="cosmic-agents-status-text">1 provider active</span>
+                  </div>
                 </div>
 
-                <button className="prx-provider-card cosmic-agent-provider-card" onClick={() => setCurrentView('agents-codex')}>
-                  <div className="prx-provider-icon cosmic-agent-provider-icon">
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="m16 18 6-6-6-6" />
-                      <path d="m8 6-6 6 6 6" />
-                    </svg>
+                <div className="cosmic-agents-section-label">Active Providers</div>
+                <button className="cosmic-agents-provider-card" onClick={() => setCurrentView('agents-codex')}>
+                  <div className="cosmic-agents-provider-icon" aria-hidden="true">
+                    <Code2 size={22} />
                   </div>
-                  <div className="prx-provider-info">
-                    <strong>Codex <span className="cosmic-agent-beta-pill">Alpha</span></strong>
+                  <div className="cosmic-agents-provider-info">
+                    <div className="cosmic-agents-provider-title">
+                      <strong>Codex</strong>
+                      <span className="cosmic-agents-beta-pill">Alpha</span>
+                    </div>
                     <span>ChatGPT sign-in or OpenAI API key for the Alpha coding runner.</span>
                   </div>
-                  <div className="prx-provider-arrow">
+                  <div className="cosmic-agents-provider-meta">
+                    <span className="cosmic-agents-status-pill ready">Ready</span>
+                  </div>
+                  <div className="cosmic-agents-provider-arrow" aria-hidden="true">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
                   </div>
                 </button>
 
-                <div className="cosmic-agent-roadmap">
-                  <div>
-                    <strong>OpenCode</strong>
-                    <span>Provider slot reserved.</span>
+                <div className="cosmic-agents-section-label">Coming Soon</div>
+                <div className="cosmic-agents-roadmap">
+                  <div className="cosmic-agents-roadmap-card">
+                    <div className="cosmic-agents-roadmap-icon" aria-hidden="true">
+                      <Sparkles size={18} />
+                    </div>
+                    <div>
+                      <strong>OpenCode</strong>
+                      <span>Provider slot reserved for future integration.</span>
+                    </div>
                   </div>
-                  <div>
-                    <strong>Cursor CLI</strong>
-                    <span>Provider slot reserved.</span>
+                  <div className="cosmic-agents-roadmap-card">
+                    <div className="cosmic-agents-roadmap-icon" aria-hidden="true">
+                      <Terminal size={18} />
+                    </div>
+                    <div>
+                      <strong>Cursor CLI</strong>
+                      <span>Provider slot reserved for future integration.</span>
+                    </div>
                   </div>
                 </div>
               </div>

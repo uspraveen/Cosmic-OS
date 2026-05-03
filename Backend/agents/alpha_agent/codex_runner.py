@@ -155,6 +155,15 @@ class CodexWorkspaceRunner:
             timed_out = True
             process.kill()
             stdout_bytes, stderr_bytes = await process.communicate()
+        except asyncio.CancelledError:
+            if process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.communicate(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.communicate()
+            raise
 
         duration_sec = asyncio.get_running_loop().time() - started_at
         stdout = stdout_bytes.decode("utf-8", errors="replace")

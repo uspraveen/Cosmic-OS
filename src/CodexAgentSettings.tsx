@@ -231,77 +231,88 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
   ].slice(-6)
 
   return (
-    <div className="setting-subpage cosmic-codex-page">
-      <section className="cosmic-codex-hero">
-        <div className="cosmic-codex-hero-icon" aria-hidden="true">
-          <Code2 size={28} />
+    <div className="cosmic-agents-detail-page">
+      <div className="cosmic-agents-detail-hero">
+        <div className="cosmic-agents-detail-hero-top">
+          <div className="cosmic-agents-detail-hero-icon" aria-hidden="true">
+            <Code2 size={28} />
+          </div>
+          <div className="cosmic-agents-detail-hero-text">
+            <h3>Codex for Alpha</h3>
+            <p>{connectionLabel}</p>
+            <span>Feeds the VM Alpha agent runner when backend handoff is enabled.</span>
+          </div>
         </div>
-        <div className="cosmic-codex-hero-copy">
-          <h3>Codex for Alpha</h3>
-          <p>{connectionLabel}</p>
-          <span>Feeds the VM Alpha agent runner when backend handoff is enabled.</span>
-        </div>
-        <div className={`cosmic-codex-status ${authMode === 'api_key' && !hasApiKey ? 'warn' : 'ready'}`}>
-          <span aria-hidden />
+        <div className={`cosmic-agents-detail-status-pill ${authMode === 'api_key' && !hasApiKey ? 'warn' : gatewayStatus?.status === 'login_pending' ? 'pending' : 'ready'}`}>
           {gatewayStatus?.status === 'login_pending'
             ? 'Pending'
             : authMode === 'api_key' && !hasApiKey
               ? 'Setup'
               : 'Ready'}
         </div>
-      </section>
+      </div>
 
-      {banner ? <div className="cosmic-google-banner" role="status">{banner}</div> : null}
-      {error ? <div className="cosmic-codex-error" role="alert">{error}</div> : null}
+      {banner ? (
+        <div className="cosmic-agents-detail-banner success" role="status">
+          <span className="cosmic-agents-detail-banner-icon">✓</span>
+          {banner}
+        </div>
+      ) : null}
+      {error ? (
+        <div className="cosmic-agents-detail-banner error" role="alert">
+          <span className="cosmic-agents-detail-banner-icon">!</span>
+          {error}
+        </div>
+      ) : null}
 
-      <section className="cosmic-codex-section">
-        <div className="cosmic-codex-section-head">
+      <div className="cosmic-agents-detail-section">
+        <div className="cosmic-agents-detail-section-head">
           <div>
-            <span className="cosmic-codex-kicker">Authentication</span>
+            <span className="cosmic-agents-detail-kicker">Authentication</span>
             <h4>Choose how Alpha will authenticate Codex</h4>
           </div>
         </div>
 
-        <div className="cosmic-codex-auth-grid">
+        <div className="cosmic-agents-detail-auth-grid">
           <button
             type="button"
-            className={`cosmic-codex-auth-card ${authMode === 'chatgpt' ? 'active' : ''}`}
+            className={`cosmic-agents-detail-auth-card ${authMode === 'chatgpt' ? 'active' : ''}`}
             onClick={() => saveAuthMode('chatgpt')}
             disabled={saving}
           >
             <LogIn size={20} />
             <strong>ChatGPT sign-in</strong>
             <span>Uses Codex CLI OAuth/subscription access.</span>
-            {authMode === 'chatgpt' ? <CheckCircle2 size={17} className="cosmic-codex-card-check" /> : null}
+            {authMode === 'chatgpt' ? <CheckCircle2 size={17} className="cosmic-agents-detail-card-check" /> : null}
           </button>
 
           <button
             type="button"
-            className={`cosmic-codex-auth-card ${authMode === 'api_key' ? 'active' : ''}`}
+            className={`cosmic-agents-detail-auth-card ${authMode === 'api_key' ? 'active' : ''}`}
             onClick={() => saveAuthMode('api_key')}
             disabled={saving}
           >
             <KeyRound size={20} />
             <strong>OpenAI API key</strong>
-            <span>Uses platform billing through `OPENAI_API_KEY`.</span>
-            {authMode === 'api_key' ? <CheckCircle2 size={17} className="cosmic-codex-card-check" /> : null}
+            <span>Uses platform billing through OPENAI_API_KEY.</span>
+            {authMode === 'api_key' ? <CheckCircle2 size={17} className="cosmic-agents-detail-card-check" /> : null}
           </button>
         </div>
-      </section>
+      </div>
 
-      <section className="cosmic-codex-section">
-        <div className="cosmic-codex-section-head">
-            <div>
-              <span className="cosmic-codex-kicker">API key</span>
-              <h4>{hasApiKey ? 'Saved on VM' : 'No key saved'}</h4>
-            </div>
+      <div className="cosmic-agents-detail-section">
+        <div className="cosmic-agents-detail-section-head">
+          <div>
+            <span className="cosmic-agents-detail-kicker">API key</span>
+            <h4>{hasApiKey ? 'Saved on VM' : 'No key saved'}</h4>
+          </div>
           {hasApiKey ? (
-            <button type="button" className="cosmic-codex-icon-btn danger" onClick={clearApiKey} title="Clear saved API key" disabled={saving}>
+            <button type="button" className="cosmic-agents-detail-btn danger" onClick={clearApiKey} title="Clear saved API key" disabled={saving}>
               <Trash2 size={16} />
             </button>
           ) : null}
         </div>
-        <div className="cosmic-codex-key-row">
+        <div className="cosmic-agents-detail-key-row">
           <input
             type="password"
             value={apiKeyDraft}
@@ -310,25 +321,25 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
             spellCheck={false}
             autoComplete="off"
           />
-          <button type="button" className="cosmic-codex-primary" onClick={saveApiKey} disabled={saving}>
+          <button type="button" className="cosmic-agents-detail-btn" onClick={saveApiKey} disabled={saving}>
             Save
           </button>
         </div>
-      </section>
+      </div>
 
       {authMode === 'chatgpt' ? (
-        <section className="cosmic-codex-section">
-          <div className="cosmic-codex-section-head">
+        <div className="cosmic-agents-detail-section">
+          <div className="cosmic-agents-detail-section-head">
             <div>
-              <span className="cosmic-codex-kicker">ChatGPT login</span>
+              <span className="cosmic-agents-detail-kicker">ChatGPT login</span>
               <h4>{gatewayStatus?.status === 'authenticated' ? 'Signed in on VM' : 'VM sign-in session'}</h4>
             </div>
-            <button type="button" className="cosmic-codex-primary" onClick={startChatGptLogin} disabled={saving}>
+            <button type="button" className="cosmic-agents-detail-btn" onClick={startChatGptLogin} disabled={saving}>
               {gatewayStatus?.status === 'login_pending' ? 'Restart' : 'Login'}
             </button>
           </div>
           {loginOutput.length ? (
-            <div className="cosmic-codex-login-output">
+            <div className="cosmic-agents-detail-login-output">
               {loginOutput.map((line, index) => {
                 const url = extractFirstUrl(line)
                 return (
@@ -344,54 +355,62 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
               })}
             </div>
           ) : (
-            <p className="cosmic-codex-section-copy">
-              Starts `codex login --device-auth` on the VM and keeps the session visible here for browser approval or re-login.
+            <p className="cosmic-agents-detail-section-copy">
+              Starts codex login --device-auth on the VM and keeps the session visible here for browser approval or re-login.
             </p>
           )}
-        </section>
+        </div>
       ) : null}
 
-      <section className="cosmic-codex-section">
-        <div className="cosmic-codex-section-head">
+      <div className="cosmic-agents-detail-section cosmic-agents-detail-runner">
+        <div className="cosmic-agents-detail-section-head">
           <div>
-            <span className="cosmic-codex-kicker">Runner defaults</span>
+            <span className="cosmic-agents-detail-kicker">Runner defaults</span>
             <h4>Model and autonomy</h4>
           </div>
         </div>
 
-        <div className="cosmic-codex-select-grid">
+        <div className="cosmic-agents-detail-model-grid">
           {MODEL_OPTIONS.map((option) => (
             <button
               key={option.value}
               type="button"
-              className={`cosmic-codex-pill ${preferredModel === option.value ? 'active' : ''}`}
+              className={`cosmic-agents-detail-model-card ${preferredModel === option.value ? 'active' : ''}`}
               onClick={() => savePreferredModel(option.value)}
               disabled={saving}
             >
-              {option.label}
+              <span className="cosmic-agents-detail-model-name">{option.label}</span>
+              {preferredModel === option.value && (
+                <span className="cosmic-agents-detail-model-check" aria-hidden="true">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+                </span>
+              )}
             </button>
           ))}
         </div>
 
-        <div className="cosmic-codex-mode-list">
+        <div className="cosmic-agents-detail-mode-list">
           {APPROVAL_MODES.map((mode) => (
             <button
               key={mode.value}
               type="button"
-              className={`cosmic-codex-mode ${approvalMode === mode.value ? 'active' : ''}`}
+              className={`cosmic-agents-detail-mode ${approvalMode === mode.value ? 'active' : ''}`}
               onClick={() => saveApprovalMode(mode.value)}
               disabled={saving}
             >
-              <span>{mode.label}</span>
+              <div className="cosmic-agents-detail-mode-left">
+                <span className="cosmic-agents-detail-mode-dot" aria-hidden="true" />
+                <span>{mode.label}</span>
+              </div>
               <small>{mode.note}</small>
             </button>
           ))}
         </div>
-      </section>
+      </div>
 
-      <section className="cosmic-codex-runtime">
-        <div className="cosmic-codex-runtime-row">
-          <div className="cosmic-codex-runtime-icon" aria-hidden="true">
+      <div className="cosmic-agents-detail-runtime">
+        <div className="cosmic-agents-detail-runtime-row">
+          <div className="cosmic-agents-detail-runtime-icon" aria-hidden="true">
             <Terminal size={18} />
           </div>
           <div>
@@ -401,16 +420,16 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
         </div>
         <button
           type="button"
-          className={`cosmic-codex-sync ${vmSyncEnabled ? 'active' : ''}`}
+          className={`cosmic-agents-detail-sync-btn ${vmSyncEnabled ? 'active' : ''}`}
           onClick={() => saveVmSync(!vmSyncEnabled)}
           disabled={saving}
         >
           <ShieldCheck size={15} />
           {vmSyncEnabled ? 'Sync on' : 'Sync off'}
         </button>
-      </section>
+      </div>
 
-      <div className="cosmic-codex-footnote">
+      <div className="cosmic-agents-detail-footnote">
         <Bot size={14} />
         <span>{gatewayStatus?.codex_home ? `CODEX_HOME: ${gatewayStatus.codex_home}` : 'Alpha Codex home is managed on the VM.'}</span>
       </div>

@@ -1,3 +1,4 @@
+import { ChevronDown, ChevronRight, Square, Terminal } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown from 'react-markdown'
@@ -1267,6 +1268,200 @@ const AssistantFlowTimeline = ({ entries }: { entries?: ActivityLogEntry[] }) =>
           )
         })}
       </div>
+    </div>
+  )
+}
+
+type AlphaConsoleStatus = 'running' | 'completed' | 'failed' | 'stopped'
+
+interface AlphaConsoleView {
+  taskId: string | null
+  status: AlphaConsoleStatus
+  lines: ActivityLogEntry[]
+}
+
+const isAlphaActivityEntry = (entry: ActivityLogEntry) => {
+  const agentId = String(entry.agentId || '').toLowerCase()
+  const agentLabel = String(entry.agentLabel || '').toLowerCase()
+  const intent = String(entry.intent || '').toLowerCase()
+  const label = String(entry.label || '').toLowerCase()
+  return (
+    agentId.includes('alpha-agent') ||
+    agentLabel.includes('alpha agent') ||
+    intent.startsWith('alpha.') ||
+    label.includes('alpha agent')
+  )
+}
+
+const getAlphaEntryTaskId = (entry: ActivityLogEntry) => {
+  return (
+    String(entry.specialistTaskId || '').trim() ||
+    String(entry.delegatedTaskId || '').trim() ||
+    null
+  )
+}
+
+const buildAlphaConsoleView = (
+  entries?: ActivityLogEntry[],
+  options: { stopped?: boolean } = {},
+): AlphaConsoleView | null => {
+  const alphaEntries = (entries || []).filter(isAlphaActivityEntry)
+  if (alphaEntries.length <= 0) {
+    return null
+  }
+
+  let taskId: string | null = null
+  for (let index = alphaEntries.length - 1; index >= 0; index -= 1) {
+    const candidate = getAlphaEntryTaskId(alphaEntries[index])
+    if (candidate) {
+      taskId = candidate
+      break
+    }
+  }
+
+  const hasFailed = alphaEntries.some((entry) => {
+    const value = `${entry.status || ''} ${entry.stage || ''} ${entry.specialistEventType || ''}`.toLowerCase()
+    return value.includes('failed') || value.includes('error')
+  })
+  const hasStopped = Boolean(options.stopped) || alphaEntries.some((entry) => {
+    const value = `${entry.status || ''} ${entry.stage || ''} ${entry.specialistEventType || ''}`.toLowerCase()
+    return value.includes('cancelled') || value.includes('canceled') || value.includes('stopped')
+  })
+  const hasCompleted = alphaEntries.some((entry) => {
+    const status = String(entry.status || '').toLowerCase()
+    const stage = String(entry.stage || '').toLowerCase()
+    const eventType = String(entry.specialistEventType || '').toLowerCase()
+    return eventType === 'task.completed' || stage.includes('alpha.codex.completed') || status === 'task.completed'
+  })
+
+  return {
+    taskId,
+    status: hasStopped ? 'stopped' : hasFailed ? 'failed' : hasCompleted ? 'completed' : 'running',
+    lines: alphaEntries.slice(-14),
+  }
+}
+
+const formatAlphaConsoleTime = (value?: string | null) => {
+  if (!value) {
+    return ''
+  }
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return ''
+  }
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+const formatAlphaConsoleDetail = (entry: ActivityLogEntry) => {
+  const detail = String(entry.detail || '').trim()
+  const stage = String(entry.stage || '').trim()
+  if (detail && detail !== entry.label) {
+    return detail
+  }
+  if (stage) {
+    return stage
+  }
+  return String(entry.specialistEventType || entry.status || '').trim()
+}
+
+const AlphaAgentConsole = ({
+  entries,
+  requestId,
+  stopped,
+  onStop,
+}: {
+  entries?: ActivityLogEntry[]
+  requestId?: string | null
+  stopped?: boolean
+  onStop: (payload: { requestId?: string; taskId?: string }) => void
+}) => {
+  const view = buildAlphaConsoleView(entries, { stopped })
+  const [expanded, setExpanded] = useState(() => view?.status === 'running')
+
+  useEffect(() => {
+    if (view?.status === 'running') {
+      setExpanded(true)
+    }
+  }, [view?.status, view?.lines.length])
+
+  if (!view) {
+    return null
+  }
+
+  const isRunning = view.status === 'running'
+  const statusLabel = view.status === 'running'
+    ? 'Running'
+    : view.status === 'completed'
+      ? 'Complete'
+      : view.status === 'failed'
+        ? 'Failed'
+        : 'Stopped'
+  const normalizedRequestId = String(requestId || '').trim()
+  const normalizedTaskId = String(view.taskId || '').trim()
+  const canStop = isRunning && Boolean(normalizedTaskId || normalizedRequestId)
+
+  return (
+    <div className={`alpha-agent-console is-${view.status}`}>
+      <div className="alpha-agent-console-head">
+        <button
+          type="button"
+          className="alpha-agent-console-toggle"
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+          aria-label={expanded ? 'Collapse Alpha Agent console' : 'Expand Alpha Agent console'}
+          title={expanded ? 'Collapse Alpha Agent console' : 'Expand Alpha Agent console'}
+        >
+          {expanded ? <ChevronDown size={15} strokeWidth={2.2} /> : <ChevronRight size={15} strokeWidth={2.2} />}
+        </button>
+        <div className="alpha-agent-console-title">
+          <span className="alpha-agent-console-icon" aria-hidden="true">
+            <Terminal size={15} strokeWidth={2.1} />
+          </span>
+          <span>Alpha Agent</span>
+        </div>
+        <div className="alpha-agent-console-meta">
+          <span className="alpha-agent-console-status">{statusLabel}</span>
+          {normalizedTaskId && <span className="alpha-agent-console-task">{normalizedTaskId}</span>}
+        </div>
+        <button
+          type="button"
+          className="alpha-agent-console-stop"
+          onClick={() => onStop({
+            requestId: normalizedRequestId || undefined,
+            taskId: normalizedTaskId || undefined,
+          })}
+          disabled={!canStop}
+          title={canStop ? 'Stop Alpha Agent' : 'Alpha Agent is not running'}
+          aria-label="Stop Alpha Agent"
+        >
+          <Square size={12} fill="currentColor" strokeWidth={2.2} />
+        </button>
+      </div>
+
+      {expanded && (
+        <div className="alpha-agent-terminal" role="log" aria-live={isRunning ? 'polite' : 'off'}>
+          {view.lines.map((entry) => {
+            const detail = formatAlphaConsoleDetail(entry)
+            return (
+              <div key={entry.id} className="alpha-agent-terminal-line">
+                <span className="alpha-agent-terminal-time">{formatAlphaConsoleTime(entry.createdAt)}</span>
+                <span className="alpha-agent-terminal-prompt">$</span>
+                <span className="alpha-agent-terminal-copy">
+                  <span>{entry.label}</span>
+                  {detail && <span className="alpha-agent-terminal-detail">{detail}</span>}
+                </span>
+              </div>
+            )
+          })}
+          {isRunning && (
+            <div className="alpha-agent-terminal-line is-live">
+              <span className="alpha-agent-terminal-time">live</span>
+              <span className="alpha-agent-terminal-prompt">$</span>
+              <span className="alpha-agent-terminal-copy">codex exec is still working</span>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -4372,17 +4567,59 @@ export default function App() {
     }
   }
 
+  const findActiveAlphaTaskId = () => {
+    const activeRequestId = String(activeStreamingRequestIdRef.current || '').trim()
+    const activeTaskId = String(activeStreamingTaskIdRef.current || '').trim()
+    for (let index = messagesRef.current.length - 1; index >= 0; index -= 1) {
+      const message = messagesRef.current[index]
+      if (message.role !== 'assistant') {
+        continue
+      }
+      const messageMatchesActiveStream = (
+        (activeRequestId && message.requestId === activeRequestId) ||
+        (activeTaskId && message.sourceId === activeTaskId) ||
+        (!activeRequestId && !activeTaskId)
+      )
+      if (!messageMatchesActiveStream) {
+        continue
+      }
+      const view = buildAlphaConsoleView(message.activityLog, { stopped: message.stopped })
+      if (view?.status === 'running' && view.taskId) {
+        return view.taskId
+      }
+    }
+    return null
+  }
+
   const handleStopStreaming = () => {
     const requestId = activeStreamingRequestIdRef.current
     const taskId = activeStreamingTaskIdRef.current
-    if (!requestId && !taskId) {
+    const activeAlphaTaskId = findActiveAlphaTaskId()
+    if (!requestId && !taskId && !activeAlphaTaskId) {
       return
     }
-    const cancelPromise = window.cosmic?.cancelGatewayResponse?.({
-      requestId: requestId || undefined,
+    if (requestId || taskId) {
+      const cancelPromise = window.cosmic?.cancelGatewayResponse?.({
+        requestId: requestId || undefined,
+        taskId: taskId || undefined,
+      })
+      cancelPromise?.catch(() => { })
+    }
+    if (activeAlphaTaskId && activeAlphaTaskId !== taskId) {
+      window.cosmic?.cancelGatewayResponse?.({ taskId: activeAlphaTaskId })?.catch(() => { })
+    }
+  }
+
+  const handleStopAlphaAgent = (payload: { requestId?: string; taskId?: string }) => {
+    const taskId = String(payload.taskId || '').trim()
+    const requestId = String(payload.requestId || '').trim()
+    if (!taskId && !requestId) {
+      return
+    }
+    window.cosmic?.cancelGatewayResponse?.({
       taskId: taskId || undefined,
-    })
-    cancelPromise?.catch(() => { })
+      requestId: taskId ? undefined : requestId || undefined,
+    })?.catch(() => { })
   }
 
   const handleCancelBackgroundTask = (task: BackgroundTask) => {
@@ -5579,6 +5816,12 @@ export default function App() {
                             </div>
                           )}
                           <AssistantFlowTimeline entries={msg.activityLog} />
+                          <AlphaAgentConsole
+                            entries={msg.activityLog}
+                            requestId={msg.requestId}
+                            stopped={msg.stopped}
+                            onStop={handleStopAlphaAgent}
+                          />
                           {msg.responseBlocks && msg.responseBlocks.length > 0 ? (
                             <AssistantResponseBlocks blocks={msg.responseBlocks} />
                           ) : (
