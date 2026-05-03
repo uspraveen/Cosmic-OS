@@ -1,0 +1,2 @@
+"""COSMIC Alpha Agent package."""
+

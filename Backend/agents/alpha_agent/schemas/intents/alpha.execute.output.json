@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "status": { "type": "string" },
+    "v1_scope": { "type": "string" },
+    "project": { "type": "object" },
+    "workspace": { "type": "object" },
+    "docker": { "type": "object" },
+    "next_action": { "type": "string" }
+  },
+  "required": ["status", "project", "workspace", "docker", "next_action"]
+}
+

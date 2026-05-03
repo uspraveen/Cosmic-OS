@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "projects": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "count": { "type": "integer" }
+  },
+  "required": ["projects", "count"]
+}
+

@@ -17,10 +17,85 @@ import httpx
 from dotenv import load_dotenv
 from PIL import Image
 
+from shared import (
+    MeteredCall,
+    begin_metered_call,
+    build_model_key,
+    build_usage_event,
+    serialize_usage_metadata,
+)
+
 _HERE = Path(__file__).resolve().parent
 load_dotenv(_HERE / ".env")
 
 logger = logging.getLogger(__name__)
+
+_SLIDE_AGENT_SOURCE_ID = "cosmic/slide-agent:1.0.0"
+
+
+def _slide_gateway_credentials() -> tuple[str, str]:
+    """Match gateway URL/token resolution used by SlideAgentConfig.from_env."""
+    url = (os.getenv("GATEWAY_URL") or "").strip() or "http://127.0.0.1:8080"
+    token = (os.getenv("GATEWAY_INTERNAL_TOKEN") or "").strip()
+    return url, token
+
+
+def _augment_xai_image_raw_usage(
+    body: dict[str, Any] | None,
+    *,
+    output_image_count: int,
+    quality: str,
+    size: str,
+) -> dict[str, Any]:
+    """Align with image_generator_agent._augment_billing_usage_metadata for cost estimation."""
+    base: dict[str, Any]
+    if isinstance(body, dict):
+        usage = body.get("usage")
+        base = dict(usage) if isinstance(usage, dict) else {}
+    else:
+        base = {}
+    if output_image_count > 0:
+        if not base.get("output_images") and not base.get("images"):
+            base["output_images"] = output_image_count
+            base["images"] = output_image_count
+    if quality and not str(base.get("generation_quality") or "").strip():
+        base["generation_quality"] = quality
+    if size and not str(base.get("generation_size") or "").strip():
+        base["generation_size"] = size
+    return base
+
+
+def _sync_post_usage_to_gateway(gateway_url: str, internal_token: str, event: Any) -> None:
+    """POST UsageEvent to gateway (sync); mirrors shared.usage.post_usage_event retries."""
+    if not gateway_url.strip() or not internal_token.strip():
+        return
+    payload = event.model_dump(mode="json")
+    url = gateway_url.rstrip("/") + "/internal/usage/log"
+    headers = {
+        "Content-Type": "application/json",
+        "X-Internal-Token": internal_token,
+    }
+    try:
+        with httpx.Client(timeout=httpx.Timeout(5.0, connect=2.5)) as client:
+            for attempt in range(3):
+                try:
+                    response = client.post(url, headers=headers, json=payload)
+                    if response.status_code in {200, 201, 202}:
+                        return
+                except httpx.HTTPError:
+                    if attempt >= 2:
+                        logger.warning(
+                            "slide_agent.image_generate.usage_post_http_failed llm_call_id=%s attempt=%s",
+                            getattr(event, "llm_call_id", ""),
+                            attempt + 1,
+                        )
+                if attempt < 2:
+                    time.sleep(0.25 * (2**attempt))
+    except Exception:
+        logger.exception(
+            "slide_agent.image_generate.usage_post_failed llm_call_id=%s",
+            getattr(event, "llm_call_id", ""),
+        )
 
 try:  # Package import path in tests, flat import path in local runner.
     from .sandbox import (
@@ -463,6 +538,45 @@ class XAIImageGenerator:
     def available(self) -> bool:
         return bool(self.config.xai_api_key)
 
+    def _post_xai_image_usage_event(
+        self,
+        *,
+        metered_call: MeteredCall,
+        raw_usage: Any,
+        provider_request_id: str | None,
+        success: bool,
+        error_code: str | None,
+        metadata_extra: dict[str, Any],
+    ) -> None:
+        gateway_url, token = _slide_gateway_credentials()
+        if not token:
+            return
+        event = build_usage_event(
+            metered_call=metered_call,
+            source_component="agent",
+            source_id=_SLIDE_AGENT_SOURCE_ID,
+            task_id=None,
+            session_id=None,
+            route="specialist",
+            operation="agent.image.generate.provider",
+            model_key=build_model_key("xai", self.config.xai_model),
+            request_id=None,
+            provider_request_id=provider_request_id,
+            raw_usage=raw_usage,
+            success=success,
+            error_code=error_code if not success else None,
+            metadata_json=serialize_usage_metadata(
+                {
+                    "provider": "xai",
+                    "model": self.config.xai_model,
+                    "tool": "slide_agent.image_generate",
+                    "router_mode": "direct_tool",
+                    **metadata_extra,
+                }
+            ),
+        )
+        _sync_post_usage_to_gateway(gateway_url, token, event)
+
     def generate(self, payload: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         if not self.available:
             raise ToolExecutionError("XAI_API_KEY is not configured.")
@@ -496,6 +610,9 @@ class XAIImageGenerator:
         }
         request_payload.update(self._xai_request_fields_for_size(size))
         timeout = httpx.Timeout(self.config.xai_timeout_sec, connect=min(self.config.xai_timeout_sec, 15.0))
+        metered_call = begin_metered_call(prefix="img_xai")
+        response: httpx.Response | None = None
+        body: Any = None
         try:
             with httpx.Client(timeout=timeout) as client:
                 response = client.post(
@@ -507,17 +624,78 @@ class XAIImageGenerator:
                     },
                 )
         except httpx.TimeoutException as exc:
+            self._post_xai_image_usage_event(
+                metered_call=metered_call,
+                raw_usage=None,
+                provider_request_id=None,
+                success=False,
+                error_code="TIMEOUT",
+                metadata_extra={"phase": "http"},
+            )
             raise ToolExecutionError("xAI image generation timed out.") from exc
         except httpx.HTTPError as exc:
+            self._post_xai_image_usage_event(
+                metered_call=metered_call,
+                raw_usage=None,
+                provider_request_id=None,
+                success=False,
+                error_code="NETWORK_ERROR",
+                metadata_extra={"phase": "http", "error": str(exc)[:200]},
+            )
             raise ToolExecutionError(f"xAI image generation request failed: {exc}") from exc
+
         try:
             body = response.json()
         except json.JSONDecodeError as exc:
+            self._post_xai_image_usage_event(
+                metered_call=metered_call,
+                raw_usage=None,
+                provider_request_id=None,
+                success=False,
+                error_code="INVALID_JSON",
+                metadata_extra={"phase": "parse_response"},
+            )
             raise ToolExecutionError("xAI image generation returned non-JSON.") from exc
+
+        provider_request_id: str | None = None
+        if isinstance(body, dict):
+            rid = body.get("id")
+            if rid is not None:
+                provider_request_id = str(rid).strip() or None
+
         if response.status_code >= 400:
+            raw_usage = _augment_xai_image_raw_usage(
+                body if isinstance(body, dict) else None,
+                output_image_count=0,
+                quality=quality,
+                size=size,
+            )
+            self._post_xai_image_usage_event(
+                metered_call=metered_call,
+                raw_usage=raw_usage,
+                provider_request_id=provider_request_id,
+                success=False,
+                error_code=f"HTTP_{response.status_code}",
+                metadata_extra={"phase": "provider_response"},
+            )
             raise ToolExecutionError(self._provider_error_message(body, response.status_code))
-        items = body.get("data")
+
+        items = body.get("data") if isinstance(body, dict) else None
         if not isinstance(items, list) or not items:
+            raw_usage = _augment_xai_image_raw_usage(
+                body if isinstance(body, dict) else None,
+                output_image_count=0,
+                quality=quality,
+                size=size,
+            )
+            self._post_xai_image_usage_event(
+                metered_call=metered_call,
+                raw_usage=raw_usage,
+                provider_request_id=provider_request_id,
+                success=False,
+                error_code="EMPTY_DATA",
+                metadata_extra={"phase": "provider_response"},
+            )
             raise ToolExecutionError("xAI image generation returned no images.")
 
         target_dir = ctx.tool_root / "generated"
@@ -533,6 +711,20 @@ class XAIImageGenerator:
             try:
                 image_bytes = base64.b64decode(raw_b64)
             except Exception as exc:
+                raw_usage = _augment_xai_image_raw_usage(
+                    body if isinstance(body, dict) else None,
+                    output_image_count=0,
+                    quality=quality,
+                    size=size,
+                )
+                self._post_xai_image_usage_event(
+                    metered_call=metered_call,
+                    raw_usage=raw_usage,
+                    provider_request_id=provider_request_id,
+                    success=False,
+                    error_code="INVALID_IMAGE_PAYLOAD",
+                    metadata_extra={"phase": "decode_b64"},
+                )
                 raise ToolExecutionError("xAI returned an invalid base64 image payload.") from exc
             mime, width, height = _inspect_image_payload(image_bytes)
             asset_id = f"gen_{uuid4().hex[:12]}"
@@ -553,7 +745,37 @@ class XAIImageGenerator:
             })
             generated_assets.append({"asset_id": asset_id, "path": str(path.resolve())})
         if not images:
+            raw_usage = _augment_xai_image_raw_usage(
+                body if isinstance(body, dict) else None,
+                output_image_count=0,
+                quality=quality,
+                size=size,
+            )
+            self._post_xai_image_usage_event(
+                metered_call=metered_call,
+                raw_usage=raw_usage,
+                provider_request_id=provider_request_id,
+                success=False,
+                error_code="NO_DECODABLE_IMAGES",
+                metadata_extra={"phase": "persist_images"},
+            )
             raise ToolExecutionError("xAI image generation returned no decodable images.")
+
+        raw_usage = _augment_xai_image_raw_usage(
+            body if isinstance(body, dict) else None,
+            output_image_count=len(images),
+            quality=quality,
+            size=size,
+        )
+        self._post_xai_image_usage_event(
+            metered_call=metered_call,
+            raw_usage=raw_usage,
+            provider_request_id=provider_request_id,
+            success=True,
+            error_code=None,
+            metadata_extra={"phase": "complete"},
+        )
+
         summary = f"Generated {len(images)} image{'s' if len(images) != 1 else ''} via xAI {self.config.xai_model}."
         return {
             "summary": summary,

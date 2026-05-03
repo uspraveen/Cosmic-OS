@@ -8,9 +8,11 @@ def test_model_specs_registry_contains_active_runtime_models() -> None:
     assert "anthropic:claude-haiku-4-5" in specs
     assert "anthropic:claude-opus-4-6" in specs
     assert "perplexity:sonar" in specs
+    assert "perplexity:pplx-embed-v1-4b" in specs
     assert "groq:openai/gpt-oss-20b" in specs
     assert "openai:gpt-5-mini" in specs
     assert "openai:gpt-image-1.5" in specs
+    assert "xai:grok-imagine-image" in specs
     assert "xai:grok-imagine-image-pro" in specs
 
 
@@ -35,9 +37,17 @@ def test_lookup_model_spec_returns_expected_context_metadata() -> None:
     assert gpt_image.pricing["output_per_1m_usd"] == 32.0
     assert gpt_image.pricing["generation_per_image_usd"]["high"]["1024x1536"] == 0.2
 
+    grok_image_std = get_model_spec("xai:grok-imagine-image")
+    assert grok_image_std is not None
+    assert grok_image_std.pricing["output_image_each_usd"] == 0.02
+
     grok_image = get_model_spec("xai:grok-imagine-image-pro")
     assert grok_image is not None
     assert grok_image.pricing["output_image_each_usd"] == 0.07
+
+    pplx_embed = get_model_spec("perplexity:pplx-embed-v1-4b")
+    assert pplx_embed is not None
+    assert pplx_embed.pricing["input_per_1m_usd"] == 0.03
 
 
 def test_estimate_text_tokens_is_bounded_and_nonzero_for_text() -> None:

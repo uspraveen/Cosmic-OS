@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "goal": {
+      "type": "string",
+      "minLength": 1,
+      "description": "High-level user goal for Alpha."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["auto", "new_project", "existing_project"],
+      "default": "auto",
+      "description": "Whether Alpha should create a new project, use an existing project, or infer automatically."
+    },
+    "project_ref": {
+      "type": ["string", "null"],
+      "description": "Existing Alpha project id, alias, repo URL, deployment URL, or local path."
+    },
+    "aliases": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Optional aliases for a newly created Alpha project."
+    },
+    "repo_url": {
+      "type": ["string", "null"],
+      "description": "Repository URL associated with a new Alpha project."
+    },
+    "deployment_url": {
+      "type": ["string", "null"],
+      "description": "Deployment URL associated with a new Alpha project."
+    },
+    "preferred_harness": {
+      "type": "string",
+      "enum": ["codex", "opencode", "cursor", "auto"],
+      "default": "codex",
+      "description": "Preferred future execution harness."
+    },
+    "deliverables": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Requested final deliverables."
+    },
+    "approval_policy": {
+      "type": "string",
+      "enum": ["container_autonomous", "ask_before_side_effects", "ask_every_step"],
+      "default": "container_autonomous",
+      "description": "Future approval posture for Alpha execution."
+    },
+    "constraints": {
+      "type": "object",
+      "description": "Optional structured constraints for the project task."
+    },
+    "run_workspace_smoke": {
+      "type": "boolean",
+      "default": false,
+      "description": "Run a harmless Docker workspace smoke test only when ALPHA_ALLOW_DOCKER_SMOKE=true."
+    }
+  },
+  "required": ["goal"]
+}
+

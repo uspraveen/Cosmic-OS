@@ -1,0 +1,93 @@
+agent_id: cosmic/alpha-agent:1.0.0
+display_name: Alpha Agent
+description: >
+  Alpha-stage project operator for COSMIC. It prepares isolated project
+  workspaces and Docker task containers for high-level software, deployment,
+  and capability-bootstrap tasks. Full Codex/OpenCode/Cursor execution is gated
+  behind later harness work and service activation.
+
+intents:
+  - name: alpha.execute
+    description: Prepare or recall an Alpha project workspace for a high-level project task.
+    input_schema: schemas/intents/alpha.execute.input.json
+    output_schema: schemas/intents/alpha.execute.output.json
+    timeout_sec: 3600
+    usage_hints:
+      - Use this only for high-level project work that requires capabilities outside the pre-packaged COSMIC specialists.
+      - In V1 this prepares project/workspace/container state only; it does not run Codex/OpenCode/Cursor task execution yet.
+      - Do not delegate destructive production changes here until the Alpha service is explicitly enabled and the user has approved the Alpha warning.
+      - Pass project_ref when the user is referring to an existing Alpha project, repo URL, deployment URL, local path, or prior project alias.
+
+  - name: alpha.recall_project
+    description: Recall Alpha projects by id, alias, repo URL, deployment URL, local path, or session.
+    input_schema: schemas/intents/alpha.recall_project.input.json
+    output_schema: schemas/intents/alpha.recall_project.output.json
+    timeout_sec: 30
+    usage_hints:
+      - Use this when the user refers to a previous Alpha project or asks what Alpha has worked on.
+      - Prefer this before alpha.execute when project identity is ambiguous.
+
+artifact_types:
+  - alpha_project_workspace
+  - alpha_project_report
+  - alpha_task_log
+  - alpha_container_summary
+
+policies:
+  network_access: true
+  writable_paths:
+    - runs/artifacts
+    - agents/alpha_agent/runtime
+    - agents/alpha_agent/store
+    - /var/lib/cosmic/alpha
+  tool_access:
+    - docker_workspace_run
+  allowed_senders:
+    - cosmic/orchestrator:1.0.0
+  intent_authorization:
+    alpha.execute: [cosmic/orchestrator:1.0.0]
+    alpha.recall_project: [cosmic/orchestrator:1.0.0]
+
+sandbox:
+  boundary: docker_task_container
+  workspace_root_env: ALPHA_WORKSPACE_ROOT
+  docker_socket_mount_default: false
+  host_deployment_broker_required: true
+
+safety:
+  alpha_warning: true
+  service_enabled_by_env: ALPHA_AGENT_ENABLED
+  require_user_approval_before_full_execution: true
+  v1_execution_scope: workspace_prepare_only
+  audit_all_container_runs: true
+
+sla:
+  max_concurrency: 1
+  heartbeat_interval_sec: 10
+  heartbeat_ttl_sec: 30
+  max_task_duration_sec: 3600
+  health_endpoint: /health
+  retry_policy:
+    max_attempts: 1
+    backoff: exponential
+    backoff_base_sec: 2
+    backoff_max_sec: 60
+    retryable_codes:
+      - TIMEOUT
+      - DOCKER_UNAVAILABLE
+      - WORKSPACE_BUSY
+    non_retryable_codes:
+      - INVALID_INPUT
+      - PROJECT_NOT_FOUND
+      - UNSUPPORTED_OPERATION
+      - INTERNAL_ERROR
+
+stream_key: streams:cosmic/alpha-agent:1.0.0
+
+version_info:
+  semver: 1.0.0
+  released_at: "2026-05-02"
+  deprecated_at: null
+  remove_after: null
+  changelog: CHANGELOG.md
+

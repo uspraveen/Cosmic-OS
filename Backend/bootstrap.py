@@ -114,6 +114,10 @@ SLIDE_AGENT_ENV_NAME = "slide-agent.env"
 SLIDE_AGENT_SERVICE_NAME = "cosmic-slide-agent.service"
 SLIDE_AGENT_ID = "cosmic/slide-agent:1.0.0"
 SLIDE_AGENT_DEFAULT_INSTANCE_ID = "slide-agent-1"
+ALPHA_AGENT_ENV_NAME = "alpha-agent.env"
+ALPHA_AGENT_SERVICE_NAME = "cosmic-alpha-agent.service"
+ALPHA_AGENT_ID = "cosmic/alpha-agent:1.0.0"
+ALPHA_AGENT_DEFAULT_INSTANCE_ID = "alpha-agent-1"
 CRITICAL_VENV_IMPORT_CHECKS: Tuple[Tuple[str, str], ...] = (
     ("docling", "docs parser runtime"),
     ("playwright", "slide HTML renderer"),
@@ -2541,6 +2545,99 @@ def read_slide_agent_system_env(
     return parse_env_text(read_text_file(env_path, use_sudo=True))
 
 
+def alpha_agent_repo_dir() -> Path:
+    return BACKEND_ROOT / "agents" / "alpha_agent"
+
+
+def alpha_agent_repo_env_path() -> Path:
+    return alpha_agent_repo_dir() / "agent.env"
+
+
+def alpha_agent_repo_env_example_path() -> Path:
+    return alpha_agent_repo_dir() / "agent.env.example"
+
+
+def alpha_agent_system_env_path(system_env_dir: Optional[Path] = None) -> Path:
+    return (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "agents" / ALPHA_AGENT_ENV_NAME
+
+
+def resolve_alpha_agent_env_source() -> Path:
+    repo_env = alpha_agent_repo_env_path()
+    if repo_env.exists():
+        return repo_env
+    return alpha_agent_repo_env_example_path()
+
+
+def build_alpha_agent_env_rendered(
+    *,
+    signing_secret: str,
+    shared_internal_token: str,
+    system_env_dir: Optional[Path] = None,
+    existing_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+    external_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Tuple[Path, str, Dict[str, str]]:
+    source_path = resolve_alpha_agent_env_source()
+    source_raw = source_path.read_text(encoding="utf-8")
+    source_data = parse_env_text(source_raw)
+    existing_env = (existing_env_by_name or {}).get(ALPHA_AGENT_ENV_NAME, {})
+    external_env = (external_env_by_name or {}).get(ALPHA_AGENT_ENV_NAME, {})
+
+    def pick_env(name: str, default: Optional[str] = None) -> Optional[str]:
+        return first_meaningful_value(
+            external_env.get(name),
+            existing_env.get(name),
+            source_data.get(name),
+            default,
+        )
+
+    redis_url = pick_env("REDIS_URL", "redis://127.0.0.1:6379/0")
+    gateway_url = pick_env("GATEWAY_URL", "http://127.0.0.1:8080")
+    orchestrator_url = pick_env("ORCHESTRATOR_URL", "http://127.0.0.1:8743")
+    instance_id = pick_env("INSTANCE_ID", ALPHA_AGENT_DEFAULT_INSTANCE_ID)
+
+    overrides = {
+        "REDIS_URL": redis_url or "redis://127.0.0.1:6379/0",
+        "GATEWAY_URL": gateway_url or "http://127.0.0.1:8080",
+        "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
+        "ORCHESTRATOR_URL": orchestrator_url or "http://127.0.0.1:8743",
+        "ORCHESTRATOR_INTERNAL_TOKEN": pick_env("ORCHESTRATOR_INTERNAL_TOKEN", shared_internal_token)
+        or shared_internal_token,
+        "AGENT_SECRET": signing_secret,
+        "INSTANCE_ID": instance_id or ALPHA_AGENT_DEFAULT_INSTANCE_ID,
+        "ALPHA_AGENT_ENABLED": pick_env("ALPHA_AGENT_ENABLED", "false") or "false",
+        "ALPHA_WORKSPACE_ROOT": pick_env("ALPHA_WORKSPACE_ROOT", "/var/lib/cosmic/alpha")
+        or "/var/lib/cosmic/alpha",
+        "ALPHA_PROJECT_DB_PATH": pick_env("ALPHA_PROJECT_DB_PATH", "") or "",
+        "ALPHA_DOCKER_IMAGE": pick_env("ALPHA_DOCKER_IMAGE", "ubuntu:24.04")
+        or "ubuntu:24.04",
+        "ALPHA_DOCKER_NETWORK": pick_env("ALPHA_DOCKER_NETWORK", "bridge") or "bridge",
+        "ALPHA_DOCKER_MEMORY": pick_env("ALPHA_DOCKER_MEMORY", "4g") or "4g",
+        "ALPHA_DOCKER_CPUS": pick_env("ALPHA_DOCKER_CPUS", "2") or "2",
+        "ALPHA_DOCKER_PIDS_LIMIT": pick_env("ALPHA_DOCKER_PIDS_LIMIT", "512") or "512",
+        "ALPHA_DOCKER_TIMEOUT_SEC": pick_env("ALPHA_DOCKER_TIMEOUT_SEC", "300") or "300",
+        "ALPHA_ALLOW_DOCKER_SMOKE": pick_env("ALPHA_ALLOW_DOCKER_SMOKE", "false")
+        or "false",
+    }
+
+    rendered = render_env_with_overrides(source_raw, overrides)
+    rendered_data = parse_env_text(rendered)
+    return alpha_agent_system_env_path(system_env_dir), rendered, rendered_data
+
+
+def alpha_agent_is_configured(env_values: Dict[str, str]) -> bool:
+    enabled = meaningful_env_value(env_values.get("ALPHA_AGENT_ENABLED"))
+    return (enabled or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def read_alpha_agent_system_env(
+    system_env_dir: Optional[Path] = None,
+) -> Dict[str, str]:
+    env_path = alpha_agent_system_env_path(system_env_dir)
+    if not env_path.exists():
+        return {}
+    return parse_env_text(read_text_file(env_path, use_sudo=True))
+
+
 def extract_host_from_url(value: Optional[str]) -> Optional[str]:
     normalized = meaningful_env_value(value)
     if normalized is None:
@@ -4160,6 +4257,24 @@ def materialize_bootstrap_env_files(
             slide_repo_path
         )
     )
+    alpha_repo_path = alpha_agent_repo_env_path()
+    _alpha_dest_path, alpha_rendered, _alpha_env = build_alpha_agent_env_rendered(
+        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+        shared_internal_token=overrides_by_dest["gateway.env"][
+            "GATEWAY_INTERNAL_TOKEN"
+        ],
+        system_env_dir=system_env_dir,
+        existing_env_by_name=existing_env_by_name,
+        external_env_by_name=external_env_by_name,
+    )
+    alpha_repo_path.parent.mkdir(parents=True, exist_ok=True)
+    alpha_repo_path.write_text(alpha_rendered, encoding="utf-8")
+    written.append(alpha_repo_path)
+    log(
+        "Materialized repo env file from bootstrap inputs: {0}".format(
+            alpha_repo_path
+        )
+    )
     return written
 
 
@@ -4362,6 +4477,21 @@ def install_service_env_files(
         install_text_file(slide_dest_path, slide_rendered, mode="600", use_sudo=True)
         installed.append(slide_dest_path)
         log("Installed system env file: {0}".format(slide_dest_path))
+
+    alpha_dest_path, alpha_rendered, _alpha_env = build_alpha_agent_env_rendered(
+        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+        shared_internal_token=overrides_by_dest["gateway.env"][
+            "GATEWAY_INTERNAL_TOKEN"
+        ],
+        system_env_dir=system_env_dir,
+    )
+    run(["install", "-d", "-m", "755", str(alpha_dest_path.parent)], use_sudo=True)
+    if alpha_dest_path.exists():
+        log("System env file already exists: {0}".format(alpha_dest_path))
+    else:
+        install_text_file(alpha_dest_path, alpha_rendered, mode="600", use_sudo=True)
+        installed.append(alpha_dest_path)
+        log("Installed system env file: {0}".format(alpha_dest_path))
 
     return installed
 
@@ -5345,6 +5475,34 @@ def sync_service_env_files(
         )
         if changed_keys:
             synced.append(slide_dest_path)
+    alpha_dest_path = alpha_agent_system_env_path(system_env_dir)
+    if alpha_dest_path.exists():
+        alpha_existing_by_name: Dict[str, Dict[str, str]] = {
+            ALPHA_AGENT_ENV_NAME: parse_env_text(
+                read_text_file(alpha_dest_path, use_sudo=True)
+            ),
+        }
+        _alpha_dest_path, alpha_rendered, _alpha_env = (
+            build_alpha_agent_env_rendered(
+                signing_secret=overrides_by_dest["gateway.env"][
+                    "GATEWAY_SIGNING_SECRET"
+                ],
+                shared_internal_token=overrides_by_dest["gateway.env"][
+                    "GATEWAY_INTERNAL_TOKEN"
+                ],
+                system_env_dir=system_env_dir,
+                existing_env_by_name=alpha_existing_by_name,
+            )
+        )
+        changed_keys = sync_env_file(
+            alpha_dest_path,
+            source_raw=alpha_rendered,
+            create_missing=False,
+            use_sudo=True,
+            mode="600",
+        )
+        if changed_keys:
+            synced.append(alpha_dest_path)
     return synced
 
 
@@ -5897,6 +6055,7 @@ def run_post_provision_health_checks(
     include_image_generator_agent: bool = False,
     include_diagram_agent: bool = False,
     include_slide_agent: bool = False,
+    include_alpha_agent: bool = False,
     timeout_sec: float = DEFAULT_POST_PROVISION_TIMEOUT_SEC,
     poll_interval_sec: float = DEFAULT_POST_PROVISION_POLL_INTERVAL_SEC,
 ) -> None:
@@ -6016,6 +6175,18 @@ def run_post_provision_health_checks(
         )
         wait_for_orchestrator_agent_ready(
             SLIDE_AGENT_ID,
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+
+    if include_alpha_agent:
+        wait_for_systemd_unit_active(
+            ALPHA_AGENT_SERVICE_NAME,
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+        wait_for_orchestrator_agent_ready(
+            ALPHA_AGENT_ID,
             timeout_sec=timeout_sec,
             poll_interval_sec=poll_interval_sec,
         )
@@ -6288,6 +6459,16 @@ def provision_vm(
         log(
             "Slide agent env is not configured; bootstrap will install the unit but skip enabling the slide agent service."
         )
+    alpha_env = read_alpha_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+    enable_alpha_agent = alpha_agent_is_configured(alpha_env)
+    if enable_alpha_agent:
+        log(
+            "Alpha agent env has ALPHA_AGENT_ENABLED=true; bootstrap will enable and start the alpha agent service."
+        )
+    else:
+        log(
+            "Alpha agent is installed but disabled; set ALPHA_AGENT_ENABLED=true to enable the alpha agent service."
+        )
     installed = install_systemd_units(
         systemd_template_dir,
         enable_units=enable_units,
@@ -6332,6 +6513,11 @@ def provision_vm(
                 if enable_units and enable_slide_agent
                 else []
             )
+            + (
+                [ALPHA_AGENT_SERVICE_NAME]
+                if enable_units and enable_alpha_agent
+                else []
+            )
         ),
         include_memory_env=enable_memory,
     )
@@ -6345,6 +6531,7 @@ def provision_vm(
             include_image_generator_agent=enable_image_generator_agent,
             include_diagram_agent=enable_diagram_agent,
             include_slide_agent=enable_slide_agent,
+            include_alpha_agent=enable_alpha_agent,
         )
 
     print("")
@@ -6627,6 +6814,8 @@ def main() -> int:
             enable_diagram_agent = diagram_agent_is_configured(diagram_env)
             slide_env = read_slide_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
             enable_slide_agent = slide_agent_is_configured(slide_env)
+            alpha_env = read_alpha_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+            enable_alpha_agent = alpha_agent_is_configured(alpha_env)
             installed = install_systemd_units(
                 systemd_template_dir,
                 enable_units=bool(getattr(args, "enable", False)),
@@ -6679,6 +6868,11 @@ def main() -> int:
                         if enable_slide_agent and bool(getattr(args, "enable", False))
                         else []
                     )
+                    + (
+                        [ALPHA_AGENT_SERVICE_NAME]
+                        if enable_alpha_agent and bool(getattr(args, "enable", False))
+                        else []
+                    )
                 ),
                 include_memory_env=memory_repo_dir is not None,
             )
@@ -6694,6 +6888,7 @@ def main() -> int:
                     include_image_generator_agent=enable_image_generator_agent,
                     include_diagram_agent=enable_diagram_agent,
                     include_slide_agent=enable_slide_agent,
+                    include_alpha_agent=enable_alpha_agent,
                 )
             print("Installed systemd units:")
             for unit_name in installed:
