@@ -825,6 +825,9 @@ export class GatewayConnectionManager {
       if (Array.isArray(payload.activity_log) && payload.activity_log.length > 0) {
         metadata.activity_log = payload.activity_log
       }
+      if (Array.isArray(payload.alpha_terminal_log) && payload.alpha_terminal_log.length > 0) {
+        metadata.alpha_terminal_log = payload.alpha_terminal_log
+      }
       if (payload.awaiting_reply === true) {
         metadata.awaiting_reply = true
       }
@@ -885,6 +888,9 @@ export class GatewayConnectionManager {
       }
       if (Array.isArray(payload.activity_log) && payload.activity_log.length > 0) {
         metadata.activity_log = payload.activity_log
+      }
+      if (Array.isArray(payload.alpha_terminal_log) && payload.alpha_terminal_log.length > 0) {
+        metadata.alpha_terminal_log = payload.alpha_terminal_log
       }
       this.historyTail = [
         ...this.historyTail,
@@ -1124,6 +1130,7 @@ export class GatewayConnectionManager {
         thinking_text: typeof payload.partial_thinking === 'string' ? payload.partial_thinking : undefined,
         activity: typeof payload.activity === 'string' ? payload.activity : undefined,
         activity_log: Array.isArray(payload.activity_log) ? payload.activity_log : undefined,
+        alpha_terminal_log: Array.isArray(payload.alpha_terminal_log) ? payload.alpha_terminal_log : undefined,
         docs_progress: payload.docs_progress,
         tabular_progress: payload.tabular_progress,
         produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : undefined,
@@ -1320,6 +1327,7 @@ export class GatewayConnectionManager {
         content: existingContent ? String(existing?.content) : errorMessage,
         thinking_text: typeof existing?.thinking_text === 'string' ? existing.thinking_text : undefined,
         activity_log: Array.isArray(existing?.activity_log) ? existing.activity_log : undefined,
+        alpha_terminal_log: Array.isArray(existing?.alpha_terminal_log) ? existing.alpha_terminal_log : undefined,
         produced_artifacts: Array.isArray(existing?.produced_artifacts) ? existing.produced_artifacts : undefined,
         response_blocks: Array.isArray(existing?.response_blocks) ? existing.response_blocks : undefined,
         snapshot_seq:

@@ -3633,6 +3633,7 @@ export default function App() {
             ? (event as any).activity
             : existingTask?.activity || existingAssistantMessage?.activity || '',
           activity_log: (event as any)?.activity_log ?? existingTask?.activityLog ?? existingAssistantMessage?.activityLog,
+          alpha_terminal_log: (event as any)?.alpha_terminal_log ?? existingTask?.alphaTerminalLog ?? existingAssistantMessage?.alphaTerminalLog,
           docs_progress: docsProgress ?? (existingTask?.progress?.kind === 'docs_parse' ? existingTask.progress : undefined) ?? (existingAssistantMessage?.progress?.kind === 'docs_parse' ? existingAssistantMessage.progress : undefined),
           tabular_progress: tabularProgress ?? (existingTask?.progress?.kind === 'tabular_parse' ? existingTask.progress : undefined) ?? (existingAssistantMessage?.progress?.kind === 'tabular_parse' ? existingAssistantMessage.progress : undefined),
           produced_artifacts: (event as any)?.produced_artifacts ?? existingTask?.producedArtifacts ?? existingAssistantMessage?.producedArtifacts,

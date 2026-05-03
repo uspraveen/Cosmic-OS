@@ -4036,6 +4036,7 @@ class GatewayRuntime:
             "response_blocks": [dict(item) for item in state.response_blocks_snapshot],
             "supporting_artifacts": [dict(item) for item in state.supporting_artifacts],
             "activity": state.activity or "Request failed.",
+            "alpha_terminal_log": [dict(item) for item in state.alpha_terminal_log],
             "completed": True,
             "failed": True,
             "error": state.error_message or None,
@@ -4064,6 +4065,8 @@ class GatewayRuntime:
             metadata["task_id"] = state.task_id
         if state.partial_thinking:
             metadata["thinking_text"] = state.partial_thinking
+        if state.alpha_terminal_log:
+            metadata["alpha_terminal_log"] = [dict(item) for item in state.alpha_terminal_log]
         if state.error_message:
             metadata["error"] = state.error_message
         if state.partial_content:
@@ -6698,6 +6701,7 @@ class GatewayRuntime:
                     "partial_content": msg.get("content") or "",
                     "partial_thinking": meta.get("thinking_text") or "",
                     "activity_log": meta.get("activity_log"),
+                    "alpha_terminal_log": meta.get("alpha_terminal_log"),
                     "sources": meta.get("sources"),
                     "produced_artifacts": self._hydrate_produced_artifact_list_for_client(
                         meta.get("produced_artifacts")
@@ -6748,6 +6752,7 @@ class GatewayRuntime:
         produced_artifacts: list[dict[str, Any]] | None = None,
         supporting_artifacts: list[dict[str, Any]] | None = None,
         activity_log: list[dict[str, Any]] | None = None,
+        alpha_terminal_log: list[dict[str, Any]] | None = None,
         response_blocks: list[dict[str, Any]] | None = None,
     ) -> None:
         """Push a cross-channel message to connected desktop/mobile clients on other platforms."""
@@ -6787,6 +6792,8 @@ class GatewayRuntime:
             event["produced_artifacts"] = client_artifacts
         if activity_log:
             event["activity_log"] = activity_log
+        if alpha_terminal_log:
+            event["alpha_terminal_log"] = alpha_terminal_log
         if client_response_blocks:
             event["response_blocks"] = client_response_blocks
 
@@ -6989,6 +6996,7 @@ class GatewayRuntime:
         produced_artifacts: list[dict[str, Any]] | None = None,
         supporting_artifacts: list[dict[str, Any]] | None = None,
         activity_log: list[dict[str, Any]] | None = None,
+        alpha_terminal_log: list[dict[str, Any]] | None = None,
         response_blocks: list[dict[str, Any]] | None = None,
     ) -> None:
         """Push a cross-channel message to all connected desktop clients for this session.
@@ -7013,6 +7021,7 @@ class GatewayRuntime:
             produced_artifacts=produced_artifacts,
             supporting_artifacts=supporting_artifacts,
             activity_log=activity_log,
+            alpha_terminal_log=alpha_terminal_log,
             response_blocks=response_blocks,
         )
 
@@ -11153,6 +11162,11 @@ class GatewayRuntime:
                 else None,
                 limit=TASK_ACTIVITY_LOG_LIMIT,
             )
+            alpha_terminal_log = (
+                event.get("alpha_terminal_log")
+                if isinstance(event.get("alpha_terminal_log"), list)
+                else []
+            )
             assistant_message_id = store_assistant_message(
                 str(event.get("content") or ""),
                 awaiting_reply=bool(event.get("awaiting_reply")),
@@ -11176,6 +11190,7 @@ class GatewayRuntime:
                     "supporting_artifacts": supporting_artifacts,
                     "response_blocks": response_blocks,
                     "activity_log": activity_log,
+                    "alpha_terminal_log": alpha_terminal_log,
                 },
                 channel=event_channel,
                 route="opus",
@@ -11218,6 +11233,8 @@ class GatewayRuntime:
                 event["response_blocks"] = client_response_blocks
             if activity_log:
                 event["activity_log"] = activity_log
+            if alpha_terminal_log:
+                event["alpha_terminal_log"] = alpha_terminal_log
             event_channel_platform = self._channel_platform(event_channel)
             email_delivery = (
                 self._effective_email_delivery(event)
@@ -11310,6 +11327,7 @@ class GatewayRuntime:
                         produced_artifacts=produced_artifacts,
                         supporting_artifacts=supporting_artifacts,
                         activity_log=activity_log,
+                        alpha_terminal_log=alpha_terminal_log,
                         response_blocks=response_blocks,
                     )
                 )
@@ -12721,6 +12739,8 @@ class GatewayRuntime:
         if event_type == "response.complete":
             state.completed = True
             state.partial_content = str(event.get("content") or state.partial_content)
+            if state.alpha_terminal_log and not isinstance(event.get("alpha_terminal_log"), list):
+                event["alpha_terminal_log"] = [dict(item) for item in state.alpha_terminal_log]
             thinking_text = self._safe_text(event.get("thinking_text"))
             if thinking_text is not None:
                 state.partial_thinking = thinking_text
