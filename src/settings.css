@@ -5661,6 +5661,18 @@
     0 6px 20px rgba(0, 122, 255, 0.18);
 }
 
+.cosmic-agents-detail-model-card small {
+  min-height: 14px;
+  color: rgba(255, 255, 255, 0.38);
+  font-size: 9px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.cosmic-agents-detail-model-card.active small {
+  color: rgba(255, 255, 255, 0.68);
+}
+
 .cosmic-agents-detail-model-name {
   font-size: 11px;
   font-weight: 700;

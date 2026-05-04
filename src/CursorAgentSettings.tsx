@@ -4,11 +4,11 @@ import { Bot, CheckCircle2, ExternalLink, LogIn, RefreshCw, ShieldCheck, Termina
 type CursorApprovalMode = 'suggest' | 'auto_edit' | 'full_auto'
 
 const MODEL_OPTIONS = [
-  { value: 'auto', label: 'Auto' },
-  { value: 'gpt-5', label: 'GPT-5' },
-  { value: 'claude-4-sonnet', label: 'Claude Sonnet' },
-  { value: 'opus-4.6', label: 'Opus 4.6' },
-  { value: 'composer-2', label: 'Composer 2' },
+  { value: 'auto', label: 'Auto', note: 'Fast default' },
+  { value: 'composer-2', label: 'Composer 2', note: 'Normal, not Fast' },
+  { value: 'gpt-5', label: 'GPT-5', note: 'Manual' },
+  { value: 'claude-4-sonnet', label: 'Claude Sonnet', note: 'Manual' },
+  { value: 'opus-4.6', label: 'Opus 4.6', note: 'Manual' },
 ]
 
 const APPROVAL_MODES: Array<{ value: CursorApprovalMode; label: string; note: string }> = [
@@ -271,6 +271,7 @@ export default function CursorAgentSettings({ active }: CursorAgentSettingsProps
               disabled={saving}
             >
               <span className="cosmic-agents-detail-model-name">{option.label}</span>
+              <small>{option.note}</small>
               {preferredModel === option.value ? <CheckCircle2 size={16} className="cosmic-agents-detail-model-check-icon" /> : null}
             </button>
           ))}

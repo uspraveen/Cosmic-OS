@@ -18,6 +18,13 @@ from .workspace_manager import WorkspacePaths
 
 
 SECRET_PATTERN = re.compile(r"(sk-[^\s\"']{4,}|cursor_[^\s\"']{8,})", re.IGNORECASE)
+CURSOR_MODEL_ALIASES = {
+    "composer 2": "composer-2",
+    "composer2": "composer-2",
+    "composer-2-normal": "composer-2",
+    "composer 2 normal": "composer-2",
+    "normal composer 2": "composer-2",
+}
 
 
 def _redact(value: str) -> str:
@@ -27,6 +34,14 @@ def _redact(value: str) -> str:
 def _tail(value: str, limit: int = 8000) -> str:
     redacted = _redact(value or "")
     return redacted[-limit:]
+
+
+def normalize_cursor_model(value: str | None) -> str | None:
+    normalized = str(value or "").strip()
+    if not normalized or normalized.lower() == "auto":
+        return None
+    alias_key = re.sub(r"\s+", " ", normalized.lower())
+    return CURSOR_MODEL_ALIASES.get(alias_key, normalized)
 
 
 def find_cursor_agent_binary() -> str | None:
@@ -105,8 +120,9 @@ class CursorWorkspaceRunner:
             "--output-format",
             "stream-json" if stream_json else "json",
         ]
-        if model:
-            command.extend(["--model", model])
+        normalized_model = normalize_cursor_model(model)
+        if normalized_model:
+            command.extend(["--model", normalized_model])
         command.append(prompt)
         return command
 

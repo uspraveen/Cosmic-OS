@@ -4,7 +4,7 @@ from pathlib import Path
 
 from agents.alpha_agent.codex_runner import CodexWorkspaceRunner
 from agents.alpha_agent.config import AlphaAgentConfig
-from agents.alpha_agent.cursor_runner import CursorWorkspaceRunner
+from agents.alpha_agent.cursor_runner import CursorWorkspaceRunner, normalize_cursor_model
 from agents.alpha_agent.docker_runner import DockerWorkspaceRunner
 from agents.alpha_agent.project_registry import ProjectRegistry
 from agents.alpha_agent.workspace_manager import WorkspaceManager
@@ -150,3 +150,35 @@ def test_cursor_runner_builds_headless_stream_command(tmp_path: Path) -> None:
     assert "--model" in command
     assert "gpt-5" in command
     assert command[-1] == "Build the app"
+
+
+def test_cursor_runner_uses_normal_composer_2_model_id(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    paths = WorkspaceManager(
+        cfg.alpha_root,
+        codex_home=cfg.codex_home,
+        cursor_home=cfg.cursor_home,
+    ).prepare(
+        project_id="prj_abc123",
+        task_id="tsk_def456",
+    )
+    runner = CursorWorkspaceRunner(cfg)
+
+    command = runner.build_command(
+        paths=paths,
+        prompt="Build the app",
+        model="Composer 2",
+        stream_json=True,
+    )
+
+    assert "--model" in command
+    model_index = command.index("--model") + 1
+    assert command[model_index] == "composer-2"
+    assert "composer-2-fast" not in command
+
+
+def test_cursor_model_normalization_preserves_explicit_fast_variant() -> None:
+    assert normalize_cursor_model("composer-2") == "composer-2"
+    assert normalize_cursor_model("Composer 2") == "composer-2"
+    assert normalize_cursor_model("composer-2-fast") == "composer-2-fast"
+    assert normalize_cursor_model("auto") is None
