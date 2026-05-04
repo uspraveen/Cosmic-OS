@@ -156,7 +156,7 @@ def test_cursor_runner_builds_headless_stream_command(tmp_path: Path) -> None:
     assert command[-1] == "Build the app"
 
 
-def test_cursor_runner_uses_normal_composer_2_model_id(tmp_path: Path) -> None:
+def test_cursor_runner_maps_normal_composer_to_working_alias(tmp_path: Path) -> None:
     cfg = _config(tmp_path)
     paths = WorkspaceManager(
         cfg.alpha_root,
@@ -177,13 +177,14 @@ def test_cursor_runner_uses_normal_composer_2_model_id(tmp_path: Path) -> None:
 
     assert "--model" in command
     model_index = command.index("--model") + 1
-    assert command[model_index] == "composer-2"
+    assert command[model_index] == "composer"
     assert "composer-2-fast" not in command
 
 
 def test_cursor_model_normalization_preserves_explicit_fast_variant() -> None:
-    assert normalize_cursor_model("composer-2") == "composer-2"
-    assert normalize_cursor_model("Composer 2") == "composer-2"
+    assert normalize_cursor_model("composer") == "composer"
+    assert normalize_cursor_model("composer-2") == "composer"
+    assert normalize_cursor_model("Composer 2") == "composer"
     assert normalize_cursor_model("composer-2-fast") == "composer-2-fast"
     assert normalize_cursor_model("auto") is None
 
@@ -193,8 +194,12 @@ def test_cursor_runner_detects_fast_model_mismatch(tmp_path: Path) -> None:
     stdout = '{"type":"system","subtype":"init","model":"Composer 2 Fast"}\n'
 
     assert runner._extract_observed_model(stdout) == "Composer 2 Fast"
+    assert not runner._model_mismatch(
+        requested_model="composer",
+        observed_model="Composer 1.5",
+    )
     assert runner._model_mismatch(
-        requested_model="composer-2",
+        requested_model="composer",
         observed_model="Composer 2 Fast",
     )
     assert not runner._model_mismatch(

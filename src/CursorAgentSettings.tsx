@@ -5,7 +5,7 @@ type CursorApprovalMode = 'suggest' | 'auto_edit' | 'full_auto'
 
 const MODEL_OPTIONS = [
   { value: 'auto', label: 'Auto', note: 'Fast default' },
-  { value: 'composer-2', label: 'Composer 2', note: 'Normal, not Fast' },
+  { value: 'composer', label: 'Composer', note: 'Normal, not Fast' },
   { value: 'gpt-5', label: 'GPT-5', note: 'Manual' },
   { value: 'claude-4-sonnet', label: 'Claude Sonnet', note: 'Manual' },
   { value: 'opus-4.6', label: 'Opus 4.6', note: 'Manual' },
@@ -45,6 +45,14 @@ interface CursorGatewayStatus {
 function normalizeApprovalMode(value: unknown): CursorApprovalMode {
   if (value === 'auto_edit' || value === 'full_auto') return value
   return 'suggest'
+}
+
+function normalizeCursorModelOption(value: unknown) {
+  const normalized = String(value ?? 'auto').trim()
+  if (!normalized || normalized === 'auto') return 'auto'
+  const lowered = normalized.toLowerCase()
+  if (['composer', 'composer-2', 'composer 2', 'composer2'].includes(lowered)) return 'composer'
+  return normalized
 }
 
 function extractFirstUrl(value: string) {
@@ -116,7 +124,7 @@ export default function CursorAgentSettings({ active }: CursorAgentSettingsProps
 
   const applyGatewayStatus = (rawStatus: unknown) => {
     const status = (rawStatus && typeof rawStatus === 'object' ? rawStatus : {}) as CursorGatewayStatus
-    const nextModel = String(status.preferred_model ?? 'auto').trim() || 'auto'
+    const nextModel = normalizeCursorModelOption(status.preferred_model)
     setGatewayStatus(status)
     setPreferredModel(MODEL_OPTIONS.some((option) => option.value === nextModel) ? nextModel : 'auto')
     setApprovalMode(normalizeApprovalMode(status.approval_mode))
