@@ -50,15 +50,19 @@ def _env_csv(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
 def _default_alpha_codex_home() -> Path:
     if os.name == "nt":
         return BACKEND_ROOT / "agents" / "alpha_agent" / "runtime" / "alpha" / "homes" / "codex"
-    alpha_root = Path(os.getenv("ALPHA_WORKSPACE_ROOT", "/var/lib/cosmic/alpha")).expanduser()
-    return alpha_root / "homes" / "codex"
+    return _default_alpha_workspace_root() / "homes" / "codex"
 
 
 def _default_alpha_cursor_home() -> Path:
     if os.name == "nt":
         return BACKEND_ROOT / "agents" / "alpha_agent" / "runtime" / "alpha" / "homes" / "cursor"
-    alpha_root = Path(os.getenv("ALPHA_WORKSPACE_ROOT", "/var/lib/cosmic/alpha")).expanduser()
-    return alpha_root / "homes" / "cursor"
+    return _default_alpha_workspace_root() / "homes" / "cursor"
+
+
+def _default_alpha_workspace_root() -> Path:
+    if os.name == "nt":
+        return BACKEND_ROOT / "agents" / "alpha_agent" / "runtime" / "alpha"
+    return Path(os.getenv("ALPHA_WORKSPACE_ROOT", "/var/lib/cosmic/alpha")).expanduser()
 
 
 @dataclass(slots=True)
@@ -90,6 +94,7 @@ class GatewayConfig:
     agent_email_integrations_db_path: Path = (
         BACKEND_ROOT / "gateway" / "agent_email_integrations.db"
     )
+    alpha_workspace_root: Path = _default_alpha_workspace_root()
     alpha_codex_home: Path = _default_alpha_codex_home()
     alpha_cursor_home: Path = _default_alpha_cursor_home()
     preferences_db_path: Path = BACKEND_ROOT / "gateway" / "preferences.db"
@@ -261,6 +266,9 @@ class GatewayConfig:
                     "GATEWAY_AGENT_EMAIL_INTEGRATIONS_DB_PATH",
                     str(BACKEND_ROOT / "gateway" / "agent_email_integrations.db"),
                 )
+            ).expanduser(),
+            alpha_workspace_root=Path(
+                os.getenv("ALPHA_WORKSPACE_ROOT", str(_default_alpha_workspace_root()))
             ).expanduser(),
             alpha_codex_home=Path(
                 os.getenv(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agents.alpha_agent.artifact_promoter import promote_alpha_artifacts
 from agents.alpha_agent.codex_runner import CodexWorkspaceRunner
 from agents.alpha_agent.config import AlphaAgentConfig
 from agents.alpha_agent.cursor_runner import CursorWorkspaceRunner, normalize_cursor_model
@@ -185,3 +186,66 @@ def test_cursor_model_normalization_preserves_explicit_fast_variant() -> None:
     assert normalize_cursor_model("Composer 2") == "composer-2"
     assert normalize_cursor_model("composer-2-fast") == "composer-2-fast"
     assert normalize_cursor_model("auto") is None
+
+
+def test_cursor_runner_detects_fast_model_mismatch(tmp_path: Path) -> None:
+    runner = CursorWorkspaceRunner(_config(tmp_path))
+    stdout = '{"type":"system","subtype":"init","model":"Composer 2 Fast"}\n'
+
+    assert runner._extract_observed_model(stdout) == "Composer 2 Fast"
+    assert runner._model_mismatch(
+        requested_model="composer-2",
+        observed_model="Composer 2 Fast",
+    )
+    assert not runner._model_mismatch(
+        requested_model="composer-2-fast",
+        observed_model="Composer 2 Fast",
+    )
+
+
+def test_promote_alpha_artifacts_includes_task_artifact_dir_files(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    paths = WorkspaceManager(
+        cfg.alpha_root,
+        codex_home=cfg.codex_home,
+        cursor_home=cfg.cursor_home,
+    ).prepare(
+        project_id="prj_abc123",
+        task_id="tsk_def456",
+    )
+    screenshot = paths.artifacts / "site-screenshot.png"
+    screenshot.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+
+    artifacts = promote_alpha_artifacts(
+        task_id="tsk_def456",
+        paths=paths,
+        text_hints=[],
+    )
+
+    assert len(artifacts) == 1
+    assert artifacts[0].mime == "image/png"
+    assert artifacts[0].path == str(screenshot.resolve())
+
+
+def test_promote_alpha_artifacts_includes_referenced_workspace_files(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    paths = WorkspaceManager(
+        cfg.alpha_root,
+        codex_home=cfg.codex_home,
+        cursor_home=cfg.cursor_home,
+    ).prepare(
+        project_id="prj_abc123",
+        task_id="tsk_def456",
+    )
+    bundle = paths.workspace / "export.zip"
+    bundle.write_bytes(b"zip bytes")
+
+    artifacts = promote_alpha_artifacts(
+        task_id="tsk_def456",
+        paths=paths,
+        text_hints=[f"Saved final export at {bundle.resolve()}."],
+    )
+
+    assert len(artifacts) == 1
+    assert artifacts[0].mime == "application/zip"
+    assert artifacts[0].path == str(bundle.resolve())

@@ -75,10 +75,13 @@ class CursorRunResult:
     last_message_path: Path
     last_message: str
     duration_sec: float
+    requested_model: str | None = None
+    observed_model: str | None = None
+    model_mismatch: bool = False
 
     @property
     def ok(self) -> bool:
-        return self.returncode == 0 and not self.timed_out
+        return self.returncode == 0 and not self.timed_out and not self.model_mismatch
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -91,6 +94,9 @@ class CursorRunResult:
             "last_message": _tail(self.last_message, 12000),
             "duration_sec": round(self.duration_sec, 3),
             "command": list(self.command),
+            "requested_model": self.requested_model,
+            "observed_model": self.observed_model,
+            "model_mismatch": self.model_mismatch,
         }
 
 
@@ -142,10 +148,11 @@ class CursorWorkspaceRunner:
         paths.artifacts.mkdir(parents=True, exist_ok=True)
         self.config.cursor_home.mkdir(parents=True, exist_ok=True)
         output_path = paths.artifacts / "cursor-last-message.md"
+        requested_model = normalize_cursor_model(model)
         command = self.build_command(
             paths=paths,
             prompt=prompt,
-            model=model,
+            model=requested_model,
             stream_json=event_callback is not None,
         )
         started_at = asyncio.get_running_loop().time()
@@ -159,6 +166,7 @@ class CursorWorkspaceRunner:
                 last_message_path=output_path,
                 last_message="",
                 duration_sec=0.0,
+                requested_model=requested_model,
             )
 
         process = await asyncio.create_subprocess_exec(
@@ -202,6 +210,17 @@ class CursorWorkspaceRunner:
         last_message = self._extract_last_message(stdout)
         if last_message:
             output_path.write_text(last_message, encoding="utf-8")
+        observed_model = self._extract_observed_model(stdout)
+        model_mismatch = self._model_mismatch(
+            requested_model=requested_model,
+            observed_model=observed_model,
+        )
+        if model_mismatch:
+            stderr = (
+                stderr.rstrip()
+                + "\nCursor initialized a different model than COSMIC requested: "
+                + f"requested={requested_model}, observed={observed_model}."
+            ).strip()
         return CursorRunResult(
             returncode=process.returncode,
             stdout=stdout,
@@ -211,6 +230,9 @@ class CursorWorkspaceRunner:
             last_message_path=output_path,
             last_message=last_message,
             duration_sec=duration_sec,
+            requested_model=requested_model,
+            observed_model=observed_model,
+            model_mismatch=model_mismatch,
         )
 
     async def _communicate_streaming(
@@ -349,6 +371,29 @@ class CursorWorkspaceRunner:
                     if isinstance(item, dict) and str(item.get("text") or "")
                 )
         return "".join(fallback_chunks).strip()
+
+    def _extract_observed_model(self, stdout: str) -> str | None:
+        for line in stdout.splitlines():
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("type") == "system":
+                model = str(payload.get("model") or "").strip()
+                if model:
+                    return model
+        return None
+
+    def _model_mismatch(self, *, requested_model: str | None, observed_model: str | None) -> bool:
+        requested = str(requested_model or "").strip().lower()
+        observed = str(observed_model or "").strip().lower()
+        if not requested or not observed:
+            return False
+        requested_is_fast = "fast" in requested
+        observed_is_fast = observed.endswith("fast") or " fast" in observed
+        return observed_is_fast and not requested_is_fast
 
     def artifact_for_last_message(self, *, task_id: str, result: CursorRunResult) -> ArtifactManifest | None:
         path = result.last_message_path

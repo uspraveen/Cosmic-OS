@@ -9602,6 +9602,21 @@ class GatewayRuntime:
         if not normalized:
             return None
         relative = Path(normalized)
+        if relative.is_absolute():
+            candidate = relative.resolve()
+            allowed_roots = [
+                self.config.artifacts_root,
+                self.config.alpha_workspace_root / "artifacts",
+                self.config.alpha_workspace_root / "workspaces",
+                self.config.alpha_workspace_root / "deployments",
+            ]
+            for root in allowed_roots:
+                try:
+                    candidate.relative_to(root.resolve())
+                    return candidate
+                except (OSError, ValueError):
+                    continue
+            return None
         parts = relative.parts
         if len(parts) >= 2 and parts[0] == "runs" and parts[1] == "artifacts":
             relative = Path(*parts[2:])

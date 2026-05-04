@@ -8,6 +8,7 @@ from uuid import uuid4
 from shared.agent_runtime import AgentRuntime
 from shared.contracts import AgentError, AgentResult, TaskEnvelope
 
+from .artifact_promoter import promote_alpha_artifacts
 from .codex_runner import CodexRunResult, CodexWorkspaceRunner
 from .config import AGENT_ROOT, AlphaAgentConfig
 from .cursor_runner import CursorRunResult, CursorWorkspaceRunner
@@ -252,27 +253,49 @@ class AlphaAgent(AgentRuntime):
                 "detail": str(paths.workspace),
             }
         )
-        prompt = self._build_cli_prompt(task=task, project=project, workspace=str(paths.workspace))
+        prompt = self._build_cli_prompt(
+            task=task,
+            project=project,
+            workspace=str(paths.workspace),
+            artifacts_dir=str(paths.artifacts),
+        )
+        selected_model: str | None = None
         if preferred_harness == "cursor":
+            selected_model = self._select_cursor_model(task, provider_status)
+            await emit_alpha_terminal(
+                {
+                    "stream": "system",
+                    "event_type": "cursor.model.selected",
+                    "text": f"Cursor model selected: {selected_model or 'auto'}",
+                    "detail": "COSMIC will fail this run if Cursor initializes a Fast model when a non-Fast model was requested.",
+                }
+            )
             run_result = await self.cursor_runner.run(
                 paths=paths,
                 prompt=prompt,
-                model=self._select_cursor_model(task, provider_status),
+                model=selected_model,
                 timeout_sec=self.config.cursor_timeout_sec,
                 event_callback=emit_alpha_terminal,
             )
-            artifact = self.cursor_runner.artifact_for_last_message(task_id=task.task_id, result=run_result)
         else:
+            selected_model = self._select_codex_model(task, provider_status)
             run_result = await self.codex_runner.run(
                 paths=paths,
                 prompt=prompt,
-                model=self._select_codex_model(task, provider_status),
+                model=selected_model,
                 sandbox=self._select_codex_sandbox(task),
                 timeout_sec=self.config.codex_timeout_sec,
                 event_callback=emit_alpha_terminal,
             )
-            artifact = self.codex_runner.artifact_for_last_message(task_id=task.task_id, result=run_result)
-        artifacts = [artifact] if artifact is not None else []
+        artifacts = promote_alpha_artifacts(
+            task_id=task.task_id,
+            paths=paths,
+            text_hints=(
+                getattr(run_result, "last_message", ""),
+                getattr(run_result, "stdout", ""),
+                getattr(run_result, "stderr", ""),
+            ),
+        )
         project = self.registry.mark_task(
             project.project_id,
             task_id=task.task_id,
@@ -300,7 +323,7 @@ class AlphaAgent(AgentRuntime):
             )
 
         if not run_result.ok:
-            return self._cli_failure(preferred_harness, run_result)
+            return self._cli_failure(preferred_harness, run_result, artifacts=artifacts)
 
         return AgentResult(
             status="completed",
@@ -470,6 +493,7 @@ class AlphaAgent(AgentRuntime):
         task: TaskEnvelope,
         project: ProjectRecord,
         workspace: str,
+        artifacts_dir: str,
     ) -> str:
         deliverables = self._coerce_string_list(task.input.get("deliverables"))
         constraints = task.input.get("constraints") if isinstance(task.input.get("constraints"), dict) else {}
@@ -490,6 +514,8 @@ class AlphaAgent(AgentRuntime):
             "## Operating Rules",
             "- Work only inside the workspace unless the task explicitly requires external setup.",
             "- Do not alter the COSMIC production repo or services unless the user goal explicitly asks for that.",
+            f"- Put every user-facing deliverable file in this artifact directory: {artifacts_dir}",
+            "- If you create a deliverable elsewhere in the workspace, mention its absolute path in your final report.",
             "- Prefer small, verifiable changes and run relevant checks when the project provides them.",
             "- Leave a concise final report with what changed, where it is, checks run, and any blocker.",
         ]
@@ -501,16 +527,28 @@ class AlphaAgent(AgentRuntime):
             lines.extend(f"- {key}: {value}" for key, value in sorted(constraints.items()))
         return "\n".join(lines)
 
-    def _cli_failure(self, provider: str, result: CodexRunResult | CursorRunResult) -> AgentResult:
+    def _cli_failure(
+        self,
+        provider: str,
+        result: CodexRunResult | CursorRunResult,
+        *,
+        artifacts: list[Any] | None = None,
+    ) -> AgentResult:
         code = "TIMEOUT" if result.timed_out else "CODEX_EXECUTION_FAILED"
         if provider == "cursor" and code != "TIMEOUT":
             code = "CURSOR_EXECUTION_FAILED"
         fallback = f"{self._harness_label(provider)} execution failed without output."
         stderr = result.stderr.strip() or result.stdout.strip() or fallback
-        return self._fail(
-            code=code,
-            message=stderr[-1000:],
-            next_action="retry" if result.timed_out else "escalate",
+        return AgentResult(
+            status="failed",
+            output={},
+            artifacts=artifacts or [],
+            error=AgentError(
+                code=code,
+                retryable=code in {"TIMEOUT", "DOCKER_UNAVAILABLE", "WORKSPACE_BUSY"},
+                message=stderr[-1000:],
+                next_action="retry" if result.timed_out else "escalate",
+            ),
         )
 
     def _optional_string(self, value: Any) -> str | None:
