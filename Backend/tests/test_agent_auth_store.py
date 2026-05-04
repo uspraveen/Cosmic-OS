@@ -93,7 +93,7 @@ def test_cursor_auth_store_uses_oauth_without_api_key_secret() -> None:
         store.initialize()
 
         saved = store.save_cursor(
-            preferred_model="gpt-5",
+            preferred_model="Composer 2",
             approval_mode="auto_edit",
             vm_sync_enabled=True,
             status="authenticated",
@@ -102,10 +102,17 @@ def test_cursor_auth_store_uses_oauth_without_api_key_secret() -> None:
 
         assert saved["provider"] == "cursor"
         assert saved["auth_mode"] == "oauth"
-        assert saved["preferred_model"] == "gpt-5"
+        assert saved["preferred_model"] == "composer"
         assert saved["approval_mode"] == "auto_edit"
         assert saved["has_api_key"] is False
         assert "api_key" not in saved
+
+        updated = store.save_cursor(approval_mode="full_auto")
+        assert updated["preferred_model"] == "composer"
+        assert updated["approval_mode"] == "full_auto"
+
+        manual = store.save_cursor(preferred_model="gpt-5")
+        assert manual["preferred_model"] == "gpt-5"
 
         with sqlite3.connect(db_path) as conn:
             row = conn.execute(

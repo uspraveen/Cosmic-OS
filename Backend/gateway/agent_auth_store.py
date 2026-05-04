@@ -13,6 +13,17 @@ from .credentials.encryption import decrypt_token, encrypt_token_str
 
 PROVIDER_CODEX = "codex"
 PROVIDER_CURSOR = "cursor"
+_CURSOR_MODEL_ALIASES = {
+    "composer": "composer",
+    "composer normal": "composer",
+    "normal composer": "composer",
+    "composer 2": "composer",
+    "composer2": "composer",
+    "composer-2": "composer",
+    "composer-2-normal": "composer",
+    "composer 2 normal": "composer",
+    "normal composer 2": "composer",
+}
 
 
 def _utcnow_iso() -> str:
@@ -366,4 +377,5 @@ def _normalize_cursor_model(value: str | None, *, fallback: str) -> str:
         normalized = fallback.strip() if fallback else "auto"
     if not normalized:
         return "auto"
-    return normalized[:80]
+    alias_key = " ".join(normalized.lower().split())
+    return _CURSOR_MODEL_ALIASES.get(alias_key, normalized)[:80]
