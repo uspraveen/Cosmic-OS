@@ -44,6 +44,7 @@ from shared import (
     agent_email_integration_is_configured,
     agent_email_integration_is_disabled,
 )
+from shared.cursor_cli_config import ensure_cursor_cli_non_fast_config
 
 
 MIN_PYTHON = (3, 10)
@@ -67,6 +68,7 @@ DEFAULT_SYSTEM_ENV_DIR = Path("/etc/cosmic")
 DEFAULT_WHATSAPP_AUTH_DIR = Path("/var/lib/cosmic/whatsapp/auth")
 DEFAULT_DIAGRAM_PUPPETEER_CACHE_DIR = Path("/var/lib/cosmic/diagram-agent/puppeteer")
 DEFAULT_MEMORY_DATA_DIR = Path("/var/lib/cosmic/memory")
+DEFAULT_ALPHA_CURSOR_HOME = Path("/var/lib/cosmic/alpha/homes/cursor")
 DEFAULT_NEO4J_APT_KEY_URL = "https://debian.neo4j.com/neotechnology.gpg.key"
 DEFAULT_NEO4J_APT_KEYRING_PATH = Path("/etc/apt/keyrings/neotechnology.gpg")
 DEFAULT_NEO4J_APT_SOURCE_PATH = Path("/etc/apt/sources.list.d/neo4j.list")
@@ -3588,6 +3590,7 @@ def ensure_cursor_cli() -> None:
     cursor_version = executable_version(["cursor-agent", "--version"])
     if cursor_version:
         log("Cursor CLI available: {0}".format(cursor_version))
+        ensure_cursor_cli_default_config()
         return
 
     manager = detect_package_manager()
@@ -3610,6 +3613,17 @@ def ensure_cursor_cli() -> None:
     if not cursor_version:
         raise BootstrapError("Cursor CLI is still unavailable after install.")
     log("Cursor CLI available: {0}".format(cursor_version))
+    ensure_cursor_cli_default_config()
+
+
+def ensure_cursor_cli_default_config(cursor_home: Path = DEFAULT_ALPHA_CURSOR_HOME) -> None:
+    try:
+        config_path, changed, _config = ensure_cursor_cli_non_fast_config(cursor_home)
+    except OSError as exc:
+        log("WARNING: unable to update Cursor CLI non-Fast config: {0}".format(exc))
+        return
+    action = "Updated" if changed else "Verified"
+    log("{0} Cursor CLI non-Fast config: {1}".format(action, config_path))
 
 
 def load_package_json(package_json: Path) -> dict:

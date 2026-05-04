@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from shared.cursor_cli_config import ensure_cursor_cli_non_fast_config
 from shared.contracts import ArtifactManifest
 
 from .config import AlphaAgentConfig
@@ -151,6 +152,11 @@ class CursorWorkspaceRunner:
         paths.workspace.mkdir(parents=True, exist_ok=True)
         paths.artifacts.mkdir(parents=True, exist_ok=True)
         self.config.cursor_home.mkdir(parents=True, exist_ok=True)
+        config_warning = ""
+        try:
+            ensure_cursor_cli_non_fast_config(self.config.cursor_home)
+        except OSError as exc:
+            config_warning = f"Unable to update Cursor CLI non-Fast config: {exc}"
         output_path = paths.artifacts / "cursor-last-message.md"
         requested_model = normalize_cursor_model(model)
         command = self.build_command(
@@ -211,6 +217,8 @@ class CursorWorkspaceRunner:
         duration_sec = asyncio.get_running_loop().time() - started_at
         stdout = "".join(stdout_parts)
         stderr = "".join(stderr_parts)
+        if config_warning:
+            stderr = (config_warning + "\n" + stderr).strip()
         last_message = self._extract_last_message(stdout)
         if last_message:
             output_path.write_text(last_message, encoding="utf-8")
