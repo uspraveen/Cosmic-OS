@@ -431,7 +431,7 @@ class AlphaAgent(AgentRuntime):
 
     def _harness_start_message(self, provider: str) -> str:
         if provider == "cursor":
-            return "cursor-agent --print --force --output-format stream-json started"
+            return "cursor-agent --print --force --trust --sandbox disabled --output-format stream-json started"
         return "codex exec --json started"
 
     def _select_codex_model(self, task: TaskEnvelope, codex_status: dict[str, Any]) -> str | None:

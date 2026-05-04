@@ -117,6 +117,9 @@ class CursorWorkspaceRunner:
             binary,
             "--print",
             "--force",
+            "--trust",
+            "--sandbox",
+            "disabled",
             "--output-format",
             "stream-json" if stream_json else "json",
         ]

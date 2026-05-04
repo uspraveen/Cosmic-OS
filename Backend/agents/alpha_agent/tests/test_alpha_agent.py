@@ -145,6 +145,9 @@ def test_cursor_runner_builds_headless_stream_command(tmp_path: Path) -> None:
 
     assert "--print" in command
     assert "--force" in command
+    assert "--trust" in command
+    assert "--sandbox" in command
+    assert command[command.index("--sandbox") + 1] == "disabled"
     assert "--output-format" in command
     assert "stream-json" in command
     assert "--model" in command
