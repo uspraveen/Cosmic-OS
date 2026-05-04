@@ -14,15 +14,15 @@ from .credentials.encryption import decrypt_token, encrypt_token_str
 PROVIDER_CODEX = "codex"
 PROVIDER_CURSOR = "cursor"
 _CURSOR_MODEL_ALIASES = {
-    "composer": "composer",
-    "composer normal": "composer",
-    "normal composer": "composer",
-    "composer 2": "composer",
-    "composer2": "composer",
-    "composer-2": "composer",
-    "composer-2-normal": "composer",
-    "composer 2 normal": "composer",
-    "normal composer 2": "composer",
+    "composer": "composer-2",
+    "composer normal": "composer-2",
+    "normal composer": "composer-2",
+    "composer 2": "composer-2",
+    "composer2": "composer-2",
+    "composer-2": "composer-2",
+    "composer-2-normal": "composer-2",
+    "composer 2 normal": "composer-2",
+    "normal composer 2": "composer-2",
 }
 
 
@@ -75,7 +75,7 @@ class AgentAuthStore:
             PROVIDER_CURSOR,
             include_secret=include_secret,
             default_auth_mode="oauth",
-            default_preferred_model="composer",
+            default_preferred_model="composer-2",
         )
 
     def save_codex(

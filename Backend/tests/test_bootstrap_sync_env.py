@@ -173,7 +173,7 @@ def test_sync_service_env_files_appends_missing_keys_without_overwriting_values(
     assert "WHATSAPP_AUTH_DIR=/var/lib/cosmic/whatsapp/auth" in bridge_rendered
 
 
-def test_alpha_agent_env_defaults_cursor_to_composer(monkeypatch, tmp_path) -> None:
+def test_alpha_agent_env_defaults_cursor_to_composer_2(monkeypatch, tmp_path) -> None:
     backend_root = tmp_path / "Backend"
     alpha_dir = backend_root / "agents" / "alpha_agent"
     system_env_dir = tmp_path / "etc" / "cosmic"
@@ -195,8 +195,8 @@ def test_alpha_agent_env_defaults_cursor_to_composer(monkeypatch, tmp_path) -> N
         system_env_dir=system_env_dir,
     )
 
-    assert "ALPHA_CURSOR_MODEL=composer" in rendered
-    assert parsed["ALPHA_CURSOR_MODEL"] == "composer"
+    assert "ALPHA_CURSOR_MODEL=composer-2" in rendered
+    assert parsed["ALPHA_CURSOR_MODEL"] == "composer-2"
 
 
 def test_normalize_bootstrap_env_payload_maps_current_supabase_shape() -> None:

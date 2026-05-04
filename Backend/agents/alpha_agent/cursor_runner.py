@@ -20,15 +20,15 @@ from .workspace_manager import WorkspacePaths
 
 SECRET_PATTERN = re.compile(r"(sk-[^\s\"']{4,}|cursor_[^\s\"']{8,})", re.IGNORECASE)
 CURSOR_MODEL_ALIASES = {
-    "composer": "composer",
-    "composer normal": "composer",
-    "normal composer": "composer",
-    "composer 2": "composer",
-    "composer2": "composer",
-    "composer-2": "composer",
-    "composer-2-normal": "composer",
-    "composer 2 normal": "composer",
-    "normal composer 2": "composer",
+    "composer": "composer-2",
+    "composer normal": "composer-2",
+    "normal composer": "composer-2",
+    "composer 2": "composer-2",
+    "composer2": "composer-2",
+    "composer-2": "composer-2",
+    "composer-2-normal": "composer-2",
+    "composer 2 normal": "composer-2",
+    "normal composer 2": "composer-2",
 }
 
 

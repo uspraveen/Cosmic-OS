@@ -177,14 +177,14 @@ def test_cursor_runner_maps_normal_composer_to_working_alias(tmp_path: Path) -> 
 
     assert "--model" in command
     model_index = command.index("--model") + 1
-    assert command[model_index] == "composer"
+    assert command[model_index] == "composer-2"
     assert "composer-2-fast" not in command
 
 
 def test_cursor_model_normalization_preserves_explicit_fast_variant() -> None:
-    assert normalize_cursor_model("composer") == "composer"
-    assert normalize_cursor_model("composer-2") == "composer"
-    assert normalize_cursor_model("Composer 2") == "composer"
+    assert normalize_cursor_model("composer") == "composer-2"
+    assert normalize_cursor_model("composer-2") == "composer-2"
+    assert normalize_cursor_model("Composer 2") == "composer-2"
     assert normalize_cursor_model("composer-2-fast") == "composer-2-fast"
     assert normalize_cursor_model("auto") is None
 
@@ -195,11 +195,11 @@ def test_cursor_runner_detects_fast_model_mismatch(tmp_path: Path) -> None:
 
     assert runner._extract_observed_model(stdout) == "Composer 2 Fast"
     assert not runner._model_mismatch(
-        requested_model="composer",
-        observed_model="Composer 1.5",
+        requested_model="composer-2",
+        observed_model="Composer 2",
     )
     assert runner._model_mismatch(
-        requested_model="composer",
+        requested_model="composer-2",
         observed_model="Composer 2 Fast",
     )
     assert not runner._model_mismatch(

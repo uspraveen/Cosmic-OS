@@ -2616,7 +2616,7 @@ def build_alpha_agent_env_rendered(
         "ALPHA_CURSOR_HOME": pick_env("ALPHA_CURSOR_HOME", "/var/lib/cosmic/alpha/homes/cursor")
         or "/var/lib/cosmic/alpha/homes/cursor",
         "ALPHA_CODEX_MODEL": pick_env("ALPHA_CODEX_MODEL", "") or "",
-        "ALPHA_CURSOR_MODEL": pick_env("ALPHA_CURSOR_MODEL", "composer") or "composer",
+        "ALPHA_CURSOR_MODEL": pick_env("ALPHA_CURSOR_MODEL", "composer-2") or "composer-2",
         "ALPHA_CODEX_SANDBOX": pick_env("ALPHA_CODEX_SANDBOX", "danger-full-access")
         or "danger-full-access",
         "ALPHA_CODEX_TIMEOUT_SEC": pick_env("ALPHA_CODEX_TIMEOUT_SEC", "3600") or "3600",

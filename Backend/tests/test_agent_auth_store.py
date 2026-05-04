@@ -93,7 +93,7 @@ def test_cursor_auth_store_uses_oauth_without_api_key_secret() -> None:
         store.initialize()
 
         initial = store.get_cursor(include_secret=False)
-        assert initial["preferred_model"] == "composer"
+        assert initial["preferred_model"] == "composer-2"
 
         saved = store.save_cursor(
             preferred_model="Composer 2",
@@ -105,13 +105,13 @@ def test_cursor_auth_store_uses_oauth_without_api_key_secret() -> None:
 
         assert saved["provider"] == "cursor"
         assert saved["auth_mode"] == "oauth"
-        assert saved["preferred_model"] == "composer"
+        assert saved["preferred_model"] == "composer-2"
         assert saved["approval_mode"] == "auto_edit"
         assert saved["has_api_key"] is False
         assert "api_key" not in saved
 
         updated = store.save_cursor(approval_mode="full_auto")
-        assert updated["preferred_model"] == "composer"
+        assert updated["preferred_model"] == "composer-2"
         assert updated["approval_mode"] == "full_auto"
 
         manual = store.save_cursor(preferred_model="gpt-5")
