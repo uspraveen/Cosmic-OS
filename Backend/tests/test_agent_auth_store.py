@@ -92,6 +92,9 @@ def test_cursor_auth_store_uses_oauth_without_api_key_secret() -> None:
         store = AgentAuthStore(db_path)
         store.initialize()
 
+        initial = store.get_cursor(include_secret=False)
+        assert initial["preferred_model"] == "composer"
+
         saved = store.save_cursor(
             preferred_model="Composer 2",
             approval_mode="auto_edit",

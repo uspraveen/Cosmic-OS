@@ -67,6 +67,7 @@ class AgentAuthStore:
             PROVIDER_CODEX,
             include_secret=include_secret,
             default_auth_mode="chatgpt",
+            default_preferred_model="auto",
         )
 
     def get_cursor(self, *, include_secret: bool = False) -> dict[str, Any]:
@@ -74,6 +75,7 @@ class AgentAuthStore:
             PROVIDER_CURSOR,
             include_secret=include_secret,
             default_auth_mode="oauth",
+            default_preferred_model="composer",
         )
 
     def save_codex(
@@ -310,6 +312,7 @@ class AgentAuthStore:
         *,
         include_secret: bool,
         default_auth_mode: str,
+        default_preferred_model: str,
     ) -> dict[str, Any]:
         conn = self._get_conn()
         row = conn.execute(
@@ -320,7 +323,7 @@ class AgentAuthStore:
             payload = {
                 "provider": provider,
                 "auth_mode": default_auth_mode,
-                "preferred_model": "auto",
+                "preferred_model": default_preferred_model,
                 "approval_mode": "suggest",
                 "vm_sync_enabled": True,
                 "has_api_key": False,
