@@ -10,6 +10,7 @@ from shared.contracts import AgentError, AgentResult, TaskEnvelope
 
 from .codex_runner import CodexRunResult, CodexWorkspaceRunner
 from .config import AGENT_ROOT, AlphaAgentConfig
+from .cursor_runner import CursorRunResult, CursorWorkspaceRunner
 from .docker_runner import DockerWorkspaceRunner
 from .project_registry import ProjectRecord, ProjectRegistry
 from .workspace_manager import WorkspaceManager
@@ -31,9 +32,11 @@ class AlphaAgent(AgentRuntime):
         self.workspace_manager = WorkspaceManager(
             self.config.alpha_root,
             codex_home=self.config.codex_home,
+            cursor_home=self.config.cursor_home,
         )
         self.docker_runner = DockerWorkspaceRunner(self.config)
         self.codex_runner = CodexWorkspaceRunner(self.config)
+        self.cursor_runner = CursorWorkspaceRunner(self.config)
         super().__init__(
             agent_card_path=AGENT_ROOT / "agent_card.yaml",
             redis_client=redis_client,
@@ -94,8 +97,8 @@ class AlphaAgent(AgentRuntime):
                     "Resolve or create Alpha project",
                     "Prepare isolated workspace directories",
                     "Inspect Docker runner readiness",
-                    "Verify Codex auth and execution readiness",
-                    "Execute task with Codex",
+                    "Verify Alpha CLI auth and execution readiness",
+                    "Execute task with selected Alpha CLI",
                 ]
             )
 
@@ -169,41 +172,42 @@ class AlphaAgent(AgentRuntime):
                     "project": project.as_dict(),
                     "workspace": paths.as_dict(),
                     "docker": docker_report,
-                    "codex": {"skipped": True, "reason": "prepare_only"},
-                    "next_action": "Call alpha.execute again without prepare_only to execute with Codex.",
+                    "harness": {"skipped": True, "reason": "prepare_only"},
+                    "next_action": "Call alpha.execute again without prepare_only to execute with the selected Alpha CLI.",
                 },
                 artifacts=[],
                 error=None,
             )
 
-        preferred_harness = str(task.input.get("preferred_harness") or "codex").strip().lower()
-        if preferred_harness not in {"auto", "codex"}:
+        preferred_harness = await self._resolve_preferred_harness(task)
+        if preferred_harness not in {"codex", "cursor"}:
             return self._fail(
                 code="UNSUPPORTED_OPERATION",
-                message="Alpha currently supports Codex execution. OpenCode and Cursor harnesses are planned but not wired.",
+                message="Alpha currently supports Codex and Cursor CLI execution. OpenCode is planned but not wired.",
                 next_action="ask_user",
             )
 
-        codex_status = await self._fetch_codex_status()
-        codex_ready = self._codex_status_is_ready(codex_status)
+        provider_status = await self._fetch_provider_status(preferred_harness)
+        provider_ready = self._provider_status_is_ready(provider_status)
+        provider_label = self._harness_label(preferred_harness)
         if self.step_plan is not None:
             await self.step_plan.update(
                 4,
-                "completed" if codex_ready else "failed",
-                "Codex is authenticated." if codex_ready else "Codex is not authenticated.",
+                "completed" if provider_ready else "failed",
+                f"{provider_label} is authenticated." if provider_ready else f"{provider_label} is not authenticated.",
             )
-        if not codex_ready:
+        if not provider_ready:
             project = self.registry.mark_task(
                 project.project_id,
                 task_id=task.task_id,
                 session_id=task.session_id,
                 local_path=str(paths.workspace),
                 summary=goal[:500],
-                status="codex_login_required",
+                status=f"{preferred_harness}_login_required",
             )
             return self._fail(
-                code="CODEX_LOGIN_REQUIRED",
-                message=self._codex_login_message(codex_status),
+                code=f"{preferred_harness.upper()}_LOGIN_REQUIRED",
+                message=self._provider_login_message(preferred_harness, provider_status),
                 next_action="ask_user",
             )
 
@@ -211,13 +215,13 @@ class AlphaAgent(AgentRuntime):
             task.task_id,
             "task.progress",
             {
-                "stage": "alpha.codex.started",
+                "stage": f"alpha.{preferred_harness}.started",
                 "project_id": project.project_id,
                 "workspace": str(paths.workspace),
             },
         )
 
-        async def emit_codex_terminal(entry: dict[str, Any]) -> None:
+        async def emit_alpha_terminal(entry: dict[str, Any]) -> None:
             text = str(entry.get("text") or "").strip()
             if not text:
                 return
@@ -225,66 +229,78 @@ class AlphaAgent(AgentRuntime):
                 task.task_id,
                 "task.progress",
                 {
-                    "stage": "alpha.codex.terminal",
+                    "stage": f"alpha.{preferred_harness}.terminal",
                     "project_id": project.project_id,
                     "workspace": str(paths.workspace),
                     "codex_terminal": {
                         "id": f"alpha_terminal_{uuid4().hex}",
                         "task_id": task.task_id,
+                        "provider": preferred_harness,
                         "stream": str(entry.get("stream") or "stdout"),
-                        "event_type": str(entry.get("event_type") or "codex.event"),
+                        "event_type": str(entry.get("event_type") or f"{preferred_harness}.event"),
                         "text": text[:2000],
                         "detail": str(entry.get("detail") or "").strip()[:2000] or None,
                     },
                 },
             )
 
-        await emit_codex_terminal(
+        await emit_alpha_terminal(
             {
                 "stream": "system",
-                "event_type": "codex.exec.started",
-                "text": "codex exec --json started",
+                "event_type": f"{preferred_harness}.exec.started",
+                "text": self._harness_start_message(preferred_harness),
                 "detail": str(paths.workspace),
             }
         )
-        codex_result = await self.codex_runner.run(
-            paths=paths,
-            prompt=self._build_codex_prompt(task=task, project=project, workspace=str(paths.workspace)),
-            model=self._select_codex_model(task, codex_status),
-            sandbox=self._select_codex_sandbox(task),
-            timeout_sec=self.config.codex_timeout_sec,
-            event_callback=emit_codex_terminal,
-        )
-        artifact = self.codex_runner.artifact_for_last_message(task_id=task.task_id, result=codex_result)
+        prompt = self._build_cli_prompt(task=task, project=project, workspace=str(paths.workspace))
+        if preferred_harness == "cursor":
+            run_result = await self.cursor_runner.run(
+                paths=paths,
+                prompt=prompt,
+                model=self._select_cursor_model(task, provider_status),
+                timeout_sec=self.config.cursor_timeout_sec,
+                event_callback=emit_alpha_terminal,
+            )
+            artifact = self.cursor_runner.artifact_for_last_message(task_id=task.task_id, result=run_result)
+        else:
+            run_result = await self.codex_runner.run(
+                paths=paths,
+                prompt=prompt,
+                model=self._select_codex_model(task, provider_status),
+                sandbox=self._select_codex_sandbox(task),
+                timeout_sec=self.config.codex_timeout_sec,
+                event_callback=emit_alpha_terminal,
+            )
+            artifact = self.codex_runner.artifact_for_last_message(task_id=task.task_id, result=run_result)
         artifacts = [artifact] if artifact is not None else []
         project = self.registry.mark_task(
             project.project_id,
             task_id=task.task_id,
             session_id=task.session_id,
             local_path=str(paths.workspace),
-            summary=(codex_result.last_message or goal)[:500],
-            status="completed" if codex_result.ok else "codex_failed",
+            summary=(run_result.last_message or goal)[:500],
+            status="completed" if run_result.ok else f"{preferred_harness}_failed",
         )
         await self.emit_event(
             task.task_id,
             "task.progress",
             {
-                "stage": "alpha.codex.completed" if codex_result.ok else "alpha.codex.failed",
+                "stage": f"alpha.{preferred_harness}.completed" if run_result.ok else f"alpha.{preferred_harness}.failed",
                 "project_id": project.project_id,
-                "returncode": codex_result.returncode,
-                "timed_out": codex_result.timed_out,
+                "returncode": run_result.returncode,
+                "timed_out": run_result.timed_out,
                 "artifact_ids": [item.artifact_id for item in artifacts],
             },
         )
         if self.step_plan is not None:
             await self.step_plan.update(
                 5,
-                "completed" if codex_result.ok else "failed",
-                "Codex completed the task." if codex_result.ok else "Codex execution failed.",
+                "completed" if run_result.ok else "failed",
+                f"{provider_label} completed the task." if run_result.ok else f"{provider_label} execution failed.",
             )
 
-        if not codex_result.ok:
-            return self._codex_failure(codex_result)
+        if not run_result.ok:
+            return self._cli_failure(preferred_harness, run_result)
 
         return AgentResult(
             status="completed",
@@ -293,8 +309,9 @@ class AlphaAgent(AgentRuntime):
                 "project": project.as_dict(),
                 "workspace": paths.as_dict(),
                 "docker": docker_report,
-                "codex": codex_result.as_dict(),
-                "next_action": "Review Codex output and continue with the same project_ref for follow-up work.",
+                "harness": preferred_harness,
+                preferred_harness: run_result.as_dict(),
+                "next_action": f"Review {provider_label} output and continue with the same project_ref for follow-up work.",
             },
             artifacts=artifacts,
             error=None,
@@ -337,6 +354,33 @@ class AlphaAgent(AgentRuntime):
             if path.exists():
                 path.read_text(encoding="utf-8")
 
+    async def _resolve_preferred_harness(self, task: TaskEnvelope) -> str:
+        explicit = str(task.input.get("preferred_harness") or "").strip().lower()
+        if explicit and explicit != "auto":
+            return explicit
+        settings = await self._fetch_alpha_settings()
+        return str(settings.get("preferred_harness") or "codex").strip().lower() or "codex"
+
+    async def _fetch_alpha_settings(self) -> dict[str, Any]:
+        if not self.gateway_internal_token:
+            return {"preferred_harness": "codex"}
+        try:
+            response = await self._http_client.get(
+                f"{self.gateway_url.rstrip('/')}/internal/agents/alpha/config",
+                headers={"Authorization": f"Bearer {self.gateway_internal_token}"},
+                timeout=15.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return payload if isinstance(payload, dict) else {"preferred_harness": "codex"}
+        except Exception:
+            return {"preferred_harness": "codex"}
+
+    async def _fetch_provider_status(self, provider: str) -> dict[str, Any]:
+        if provider == "cursor":
+            return await self._fetch_cursor_status()
+        return await self._fetch_codex_status()
+
     async def _fetch_codex_status(self) -> dict[str, Any]:
         if not self.gateway_internal_token:
             return {
@@ -353,16 +397,42 @@ class AlphaAgent(AgentRuntime):
         payload = response.json()
         return payload if isinstance(payload, dict) else {}
 
-    def _codex_status_is_ready(self, payload: dict[str, Any]) -> bool:
+    async def _fetch_cursor_status(self) -> dict[str, Any]:
+        if not self.gateway_internal_token:
+            return {
+                "status": "unknown",
+                "login_required_reason": "gateway_internal_token_missing",
+                "cli": {"authenticated": False},
+            }
+        response = await self._http_client.get(
+            f"{self.gateway_url.rstrip('/')}/internal/agents/cursor/status",
+            headers={"Authorization": f"Bearer {self.gateway_internal_token}"},
+            timeout=15.0,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+
+    def _provider_status_is_ready(self, payload: dict[str, Any]) -> bool:
         cli = payload.get("cli") if isinstance(payload.get("cli"), dict) else {}
         return payload.get("status") == "authenticated" and bool(cli.get("authenticated"))
 
-    def _codex_login_message(self, payload: dict[str, Any]) -> str:
-        reason = self._optional_string(payload.get("login_required_reason")) or "codex_login_required"
+    def _provider_login_message(self, provider: str, payload: dict[str, Any]) -> str:
+        label = self._harness_label(provider)
+        reason = self._optional_string(payload.get("login_required_reason")) or f"{provider}_login_required"
+        settings_page = "Codex" if provider == "codex" else "Cursor"
         return (
-            "Codex is not ready for Alpha execution. "
-            f"Open Settings > Agents > Codex and complete login or API-key sync. Reason: {reason}."
+            f"{label} is not ready for Alpha execution. "
+            f"Open Settings > Agents > {settings_page} and complete login. Reason: {reason}."
         )
+
+    def _harness_label(self, provider: str) -> str:
+        return "Cursor CLI" if provider == "cursor" else "Codex"
+
+    def _harness_start_message(self, provider: str) -> str:
+        if provider == "cursor":
+            return "cursor-agent --print --force --output-format stream-json started"
+        return "codex exec --json started"
 
     def _select_codex_model(self, task: TaskEnvelope, codex_status: dict[str, Any]) -> str | None:
         for value in (
@@ -376,13 +446,25 @@ class AlphaAgent(AgentRuntime):
                 return normalized
         return None
 
+    def _select_cursor_model(self, task: TaskEnvelope, cursor_status: dict[str, Any]) -> str | None:
+        for value in (
+            task.input.get("model"),
+            task.input.get("preferred_model"),
+            cursor_status.get("preferred_model"),
+            self.config.cursor_default_model,
+        ):
+            normalized = self._optional_string(value)
+            if normalized and normalized.lower() != "auto":
+                return normalized
+        return None
+
     def _select_codex_sandbox(self, task: TaskEnvelope) -> str:
         normalized = str(task.input.get("codex_sandbox") or self.config.codex_sandbox).strip()
         if normalized in {"read-only", "workspace-write", "danger-full-access"}:
             return normalized
         return self.config.codex_sandbox
 
-    def _build_codex_prompt(
+    def _build_cli_prompt(
         self,
         *,
         task: TaskEnvelope,
@@ -419,9 +501,12 @@ class AlphaAgent(AgentRuntime):
             lines.extend(f"- {key}: {value}" for key, value in sorted(constraints.items()))
         return "\n".join(lines)
 
-    def _codex_failure(self, result: CodexRunResult) -> AgentResult:
+    def _cli_failure(self, provider: str, result: CodexRunResult | CursorRunResult) -> AgentResult:
         code = "TIMEOUT" if result.timed_out else "CODEX_EXECUTION_FAILED"
-        stderr = result.stderr.strip() or result.stdout.strip() or "Codex execution failed without output."
+        if provider == "cursor" and code != "TIMEOUT":
+            code = "CURSOR_EXECUTION_FAILED"
+        fallback = f"{self._harness_label(provider)} execution failed without output."
+        stderr = result.stderr.strip() or result.stdout.strip() or fallback
         return self._fail(
             code=code,
             message=stderr[-1000:],

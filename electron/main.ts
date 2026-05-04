@@ -2144,6 +2144,80 @@ app.whenReady().then(() => {
     })
   })
 
+  ipcMain.handle('gateway:get-cursor-status', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/agents/cursor/status', { timeoutMs: 20000 })
+  })
+
+  ipcMain.handle('gateway:save-cursor-config', async (_, payload: {
+    preferredModel?: string
+    approvalMode?: string
+    vmSyncEnabled?: boolean
+  }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/agents/cursor/config', {
+      method: 'POST',
+      body: {
+        preferred_model: payload?.preferredModel,
+        approval_mode: payload?.approvalMode,
+        vm_sync_enabled: payload?.vmSyncEnabled,
+      },
+      timeoutMs: 45000,
+    })
+  })
+
+  ipcMain.handle('gateway:start-cursor-login', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/agents/cursor/login/start', {
+      method: 'POST',
+      timeoutMs: 30000,
+    })
+  })
+
+  ipcMain.handle('gateway:logout-cursor', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/agents/cursor/auth', {
+      method: 'DELETE',
+      timeoutMs: 25000,
+    })
+  })
+
+  ipcMain.handle('gateway:get-alpha-agent-config', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/agents/alpha/config', { timeoutMs: 15000 })
+  })
+
+  ipcMain.handle('gateway:save-alpha-agent-config', async (_, payload: {
+    preferredHarness?: string
+  }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/agents/alpha/config', {
+      method: 'POST',
+      body: {
+        preferred_harness: payload?.preferredHarness,
+      },
+      timeoutMs: 15000,
+    })
+  })
+
   ipcMain.handle('gateway:download-output-artifact', async (_, payload: {
     messageId?: string
     artifactId?: string

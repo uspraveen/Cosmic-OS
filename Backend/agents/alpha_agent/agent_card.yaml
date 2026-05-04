@@ -3,12 +3,12 @@ display_name: Alpha Agent
 description: >
   Alpha-stage project operator for COSMIC. It prepares isolated project
   workspaces and executes high-level software, deployment, and
-  capability-bootstrap tasks through the Codex CLI harness when the desktop
-  Codex settings are authenticated.
+  capability-bootstrap tasks through the selected Codex or Cursor CLI harness
+  when the desktop agent provider settings are authenticated.
 
 intents:
   - name: alpha.execute
-    description: Execute or continue a high-level Alpha project task with Codex.
+    description: Execute or continue a high-level Alpha project task with the selected CLI harness.
     input_schema: schemas/intents/alpha.execute.input.json
     output_schema: schemas/intents/alpha.execute.output.json
     timeout_sec: 3600
@@ -34,6 +34,7 @@ artifact_types:
   - alpha_task_log
   - alpha_container_summary
   - alpha_codex_report
+  - alpha_cursor_report
 
 policies:
   network_access: true
@@ -45,6 +46,7 @@ policies:
   tool_access:
     - docker_workspace_run
     - codex_exec
+    - cursor_agent
   allowed_senders:
     - cosmic/orchestrator:1.0.0
   intent_authorization:
@@ -52,9 +54,10 @@ policies:
     alpha.recall_project: [cosmic/orchestrator:1.0.0]
 
 sandbox:
-  boundary: alpha_workspace_codex_sandbox
+  boundary: alpha_workspace_cli_sandbox
   workspace_root_env: ALPHA_WORKSPACE_ROOT
   codex_home_env: ALPHA_CODEX_HOME
+  cursor_home_env: ALPHA_CURSOR_HOME
   codex_sandbox_default: danger-full-access
   docker_socket_mount_default: false
   host_deployment_broker_required: true
@@ -62,8 +65,8 @@ sandbox:
 safety:
   alpha_warning: true
   service_enabled_by_env: ALPHA_AGENT_ENABLED
-  require_codex_auth_from_desktop_settings: true
-  execution_scope: codex_danger_full_access_in_alpha_workspace
+  require_cli_auth_from_desktop_settings: true
+  execution_scope: selected_cli_in_alpha_workspace
   audit_all_container_runs: true
 
 sla:

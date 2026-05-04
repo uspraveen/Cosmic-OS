@@ -220,6 +220,27 @@ def test_desktop_preferences_snapshot_falls_back_when_store_read_fails() -> None
         assert snapshot["visual_response_enhancement"]["updated_at"]
 
 
+def test_alpha_execution_provider_preference_defaults_and_updates() -> None:
+    with _runtime_root() as root:
+        runtime = build_runtime(root)
+        runtime.preference_store.initialize()
+
+        initial = runtime.preference_store.get_alpha_execution_provider()
+        assert initial["preferred_harness"] == "codex"
+        assert initial["revision"] == 1
+
+        updated = runtime.preference_store.set_alpha_execution_provider(
+            "cursor",
+            source="test",
+            device_id="desk_alpha_1",
+        )
+
+        assert updated["preferred_harness"] == "cursor"
+        assert updated["revision"] == 2
+        assert updated["updated_source"] == "test"
+        assert updated["updated_device_id"] == "desk_alpha_1"
+
+
 @pytest.mark.asyncio
 async def test_process_incoming_message_pins_gateway_preferences_metadata() -> None:
     with _runtime_root() as root:

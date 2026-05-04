@@ -69,6 +69,16 @@ class CodexAgentConfigRequest(BaseModel):
     vm_sync_enabled: bool | None = None
 
 
+class CursorAgentConfigRequest(BaseModel):
+    preferred_model: str | None = Field(default=None, max_length=80)
+    approval_mode: str | None = Field(default=None, max_length=32)
+    vm_sync_enabled: bool | None = None
+
+
+class AlphaAgentConfigRequest(BaseModel):
+    preferred_harness: str | None = Field(default=None, max_length=32)
+
+
 class TaskInputReplyRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=8000)
 
@@ -1418,6 +1428,38 @@ async def get_internal_codex_status(
     return await runtime.get_desktop_codex_status()
 
 
+@router.get("/desktop/agents/cursor/status")
+async def get_desktop_cursor_status(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.get_desktop_cursor_status()
+
+
+@router.get("/internal/agents/cursor/status")
+async def get_internal_cursor_status(
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.get_desktop_cursor_status()
+
+
+@router.get("/desktop/agents/alpha/config")
+async def get_desktop_alpha_agent_config(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.get_desktop_alpha_agent_config()
+
+
+@router.get("/internal/agents/alpha/config")
+async def get_internal_alpha_agent_config(
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.get_desktop_alpha_agent_config()
+
+
 @router.post("/desktop/agents/codex/config")
 async def save_desktop_codex_config(
     body: CodexAgentConfigRequest,
@@ -1433,6 +1475,31 @@ async def save_desktop_codex_config(
     )
 
 
+@router.post("/desktop/agents/cursor/config")
+async def save_desktop_cursor_config(
+    body: CursorAgentConfigRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.save_desktop_cursor_config(
+        preferred_model=body.preferred_model,
+        approval_mode=body.approval_mode,
+        vm_sync_enabled=body.vm_sync_enabled,
+    )
+
+
+@router.post("/desktop/agents/alpha/config")
+async def save_desktop_alpha_agent_config(
+    body: AlphaAgentConfigRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.save_desktop_alpha_agent_config(
+        preferred_harness=body.preferred_harness,
+        source="desktop",
+    )
+
+
 @router.post("/desktop/agents/codex/login/start")
 async def start_desktop_codex_login(
     _: None = Depends(require_local_api_token),
@@ -1441,12 +1508,28 @@ async def start_desktop_codex_login(
     return await runtime.start_desktop_codex_login()
 
 
+@router.post("/desktop/agents/cursor/login/start")
+async def start_desktop_cursor_login(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.start_desktop_cursor_login()
+
+
 @router.delete("/desktop/agents/codex/auth")
 async def logout_desktop_codex(
     _: None = Depends(require_local_api_token),
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
     return await runtime.logout_desktop_codex()
+
+
+@router.delete("/desktop/agents/cursor/auth")
+async def logout_desktop_cursor(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.logout_desktop_cursor()
 
 
 @router.get("/desktop/messages/{message_id}/artifacts/{artifact_id}/download")

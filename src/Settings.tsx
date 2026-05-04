@@ -9,6 +9,7 @@ import TelegramIntegrationSettings from './TelegramIntegrationSettings'
 import MobileDevicesSettings from './MobileDevicesSettings'
 import GatewayPreferencesSettings from './GatewayPreferencesSettings'
 import CodexAgentSettings from './CodexAgentSettings'
+import CursorAgentSettings from './CursorAgentSettings'
 import { GOOGLE_TOOL_DEFINITIONS } from './integrations'
 import type { SearchPosition } from './App'
 import './settings.css'
@@ -51,6 +52,7 @@ type SettingsView =
   | 'devices'
   | 'agents'
   | 'agents-codex'
+  | 'agents-cursor'
   | 'integrations'
   | 'integrations-google'
   | 'integrations-whatsapp'
@@ -71,6 +73,9 @@ export default function Settings({
   onLogout,
 }: SettingsProps) {
   const [currentView, setCurrentView] = useState<SettingsView>('main')
+  const [alphaPreferredHarness, setAlphaPreferredHarness] = useState<'codex' | 'cursor'>('codex')
+  const [alphaConfigLoading, setAlphaConfigLoading] = useState(false)
+  const [alphaConfigError, setAlphaConfigError] = useState('')
 
   useEffect(() => {
     const handleEsc = (e: KeyboardEvent) => {
@@ -83,6 +88,28 @@ export default function Settings({
   useEffect(() => {
     if (!isOpen) setCurrentView('main')
   }, [isOpen])
+
+  useEffect(() => {
+    if (!isOpen || currentView !== 'agents') return
+    let cancelled = false
+    const loadAlphaConfig = async () => {
+      setAlphaConfigLoading(true)
+      setAlphaConfigError('')
+      try {
+        const config = await window.cosmic?.getGatewayAlphaAgentConfig()
+        const harness = String(config?.preferred_harness || '').trim().toLowerCase()
+        if (!cancelled) setAlphaPreferredHarness(harness === 'cursor' ? 'cursor' : 'codex')
+      } catch (err) {
+        if (!cancelled) setAlphaConfigError(err instanceof Error ? err.message : 'Unable to load Alpha provider selection.')
+      } finally {
+        if (!cancelled) setAlphaConfigLoading(false)
+      }
+    }
+    void loadAlphaConfig()
+    return () => {
+      cancelled = true
+    }
+  }, [isOpen, currentView])
 
   if (!isOpen) return null
 
@@ -103,6 +130,8 @@ export default function Settings({
               ? 'Agents'
             : currentView === 'agents-codex'
               ? 'Codex'
+            : currentView === 'agents-cursor'
+              ? 'Cursor'
             : currentView === 'integrations'
               ? 'Integrations'
               : currentView === 'integrations-whatsapp'
@@ -120,7 +149,7 @@ export default function Settings({
       setCurrentView('integrations')
       return
     }
-    if (currentView === 'agents-codex') {
+    if (currentView === 'agents-codex' || currentView === 'agents-cursor') {
       setCurrentView('agents')
       return
     }
@@ -138,6 +167,20 @@ export default function Settings({
       : gatewayConnection?.state === 'error'
         ? 'Gateway unavailable'
         : 'Signed in to VM'
+  const saveAlphaPreferredHarness = async (preferredHarness: 'codex' | 'cursor') => {
+    setAlphaPreferredHarness(preferredHarness)
+    setAlphaConfigError('')
+    setAlphaConfigLoading(true)
+    try {
+      const config = await window.cosmic?.saveGatewayAlphaAgentConfig({ preferredHarness })
+      const harness = String(config?.preferred_harness || preferredHarness).trim().toLowerCase()
+      setAlphaPreferredHarness(harness === 'cursor' ? 'cursor' : 'codex')
+    } catch (err) {
+      setAlphaConfigError(err instanceof Error ? err.message : 'Unable to save Alpha provider selection.')
+    } finally {
+      setAlphaConfigLoading(false)
+    }
+  }
 
   return (
     <div
@@ -348,9 +391,38 @@ export default function Settings({
                   </div>
                   <div className="cosmic-agents-hero-status">
                     <span className="cosmic-agents-live-dot on" aria-hidden="true" />
-                    <span className="cosmic-agents-status-text">1 provider active</span>
+                    <span className="cosmic-agents-status-text">{alphaPreferredHarness === 'cursor' ? 'Cursor selected' : 'Codex selected'}</span>
                   </div>
                 </div>
+
+                <div className="cosmic-alpha-provider-switch">
+                  <div className="cosmic-alpha-provider-switch-copy">
+                    <span className="cosmic-agents-section-label">Default Alpha Runner</span>
+                    <strong>{alphaPreferredHarness === 'cursor' ? 'Cursor CLI' : 'Codex'}</strong>
+                    <small>Used when the orchestrator delegates `alpha.execute` without an explicit harness.</small>
+                  </div>
+                  <div className="cosmic-alpha-provider-toggle" role="group" aria-label="Default Alpha runner">
+                    <button
+                      type="button"
+                      className={alphaPreferredHarness === 'codex' ? 'active' : ''}
+                      onClick={() => void saveAlphaPreferredHarness('codex')}
+                      disabled={alphaConfigLoading}
+                    >
+                      <Code2 size={14} />
+                      Codex
+                    </button>
+                    <button
+                      type="button"
+                      className={alphaPreferredHarness === 'cursor' ? 'active' : ''}
+                      onClick={() => void saveAlphaPreferredHarness('cursor')}
+                      disabled={alphaConfigLoading}
+                    >
+                      <Terminal size={14} />
+                      Cursor
+                    </button>
+                  </div>
+                </div>
+                {alphaConfigError ? <div className="cosmic-agents-inline-error">{alphaConfigError}</div> : null}
 
                 <div className="cosmic-agents-section-label">Active Providers</div>
                 <button className="cosmic-agents-provider-card" onClick={() => setCurrentView('agents-codex')}>
@@ -365,7 +437,30 @@ export default function Settings({
                     <span>ChatGPT sign-in or OpenAI API key for the Alpha coding runner.</span>
                   </div>
                   <div className="cosmic-agents-provider-meta">
-                    <span className="cosmic-agents-status-pill ready">Ready</span>
+                    <span className={`cosmic-agents-status-pill ${alphaPreferredHarness === 'codex' ? 'ready' : 'pending'}`}>
+                      {alphaPreferredHarness === 'codex' ? 'Selected' : 'Available'}
+                    </span>
+                  </div>
+                  <div className="cosmic-agents-provider-arrow" aria-hidden="true">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
+                  </div>
+                </button>
+
+                <button className="cosmic-agents-provider-card" onClick={() => setCurrentView('agents-cursor')}>
+                  <div className="cosmic-agents-provider-icon cursor" aria-hidden="true">
+                    <Terminal size={22} />
+                  </div>
+                  <div className="cosmic-agents-provider-info">
+                    <div className="cosmic-agents-provider-title">
+                      <strong>Cursor CLI</strong>
+                      <span className="cosmic-agents-beta-pill">OAuth</span>
+                    </div>
+                    <span>Browser sign-in for the Cursor Agent runner on the VM.</span>
+                  </div>
+                  <div className="cosmic-agents-provider-meta">
+                    <span className={`cosmic-agents-status-pill ${alphaPreferredHarness === 'cursor' ? 'ready' : 'pending'}`}>
+                      {alphaPreferredHarness === 'cursor' ? 'Selected' : 'Available'}
+                    </span>
                   </div>
                   <div className="cosmic-agents-provider-arrow" aria-hidden="true">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
@@ -383,21 +478,16 @@ export default function Settings({
                       <span>Provider slot reserved for future integration.</span>
                     </div>
                   </div>
-                  <div className="cosmic-agents-roadmap-card">
-                    <div className="cosmic-agents-roadmap-icon" aria-hidden="true">
-                      <Terminal size={18} />
-                    </div>
-                    <div>
-                      <strong>Cursor CLI</strong>
-                      <span>Provider slot reserved for future integration.</span>
-                    </div>
-                  </div>
                 </div>
               </div>
             )}
 
             {currentView === 'agents-codex' && (
               <CodexAgentSettings active={currentView === 'agents-codex'} />
+            )}
+
+            {currentView === 'agents-cursor' && (
+              <CursorAgentSettings active={currentView === 'agents-cursor'} />
             )}
 
             {currentView === 'integrations-google' && (

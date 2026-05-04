@@ -12,6 +12,7 @@ from .credentials.encryption import decrypt_token, encrypt_token_str
 
 
 PROVIDER_CODEX = "codex"
+PROVIDER_CURSOR = "cursor"
 
 
 def _utcnow_iso() -> str:
@@ -51,7 +52,18 @@ class AgentAuthStore:
             self._conn = None
 
     def get_codex(self, *, include_secret: bool = False) -> dict[str, Any]:
-        return self._get_provider(PROVIDER_CODEX, include_secret=include_secret)
+        return self._get_provider(
+            PROVIDER_CODEX,
+            include_secret=include_secret,
+            default_auth_mode="chatgpt",
+        )
+
+    def get_cursor(self, *, include_secret: bool = False) -> dict[str, Any]:
+        return self._get_provider(
+            PROVIDER_CURSOR,
+            include_secret=include_secret,
+            default_auth_mode="oauth",
+        )
 
     def save_codex(
         self,
@@ -140,6 +152,84 @@ class AgentAuthStore:
         conn.commit()
         return self.get_codex(include_secret=False)
 
+    def save_cursor(
+        self,
+        *,
+        auth_mode: str | None = None,
+        preferred_model: str | None = None,
+        approval_mode: str | None = None,
+        vm_sync_enabled: bool | None = None,
+        status: str | None = None,
+        login_required_reason: str | None = None,
+        last_cli_status: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        current = self.get_cursor(include_secret=False)
+        next_auth_mode = _normalize_choice(
+            auth_mode,
+            allowed={"oauth"},
+            fallback=str(current.get("auth_mode") or "oauth"),
+        )
+        next_model = _normalize_cursor_model(
+            preferred_model,
+            fallback=str(current.get("preferred_model") or "auto"),
+        )
+        next_approval = _normalize_choice(
+            approval_mode,
+            allowed={"suggest", "auto_edit", "full_auto"},
+            fallback=str(current.get("approval_mode") or "suggest"),
+        )
+        next_sync_enabled = (
+            bool(vm_sync_enabled)
+            if vm_sync_enabled is not None
+            else bool(current.get("vm_sync_enabled", True))
+        )
+        cli_status = (
+            last_cli_status
+            if isinstance(last_cli_status, dict)
+            else current.get("last_cli_status")
+            if isinstance(current.get("last_cli_status"), dict)
+            else {}
+        )
+
+        now = _utcnow_iso()
+        conn = self._get_conn()
+        conn.execute(
+            """INSERT INTO agent_provider_auth
+               (provider, auth_mode, preferred_model, approval_mode, vm_sync_enabled,
+                encrypted_api_key, has_api_key, status, login_required_reason,
+                last_cli_status_json, updated_at)
+               VALUES (?, ?, ?, ?, ?, '', 0, ?, ?, ?, ?)
+               ON CONFLICT(provider) DO UPDATE SET
+                 auth_mode = excluded.auth_mode,
+                 preferred_model = excluded.preferred_model,
+                 approval_mode = excluded.approval_mode,
+                 vm_sync_enabled = excluded.vm_sync_enabled,
+                 encrypted_api_key = '',
+                 has_api_key = 0,
+                 status = excluded.status,
+                 login_required_reason = excluded.login_required_reason,
+                 last_cli_status_json = excluded.last_cli_status_json,
+                 updated_at = excluded.updated_at""",
+            [
+                PROVIDER_CURSOR,
+                next_auth_mode,
+                next_model,
+                next_approval,
+                1 if next_sync_enabled else 0,
+                (status or str(current.get("status") or "not_configured")).strip()
+                or "not_configured",
+                (
+                    login_required_reason
+                    if login_required_reason is not None
+                    else str(current.get("login_required_reason") or "")
+                ),
+                json.dumps(cli_status),
+                now,
+            ],
+        )
+        conn.commit()
+        return self.get_cursor(include_secret=False)
+
     def clear_codex_api_key(
         self,
         *,
@@ -178,6 +268,24 @@ class AgentAuthStore:
         conn.commit()
         return self.get_codex(include_secret=False)
 
+    def clear_cursor_auth(
+        self,
+        *,
+        status: str = "logged_out",
+        login_required_reason: str = "user_logged_out",
+        last_cli_status: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        current = self.get_cursor(include_secret=False)
+        return self.save_cursor(
+            auth_mode="oauth",
+            preferred_model=str(current.get("preferred_model") or "auto"),
+            approval_mode=str(current.get("approval_mode") or "suggest"),
+            vm_sync_enabled=bool(current.get("vm_sync_enabled", True)),
+            status=status,
+            login_required_reason=login_required_reason,
+            last_cli_status=last_cli_status or {},
+        )
+
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
             self._conn = connect_sync(self._db_path)
@@ -185,7 +293,13 @@ class AgentAuthStore:
             self._conn.commit()
         return self._conn
 
-    def _get_provider(self, provider: str, *, include_secret: bool) -> dict[str, Any]:
+    def _get_provider(
+        self,
+        provider: str,
+        *,
+        include_secret: bool,
+        default_auth_mode: str,
+    ) -> dict[str, Any]:
         conn = self._get_conn()
         row = conn.execute(
             "SELECT * FROM agent_provider_auth WHERE provider = ?",
@@ -194,7 +308,7 @@ class AgentAuthStore:
         if row is None:
             payload = {
                 "provider": provider,
-                "auth_mode": "chatgpt",
+                "auth_mode": default_auth_mode,
                 "preferred_model": "auto",
                 "approval_mode": "suggest",
                 "vm_sync_enabled": True,
@@ -244,3 +358,12 @@ def _normalize_choice(value: str | None, *, allowed: set[str], fallback: str) ->
     if normalized in allowed:
         return normalized
     return fallback if fallback in allowed else sorted(allowed)[0]
+
+
+def _normalize_cursor_model(value: str | None, *, fallback: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        normalized = fallback.strip() if fallback else "auto"
+    if not normalized:
+        return "auto"
+    return normalized[:80]

@@ -35,15 +35,15 @@
       "type": "string",
       "enum": ["codex", "opencode", "cursor", "auto"],
       "default": "codex",
-      "description": "Preferred execution harness. Codex and auto are currently executable."
+      "description": "Preferred execution harness. Codex, Cursor, and auto are currently executable."
     },
     "preferred_model": {
       "type": ["string", "null"],
-      "description": "Optional Codex model override for this task."
+      "description": "Optional CLI model override for this task."
     },
     "model": {
       "type": ["string", "null"],
-      "description": "Optional Codex model override for this task."
+      "description": "Optional CLI model override for this task."
     },
     "codex_sandbox": {
       "type": "string",
@@ -74,7 +74,7 @@
     "prepare_only": {
       "type": "boolean",
       "default": false,
-      "description": "Prepare or recall the Alpha workspace without running Codex."
+      "description": "Prepare or recall the Alpha workspace without running the selected CLI."
     }
   },
   "required": ["goal"]

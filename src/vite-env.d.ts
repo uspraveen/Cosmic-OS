@@ -130,6 +130,18 @@ interface Window {
     }) => Promise<any>
     startGatewayCodexLogin: () => Promise<any>
     logoutGatewayCodex: () => Promise<any>
+    getGatewayCursorStatus: () => Promise<any>
+    saveGatewayCursorConfig: (payload: {
+      preferredModel?: string
+      approvalMode?: string
+      vmSyncEnabled?: boolean
+    }) => Promise<any>
+    startGatewayCursorLogin: () => Promise<any>
+    logoutGatewayCursor: () => Promise<any>
+    getGatewayAlphaAgentConfig: () => Promise<any>
+    saveGatewayAlphaAgentConfig: (payload: {
+      preferredHarness?: string
+    }) => Promise<any>
     pickGatewayDocuments: () => Promise<{ documents: GatewayPendingDocumentAttachment[] }>
     sendGatewayQuery: (payload: {
       content: string

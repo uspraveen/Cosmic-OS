@@ -2,11 +2,11 @@
 
 ## Execution Safety
 
-- Alpha V1 is workspace-preparation only.
-- Do not execute arbitrary user goals.
-- Do not run Codex/OpenCode/Cursor harnesses until those harnesses are implemented and reviewed.
+- Alpha executes high-level user goals through reviewed CLI harnesses only.
+- Do not execute arbitrary user goals outside the prepared Alpha workspace unless the user's goal explicitly requires VM-level setup.
+- Codex and Cursor harnesses are implemented. OpenCode remains planned.
 - Docker task containers are the intended host isolation boundary.
-- Codex sandbox flags are the future inner execution policy.
+- Codex sandbox flags are the inner execution policy for Codex runs.
 
 ## Error Handling
 
@@ -19,4 +19,3 @@
 
 - Access credentials only through runtime-provided `self.auth` if a future intent needs them.
 - Never serialize credentials into events, artifacts, logs, `store/`, `runtime/`, or project workspaces.
-

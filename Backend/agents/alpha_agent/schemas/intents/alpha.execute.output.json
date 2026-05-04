@@ -7,8 +7,10 @@
     "project": { "type": "object" },
     "workspace": { "type": "object" },
     "docker": { "type": "object" },
+    "harness": { "type": ["string", "object"] },
     "codex": { "type": "object" },
+    "cursor": { "type": "object" },
     "next_action": { "type": "string" }
   },
-  "required": ["status", "project", "workspace", "codex", "next_action"]
+  "required": ["status", "project", "workspace", "next_action"]
 }

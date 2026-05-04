@@ -54,6 +54,13 @@ def _default_alpha_codex_home() -> Path:
     return alpha_root / "homes" / "codex"
 
 
+def _default_alpha_cursor_home() -> Path:
+    if os.name == "nt":
+        return BACKEND_ROOT / "agents" / "alpha_agent" / "runtime" / "alpha" / "homes" / "cursor"
+    alpha_root = Path(os.getenv("ALPHA_WORKSPACE_ROOT", "/var/lib/cosmic/alpha")).expanduser()
+    return alpha_root / "homes" / "cursor"
+
+
 @dataclass(slots=True)
 class GatewayConfig:
     host: str = "0.0.0.0"
@@ -84,6 +91,7 @@ class GatewayConfig:
         BACKEND_ROOT / "gateway" / "agent_email_integrations.db"
     )
     alpha_codex_home: Path = _default_alpha_codex_home()
+    alpha_cursor_home: Path = _default_alpha_cursor_home()
     preferences_db_path: Path = BACKEND_ROOT / "gateway" / "preferences.db"
     sessions_db_path: Path = BACKEND_ROOT / "gateway" / "sessions.db"
     mobile_devices_db_path: Path = BACKEND_ROOT / "gateway" / "mobile_devices.db"
@@ -258,6 +266,12 @@ class GatewayConfig:
                 os.getenv(
                     "ALPHA_CODEX_HOME",
                     os.getenv("CODEX_HOME", str(_default_alpha_codex_home())),
+                )
+            ).expanduser(),
+            alpha_cursor_home=Path(
+                os.getenv(
+                    "ALPHA_CURSOR_HOME",
+                    os.getenv("CURSOR_HOME", str(_default_alpha_cursor_home())),
                 )
             ).expanduser(),
             preferences_db_path=Path(

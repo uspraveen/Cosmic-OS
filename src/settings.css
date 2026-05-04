@@ -5042,6 +5042,98 @@
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 }
 
+.cosmic-agents-provider-icon.cursor,
+.cosmic-agents-detail-hero-icon.cursor {
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.96), rgba(194, 224, 255, 0.9));
+  color: #0b1118;
+}
+
+.cosmic-alpha-provider-switch {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 14px;
+  align-items: center;
+  padding: 15px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01)),
+    rgba(10, 14, 20, 0.42);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+}
+
+.cosmic-alpha-provider-switch-copy {
+  min-width: 0;
+}
+
+.cosmic-alpha-provider-switch-copy strong {
+  display: block;
+  margin-top: 4px;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.cosmic-alpha-provider-switch-copy small {
+  display: block;
+  margin-top: 4px;
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.cosmic-alpha-provider-toggle {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.cosmic-alpha-provider-toggle button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease;
+}
+
+.cosmic-alpha-provider-toggle button:hover:not(:disabled) {
+  color: #fff;
+}
+
+.cosmic-alpha-provider-toggle button.active {
+  background: rgba(255, 255, 255, 0.94);
+  color: #0b0f14;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.22);
+}
+
+.cosmic-alpha-provider-toggle button:disabled {
+  cursor: default;
+  opacity: 0.68;
+}
+
+.cosmic-agents-inline-error {
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 69, 58, 0.18);
+  background: rgba(255, 69, 58, 0.1);
+  color: #ffaaa5;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .cosmic-agents-provider-info {
   flex: 1;
   display: flex;
@@ -5460,7 +5552,24 @@
   font-size: 12px;
   font-weight: 700;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
   transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.cosmic-agents-detail-btn.icon {
+  width: 38px;
+  height: 38px;
+  padding: 0;
+}
+
+.cosmic-agents-detail-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .cosmic-agents-detail-btn:hover:not(:disabled) {
@@ -5499,6 +5608,10 @@
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
+}
+
+.cosmic-agents-detail-model-grid.compact {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 .cosmic-agents-detail-model-card {
@@ -5565,6 +5678,10 @@
   height: 18px;
   border-radius: 50%;
   background: rgba(0, 122, 255, 0.25);
+  color: #7ab8ff;
+}
+
+.cosmic-agents-detail-model-check-icon {
   color: #7ab8ff;
 }
 
@@ -5790,6 +5907,26 @@
   text-decoration: underline;
 }
 
+.cosmic-agents-detail-login-output button {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  border-radius: 8px;
+  padding: 5px 7px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #9cc7ff;
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.cosmic-agents-detail-login-output button:hover {
+  background: rgba(255, 255, 255, 0.13);
+  color: #fff;
+}
+
 .cosmic-agents-detail-section-copy {
   margin: 0;
   font-size: 12px;
@@ -5864,6 +6001,23 @@
   .cosmic-agents-detail-model-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
+  }
+
+  .cosmic-alpha-provider-switch {
+    grid-template-columns: 1fr;
+  }
+
+  .cosmic-alpha-provider-toggle {
+    width: 100%;
+  }
+
+  .cosmic-alpha-provider-toggle button {
+    flex: 1;
+    justify-content: center;
+  }
+
+  .cosmic-agents-detail-model-grid.compact {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .cosmic-agents-detail-model-card {

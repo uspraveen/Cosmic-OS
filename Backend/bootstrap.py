@@ -158,6 +158,7 @@ PYTHON_CANDIDATES = [
 MIN_NODE_MAJOR = 20
 MERMAID_CLI_PACKAGE = "@mermaid-js/mermaid-cli"
 OPENAI_CODEX_CLI_PACKAGE = "@openai/codex"
+CURSOR_CLI_INSTALL_URL = "https://cursor.com/install"
 DEFAULT_RETRY_ATTEMPTS = 4
 DEFAULT_RETRY_INITIAL_DELAY_SEC = 1.5
 PACKAGE_NAMES: Dict[str, Dict[str, str]] = {
@@ -2610,6 +2611,8 @@ def build_alpha_agent_env_rendered(
         or "/var/lib/cosmic/alpha",
         "ALPHA_CODEX_HOME": pick_env("ALPHA_CODEX_HOME", "/var/lib/cosmic/alpha/homes/codex")
         or "/var/lib/cosmic/alpha/homes/codex",
+        "ALPHA_CURSOR_HOME": pick_env("ALPHA_CURSOR_HOME", "/var/lib/cosmic/alpha/homes/cursor")
+        or "/var/lib/cosmic/alpha/homes/cursor",
         "ALPHA_CODEX_MODEL": pick_env("ALPHA_CODEX_MODEL", "") or "",
         "ALPHA_CODEX_SANDBOX": pick_env("ALPHA_CODEX_SANDBOX", "danger-full-access")
         or "danger-full-access",
@@ -3578,6 +3581,34 @@ def ensure_openai_codex_cli() -> None:
     if not codex_version:
         raise BootstrapError("OpenAI Codex CLI is still unavailable after npm install.")
     log("OpenAI Codex CLI available: {0}".format(codex_version))
+
+
+def ensure_cursor_cli() -> None:
+    cursor_version = executable_version(["cursor-agent", "--version"])
+    if cursor_version:
+        log("Cursor CLI available: {0}".format(cursor_version))
+        return
+
+    manager = detect_package_manager()
+    if manager is not None:
+        packages = ["ca-certificates", "curl"]
+        if manager == "apk":
+            packages.append("bash")
+        install_system_packages(manager, packages)
+
+    log("Installing Cursor CLI for Alpha agent execution.")
+    run_with_retry(
+        ["bash", "-lc", "curl {0} -fsS | bash".format(CURSOR_CLI_INSTALL_URL)],
+        capture_output=False,
+    )
+    cursor_version = executable_version(["cursor-agent", "--version"])
+    if not cursor_version:
+        local_cursor = Path.home() / ".local" / "bin" / "cursor-agent"
+        if local_cursor.exists():
+            cursor_version = executable_version([str(local_cursor), "--version"])
+    if not cursor_version:
+        raise BootstrapError("Cursor CLI is still unavailable after install.")
+    log("Cursor CLI available: {0}".format(cursor_version))
 
 
 def load_package_json(package_json: Path) -> dict:
@@ -4908,6 +4939,11 @@ def doctor(
     print(
         "  codex cli          : {0}".format(
             executable_version(["codex", "--version"]) or "no"
+        )
+    )
+    print(
+        "  cursor cli         : {0}".format(
+            executable_version(["cursor-agent", "--version"]) or "no"
         )
     )
     print(
@@ -6331,6 +6367,7 @@ def bootstrap(
     setup_whatsapp_bridge(bridge_dir)
     setup_diagram_renderers()
     ensure_openai_codex_cli()
+    ensure_cursor_cli()
     if not skip_edge and edge_setup_script is not None and gateway_env_path is not None:
         setup_vm_edge(
             edge_setup_script,
@@ -6684,6 +6721,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Install the OpenAI Codex CLI used by the Alpha agent runner.",
     )
     subparsers.add_parser(
+        "setup-cursor-cli",
+        help="Install the Cursor CLI used by the Alpha agent runner.",
+    )
+    subparsers.add_parser(
         "setup-env",
         help="Create missing env files from committed *.env.example templates.",
     )
@@ -6818,6 +6859,8 @@ def main() -> int:
             setup_whatsapp_bridge(bridge_dir)
         elif command == "setup-codex-cli":
             ensure_openai_codex_cli()
+        elif command == "setup-cursor-cli":
+            ensure_cursor_cli()
         elif command == "setup-edge":
             setup_vm_edge(
                 edge_setup_script,

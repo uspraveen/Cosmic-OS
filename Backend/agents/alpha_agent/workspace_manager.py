@@ -31,9 +31,16 @@ class WorkspacePaths:
 
 
 class WorkspaceManager:
-    def __init__(self, alpha_root: str | Path, *, codex_home: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        alpha_root: str | Path,
+        *,
+        codex_home: str | Path | None = None,
+        cursor_home: str | Path | None = None,
+    ) -> None:
         self.alpha_root = Path(alpha_root).expanduser()
         self.codex_home = Path(codex_home).expanduser() if codex_home else self.alpha_root / "homes" / "codex"
+        self.cursor_home = Path(cursor_home).expanduser() if cursor_home else self.alpha_root / "homes" / "cursor"
 
     def ensure_base_layout(self) -> None:
         for child in (
@@ -58,7 +65,7 @@ class WorkspaceManager:
             artifacts=self.alpha_root / "artifacts" / normalized_task_id,
             codex_home=self.codex_home,
             opencode_home=self.alpha_root / "homes" / "opencode",
-            cursor_home=self.alpha_root / "homes" / "cursor",
+            cursor_home=self.cursor_home,
             deployments=self.alpha_root / "deployments",
             caches=self.alpha_root / "caches",
         )

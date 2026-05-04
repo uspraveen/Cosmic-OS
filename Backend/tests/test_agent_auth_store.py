@@ -84,3 +84,31 @@ def test_codex_auth_store_logout_clears_secret_but_preserves_preferences() -> No
         assert cleared["status"] == "logged_out"
         assert cleared["login_required_reason"] == "user_logged_out"
         assert store.get_codex(include_secret=True)["api_key"] == ""
+
+
+def test_cursor_auth_store_uses_oauth_without_api_key_secret() -> None:
+    with _store_root() as root:
+        db_path = root / "credentials.db"
+        store = AgentAuthStore(db_path)
+        store.initialize()
+
+        saved = store.save_cursor(
+            preferred_model="gpt-5",
+            approval_mode="auto_edit",
+            vm_sync_enabled=True,
+            status="authenticated",
+            last_cli_status={"ok": True},
+        )
+
+        assert saved["provider"] == "cursor"
+        assert saved["auth_mode"] == "oauth"
+        assert saved["preferred_model"] == "gpt-5"
+        assert saved["approval_mode"] == "auto_edit"
+        assert saved["has_api_key"] is False
+        assert "api_key" not in saved
+
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT encrypted_api_key, has_api_key FROM agent_provider_auth WHERE provider = 'cursor'"
+            ).fetchone()
+        assert row == ("", 0)

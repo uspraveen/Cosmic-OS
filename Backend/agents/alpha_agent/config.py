@@ -50,9 +50,12 @@ class AlphaAgentConfig:
     docker_timeout_sec: float
     allow_docker_smoke: bool
     codex_home: Path
+    cursor_home: Path
     codex_sandbox: str
     codex_timeout_sec: float
     codex_default_model: str
+    cursor_timeout_sec: float
+    cursor_default_model: str
 
     @classmethod
     def from_env(cls) -> "AlphaAgentConfig":
@@ -97,10 +100,21 @@ class AlphaAgentConfig:
                 / "homes"
                 / "codex"
             ),
+            cursor_home=(
+                _optional_path(os.getenv("ALPHA_CURSOR_HOME"))
+                or alpha_root
+                / "homes"
+                / "cursor"
+            ),
             codex_sandbox=codex_sandbox,
             codex_timeout_sec=max(
                 30.0,
                 float(os.getenv("ALPHA_CODEX_TIMEOUT_SEC", "3600") or "3600"),
             ),
             codex_default_model=os.getenv("ALPHA_CODEX_MODEL", "").strip(),
+            cursor_timeout_sec=max(
+                30.0,
+                float(os.getenv("ALPHA_CURSOR_TIMEOUT_SEC", "3600") or "3600"),
+            ),
+            cursor_default_model=os.getenv("ALPHA_CURSOR_MODEL", "").strip(),
         )

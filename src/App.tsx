@@ -229,6 +229,7 @@ interface ActivityLogEntry {
 interface AlphaTerminalEntry {
   id: string
   taskId?: string | null
+  provider?: string | null
   stream?: 'stdout' | 'stderr' | 'system'
   eventType?: string | null
   text: string
@@ -747,6 +748,9 @@ const normalizeAlphaTerminalEntry = (value: unknown): AlphaTerminalEntry | null 
       : typeof (value as any).taskId === 'string' && (value as any).taskId.trim()
         ? (value as any).taskId.trim()
         : null,
+    provider: typeof (value as any).provider === 'string' && (value as any).provider.trim()
+      ? (value as any).provider.trim().toLowerCase()
+      : null,
     stream,
     eventType: typeof (value as any).event_type === 'string' && (value as any).event_type.trim()
       ? (value as any).event_type.trim()
@@ -1379,6 +1383,7 @@ type AlphaConsoleStatus = 'running' | 'completed' | 'failed' | 'stopped'
 
 interface AlphaConsoleView {
   taskId: string | null
+  provider: string | null
   status: AlphaConsoleStatus
   lines: AlphaTerminalEntry[]
 }
@@ -1454,6 +1459,8 @@ const buildAlphaConsoleView = (
       eventType === 'task.cancelled' ||
       stage.includes('alpha.codex.completed') ||
       stage.includes('alpha.codex.failed') ||
+      stage.includes('alpha.cursor.completed') ||
+      stage.includes('alpha.cursor.failed') ||
       status === 'completed' ||
       status === 'failed' ||
       status === 'cancelled'
@@ -1470,9 +1477,17 @@ const buildAlphaConsoleView = (
 
   return {
     taskId,
+    provider: [...visibleTerminalEntries].reverse().find((entry) => entry.provider)?.provider || null,
     status,
     lines: visibleTerminalEntries.slice(-80),
   }
+}
+
+const formatAlphaProviderLabel = (provider?: string | null) => {
+  const normalized = String(provider || '').trim().toLowerCase()
+  if (normalized === 'cursor') return 'Cursor CLI'
+  if (normalized === 'codex') return 'Codex CLI'
+  return 'Alpha CLI'
 }
 
 const formatAlphaConsoleTime = (value?: string | null) => {
@@ -1549,7 +1564,7 @@ const AlphaAgentConsole = ({
           <span className="alpha-agent-console-icon" aria-hidden="true">
             <Terminal size={15} strokeWidth={2.1} />
           </span>
-          <span>Codex CLI</span>
+          <span>{formatAlphaProviderLabel(view.provider)}</span>
         </div>
         <div className="alpha-agent-console-meta">
           <span className="alpha-agent-console-status">{statusLabel}</span>

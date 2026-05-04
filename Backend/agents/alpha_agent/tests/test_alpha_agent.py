@@ -4,6 +4,7 @@ from pathlib import Path
 
 from agents.alpha_agent.codex_runner import CodexWorkspaceRunner
 from agents.alpha_agent.config import AlphaAgentConfig
+from agents.alpha_agent.cursor_runner import CursorWorkspaceRunner
 from agents.alpha_agent.docker_runner import DockerWorkspaceRunner
 from agents.alpha_agent.project_registry import ProjectRegistry
 from agents.alpha_agent.workspace_manager import WorkspaceManager
@@ -27,9 +28,12 @@ def _config(tmp_path: Path) -> AlphaAgentConfig:
         docker_timeout_sec=300.0,
         allow_docker_smoke=False,
         codex_home=tmp_path / "alpha" / "homes" / "codex",
+        cursor_home=tmp_path / "alpha" / "homes" / "cursor",
         codex_sandbox="workspace-write",
         codex_timeout_sec=3600.0,
         codex_default_model="",
+        cursor_timeout_sec=3600.0,
+        cursor_default_model="",
     )
 
 
@@ -118,3 +122,31 @@ def test_codex_runner_builds_workspace_write_exec_command(tmp_path: Path) -> Non
     assert "--output-last-message" in command
     assert "gpt-5.1-codex" in command
     assert command[-1] == "-"
+
+
+def test_cursor_runner_builds_headless_stream_command(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    paths = WorkspaceManager(
+        cfg.alpha_root,
+        codex_home=cfg.codex_home,
+        cursor_home=cfg.cursor_home,
+    ).prepare(
+        project_id="prj_abc123",
+        task_id="tsk_def456",
+    )
+    runner = CursorWorkspaceRunner(cfg)
+
+    command = runner.build_command(
+        paths=paths,
+        prompt="Build the app",
+        model="gpt-5",
+        stream_json=True,
+    )
+
+    assert "--print" in command
+    assert "--force" in command
+    assert "--output-format" in command
+    assert "stream-json" in command
+    assert "--model" in command
+    assert "gpt-5" in command
+    assert command[-1] == "Build the app"

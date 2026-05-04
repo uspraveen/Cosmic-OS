@@ -302,6 +302,7 @@ function normalizeCachedAlphaTerminalEntry(value: any) {
         : typeof value.taskId === 'string' && value.taskId.trim()
           ? value.taskId.trim()
           : null,
+    provider: typeof value.provider === 'string' && value.provider.trim() ? value.provider.trim().toLowerCase() : null,
     stream: rawStream === 'stderr' || rawStream === 'system' ? rawStream : 'stdout',
     event_type:
       typeof value.event_type === 'string' && value.event_type.trim()

@@ -380,6 +380,7 @@ class GatewayRuntime:
         self._system_metrics_network_sample: tuple[int, int, float] | None = None
         self._recent_push_dedupe: dict[str, float] = {}
         self._codex_login_session: dict[str, Any] | None = None
+        self._cursor_login_session: dict[str, Any] | None = None
 
     async def start(self) -> None:
         self.session_store.initialize()
@@ -500,6 +501,7 @@ class GatewayRuntime:
         self.active_requests_by_task.clear()
         await self.registry.stop_all()
         await self._stop_codex_login_session()
+        await self._stop_cursor_login_session()
         await self.model_router.stop()
         await self.orchestrator.stop()
         await self.memory_client.stop()
@@ -12069,6 +12071,139 @@ class GatewayRuntime:
             }
         )
 
+    async def get_desktop_cursor_status(self) -> dict[str, Any]:
+        settings = self.agent_auth_store.get_cursor(include_secret=False)
+        cli_status = await self._cursor_cli_status()
+        pending_login = self._cursor_login_session_snapshot()
+        effective_status = self._effective_cursor_status(settings, cli_status, pending_login)
+        updated = self.agent_auth_store.save_cursor(
+            status=effective_status["status"],
+            login_required_reason=effective_status["login_required_reason"],
+            last_cli_status=cli_status,
+        )
+        return self._redact_codex_status(
+            {
+                **updated,
+                "cli": cli_status,
+                "login_session": pending_login,
+                "cursor_home": str(self.config.alpha_cursor_home),
+            }
+        )
+
+    async def save_desktop_cursor_config(
+        self,
+        *,
+        preferred_model: str | None = None,
+        approval_mode: str | None = None,
+        vm_sync_enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        self.agent_auth_store.save_cursor(
+            auth_mode="oauth",
+            preferred_model=preferred_model,
+            approval_mode=approval_mode,
+            vm_sync_enabled=vm_sync_enabled,
+        )
+        return await self.get_desktop_cursor_status()
+
+    async def start_desktop_cursor_login(self) -> dict[str, Any]:
+        self.agent_auth_store.save_cursor(
+            auth_mode="oauth",
+            status="login_required",
+            login_required_reason="cursor_oauth_required",
+        )
+        binary = self._cursor_binary()
+        if not binary:
+            settings = self.agent_auth_store.save_cursor(
+                auth_mode="oauth",
+                status="relogin_required",
+                login_required_reason="cursor_cli_missing",
+                last_cli_status={"ok": False, "reason": "cursor_cli_missing"},
+            )
+            return self._redact_codex_status(
+                {
+                    **settings,
+                    "cli": {"available": False, "reason": "cursor_cli_missing"},
+                    "login_session": None,
+                    "cursor_home": str(self.config.alpha_cursor_home),
+                }
+            )
+
+        session = self._cursor_login_session_snapshot()
+        if session and session.get("state") == "running":
+            return await self.get_desktop_cursor_status()
+
+        await self._stop_cursor_login_session()
+        self.config.alpha_cursor_home.mkdir(parents=True, exist_ok=True)
+        process = await asyncio.create_subprocess_exec(
+            binary,
+            "login",
+            stdin=subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=self._cursor_env(),
+        )
+        session_id = f"cursor_login_{uuid4().hex[:12]}"
+        session_state: dict[str, Any] = {
+            "session_id": session_id,
+            "state": "running",
+            "started_at": utcnow_iso(),
+            "stdout": [],
+            "stderr": [],
+            "returncode": None,
+        }
+        session_state["stdout_task"] = asyncio.create_task(
+            self._capture_codex_stream(process.stdout, session_state["stdout"]),
+            name=f"{session_id}-stdout",
+        )
+        session_state["stderr_task"] = asyncio.create_task(
+            self._capture_codex_stream(process.stderr, session_state["stderr"]),
+            name=f"{session_id}-stderr",
+        )
+        session_state["watch_task"] = asyncio.create_task(
+            self._watch_cursor_login_process(process, session_state),
+            name=f"{session_id}-watch",
+        )
+        session_state["process"] = process
+        self._cursor_login_session = session_state
+        await asyncio.sleep(1.25)
+        return await self.get_desktop_cursor_status()
+
+    async def logout_desktop_cursor(self) -> dict[str, Any]:
+        await self._stop_cursor_login_session()
+        logout_result = await self._run_cursor_command(["logout"], timeout_sec=15.0)
+        settings = self.agent_auth_store.clear_cursor_auth(
+            status="logged_out",
+            login_required_reason="user_logged_out",
+            last_cli_status=logout_result,
+        )
+        cli_status = await self._cursor_cli_status()
+        return self._redact_codex_status(
+            {
+                **settings,
+                "cli": cli_status,
+                "login_session": None,
+                "cursor_home": str(self.config.alpha_cursor_home),
+            }
+        )
+
+    async def get_desktop_alpha_agent_config(self) -> dict[str, Any]:
+        return self.preference_store.get_alpha_execution_provider()
+
+    async def save_desktop_alpha_agent_config(
+        self,
+        *,
+        preferred_harness: str | None = None,
+        source: str | None = "desktop",
+        device_id: str | None = None,
+    ) -> dict[str, Any]:
+        if preferred_harness is None:
+            return self.preference_store.get_alpha_execution_provider()
+        return self.preference_store.set_alpha_execution_provider(
+            preferred_harness,
+            source=source,
+            device_id=device_id,
+        )
+
     async def _codex_login_with_api_key(self, api_key: str) -> dict[str, Any]:
         return await self._run_codex_command(
             ["login", "--with-api-key"],
@@ -12151,6 +12286,104 @@ class GatewayRuntime:
         env.setdefault("HOME", str(self.config.alpha_codex_home.parent))
         return env
 
+    async def _cursor_cli_status(self) -> dict[str, Any]:
+        result = await self._run_cursor_command(["status"], timeout_sec=10.0)
+        output = "\n".join(
+            item
+            for item in (self._safe_text(result.get("stdout")), self._safe_text(result.get("stderr")))
+            if item
+        )
+        authenticated = bool(result.get("ok")) and not re.search(
+            r"not\s+logged\s+in|not\s+authenticated|no\s+credentials|login\s+required",
+            output,
+            re.IGNORECASE,
+        )
+        return {
+            **result,
+            "authenticated": authenticated,
+            "cursor_home": str(self.config.alpha_cursor_home),
+        }
+
+    async def _run_cursor_command(
+        self,
+        args: list[str],
+        *,
+        stdin: str | None = None,
+        timeout_sec: float,
+    ) -> dict[str, Any]:
+        binary = self._cursor_binary()
+        if not binary:
+            return {
+                "ok": False,
+                "available": False,
+                "returncode": None,
+                "stdout": "",
+                "stderr": "",
+                "reason": "cursor_cli_missing",
+            }
+
+        self.config.alpha_cursor_home.mkdir(parents=True, exist_ok=True)
+        process = await asyncio.create_subprocess_exec(
+            binary,
+            *args,
+            stdin=asyncio.subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=self._cursor_env(),
+        )
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                process.communicate(stdin.encode("utf-8") if stdin is not None else None),
+                timeout=timeout_sec,
+            )
+            return {
+                "ok": process.returncode == 0,
+                "available": True,
+                "returncode": process.returncode,
+                "stdout": stdout_bytes.decode("utf-8", errors="replace").strip(),
+                "stderr": stderr_bytes.decode("utf-8", errors="replace").strip(),
+            }
+        except TimeoutError:
+            process.kill()
+            stdout_bytes, stderr_bytes = await process.communicate()
+            return {
+                "ok": False,
+                "available": True,
+                "returncode": process.returncode,
+                "stdout": stdout_bytes.decode("utf-8", errors="replace").strip(),
+                "stderr": stderr_bytes.decode("utf-8", errors="replace").strip(),
+                "reason": "timeout",
+            }
+
+    def _cursor_binary(self) -> str | None:
+        binary = shutil.which("cursor-agent")
+        if binary:
+            return binary
+        names = ["cursor-agent.exe", "cursor-agent.cmd", "cursor-agent"] if os.name == "nt" else ["cursor-agent"]
+        candidates: list[Path] = []
+        for name in names:
+            candidates.extend(
+                [
+                    Path.home() / ".local" / "bin" / name,
+                    Path("/usr/local/bin") / name,
+                    Path("/usr/bin") / name,
+                    Path("/home/ubuntu/.local/bin") / name,
+                ]
+            )
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+        return None
+
+    def _cursor_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env["HOME"] = str(self.config.alpha_cursor_home)
+        env["CURSOR_AGENT"] = "1"
+        existing_path = env.get("PATH", "")
+        local_bin = str(Path.home() / ".local" / "bin")
+        env["PATH"] = f"{local_bin}{os.pathsep}/usr/local/bin{os.pathsep}{existing_path}"
+        return env
+
     async def _capture_codex_stream(
         self,
         stream: asyncio.StreamReader | None,
@@ -12183,8 +12416,43 @@ class GatewayRuntime:
             last_cli_status=self._codex_login_session_snapshot() or {},
         )
 
+    async def _watch_cursor_login_process(
+        self,
+        process: asyncio.subprocess.Process,
+        session_state: dict[str, Any],
+    ) -> None:
+        returncode = await process.wait()
+        session_state["returncode"] = returncode
+        session_state["state"] = "completed" if returncode == 0 else "failed"
+        session_state["completed_at"] = utcnow_iso()
+        self.agent_auth_store.save_cursor(
+            auth_mode="oauth",
+            status="authenticated" if returncode == 0 else "relogin_required",
+            login_required_reason="" if returncode == 0 else "cursor_oauth_login_failed",
+            last_cli_status=self._cursor_login_session_snapshot() or {},
+        )
+
     def _codex_login_session_snapshot(self) -> dict[str, Any] | None:
         session = self._codex_login_session
+        if not session:
+            return None
+        process = session.get("process")
+        returncode = process.returncode if process is not None else session.get("returncode")
+        state = session.get("state")
+        if returncode is not None and state == "running":
+            state = "completed" if returncode == 0 else "failed"
+        return {
+            "session_id": session.get("session_id"),
+            "state": state,
+            "started_at": session.get("started_at"),
+            "completed_at": session.get("completed_at"),
+            "returncode": returncode,
+            "stdout": list(session.get("stdout") or []),
+            "stderr": list(session.get("stderr") or []),
+        }
+
+    def _cursor_login_session_snapshot(self) -> dict[str, Any] | None:
+        session = self._cursor_login_session
         if not session:
             return None
         process = session.get("process")
@@ -12229,6 +12497,33 @@ class GatewayRuntime:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._codex_login_session = None
 
+    async def _stop_cursor_login_session(self) -> None:
+        session = self._cursor_login_session
+        if not session:
+            return
+        process = session.get("process")
+        if process is not None and process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=3.0)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+        tasks = [
+            task
+            for task in (
+                session.get("stdout_task"),
+                session.get("stderr_task"),
+                session.get("watch_task"),
+            )
+            if isinstance(task, asyncio.Task)
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._cursor_login_session = None
+
     def _effective_codex_status(
         self,
         settings: dict[str, Any],
@@ -12245,6 +12540,22 @@ class GatewayRuntime:
             return {"status": "relogin_required", "login_required_reason": "api_key_relogin_required"}
         if settings.get("auth_mode") == "chatgpt":
             return {"status": "login_required", "login_required_reason": "chatgpt_login_required"}
+        return {"status": "not_configured", "login_required_reason": "auth_not_configured"}
+
+    def _effective_cursor_status(
+        self,
+        settings: dict[str, Any],
+        cli_status: dict[str, Any],
+        pending_login: dict[str, Any] | None,
+    ) -> dict[str, str]:
+        if pending_login and pending_login.get("state") == "running":
+            return {"status": "login_pending", "login_required_reason": "cursor_oauth_login_pending"}
+        if cli_status.get("authenticated"):
+            return {"status": "authenticated", "login_required_reason": ""}
+        if not cli_status.get("available", True):
+            return {"status": "relogin_required", "login_required_reason": "cursor_cli_missing"}
+        if settings.get("auth_mode") == "oauth":
+            return {"status": "login_required", "login_required_reason": "cursor_oauth_login_required"}
         return {"status": "not_configured", "login_required_reason": "auth_not_configured"}
 
     def _redact_codex_status(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -12269,7 +12580,8 @@ class GatewayRuntime:
     def _redact_secret_text(self, value: str) -> str:
         if not value:
             return ""
-        return re.sub(r"sk-[^\s\"']{4,}", "sk-...redacted", value)
+        redacted = re.sub(r"sk-[^\s\"']{4,}", "sk-...redacted", value)
+        return re.sub(r"cursor_[^\s\"']{8,}", "cursor_...redacted", redacted, flags=re.IGNORECASE)
 
     def _normalize_codex_auth_mode(self, value: str | None) -> str:
         normalized = self._safe_text(value)
