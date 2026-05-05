@@ -13,7 +13,7 @@ intents:
     output_schema: schemas/intents/alpha.execute.output.json
     timeout_sec: 3600
     usage_hints:
-      - Treat Alpha as COSMIC's VM project operator: a Codex/Cursor/Claude Code CLI-style agent that can work in a real workspace, edit files, run terminal commands, install dependencies, execute tests, operate repos, produce artifacts, and perform deployment-oriented workflows when the selected CLI provider is authenticated.
+      - "Treat Alpha as COSMIC's VM project operator: a Codex/Cursor/Claude Code CLI-style agent that can work in a real workspace, edit files, run terminal commands, install dependencies, execute tests, operate repos, produce artifacts, and perform deployment-oriented workflows when the selected CLI provider is authenticated."
       - Use this for high-level project work that requires capabilities outside the pre-packaged COSMIC specialists, especially when the task needs arbitrary CLI/tool use, repo-level code changes, dependency setup, filesystem work, long-running engineering loops, or VM-side deployment steps.
       - Good fits include building and hosting a website, cloning a repo and extending it, creating a new app, wiring an unfamiliar toolchain, running a research/code workflow, fine-tuning or training experiments, browser/screenshot automation from the VM, or completing a multi-step engineering task end-to-end.
       - Pass a high-level goal with success criteria, relevant constraints, desired outputs, deployment target, artifact expectations, and any known repo/project/deployment references; do not decompose into tiny shell commands unless the user explicitly requires exact commands.
