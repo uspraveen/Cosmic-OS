@@ -195,6 +195,10 @@ interface GatewaySessionHistoryMessage {
   id: string
   role: string
   content: string
+  route: string | null
+  request_id: string | null
+  in_reply_to_request_id: string | null
+  channel: string | null
   created_at: string | null
   metadata: Record<string, unknown> | null
 }
@@ -288,6 +292,12 @@ function gatewaySessionMessageMs(message: Pick<GatewaySessionHistoryMessage, 'cr
   const raw = message.created_at
   if (!raw) return 0
   const t = new Date(raw).getTime()
+  return Number.isFinite(t) ? t : 0
+}
+
+function timestampMs(value: string | null | undefined): number {
+  if (!value) return 0
+  const t = new Date(value).getTime()
   return Number.isFinite(t) ? t : 0
 }
 
@@ -862,6 +872,13 @@ function normalizeGatewaySessionHistoryPayload(raw: unknown): { sessionId: strin
       id: String(row.id || `${row.role || 'message'}:${createdAt || messages.length}`).trim(),
       role: String(row.role || 'unknown').trim() || 'unknown',
       content: content.trim(),
+      route: typeof row.route === 'string' && row.route.trim() ? row.route.trim() : null,
+      request_id: typeof row.request_id === 'string' && row.request_id.trim() ? row.request_id.trim() : null,
+      in_reply_to_request_id:
+        typeof row.in_reply_to_request_id === 'string' && row.in_reply_to_request_id.trim()
+          ? row.in_reply_to_request_id.trim()
+          : null,
+      channel: typeof row.channel === 'string' && row.channel.trim() ? row.channel.trim() : null,
       created_at: createdAt,
       metadata: toRecord(row.metadata),
     })
@@ -894,6 +911,7 @@ function normalizeGatewayRequestTracePayload(raw: unknown): { sessionId: string 
         metadata: toRecord(event.metadata),
       })
     }
+    events.sort((a, b) => timestampMs(a.at) - timestampMs(b.at))
     requestTraces.push({
       request_id: requestId,
       session_id: typeof row.session_id === 'string' && row.session_id.trim() ? row.session_id.trim() : sessionId || '',
@@ -914,6 +932,11 @@ function normalizeGatewayRequestTracePayload(raw: unknown): { sessionId: string 
       completed_at: typeof row.completed_at === 'string' && row.completed_at.trim() ? row.completed_at.trim() : null,
     })
   }
+  requestTraces.sort(
+    (a, b) =>
+      timestampMs(a.created_at || a.completed_at || a.updated_at) -
+      timestampMs(b.created_at || b.completed_at || b.updated_at),
+  )
   return { sessionId, requestTraces }
 }
 
@@ -1033,6 +1056,45 @@ function sessionRoleLabel(role: string): string {
   if (normalized === 'system') return 'System'
   if (normalized === 'tool') return 'Tool'
   return normalized.charAt(0).toUpperCase() + normalized.slice(1)
+}
+
+function sessionChannelLabel(channel: string | null | undefined): string {
+  const raw = String(channel || '').trim()
+  if (!raw) return 'Desktop'
+  const lower = raw.toLowerCase()
+  if (lower === '__session_rollover__') return 'Rollover'
+  if (lower.startsWith('desktop:')) return 'Desktop'
+  if (lower.startsWith('mobile:')) return 'Mobile'
+  if (lower.startsWith('whatsapp:')) return 'WhatsApp'
+  if (lower.startsWith('telegram:')) return 'Telegram'
+  if (lower === 'agent-email' || lower.startsWith('agent-email:')) return 'Agent Email'
+  const prefix = raw.split(':', 1)[0]?.trim()
+  return prefix
+    ? prefix.replace(/[-_]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
+    : 'Gateway'
+}
+
+function isRenderableSessionConversationMessage(message: GatewaySessionHistoryMessage): boolean {
+  const role = String(message.role || '').trim().toLowerCase()
+  if (role !== 'user' && role !== 'assistant') return false
+  if (message.metadata?.compacted_summary) return false
+  if (String(message.channel || '').trim() === '__session_rollover__') return false
+
+  const content = String(message.content || '').trim()
+  if (!content) return false
+
+  const lowerContent = content.toLowerCase()
+  if (
+    lowerContent === 'channel delivery completed' ||
+    lowerContent.startsWith('gateway delivery=') ||
+    lowerContent.includes('\ngateway delivery=')
+  ) {
+    return false
+  }
+  if (message.metadata?.gateway_delivery_status && lowerContent.includes('gateway delivery=')) {
+    return false
+  }
+  return true
 }
 
 function humanizeAgentEmailValue(value: unknown): string {
@@ -1854,6 +1916,7 @@ export default function SpacesControlCenter({
   const [selectedSessionFetchedAt, setSelectedSessionFetchedAt] = useState<number | null>(null)
   const [selectedSessionTraceError, setSelectedSessionTraceError] = useState<string | null>(null)
   const [sessionsListCollapsed, setSessionsListCollapsed] = useState(false)
+  const [sessionsDiagnosticsOpen, setSessionsDiagnosticsOpen] = useState(false)
   const [sessionsJumpToBottomVisible, setSessionsJumpToBottomVisible] = useState(false)
   const sessionsDetailScrollRef = useRef<HTMLDivElement>(null)
   const sessionsDetailAnchorRef = useRef<HTMLDivElement>(null)
@@ -2255,6 +2318,7 @@ export default function SpacesControlCenter({
   useEffect(() => {
     if (!active || page !== 'sessions') {
       setSessionsListCollapsed(false)
+      setSessionsDiagnosticsOpen(false)
     }
   }, [active, page])
 
@@ -2268,8 +2332,10 @@ export default function SpacesControlCenter({
       setSelectedSessionFetchedAt(null)
       setSelectedSessionError(null)
       setSelectedSessionTraceError(null)
+      setSessionsDiagnosticsOpen(false)
       return
     }
+    setSessionsDiagnosticsOpen(false)
     requestSelectedSessionHistory(selectedSessionId, true)
     requestSelectedSessionRequestTraces(selectedSessionId)
   }, [active, page, selectedSessionId, requestSelectedSessionHistory, requestSelectedSessionRequestTraces])
@@ -2310,13 +2376,14 @@ export default function SpacesControlCenter({
     )
     return summaryMessage?.content || null
   }, [selectedSessionMessages])
-  const selectedSessionPreviewMessages = useMemo(() => {
-    const filtered = selectedSessionMessages.filter(
-      (message) => !(message.role === 'system' && Boolean(message.metadata?.compacted_summary)),
-    )
-    const chronological = [...filtered].sort((a, b) => gatewaySessionMessageMs(a) - gatewaySessionMessageMs(b))
-    return chronological.slice(-18)
+  const selectedSessionConversationMessages = useMemo(() => {
+    const filtered = selectedSessionMessages.filter(isRenderableSessionConversationMessage)
+    return [...filtered].sort((a, b) => gatewaySessionMessageMs(a) - gatewaySessionMessageMs(b))
   }, [selectedSessionMessages])
+  const selectedSessionHiddenMessageCount = Math.max(
+    0,
+    selectedSessionMessages.length - selectedSessionConversationMessages.length - (selectedSessionCompactedSummary ? 1 : 0),
+  )
 
   const updateSessionsJumpVisibility = useCallback(() => {
     const el = sessionsDetailScrollRef.current
@@ -6192,7 +6259,7 @@ export default function SpacesControlCenter({
     const lastUpdatedLabel = sessionsFetchedAt
       ? new Date(sessionsFetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
       : '—'
-    const selectedMessageCount = selectedSessionMessages.length
+    const selectedMessageCount = selectedSessionConversationMessages.length
     const selectedTraceCount = selectedSessionRequestTraces.length
     const selectedLastUpdatedLabel = selectedSessionFetchedAt
       ? new Date(selectedSessionFetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -6200,11 +6267,14 @@ export default function SpacesControlCenter({
     const sessionDetailMetaLine = [
       `Started ${formatSessionMetaStamp(selectedSession?.first_message_at ?? selectedSession?.created_at ?? null)}`,
       `Last ${formatSessionMetaStamp(selectedSession?.last_message_at ?? selectedSession?.updated_at ?? null)}`,
-      `${selectedMessageCount} ${selectedMessageCount === 1 ? 'message' : 'messages'}`,
-      `${selectedTraceCount} ${selectedTraceCount === 1 ? 'trace' : 'traces'}`,
+      `${selectedMessageCount} conversation ${selectedMessageCount === 1 ? 'message' : 'messages'}`,
+      selectedSessionHiddenMessageCount > 0
+        ? `${selectedSessionHiddenMessageCount} system ${selectedSessionHiddenMessageCount === 1 ? 'entry' : 'entries'} hidden`
+        : null,
+      selectedTraceCount > 0 ? `${selectedTraceCount} diagnostics` : null,
       selectedSessionCompactedSummary ? 'Summary on file' : 'No summary',
       `History ${selectedLastUpdatedLabel}`,
-    ].join(' · ')
+    ].filter(Boolean).join(' · ')
 
     return (
       <div className="spaces-page spaces-sessions-page">
@@ -6375,17 +6445,21 @@ export default function SpacesControlCenter({
                       {!selectedSessionLoading ? (
                         <section className="agent-email-console-card spaces-sessions-transcript-card">
                           <div className="agent-email-console-card-head">
-                            <h4>Recent transcript</h4>
+                            <h4>Conversation</h4>
                             <span className="agent-email-console-muted">
-                              Last {selectedSessionPreviewMessages.length} messages
+                              {selectedSessionConversationMessages.length} clean messages
+                              {selectedSessionHiddenMessageCount > 0
+                                ? ` · ${selectedSessionHiddenMessageCount} system entries hidden`
+                                : ''}
                             </span>
                           </div>
-                          {selectedSessionPreviewMessages.length > 0 ? (
+                          {selectedSessionConversationMessages.length > 0 ? (
                             <div className="spaces-sessions-transcript spaces-sessions-transcript--chat">
-                              {selectedSessionPreviewMessages.map((message) => {
+                              {selectedSessionConversationMessages.map((message) => {
                                 const roleKey = String(message.role || '').toLowerCase()
-                                const chatLane =
-                                  roleKey === 'user' ? 'user' : roleKey === 'system' ? 'system' : 'assistant'
+                                const chatLane = roleKey === 'user' ? 'user' : 'assistant'
+                                const channelLabel = sessionChannelLabel(message.channel)
+                                const requestLabel = message.request_id ? message.request_id.slice(0, 12) : null
                                 return (
                                   <article
                                     key={message.id}
@@ -6395,7 +6469,12 @@ export default function SpacesControlCenter({
                                       <header className="spaces-sessions-msg-head">
                                         <div className="spaces-sessions-msg-who-wrap">
                                           <span className="spaces-sessions-msg-who">{sessionRoleLabel(message.role)}</span>
-                                          <span className="spaces-sessions-msg-pill">{message.role}</span>
+                                          <span className="spaces-sessions-msg-pill">{channelLabel}</span>
+                                          {requestLabel ? (
+                                            <span className="spaces-sessions-msg-pill spaces-sessions-msg-pill--subtle">
+                                              {requestLabel}
+                                            </span>
+                                          ) : null}
                                         </div>
                                         <time className="spaces-sessions-msg-time">{formatSessionAbsolute(message.created_at)}</time>
                                       </header>
@@ -6409,8 +6488,8 @@ export default function SpacesControlCenter({
                             </div>
                           ) : (
                             <div className="spaces-sessions-detail-placeholder">
-                              <strong>No transcript yet</strong>
-                              <p>This session exists, but there is no readable message history to show yet.</p>
+                              <strong>No conversation messages</strong>
+                              <p>Only system, rollover, or transport records were found for this session.</p>
                             </div>
                           )}
                         </section>
@@ -6418,14 +6497,27 @@ export default function SpacesControlCenter({
 
                       {!selectedSessionLoading ? (
                         <section className="agent-email-console-card spaces-sessions-traces-card">
-                          <div className="agent-email-console-card-head">
-                            <h4>Request traces</h4>
-                            <span className="agent-email-console-muted">
-                              Last {selectedSessionRequestTraces.length} requests
+                          <button
+                            type="button"
+                            className="spaces-sessions-diagnostics-toggle"
+                            onClick={() => setSessionsDiagnosticsOpen((open) => !open)}
+                            aria-expanded={sessionsDiagnosticsOpen}
+                          >
+                            <span className="spaces-sessions-diagnostics-main">
+                              <span className="spaces-sessions-diagnostics-title">Diagnostics</span>
+                              <span className="spaces-sessions-diagnostics-sub">
+                                {selectedSessionRequestTraces.length} request {selectedSessionRequestTraces.length === 1 ? 'trace' : 'traces'}
+                                {selectedSessionTraceError ? ' · load issue' : ''}
+                              </span>
                             </span>
-                          </div>
-                          {selectedSessionTraceError ? <div className="spaces-agents-error">{selectedSessionTraceError}</div> : null}
-                          {!selectedSessionTraceError && selectedSessionRequestTraces.length > 0 ? (
+                            <span className="spaces-sessions-diagnostics-action">
+                              {sessionsDiagnosticsOpen ? 'Hide' : 'Show'}
+                            </span>
+                          </button>
+                          {sessionsDiagnosticsOpen && selectedSessionTraceError ? (
+                            <div className="spaces-agents-error">{selectedSessionTraceError}</div>
+                          ) : null}
+                          {sessionsDiagnosticsOpen && !selectedSessionTraceError && selectedSessionRequestTraces.length > 0 ? (
                             <div className="spaces-session-trace-list">
                               {selectedSessionRequestTraces.map((trace) => {
                                 const deliveryStatus = typeof trace.delivery?.status === 'string' ? trace.delivery.status : ''
@@ -6486,7 +6578,7 @@ export default function SpacesControlCenter({
                                 )
                               })}
                             </div>
-                          ) : !selectedSessionTraceError ? (
+                          ) : sessionsDiagnosticsOpen && !selectedSessionTraceError ? (
                             <div className="spaces-sessions-detail-placeholder">
                               <strong>No request traces yet</strong>
                               <p>Gateway has not recorded request-level execution detail for this session yet.</p>

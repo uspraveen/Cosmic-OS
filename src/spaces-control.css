@@ -8236,10 +8236,12 @@
 
 .spaces-sessions-transcript--chat .spaces-sessions-msg--assistant {
   align-self: flex-start;
+  max-width: min(92%, 760px);
 }
 
 .spaces-sessions-transcript--chat .spaces-sessions-msg--user {
   align-self: flex-end;
+  max-width: min(78%, 580px);
 }
 
 .spaces-sessions-transcript--chat .spaces-sessions-msg--system {
@@ -8311,6 +8313,13 @@
   border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
+.spaces-sessions-msg-pill--subtle {
+  color: rgba(255, 255, 255, 0.28);
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.045);
+  text-transform: none;
+}
+
 .spaces-sessions-msg-time {
   flex-shrink: 0;
   font-size: 11px;
@@ -8379,10 +8388,65 @@
   overflow: visible;
 }
 
+.spaces-sessions-diagnostics-toggle {
+  width: 100%;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.025);
+  color: inherit;
+  padding: 10px 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.spaces-sessions-diagnostics-toggle:hover {
+  background: rgba(255, 255, 255, 0.045);
+  border-color: rgba(255, 255, 255, 0.11);
+}
+
+.spaces-sessions-diagnostics-main {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.spaces-sessions-diagnostics-title {
+  font-size: 13px;
+  font-weight: 680;
+  letter-spacing: -0.02em;
+  color: rgba(255, 255, 255, 0.84);
+}
+
+.spaces-sessions-diagnostics-sub {
+  font-size: 11.5px;
+  font-weight: 520;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.spaces-sessions-diagnostics-action {
+  flex-shrink: 0;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.62);
+}
+
 .spaces-session-trace-list {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  margin-top: 12px;
 }
 
 .spaces-session-trace-card {
