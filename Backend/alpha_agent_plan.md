@@ -249,3 +249,58 @@ ALPHA_CODEX_SANDBOX=danger-full-access
 ```
 
 This is an explicit operational compromise, not the final isolation design. The service still confines project state to `/var/lib/cosmic/alpha` by convention and prompt policy, but host-level sandboxing is not complete until the container/LXD runner is added. The next hardening step is to install/build an Alpha task container image with Codex available inside it and run Codex with full freedom only inside that container.
+
+## Future Improvement: Intelligent Alpha Project Lookup
+
+Alpha project recall should evolve beyond exact `project_ref` matching. The current registry is good for precise continuity when the orchestrator passes a project id, repo URL, deployment URL, local path, task id, artifact id, or exact alias, but it is not enough when many projects have similar names or goals.
+
+The future lookup path should be layered:
+
+1. Exact match first:
+   - `project_id`
+   - repo URL
+   - deployment URL
+   - local path
+   - task id
+   - artifact id
+   - exact alias
+
+2. BM25 keyword search:
+   - project aliases
+   - project summaries
+   - original and recent task goals
+   - task logs / last messages
+   - repo names
+   - deployment URLs and domains
+   - produced artifact names
+
+3. Vector similarity search:
+   - project summaries
+   - task summaries
+   - session summaries
+   - generated reports
+   - compact Alpha terminal/log summaries
+
+4. Combined candidate scoring:
+   - exact match strength
+   - BM25 score
+   - vector similarity
+   - recency
+   - current session affinity
+   - repo/deployment/artifact linkage
+
+5. Ambiguity handling:
+   - do not silently choose when top candidates are close
+   - return `ambiguous=true`
+   - include the top 3-5 candidates with scores and why they matched
+   - let the orchestrator resolve from conversation context or ask the user
+
+6. Project graph traversal:
+   - project -> tasks
+   - tasks -> artifacts
+   - artifacts -> deployment URLs
+   - project -> repo URL / local path
+   - project -> session ids
+   - tasks -> specialist receipts
+
+COSMIC should own this durable Alpha memory/index. Codex and Cursor should remain execution engines, not the source of truth for project recall. Their outputs, terminal summaries, produced files, repo/deployment URLs, and task reports should be normalized into Alpha's registry/search store so lookup works consistently across both harnesses.

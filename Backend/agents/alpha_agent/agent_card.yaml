@@ -13,11 +13,16 @@ intents:
     output_schema: schemas/intents/alpha.execute.output.json
     timeout_sec: 3600
     usage_hints:
-      - Use this only for high-level project work that requires capabilities outside the pre-packaged COSMIC specialists.
-      - Good fits include building or hosting a website, cloning a repo and extending it, creating a new app, running a research/code workflow, or completing a multi-step engineering task.
+      - Treat Alpha as COSMIC's VM project operator: a Codex/Cursor/Claude Code CLI-style agent that can work in a real workspace, edit files, run terminal commands, install dependencies, execute tests, operate repos, produce artifacts, and perform deployment-oriented workflows when the selected CLI provider is authenticated.
+      - Use this for high-level project work that requires capabilities outside the pre-packaged COSMIC specialists, especially when the task needs arbitrary CLI/tool use, repo-level code changes, dependency setup, filesystem work, long-running engineering loops, or VM-side deployment steps.
+      - Good fits include building and hosting a website, cloning a repo and extending it, creating a new app, wiring an unfamiliar toolchain, running a research/code workflow, fine-tuning or training experiments, browser/screenshot automation from the VM, or completing a multi-step engineering task end-to-end.
+      - Pass a high-level goal with success criteria, relevant constraints, desired outputs, deployment target, artifact expectations, and any known repo/project/deployment references; do not decompose into tiny shell commands unless the user explicitly requires exact commands.
+      - Prefer normal COSMIC specialists for narrow packaged capabilities such as email, calendar, slides, docs parsing, tabular analysis, image generation, diagrams, X search, or Firecrawl extraction when those specialists directly satisfy the request.
+      - Use Alpha when a packaged specialist is insufficient, when several tools must be combined inside a project workspace, or when the user asks for something a human engineer would normally do through a coding CLI/terminal agent.
       - Use prepare_only=true only for diagnostics or when the user explicitly asks to create/recall the workspace without execution.
-      - Do not delegate destructive production changes here unless the user goal explicitly asks for production changes.
-      - Pass project_ref when the user is referring to an existing Alpha project, repo URL, deployment URL, local path, or prior project alias.
+      - Do not delegate destructive production changes, credential changes, or irreversible infrastructure mutations here unless the user goal explicitly asks for them and the target project/context is clear.
+      - Pass project_ref when the user is referring to an existing Alpha project, repo URL, deployment URL, local path, prior task, prior artifact, or project alias; call alpha.recall_project first when identity is ambiguous.
+      - Expect Alpha to communicate progress back through task events and final artifacts; if Alpha reports ambiguity or missing auth/tooling, treat that like a human engineer asking for clarification or setup.
 
   - name: alpha.recall_project
     description: Recall Alpha projects by id, alias, repo URL, deployment URL, local path, or session.
@@ -25,8 +30,9 @@ intents:
     output_schema: schemas/intents/alpha.recall_project.output.json
     timeout_sec: 30
     usage_hints:
-      - Use this when the user refers to a previous Alpha project or asks what Alpha has worked on.
-      - Prefer this before alpha.execute when project identity is ambiguous.
+      - Use this when the user refers to a previous Alpha project, repo, deployment, artifact, task, workspace, or asks what Alpha has worked on.
+      - Prefer this before alpha.execute when project identity is ambiguous; pass the strongest reference the orchestrator can recover from memory, session history, artifacts, specialist receipts, deployment URLs, repo URLs, or user wording.
+      - If recall returns multiple plausible projects or no clear project, the orchestrator should resolve with memory/context or ask the user before continuing with alpha.execute.
 
 artifact_types:
   - alpha_project_workspace
