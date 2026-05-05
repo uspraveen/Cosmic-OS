@@ -3,12 +3,53 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
+    "query": {
+      "type": ["string", "null"]
+    },
     "projects": {
       "type": "array",
       "items": { "type": "object" }
     },
-    "count": { "type": "integer" }
+    "count": { "type": "integer" },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "project": { "type": "object" },
+          "score": { "type": "number" },
+          "match_type": { "type": "string" },
+          "match_reason": { "type": "string" },
+          "matched_fields": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "task_ids": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "artifact_ids": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "required": [
+          "project",
+          "score",
+          "match_type",
+          "match_reason",
+          "matched_fields",
+          "task_ids",
+          "artifact_ids"
+        ]
+      }
+    },
+    "ambiguous": { "type": "boolean" },
+    "selected_project": {
+      "type": ["object", "null"]
+    },
+    "next_action": { "type": "string" }
   },
   "required": ["projects", "count"]
 }
-

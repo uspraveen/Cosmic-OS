@@ -25,13 +25,14 @@ intents:
       - Expect Alpha to communicate progress back through task events and final artifacts; if Alpha reports ambiguity or missing auth/tooling, treat that like a human engineer asking for clarification or setup.
 
   - name: alpha.recall_project
-    description: Recall Alpha projects by id, alias, repo URL, deployment URL, local path, or session.
+    description: Recall and score Alpha projects by id, alias, repo URL, deployment URL, local path, prior task, artifact, session, or natural-language project/task reference.
     input_schema: schemas/intents/alpha.recall_project.input.json
     output_schema: schemas/intents/alpha.recall_project.output.json
     timeout_sec: 30
     usage_hints:
       - Use this when the user refers to a previous Alpha project, repo, deployment, artifact, task, workspace, or asks what Alpha has worked on.
       - Prefer this before alpha.execute when project identity is ambiguous; pass the strongest reference the orchestrator can recover from memory, session history, artifacts, specialist receipts, deployment URLs, repo URLs, or user wording.
+      - Recall searches project metadata and task history, returns ranked candidates, and marks ambiguous matches so the orchestrator can choose from memory or ask the user.
       - If recall returns multiple plausible projects or no clear project, the orchestrator should resolve with memory/context or ask the user before continuing with alpha.execute.
 
 artifact_types:

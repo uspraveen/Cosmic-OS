@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from agents.alpha_agent.artifact_promoter import promote_alpha_artifacts
@@ -52,6 +53,7 @@ def test_project_registry_creates_and_resolves_project(tmp_path: Path) -> None:
     assert registry.find_project(created.project_id).project_id == created.project_id
     assert registry.find_project("portfolio").project_id == created.project_id
     assert registry.find_project("https://example.test/repo.git").project_id == created.project_id
+    assert registry.find_project("") is None
 
     updated = registry.mark_task(
         created.project_id,
@@ -63,6 +65,118 @@ def test_project_registry_creates_and_resolves_project(tmp_path: Path) -> None:
     assert updated.last_task_id == "tsk_def"
     assert updated.last_session_id == "sess_2"
     assert updated.status == "workspace_prepared"
+
+
+def test_project_registry_scores_task_search_fields(tmp_path: Path) -> None:
+    registry = ProjectRegistry(tmp_path / "projects.db")
+    site = registry.create_project(
+        aliases=["cosmic-site"],
+        last_task_id="tsk_site_initial",
+        last_session_id="sess_alpha",
+        goal="Build and host a website for Cosmic",
+        summary="Initial website deployment",
+    )
+    archive = registry.create_project(
+        aliases=["archive-site"],
+        last_task_id="tsk_archive_initial",
+        last_session_id="sess_alpha",
+        goal="Build an archive website for notes",
+        summary="Older website project",
+    )
+
+    registry.mark_task(
+        site.project_id,
+        task_id="tsk_site_screenshot",
+        session_id="sess_beta",
+        goal="Take a screenshot of the live white background website",
+        context_brief="Playwright capture for the site running on port 8000.",
+        preferred_harness="cursor",
+        summary="Captured a PNG screenshot of the white COSMIC landing page.",
+        status="completed",
+        artifact_ids=["art_site_screenshot_png"],
+        deployment_url="http://3.21.236.10:8000/",
+    )
+    registry.mark_task(
+        archive.project_id,
+        task_id="tsk_archive_nav",
+        session_id="sess_beta",
+        goal="Update archive website navigation",
+        summary="Navigation polish for another site.",
+        status="completed",
+    )
+
+    candidates = registry.search_projects("screenshot white website", session_id="sess_beta", limit=3)
+
+    assert candidates[0].project.project_id == site.project_id
+    assert candidates[0].score > candidates[1].score
+    assert "task_goal" in candidates[0].matched_fields
+    assert "task_summary" in candidates[0].matched_fields
+    assert registry.find_project("art_site_screenshot_png").project_id == site.project_id
+    assert registry.find_project("http://3.21.236.10:8000/").project_id == site.project_id
+
+
+def test_project_registry_migrates_legacy_project_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "projects.db"
+    registry = ProjectRegistry(db_path)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE alpha_projects (
+                project_id TEXT PRIMARY KEY,
+                aliases TEXT NOT NULL DEFAULT '[]',
+                repo_url TEXT,
+                local_path TEXT,
+                deployment_url TEXT,
+                last_task_id TEXT,
+                last_session_id TEXT,
+                harness_thread_ids TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL,
+                summary TEXT,
+                artifact_ids TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO alpha_projects (
+                project_id, aliases, repo_url, local_path, deployment_url,
+                last_task_id, last_session_id, harness_thread_ids, status,
+                summary, artifact_ids, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "prj_legacy",
+                '["legacy-site"]',
+                None,
+                None,
+                None,
+                "tsk_legacy",
+                "sess_legacy",
+                "[]",
+                "prepared",
+                "Legacy Alpha project",
+                "[]",
+                "2026-05-01T00:00:00+00:00",
+                "2026-05-01T00:00:00+00:00",
+            ),
+        )
+
+    updated = registry.mark_task(
+        "prj_legacy",
+        task_id="tsk_modern",
+        session_id="sess_modern",
+        goal="Modern searchable migration goal",
+        summary="Migrated project can now be searched by task metadata.",
+        artifact_ids=["art_modern"],
+        status="completed",
+    )
+
+    assert updated.goal == "Modern searchable migration goal"
+    assert registry.find_project("legacy-site").project_id == "prj_legacy"
+    assert registry.find_project("art_modern").project_id == "prj_legacy"
+    assert registry.search_projects("migration goal")[0].project.project_id == "prj_legacy"
 
 
 def test_workspace_manager_prepares_expected_layout(tmp_path: Path) -> None:

@@ -5,7 +5,11 @@
   "properties": {
     "project_ref": {
       "type": ["string", "null"],
-      "description": "Project id, alias, repo URL, deployment URL, or local path to recall."
+      "description": "Project id, alias, repo URL, deployment URL, local path, prior task id, artifact id, or natural-language project/task reference to recall."
+    },
+    "query": {
+      "type": ["string", "null"],
+      "description": "Optional natural-language search query across Alpha project and task metadata. Used when project_ref is absent."
     },
     "limit": {
       "type": "integer",
@@ -15,4 +19,3 @@
     }
   }
 }
-

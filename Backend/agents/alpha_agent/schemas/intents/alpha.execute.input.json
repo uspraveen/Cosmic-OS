@@ -16,7 +16,7 @@
     },
     "project_ref": {
       "type": ["string", "null"],
-      "description": "Existing Alpha project id, alias, repo URL, deployment URL, or local path."
+      "description": "Existing Alpha project id, alias, repo URL, deployment URL, local path, prior task id, artifact id, or natural-language project/task reference."
     },
     "aliases": {
       "type": "array",

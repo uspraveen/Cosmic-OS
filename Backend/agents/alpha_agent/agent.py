@@ -13,7 +13,7 @@ from .codex_runner import CodexRunResult, CodexWorkspaceRunner
 from .config import AGENT_ROOT, AlphaAgentConfig
 from .cursor_runner import CursorRunResult, CursorWorkspaceRunner
 from .docker_runner import DockerWorkspaceRunner
-from .project_registry import ProjectRecord, ProjectRegistry
+from .project_registry import ProjectCandidate, ProjectRecord, ProjectRegistry
 from .workspace_manager import WorkspaceManager
 
 logger = logging.getLogger(__name__)
@@ -103,6 +103,11 @@ class AlphaAgent(AgentRuntime):
                 ]
             )
 
+        context_brief = self._task_context_brief(task)
+        requested_harness = self._optional_string(task.input.get("preferred_harness"))
+        if requested_harness and requested_harness.lower() == "auto":
+            requested_harness = None
+
         project = self._resolve_project(task, mode=mode)
         if project is None and mode == "existing_project":
             return self._fail(
@@ -120,6 +125,9 @@ class AlphaAgent(AgentRuntime):
                 last_session_id=task.session_id,
                 summary=goal[:500],
                 status="prepared",
+                goal=goal[:2000],
+                context_brief=context_brief,
+                preferred_harness=requested_harness,
             )
 
         if self.step_plan is not None:
@@ -133,6 +141,11 @@ class AlphaAgent(AgentRuntime):
             local_path=str(paths.workspace),
             summary=goal[:500],
             status="workspace_prepared",
+            goal=goal[:2000],
+            context_brief=context_brief,
+            preferred_harness=requested_harness,
+            repo_url=self._optional_string(task.input.get("repo_url")),
+            deployment_url=self._optional_string(task.input.get("deployment_url")),
         )
 
         if self.step_plan is not None:
@@ -205,6 +218,11 @@ class AlphaAgent(AgentRuntime):
                 local_path=str(paths.workspace),
                 summary=goal[:500],
                 status=f"{preferred_harness}_login_required",
+                goal=goal[:2000],
+                context_brief=context_brief,
+                preferred_harness=preferred_harness,
+                repo_url=self._optional_string(task.input.get("repo_url")),
+                deployment_url=self._optional_string(task.input.get("deployment_url")),
             )
             return self._fail(
                 code=f"{preferred_harness.upper()}_LOGIN_REQUIRED",
@@ -303,6 +321,12 @@ class AlphaAgent(AgentRuntime):
             local_path=str(paths.workspace),
             summary=(run_result.last_message or goal)[:500],
             status="completed" if run_result.ok else f"{preferred_harness}_failed",
+            goal=goal[:2000],
+            context_brief=context_brief,
+            preferred_harness=preferred_harness,
+            artifact_ids=[item.artifact_id for item in artifacts],
+            repo_url=self._optional_string(task.input.get("repo_url")),
+            deployment_url=self._optional_string(task.input.get("deployment_url")),
         )
         await self.emit_event(
             task.task_id,
@@ -341,20 +365,34 @@ class AlphaAgent(AgentRuntime):
         )
 
     async def handle_alpha_recall_project(self, task: TaskEnvelope) -> AgentResult:
-        project_ref = self._optional_string(task.input.get("project_ref"))
+        project_query = self._optional_string(task.input.get("project_ref")) or self._optional_string(
+            task.input.get("query")
+        )
         limit = int(task.input.get("limit") or 5)
-        projects: list[ProjectRecord] = []
-        if project_ref:
-            project = self.registry.find_project(project_ref)
-            if project is not None:
-                projects = [project]
+        candidates = self.registry.search_projects(
+            project_query,
+            session_id=task.session_id,
+            limit=limit,
+        )
+        projects = [candidate.project for candidate in candidates]
+        ambiguous = self._project_candidates_are_ambiguous(candidates, has_query=bool(project_query))
+        selected_project = projects[0] if projects and not ambiguous else None
         if not projects:
-            projects = self.registry.recent_for_session(task.session_id, limit=limit)
+            next_action = "No Alpha project matched. Create a new Alpha project or provide a stronger reference."
+        elif ambiguous:
+            next_action = "Multiple Alpha projects look plausible. Resolve with orchestrator memory or ask the user."
+        else:
+            next_action = f"Use project_ref={selected_project.project_id} for follow-up Alpha work."
         return AgentResult(
             status="completed",
             output={
+                "query": project_query,
                 "projects": [project.as_dict() for project in projects],
                 "count": len(projects),
+                "candidates": [candidate.as_dict() for candidate in candidates],
+                "ambiguous": ambiguous,
+                "selected_project": selected_project.as_dict() if selected_project else None,
+                "next_action": next_action,
             },
             artifacts=[],
             error=None,
@@ -559,6 +597,54 @@ class AlphaAgent(AgentRuntime):
         if not isinstance(value, list):
             return []
         return [str(item).strip() for item in value if str(item).strip()]
+
+    def _task_context_brief(self, task: TaskEnvelope) -> str | None:
+        parts: list[str] = []
+        for key in ("context_brief", "project_context", "context"):
+            value = task.input.get(key)
+            if isinstance(value, dict):
+                rendered = "; ".join(
+                    f"{item_key}: {item_value}"
+                    for item_key, item_value in sorted(value.items())
+                    if str(item_value).strip()
+                )
+            elif isinstance(value, list):
+                rendered = "; ".join(str(item).strip() for item in value if str(item).strip())
+            else:
+                rendered = str(value or "").strip()
+            if rendered:
+                parts.append(f"{key}: {rendered}")
+
+        deliverables = self._coerce_string_list(task.input.get("deliverables"))
+        if deliverables:
+            parts.append("deliverables: " + "; ".join(deliverables))
+
+        constraints = task.input.get("constraints")
+        if isinstance(constraints, dict):
+            rendered_constraints = "; ".join(
+                f"{key}: {value}" for key, value in sorted(constraints.items()) if str(value).strip()
+            )
+            if rendered_constraints:
+                parts.append("constraints: " + rendered_constraints)
+
+        brief = "\n".join(parts).strip()
+        return brief[:2000] or None
+
+    def _project_candidates_are_ambiguous(
+        self,
+        candidates: list[ProjectCandidate],
+        *,
+        has_query: bool,
+    ) -> bool:
+        if not has_query or len(candidates) < 2:
+            return False
+        top = candidates[0]
+        runner_up = candidates[1]
+        if top.score <= 0:
+            return False
+        if top.match_type == "exact" and top.score >= 900 and (top.score - runner_up.score) > 100:
+            return False
+        return runner_up.score >= top.score * 0.88 or (top.score - runner_up.score) <= 35
 
     def _fail(self, *, code: str, message: str, next_action: str) -> AgentResult:
         return AgentResult(
