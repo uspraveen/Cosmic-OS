@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, RefObject } from 'react'
+import type { ComponentPropsWithoutRef, CSSProperties, RefObject } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -186,6 +186,9 @@ interface GatewaySessionRow {
   title: string
   created_at: string | null
   updated_at: string | null
+  message_count: number
+  first_message_at: string | null
+  last_message_at: string | null
 }
 
 interface GatewaySessionHistoryMessage {
@@ -241,11 +244,44 @@ interface GatewayAgentEmailStatus {
   mail?: Record<string, unknown> | null
 }
 
-function gatewaySessionRecencyMs(session: Pick<GatewaySessionRow, 'updated_at' | 'created_at'>): number {
-  const raw = session.updated_at || session.created_at
+function gatewaySessionRecencyMs(session: Pick<GatewaySessionRow, 'last_message_at' | 'updated_at' | 'created_at'>): number {
+  const raw = session.last_message_at || session.updated_at || session.created_at
   if (!raw) return 0
   const t = new Date(raw).getTime()
   return Number.isFinite(t) ? t : 0
+}
+
+function gatewayDailySessionDate(sessionId: string): { key: string; date: Date; sortMs: number } | null {
+  const match = /^sess_(\d{4})(\d{2})(\d{2})$/.exec(String(sessionId || '').trim())
+  if (!match) return null
+  const year = Number(match[1])
+  const monthIndex = Number(match[2]) - 1
+  const day = Number(match[3])
+  if (!Number.isInteger(year) || !Number.isInteger(monthIndex) || !Number.isInteger(day)) return null
+  const date = new Date(year, monthIndex, day, 12, 0, 0)
+  if (!Number.isFinite(date.getTime())) return null
+  return {
+    key: `${match[1]}-${match[2]}-${match[3]}`,
+    date,
+    sortMs: date.getTime(),
+  }
+}
+
+function gatewaySessionGroupInfo(session: GatewaySessionRow): { key: string; label: string; sortMs: number } {
+  const daily = gatewayDailySessionDate(session.id)
+  if (daily) {
+    return { key: daily.key, label: formatSessionDayDate(daily.date), sortMs: daily.sortMs }
+  }
+  const raw = session.last_message_at || session.first_message_at || session.created_at || session.updated_at
+  const date = raw ? new Date(raw) : null
+  if (date && Number.isFinite(date.getTime())) {
+    return {
+      key: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`,
+      label: formatSessionDayDate(date),
+      sortMs: date.getTime(),
+    }
+  }
+  return { key: session.id, label: 'Unknown date', sortMs: 0 }
 }
 
 function gatewaySessionMessageMs(message: Pick<GatewaySessionHistoryMessage, 'created_at'>): number {
@@ -784,11 +820,19 @@ function normalizeGatewaySessionsPayload(raw: unknown): GatewaySessionRow[] {
     const title = String(row.title || id).trim() || id
     const createdAt = typeof row.created_at === 'string' && row.created_at.trim() ? row.created_at.trim() : null
     const updatedAt = typeof row.updated_at === 'string' && row.updated_at.trim() ? row.updated_at.trim() : null
+    const firstMessageAt =
+      typeof row.first_message_at === 'string' && row.first_message_at.trim() ? row.first_message_at.trim() : null
+    const lastMessageAt =
+      typeof row.last_message_at === 'string' && row.last_message_at.trim() ? row.last_message_at.trim() : null
+    const rawMessageCount = typeof row.message_count === 'number' ? row.message_count : Number(row.message_count ?? 0)
     sessions.push({
       id,
       title,
       created_at: createdAt,
       updated_at: updatedAt,
+      message_count: Number.isFinite(rawMessageCount) ? Math.max(0, rawMessageCount) : 0,
+      first_message_at: firstMessageAt,
+      last_message_at: lastMessageAt,
     })
   }
   return sessions
@@ -894,10 +938,8 @@ function normalizeGatewayAgentEmailStatus(raw: unknown): GatewayAgentEmailStatus
   }
 }
 
-function formatSessionDayLabel(value: string | null): string {
-  if (!value) return 'Unknown date'
-  const date = new Date(value)
-  if (!Number.isFinite(date.getTime())) return 'Unknown date'
+function formatSessionDayDate(date: Date | null): string {
+  if (!date || !Number.isFinite(date.getTime())) return 'Unknown date'
   const today = new Date()
   const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime()
   const targetMidnight = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
@@ -937,6 +979,8 @@ function formatSessionMetaStamp(value: string | null): string {
 
 const SESSION_MARKDOWN_REMARK = [remarkGfm, remarkMath]
 const SESSION_MARKDOWN_REHYPE = [rehypeKatex]
+type MarkdownElementProps<Tag extends keyof HTMLElementTagNameMap> = ComponentPropsWithoutRef<Tag> & { node?: unknown }
+type MarkdownCodeProps = MarkdownElementProps<'code'> & { inline?: boolean }
 
 function SessionMessageMarkdown({ source }: { source: string }) {
   const text = String(source ?? '').trim()
@@ -946,15 +990,20 @@ function SessionMessageMarkdown({ source }: { source: string }) {
         remarkPlugins={SESSION_MARKDOWN_REMARK}
         rehypePlugins={SESSION_MARKDOWN_REHYPE}
         components={{
-          table: ({ node: _node, ...props }) => (
-            <div className="table-wrapper">
-              <table {...props} />
-            </div>
-          ),
-          pre: ({ node: _node, className, ...props }: any) => (
-            <pre className={['code-block', className].filter(Boolean).join(' ')} {...props} />
-          ),
-          code: ({ node: _node, inline, className, children, ...props }: any) => {
+          table: ({ node, ...props }: MarkdownElementProps<'table'>) => {
+            void node
+            return (
+              <div className="table-wrapper">
+                <table {...props} />
+              </div>
+            )
+          },
+          pre: ({ node, className, ...props }: MarkdownElementProps<'pre'>) => {
+            void node
+            return <pre className={['code-block', className].filter(Boolean).join(' ')} {...props} />
+          },
+          code: ({ node, inline, className, children, ...props }: MarkdownCodeProps) => {
+            void node
             if (inline) {
               return (
                 <code className="inline-code" {...props}>
@@ -964,7 +1013,10 @@ function SessionMessageMarkdown({ source }: { source: string }) {
             }
             return <code className={className} {...props}>{children}</code>
           },
-          a: ({ node: _node, ...props }) => <a target="_blank" rel="noopener noreferrer" {...props} />,
+          a: ({ node, ...props }: MarkdownElementProps<'a'>) => {
+            void node
+            return <a target="_blank" rel="noopener noreferrer" {...props} />
+          },
         }}
       >
         {text || '*No readable content.*'}
@@ -2226,24 +2278,24 @@ export default function SpacesControlCenter({
   const today = useMemo(() => new Date(), [])
   const manageSnapshot = useMemo(() => buildManageSnapshot(manageMetrics), [manageMetrics])
   const groupedSessions = useMemo(() => {
-    const sorted = [...sessionsList].sort(
-      (a, b) => gatewaySessionRecencyMs(a) - gatewaySessionRecencyMs(b),
-    )
-    const groups: Array<{ key: string; label: string; sessions: GatewaySessionRow[] }> = []
+    const sorted = [...sessionsList].sort((a, b) => {
+      const dayDelta = gatewaySessionGroupInfo(b).sortMs - gatewaySessionGroupInfo(a).sortMs
+      if (dayDelta !== 0) return dayDelta
+      return gatewaySessionRecencyMs(b) - gatewaySessionRecencyMs(a)
+    })
+    const groups: Array<{ key: string; label: string; sortMs: number; sessions: GatewaySessionRow[] }> = []
     const indexByKey = new Map<string, number>()
     for (const session of sorted) {
-      const keySource = session.updated_at || session.created_at || session.id
-      const groupKey = typeof keySource === 'string' && keySource.length >= 10 ? keySource.slice(0, 10) : session.id
-      const groupLabel = formatSessionDayLabel(session.updated_at || session.created_at)
-      let groupIndex = indexByKey.get(groupKey)
+      const groupInfo = gatewaySessionGroupInfo(session)
+      let groupIndex = indexByKey.get(groupInfo.key)
       if (groupIndex == null) {
         groupIndex = groups.length
-        indexByKey.set(groupKey, groupIndex)
-        groups.push({ key: groupKey, label: groupLabel, sessions: [] })
+        indexByKey.set(groupInfo.key, groupIndex)
+        groups.push({ key: groupInfo.key, label: groupInfo.label, sortMs: groupInfo.sortMs, sessions: [] })
       }
       groups[groupIndex].sessions.push(session)
     }
-    groups.sort((a, b) => a.key.localeCompare(b.key))
+    groups.sort((a, b) => b.sortMs - a.sortMs)
     return groups
   }, [sessionsList])
   const selectedSession = useMemo(
@@ -6146,8 +6198,8 @@ export default function SpacesControlCenter({
       ? new Date(selectedSessionFetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
       : '—'
     const sessionDetailMetaLine = [
-      `Started ${formatSessionMetaStamp(selectedSession?.created_at ?? null)}`,
-      `Active ${formatSessionMetaStamp(selectedSession?.updated_at ?? null)}`,
+      `Started ${formatSessionMetaStamp(selectedSession?.first_message_at ?? selectedSession?.created_at ?? null)}`,
+      `Last ${formatSessionMetaStamp(selectedSession?.last_message_at ?? selectedSession?.updated_at ?? null)}`,
       `${selectedMessageCount} ${selectedMessageCount === 1 ? 'message' : 'messages'}`,
       `${selectedTraceCount} ${selectedTraceCount === 1 ? 'trace' : 'traces'}`,
       selectedSessionCompactedSummary ? 'Summary on file' : 'No summary',
@@ -6235,8 +6287,9 @@ export default function SpacesControlCenter({
                           <div className="spaces-sessions-day-heading">{group.label}</div>
                           {group.sessions.map((session) => {
                             const isActive = session.id === selectedSessionId
-                            const relative = formatAgentEmailRelative(session.updated_at || session.created_at)
-                            const clock = formatSessionRowTime(session.updated_at || session.created_at)
+                            const activityAt = session.last_message_at || session.updated_at || session.created_at
+                            const relative = formatAgentEmailRelative(activityAt)
+                            const clock = formatSessionRowTime(activityAt)
                             return (
                               <button
                                 key={session.id}

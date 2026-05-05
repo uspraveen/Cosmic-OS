@@ -508,12 +508,18 @@ class SessionStore:
             session_rows = connection.execute(
                 """
                 SELECT
-                    session_id,
-                    created_at,
-                    updated_at,
-                    compacted_summary
-                FROM sessions
-                ORDER BY updated_at DESC, created_at DESC
+                    s.session_id,
+                    s.created_at,
+                    s.updated_at,
+                    s.compacted_summary,
+                    COUNT(m.message_id) AS message_count,
+                    MIN(m.created_at) AS first_message_at,
+                    MAX(m.created_at) AS last_message_at
+                FROM sessions s
+                JOIN messages m ON m.session_id = s.session_id
+                GROUP BY s.session_id
+                HAVING message_count > 0
+                ORDER BY last_message_at DESC, s.created_at DESC
                 LIMIT ?
                 """,
                 (max(1, limit),),
@@ -547,6 +553,9 @@ class SessionStore:
                         "title": self._title_for_session(title_source),
                         "created_at": row["created_at"],
                         "updated_at": row["updated_at"],
+                        "message_count": int(row["message_count"] or 0),
+                        "first_message_at": row["first_message_at"],
+                        "last_message_at": row["last_message_at"],
                     }
                 )
         return sessions
