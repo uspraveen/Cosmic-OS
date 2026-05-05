@@ -1914,6 +1914,8 @@ export default function SpacesControlCenter({
   const [selectedSessionLoading, setSelectedSessionLoading] = useState(false)
   const [selectedSessionError, setSelectedSessionError] = useState<string | null>(null)
   const [selectedSessionFetchedAt, setSelectedSessionFetchedAt] = useState<number | null>(null)
+  const [selectedSessionTracesLoading, setSelectedSessionTracesLoading] = useState(false)
+  const [selectedSessionTraceLoadedForId, setSelectedSessionTraceLoadedForId] = useState<string | null>(null)
   const [selectedSessionTraceError, setSelectedSessionTraceError] = useState<string | null>(null)
   const [sessionsListCollapsed, setSessionsListCollapsed] = useState(false)
   const [sessionsDiagnosticsOpen, setSessionsDiagnosticsOpen] = useState(false)
@@ -1922,6 +1924,7 @@ export default function SpacesControlCenter({
   const sessionsDetailAnchorRef = useRef<HTMLDivElement>(null)
   const sessionsRequestRef = useRef(0)
   const sessionsDetailRequestRef = useRef(0)
+  const sessionsTraceRequestRef = useRef(0)
   const sessionsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
@@ -1947,6 +1950,9 @@ export default function SpacesControlCenter({
   }, [])
 
   useEffect(() => {
+    if (!active || page !== 'calendar') {
+      return
+    }
     if (!window.cosmic?.onCalendarAgendaUpdate) return
     const offAgenda = window.cosmic.onCalendarAgendaUpdate((snapshot: unknown) => {
       const normalized = normalizeCalendarAgendaSnapshot(snapshot as Record<string, unknown>)
@@ -1972,10 +1978,14 @@ export default function SpacesControlCenter({
       offAgenda?.()
       offShown?.()
       offIntegration?.()
-    window.clearInterval(intervalId)
-    if (calendarRefreshTimeoutRef.current) clearTimeout(calendarRefreshTimeoutRef.current)
+      window.clearInterval(intervalId)
+      if (calendarRefreshTimeoutRef.current) {
+        clearTimeout(calendarRefreshTimeoutRef.current)
+        calendarRefreshTimeoutRef.current = null
+      }
+      setCalendarRefreshing(false)
     }
-  }, [requestCalendarAgenda])
+  }, [active, page, requestCalendarAgenda])
 
   const requestManageMetrics = useCallback(async (showSpinner = false, forceRefresh = false) => {
     if (!gatewayConnected) {
@@ -2261,25 +2271,45 @@ export default function SpacesControlCenter({
     if (!targetId) {
       setSelectedSessionRequestTraces([])
       setSelectedSessionTraceError(null)
+      setSelectedSessionTraceLoadedForId(null)
+      setSelectedSessionTracesLoading(false)
       return
     }
     if (!gatewayConnected) {
       setSelectedSessionRequestTraces([])
       setSelectedSessionTraceError(String(gatewayDetail || 'The desktop app is not connected to your VM yet.'))
+      setSelectedSessionTraceLoadedForId(targetId)
+      setSelectedSessionTracesLoading(false)
       return
     }
     if (!window.cosmic?.getGatewayRequestTraces) {
       setSelectedSessionTraceError('Gateway request trace bridge is unavailable.')
+      setSelectedSessionTraceLoadedForId(targetId)
+      setSelectedSessionTracesLoading(false)
       return
     }
+    const requestId = ++sessionsTraceRequestRef.current
+    setSelectedSessionTracesLoading(true)
     try {
       const raw = await window.cosmic.getGatewayRequestTraces(targetId)
+      if (requestId !== sessionsTraceRequestRef.current) {
+        return
+      }
       const normalized = normalizeGatewayRequestTracePayload(raw)
       setSelectedSessionRequestTraces(normalized.requestTraces)
       setSelectedSessionTraceError(null)
+      setSelectedSessionTraceLoadedForId(targetId)
     } catch (error: unknown) {
+      if (requestId !== sessionsTraceRequestRef.current) {
+        return
+      }
       setSelectedSessionRequestTraces([])
       setSelectedSessionTraceError(toErrorMessage(error, 'Unable to load request traces for this session.'))
+      setSelectedSessionTraceLoadedForId(targetId)
+    } finally {
+      if (requestId === sessionsTraceRequestRef.current) {
+        setSelectedSessionTracesLoading(false)
+      }
     }
   }, [gatewayConnected, gatewayDetail])
 
@@ -2332,13 +2362,38 @@ export default function SpacesControlCenter({
       setSelectedSessionFetchedAt(null)
       setSelectedSessionError(null)
       setSelectedSessionTraceError(null)
+      setSelectedSessionTraceLoadedForId(null)
+      setSelectedSessionTracesLoading(false)
       setSessionsDiagnosticsOpen(false)
+      sessionsTraceRequestRef.current += 1
       return
     }
     setSessionsDiagnosticsOpen(false)
+    setSelectedSessionRequestTraces([])
+    setSelectedSessionTraceError(null)
+    setSelectedSessionTraceLoadedForId(null)
+    setSelectedSessionTracesLoading(false)
+    sessionsTraceRequestRef.current += 1
     requestSelectedSessionHistory(selectedSessionId, true)
+  }, [active, page, selectedSessionId, requestSelectedSessionHistory])
+
+  useEffect(() => {
+    if (!active || page !== 'sessions' || !selectedSessionId || !sessionsDiagnosticsOpen) {
+      return
+    }
+    if (selectedSessionTracesLoading || selectedSessionTraceLoadedForId === selectedSessionId) {
+      return
+    }
     requestSelectedSessionRequestTraces(selectedSessionId)
-  }, [active, page, selectedSessionId, requestSelectedSessionHistory, requestSelectedSessionRequestTraces])
+  }, [
+    active,
+    page,
+    selectedSessionId,
+    sessionsDiagnosticsOpen,
+    selectedSessionTraceLoadedForId,
+    selectedSessionTracesLoading,
+    requestSelectedSessionRequestTraces,
+  ])
 
   const gatewayStatus = useMemo(() => normalizeGatewayState(gatewayState), [gatewayState])
   const today = useMemo(() => new Date(), [])
@@ -6506,7 +6561,11 @@ export default function SpacesControlCenter({
                             <span className="spaces-sessions-diagnostics-main">
                               <span className="spaces-sessions-diagnostics-title">Diagnostics</span>
                               <span className="spaces-sessions-diagnostics-sub">
-                                {selectedSessionRequestTraces.length} request {selectedSessionRequestTraces.length === 1 ? 'trace' : 'traces'}
+                                {selectedSessionTracesLoading
+                                  ? 'Loading request traces'
+                                  : selectedSessionTraceLoadedForId === selectedSessionId
+                                    ? `${selectedSessionRequestTraces.length} request ${selectedSessionRequestTraces.length === 1 ? 'trace' : 'traces'}`
+                                    : 'Open to load request traces'}
                                 {selectedSessionTraceError ? ' · load issue' : ''}
                               </span>
                             </span>
@@ -6517,7 +6576,12 @@ export default function SpacesControlCenter({
                           {sessionsDiagnosticsOpen && selectedSessionTraceError ? (
                             <div className="spaces-agents-error">{selectedSessionTraceError}</div>
                           ) : null}
-                          {sessionsDiagnosticsOpen && !selectedSessionTraceError && selectedSessionRequestTraces.length > 0 ? (
+                          {sessionsDiagnosticsOpen && selectedSessionTracesLoading ? (
+                            <div className="spaces-sessions-detail-placeholder">
+                              <strong>Loading diagnostics</strong>
+                              <p>Fetching request traces only because Diagnostics is open.</p>
+                            </div>
+                          ) : sessionsDiagnosticsOpen && !selectedSessionTraceError && selectedSessionRequestTraces.length > 0 ? (
                             <div className="spaces-session-trace-list">
                               {selectedSessionRequestTraces.map((trace) => {
                                 const deliveryStatus = typeof trace.delivery?.status === 'string' ? trace.delivery.status : ''
