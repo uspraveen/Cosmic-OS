@@ -47,7 +47,7 @@ class StepPlan:
             return {"error": f"Invalid step {step}. Valid: 1-{len(self._steps)}"}
 
         normalized_status = str(status or "").strip().lower()
-        if normalized_status not in {"pending", "in_progress", "completed", "skipped"}:
+        if normalized_status not in {"pending", "in_progress", "completed", "failed", "skipped"}:
             return {"error": f"Invalid status: {status!r}"}
 
         entry = self._steps[step - 1]
@@ -55,7 +55,7 @@ class StepPlan:
         if note is not None:
             entry["note"] = str(note)
 
-        completed = sum(1 for item in self._steps if item["status"] in {"completed", "skipped"})
+        completed = sum(1 for item in self._steps if item["status"] in {"completed", "failed", "skipped"})
         total = len(self._steps)
         percent = round((completed / total) * 100) if total else 0
 
@@ -82,7 +82,7 @@ class StepPlan:
         }
 
     async def list(self) -> dict[str, Any]:
-        completed = sum(1 for item in self._steps if item["status"] in {"completed", "skipped"})
+        completed = sum(1 for item in self._steps if item["status"] in {"completed", "failed", "skipped"})
         return {
             "plan_active": self._active,
             "steps": self._copy_steps(),

@@ -195,183 +195,267 @@ class AlphaAgent(AgentRuntime):
             )
 
         preferred_harness = await self._resolve_preferred_harness(task)
-        if preferred_harness not in {"codex", "cursor"}:
+        candidate_harnesses = self._candidate_harnesses(preferred_harness, task)
+        if not candidate_harnesses:
             return self._fail(
                 code="UNSUPPORTED_OPERATION",
                 message="Alpha currently supports Codex and Cursor CLI execution. OpenCode is planned but not wired.",
                 next_action="ask_user",
             )
 
-        provider_status = await self._fetch_provider_status(preferred_harness)
-        provider_ready = self._provider_status_is_ready(provider_status)
-        provider_label = self._harness_label(preferred_harness)
-        if self.step_plan is not None:
-            await self.step_plan.update(
-                4,
-                "completed" if provider_ready else "failed",
-                f"{provider_label} is authenticated." if provider_ready else f"{provider_label} is not authenticated.",
-            )
-        if not provider_ready:
-            project = self.registry.mark_task(
-                project.project_id,
-                task_id=task.task_id,
-                session_id=task.session_id,
-                local_path=str(paths.workspace),
-                summary=goal[:500],
-                status=f"{preferred_harness}_login_required",
-                goal=goal[:2000],
-                context_brief=context_brief,
-                preferred_harness=preferred_harness,
-                repo_url=self._optional_string(task.input.get("repo_url")),
-                deployment_url=self._optional_string(task.input.get("deployment_url")),
-            )
-            return self._fail(
-                code=f"{preferred_harness.upper()}_LOGIN_REQUIRED",
-                message=self._provider_login_message(preferred_harness, provider_status),
-                next_action="ask_user",
-            )
-
-        await self.emit_event(
-            task.task_id,
-            "task.progress",
-            {
-                "stage": f"alpha.{preferred_harness}.started",
-                "project_id": project.project_id,
-                "workspace": str(paths.workspace),
-            },
-        )
-
-        async def emit_alpha_terminal(entry: dict[str, Any]) -> None:
-            text = str(entry.get("text") or "").strip()
-            if not text:
-                return
-            await self.emit_event(
-                task.task_id,
-                "task.progress",
-                {
-                    "stage": f"alpha.{preferred_harness}.terminal",
-                    "project_id": project.project_id,
-                    "workspace": str(paths.workspace),
-                    "codex_terminal": {
-                        "id": f"alpha_terminal_{uuid4().hex}",
-                        "task_id": task.task_id,
-                        "provider": preferred_harness,
-                        "stream": str(entry.get("stream") or "stdout"),
-                        "event_type": str(entry.get("event_type") or f"{preferred_harness}.event"),
-                        "text": text[:2000],
-                        "detail": str(entry.get("detail") or "").strip()[:2000] or None,
-                    },
-                },
-            )
-
-        await emit_alpha_terminal(
-            {
-                "stream": "system",
-                "event_type": f"{preferred_harness}.exec.started",
-                "text": self._harness_start_message(preferred_harness),
-                "detail": str(paths.workspace),
-            }
-        )
         staged_inputs = self._stage_input_artifacts(task, workspace=paths.workspace)
-        prompt = self._build_cli_prompt(
+        base_prompt = self._build_cli_prompt(
             task=task,
             project=project,
             workspace=str(paths.workspace),
             artifacts_dir=str(paths.artifacts),
             staged_inputs=staged_inputs,
         )
+
         async def cancel_check() -> bool:
             raw = await self.redis.get(f"task_cancel:{task.task_id}")
             return bool(raw)
 
-        selected_model: str | None = None
-        if preferred_harness == "cursor":
-            selected_model = self._select_cursor_model(task, provider_status)
+        all_artifacts: list[Any] = []
+        attempt_outputs: dict[str, Any] = {}
+        fallback_from: dict[str, Any] | None = None
+        last_result: CodexRunResult | CursorRunResult | None = None
+        last_provider = candidate_harnesses[0]
+        last_provider_status: dict[str, Any] = {}
+        last_provider_label = self._harness_label(last_provider)
+
+        for attempt_index, active_harness in enumerate(candidate_harnesses):
+            provider_status = await self._safe_fetch_provider_status(active_harness)
+            provider_ready = self._provider_status_is_ready(provider_status)
+            provider_label = self._harness_label(active_harness)
+            last_provider = active_harness
+            last_provider_status = provider_status
+            last_provider_label = provider_label
+
+            if self.step_plan is not None and (attempt_index == 0 or provider_ready):
+                await self.step_plan.update(
+                    4,
+                    "completed" if provider_ready else "failed",
+                    f"{provider_label} is authenticated." if provider_ready else f"{provider_label} is not authenticated.",
+                )
+
+            emit_alpha_terminal = self._terminal_emitter(
+                task=task,
+                project_id=project.project_id,
+                workspace=str(paths.workspace),
+                provider=active_harness,
+            )
+
+            if not provider_ready:
+                await emit_alpha_terminal(
+                    {
+                        "stream": "system",
+                        "event_type": f"{active_harness}.login_required",
+                        "text": f"{provider_label} is not authenticated.",
+                        "detail": self._provider_login_message(active_harness, provider_status),
+                    }
+                )
+                if attempt_index + 1 < len(candidate_harnesses):
+                    next_harness = candidate_harnesses[attempt_index + 1]
+                    await self._emit_harness_fallback(
+                        task=task,
+                        project_id=project.project_id,
+                        workspace=str(paths.workspace),
+                        from_provider=active_harness,
+                        to_provider=next_harness,
+                        reason=f"{provider_label} is not authenticated.",
+                    )
+                    fallback_from = {
+                        "provider": active_harness,
+                        "reason": "login_required",
+                    }
+                    continue
+
+                project = self.registry.mark_task(
+                    project.project_id,
+                    task_id=task.task_id,
+                    session_id=task.session_id,
+                    local_path=str(paths.workspace),
+                    summary=goal[:500],
+                    status=f"{active_harness}_login_required",
+                    goal=goal[:2000],
+                    context_brief=context_brief,
+                    preferred_harness=active_harness,
+                    repo_url=self._optional_string(task.input.get("repo_url")),
+                    deployment_url=self._optional_string(task.input.get("deployment_url")),
+                )
+                return self._fail(
+                    code=f"{active_harness.upper()}_LOGIN_REQUIRED",
+                    message=self._provider_login_message(active_harness, provider_status),
+                    next_action="ask_user",
+                )
+
+            await self.emit_event(
+                task.task_id,
+                "task.progress",
+                {
+                    "stage": f"alpha.{active_harness}.started",
+                    "project_id": project.project_id,
+                    "workspace": str(paths.workspace),
+                    "attempt": attempt_index + 1,
+                },
+            )
             await emit_alpha_terminal(
                 {
                     "stream": "system",
-                    "event_type": "cursor.model.selected",
-                    "text": f"Cursor model selected: {selected_model or 'auto'}",
-                    "detail": "COSMIC will fail this run if Cursor initializes a Fast model when a non-Fast model was requested.",
+                    "event_type": f"{active_harness}.exec.started",
+                    "text": self._harness_start_message(active_harness),
+                    "detail": str(paths.workspace),
                 }
             )
-            run_result = await self.cursor_runner.run(
-                paths=paths,
-                prompt=prompt,
-                model=selected_model,
-                timeout_sec=self.config.cursor_timeout_sec,
-                event_callback=emit_alpha_terminal,
-                cancel_check=cancel_check,
+
+            prompt = self._prompt_for_attempt(
+                base_prompt,
+                fallback_from=fallback_from,
+                previous_result=last_result,
             )
-        else:
-            selected_model = self._select_codex_model(task, provider_status)
-            run_result = await self.codex_runner.run(
+            selected_model: str | None = None
+            if active_harness == "cursor":
+                selected_model = self._select_cursor_model(task, provider_status)
+                await emit_alpha_terminal(
+                    {
+                        "stream": "system",
+                        "event_type": "cursor.model.selected",
+                        "text": f"Cursor model selected: {selected_model or 'auto'}",
+                        "detail": "COSMIC will fail this run if Cursor initializes a Fast model when a non-Fast model was requested.",
+                    }
+                )
+                run_result = await self.cursor_runner.run(
+                    paths=paths,
+                    prompt=prompt,
+                    model=selected_model,
+                    timeout_sec=self.config.cursor_timeout_sec,
+                    event_callback=emit_alpha_terminal,
+                    cancel_check=cancel_check,
+                )
+            else:
+                selected_model = self._select_codex_model(task, provider_status)
+                run_result = await self.codex_runner.run(
+                    paths=paths,
+                    prompt=prompt,
+                    model=selected_model,
+                    sandbox=self._select_codex_sandbox(task),
+                    timeout_sec=self.config.codex_timeout_sec,
+                    event_callback=emit_alpha_terminal,
+                    cancel_check=cancel_check,
+                )
+
+            last_result = run_result
+            artifact_batch = promote_alpha_artifacts(
+                task_id=task.task_id,
                 paths=paths,
-                prompt=prompt,
-                model=selected_model,
-                sandbox=self._select_codex_sandbox(task),
-                timeout_sec=self.config.codex_timeout_sec,
-                event_callback=emit_alpha_terminal,
-                cancel_check=cancel_check,
+                text_hints=(
+                    getattr(run_result, "last_message", ""),
+                    getattr(run_result, "stdout", ""),
+                    getattr(run_result, "stderr", ""),
+                ),
             )
-        artifacts = promote_alpha_artifacts(
-            task_id=task.task_id,
-            paths=paths,
-            text_hints=(
-                getattr(run_result, "last_message", ""),
-                getattr(run_result, "stdout", ""),
-                getattr(run_result, "stderr", ""),
-            ),
-        )
-        project = self.registry.mark_task(
-            project.project_id,
-            task_id=task.task_id,
-            session_id=task.session_id,
-            local_path=str(paths.workspace),
-            summary=(run_result.last_message or goal)[:500],
-            status="completed" if run_result.ok else f"{preferred_harness}_failed",
-            goal=goal[:2000],
-            context_brief=context_brief,
-            preferred_harness=preferred_harness,
-            artifact_ids=[item.artifact_id for item in artifacts],
-            repo_url=self._optional_string(task.input.get("repo_url")),
-            deployment_url=self._optional_string(task.input.get("deployment_url")),
-        )
-        await self.emit_event(
-            task.task_id,
-            "task.progress",
-            {
-                "stage": f"alpha.{preferred_harness}.completed" if run_result.ok else f"alpha.{preferred_harness}.failed",
-                "project_id": project.project_id,
+            all_artifacts = self._merge_artifacts(all_artifacts, artifact_batch)
+            attempt_outputs[active_harness] = run_result.as_dict()
+            if fallback_from:
+                attempt_outputs.setdefault("fallback_from", fallback_from)
+
+            project = self.registry.mark_task(
+                project.project_id,
+                task_id=task.task_id,
+                session_id=task.session_id,
+                local_path=str(paths.workspace),
+                summary=(run_result.last_message or goal)[:500],
+                status="completed" if run_result.ok else f"{active_harness}_failed",
+                goal=goal[:2000],
+                context_brief=context_brief,
+                preferred_harness=active_harness,
+                artifact_ids=[item.artifact_id for item in all_artifacts],
+                repo_url=self._optional_string(task.input.get("repo_url")),
+                deployment_url=self._optional_string(task.input.get("deployment_url")),
+            )
+            await self.emit_event(
+                task.task_id,
+                "task.progress",
+                {
+                    "stage": f"alpha.{active_harness}.completed" if run_result.ok else f"alpha.{active_harness}.failed",
+                    "project_id": project.project_id,
+                    "returncode": run_result.returncode,
+                    "timed_out": run_result.timed_out,
+                    "artifact_ids": [item.artifact_id for item in all_artifacts],
+                    "attempt": attempt_index + 1,
+                },
+            )
+
+            if run_result.ok:
+                if self.step_plan is not None:
+                    await self.step_plan.update(5, "completed", f"{provider_label} completed the task.")
+                output: dict[str, Any] = {
+                    "status": "completed",
+                    "project": project.as_dict(),
+                    "workspace": paths.as_dict(),
+                    "docker": docker_report,
+                    "harness": active_harness,
+                    active_harness: run_result.as_dict(),
+                    "attempts": attempt_outputs,
+                    "next_action": f"Review {provider_label} output and continue with the same project_ref for follow-up work.",
+                }
+                if fallback_from:
+                    output["fallback_from"] = fallback_from
+                return AgentResult(
+                    status="completed",
+                    output=output,
+                    artifacts=all_artifacts,
+                    error=None,
+                )
+
+            if attempt_index + 1 >= len(candidate_harnesses) or not self._should_try_next_harness(run_result):
+                break
+
+            next_harness = candidate_harnesses[attempt_index + 1]
+            reason = self._failure_reason(active_harness, run_result)
+            await self._emit_harness_fallback(
+                task=task,
+                project_id=project.project_id,
+                workspace=str(paths.workspace),
+                from_provider=active_harness,
+                to_provider=next_harness,
+                reason=reason,
+            )
+            fallback_from = {
+                "provider": active_harness,
+                "model": selected_model,
                 "returncode": run_result.returncode,
                 "timed_out": run_result.timed_out,
-                "artifact_ids": [item.artifact_id for item in artifacts],
-            },
-        )
+                "reason": reason,
+            }
+
         if self.step_plan is not None:
-            await self.step_plan.update(
-                5,
-                "completed" if run_result.ok else "failed",
-                f"{provider_label} completed the task." if run_result.ok else f"{provider_label} execution failed.",
+            await self.step_plan.update(5, "failed", f"{last_provider_label} execution failed.")
+
+        if last_result is None:
+            project = self.registry.mark_task(
+                project.project_id,
+                task_id=task.task_id,
+                session_id=task.session_id,
+                local_path=str(paths.workspace),
+                summary=goal[:500],
+                status=f"{last_provider}_login_required",
+                goal=goal[:2000],
+                context_brief=context_brief,
+                preferred_harness=last_provider,
+                repo_url=self._optional_string(task.input.get("repo_url")),
+                deployment_url=self._optional_string(task.input.get("deployment_url")),
             )
-
-        if not run_result.ok:
-            return self._cli_failure(preferred_harness, run_result, artifacts=artifacts)
-
-        return AgentResult(
-            status="completed",
-            output={
-                "status": "completed",
-                "project": project.as_dict(),
-                "workspace": paths.as_dict(),
-                "docker": docker_report,
-                "harness": preferred_harness,
-                preferred_harness: run_result.as_dict(),
-                "next_action": f"Review {provider_label} output and continue with the same project_ref for follow-up work.",
-            },
-            artifacts=artifacts,
-            error=None,
-        )
+            return self._fail(
+                code=f"{last_provider.upper()}_LOGIN_REQUIRED",
+                message=self._provider_login_message(last_provider, last_provider_status),
+                next_action="ask_user",
+            )
+        failure = self._cli_failure(last_provider, last_result, artifacts=all_artifacts)
+        if fallback_from:
+            failure.output = {"fallback_from": fallback_from, "attempts": attempt_outputs}
+        return failure
 
     async def handle_alpha_recall_project(self, task: TaskEnvelope) -> AgentResult:
         project_query = self._optional_string(task.input.get("project_ref")) or self._optional_string(
@@ -426,10 +510,203 @@ class AlphaAgent(AgentRuntime):
 
     async def _resolve_preferred_harness(self, task: TaskEnvelope) -> str:
         explicit = str(task.input.get("preferred_harness") or "").strip().lower()
-        if explicit and explicit != "auto":
+        if explicit:
             return explicit
         settings = await self._fetch_alpha_settings()
         return str(settings.get("preferred_harness") or "codex").strip().lower() or "codex"
+
+    def _candidate_harnesses(self, preferred_harness: str, task: TaskEnvelope) -> list[str]:
+        normalized = str(preferred_harness or "").strip().lower()
+        if normalized == "auto":
+            normalized = "codex" if self._task_prefers_codex_first(task) else "cursor"
+        if normalized not in {"codex", "cursor"}:
+            return []
+        candidates = [normalized]
+        if self._allow_harness_fallback(task):
+            alternate = "codex" if normalized == "cursor" else "cursor"
+            candidates.append(alternate)
+        return self._dedupe_harnesses(candidates)
+
+    def _task_prefers_codex_first(self, task: TaskEnvelope) -> bool:
+        goal = str(task.input.get("goal") or "")
+        text = " ".join(
+            [
+                goal,
+                str(task.input.get("context_brief") or ""),
+                str(task.input.get("project_context") or ""),
+            ]
+        ).casefold()
+        if len(goal) > 6000:
+            return True
+        broad_generation_terms = (
+            "build and deploy",
+            "full redesign",
+            "complete redesign",
+            "complete rewrite",
+            "from scratch",
+            "write the complete",
+            "generate the complete",
+            "fine-tune",
+            "training",
+            "train a model",
+            "create a new app",
+            "build a website",
+            "host a website",
+            "deploy",
+        )
+        return any(term in text for term in broad_generation_terms)
+
+    def _allow_harness_fallback(self, task: TaskEnvelope) -> bool:
+        if self._coerce_bool(task.input.get("require_preferred_harness"), default=False):
+            return False
+        return self._coerce_bool(task.input.get("allow_harness_fallback"), default=True)
+
+    def _dedupe_harnesses(self, values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for value in values:
+            normalized = str(value or "").strip().lower()
+            if normalized not in {"codex", "cursor"} or normalized in seen:
+                continue
+            seen.add(normalized)
+            result.append(normalized)
+        return result
+
+    async def _safe_fetch_provider_status(self, provider: str) -> dict[str, Any]:
+        try:
+            return await self._fetch_provider_status(provider)
+        except Exception as exc:
+            return {
+                "status": "error",
+                "login_required_reason": f"{provider}_status_lookup_failed: {str(exc)[:200]}",
+                "cli": {"authenticated": False},
+            }
+
+    def _terminal_emitter(
+        self,
+        *,
+        task: TaskEnvelope,
+        project_id: str,
+        workspace: str,
+        provider: str,
+    ) -> Any:
+        async def emit_alpha_terminal(entry: dict[str, Any]) -> None:
+            text = str(entry.get("text") or "").strip()
+            if not text:
+                return
+            await self.emit_event(
+                task.task_id,
+                "task.progress",
+                {
+                    "stage": f"alpha.{provider}.terminal",
+                    "project_id": project_id,
+                    "workspace": workspace,
+                    "codex_terminal": {
+                        "id": f"alpha_terminal_{uuid4().hex}",
+                        "task_id": task.task_id,
+                        "provider": provider,
+                        "stream": str(entry.get("stream") or "stdout"),
+                        "event_type": str(entry.get("event_type") or f"{provider}.event"),
+                        "text": text[:2000],
+                        "detail": str(entry.get("detail") or "").strip()[:2000] or None,
+                    },
+                },
+            )
+
+        return emit_alpha_terminal
+
+    async def _emit_harness_fallback(
+        self,
+        *,
+        task: TaskEnvelope,
+        project_id: str,
+        workspace: str,
+        from_provider: str,
+        to_provider: str,
+        reason: str,
+    ) -> None:
+        await self.emit_event(
+            task.task_id,
+            "task.progress",
+            {
+                "stage": "alpha.harness_fallback",
+                "project_id": project_id,
+                "workspace": workspace,
+                "codex_terminal": {
+                    "id": f"alpha_terminal_{uuid4().hex}",
+                    "task_id": task.task_id,
+                    "provider": to_provider,
+                    "stream": "system",
+                    "event_type": "alpha.harness_fallback",
+                    "text": (
+                        f"{self._harness_label(from_provider)} did not complete cleanly; "
+                        f"continuing in the same workspace with {self._harness_label(to_provider)}."
+                    ),
+                    "detail": reason[:2000],
+                },
+            },
+        )
+
+    def _prompt_for_attempt(
+        self,
+        base_prompt: str,
+        *,
+        fallback_from: dict[str, Any] | None,
+        previous_result: CodexRunResult | CursorRunResult | None,
+    ) -> str:
+        if not fallback_from:
+            return base_prompt
+        details = [
+            "",
+            "## Previous Harness Attempt",
+            (
+                f"{self._harness_label(str(fallback_from.get('provider') or ''))} did not complete cleanly. "
+                "Continue from the current workspace and artifact directory; do not discard partial files that look useful."
+            ),
+            f"- reason: {fallback_from.get('reason') or ''}",
+            f"- returncode: {fallback_from.get('returncode')}",
+            f"- timed_out: {fallback_from.get('timed_out')}",
+            "- Finish the original user goal, repair any partial work, produce the requested artifacts, and run the verification commands.",
+        ]
+        if previous_result is not None:
+            stderr = str(getattr(previous_result, "stderr", "") or "").strip()
+            last_message = str(getattr(previous_result, "last_message", "") or "").strip()
+            if stderr:
+                details.append(f"- stderr_tail: {stderr[-2000:]}")
+            if last_message:
+                details.append(f"- previous_last_message_tail: {last_message[-2000:]}")
+        return base_prompt + "\n" + "\n".join(details)
+
+    def _should_try_next_harness(self, result: CodexRunResult | CursorRunResult) -> bool:
+        if getattr(result, "cancelled", False):
+            return False
+        return not result.ok
+
+    def _failure_reason(self, provider: str, result: CodexRunResult | CursorRunResult) -> str:
+        if getattr(result, "cancelled", False):
+            return f"{self._harness_label(provider)} was cancelled."
+        if getattr(result, "init_timed_out", False):
+            return f"{self._harness_label(provider)} did not initialize before the init timeout."
+        if getattr(result, "timed_out", False):
+            return f"{self._harness_label(provider)} exceeded the execution timeout."
+        if getattr(result, "model_mismatch", False):
+            return f"{self._harness_label(provider)} initialized the wrong model."
+        stderr = str(getattr(result, "stderr", "") or "").strip()
+        stdout = str(getattr(result, "stdout", "") or "").strip()
+        tail = (stderr or stdout)[-500:]
+        return tail or f"{self._harness_label(provider)} exited without a clean final result."
+
+    def _merge_artifacts(self, first: list[Any], second: list[Any]) -> list[Any]:
+        merged: list[Any] = []
+        seen: set[str] = set()
+        for item in [*first, *second]:
+            artifact_id = str(getattr(item, "artifact_id", "") or "").strip()
+            key = artifact_id or str(getattr(item, "path", "") or "")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+        return merged
 
     async def _fetch_alpha_settings(self) -> dict[str, Any]:
         if not self.gateway_internal_token:
@@ -550,7 +827,7 @@ class AlphaAgent(AgentRuntime):
         goal_for_prompt = goal
         if goal_reference:
             goal_for_prompt = (
-                goal[:12000].rstrip()
+                goal[:4000].rstrip()
                 + "\n\n[The full user goal/context was too large for safe CLI argv transport. "
                 + f"Read the full content from: {goal_reference}]"
             )
@@ -606,7 +883,7 @@ class AlphaAgent(AgentRuntime):
         return "\n".join(lines)
 
     def _externalize_large_goal(self, goal: str, *, artifacts_dir: str) -> str | None:
-        if len(goal) <= 24000:
+        if len(goal) <= 8000:
             return None
         try:
             path = Path(artifacts_dir) / "alpha-full-goal.md"
@@ -726,6 +1003,18 @@ class AlphaAgent(AgentRuntime):
     def _optional_string(self, value: Any) -> str | None:
         normalized = str(value or "").strip()
         return normalized or None
+
+    def _coerce_bool(self, value: Any, *, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        normalized = str(value).strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+        return default
 
     def _coerce_string_list(self, value: Any) -> list[str]:
         if not isinstance(value, list):

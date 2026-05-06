@@ -440,9 +440,9 @@ class ToolExecutor:
 
         if self.artifacts_root is None:
             return payload, []
-        max_inline_chars = 24000
+        max_inline_chars = 8000
         payload_json = json.dumps(payload, ensure_ascii=False, default=str)
-        if len(payload_json) <= 90000 and not self._payload_has_large_string(payload, max_inline_chars):
+        if len(payload_json) <= 30000 and not self._payload_has_large_string(payload, max_inline_chars):
             return payload, []
 
         root_task_id = str(context.task_id if context and context.task_id else "alpha").strip() or "alpha"

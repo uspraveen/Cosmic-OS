@@ -51,6 +51,16 @@
       "default": "danger-full-access",
       "description": "Codex sandbox mode for model-generated shell commands."
     },
+    "allow_harness_fallback": {
+      "type": "boolean",
+      "default": true,
+      "description": "When true, Alpha may continue the same workspace with the other authenticated CLI harness if the preferred harness is unavailable, exits dirty, times out, or produces no clean final result. Set false only when the user explicitly requires one provider."
+    },
+    "require_preferred_harness": {
+      "type": "boolean",
+      "default": false,
+      "description": "When true, Alpha must not fall back to another CLI harness. Use only for provider diagnostics or user-mandated provider runs."
+    },
     "deliverables": {
       "type": "array",
       "items": { "type": "string" },

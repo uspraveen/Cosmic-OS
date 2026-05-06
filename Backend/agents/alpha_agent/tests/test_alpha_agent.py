@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from pathlib import Path
 
+from agents.alpha_agent.agent import AlphaAgent
 from agents.alpha_agent.artifact_promoter import promote_alpha_artifacts
-from agents.alpha_agent.codex_runner import CodexWorkspaceRunner
+from agents.alpha_agent.codex_runner import CodexRunResult, CodexWorkspaceRunner
 from agents.alpha_agent.config import AlphaAgentConfig
-from agents.alpha_agent.cursor_runner import CursorWorkspaceRunner, normalize_cursor_model
+from agents.alpha_agent.cursor_runner import CursorRunResult, CursorWorkspaceRunner, normalize_cursor_model
 from agents.alpha_agent.docker_runner import DockerWorkspaceRunner
 from agents.alpha_agent.project_registry import ProjectRegistry
 from agents.alpha_agent.workspace_manager import WorkspaceManager
+from shared.contracts import TaskEnvelope
 
 
 def _config(tmp_path: Path) -> AlphaAgentConfig:
@@ -38,6 +41,44 @@ def _config(tmp_path: Path) -> AlphaAgentConfig:
         cursor_default_model="",
         cursor_init_timeout_sec=180.0,
         cli_idle_check_sec=300.0,
+    )
+
+
+class _FakeRedis:
+    def __init__(self) -> None:
+        self.seq = 0
+        self.events: list[dict[str, object]] = []
+
+    async def incr(self, key: str) -> int:
+        del key
+        self.seq += 1
+        return self.seq
+
+    async def xadd(self, stream: str, fields: dict[str, object], **kwargs: object) -> str:
+        del kwargs
+        self.events.append({"stream": stream, "fields": fields})
+        return f"0-{self.seq}"
+
+    async def rpush(self, key: str, value: object) -> int:
+        del key, value
+        return 1
+
+    async def get(self, key: str) -> None:
+        del key
+        return None
+
+
+def _task(input_payload: dict[str, object]) -> TaskEnvelope:
+    return TaskEnvelope(
+        task_id="tsk_test",
+        task_list_id="list_test",
+        session_id="sess_test",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/alpha-agent:1.0.0",
+        intent="alpha.execute",
+        input=input_payload,
+        idempotency_key="idem_test",
+        signature="",
     )
 
 
@@ -322,6 +363,121 @@ def test_cursor_runner_detects_fast_model_mismatch(tmp_path: Path) -> None:
         requested_model="composer-2-fast",
         observed_model="Composer 2 Fast",
     )
+
+
+def test_alpha_execute_falls_back_from_dirty_cursor_to_codex(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    redis = _FakeRedis()
+    agent = AlphaAgent(redis, config=cfg)
+
+    class CursorFails:
+        async def run(self, **kwargs: object) -> CursorRunResult:
+            paths = kwargs["paths"]
+            paths.artifacts.mkdir(parents=True, exist_ok=True)
+            (paths.artifacts / "cursor-last-message.md").write_text("Cursor partial work", encoding="utf-8")
+            (paths.workspace / "partial.txt").write_text("partial", encoding="utf-8")
+            event_callback = kwargs.get("event_callback")
+            if event_callback is not None:
+                await event_callback(
+                    {
+                        "stream": "stdout",
+                        "event_type": "assistant",
+                        "text": "Cursor wrote partial files, then exited dirty.",
+                    }
+                )
+            return CursorRunResult(
+                returncode=1,
+                stdout='{"type":"assistant","message":{"content":[{"type":"text","text":"partial"}]}}\n',
+                stderr="Cursor exited before result",
+                timed_out=False,
+                command=["cursor-agent"],
+                last_message_path=paths.artifacts / "cursor-last-message.md",
+                last_message="Cursor partial work",
+                duration_sec=1.0,
+                requested_model="composer-2",
+                observed_model="Composer 2",
+            )
+
+    class CodexSucceeds:
+        async def run(self, **kwargs: object) -> CodexRunResult:
+            paths = kwargs["paths"]
+            paths.artifacts.mkdir(parents=True, exist_ok=True)
+            output = paths.artifacts / "codex-last-message.md"
+            output.write_text("Codex finished and verified the task.", encoding="utf-8")
+            (paths.artifacts / "final.txt").write_text("done", encoding="utf-8")
+            event_callback = kwargs.get("event_callback")
+            if event_callback is not None:
+                await event_callback(
+                    {
+                        "stream": "stdout",
+                        "event_type": "codex.result",
+                        "text": "Codex completed fallback.",
+                    }
+                )
+            return CodexRunResult(
+                returncode=0,
+                stdout='{"type":"result","message":"done"}\n',
+                stderr="",
+                timed_out=False,
+                command=["codex", "exec"],
+                last_message_path=output,
+                last_message="Codex finished and verified the task.",
+                duration_sec=1.0,
+            )
+
+    agent.cursor_runner = CursorFails()
+    agent.codex_runner = CodexSucceeds()
+
+    async def fetch_status(provider: str) -> dict[str, object]:
+        return {
+            "status": "authenticated",
+            "preferred_model": "composer-2" if provider == "cursor" else "gpt-5.1-codex",
+            "cli": {"authenticated": True},
+        }
+
+    agent._fetch_provider_status = fetch_status
+
+    result = asyncio.run(
+        agent.handle_alpha_execute(
+            _task(
+                {
+                    "goal": "Complete a portfolio redesign and verify deployment.",
+                    "preferred_harness": "cursor",
+                    "project_ref": "portfolio",
+                }
+            )
+        )
+    )
+
+    assert result.status == "completed"
+    assert result.output["harness"] == "codex"
+    assert result.output["fallback_from"]["provider"] == "cursor"
+    assert "cursor" in result.output["attempts"]
+    assert "codex" in result.output["attempts"]
+    assert {artifact.mime for artifact in result.artifacts} >= {"text/markdown", "text/plain"}
+    assert any("alpha.harness_fallback" in str(event) for event in redis.events)
+
+
+def test_alpha_auto_prefers_codex_for_large_generation_tasks(tmp_path: Path) -> None:
+    agent = AlphaAgent(_FakeRedis(), config=_config(tmp_path))
+
+    candidates = agent._candidate_harnesses(
+        "auto",
+        _task({"goal": "Build and deploy a website from scratch with a complete redesign."}),
+    )
+
+    assert candidates[:2] == ["codex", "cursor"]
+
+
+def test_alpha_large_goal_is_externalized_for_cli_prompt(tmp_path: Path) -> None:
+    agent = AlphaAgent(_FakeRedis(), config=_config(tmp_path))
+    artifacts_dir = tmp_path / "artifacts"
+    goal = "A" * 9000
+
+    reference = agent._externalize_large_goal(goal, artifacts_dir=str(artifacts_dir))
+
+    assert reference is not None
+    assert Path(reference).read_text(encoding="utf-8") == goal
 
 
 async def _collect_stream_lines(payload: bytes) -> list[str]:
