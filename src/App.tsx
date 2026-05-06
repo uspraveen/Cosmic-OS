@@ -1,5 +1,5 @@
 import { ArrowDownToLine, ChevronDown, ChevronRight, Square, Terminal } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -1518,6 +1518,18 @@ const AlphaAgentConsole = ({
   const [expanded, setExpanded] = useState(() => view?.status === 'running')
   const [isPinnedToBottom, setIsPinnedToBottom] = useState(true)
   const terminalRef = useRef<HTMLDivElement | null>(null)
+  const followTerminalRef = useRef(true)
+  const lastUserScrollIntentRef = useRef(0)
+  const latestLine = view?.lines[view.lines.length - 1]
+  const latestTerminalKey = [
+    view?.taskId || '',
+    view?.status || '',
+    view?.lines.length || 0,
+    latestLine?.id || '',
+    latestLine?.createdAt || '',
+    latestLine?.text || '',
+    latestLine?.detail || '',
+  ].join('|')
 
   const scrollTerminalToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
     const terminal = terminalRef.current
@@ -1525,6 +1537,7 @@ const AlphaAgentConsole = ({
       return
     }
     terminal.scrollTo({ top: terminal.scrollHeight, behavior })
+    followTerminalRef.current = true
     setIsPinnedToBottom(true)
   }, [])
 
@@ -1534,7 +1547,18 @@ const AlphaAgentConsole = ({
       return
     }
     const distanceFromBottom = terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight
-    setIsPinnedToBottom(distanceFromBottom <= 24)
+    const pinned = distanceFromBottom <= 32 || terminal.scrollHeight <= terminal.clientHeight + 1
+    const userScrollRecent = Date.now() - lastUserScrollIntentRef.current < 900
+    if (!pinned && !userScrollRecent && followTerminalRef.current) {
+      requestAnimationFrame(() => scrollTerminalToBottom('auto'))
+      return
+    }
+    followTerminalRef.current = pinned
+    setIsPinnedToBottom((current) => (current === pinned ? current : pinned))
+  }, [scrollTerminalToBottom])
+
+  const markUserScrollIntent = useCallback(() => {
+    lastUserScrollIntentRef.current = Date.now()
   }, [])
 
   useEffect(() => {
@@ -1544,15 +1568,26 @@ const AlphaAgentConsole = ({
   }, [view?.status, view?.lines.length])
 
   useEffect(() => {
+    followTerminalRef.current = true
     setIsPinnedToBottom(true)
   }, [view?.taskId])
 
-  useEffect(() => {
-    if (!expanded || !isPinnedToBottom) {
+  useLayoutEffect(() => {
+    if (!expanded || !followTerminalRef.current) {
       return
     }
-    requestAnimationFrame(() => scrollTerminalToBottom('auto'))
-  }, [expanded, isPinnedToBottom, scrollTerminalToBottom, view?.lines.length])
+    let secondFrame = 0
+    const firstFrame = requestAnimationFrame(() => {
+      scrollTerminalToBottom('auto')
+      secondFrame = requestAnimationFrame(() => scrollTerminalToBottom('auto'))
+    })
+    return () => {
+      cancelAnimationFrame(firstFrame)
+      if (secondFrame) {
+        cancelAnimationFrame(secondFrame)
+      }
+    }
+  }, [expanded, latestTerminalKey, scrollTerminalToBottom])
 
   if (!view) {
     return null
@@ -1579,6 +1614,7 @@ const AlphaAgentConsole = ({
           onClick={() => setExpanded((value) => {
             const next = !value
             if (next) {
+              followTerminalRef.current = true
               setIsPinnedToBottom(true)
             }
             return next
@@ -1621,6 +1657,9 @@ const AlphaAgentConsole = ({
             className="alpha-agent-terminal"
             role="log"
             aria-live={isRunning ? 'polite' : 'off'}
+            onWheel={markUserScrollIntent}
+            onPointerDown={markUserScrollIntent}
+            onTouchStart={markUserScrollIntent}
             onScroll={updateTerminalPinState}
           >
             {view.lines.map((entry) => {
