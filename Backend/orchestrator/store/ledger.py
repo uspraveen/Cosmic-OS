@@ -521,7 +521,7 @@ class TaskLedger:
         session_id: str | None = None,
         channel: str | None = None,
     ) -> list[dict[str, Any]]:
-        clauses = ["status IN ('running', 'suspended')"]
+        clauses = ["status IN ('running', 'suspended', 'deferred')"]
         params: list[Any] = []
         if session_id:
             clauses.append("session_id = ?")
@@ -554,6 +554,39 @@ class TaskLedger:
             }
             for row in rows
         ]
+
+    def list_active_descendant_tasks(self, parent_task_id: str) -> list[dict[str, Any]]:
+        root = str(parent_task_id or "").strip()
+        if not root:
+            return []
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                WITH RECURSIVE descendants AS (
+                    SELECT *
+                    FROM tasks
+                    WHERE parent_task_id = ?
+                    UNION ALL
+                    SELECT child.*
+                    FROM tasks child
+                    INNER JOIN descendants parent ON child.parent_task_id = parent.task_id
+                )
+                SELECT *
+                FROM descendants
+                WHERE status IN ('running', 'suspended', 'deferred')
+                ORDER BY created_at ASC
+                """,
+                (root,),
+            ).fetchall()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            if item.get("envelope_json"):
+                item["envelope_json"] = json.loads(item["envelope_json"])
+            if item.get("result_json"):
+                item["result_json"] = json.loads(item["result_json"])
+            results.append(item)
+        return results
 
     def get_task(self, task_id: str) -> dict[str, Any] | None:
         with self._lock, self._connect() as connection:

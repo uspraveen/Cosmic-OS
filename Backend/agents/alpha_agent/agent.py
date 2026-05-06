@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -271,12 +272,18 @@ class AlphaAgent(AgentRuntime):
                 "detail": str(paths.workspace),
             }
         )
+        staged_inputs = self._stage_input_artifacts(task, workspace=paths.workspace)
         prompt = self._build_cli_prompt(
             task=task,
             project=project,
             workspace=str(paths.workspace),
             artifacts_dir=str(paths.artifacts),
+            staged_inputs=staged_inputs,
         )
+        async def cancel_check() -> bool:
+            raw = await self.redis.get(f"task_cancel:{task.task_id}")
+            return bool(raw)
+
         selected_model: str | None = None
         if preferred_harness == "cursor":
             selected_model = self._select_cursor_model(task, provider_status)
@@ -294,6 +301,7 @@ class AlphaAgent(AgentRuntime):
                 model=selected_model,
                 timeout_sec=self.config.cursor_timeout_sec,
                 event_callback=emit_alpha_terminal,
+                cancel_check=cancel_check,
             )
         else:
             selected_model = self._select_codex_model(task, provider_status)
@@ -304,6 +312,7 @@ class AlphaAgent(AgentRuntime):
                 sandbox=self._select_codex_sandbox(task),
                 timeout_sec=self.config.codex_timeout_sec,
                 event_callback=emit_alpha_terminal,
+                cancel_check=cancel_check,
             )
         artifacts = promote_alpha_artifacts(
             task_id=task.task_id,
@@ -532,16 +541,26 @@ class AlphaAgent(AgentRuntime):
         project: ProjectRecord,
         workspace: str,
         artifacts_dir: str,
+        staged_inputs: list[dict[str, str]] | None = None,
     ) -> str:
         deliverables = self._coerce_string_list(task.input.get("deliverables"))
         constraints = task.input.get("constraints") if isinstance(task.input.get("constraints"), dict) else {}
+        goal = str(task.input.get("goal") or "").strip()
+        goal_reference = self._externalize_large_goal(goal, artifacts_dir=artifacts_dir)
+        goal_for_prompt = goal
+        if goal_reference:
+            goal_for_prompt = (
+                goal[:12000].rstrip()
+                + "\n\n[The full user goal/context was too large for safe CLI argv transport. "
+                + f"Read the full content from: {goal_reference}]"
+            )
         lines = [
             "You are the COSMIC Alpha Agent execution harness.",
             "",
             "Treat the COSMIC orchestrator as the human operator. Complete the user's high-level task end to end inside the provided workspace. Ask for clarification in your final message when the task cannot be completed safely or needs missing credentials.",
             "",
             "## User Goal",
-            str(task.input.get("goal") or "").strip(),
+            goal_for_prompt,
             "",
             "## Project Context",
             f"- project_id: {project.project_id}",
@@ -560,10 +579,111 @@ class AlphaAgent(AgentRuntime):
         if deliverables:
             lines.extend(["", "## Requested Deliverables"])
             lines.extend(f"- {item}" for item in deliverables)
+        if staged_inputs:
+            lines.extend(
+                [
+                    "",
+                    "## Input Artifacts",
+                    "The orchestrator passed files and large context by reference. Inspect these staged files directly instead of asking for pasted content.",
+                ]
+            )
+            for index, item in enumerate(staged_inputs, 1):
+                details = [
+                    f"path={item.get('staged_path') or item.get('path') or ''}",
+                    f"mime={item.get('mime') or ''}",
+                    f"artifact_id={item.get('artifact_id') or ''}",
+                    f"parse_bundle_id={item.get('parse_bundle_id') or ''}",
+                    f"doc_id={item.get('doc_id') or ''}",
+                ]
+                details = [part for part in details if not part.endswith("=")]
+                lines.append(f"{index}. " + "; ".join(details))
         if constraints:
             lines.extend(["", "## Constraints"])
             lines.extend(f"- {key}: {value}" for key, value in sorted(constraints.items()))
         return "\n".join(lines)
+
+    def _externalize_large_goal(self, goal: str, *, artifacts_dir: str) -> str | None:
+        if len(goal) <= 24000:
+            return None
+        try:
+            path = Path(artifacts_dir) / "alpha-full-goal.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(goal, encoding="utf-8")
+            return str(path)
+        except OSError:
+            return None
+
+    def _stage_input_artifacts(self, task: TaskEnvelope, *, workspace: Path) -> list[dict[str, str]]:
+        raw_artifacts = task.input_artifacts if isinstance(task.input_artifacts, list) else []
+        if not raw_artifacts:
+            return []
+        input_dir = workspace / "_cosmic_inputs"
+        summaries: list[dict[str, str]] = []
+        for index, artifact in enumerate(raw_artifacts, 1):
+            if not isinstance(artifact, dict):
+                continue
+            artifact_id = self._optional_string(artifact.get("artifact_id")) or f"input_{index}"
+            filename = self._safe_filename(
+                self._optional_string(artifact.get("filename"))
+                or Path(str(artifact.get("path") or "")).name
+                or f"{artifact_id}.bin"
+            )
+            summary = {
+                "artifact_id": artifact_id,
+                "filename": filename,
+                "mime": self._optional_string(artifact.get("mime") or artifact.get("mime_type")) or "",
+                "path": self._optional_string(artifact.get("path")) or "",
+                "parse_bundle_id": self._optional_string(artifact.get("parse_bundle_id")) or "",
+                "doc_id": self._parsed_doc_id(artifact) or "",
+            }
+            source_path = self._artifact_source_path(artifact)
+            if source_path is not None and source_path.is_file():
+                try:
+                    input_dir.mkdir(parents=True, exist_ok=True)
+                    target = input_dir / f"{index:02d}_{filename}"
+                    if source_path.resolve() != target.resolve():
+                        shutil.copy2(source_path, target)
+                    summary["staged_path"] = str(target)
+                except OSError:
+                    summary["staged_path"] = ""
+            summaries.append(summary)
+        return summaries
+
+    def _artifact_source_path(self, artifact: dict[str, Any]) -> Path | None:
+        raw_path = self._optional_string(artifact.get("path"))
+        if not raw_path:
+            return None
+        candidate = Path(raw_path).expanduser()
+        backend_root = AGENT_ROOT.parent.parent
+        artifacts_root = backend_root / "runs" / "artifacts"
+        candidates = [candidate]
+        if not candidate.is_absolute():
+            candidates.extend(
+                [
+                    Path.cwd() / candidate,
+                    backend_root / candidate,
+                    artifacts_root / candidate,
+                ]
+            )
+            parts = candidate.parts
+            if len(parts) >= 3 and parts[0] == "runs" and parts[1] == "artifacts":
+                candidates.append(artifacts_root / Path(*parts[2:]))
+        for item in candidates:
+            try:
+                resolved = item.resolve()
+            except OSError:
+                continue
+            if resolved.is_file():
+                return resolved
+        return None
+
+    def _parsed_doc_id(self, artifact: dict[str, Any]) -> str | None:
+        parsed_summary = artifact.get("parsed_summary") if isinstance(artifact.get("parsed_summary"), dict) else {}
+        return self._optional_string(artifact.get("doc_id")) or self._optional_string(parsed_summary.get("doc_id"))
+
+    def _safe_filename(self, value: str) -> str:
+        normalized = "".join(ch if ch.isalnum() or ch in {".", "-", "_"} else "_" for ch in value.strip())
+        return normalized[:160].strip("._") or "artifact.bin"
 
     def _cli_failure(
         self,
@@ -572,9 +692,18 @@ class AlphaAgent(AgentRuntime):
         *,
         artifacts: list[Any] | None = None,
     ) -> AgentResult:
-        code = "TIMEOUT" if result.timed_out else "CODEX_EXECUTION_FAILED"
+        if getattr(result, "cancelled", False):
+            code = "CANCELLED"
+        elif getattr(result, "init_timed_out", False):
+            code = "CLI_INIT_TIMEOUT"
+        else:
+            code = "TIMEOUT" if result.timed_out else "CODEX_EXECUTION_FAILED"
         if provider == "cursor" and code != "TIMEOUT":
             code = "CURSOR_EXECUTION_FAILED"
+        if getattr(result, "cancelled", False):
+            code = "CANCELLED"
+        elif getattr(result, "init_timed_out", False):
+            code = "CURSOR_INIT_TIMEOUT" if provider == "cursor" else "CLI_INIT_TIMEOUT"
         fallback = f"{self._harness_label(provider)} execution failed without output."
         stderr = result.stderr.strip() or result.stdout.strip() or fallback
         return AgentResult(
@@ -583,9 +712,9 @@ class AlphaAgent(AgentRuntime):
             artifacts=artifacts or [],
             error=AgentError(
                 code=code,
-                retryable=code in {"TIMEOUT", "DOCKER_UNAVAILABLE", "WORKSPACE_BUSY"},
+                retryable=code in {"TIMEOUT", "CURSOR_INIT_TIMEOUT", "CLI_INIT_TIMEOUT", "DOCKER_UNAVAILABLE", "WORKSPACE_BUSY"},
                 message=stderr[-1000:],
-                next_action="retry" if result.timed_out else "escalate",
+                next_action="skip" if code == "CANCELLED" else "retry" if result.timed_out else "escalate",
             ),
         )
 

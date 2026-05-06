@@ -423,7 +423,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                     },
                     "input": {
                         "type": "object",
-                        "description": "Structured payload for the specialist intent. Keep it minimal and match the schema hints returned by agent_catalog_search.",
+                        "description": "Structured payload for the specialist intent. Keep it minimal and match the schema hints returned by agent_catalog_search. For alpha.execute, write a concise high-level goal and pass bulky files or parsed documents by artifact_ids/input_artifacts.",
                     },
                     "agent_id": {
                         "type": "string",
@@ -459,7 +459,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             },
         },
         group="specialists",
-        prompt_summary="Delegate specialist work by exact intent after discovery. Prefer this over carrying agent-specific tools in your tool list.",
+        prompt_summary="Delegate specialist work by exact intent after discovery. For Alpha project work, pass artifact_ids/input_artifacts for large files or parsed documents instead of pasting their full contents into the input.",
         progress_builder=_delegate_to_agent_progress,
         handler_method="_delegate_to_agent",
     ),

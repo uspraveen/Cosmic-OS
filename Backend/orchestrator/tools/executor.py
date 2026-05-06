@@ -5,11 +5,14 @@ an internal COSMIC service or an external research provider.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
+from uuid import uuid4
 from urllib.parse import quote
 
 import httpx
@@ -52,6 +55,7 @@ class ToolExecutor:
         gateway_url: str = "",
         gateway_internal_token: str = "",
         usage_source_id: str = "orchestrator:tool_executor",
+        artifacts_root: str | Path | None = None,
         agent_dispatcher: Callable[..., Awaitable[AgentResult | TaskInProgress]] | None = None,
         agent_catalog_searcher: Callable[..., Awaitable[dict[str, Any]]] | None = None,
         client: httpx.AsyncClient | None = None,
@@ -62,6 +66,7 @@ class ToolExecutor:
         self.gateway_url = gateway_url.rstrip("/") if gateway_url else ""
         self.gateway_internal_token = gateway_internal_token.strip()
         self.usage_source_id = usage_source_id.strip() or "orchestrator:tool_executor"
+        self.artifacts_root = Path(artifacts_root).expanduser() if artifacts_root else None
         self._agent_dispatcher = agent_dispatcher
         self._agent_catalog_searcher = agent_catalog_searcher
         timeout = httpx.Timeout(30.0, connect=10.0)
@@ -268,6 +273,7 @@ class ToolExecutor:
         payload = tool_input.get("input")
         if not isinstance(payload, dict):
             return {"error": True, "message": "input must be an object"}
+        payload = dict(payload)
         preferred_agent_id = str(tool_input.get("agent_id") or "").strip() or None
         wait_timeout_value = tool_input.get("wait_timeout_sec")
         wait_timeout_sec: float | None = None
@@ -279,6 +285,14 @@ class ToolExecutor:
         input_artifacts = await self._resolve_delegate_input_artifacts(tool_input, context=context)
         if isinstance(input_artifacts, dict) and input_artifacts.get("error"):
             return input_artifacts
+        if intent == "alpha.execute":
+            input_artifacts = self._merge_artifact_descriptors(
+                input_artifacts or [],
+                context.parent_task.input_artifacts if context and context.parent_task else [],
+            )
+            payload, externalized = self._externalize_alpha_payload(payload, context=context)
+            if externalized:
+                input_artifacts = self._merge_artifact_descriptors(input_artifacts or [], externalized)
         response = await self._dispatch_specialist_agent(
             intent=intent,
             payload=payload,
@@ -293,6 +307,104 @@ class ToolExecutor:
                 "agent_id": preferred_agent_id,
             }
         return response
+
+    def _merge_artifact_descriptors(
+        self,
+        first: list[dict[str, Any]],
+        second: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in [*first, *second]:
+            if not isinstance(item, dict):
+                continue
+            artifact_id = str(item.get("artifact_id") or "").strip()
+            path = str(item.get("path") or "").strip()
+            key = (artifact_id, path)
+            if not any(key) or key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+        return merged
+
+    def _externalize_alpha_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Move very large Alpha input strings into files.
+
+        Alpha is a workspace/CLI operator, so large documents, parsed markdown,
+        generated HTML, logs, and other bulky context should travel as files the
+        CLI can inspect. Keeping the structured payload compact avoids Redis,
+        model-tool, and shell argv pressure without constraining the model's
+        autonomy.
+        """
+
+        if self.artifacts_root is None:
+            return payload, []
+        max_inline_chars = 24000
+        payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+        if len(payload_json) <= 90000 and not self._payload_has_large_string(payload, max_inline_chars):
+            return payload, []
+
+        root_task_id = str(context.task_id if context and context.task_id else "alpha").strip() or "alpha"
+        target_dir = self.artifacts_root / "alpha_handoffs" / root_task_id / uuid4().hex[:12]
+        artifacts: list[dict[str, Any]] = []
+
+        def externalize_value(value: Any, path_parts: list[str]) -> Any:
+            if isinstance(value, str) and len(value) > max_inline_chars:
+                filename = self._safe_handoff_filename(path_parts)
+                target_dir.mkdir(parents=True, exist_ok=True)
+                file_path = target_dir / filename
+                file_path.write_text(value, encoding="utf-8")
+                digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+                artifact_id = f"art_alpha_input_{digest[:16]}"
+                artifacts.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "kind": "input",
+                        "audience": "supporting",
+                        "mime": "text/markdown" if filename.endswith(".md") else "text/plain",
+                        "filename": filename,
+                        "path": str(file_path),
+                        "sha256": digest,
+                        "size_bytes": len(value.encode("utf-8")),
+                        "caption": "Externalized Alpha input context from a large delegation payload.",
+                    }
+                )
+                return (
+                    f"[Large Alpha input moved to artifact {artifact_id}: {file_path}. "
+                    "Alpha must inspect this file directly instead of relying on inline text.]"
+                )
+            if isinstance(value, dict):
+                return {
+                    str(key): externalize_value(item, [*path_parts, str(key)])
+                    for key, item in value.items()
+                }
+            if isinstance(value, list):
+                return [
+                    externalize_value(item, [*path_parts, str(index)])
+                    for index, item in enumerate(value)
+                ]
+            return value
+
+        return externalize_value(payload, ["alpha_input"]), artifacts
+
+    def _payload_has_large_string(self, value: Any, limit: int) -> bool:
+        if isinstance(value, str):
+            return len(value) > limit
+        if isinstance(value, dict):
+            return any(self._payload_has_large_string(item, limit) for item in value.values())
+        if isinstance(value, list):
+            return any(self._payload_has_large_string(item, limit) for item in value)
+        return False
+
+    def _safe_handoff_filename(self, parts: list[str]) -> str:
+        base = "_".join(part for part in parts if part).strip("_") or "alpha_input"
+        safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in base)
+        return f"{safe[:120] or 'alpha_input'}.md"
 
     async def _cosmics_capability_wishlist_search(
         self,

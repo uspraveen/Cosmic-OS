@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable, Sequence
 from shared.contracts import ArtifactManifest
 
 from .config import AlphaAgentConfig
+from .streaming import compact_for_memory, iter_stream_lines
 from .workspace_manager import WorkspacePaths
 
 
@@ -38,10 +39,11 @@ class CodexRunResult:
     last_message_path: Path
     last_message: str
     duration_sec: float
+    cancelled: bool = False
 
     @property
     def ok(self) -> bool:
-        return self.returncode == 0 and not self.timed_out
+        return self.returncode == 0 and not self.timed_out and not self.cancelled
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -54,6 +56,7 @@ class CodexRunResult:
             "last_message": _tail(self.last_message, 12000),
             "duration_sec": round(self.duration_sec, 3),
             "command": self.safe_command(),
+            "cancelled": self.cancelled,
         }
 
     def safe_command(self) -> list[str]:
@@ -118,6 +121,7 @@ class CodexWorkspaceRunner:
         sandbox: str | None = None,
         timeout_sec: float | None = None,
         event_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        cancel_check: Callable[[], Awaitable[bool]] | None = None,
     ) -> CodexRunResult:
         paths.workspace.mkdir(parents=True, exist_ok=True)
         paths.artifacts.mkdir(parents=True, exist_ok=True)
@@ -152,23 +156,19 @@ class CodexWorkspaceRunner:
             env=self._env(),
         )
         timed_out = False
+        cancelled = False
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
         try:
-            stdout_parts, stderr_parts = await asyncio.wait_for(
-                self._communicate_streaming(
-                    process,
-                    prompt=prompt,
-                    event_callback=event_callback,
-                ),
-                timeout=timeout_sec or self.config.codex_timeout_sec,
+            stdout_parts, stderr_parts, stream_state = await self._communicate_streaming(
+                process,
+                prompt=prompt,
+                timeout_sec=timeout_sec or self.config.codex_timeout_sec,
+                event_callback=event_callback,
+                cancel_check=cancel_check,
             )
-        except asyncio.TimeoutError:
-            timed_out = True
-            process.kill()
-            stdout_bytes, stderr_bytes = await process.communicate()
-            stdout_parts.append(stdout_bytes.decode("utf-8", errors="replace"))
-            stderr_parts.append(stderr_bytes.decode("utf-8", errors="replace"))
+            timed_out = bool(stream_state.get("timed_out"))
+            cancelled = bool(stream_state.get("cancelled"))
         except asyncio.CancelledError:
             if process.returncode is None:
                 process.terminate()
@@ -194,6 +194,7 @@ class CodexWorkspaceRunner:
             last_message_path=output_path,
             last_message=last_message,
             duration_sec=duration_sec,
+            cancelled=cancelled,
         )
 
     async def _communicate_streaming(
@@ -201,10 +202,21 @@ class CodexWorkspaceRunner:
         process: asyncio.subprocess.Process,
         *,
         prompt: str,
+        timeout_sec: float,
         event_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
-    ) -> tuple[list[str], list[str]]:
+        cancel_check: Callable[[], Awaitable[bool]] | None = None,
+    ) -> tuple[list[str], list[str], dict[str, bool]]:
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        state = {
+            "cancelled": False,
+            "timed_out": False,
+            "saw_output": False,
+            "last_output_at": started_at,
+            "last_idle_notice_at": started_at,
+        }
 
         async def emit(entry: dict[str, Any]) -> None:
             if event_callback is None:
@@ -214,6 +226,11 @@ class CodexWorkspaceRunner:
             except Exception:
                 # Terminal streaming must not fail the Codex run.
                 return
+
+        def note_output() -> None:
+            now = loop.time()
+            state["saw_output"] = True
+            state["last_output_at"] = now
 
         async def write_stdin() -> None:
             if process.stdin is None:
@@ -229,24 +246,24 @@ class CodexWorkspaceRunner:
         async def read_stdout() -> None:
             if process.stdout is None:
                 return
-            while True:
-                line = await process.stdout.readline()
-                if not line:
-                    break
-                text = line.decode("utf-8", errors="replace")
-                stdout_parts.append(text)
+            async for text in iter_stream_lines(
+                process.stdout,
+                omitted_event_type="cosmic.codex.large_event_omitted",
+            ):
+                note_output()
+                stdout_parts.append(compact_for_memory(text))
                 if event_callback is not None:
                     await emit(self._codex_json_line_to_terminal_event(text, stream="stdout"))
 
         async def read_stderr() -> None:
             if process.stderr is None:
                 return
-            while True:
-                line = await process.stderr.readline()
-                if not line:
-                    break
-                text = line.decode("utf-8", errors="replace")
-                stderr_parts.append(text)
+            async for text in iter_stream_lines(
+                process.stderr,
+                omitted_event_type="cosmic.codex.large_stderr_event_omitted",
+            ):
+                note_output()
+                stderr_parts.append(compact_for_memory(text))
                 if event_callback is not None:
                     await emit({
                         "stream": "stderr",
@@ -254,9 +271,79 @@ class CodexWorkspaceRunner:
                         "text": _tail(text.strip(), 2000),
                     })
 
-        await asyncio.gather(write_stdin(), read_stdout(), read_stderr())
+        readers_done = asyncio.Event()
+
+        async def monitor_process() -> None:
+            hard_timeout = max(30.0, float(timeout_sec or self.config.codex_timeout_sec))
+            idle_check = max(30.0, float(self.config.cli_idle_check_sec))
+            while process.returncode is None and not readers_done.is_set():
+                await asyncio.sleep(min(5.0, idle_check))
+                now = loop.time()
+                if cancel_check is not None:
+                    try:
+                        if await cancel_check():
+                            state["cancelled"] = True
+                            stderr_parts.append("Codex CLI execution cancelled by COSMIC.\n")
+                            await emit({
+                                "stream": "system",
+                                "event_type": "codex.cancelled",
+                                "text": "Codex run cancelled by COSMIC.",
+                            })
+                            await self._terminate_process(process)
+                            return
+                    except Exception:
+                        pass
+                if hard_timeout > 0 and now - started_at >= hard_timeout:
+                    state["timed_out"] = True
+                    stderr_parts.append(
+                        f"Codex CLI exceeded hard execution limit after {int(hard_timeout)} seconds.\n"
+                    )
+                    await emit({
+                        "stream": "system",
+                        "event_type": "codex.timeout",
+                        "text": f"Codex is still running after {int(hard_timeout)} seconds; COSMIC stopped this run.",
+                    })
+                    await self._terminate_process(process)
+                    return
+                if state["saw_output"] and now - state["last_output_at"] >= idle_check:
+                    if now - state["last_idle_notice_at"] >= idle_check:
+                        state["last_idle_notice_at"] = now
+                        await emit({
+                            "stream": "system",
+                            "event_type": "codex.idle_check",
+                            "text": f"Codex is still running; no CLI output for {int(now - state['last_output_at'])} seconds.",
+                        })
+
+        stdin_task = asyncio.create_task(write_stdin())
+        stdout_task = asyncio.create_task(read_stdout())
+        stderr_task = asyncio.create_task(read_stderr())
+        monitor_task = asyncio.create_task(monitor_process())
+        try:
+            await asyncio.gather(stdin_task, stdout_task, stderr_task)
+            readers_done.set()
+            if process.returncode is None:
+                await process.wait()
+        finally:
+            readers_done.set()
+            if not monitor_task.done():
+                monitor_task.cancel()
+            await asyncio.gather(monitor_task, return_exceptions=True)
+            await asyncio.gather(stdin_task, stdout_task, stderr_task, return_exceptions=True)
         await process.wait()
-        return stdout_parts, stderr_parts
+        return stdout_parts, stderr_parts, {
+            "cancelled": bool(state["cancelled"]),
+            "timed_out": bool(state["timed_out"]),
+        }
+
+    async def _terminate_process(self, process: asyncio.subprocess.Process) -> None:
+        if process.returncode is not None:
+            return
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=10.0)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
 
     def _codex_json_line_to_terminal_event(self, line: str, *, stream: str) -> dict[str, Any]:
         text = line.strip()

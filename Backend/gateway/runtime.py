@@ -7134,17 +7134,29 @@ class GatewayRuntime:
     async def _task_input_consumer_loop(self) -> None:
         assert self._redis is not None
         consumer_name = "gateway-{0}".format(id(self))
+        backoff_sec = 1.0
         while True:
-            entries = await self._redis.xreadgroup(
-                groupname=self.config.task_input_gateway_group,
-                consumername=consumer_name,
-                streams={self.config.task_input_requests_stream: ">"},
-                count=5,
-                block=1000,
-            )
-            for _stream, messages in entries:
-                for message_id, data in messages:
-                    await self._handle_task_input_stream_message(message_id, data)
+            try:
+                entries = await self._redis.xreadgroup(
+                    groupname=self.config.task_input_gateway_group,
+                    consumername=consumer_name,
+                    streams={self.config.task_input_requests_stream: ">"},
+                    count=5,
+                    block=1000,
+                )
+                backoff_sec = 1.0
+                for _stream, messages in entries:
+                    for message_id, data in messages:
+                        await self._handle_task_input_stream_message(message_id, data)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "gateway.task_input_consumer_loop_failed retry_in=%.1fs",
+                    backoff_sec,
+                )
+                await asyncio.sleep(backoff_sec)
+                backoff_sec = min(backoff_sec * 2, 30.0)
 
     async def _handle_task_input_stream_message(
         self, message_id: str, data: dict[str, Any]
@@ -7181,7 +7193,11 @@ class GatewayRuntime:
                 event, channel=channel
             )
             if delivery_status == "dropped":
-                return
+                logger.info(
+                    "gateway.task_input_delivery_dropped_acknowledged msg_id=%s channel=%s",
+                    message_id,
+                    channel,
+                )
             await self._redis.xack(
                 self.config.task_input_requests_stream,
                 self.config.task_input_gateway_group,
@@ -7200,19 +7216,31 @@ class GatewayRuntime:
     async def _specialist_event_consumer_loop(self) -> None:
         assert self._redis is not None
         consumer_name = "gateway-specialist-{0}".format(id(self))
+        backoff_sec = 1.0
         while True:
-            entries = await self._redis.xreadgroup(
-                groupname=self.config.agent_events_gateway_group,
-                consumername=consumer_name,
-                streams={self.config.agent_events_stream: ">"},
-                count=20,
-                block=1000,
-            )
-            for _stream, messages in entries:
-                for message_id, data in messages:
-                    await self._handle_specialist_event_stream_message(
-                        message_id, data
-                    )
+            try:
+                entries = await self._redis.xreadgroup(
+                    groupname=self.config.agent_events_gateway_group,
+                    consumername=consumer_name,
+                    streams={self.config.agent_events_stream: ">"},
+                    count=20,
+                    block=1000,
+                )
+                backoff_sec = 1.0
+                for _stream, messages in entries:
+                    for message_id, data in messages:
+                        await self._handle_specialist_event_stream_message(
+                            message_id, data
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "gateway.specialist_event_consumer_loop_failed retry_in=%.1fs",
+                    backoff_sec,
+                )
+                await asyncio.sleep(backoff_sec)
+                backoff_sec = min(backoff_sec * 2, 30.0)
 
     async def _handle_specialist_event_stream_message(
         self, message_id: str, data: dict[str, Any]
@@ -7279,6 +7307,7 @@ class GatewayRuntime:
             "task.resumed",
             "task.completed",
             "task.failed",
+            "task.cancelled",
             "task.rejected",
             "task.deferred",
         }:

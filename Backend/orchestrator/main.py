@@ -122,7 +122,7 @@ async def cancel_task(
     _: None = Depends(require_internal_token),
     runtime: OrchestratorRuntime = Depends(get_runtime),
 ) -> dict[str, object]:
-    cancelled = runtime.cancel_task(task_id)
+    cancelled = await runtime.cancel_task(task_id)
     return {
         "ok": True,
         "task_id": task_id,

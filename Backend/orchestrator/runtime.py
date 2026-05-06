@@ -295,6 +295,7 @@ class OrchestratorRuntime:
             cosmic_memory_url=self.config.cosmic_memory_url,
             gateway_url=self.config.gateway_url,
             gateway_internal_token=self.config.internal_token,
+            artifacts_root=self.config.artifacts_root,
             agent_dispatcher=self.dispatch_agent_task,
             agent_catalog_searcher=self.search_agent_catalog,
         )
@@ -1008,19 +1009,71 @@ class OrchestratorRuntime:
     def list_active_tasks(self, *, session_id: str | None = None, channel: str | None = None) -> list[dict[str, Any]]:
         return self.task_ledger.list_active_tasks(session_id=session_id, channel=channel)
 
-    def cancel_task(self, task_id: str, *, message: str = "Response stopped.") -> bool:
+    async def cancel_task(self, task_id: str, *, message: str = "Response stopped.") -> bool:
         tid = str(task_id or "").strip()
         if not tid:
             return False
+        cancelled_any = False
         run_state = self._active_runs.get(tid)
-        if run_state is None:
-            return False
-        run_state.cancel_requested = True
-        run_state.cancel_message = message
-        runner = run_state.runner_task
-        if runner is not None and not runner.done():
-            runner.cancel()
-        return True
+        if run_state is not None:
+            run_state.cancel_requested = True
+            run_state.cancel_message = message
+            runner = run_state.runner_task
+            if runner is not None and not runner.done():
+                runner.cancel()
+            cancelled_any = True
+
+        task_record = self.task_ledger.get_task(tid)
+        if task_record is not None:
+            status = str(task_record.get("status") or "").strip()
+            if status in {"running", "suspended", "deferred"}:
+                self.task_ledger.mark_cancelled(tid, message=message)
+                await self._request_agent_task_cancel(tid)
+                self._resolve_pending_agent_result(
+                    tid,
+                    AgentResult(
+                        status="failed",
+                        output={},
+                        artifacts=[],
+                        error=AgentError(
+                            code="CANCELLED",
+                            retryable=False,
+                            message=message,
+                            next_action="skip",
+                        ),
+                    ),
+                )
+                cancelled_any = True
+            for child in self.task_ledger.list_active_descendant_tasks(tid):
+                child_id = str(child.get("task_id") or "").strip()
+                if not child_id:
+                    continue
+                self.task_ledger.mark_cancelled(child_id, message=message)
+                await self._request_agent_task_cancel(child_id)
+                self._resolve_pending_agent_result(
+                    child_id,
+                    AgentResult(
+                        status="failed",
+                        output={},
+                        artifacts=[],
+                        error=AgentError(
+                            code="CANCELLED",
+                            retryable=False,
+                            message=message,
+                            next_action="skip",
+                        ),
+                    ),
+                )
+                cancelled_any = True
+        return cancelled_any
+
+    async def _request_agent_task_cancel(self, task_id: str) -> None:
+        if self._redis is None:
+            return
+        try:
+            await self._redis.set(f"task_cancel:{task_id}", "1", ex=86_400)
+        except Exception:
+            logger.exception("orchestrator.task_cancel_signal_failed task_id=%s", task_id)
 
     def get_loop_diagnostics_snapshot(self) -> dict[str, int]:
         return self._anthropic_loop_stats.as_dict()
@@ -2283,27 +2336,39 @@ class OrchestratorRuntime:
 
     async def _agent_event_consumer_loop(self) -> None:
         assert self._redis is not None
+        backoff_sec = 1.0
         while True:
-            entries = await self._redis.xreadgroup(
-                groupname=self.config.agent_events_group,
-                consumername=self._agent_event_consumer_name,
-                streams={self.config.agent_events_stream: ">"},
-                count=20,
-                block=1000,
-            )
-            for _stream, messages in entries:
-                for message_id, data in messages:
-                    try:
-                        event = parse_event_envelope(data)
-                        await self._handle_agent_event(event)
-                    except Exception as exc:
-                        logger.warning("orchestrator.agent_event_invalid message_id=%s error=%s", message_id, exc)
-                    finally:
-                        await self._redis.xack(
-                            self.config.agent_events_stream,
-                            self.config.agent_events_group,
-                            message_id,
-                        )
+            try:
+                entries = await self._redis.xreadgroup(
+                    groupname=self.config.agent_events_group,
+                    consumername=self._agent_event_consumer_name,
+                    streams={self.config.agent_events_stream: ">"},
+                    count=20,
+                    block=1000,
+                )
+                backoff_sec = 1.0
+                for _stream, messages in entries:
+                    for message_id, data in messages:
+                        try:
+                            event = parse_event_envelope(data)
+                            await self._handle_agent_event(event)
+                        except Exception as exc:
+                            logger.warning("orchestrator.agent_event_invalid message_id=%s error=%s", message_id, exc)
+                        finally:
+                            await self._redis.xack(
+                                self.config.agent_events_stream,
+                                self.config.agent_events_group,
+                                message_id,
+                            )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "orchestrator.agent_event_consumer_loop_failed retry_in=%.1fs",
+                    backoff_sec,
+                )
+                await asyncio.sleep(backoff_sec)
+                backoff_sec = min(backoff_sec * 2, 30.0)
 
     async def _handle_agent_event(self, event: EventEnvelope) -> None:
         self._agent_dispatch_stats.events_consumed += 1
@@ -2312,6 +2377,33 @@ class OrchestratorRuntime:
             resume_wait = self.task_ledger.get_reverse_task_wait_by_resumed_task(event.task_id)
         canonical_task_id = str(resume_wait.get("waiting_task_id") or "").strip() if resume_wait else event.task_id
         delegated_wait = self.task_ledger.get_reverse_task_wait_by_delegated_task(event.task_id)
+        canonical_record = self.task_ledger.get_task(canonical_task_id)
+        event_record = self.task_ledger.get_task(event.task_id)
+        if event.event_type in {"task.completed", "task.failed", "task.cancelled", "task.dlq"} and (
+            str((canonical_record or {}).get("status") or "").strip() == "cancelled"
+            or str((event_record or {}).get("status") or "").strip() == "cancelled"
+        ):
+            self._agent_dispatch_stats.events_consumed += 0
+            return
+
+        if event.event_type == "task.cancelled":
+            message = str(event.payload.get("message") or "Task cancelled.").strip()
+            self.task_ledger.mark_cancelled(event.task_id, message=message)
+            if canonical_task_id != event.task_id:
+                self.task_ledger.mark_cancelled(canonical_task_id, message=message)
+            result = AgentResult(
+                status="failed",
+                output={},
+                artifacts=[],
+                error=AgentError(
+                    code="CANCELLED",
+                    retryable=False,
+                    message=message,
+                    next_action="skip",
+                ),
+            )
+            self._resolve_pending_agent_result(canonical_task_id, result)
+            return
 
         if event.event_type == "task.completed":
             task_record = self.task_ledger.get_task(canonical_task_id)

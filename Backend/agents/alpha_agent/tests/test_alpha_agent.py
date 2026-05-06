@@ -32,10 +32,12 @@ def _config(tmp_path: Path) -> AlphaAgentConfig:
         codex_home=tmp_path / "alpha" / "homes" / "codex",
         cursor_home=tmp_path / "alpha" / "homes" / "cursor",
         codex_sandbox="workspace-write",
-        codex_timeout_sec=3600.0,
+        codex_timeout_sec=14400.0,
         codex_default_model="",
-        cursor_timeout_sec=3600.0,
+        cursor_timeout_sec=14400.0,
         cursor_default_model="",
+        cursor_init_timeout_sec=180.0,
+        cli_idle_check_sec=300.0,
     )
 
 
@@ -320,6 +322,32 @@ def test_cursor_runner_detects_fast_model_mismatch(tmp_path: Path) -> None:
         requested_model="composer-2-fast",
         observed_model="Composer 2 Fast",
     )
+
+
+async def _collect_stream_lines(payload: bytes) -> list[str]:
+    from agents.alpha_agent.streaming import iter_stream_lines
+
+    class Reader:
+        def __init__(self, data: bytes) -> None:
+            self._data = bytearray(data)
+
+        async def read(self, size: int) -> bytes:
+            if not self._data:
+                return b""
+            chunk = self._data[:size]
+            del self._data[:size]
+            return bytes(chunk)
+
+    return [line async for line in iter_stream_lines(Reader(payload), max_line_bytes=32, chunk_size=8)]
+
+
+def test_cli_stream_reader_omits_oversized_jsonl_event() -> None:
+    import asyncio
+
+    lines = asyncio.run(_collect_stream_lines(b'{"type":"small"}\n' + b"x" * 80 + b"\n"))
+
+    assert lines[0] == '{"type":"small"}\n'
+    assert "cosmic.large_cli_event_omitted" in lines[1]
 
 
 def test_promote_alpha_artifacts_includes_task_artifact_dir_files(tmp_path: Path) -> None:

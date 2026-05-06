@@ -11,12 +11,13 @@ intents:
     description: Execute or continue a high-level Alpha project task with the selected CLI harness.
     input_schema: schemas/intents/alpha.execute.input.json
     output_schema: schemas/intents/alpha.execute.output.json
-    timeout_sec: 3600
+    timeout_sec: 14400
     usage_hints:
       - "Treat Alpha as COSMIC's VM project operator: a Codex/Cursor/Claude Code CLI-style agent that can work in a real workspace, edit files, run terminal commands, install dependencies, execute tests, operate repos, produce artifacts, and perform deployment-oriented workflows when the selected CLI provider is authenticated."
       - Use this for high-level project work that requires capabilities outside the pre-packaged COSMIC specialists, especially when the task needs arbitrary CLI/tool use, repo-level code changes, dependency setup, filesystem work, long-running engineering loops, or VM-side deployment steps.
       - Good fits include building and hosting a website, cloning a repo and extending it, creating a new app, wiring an unfamiliar toolchain, running a research/code workflow, fine-tuning or training experiments, browser/screenshot automation from the VM, or completing a multi-step engineering task end-to-end.
       - Pass a high-level goal with success criteria, relevant constraints, desired outputs, deployment target, artifact expectations, and any known repo/project/deployment references; do not decompose into tiny shell commands unless the user explicitly requires exact commands.
+      - For uploaded PDFs, parsed document bundles, images, large logs, generated HTML, repo archives, screenshots, or other bulky context, pass artifact_ids or input_artifacts and concise instructions; do not paste full parsed documents or full files into goal. Alpha can inspect staged files directly in its workspace.
       - Prefer normal COSMIC specialists for narrow packaged capabilities such as email, calendar, slides, docs parsing, tabular analysis, image generation, diagrams, X search, or Firecrawl extraction when those specialists directly satisfy the request.
       - Use Alpha when a packaged specialist is insufficient, when several tools must be combined inside a project workspace, or when the user asks for something a human engineer would normally do through a coding CLI/terminal agent.
       - Use prepare_only=true only for diagnostics or when the user explicitly asks to create/recall the workspace without execution.
@@ -67,7 +68,7 @@ sandbox:
   cursor_home_env: ALPHA_CURSOR_HOME
   codex_sandbox_default: danger-full-access
   docker_socket_mount_default: false
-  host_deployment_broker_required: true
+  host_deployment_broker_required: false
 
 safety:
   alpha_warning: true
@@ -80,7 +81,7 @@ sla:
   max_concurrency: 1
   heartbeat_interval_sec: 10
   heartbeat_ttl_sec: 30
-  max_task_duration_sec: 3600
+  max_task_duration_sec: 14400
   health_endpoint: /health
   retry_policy:
     max_attempts: 1

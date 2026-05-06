@@ -51,11 +51,12 @@ EventType = Literal[
     "artifact.added",
     "task.completed",
     "task.failed",
+    "task.cancelled",
     "task.dlq",
     "task.rejected",
 ]
 
-TERMINAL_EVENTS: set[EventType] = {"task.completed", "task.failed", "task.dlq"}
+TERMINAL_EVENTS: set[EventType] = {"task.completed", "task.failed", "task.cancelled", "task.dlq"}
 NON_TERMINAL_EVENTS: set[EventType] = {
     "task.accepted",
     "task.progress",

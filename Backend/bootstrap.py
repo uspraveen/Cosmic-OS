@@ -2619,7 +2619,10 @@ def build_alpha_agent_env_rendered(
         "ALPHA_CURSOR_MODEL": pick_env("ALPHA_CURSOR_MODEL", "composer-2") or "composer-2",
         "ALPHA_CODEX_SANDBOX": pick_env("ALPHA_CODEX_SANDBOX", "danger-full-access")
         or "danger-full-access",
-        "ALPHA_CODEX_TIMEOUT_SEC": pick_env("ALPHA_CODEX_TIMEOUT_SEC", "3600") or "3600",
+        "ALPHA_CODEX_TIMEOUT_SEC": pick_env("ALPHA_CODEX_TIMEOUT_SEC", "14400") or "14400",
+        "ALPHA_CURSOR_TIMEOUT_SEC": pick_env("ALPHA_CURSOR_TIMEOUT_SEC", "14400") or "14400",
+        "ALPHA_CURSOR_INIT_TIMEOUT_SEC": pick_env("ALPHA_CURSOR_INIT_TIMEOUT_SEC", "180") or "180",
+        "ALPHA_CLI_IDLE_CHECK_SEC": pick_env("ALPHA_CLI_IDLE_CHECK_SEC", "300") or "300",
         "ALPHA_PROJECT_DB_PATH": pick_env("ALPHA_PROJECT_DB_PATH", "") or "",
         "ALPHA_DOCKER_IMAGE": pick_env("ALPHA_DOCKER_IMAGE", "ubuntu:24.04")
         or "ubuntu:24.04",

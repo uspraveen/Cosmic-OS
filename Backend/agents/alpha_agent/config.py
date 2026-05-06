@@ -56,6 +56,8 @@ class AlphaAgentConfig:
     codex_default_model: str
     cursor_timeout_sec: float
     cursor_default_model: str
+    cursor_init_timeout_sec: float
+    cli_idle_check_sec: float
 
     @classmethod
     def from_env(cls) -> "AlphaAgentConfig":
@@ -109,12 +111,20 @@ class AlphaAgentConfig:
             codex_sandbox=codex_sandbox,
             codex_timeout_sec=max(
                 30.0,
-                float(os.getenv("ALPHA_CODEX_TIMEOUT_SEC", "3600") or "3600"),
+                float(os.getenv("ALPHA_CODEX_TIMEOUT_SEC", "14400") or "14400"),
             ),
             codex_default_model=os.getenv("ALPHA_CODEX_MODEL", "").strip(),
             cursor_timeout_sec=max(
                 30.0,
-                float(os.getenv("ALPHA_CURSOR_TIMEOUT_SEC", "3600") or "3600"),
+                float(os.getenv("ALPHA_CURSOR_TIMEOUT_SEC", "14400") or "14400"),
             ),
             cursor_default_model=os.getenv("ALPHA_CURSOR_MODEL", "").strip(),
+            cursor_init_timeout_sec=max(
+                30.0,
+                float(os.getenv("ALPHA_CURSOR_INIT_TIMEOUT_SEC", "180") or "180"),
+            ),
+            cli_idle_check_sec=max(
+                30.0,
+                float(os.getenv("ALPHA_CLI_IDLE_CHECK_SEC", "300") or "300"),
+            ),
         )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -902,6 +903,64 @@ async def test_tool_executor_delegate_to_agent_handles_in_progress_result() -> N
         "message": "firecrawl.recall_session is still running in the specialist agent.",
         "delegation": {"intent": "firecrawl.recall_session", "agent_id": None},
     }
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_alpha_delegate_externalizes_large_payload_and_inherits_artifacts(tmp_path) -> None:
+    observed: dict[str, object] = {}
+
+    async def dispatcher(**kwargs):
+        observed.update(kwargs)
+        return AgentResult(status="completed", output={"message": "ok"}, artifacts=[])
+
+    inherited_artifact = {
+        "artifact_id": "art_resume_pdf",
+        "mime": "application/pdf",
+        "path": "runs/artifacts/req_upload/inputs/art_resume_pdf/original/resume.pdf",
+        "filename": "resume.pdf",
+    }
+    parent_task = _parent_task().model_copy(update={"input_artifacts": [inherited_artifact]})
+    executor = ToolExecutor(
+        artifacts_root=tmp_path / "artifacts",
+        agent_dispatcher=dispatcher,
+    )
+    large_goal = "portfolio resume context\n" + ("Principal engineer accomplishments.\n" * 1200)
+    context = ToolExecutionContext(
+        task_id="tsk_parent",
+        request_id="req_parent",
+        session_id="sess_parent",
+        channel="desktop:test",
+        source="user",
+        source_id="desktop",
+        parent_task=parent_task,
+    )
+
+    raw_result = await executor.execute(
+        "delegate_to_agent",
+        {
+            "intent": "alpha.execute",
+            "input": {
+                "goal": large_goal,
+                "preferred_harness": "cursor",
+            },
+        },
+        context=context,
+    )
+
+    result = json.loads(raw_result)
+    assert result["message"] == "ok"
+    input_payload = observed["input_payload"]
+    assert isinstance(input_payload, dict)
+    assert "Large Alpha input moved to artifact" in input_payload["goal"]
+    assert "Principal engineer accomplishments" not in input_payload["goal"]
+    input_artifacts = observed["input_artifacts"]
+    assert isinstance(input_artifacts, list)
+    assert inherited_artifact in input_artifacts
+    externalized = [item for item in input_artifacts if item.get("artifact_id", "").startswith("art_alpha_input_")]
+    assert len(externalized) == 1
+    externalized_path = tmp_path / "artifacts" / "alpha_handoffs" / "tsk_parent"
+    assert str(externalized[0]["path"]).startswith(str(externalized_path))
+    assert Path(externalized[0]["path"]).read_text(encoding="utf-8") == large_goal
 
 
 @pytest.mark.asyncio

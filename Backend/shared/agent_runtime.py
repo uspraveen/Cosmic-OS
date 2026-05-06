@@ -200,7 +200,7 @@ class AgentRuntime:
             approximate=True,
         )
         await self.redis.rpush(f"task_events:{task_id}", message_id)
-        if event_type in {"task.completed", "task.failed", "task.dlq"}:
+        if event_type in {"task.completed", "task.failed", "task.cancelled", "task.dlq"}:
             await self.redis.expire(f"event_seq:{task_id}", RESULT_TTL_SEC)
             await self.redis.expire(f"task_events:{task_id}", RESULT_TTL_SEC)
         return message_id
@@ -213,7 +213,12 @@ class AgentRuntime:
         }
         if result.error is not None:
             payload["error"] = result.error.model_dump(mode="json")
-        event_type = "task.completed" if result.status == "completed" else "task.failed"
+        if result.status == "completed":
+            event_type = "task.completed"
+        elif result.error is not None and result.error.code == "CANCELLED":
+            event_type = "task.cancelled"
+        else:
+            event_type = "task.failed"
         return await self.emit_event(task_id, event_type, payload)
 
     async def submit_reverse_task(

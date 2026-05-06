@@ -672,7 +672,7 @@ async def test_orchestrator_runtime_can_cancel_active_task(tmp_path) -> None:
     consumer = asyncio.create_task(consume())
     try:
         await asyncio.wait_for(created.wait(), timeout=2)
-        assert runtime.cancel_task(task.task_id) is True
+        assert await runtime.cancel_task(task.task_id) is True
         await asyncio.wait_for(consumer, timeout=2)
     finally:
         if not consumer.done():
