@@ -3471,8 +3471,8 @@ kbd {
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.13);
   background:
-    linear-gradient(180deg, rgba(18, 18, 20, 0.58), rgba(4, 4, 6, 0.48)),
-    rgba(0, 0, 0, 0.18);
+    linear-gradient(180deg, rgba(18, 18, 20, 0.48), rgba(4, 4, 6, 0.38)),
+    rgba(0, 0, 0, 0.12);
   backdrop-filter: blur(24px) saturate(128%);
   -webkit-backdrop-filter: blur(24px) saturate(128%);
   box-shadow:
@@ -3501,7 +3501,7 @@ kbd {
   align-items: center;
   gap: 7px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.065);
-  background: rgba(0, 0, 0, 0.08);
+  background: rgba(0, 0, 0, 0.055);
 }
 
 .alpha-agent-console-toggle,
@@ -3515,7 +3515,7 @@ kbd {
   align-items: center;
   justify-content: center;
   color: rgba(238, 247, 255, 0.84);
-  background: rgba(0, 0, 0, 0.2);
+  background: rgba(0, 0, 0, 0.14);
   backdrop-filter: blur(16px) saturate(128%);
   -webkit-backdrop-filter: blur(16px) saturate(128%);
   cursor: pointer;
@@ -3617,8 +3617,8 @@ kbd {
   overflow: auto;
   padding: 9px 10px 10px;
   background:
-    linear-gradient(180deg, rgba(0, 0, 0, 0.32), rgba(0, 0, 0, 0.48)),
-    rgba(0, 0, 0, 0.2);
+    linear-gradient(180deg, rgba(0, 0, 0, 0.24), rgba(0, 0, 0, 0.36)),
+    rgba(0, 0, 0, 0.14);
   scrollbar-color: rgba(112, 137, 163, 0.5) rgba(255, 255, 255, 0.02);
   scrollbar-width: thin;
 }
