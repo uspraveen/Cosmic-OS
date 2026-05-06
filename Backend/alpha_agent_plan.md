@@ -263,6 +263,8 @@ Cross-provider continuation is allowed only when the orchestrator explicitly pas
 
 Known recoverable example: a CLI may terminate itself with `SIGTERM` by running an over-broad command such as `pkill -f 'python.*http.server'` from a shell whose own command line contains that pattern. Alpha should classify this as a same-provider retry case and feed the CLI targeted guidance to use a non-self-matching pattern or port-specific cleanup.
 
+Codex and Cursor child processes should run in their own process group/session so COSMIC stop, timeout, or cancellation can terminate the whole CLI tree rather than only the parent process. Long-running tasks are allowed, but the inline Alpha terminal should receive regular idle heartbeats when a CLI is alive but silent; silence should be visible to the user and diagnosable from task logs.
+
 ## Future Improvement: Intelligent Alpha Project Lookup
 
 Alpha project recall should evolve beyond exact `project_ref` matching. The current registry is good for precise continuity when the orchestrator passes a project id, repo URL, deployment URL, local path, task id, artifact id, or exact alias, but it is not enough when many projects have similar names or goals.

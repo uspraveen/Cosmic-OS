@@ -125,6 +125,6 @@ class AlphaAgentConfig:
             ),
             cli_idle_check_sec=max(
                 30.0,
-                float(os.getenv("ALPHA_CLI_IDLE_CHECK_SEC", "300") or "300"),
+                float(os.getenv("ALPHA_CLI_IDLE_CHECK_SEC", "60") or "60"),
             ),
         )

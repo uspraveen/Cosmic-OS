@@ -5,7 +5,9 @@ import hashlib
 import json
 import os
 import re
+import signal
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
@@ -154,6 +156,7 @@ class CodexWorkspaceRunner:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=self._env(),
+            **self._process_group_kwargs(),
         )
         timed_out = False
         cancelled = False
@@ -171,11 +174,11 @@ class CodexWorkspaceRunner:
             cancelled = bool(stream_state.get("cancelled"))
         except asyncio.CancelledError:
             if process.returncode is None:
-                process.terminate()
+                self._terminate_process_tree(process)
                 try:
                     await asyncio.wait_for(process.communicate(), timeout=5.0)
                 except asyncio.TimeoutError:
-                    process.kill()
+                    self._kill_process_tree(process)
                     await process.communicate()
             raise
 
@@ -312,6 +315,7 @@ class CodexWorkspaceRunner:
                             "stream": "system",
                             "event_type": "codex.idle_check",
                             "text": f"Codex is still running; no CLI output for {int(now - state['last_output_at'])} seconds.",
+                            "detail": f"pid={process.pid}; elapsed={int(now - started_at)}s",
                         })
 
         stdin_task = asyncio.create_task(write_stdin())
@@ -338,12 +342,39 @@ class CodexWorkspaceRunner:
     async def _terminate_process(self, process: asyncio.subprocess.Process) -> None:
         if process.returncode is not None:
             return
-        process.terminate()
+        self._terminate_process_tree(process)
         try:
             await asyncio.wait_for(process.wait(), timeout=10.0)
         except asyncio.TimeoutError:
-            process.kill()
+            self._kill_process_tree(process)
             await process.wait()
+
+    def _process_group_kwargs(self) -> dict[str, Any]:
+        if os.name == "nt":
+            return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        return {"start_new_session": True}
+
+    def _terminate_process_tree(self, process: asyncio.subprocess.Process) -> None:
+        if os.name != "nt":
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                return
+            except ProcessLookupError:
+                return
+            except OSError:
+                pass
+        process.terminate()
+
+    def _kill_process_tree(self, process: asyncio.subprocess.Process) -> None:
+        if os.name != "nt":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+                return
+            except ProcessLookupError:
+                return
+            except OSError:
+                pass
+        process.kill()
 
     def _codex_json_line_to_terminal_event(self, line: str, *, stream: str) -> dict[str, Any]:
         text = line.strip()
