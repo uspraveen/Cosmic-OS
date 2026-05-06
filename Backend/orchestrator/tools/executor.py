@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import mimetypes
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -290,6 +291,10 @@ class ToolExecutor:
                 input_artifacts or [],
                 context.parent_task.input_artifacts if context and context.parent_task else [],
             )
+            input_artifacts = self._merge_artifact_descriptors(
+                input_artifacts or [],
+                self._alpha_parsed_bundle_artifacts(input_artifacts or []),
+            )
             payload, externalized = self._externalize_alpha_payload(payload, context=context)
             if externalized:
                 input_artifacts = self._merge_artifact_descriptors(input_artifacts or [], externalized)
@@ -326,6 +331,97 @@ class ToolExecutor:
             seen.add(key)
             merged.append(item)
         return merged
+
+    def _alpha_parsed_bundle_artifacts(
+        self,
+        input_artifacts: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Expose parsed document bundle files to Alpha as normal input artifacts.
+
+        The orchestrator often knows a parsed `bundle_id` through attachment
+        metadata, but Alpha needs concrete files in its workspace. Deriving
+        artifacts from the docs-parser `parsed_summary.paths` keeps large parsed
+        markdown/JSON out of the model payload while preserving direct CLI access.
+        """
+
+        existing_paths = {
+            str(item.get("path") or "").strip()
+            for item in input_artifacts
+            if isinstance(item, dict) and str(item.get("path") or "").strip()
+        }
+        derived: list[dict[str, Any]] = []
+        seen_paths = set(existing_paths)
+        for artifact in input_artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            parsed_summary = (
+                artifact.get("parsed_summary")
+                if isinstance(artifact.get("parsed_summary"), dict)
+                else {}
+            )
+            paths = parsed_summary.get("paths") if isinstance(parsed_summary.get("paths"), dict) else {}
+            if not paths:
+                continue
+            source_artifact_id = str(artifact.get("artifact_id") or "").strip()
+            parse_bundle_id = (
+                str(artifact.get("parse_bundle_id") or "").strip()
+                or str(parsed_summary.get("bundle_id") or "").strip()
+            )
+            doc_id = str(artifact.get("doc_id") or parsed_summary.get("doc_id") or "").strip()
+            source_filename = str(artifact.get("filename") or parsed_summary.get("filename") or "").strip()
+            for path_key, raw_path in paths.items():
+                path = str(raw_path or "").strip()
+                if not path or path in seen_paths:
+                    continue
+                seen_paths.add(path)
+                filename = Path(path).name or f"{path_key}.bin"
+                artifact_id = self._safe_alpha_parsed_artifact_id(
+                    source_artifact_id=source_artifact_id,
+                    parse_bundle_id=parse_bundle_id,
+                    path_key=str(path_key),
+                    path=path,
+                )
+                derived.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "kind": "parsed_document_bundle",
+                        "audience": "supporting",
+                        "mime": self._guess_parsed_bundle_mime(path=path, path_key=str(path_key)),
+                        "mime_type": self._guess_parsed_bundle_mime(path=path, path_key=str(path_key)),
+                        "filename": filename,
+                        "path": path,
+                        "parse_bundle_id": parse_bundle_id,
+                        "doc_id": doc_id,
+                        "source_artifact_id": source_artifact_id,
+                        "source_filename": source_filename,
+                        "bundle_path_key": str(path_key),
+                        "caption": "Parsed document bundle file staged for Alpha workspace access.",
+                    }
+                )
+        return derived
+
+    def _safe_alpha_parsed_artifact_id(
+        self,
+        *,
+        source_artifact_id: str,
+        parse_bundle_id: str,
+        path_key: str,
+        path: str,
+    ) -> str:
+        base = source_artifact_id or parse_bundle_id or "parsed_bundle"
+        digest = hashlib.sha256(f"{base}:{path_key}:{path}".encode("utf-8")).hexdigest()[:12]
+        safe_base = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in base).strip("_")
+        safe_key = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in path_key).strip("_")
+        return f"art_alpha_parsed_{(safe_base or 'bundle')[:48]}_{(safe_key or 'file')[:32]}_{digest}"
+
+    def _guess_parsed_bundle_mime(self, *, path: str, path_key: str) -> str:
+        normalized_key = path_key.lower().strip()
+        if normalized_key.endswith("_md") or normalized_key in {"document_md", "markdown"}:
+            return "text/markdown"
+        if normalized_key.endswith("_json") or normalized_key in {"document_json", "chunk_index", "manifest"}:
+            return "application/json"
+        guessed = mimetypes.guess_type(Path(path).name)[0]
+        return guessed or "application/octet-stream"
 
     def _externalize_alpha_payload(
         self,

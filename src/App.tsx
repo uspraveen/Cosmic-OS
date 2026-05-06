@@ -1,5 +1,5 @@
-import { ChevronDown, ChevronRight, Square, Terminal } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowDownToLine, ChevronDown, ChevronRight, Square, Terminal } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -1516,7 +1516,26 @@ const AlphaAgentConsole = ({
 }) => {
   const view = buildAlphaConsoleView(entries, terminalLog, { stopped })
   const [expanded, setExpanded] = useState(() => view?.status === 'running')
+  const [isPinnedToBottom, setIsPinnedToBottom] = useState(true)
   const terminalRef = useRef<HTMLDivElement | null>(null)
+
+  const scrollTerminalToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
+    const terminal = terminalRef.current
+    if (!terminal) {
+      return
+    }
+    terminal.scrollTo({ top: terminal.scrollHeight, behavior })
+    setIsPinnedToBottom(true)
+  }, [])
+
+  const updateTerminalPinState = useCallback(() => {
+    const terminal = terminalRef.current
+    if (!terminal) {
+      return
+    }
+    const distanceFromBottom = terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight
+    setIsPinnedToBottom(distanceFromBottom <= 24)
+  }, [])
 
   useEffect(() => {
     if (view?.status === 'running') {
@@ -1525,11 +1544,15 @@ const AlphaAgentConsole = ({
   }, [view?.status, view?.lines.length])
 
   useEffect(() => {
-    if (!expanded || !terminalRef.current) {
+    setIsPinnedToBottom(true)
+  }, [view?.taskId])
+
+  useEffect(() => {
+    if (!expanded || !isPinnedToBottom) {
       return
     }
-    terminalRef.current.scrollTop = terminalRef.current.scrollHeight
-  }, [expanded, view?.lines.length])
+    requestAnimationFrame(() => scrollTerminalToBottom('auto'))
+  }, [expanded, isPinnedToBottom, scrollTerminalToBottom, view?.lines.length])
 
   if (!view) {
     return null
@@ -1553,7 +1576,13 @@ const AlphaAgentConsole = ({
         <button
           type="button"
           className="alpha-agent-console-toggle"
-          onClick={() => setExpanded((value) => !value)}
+          onClick={() => setExpanded((value) => {
+            const next = !value
+            if (next) {
+              setIsPinnedToBottom(true)
+            }
+            return next
+          })}
           aria-expanded={expanded}
           aria-label={expanded ? 'Collapse Alpha Agent console' : 'Expand Alpha Agent console'}
           title={expanded ? 'Collapse Alpha Agent console' : 'Expand Alpha Agent console'}
@@ -1586,25 +1615,46 @@ const AlphaAgentConsole = ({
       </div>
 
       {expanded && (
-        <div ref={terminalRef} className="alpha-agent-terminal" role="log" aria-live={isRunning ? 'polite' : 'off'}>
-          {view.lines.map((entry) => {
-            return (
-              <div key={entry.id} className={`alpha-agent-terminal-line is-${entry.stream || 'stdout'}`}>
-                <span className="alpha-agent-terminal-time">{formatAlphaConsoleTime(entry.createdAt)}</span>
+        <div className="alpha-agent-terminal-shell">
+          <div
+            ref={terminalRef}
+            className="alpha-agent-terminal"
+            role="log"
+            aria-live={isRunning ? 'polite' : 'off'}
+            onScroll={updateTerminalPinState}
+          >
+            {view.lines.map((entry) => {
+              return (
+                <div key={entry.id} className={`alpha-agent-terminal-line is-${entry.stream || 'stdout'}`}>
+                  <span className="alpha-agent-terminal-time">{formatAlphaConsoleTime(entry.createdAt)}</span>
+                  <span className="alpha-agent-terminal-prompt">$</span>
+                  <span className="alpha-agent-terminal-copy">
+                    <span>{entry.text}</span>
+                    {entry.detail && <span className="alpha-agent-terminal-detail">{entry.detail}</span>}
+                  </span>
+                </div>
+              )
+            })}
+            {isRunning && (
+              <div className="alpha-agent-terminal-line is-live">
+                <span className="alpha-agent-terminal-time">live</span>
                 <span className="alpha-agent-terminal-prompt">$</span>
                 <span className="alpha-agent-terminal-copy">
-                  <span>{entry.text}</span>
-                  {entry.detail && <span className="alpha-agent-terminal-detail">{entry.detail}</span>}
+                  streaming {formatAlphaProviderLabel(view.provider).toLowerCase()} events
                 </span>
               </div>
-            )
-          })}
-          {isRunning && (
-            <div className="alpha-agent-terminal-line is-live">
-              <span className="alpha-agent-terminal-time">live</span>
-              <span className="alpha-agent-terminal-prompt">$</span>
-              <span className="alpha-agent-terminal-copy">streaming codex exec events</span>
-            </div>
+            )}
+          </div>
+          {!isPinnedToBottom && (
+            <button
+              type="button"
+              className="alpha-agent-terminal-bottom"
+              onClick={() => scrollTerminalToBottom('smooth')}
+              aria-label="Jump to latest Alpha CLI output"
+              title="Jump to latest Alpha CLI output"
+            >
+              <ArrowDownToLine size={14} strokeWidth={2.2} />
+            </button>
           )}
         </div>
       )}

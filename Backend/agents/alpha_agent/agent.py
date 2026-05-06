@@ -585,6 +585,7 @@ class AlphaAgent(AgentRuntime):
                     "",
                     "## Input Artifacts",
                     "The orchestrator passed files and large context by reference. Inspect these staged files directly instead of asking for pasted content.",
+                    "Parsed document bundles are staged as concrete files such as document.md, chunk_index.json, document.json, and manifest.json when available.",
                 ]
             )
             for index, item in enumerate(staged_inputs, 1):
@@ -594,6 +595,8 @@ class AlphaAgent(AgentRuntime):
                     f"artifact_id={item.get('artifact_id') or ''}",
                     f"parse_bundle_id={item.get('parse_bundle_id') or ''}",
                     f"doc_id={item.get('doc_id') or ''}",
+                    f"bundle_path_key={item.get('bundle_path_key') or ''}",
+                    f"source_artifact_id={item.get('source_artifact_id') or ''}",
                 ]
                 details = [part for part in details if not part.endswith("=")]
                 lines.append(f"{index}. " + "; ".join(details))
@@ -635,6 +638,8 @@ class AlphaAgent(AgentRuntime):
                 "path": self._optional_string(artifact.get("path")) or "",
                 "parse_bundle_id": self._optional_string(artifact.get("parse_bundle_id")) or "",
                 "doc_id": self._parsed_doc_id(artifact) or "",
+                "bundle_path_key": self._optional_string(artifact.get("bundle_path_key")) or "",
+                "source_artifact_id": self._optional_string(artifact.get("source_artifact_id")) or "",
             }
             source_path = self._artifact_source_path(artifact)
             if source_path is not None and source_path.is_file():

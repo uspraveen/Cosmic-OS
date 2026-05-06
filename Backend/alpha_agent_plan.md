@@ -234,13 +234,18 @@ Current flow:
 ```text
 COSMIC Orchestrator
   -> delegate_to_agent(alpha.execute)
+    -> resolve artifact_ids / inherit current TaskEnvelope.input_artifacts
+    -> expand parsed document bundle paths from parsed_summary.paths for Alpha
     -> Alpha project registry
     -> /var/lib/cosmic/alpha/workspaces/prj_xxx
+    -> stage input artifacts into <workspace>/_cosmic_inputs
     -> Gateway internal Codex status check
     -> codex exec --cd <workspace> --sandbox <ALPHA_CODEX_SANDBOX>
     -> /var/lib/cosmic/alpha/artifacts/tsk_xxx/codex-last-message.md
     -> task.completed / task.failed
 ```
+
+Alpha handoffs should pass bulky context by file reference, not by pasted text. When the orchestrator has uploaded artifacts or parsed document metadata, `delegate_to_agent(alpha.execute)` should pass `artifact_ids` or `input_artifacts`. For parsed docs, the handoff expands `parsed_summary.paths` into concrete artifacts such as `document.md`, `chunk_index.json`, `document.json`, and `manifest.json`; the Alpha agent then copies those files into `_cosmic_inputs` and gives the CLI absolute staged paths. A bare `bundle_id` is useful metadata, but it is not sufficient by itself unless the corresponding source artifact reference is also passed.
 
 Runtime finding on the current VM: Codex `workspace-write` fails because the VM rejects the bubblewrap loopback setup with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`. `danger-full-access` works in the Alpha workspace. Docker is also not installed on the current VM, so V2 uses:
 

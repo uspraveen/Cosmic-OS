@@ -6,7 +6,7 @@
     "goal": {
       "type": "string",
       "minLength": 1,
-      "description": "High-level user goal for Alpha. Keep bulky documents, parsed PDF text, logs, generated files, and archives out of this string; pass them through TaskEnvelope.input_artifacts or delegate_to_agent.artifact_ids so Alpha can inspect staged files directly."
+      "description": "High-level user goal for Alpha. Keep bulky documents, parsed PDF text, logs, generated files, and archives out of this string; pass them through TaskEnvelope.input_artifacts or delegate_to_agent.artifact_ids so Alpha can inspect staged files directly. If context comes from a parsed bundle, pass the source artifact reference rather than only a bundle_id."
     },
     "mode": {
       "type": "string",

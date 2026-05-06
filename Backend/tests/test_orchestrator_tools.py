@@ -918,6 +918,16 @@ async def test_tool_executor_alpha_delegate_externalizes_large_payload_and_inher
         "mime": "application/pdf",
         "path": "runs/artifacts/req_upload/inputs/art_resume_pdf/original/resume.pdf",
         "filename": "resume.pdf",
+        "parse_bundle_id": "bundle_resume_1",
+        "parsed_summary": {
+            "doc_id": "doc_resume_1",
+            "filename": "resume.pdf",
+            "paths": {
+                "document_md": "runs/artifacts/tsk_docs_parse/docs_parser/art_resume_pdf/document.md",
+                "chunk_index": "runs/artifacts/tsk_docs_parse/docs_parser/art_resume_pdf/chunk_index.json",
+                "manifest": "runs/artifacts/tsk_docs_parse/docs_parser/art_resume_pdf/manifest.json",
+            },
+        },
     }
     parent_task = _parent_task().model_copy(update={"input_artifacts": [inherited_artifact]})
     executor = ToolExecutor(
@@ -956,6 +966,18 @@ async def test_tool_executor_alpha_delegate_externalizes_large_payload_and_inher
     input_artifacts = observed["input_artifacts"]
     assert isinstance(input_artifacts, list)
     assert inherited_artifact in input_artifacts
+    parsed_bundle_artifacts = [
+        item for item in input_artifacts
+        if item.get("kind") == "parsed_document_bundle"
+    ]
+    assert {item["bundle_path_key"] for item in parsed_bundle_artifacts} == {
+        "document_md",
+        "chunk_index",
+        "manifest",
+    }
+    assert all(item["parse_bundle_id"] == "bundle_resume_1" for item in parsed_bundle_artifacts)
+    assert any(item["mime"] == "text/markdown" for item in parsed_bundle_artifacts)
+    assert any(item["mime"] == "application/json" for item in parsed_bundle_artifacts)
     externalized = [item for item in input_artifacts if item.get("artifact_id", "").startswith("art_alpha_input_")]
     assert len(externalized) == 1
     externalized_path = tmp_path / "artifacts" / "alpha_handoffs" / "tsk_parent"
