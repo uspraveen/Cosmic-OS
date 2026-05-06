@@ -3059,8 +3059,16 @@ class OrchestratorRuntime:
         and collapses consecutive same-role messages that can accumulate across
         repeated internal tool loops.
         """
+        candidate_messages: list[tuple[int, dict[str, Any]]] = [
+            (index, item)
+            for index, item in enumerate(messages)
+            if isinstance(item, dict)
+            and str(item.get("role") or "").strip() in {"user", "assistant"}
+        ]
+        last_candidate_index = candidate_messages[-1][0] if candidate_messages else -1
+
         prepared: list[dict[str, Any]] = []
-        for item in messages:
+        for original_index, item in candidate_messages:
             if not isinstance(item, dict):
                 continue
             role = str(item.get("role") or "").strip()
@@ -3068,7 +3076,12 @@ class OrchestratorRuntime:
                 continue
             raw_content = item.get("content")
             if role == "assistant" and isinstance(raw_content, list):
-                if strip_all_server_tool_blocks:
+                # Server-side tool blocks are only replay-safe for the immediate
+                # trailing assistant continuation. Older conversation history can
+                # look structurally paired but still be rejected by Anthropic as
+                # stale server-tool replay.
+                allow_server_tool_replay = original_index == last_candidate_index
+                if strip_all_server_tool_blocks or not allow_server_tool_replay:
                     content, _ = self._strip_server_tool_replay_content_blocks(
                         raw_content
                     )
@@ -3186,7 +3199,7 @@ class OrchestratorRuntime:
         return (
             "tool use with id" in normalized
             and "without a corresponding" in normalized
-            and "_tool_result block" in normalized
+            and ("_tool_result block" in normalized or "tool_result" in normalized)
         )
 
     def _strip_server_tool_replay_content_blocks(

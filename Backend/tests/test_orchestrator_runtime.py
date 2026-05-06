@@ -1568,33 +1568,6 @@ async def test_orchestrator_runtime_recovers_from_provider_server_tool_replay_er
         del system_prompt, tools, container_id, usage_context, model_override
         nonlocal stream_call_count
         stream_call_count += 1
-        if stream_call_count == 1:
-            assert messages == [
-                {"role": "user", "content": "Earlier question"},
-                {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "text", "text": "Working..."},
-                        {
-                            "type": "server_tool_use",
-                            "id": "srv_code_hist",
-                            "name": "code_execution",
-                            "input": {"code": "print(1)"},
-                        },
-                        {
-                            "type": "code_execution_tool_result",
-                            "tool_use_id": "srv_code_hist",
-                            "content": [{"type": "text", "text": "1"}],
-                        },
-                    ],
-                },
-                {"role": "user", "content": "Why is the sky blue?"},
-            ]
-            raise RuntimeError(
-                "Anthropic API error: messages.1: code_execution tool use with id "
-                "srv_code_hist was found without a corresponding code_execution_tool_result block"
-            )
-
         assert messages == [
             {"role": "user", "content": "Earlier question"},
             {
@@ -1605,6 +1578,12 @@ async def test_orchestrator_runtime_recovers_from_provider_server_tool_replay_er
             },
             {"role": "user", "content": "Why is the sky blue?"},
         ]
+        if stream_call_count == 1:
+            raise RuntimeError(
+                "Anthropic API error: messages.1: code_execution tool use with id "
+                "srv_code_hist was found without a corresponding code_execution_tool_result block"
+            )
+
         for event_name, payload in [
             ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 7}}}),
             ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
