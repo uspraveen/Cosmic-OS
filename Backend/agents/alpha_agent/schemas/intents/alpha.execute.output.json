@@ -10,6 +10,9 @@
     "harness": { "type": ["string", "object"] },
     "codex": { "type": "object" },
     "cursor": { "type": "object" },
+    "attempts": { "type": "object" },
+    "retry_from": { "type": "object" },
+    "fallback_from": { "type": "object" },
     "next_action": { "type": "string" }
   },
   "required": ["status", "project", "workspace", "next_action"]

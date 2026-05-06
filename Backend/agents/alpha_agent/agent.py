@@ -255,7 +255,9 @@ class AlphaAgent(AgentRuntime):
                         "detail": self._provider_login_message(active_harness, provider_status),
                     }
                 )
-                if attempt_index + 1 < len(candidate_harnesses):
+                if last_result is not None:
+                    break
+                if attempt_index + 1 < len(candidate_harnesses) and candidate_harnesses[attempt_index + 1] != active_harness:
                     next_harness = candidate_harnesses[attempt_index + 1]
                     await self._emit_harness_fallback(
                         task=task,
@@ -356,9 +358,13 @@ class AlphaAgent(AgentRuntime):
                 ),
             )
             all_artifacts = self._merge_artifacts(all_artifacts, artifact_batch)
-            attempt_outputs[active_harness] = run_result.as_dict()
+            attempt_key = f"{active_harness}_{attempt_index + 1}"
+            attempt_outputs[attempt_key] = run_result.as_dict()
             if fallback_from:
-                attempt_outputs.setdefault("fallback_from", fallback_from)
+                attempt_outputs.setdefault(
+                    "retry_from" if fallback_from.get("retrying_same_provider") else "fallback_from",
+                    fallback_from,
+                )
 
             project = self.registry.mark_task(
                 project.project_id,
@@ -401,7 +407,7 @@ class AlphaAgent(AgentRuntime):
                     "next_action": f"Review {provider_label} output and continue with the same project_ref for follow-up work.",
                 }
                 if fallback_from:
-                    output["fallback_from"] = fallback_from
+                    output["retry_from" if fallback_from.get("retrying_same_provider") else "fallback_from"] = fallback_from
                 return AgentResult(
                     status="completed",
                     output=output,
@@ -424,6 +430,7 @@ class AlphaAgent(AgentRuntime):
             )
             fallback_from = {
                 "provider": active_harness,
+                "retrying_same_provider": next_harness == active_harness,
                 "model": selected_model,
                 "returncode": run_result.returncode,
                 "timed_out": run_result.timed_out,
@@ -454,7 +461,10 @@ class AlphaAgent(AgentRuntime):
             )
         failure = self._cli_failure(last_provider, last_result, artifacts=all_artifacts)
         if fallback_from:
-            failure.output = {"fallback_from": fallback_from, "attempts": attempt_outputs}
+            failure.output = {
+                "retry_from" if fallback_from.get("retrying_same_provider") else "fallback_from": fallback_from,
+                "attempts": attempt_outputs,
+            }
         return failure
 
     async def handle_alpha_recall_project(self, task: TaskEnvelope) -> AgentResult:
@@ -521,11 +531,11 @@ class AlphaAgent(AgentRuntime):
             normalized = "codex" if self._task_prefers_codex_first(task) else "cursor"
         if normalized not in {"codex", "cursor"}:
             return []
-        candidates = [normalized]
-        if self._allow_harness_fallback(task):
+        candidates = [normalized] * self._max_same_harness_attempts(task)
+        if self._allow_cross_harness_fallback(task):
             alternate = "codex" if normalized == "cursor" else "cursor"
             candidates.append(alternate)
-        return self._dedupe_harnesses(candidates)
+        return candidates
 
     def _task_prefers_codex_first(self, task: TaskEnvelope) -> bool:
         goal = str(task.input.get("goal") or "")
@@ -556,21 +566,23 @@ class AlphaAgent(AgentRuntime):
         )
         return any(term in text for term in broad_generation_terms)
 
-    def _allow_harness_fallback(self, task: TaskEnvelope) -> bool:
+    def _max_same_harness_attempts(self, task: TaskEnvelope) -> int:
+        raw = task.input.get("max_harness_attempts")
+        if raw in (None, ""):
+            return 2
+        try:
+            return min(3, max(1, int(raw)))
+        except (TypeError, ValueError):
+            return 2
+
+    def _allow_cross_harness_fallback(self, task: TaskEnvelope) -> bool:
         if self._coerce_bool(task.input.get("require_preferred_harness"), default=False):
             return False
-        return self._coerce_bool(task.input.get("allow_harness_fallback"), default=True)
-
-    def _dedupe_harnesses(self, values: list[str]) -> list[str]:
-        seen: set[str] = set()
-        result: list[str] = []
-        for value in values:
-            normalized = str(value or "").strip().lower()
-            if normalized not in {"codex", "cursor"} or normalized in seen:
-                continue
-            seen.add(normalized)
-            result.append(normalized)
-        return result
+        if "allow_cross_harness_fallback" in task.input:
+            return self._coerce_bool(task.input.get("allow_cross_harness_fallback"), default=False)
+        if "allow_harness_fallback" in task.input:
+            return self._coerce_bool(task.input.get("allow_harness_fallback"), default=False)
+        return False
 
     async def _safe_fetch_provider_status(self, provider: str) -> dict[str, Any]:
         try:
@@ -629,7 +641,7 @@ class AlphaAgent(AgentRuntime):
             task.task_id,
             "task.progress",
             {
-                "stage": "alpha.harness_fallback",
+                "stage": "alpha.harness_retry" if from_provider == to_provider else "alpha.harness_fallback",
                 "project_id": project_id,
                 "workspace": workspace,
                 "codex_terminal": {
@@ -637,10 +649,14 @@ class AlphaAgent(AgentRuntime):
                     "task_id": task.task_id,
                     "provider": to_provider,
                     "stream": "system",
-                    "event_type": "alpha.harness_fallback",
+                    "event_type": "alpha.harness_retry" if from_provider == to_provider else "alpha.harness_fallback",
                     "text": (
-                        f"{self._harness_label(from_provider)} did not complete cleanly; "
-                        f"continuing in the same workspace with {self._harness_label(to_provider)}."
+                        f"{self._harness_label(from_provider)} did not complete cleanly; retrying in the same workspace."
+                        if from_provider == to_provider
+                        else (
+                            f"{self._harness_label(from_provider)} did not complete cleanly; "
+                            f"continuing in the same workspace with {self._harness_label(to_provider)}."
+                        )
                     ),
                     "detail": reason[:2000],
                 },
@@ -658,7 +674,7 @@ class AlphaAgent(AgentRuntime):
             return base_prompt
         details = [
             "",
-            "## Previous Harness Attempt",
+            "## Previous CLI Attempt",
             (
                 f"{self._harness_label(str(fallback_from.get('provider') or ''))} did not complete cleanly. "
                 "Continue from the current workspace and artifact directory; do not discard partial files that look useful."
@@ -693,6 +709,13 @@ class AlphaAgent(AgentRuntime):
             return f"{self._harness_label(provider)} initialized the wrong model."
         stderr = str(getattr(result, "stderr", "") or "").strip()
         stdout = str(getattr(result, "stdout", "") or "").strip()
+        combined = f"{stderr}\n{stdout}"
+        if getattr(result, "returncode", None) == 143 and "pkill -f" in combined and "http.server" in combined:
+            return (
+                f"{self._harness_label(provider)} was terminated by SIGTERM while running a broad "
+                "`pkill -f` http.server cleanup command. On retry, avoid self-matching kill patterns; use "
+                "`pgrep -f '[p]ython.*http.server' | xargs -r kill` or a port-specific cleanup before restart."
+            )
         tail = (stderr or stdout)[-500:]
         return tail or f"{self._harness_label(provider)} exited without a clean final result."
 

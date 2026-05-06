@@ -6,7 +6,7 @@ from pathlib import Path
 
 from agents.alpha_agent.agent import AlphaAgent
 from agents.alpha_agent.artifact_promoter import promote_alpha_artifacts
-from agents.alpha_agent.codex_runner import CodexRunResult, CodexWorkspaceRunner
+from agents.alpha_agent.codex_runner import CodexWorkspaceRunner
 from agents.alpha_agent.config import AlphaAgentConfig
 from agents.alpha_agent.cursor_runner import CursorRunResult, CursorWorkspaceRunner, normalize_cursor_model
 from agents.alpha_agent.docker_runner import DockerWorkspaceRunner
@@ -365,13 +365,20 @@ def test_cursor_runner_detects_fast_model_mismatch(tmp_path: Path) -> None:
     )
 
 
-def test_alpha_execute_falls_back_from_dirty_cursor_to_codex(tmp_path: Path) -> None:
+def test_alpha_execute_retries_dirty_cursor_before_any_cross_provider_fallback(tmp_path: Path) -> None:
     cfg = _config(tmp_path)
     redis = _FakeRedis()
     agent = AlphaAgent(redis, config=cfg)
 
-    class CursorFails:
+    prompts: list[str] = []
+
+    class CursorRetries:
+        def __init__(self) -> None:
+            self.calls = 0
+
         async def run(self, **kwargs: object) -> CursorRunResult:
+            self.calls += 1
+            prompts.append(str(kwargs["prompt"]))
             paths = kwargs["paths"]
             paths.artifacts.mkdir(parents=True, exist_ok=True)
             (paths.artifacts / "cursor-last-message.md").write_text("Cursor partial work", encoding="utf-8")
@@ -382,51 +389,49 @@ def test_alpha_execute_falls_back_from_dirty_cursor_to_codex(tmp_path: Path) -> 
                     {
                         "stream": "stdout",
                         "event_type": "assistant",
-                        "text": "Cursor wrote partial files, then exited dirty.",
+                        "text": "Cursor reached deployment cleanup.",
                     }
                 )
+            if self.calls == 1:
+                return CursorRunResult(
+                    returncode=143,
+                    stdout=(
+                        "mkdir -p /artifacts && cp index.html /artifacts/index.html && "
+                        "pkill -f 'python.*http.server' || true"
+                    ),
+                    stderr="Terminated",
+                    timed_out=False,
+                    command=["cursor-agent"],
+                    last_message_path=paths.artifacts / "cursor-last-message.md",
+                    last_message="Cursor wrote partial work before SIGTERM.",
+                    duration_sec=1.0,
+                    requested_model="composer-2",
+                    observed_model="Composer 2",
+                )
+            output = paths.artifacts / "cursor-last-message.md"
+            output.write_text("Cursor retried, fixed cleanup, and verified the task.", encoding="utf-8")
+            (paths.artifacts / "final.txt").write_text("done", encoding="utf-8")
             return CursorRunResult(
-                returncode=1,
-                stdout='{"type":"assistant","message":{"content":[{"type":"text","text":"partial"}]}}\n',
-                stderr="Cursor exited before result",
+                returncode=0,
+                stdout='{"type":"result","message":"done"}\n',
+                stderr="",
                 timed_out=False,
                 command=["cursor-agent"],
-                last_message_path=paths.artifacts / "cursor-last-message.md",
-                last_message="Cursor partial work",
+                last_message_path=output,
+                last_message="Cursor retried, fixed cleanup, and verified the task.",
                 duration_sec=1.0,
                 requested_model="composer-2",
                 observed_model="Composer 2",
             )
 
-    class CodexSucceeds:
-        async def run(self, **kwargs: object) -> CodexRunResult:
-            paths = kwargs["paths"]
-            paths.artifacts.mkdir(parents=True, exist_ok=True)
-            output = paths.artifacts / "codex-last-message.md"
-            output.write_text("Codex finished and verified the task.", encoding="utf-8")
-            (paths.artifacts / "final.txt").write_text("done", encoding="utf-8")
-            event_callback = kwargs.get("event_callback")
-            if event_callback is not None:
-                await event_callback(
-                    {
-                        "stream": "stdout",
-                        "event_type": "codex.result",
-                        "text": "Codex completed fallback.",
-                    }
-                )
-            return CodexRunResult(
-                returncode=0,
-                stdout='{"type":"result","message":"done"}\n',
-                stderr="",
-                timed_out=False,
-                command=["codex", "exec"],
-                last_message_path=output,
-                last_message="Codex finished and verified the task.",
-                duration_sec=1.0,
-            )
+    class CodexMustNotRun:
+        async def run(self, **kwargs: object) -> object:
+            del kwargs
+            raise AssertionError("Codex must not run unless cross-provider fallback is explicitly enabled.")
 
-    agent.cursor_runner = CursorFails()
-    agent.codex_runner = CodexSucceeds()
+    cursor = CursorRetries()
+    agent.cursor_runner = cursor
+    agent.codex_runner = CodexMustNotRun()
 
     async def fetch_status(provider: str) -> dict[str, object]:
         return {
@@ -450,12 +455,15 @@ def test_alpha_execute_falls_back_from_dirty_cursor_to_codex(tmp_path: Path) -> 
     )
 
     assert result.status == "completed"
-    assert result.output["harness"] == "codex"
-    assert result.output["fallback_from"]["provider"] == "cursor"
-    assert "cursor" in result.output["attempts"]
-    assert "codex" in result.output["attempts"]
+    assert result.output["harness"] == "cursor"
+    assert cursor.calls == 2
+    assert "fallback_from" not in result.output
+    assert "cursor_1" in result.output["attempts"]
+    assert "cursor_2" in result.output["attempts"]
     assert {artifact.mime for artifact in result.artifacts} >= {"text/markdown", "text/plain"}
-    assert any("alpha.harness_fallback" in str(event) for event in redis.events)
+    assert any("alpha.harness_retry" in str(event) for event in redis.events)
+    assert "Previous CLI Attempt" in prompts[1]
+    assert "pkill -f" in prompts[1]
 
 
 def test_alpha_auto_prefers_codex_for_large_generation_tasks(tmp_path: Path) -> None:
@@ -466,7 +474,30 @@ def test_alpha_auto_prefers_codex_for_large_generation_tasks(tmp_path: Path) -> 
         _task({"goal": "Build and deploy a website from scratch with a complete redesign."}),
     )
 
-    assert candidates[:2] == ["codex", "cursor"]
+    assert candidates == ["codex", "codex"]
+
+
+def test_alpha_cross_provider_fallback_is_explicit_opt_in(tmp_path: Path) -> None:
+    agent = AlphaAgent(_FakeRedis(), config=_config(tmp_path))
+
+    assert agent._candidate_harnesses(
+        "cursor",
+        _task({"goal": "Update the existing site."}),
+    ) == ["cursor", "cursor"]
+    assert agent._candidate_harnesses(
+        "cursor",
+        _task({"goal": "Update the existing site.", "allow_cross_harness_fallback": True}),
+    ) == ["cursor", "cursor", "codex"]
+    assert agent._candidate_harnesses(
+        "cursor",
+        _task(
+            {
+                "goal": "Update the existing site.",
+                "allow_cross_harness_fallback": True,
+                "require_preferred_harness": True,
+            }
+        ),
+    ) == ["cursor", "cursor"]
 
 
 def test_alpha_large_goal_is_externalized_for_cli_prompt(tmp_path: Path) -> None:

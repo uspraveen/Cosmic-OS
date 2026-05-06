@@ -51,10 +51,22 @@
       "default": "danger-full-access",
       "description": "Codex sandbox mode for model-generated shell commands."
     },
+    "allow_cross_harness_fallback": {
+      "type": "boolean",
+      "default": false,
+      "description": "When true, Alpha may continue the same workspace with the other authenticated CLI harness after same-provider retries are exhausted. Default is false so a selected provider such as Cursor is retried and diagnosed before any provider switch."
+    },
     "allow_harness_fallback": {
       "type": "boolean",
-      "default": true,
-      "description": "When true, Alpha may continue the same workspace with the other authenticated CLI harness if the preferred harness is unavailable, exits dirty, times out, or produces no clean final result. Set false only when the user explicitly requires one provider."
+      "default": false,
+      "description": "Legacy alias for allow_cross_harness_fallback. Default is false; do not set true unless cross-provider continuation is explicitly acceptable."
+    },
+    "max_harness_attempts": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3,
+      "default": 2,
+      "description": "Maximum attempts with the selected CLI harness before failing or, only when allow_cross_harness_fallback=true, trying another authenticated harness."
     },
     "require_preferred_harness": {
       "type": "boolean",

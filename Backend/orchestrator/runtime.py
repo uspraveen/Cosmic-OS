@@ -3586,6 +3586,19 @@ class OrchestratorRuntime:
                     }.items()
                     if value
                 }
+        retry_from = data.get("retry_from") if isinstance(data.get("retry_from"), dict) else {}
+        if retry_from:
+            retry_provider = self._activity_excerpt(retry_from.get("provider"), limit=48)
+            retry_model = self._activity_excerpt(retry_from.get("model"), limit=96)
+            if retry_provider or retry_model:
+                receipt["retry_from"] = {
+                    key: value
+                    for key, value in {
+                        "provider": retry_provider,
+                        "model": retry_model,
+                    }.items()
+                    if value
+                }
         if intent_name == "tabular.create_workbook":
             bundle_id = self._activity_excerpt(data.get("bundle_id"), limit=96)
             workbooks = data.get("workbooks") if isinstance(data.get("workbooks"), list) else []

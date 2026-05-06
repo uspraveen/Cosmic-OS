@@ -255,6 +255,14 @@ ALPHA_CODEX_SANDBOX=danger-full-access
 
 This is an explicit operational compromise, not the final isolation design. The service still confines project state to `/var/lib/cosmic/alpha` by convention and prompt policy, but host-level sandboxing is not complete until the container/LXD runner is added. The next hardening step is to install/build an Alpha task container image with Codex available inside it and run Codex with full freedom only inside that container.
 
+## Provider Retry Policy
+
+Alpha must not silently switch execution providers. If the selected/configured harness is Cursor, Cursor should be retried first in the same workspace with the previous failure context; if the selected harness is Codex, Codex should be retried first the same way. This preserves user intent and avoids assuming the user has another provider authenticated.
+
+Cross-provider continuation is allowed only when the orchestrator explicitly passes `allow_cross_harness_fallback=true` and the alternate provider is authenticated. The default is same-provider retry, then a clear failure report with terminal logs, return code, timeout/cancel state, artifacts, and retry guidance.
+
+Known recoverable example: a CLI may terminate itself with `SIGTERM` by running an over-broad command such as `pkill -f 'python.*http.server'` from a shell whose own command line contains that pattern. Alpha should classify this as a same-provider retry case and feed the CLI targeted guidance to use a non-self-matching pattern or port-specific cleanup.
+
 ## Future Improvement: Intelligent Alpha Project Lookup
 
 Alpha project recall should evolve beyond exact `project_ref` matching. The current registry is good for precise continuity when the orchestrator passes a project id, repo URL, deployment URL, local path, task id, artifact id, or exact alias, but it is not enough when many projects have similar names or goals.
