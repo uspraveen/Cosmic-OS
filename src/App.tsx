@@ -2460,6 +2460,36 @@ export default function App() {
     ...overrides,
   })
 
+  const insertAssistantMessageAfterRequest = (
+    current: Message[],
+    requestId: string,
+    assistantMessage: Message,
+  ): Message[] => {
+    const normalizedRequestId = String(requestId || '').trim()
+    const withoutExisting = current.filter((message) => (
+      message.role !== 'assistant' || message.requestId !== normalizedRequestId
+    ))
+    if (!normalizedRequestId) {
+      return [...withoutExisting, assistantMessage]
+    }
+    let userIndex = -1
+    for (let index = withoutExisting.length - 1; index >= 0; index -= 1) {
+      const message = withoutExisting[index]
+      if (message.role === 'user' && message.requestId === normalizedRequestId) {
+        userIndex = index
+        break
+      }
+    }
+    if (userIndex < 0) {
+      return [...withoutExisting, assistantMessage]
+    }
+    return [
+      ...withoutExisting.slice(0, userIndex + 1),
+      assistantMessage,
+      ...withoutExisting.slice(userIndex + 1),
+    ]
+  }
+
   const patchMessagesForRequest = (
     requestId: string,
     updater: (message: Message) => Message,
@@ -3862,33 +3892,35 @@ export default function App() {
         }
         const messageId = createAssistantMessageId()
         bindAssistantMessageToEvent(event, messageId)
-        setMessages((prev) => {
-          const nextMessages = prev.filter((message) => (
-            message.role !== 'assistant' || message.requestId !== requestId
-          ))
-          return [
-            ...nextMessages,
-            createAssistantMessage({
-              id: messageId,
-              requestId,
-              content: foregroundTask?.partialContent || '',
-              thinking: foregroundTask?.partialThinking || '',
-              activity: foregroundTask?.activity,
-              activityLog: foregroundTask?.activityLog,
-              alphaTerminalLog: foregroundTask?.alphaTerminalLog,
-              progress: foregroundTask?.progress,
-              producedArtifacts: foregroundTask?.producedArtifacts,
-              sources: foregroundTask?.sources,
-            }),
-          ]
+        const foregroundAssistantMessage = createAssistantMessage({
+          id: messageId,
+          requestId,
+          content: foregroundTask?.partialContent || '',
+          thinking: foregroundTask?.partialThinking || '',
+          activity: foregroundTask?.activity,
+          activityLog: foregroundTask?.activityLog,
+          alphaTerminalLog: foregroundTask?.alphaTerminalLog,
+          progress: foregroundTask?.progress,
+          producedArtifacts: foregroundTask?.producedArtifacts,
+          sources: foregroundTask?.sources,
         })
-        activeStreamingRequestIdRef.current = requestId
-        if (foregroundTask?.taskId) {
-          activeStreamingTaskIdRef.current = foregroundTask.taskId
+        setMessages((prev) => {
+          return insertAssistantMessageAfterRequest(prev, requestId, foregroundAssistantMessage)
+        })
+        const foregroundCompleted = Boolean((event as any).completed)
+        if (!foregroundCompleted) {
+          activeStreamingRequestIdRef.current = requestId
+          if (foregroundTask?.taskId) {
+            activeStreamingTaskIdRef.current = foregroundTask.taskId
+          }
+          setStreamingProgress('')
+          setIsStreaming(true)
+        } else if (activeStreamingRequestIdRef.current === requestId) {
+          clearActiveStreamingRefs()
+          setStreamingProgress('')
+          setIsStreaming(false)
         }
-        setStreamingProgress('')
-        setIsStreaming(!Boolean((event as any).completed))
-        shouldAutoScrollRef.current = true
+        shouldAutoScrollRef.current = !foregroundCompleted
         if (modeRef.current !== 'chat') {
           showChatComposer()
         }
@@ -4800,25 +4832,20 @@ export default function App() {
       // Create the assistant message from the background task's stored content
       // (the original assistant message was removed when the task was backgrounded)
       const messageId = createAssistantMessageId()
+      const foregroundAssistantMessage = createAssistantMessage({
+        id: messageId,
+        requestId,
+        content: task.partialContent || '',
+        thinking: task.partialThinking || '',
+        activity: task.activity,
+        activityLog: task.activityLog,
+        alphaTerminalLog: task.alphaTerminalLog,
+        progress: task.progress,
+        producedArtifacts: task.producedArtifacts,
+        sources: task.sources,
+      })
       setMessages((prev) => {
-        const nextMessages = prev.filter((message) => (
-          message.role !== 'assistant' || message.requestId !== requestId
-        ))
-        return [
-          ...nextMessages,
-          createAssistantMessage({
-            id: messageId,
-            requestId,
-            content: task.partialContent || '',
-            thinking: task.partialThinking || '',
-            activity: task.activity,
-            activityLog: task.activityLog,
-            alphaTerminalLog: task.alphaTerminalLog,
-            progress: task.progress,
-            producedArtifacts: task.producedArtifacts,
-            sources: task.sources,
-          }),
-        ]
+        return insertAssistantMessageAfterRequest(prev, requestId, foregroundAssistantMessage)
       })
       removeBackgroundTask(requestId)
       setSelectedBackgroundRequestId(null)
@@ -4827,13 +4854,10 @@ export default function App() {
         delete next.backgroundState
         return next
       })
-      shouldAutoScrollRef.current = true
+      shouldAutoScrollRef.current = false
       showChatComposer()
       // Fire-and-forget: tell backend to clear the background flag for persistence
       window.cosmic?.foregroundGatewayRequest?.({ requestId })?.catch?.(() => {})
-      window.setTimeout(() => {
-        responseEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-      }, 120)
       return
     }
     if (!window.cosmic?.foregroundGatewayRequest) {

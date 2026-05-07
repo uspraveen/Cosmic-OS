@@ -1036,6 +1036,7 @@ def test_gateway_partial_stream_inserts_boundary_between_text_turns(tmp_path) ->
         request_id="req_stream_join",
         session_id="sess_stream_join",
         channel="desktop:desk_a",
+        route="opus",
         task_id="tsk_stream_join",
         created_at=utcnow_iso(),
     )
@@ -1050,6 +1051,62 @@ def test_gateway_partial_stream_inserts_boundary_between_text_turns(tmp_path) ->
     )
 
     assert state.partial_content == "Let me grab the artifact!\n\nGot it - firing Alpha now."
+
+
+def test_backgrounded_request_context_gets_model_separator(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+    session_id = runtime._current_session_id()
+    runtime.session_store.append_message(
+        session_id,
+        role="user",
+        content="The marquee was needed but in a better design I believe!?",
+        channel="desktop:desk_a",
+        metadata={"request_id": "req_background_marquee"},
+    )
+    runtime.active_requests["req_background_marquee"] = ActiveRequest(
+        request_id="req_background_marquee",
+        session_id=session_id,
+        channel="desktop:desk_a",
+        route="opus",
+        task_id="tsk_background_marquee",
+        foreground=False,
+        user_query_excerpt="The marquee was needed but in a better design I believe!?",
+    )
+
+    context = runtime._build_conversation_context(session_id)  # noqa: SLF001 - targeted context shaping
+
+    assert [item["role"] for item in context] == ["user", "assistant"]
+    assert "already running as a background task" in context[1]["content"]
+    assert "Do not resume" in context[1]["content"]
+
+
+def test_backgrounded_task_notebook_is_not_rendered_as_active_workstream(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+    session_id = runtime._current_session_id()
+    runtime.session_store.upsert_task_notebook(
+        "tsk_background_marquee",
+        session_id,
+        {
+            "task_id": "tsk_background_marquee",
+            "status": "active",
+            "goal": "Improve the marquee design.",
+            "current_state": "Alpha is editing the site.",
+            "created_at": utcnow_iso(),
+        },
+    )
+    runtime.active_requests["req_background_marquee"] = ActiveRequest(
+        request_id="req_background_marquee",
+        session_id=session_id,
+        channel="desktop:desk_a",
+        route="opus",
+        task_id="tsk_background_marquee",
+        foreground=False,
+    )
+
+    working_set = runtime._refresh_active_working_set(session_id)  # noqa: SLF001 - targeted working-set shaping
+
+    assert "tsk_background_marquee" not in (working_set.get("active_task_refs") or [])
+    assert "Improve the marquee design." not in (working_set.get("active_workstreams") or [])
 
 
 @pytest.mark.asyncio

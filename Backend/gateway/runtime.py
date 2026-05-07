@@ -3931,6 +3931,9 @@ class GatewayRuntime:
         history = self.session_store.get_history_tail(session_id, limit=limit)
         if history:
             context: list[dict[str, str]] = []
+            backgrounded_request_ids = self._backgrounded_active_request_ids(
+                session_id
+            )
             for item in history[-limit:]:
                 entry: dict[str, str] = {
                     "role": item["role"],
@@ -3940,11 +3943,51 @@ class GatewayRuntime:
                 if route and item["role"] == "assistant":
                     entry["route"] = route
                 context.append(entry)
+                request_id = self._safe_text(item.get("request_id"))
+                if item["role"] == "user" and request_id in backgrounded_request_ids:
+                    context.append(
+                        {
+                            "role": "assistant",
+                            "content": (
+                                "[This prior request is already running as a background task. "
+                                "Do not resume, repeat, or answer it unless the current user explicitly asks.]"
+                            ),
+                        }
+                    )
             return context
 
         if not fallback_context:
             return []
         return self._normalize_conversation_context(fallback_context)[:limit]
+
+    def _backgrounded_active_request_ids(self, session_id: str) -> set[str]:
+        normalized_session_id = self._safe_text(session_id)
+        if not normalized_session_id:
+            return set()
+        return {
+            state.request_id
+            for state in self.active_requests.values()
+            if state.session_id == normalized_session_id
+            and not state.foreground
+            and not state.completed
+            and self._safe_text(state.request_id)
+        }
+
+    def _backgrounded_active_task_ids(self, session_id: str) -> set[str]:
+        normalized_session_id = self._safe_text(session_id)
+        if not normalized_session_id:
+            return set()
+        return {
+            task_id
+            for task_id in (
+                self._safe_text(state.task_id)
+                for state in self.active_requests.values()
+                if state.session_id == normalized_session_id
+                and not state.foreground
+                and not state.completed
+            )
+            if task_id
+        }
 
     def _normalize_conversation_context(
         self, conversation_context: list[dict[str, Any]]
@@ -5545,6 +5588,7 @@ class GatewayRuntime:
         goal = self._safe_text(carry_forward.get("goal")) or ""
         recent_research_receipts: list[dict[str, Any]] = []
         recent_specialist_receipts: list[dict[str, Any]] = []
+        backgrounded_task_ids = self._backgrounded_active_task_ids(session_id)
 
         for turn in recent_turns:
             if not goal:
@@ -5606,10 +5650,17 @@ class GatewayRuntime:
 
         next_actions: list[str] = []
         for notebook in notebooks:
+            notebook_task_id = self._safe_text(notebook.get("task_id"))
             status = (self._safe_text(notebook.get("status")) or "").lower()
-            if status not in {"completed", "cancelled", "failed"}:
+            is_backgrounded_task = bool(
+                notebook_task_id and notebook_task_id in backgrounded_task_ids
+            )
+            if (
+                status not in {"completed", "cancelled", "failed"}
+                and not is_backgrounded_task
+            ):
                 active_task_refs = self._normalize_string_list(
-                    [*active_task_refs, self._safe_text(notebook.get("task_id"))],
+                    [*active_task_refs, notebook_task_id],
                     limit=8,
                 )
                 workstreams = self._normalize_string_list(
