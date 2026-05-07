@@ -1708,6 +1708,18 @@ async def test_orchestrator_runtime_recovers_from_modified_thinking_replay_error
     assert stream_call_count == 2
 
 
+def test_orchestrator_stream_text_append_inserts_turn_boundary() -> None:
+    assert (
+        OrchestratorRuntime._append_stream_text(
+            "Let me grab the artifact!",
+            "Got it - firing Alpha now.",
+        )
+        == "Let me grab the artifact!\n\nGot it - firing Alpha now."
+    )
+    assert OrchestratorRuntime._append_stream_text("Hello", "world") == "Hello world"
+    assert OrchestratorRuntime._append_stream_text("Hello ", "world") == "Hello world"
+
+
 @pytest.mark.asyncio
 async def test_orchestrator_runtime_emits_local_research_provenance_for_perplexity_and_firecrawl(tmp_path) -> None:
     client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))

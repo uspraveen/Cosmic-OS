@@ -1030,6 +1030,28 @@ def test_alpha_harness_completion_progress_keeps_activity_stage(tmp_path) -> Non
     assert activity["specialist_task_id"] == "tsk_alpha_123"
 
 
+def test_gateway_partial_stream_inserts_boundary_between_text_turns(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+    state = ActiveRequest(
+        request_id="req_stream_join",
+        session_id="sess_stream_join",
+        channel="desktop:desk_a",
+        task_id="tsk_stream_join",
+        created_at=utcnow_iso(),
+    )
+
+    runtime._track_partial_stream(  # noqa: SLF001 - targeted stream cache behavior
+        state,
+        {"type": "response.chunk", "content": "Let me grab the artifact!"},
+    )
+    runtime._track_partial_stream(  # noqa: SLF001 - targeted stream cache behavior
+        state,
+        {"type": "response.chunk", "content": "Got it - firing Alpha now."},
+    )
+
+    assert state.partial_content == "Let me grab the artifact!\n\nGot it - firing Alpha now."
+
+
 @pytest.mark.asyncio
 async def test_runtime_uses_shared_daily_session_across_channels(tmp_path) -> None:
     runtime = build_runtime(tmp_path)

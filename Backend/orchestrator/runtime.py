@@ -748,7 +748,10 @@ class OrchestratorRuntime:
 
                 turn_text = "".join(turn_text_parts)
                 turn_reasoning = "".join(turn_reasoning_parts)
-                full_response_text += turn_text
+                full_response_text = self._append_stream_text(
+                    full_response_text,
+                    turn_text,
+                )
                 full_reasoning_text += turn_reasoning
 
                 # ── Server-side tool continuation (pause_turn) ────
@@ -3169,6 +3172,25 @@ class OrchestratorRuntime:
             if isinstance(value, (int, float)):
                 merged[key] = merged.get(key, 0) + int(value)
         return merged
+
+    @staticmethod
+    def _append_stream_text(current: str, incoming: str) -> str:
+        prev = str(current or "")
+        next_text = str(incoming or "")
+        if not next_text:
+            return prev
+        if not prev:
+            return next_text
+
+        prev_end = prev[-1:]
+        next_start = next_text[:1]
+        if not prev_end or not next_start or prev_end.isspace() or next_start.isspace():
+            return prev + next_text
+        if re.search(r'[\.\!\?:\u2026]', prev_end) and re.search(r'[A-Z0-9"\'`\(\[]', next_start):
+            return prev + "\n\n" + next_text
+        if re.search(r"[A-Za-z0-9]", prev_end) and re.search(r"[A-Za-z0-9]", next_start):
+            return prev + " " + next_text
+        return prev + next_text
 
     def _estimate_request_context_chars(self, system_prompt: str, messages: list[dict[str, Any]]) -> int:
         try:
