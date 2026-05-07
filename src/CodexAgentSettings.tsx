@@ -3,18 +3,29 @@ import { Bot, CheckCircle2, Code2, KeyRound, LogIn, ShieldCheck, Terminal, Trash
 
 type CodexAuthMode = 'chatgpt' | 'api_key'
 type CodexApprovalMode = 'suggest' | 'auto_edit' | 'full_auto'
+type CodexReasoningEffort = 'auto' | 'low' | 'medium' | 'high' | 'xhigh'
 
 const MODEL_OPTIONS = [
   { value: 'auto', label: 'Auto' },
+  { value: 'gpt-5.5', label: 'GPT-5.5' },
   { value: 'gpt-5.4', label: 'GPT-5.4' },
-  { value: 'gpt-5.3-codex', label: 'GPT-5.3-Codex' },
-  { value: 'gpt-5.1-codex', label: 'GPT-5.1-Codex' },
+  { value: 'gpt-5.4-mini', label: 'GPT-5.4 Mini' },
+  { value: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
+  { value: 'gpt-5.2', label: 'GPT-5.2' },
 ]
 
 const APPROVAL_MODES: Array<{ value: CodexApprovalMode; label: string; note: string }> = [
   { value: 'suggest', label: 'Suggest', note: 'Read and propose' },
   { value: 'auto_edit', label: 'Auto Edit', note: 'Write after routing' },
   { value: 'full_auto', label: 'Full Auto', note: 'Container scoped' },
+]
+
+const REASONING_OPTIONS: Array<{ value: CodexReasoningEffort; label: string; note: string }> = [
+  { value: 'auto', label: 'Auto', note: 'CLI default' },
+  { value: 'low', label: 'Low', note: 'Faster' },
+  { value: 'medium', label: 'Medium', note: 'Balanced' },
+  { value: 'high', label: 'High', note: 'Deeper' },
+  { value: 'xhigh', label: 'XHigh', note: 'Maximum' },
 ]
 
 interface CodexAgentSettingsProps {
@@ -25,6 +36,7 @@ interface CodexGatewayStatus {
   auth_mode?: string
   has_api_key?: boolean
   preferred_model?: string
+  reasoning_effort?: string
   approval_mode?: string
   vm_sync_enabled?: boolean
   status?: string
@@ -53,6 +65,11 @@ function normalizeApprovalMode(value: unknown): CodexApprovalMode {
   return 'suggest'
 }
 
+function normalizeReasoningEffort(value: unknown): CodexReasoningEffort {
+  if (value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh') return value
+  return 'auto'
+}
+
 function extractFirstUrl(value: string) {
   return value.match(/https?:\/\/\S+/)?.[0] || ''
 }
@@ -62,6 +79,7 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
   const [apiKeyDraft, setApiKeyDraft] = useState('')
   const [hasApiKey, setHasApiKey] = useState(false)
   const [preferredModel, setPreferredModel] = useState('auto')
+  const [reasoningEffort, setReasoningEffort] = useState<CodexReasoningEffort>('auto')
   const [approvalMode, setApprovalMode] = useState<CodexApprovalMode>('suggest')
   const [vmSyncEnabled, setVmSyncEnabled] = useState(true)
   const [gatewayStatus, setGatewayStatus] = useState<CodexGatewayStatus | null>(null)
@@ -129,6 +147,7 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
     setAuthMode(nextAuthMode)
     setHasApiKey(Boolean(status.has_api_key))
     setPreferredModel(MODEL_OPTIONS.some((option) => option.value === nextModel) ? nextModel : 'auto')
+    setReasoningEffort(normalizeReasoningEffort(status.reasoning_effort))
     setApprovalMode(normalizeApprovalMode(status.approval_mode))
     setVmSyncEnabled(status.vm_sync_enabled !== false)
   }
@@ -137,6 +156,7 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
     authMode?: CodexAuthMode
     apiKey?: string
     preferredModel?: string
+    reasoningEffort?: CodexReasoningEffort
     approvalMode?: CodexApprovalMode
     vmSyncEnabled?: boolean
   }, successMessage?: string) => {
@@ -166,6 +186,11 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
   const savePreferredModel = (nextModel: string) => {
     setPreferredModel(nextModel)
     void saveRemoteConfig({ preferredModel: nextModel })
+  }
+
+  const saveReasoningEffort = (nextEffort: CodexReasoningEffort) => {
+    setReasoningEffort(nextEffort)
+    void saveRemoteConfig({ reasoningEffort: nextEffort })
   }
 
   const saveApprovalMode = (nextMode: CodexApprovalMode) => {
@@ -370,7 +395,8 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
           </div>
         </div>
 
-        <div className="cosmic-agents-detail-model-grid">
+        <span className="cosmic-agents-detail-control-label">Model</span>
+        <div className="cosmic-agents-detail-model-grid codex">
           {MODEL_OPTIONS.map((option) => (
             <button
               key={option.value}
@@ -389,6 +415,24 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
           ))}
         </div>
 
+        <span className="cosmic-agents-detail-control-label">Reasoning effort</span>
+        <div className="cosmic-agents-detail-model-grid compact">
+          {REASONING_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={`cosmic-agents-detail-model-card ${reasoningEffort === option.value ? 'active' : ''}`}
+              onClick={() => saveReasoningEffort(option.value)}
+              disabled={saving}
+            >
+              <span className="cosmic-agents-detail-model-name">{option.label}</span>
+              <small>{option.note}</small>
+              {reasoningEffort === option.value ? <CheckCircle2 size={16} className="cosmic-agents-detail-model-check-icon" /> : null}
+            </button>
+          ))}
+        </div>
+
+        <span className="cosmic-agents-detail-control-label">Autonomy</span>
         <div className="cosmic-agents-detail-mode-list">
           {APPROVAL_MODES.map((mode) => (
             <button

@@ -2102,6 +2102,7 @@ app.whenReady().then(() => {
     authMode?: string
     apiKey?: string
     preferredModel?: string
+    reasoningEffort?: string
     approvalMode?: string
     vmSyncEnabled?: boolean
   }) => {
@@ -2115,6 +2116,7 @@ app.whenReady().then(() => {
         auth_mode: payload?.authMode,
         api_key: payload?.apiKey,
         preferred_model: payload?.preferredModel,
+        reasoning_effort: payload?.reasoningEffort,
         approval_mode: payload?.approvalMode,
         vm_sync_enabled: payload?.vmSyncEnabled,
       },

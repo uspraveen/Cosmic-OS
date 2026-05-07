@@ -268,7 +268,8 @@ def test_codex_runner_builds_workspace_write_exec_command(tmp_path: Path) -> Non
         paths=paths,
         prompt="Build the app",
         output_path=paths.artifacts / "codex-last-message.md",
-        model="gpt-5.1-codex",
+        model="gpt-5.5",
+        reasoning_effort="high",
     )
     joined = " ".join(command)
 
@@ -278,7 +279,9 @@ def test_codex_runner_builds_workspace_write_exec_command(tmp_path: Path) -> Non
     assert "--sandbox workspace-write" in joined
     assert "--skip-git-repo-check" in joined
     assert "--output-last-message" in command
-    assert "gpt-5.1-codex" in command
+    assert "gpt-5.5" in command
+    assert "-c" in command
+    assert 'model_reasoning_effort="high"' in command
     assert command[-1] == "-"
 
 

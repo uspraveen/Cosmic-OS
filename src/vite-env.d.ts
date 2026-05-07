@@ -125,6 +125,7 @@ interface Window {
       authMode?: string
       apiKey?: string
       preferredModel?: string
+      reasoningEffort?: string
       approvalMode?: string
       vmSyncEnabled?: boolean
     }) => Promise<any>

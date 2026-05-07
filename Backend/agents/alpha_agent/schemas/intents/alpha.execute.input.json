@@ -45,6 +45,16 @@
       "type": ["string", "null"],
       "description": "Optional CLI model override for this task."
     },
+    "reasoning_effort": {
+      "type": ["string", "null"],
+      "enum": ["auto", "low", "medium", "high", "xhigh", null],
+      "description": "Optional Codex CLI reasoning effort override for this task. Maps to codex exec -c model_reasoning_effort=...; omit or use auto to respect the Settings > Agents > Codex default."
+    },
+    "codex_reasoning_effort": {
+      "type": ["string", "null"],
+      "enum": ["auto", "low", "medium", "high", "xhigh", null],
+      "description": "Codex-specific alias for reasoning_effort."
+    },
     "codex_sandbox": {
       "type": "string",
       "enum": ["read-only", "workspace-write", "danger-full-access"],

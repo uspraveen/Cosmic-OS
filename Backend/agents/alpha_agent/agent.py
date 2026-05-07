@@ -337,10 +337,19 @@ class AlphaAgent(AgentRuntime):
                 )
             else:
                 selected_model = self._select_codex_model(task, provider_status)
+                selected_reasoning_effort = self._select_codex_reasoning_effort(task, provider_status)
+                await emit_alpha_terminal(
+                    {
+                        "stream": "system",
+                        "event_type": "codex.reasoning.selected",
+                        "text": f"Codex reasoning effort selected: {selected_reasoning_effort or 'auto'}",
+                    }
+                )
                 run_result = await self.codex_runner.run(
                     paths=paths,
                     prompt=prompt,
                     model=selected_model,
+                    reasoning_effort=selected_reasoning_effort,
                     sandbox=self._select_codex_sandbox(task),
                     timeout_sec=self.config.codex_timeout_sec,
                     event_callback=emit_alpha_terminal,
@@ -814,6 +823,23 @@ class AlphaAgent(AgentRuntime):
             normalized = self._optional_string(value)
             if normalized and normalized.lower() != "auto":
                 return normalized
+        return None
+
+    def _select_codex_reasoning_effort(
+        self,
+        task: TaskEnvelope,
+        codex_status: dict[str, Any],
+    ) -> str | None:
+        for value in (
+            task.input.get("reasoning_effort"),
+            task.input.get("codex_reasoning_effort"),
+            codex_status.get("reasoning_effort"),
+        ):
+            normalized = self._optional_string(value)
+            if normalized and normalized.lower() != "auto":
+                lowered = normalized.lower()
+                if lowered in {"low", "medium", "high", "xhigh"}:
+                    return lowered
         return None
 
     def _select_cursor_model(self, task: TaskEnvelope, cursor_status: dict[str, Any]) -> str | None:

@@ -13,6 +13,12 @@ from .credentials.encryption import decrypt_token, encrypt_token_str
 
 PROVIDER_CODEX = "codex"
 PROVIDER_CURSOR = "cursor"
+_CODEX_MODEL_ALIASES = {
+    "gpt-5.1-codex": "gpt-5.4",
+    "gpt-5.1-codex-mini": "gpt-5.4",
+    "gpt-5.3-codex-mini": "gpt-5.4",
+}
+_CODEX_MODELS = {"auto", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2"}
 _CURSOR_MODEL_ALIASES = {
     "composer": "composer-2",
     "composer normal": "composer-2",
@@ -35,6 +41,7 @@ CREATE TABLE IF NOT EXISTS agent_provider_auth (
     provider TEXT PRIMARY KEY,
     auth_mode TEXT NOT NULL DEFAULT 'chatgpt',
     preferred_model TEXT NOT NULL DEFAULT 'auto',
+    reasoning_effort TEXT NOT NULL DEFAULT 'auto',
     approval_mode TEXT NOT NULL DEFAULT 'suggest',
     vm_sync_enabled INTEGER NOT NULL DEFAULT 1,
     encrypted_api_key TEXT NOT NULL DEFAULT '',
@@ -83,6 +90,7 @@ class AgentAuthStore:
         *,
         auth_mode: str | None = None,
         preferred_model: str | None = None,
+        reasoning_effort: str | None = None,
         approval_mode: str | None = None,
         vm_sync_enabled: bool | None = None,
         api_key: str | None = None,
@@ -96,10 +104,14 @@ class AgentAuthStore:
             allowed={"chatgpt", "api_key"},
             fallback=str(current.get("auth_mode") or "chatgpt"),
         )
-        next_model = _normalize_choice(
+        next_model = _normalize_codex_model(
             preferred_model,
-            allowed={"auto", "gpt-5.4", "gpt-5.3-codex", "gpt-5.1-codex"},
             fallback=str(current.get("preferred_model") or "auto"),
+        )
+        next_reasoning = _normalize_choice(
+            reasoning_effort,
+            allowed={"auto", "low", "medium", "high", "xhigh"},
+            fallback=str(current.get("reasoning_effort") or "auto"),
         )
         next_approval = _normalize_choice(
             approval_mode,
@@ -128,13 +140,14 @@ class AgentAuthStore:
         conn = self._get_conn()
         conn.execute(
             """INSERT INTO agent_provider_auth
-               (provider, auth_mode, preferred_model, approval_mode, vm_sync_enabled,
+               (provider, auth_mode, preferred_model, reasoning_effort, approval_mode, vm_sync_enabled,
                 encrypted_api_key, has_api_key, status, login_required_reason,
                 last_cli_status_json, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(provider) DO UPDATE SET
                  auth_mode = excluded.auth_mode,
                  preferred_model = excluded.preferred_model,
+                 reasoning_effort = excluded.reasoning_effort,
                  approval_mode = excluded.approval_mode,
                  vm_sync_enabled = excluded.vm_sync_enabled,
                  encrypted_api_key = excluded.encrypted_api_key,
@@ -147,6 +160,7 @@ class AgentAuthStore:
                 PROVIDER_CODEX,
                 next_auth_mode,
                 next_model,
+                next_reasoning,
                 next_approval,
                 1 if next_sync_enabled else 0,
                 encrypt_token_str(next_api_key) if next_api_key else "",
@@ -255,10 +269,10 @@ class AgentAuthStore:
         conn = self._get_conn()
         conn.execute(
             """INSERT INTO agent_provider_auth
-               (provider, auth_mode, preferred_model, approval_mode, vm_sync_enabled,
+               (provider, auth_mode, preferred_model, reasoning_effort, approval_mode, vm_sync_enabled,
                 encrypted_api_key, has_api_key, status, login_required_reason,
                 last_cli_status_json, updated_at)
-               VALUES (?, ?, ?, ?, ?, '', 0, ?, ?, ?, ?)
+               VALUES (?, ?, ?, ?, ?, ?, '', 0, ?, ?, ?, ?)
                ON CONFLICT(provider) DO UPDATE SET
                  encrypted_api_key = '',
                  has_api_key = 0,
@@ -270,6 +284,7 @@ class AgentAuthStore:
                 PROVIDER_CODEX,
                 str(current.get("auth_mode") or "chatgpt"),
                 str(current.get("preferred_model") or "auto"),
+                str(current.get("reasoning_effort") or "auto"),
                 str(current.get("approval_mode") or "suggest"),
                 1 if bool(current.get("vm_sync_enabled", True)) else 0,
                 status,
@@ -303,8 +318,22 @@ class AgentAuthStore:
         if self._conn is None:
             self._conn = connect_sync(self._db_path)
             self._conn.executescript(_SCHEMA)
+            self._ensure_columns()
             self._conn.commit()
         return self._conn
+
+    def _ensure_columns(self) -> None:
+        if self._conn is None:
+            return
+        columns = {
+            str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
+            for row in self._conn.execute("PRAGMA table_info(agent_provider_auth)").fetchall()
+        }
+        if "reasoning_effort" not in columns:
+            self._conn.execute(
+                "ALTER TABLE agent_provider_auth "
+                "ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT 'auto'"
+            )
 
     def _get_provider(
         self,
@@ -324,6 +353,7 @@ class AgentAuthStore:
                 "provider": provider,
                 "auth_mode": default_auth_mode,
                 "preferred_model": default_preferred_model,
+                "reasoning_effort": "auto",
                 "approval_mode": "suggest",
                 "vm_sync_enabled": True,
                 "has_api_key": False,
@@ -348,6 +378,7 @@ class AgentAuthStore:
             "provider": row["provider"],
             "auth_mode": row["auth_mode"],
             "preferred_model": row["preferred_model"],
+            "reasoning_effort": row["reasoning_effort"] if "reasoning_effort" in row.keys() else "auto",
             "approval_mode": row["approval_mode"],
             "vm_sync_enabled": bool(row["vm_sync_enabled"]),
             "has_api_key": bool(row["has_api_key"]),
@@ -372,6 +403,15 @@ def _normalize_choice(value: str | None, *, allowed: set[str], fallback: str) ->
     if normalized in allowed:
         return normalized
     return fallback if fallback in allowed else sorted(allowed)[0]
+
+
+def _normalize_codex_model(value: str | None, *, fallback: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        normalized = str(fallback or "").strip() or "auto"
+    normalized = normalized.lower()
+    normalized = _CODEX_MODEL_ALIASES.get(normalized, normalized)
+    return normalized if normalized in _CODEX_MODELS else "auto"
 
 
 def _normalize_cursor_model(value: str | None, *, fallback: str) -> str:

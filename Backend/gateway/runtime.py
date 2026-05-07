@@ -11973,6 +11973,7 @@ class GatewayRuntime:
         auth_mode: str | None = None,
         api_key: str | None = None,
         preferred_model: str | None = None,
+        reasoning_effort: str | None = None,
         approval_mode: str | None = None,
         vm_sync_enabled: bool | None = None,
     ) -> dict[str, Any]:
@@ -12002,6 +12003,7 @@ class GatewayRuntime:
             auth_mode=normalized_auth_mode,
             api_key=api_key_value if api_key is not None else None,
             preferred_model=preferred_model,
+            reasoning_effort=reasoning_effort,
             approval_mode=approval_mode,
             vm_sync_enabled=vm_sync_enabled,
             status=next_status,

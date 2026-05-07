@@ -92,6 +92,7 @@ class CodexWorkspaceRunner:
         prompt: str,
         output_path: Path,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         sandbox: str | None = None,
         json_events: bool = False,
     ) -> list[str]:
@@ -111,6 +112,8 @@ class CodexWorkspaceRunner:
             command.append("--json")
         if model:
             command.extend(["--model", model])
+        if reasoning_effort:
+            command.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
         command.append("-")
         return command
 
@@ -120,6 +123,7 @@ class CodexWorkspaceRunner:
         paths: WorkspacePaths,
         prompt: str,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         sandbox: str | None = None,
         timeout_sec: float | None = None,
         event_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
@@ -134,6 +138,7 @@ class CodexWorkspaceRunner:
             prompt=prompt,
             output_path=output_path,
             model=model,
+            reasoning_effort=reasoning_effort,
             sandbox=sandbox,
             json_events=event_callback is not None,
         )

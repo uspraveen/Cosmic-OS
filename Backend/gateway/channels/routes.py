@@ -65,6 +65,7 @@ class CodexAgentConfigRequest(BaseModel):
     auth_mode: str | None = Field(default=None, max_length=32)
     api_key: str | None = Field(default=None, max_length=4096)
     preferred_model: str | None = Field(default=None, max_length=80)
+    reasoning_effort: str | None = Field(default=None, max_length=32)
     approval_mode: str | None = Field(default=None, max_length=32)
     vm_sync_enabled: bool | None = None
 
@@ -1470,6 +1471,7 @@ async def save_desktop_codex_config(
         auth_mode=body.auth_mode,
         api_key=body.api_key,
         preferred_model=body.preferred_model,
+        reasoning_effort=body.reasoning_effort,
         approval_mode=body.approval_mode,
         vm_sync_enabled=body.vm_sync_enabled,
     )
