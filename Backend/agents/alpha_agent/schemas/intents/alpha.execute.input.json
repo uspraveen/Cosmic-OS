@@ -71,6 +71,30 @@
       "default": false,
       "description": "Legacy alias for allow_cross_harness_fallback. Default is false; do not set true unless cross-provider continuation is explicitly acceptable."
     },
+    "native_resume_policy": {
+      "type": "string",
+      "enum": ["auto", "fresh", "disabled", "force"],
+      "default": "auto",
+      "description": "Native CLI session policy for Alpha. auto reuses the best healthy provider-native session for the resolved Alpha project when safe; fresh creates a new native session; disabled runs without native session resume; force prefers a supplied native_session_id/cursor_chat_id."
+    },
+    "native_session_id": {
+      "type": ["string", "null"],
+      "description": "Optional provider-native session/chat id to resume for this task. For Cursor this is a chat id."
+    },
+    "cursor_chat_id": {
+      "type": ["string", "null"],
+      "description": "Cursor-specific native chat id to resume."
+    },
+    "fresh_native_session": {
+      "type": "boolean",
+      "default": false,
+      "description": "When true, do not reuse an existing provider-native session; create a fresh one when supported."
+    },
+    "disable_native_resume": {
+      "type": "boolean",
+      "default": false,
+      "description": "When true, run the selected harness without provider-native session resume."
+    },
     "max_harness_attempts": {
       "type": "integer",
       "minimum": 1,

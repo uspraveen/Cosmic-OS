@@ -73,6 +73,10 @@ def _tokenize(value: Any) -> set[str]:
     return {token for token in re.findall(r"[a-z0-9][a-z0-9_-]*", text) if len(token) >= 2}
 
 
+def generate_harness_session_id() -> str:
+    return f"hses_{uuid4().hex[:12]}"
+
+
 @dataclass(frozen=True)
 class ProjectTaskRecord:
     task_id: str
@@ -108,6 +112,68 @@ class ProjectTaskRecord:
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
         )
+
+
+@dataclass(frozen=True)
+class HarnessSessionRecord:
+    session_id: str
+    project_id: str
+    harness: str
+    native_session_id: str
+    workspace_path: str | None
+    task_id_created: str | None
+    last_task_id: str | None
+    model: str | None
+    status: str
+    failure_count: int
+    metadata: dict[str, Any]
+    created_at: str
+    updated_at: str
+    last_used_at: str
+
+    @classmethod
+    def from_row(cls, row: Any) -> "HarnessSessionRecord":
+        metadata: dict[str, Any] = {}
+        try:
+            parsed = json.loads(_row_get(row, "metadata_json") or "{}")
+            if isinstance(parsed, dict):
+                metadata = parsed
+        except json.JSONDecodeError:
+            metadata = {}
+        return cls(
+            session_id=str(row["session_id"]),
+            project_id=str(row["project_id"]),
+            harness=str(row["harness"]),
+            native_session_id=str(row["native_session_id"]),
+            workspace_path=_row_get(row, "workspace_path"),
+            task_id_created=_row_get(row, "task_id_created"),
+            last_task_id=_row_get(row, "last_task_id"),
+            model=_row_get(row, "model"),
+            status=str(row["status"]),
+            failure_count=int(_row_get(row, "failure_count", 0) or 0),
+            metadata=metadata,
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+            last_used_at=str(row["last_used_at"]),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "project_id": self.project_id,
+            "harness": self.harness,
+            "native_session_id": self.native_session_id,
+            "workspace_path": self.workspace_path,
+            "task_id_created": self.task_id_created,
+            "last_task_id": self.last_task_id,
+            "model": self.model,
+            "status": self.status,
+            "failure_count": self.failure_count,
+            "metadata": self.metadata,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "last_used_at": self.last_used_at,
+        }
 
 
 @dataclass(frozen=True)
@@ -251,6 +317,28 @@ class ProjectRegistry:
                     """
                 )
                 connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS alpha_harness_sessions (
+                        session_id TEXT PRIMARY KEY,
+                        project_id TEXT NOT NULL,
+                        harness TEXT NOT NULL,
+                        native_session_id TEXT NOT NULL,
+                        workspace_path TEXT,
+                        task_id_created TEXT,
+                        last_task_id TEXT,
+                        model TEXT,
+                        status TEXT NOT NULL DEFAULT 'active',
+                        failure_count INTEGER NOT NULL DEFAULT 0,
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        last_used_at TEXT NOT NULL,
+                        UNIQUE(harness, native_session_id),
+                        FOREIGN KEY(project_id) REFERENCES alpha_projects(project_id) ON DELETE CASCADE
+                    )
+                    """
+                )
+                connection.execute(
                     "CREATE INDEX IF NOT EXISTS idx_alpha_projects_session ON alpha_projects(last_session_id)"
                 )
                 connection.execute(
@@ -264,6 +352,15 @@ class ProjectRegistry:
                 )
                 connection.execute(
                     "CREATE INDEX IF NOT EXISTS idx_alpha_project_tasks_updated ON alpha_project_tasks(updated_at)"
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_alpha_harness_sessions_project ON alpha_harness_sessions(project_id, harness, last_used_at)"
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_alpha_harness_sessions_native ON alpha_harness_sessions(harness, native_session_id)"
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_alpha_harness_sessions_status ON alpha_harness_sessions(status, failure_count)"
                 )
 
     def create_project(
@@ -420,11 +517,23 @@ class ProjectRegistry:
                 LIMIT 2000
                 """
             ).fetchall()
+            harness_session_rows = connection.execute(
+                """
+                SELECT * FROM alpha_harness_sessions
+                ORDER BY last_used_at DESC
+                LIMIT 1000
+                """
+            ).fetchall()
 
         tasks_by_project: dict[str, list[ProjectTaskRecord]] = {}
         for row in task_rows:
             task = ProjectTaskRecord.from_row(row)
             tasks_by_project.setdefault(task.project_id, []).append(task)
+
+        harness_sessions_by_project: dict[str, list[HarnessSessionRecord]] = {}
+        for row in harness_session_rows:
+            harness_session = HarnessSessionRecord.from_row(row)
+            harness_sessions_by_project.setdefault(harness_session.project_id, []).append(harness_session)
 
         candidates: list[ProjectCandidate] = []
         for index, row in enumerate(project_rows):
@@ -432,6 +541,7 @@ class ProjectRegistry:
             candidate = self._score_project(
                 record,
                 tasks_by_project.get(record.project_id, []),
+                harness_sessions_by_project.get(record.project_id, []),
                 query=normalized_query,
                 session_id=normalized_session,
                 recency_index=index,
@@ -471,6 +581,237 @@ class ProjectRegistry:
                 (normalized, max(1, min(limit, 20))),
             ).fetchall()
         return [ProjectRecord.from_row(row) for row in rows]
+
+    def list_harness_sessions(
+        self,
+        project_id: str,
+        *,
+        harness: str | None = None,
+        limit: int = 10,
+    ) -> list[HarnessSessionRecord]:
+        normalized_project = str(project_id or "").strip()
+        normalized_harness = str(harness or "").strip().lower()
+        if not normalized_project:
+            return []
+        self.initialize()
+        clauses = ["project_id = ?"]
+        params: list[Any] = [normalized_project]
+        if normalized_harness:
+            clauses.append("harness = ?")
+            params.append(normalized_harness)
+        params.append(max(1, min(int(limit or 10), 50)))
+        with closing(connect_sync(self.db_path)) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM alpha_harness_sessions
+                WHERE {' AND '.join(clauses)}
+                ORDER BY last_used_at DESC, updated_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [HarnessSessionRecord.from_row(row) for row in rows]
+
+    def best_harness_session(
+        self,
+        project_id: str,
+        *,
+        harness: str,
+        workspace_path: str | None = None,
+        model: str | None = None,
+    ) -> HarnessSessionRecord | None:
+        normalized_project = str(project_id or "").strip()
+        normalized_harness = str(harness or "").strip().lower()
+        normalized_workspace = str(workspace_path or "").strip()
+        normalized_model = str(model or "").strip()
+        if not normalized_project or not normalized_harness:
+            return None
+        sessions = self.list_harness_sessions(
+            normalized_project,
+            harness=normalized_harness,
+            limit=25,
+        )
+        best: tuple[float, HarnessSessionRecord] | None = None
+        for index, item in enumerate(sessions):
+            if item.status in {"failed", "invalid", "archived"}:
+                continue
+            if item.failure_count >= 2:
+                continue
+            score = max(1.0, 100.0 - index)
+            if normalized_workspace and item.workspace_path == normalized_workspace:
+                score += 60
+            elif normalized_workspace and item.workspace_path:
+                score -= 20
+            if normalized_model and item.model == normalized_model:
+                score += 15
+            elif normalized_model and item.model:
+                score -= 5
+            if item.status in {"active", "completed"}:
+                score += 10
+            if best is None or score > best[0]:
+                best = (score, item)
+        return best[1] if best is not None else None
+
+    def record_harness_session(
+        self,
+        *,
+        project_id: str,
+        harness: str,
+        native_session_id: str,
+        workspace_path: str | None = None,
+        task_id: str | None = None,
+        model: str | None = None,
+        status: str = "active",
+        metadata: dict[str, Any] | None = None,
+    ) -> HarnessSessionRecord:
+        normalized_project = str(project_id or "").strip()
+        normalized_harness = str(harness or "").strip().lower()
+        normalized_native = str(native_session_id or "").strip()
+        if not normalized_project:
+            raise ValueError("project_id is required")
+        if normalized_harness not in {"codex", "cursor", "opencode"}:
+            raise ValueError("unsupported harness")
+        if not normalized_native:
+            raise ValueError("native_session_id is required")
+        self.initialize()
+        now = utcnow().isoformat()
+        clean_metadata = metadata if isinstance(metadata, dict) else {}
+        with closing(connect_sync(self.db_path)) as connection:
+            with connection:
+                existing = connection.execute(
+                    """
+                    SELECT * FROM alpha_harness_sessions
+                    WHERE harness = ? AND native_session_id = ?
+                    """,
+                    (normalized_harness, normalized_native),
+                ).fetchone()
+                if existing is None:
+                    session_id = generate_harness_session_id()
+                    task_id_created = task_id
+                    failure_count = 0
+                    created_at = now
+                else:
+                    session_id = str(existing["session_id"])
+                    task_id_created = _row_get(existing, "task_id_created") or task_id
+                    failure_count = int(_row_get(existing, "failure_count", 0) or 0)
+                    created_at = str(existing["created_at"])
+                    merged_metadata = {}
+                    try:
+                        parsed = json.loads(_row_get(existing, "metadata_json") or "{}")
+                        if isinstance(parsed, dict):
+                            merged_metadata.update(parsed)
+                    except json.JSONDecodeError:
+                        pass
+                    merged_metadata.update(clean_metadata)
+                    clean_metadata = merged_metadata
+                next_failure_count = failure_count + 1 if status in {"failed", "invalid"} else 0
+                connection.execute(
+                    """
+                    INSERT INTO alpha_harness_sessions (
+                        session_id, project_id, harness, native_session_id,
+                        workspace_path, task_id_created, last_task_id, model,
+                        status, failure_count, metadata_json, created_at,
+                        updated_at, last_used_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(harness, native_session_id) DO UPDATE SET
+                        project_id = excluded.project_id,
+                        workspace_path = COALESCE(excluded.workspace_path, alpha_harness_sessions.workspace_path),
+                        last_task_id = COALESCE(excluded.last_task_id, alpha_harness_sessions.last_task_id),
+                        model = COALESCE(excluded.model, alpha_harness_sessions.model),
+                        status = excluded.status,
+                        failure_count = excluded.failure_count,
+                        metadata_json = excluded.metadata_json,
+                        updated_at = excluded.updated_at,
+                        last_used_at = excluded.last_used_at
+                    """,
+                    (
+                        session_id,
+                        normalized_project,
+                        normalized_harness,
+                        normalized_native,
+                        workspace_path,
+                        task_id_created,
+                        task_id,
+                        model,
+                        status,
+                        next_failure_count,
+                        json.dumps(clean_metadata),
+                        created_at,
+                        now,
+                        now,
+                    ),
+                )
+                self._merge_project_harness_thread_locked(
+                    connection,
+                    project_id=normalized_project,
+                    thread_ids=[
+                        normalized_native,
+                        f"{normalized_harness}:{normalized_native}",
+                    ],
+                    now=now,
+                )
+                row = connection.execute(
+                    "SELECT * FROM alpha_harness_sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+        if row is None:
+            raise RuntimeError("Alpha harness session upsert succeeded but record could not be reloaded.")
+        return HarnessSessionRecord.from_row(row)
+
+    def mark_harness_session_failed(
+        self,
+        session_id: str,
+        *,
+        task_id: str | None = None,
+        reason: str | None = None,
+    ) -> HarnessSessionRecord | None:
+        normalized_session = str(session_id or "").strip()
+        if not normalized_session:
+            return None
+        self.initialize()
+        now = utcnow().isoformat()
+        with closing(connect_sync(self.db_path)) as connection:
+            with connection:
+                row = connection.execute(
+                    "SELECT * FROM alpha_harness_sessions WHERE session_id = ?",
+                    (normalized_session,),
+                ).fetchone()
+                if row is None:
+                    return None
+                metadata = {}
+                try:
+                    parsed = json.loads(_row_get(row, "metadata_json") or "{}")
+                    if isinstance(parsed, dict):
+                        metadata = parsed
+                except json.JSONDecodeError:
+                    metadata = {}
+                if reason:
+                    metadata["last_failure_reason"] = reason[:500]
+                connection.execute(
+                    """
+                    UPDATE alpha_harness_sessions
+                    SET status = ?,
+                        failure_count = failure_count + 1,
+                        last_task_id = COALESCE(?, last_task_id),
+                        metadata_json = ?,
+                        updated_at = ?,
+                        last_used_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (
+                        "failed",
+                        task_id,
+                        json.dumps(metadata),
+                        now,
+                        now,
+                        normalized_session,
+                    ),
+                )
+                updated = connection.execute(
+                    "SELECT * FROM alpha_harness_sessions WHERE session_id = ?",
+                    (normalized_session,),
+                ).fetchone()
+        return HarnessSessionRecord.from_row(updated) if updated is not None else None
 
     def mark_task(
         self,
@@ -685,10 +1026,59 @@ class ProjectRegistry:
             ),
         )
 
+    def _merge_project_harness_thread_locked(
+        self,
+        connection: Any,
+        *,
+        project_id: str,
+        thread_ids: list[str],
+        now: str,
+    ) -> None:
+        row = connection.execute(
+            "SELECT * FROM alpha_projects WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        if row is None:
+            return
+        record = ProjectRecord.from_row(row)
+        merged_thread_ids = _merge_unique(record.harness_thread_ids, thread_ids)
+        search_text = self._build_project_search_text(
+            project_id=record.project_id,
+            aliases=record.aliases,
+            repo_url=record.repo_url,
+            local_path=record.local_path,
+            deployment_url=record.deployment_url,
+            last_task_id=record.last_task_id,
+            last_session_id=record.last_session_id,
+            harness_thread_ids=merged_thread_ids,
+            status=record.status,
+            summary=record.summary,
+            artifact_ids=record.artifact_ids,
+            goal=record.goal,
+            context_brief=record.context_brief,
+            preferred_harness=record.preferred_harness,
+        )
+        connection.execute(
+            """
+            UPDATE alpha_projects
+            SET harness_thread_ids = ?,
+                search_text = ?,
+                updated_at = ?
+            WHERE project_id = ?
+            """,
+            (
+                json.dumps(merged_thread_ids),
+                search_text,
+                now,
+                project_id,
+            ),
+        )
+
     def _score_project(
         self,
         record: ProjectRecord,
         tasks: list[ProjectTaskRecord],
+        harness_sessions: list[HarnessSessionRecord],
         *,
         query: str,
         session_id: str,
@@ -780,6 +1170,53 @@ class ProjectRegistry:
             )
             add_field("task_local_paths", task.local_paths, exact_weight=900, partial_weight=160, token_weight=60)
             add_field("task_harness", [task.preferred_harness], exact_weight=100, partial_weight=45, token_weight=20)
+
+        for harness_session in harness_sessions[:50]:
+            add_field(
+                "harness_session_id",
+                [harness_session.session_id],
+                exact_weight=825,
+                partial_weight=125,
+                token_weight=0,
+            )
+            add_field(
+                "native_session_id",
+                [
+                    harness_session.native_session_id,
+                    f"{harness_session.harness}:{harness_session.native_session_id}",
+                ],
+                exact_weight=850,
+                partial_weight=140,
+                token_weight=0,
+            )
+            add_field(
+                "harness_session_workspace",
+                [harness_session.workspace_path],
+                exact_weight=880,
+                partial_weight=155,
+                token_weight=60,
+            )
+            add_field(
+                "harness_session_task",
+                [harness_session.task_id_created, harness_session.last_task_id],
+                exact_weight=880,
+                partial_weight=140,
+                token_weight=0,
+            )
+            add_field(
+                "harness_session_harness",
+                [harness_session.harness],
+                exact_weight=100,
+                partial_weight=45,
+                token_weight=20,
+            )
+            add_field(
+                "harness_session_model",
+                [harness_session.model],
+                exact_weight=80,
+                partial_weight=35,
+                token_weight=15,
+            )
 
         if score <= 0:
             return None

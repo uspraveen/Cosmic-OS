@@ -109,6 +109,24 @@ def test_project_registry_creates_and_resolves_project(tmp_path: Path) -> None:
     assert updated.last_session_id == "sess_2"
     assert updated.status == "workspace_prepared"
 
+    harness_session = registry.record_harness_session(
+        project_id=created.project_id,
+        harness="cursor",
+        native_session_id="chat_resume_123456",
+        workspace_path="/var/lib/cosmic/alpha/workspaces/prj_x",
+        task_id="tsk_def",
+        model="composer-2",
+        status="active",
+    )
+    assert harness_session.session_id.startswith("hses_")
+    assert registry.best_harness_session(
+        created.project_id,
+        harness="cursor",
+        workspace_path="/var/lib/cosmic/alpha/workspaces/prj_x",
+        model="composer-2",
+    ).native_session_id == "chat_resume_123456"
+    assert registry.find_project("cursor:chat_resume_123456").project_id == created.project_id
+
 
 def test_project_registry_scores_task_search_fields(tmp_path: Path) -> None:
     registry = ProjectRegistry(tmp_path / "projects.db")
@@ -301,9 +319,12 @@ def test_cursor_runner_builds_headless_stream_command(tmp_path: Path) -> None:
         paths=paths,
         prompt="Build the app",
         model="gpt-5",
+        resume_chat_id="chat_resume_123456",
         stream_json=True,
     )
 
+    assert "--resume" in command
+    assert command[command.index("--resume") + 1] == "chat_resume_123456"
     assert "--print" in command
     assert "--force" in command
     assert "--trust" in command
@@ -378,9 +399,17 @@ def test_alpha_execute_retries_dirty_cursor_before_any_cross_provider_fallback(t
     class CursorRetries:
         def __init__(self) -> None:
             self.calls = 0
+            self.created_chats = 0
+            self.resume_chat_ids: list[str | None] = []
+
+        async def create_chat(self, **kwargs: object) -> str:
+            del kwargs
+            self.created_chats += 1
+            return f"chat_retry_{self.created_chats}"
 
         async def run(self, **kwargs: object) -> CursorRunResult:
             self.calls += 1
+            self.resume_chat_ids.append(kwargs.get("resume_chat_id"))
             prompts.append(str(kwargs["prompt"]))
             paths = kwargs["paths"]
             paths.artifacts.mkdir(parents=True, exist_ok=True)
@@ -410,6 +439,9 @@ def test_alpha_execute_retries_dirty_cursor_before_any_cross_provider_fallback(t
                     duration_sec=1.0,
                     requested_model="composer-2",
                     observed_model="Composer 2",
+                    native_session_id=str(kwargs.get("resume_chat_id") or ""),
+                    resume_session_id=str(kwargs.get("resume_chat_id") or ""),
+                    resume_used=True,
                 )
             output = paths.artifacts / "cursor-last-message.md"
             output.write_text("Cursor retried, fixed cleanup, and verified the task.", encoding="utf-8")
@@ -425,6 +457,9 @@ def test_alpha_execute_retries_dirty_cursor_before_any_cross_provider_fallback(t
                 duration_sec=1.0,
                 requested_model="composer-2",
                 observed_model="Composer 2",
+                native_session_id=str(kwargs.get("resume_chat_id") or ""),
+                resume_session_id=str(kwargs.get("resume_chat_id") or ""),
+                resume_used=True,
             )
 
     class CodexMustNotRun:
@@ -460,7 +495,10 @@ def test_alpha_execute_retries_dirty_cursor_before_any_cross_provider_fallback(t
     assert result.status == "completed"
     assert result.output["harness"] == "cursor"
     assert cursor.calls == 2
+    assert cursor.created_chats == 2
+    assert cursor.resume_chat_ids == ["chat_retry_1", "chat_retry_2"]
     assert "fallback_from" not in result.output
+    assert result.output["native_session"]["native_session_id"] == "chat_retry_2"
     assert "cursor_1" in result.output["attempts"]
     assert "cursor_2" in result.output["attempts"]
     assert {artifact.mime for artifact in result.artifacts} >= {"text/markdown", "text/plain"}

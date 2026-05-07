@@ -41,6 +41,7 @@ class CodexRunResult:
     last_message_path: Path
     last_message: str
     duration_sec: float
+    native_session_id: str | None = None
     cancelled: bool = False
 
     @property
@@ -58,6 +59,7 @@ class CodexRunResult:
             "last_message": _tail(self.last_message, 12000),
             "duration_sec": round(self.duration_sec, 3),
             "command": self.safe_command(),
+            "native_session_id": self.native_session_id,
             "cancelled": self.cancelled,
         }
 
@@ -202,6 +204,7 @@ class CodexWorkspaceRunner:
             last_message_path=output_path,
             last_message=last_message,
             duration_sec=duration_sec,
+            native_session_id=self._extract_native_session_id(stdout),
             cancelled=cancelled,
         )
 
@@ -425,6 +428,41 @@ class CodexWorkspaceRunner:
             value = payload.get(key)
             if isinstance(value, str) and value.strip():
                 return f"{key}: {value.strip()}"
+        return None
+
+    def _extract_native_session_id(self, stdout: str) -> str | None:
+        for line in stdout.splitlines():
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            found = self._find_session_id_in_payload(payload)
+            if found:
+                return found
+        return None
+
+    def _find_session_id_in_payload(self, payload: Any) -> str | None:
+        if isinstance(payload, dict):
+            for key in (
+                "session_id",
+                "sessionId",
+                "conversation_id",
+                "conversationId",
+                "thread_id",
+                "threadId",
+            ):
+                value = str(payload.get(key) or "").strip()
+                if value:
+                    return value
+            for value in payload.values():
+                found = self._find_session_id_in_payload(value)
+                if found:
+                    return found
+        if isinstance(payload, list):
+            for item in payload:
+                found = self._find_session_id_in_payload(item)
+                if found:
+                    return found
         return None
 
     def artifact_for_last_message(self, *, task_id: str, result: CodexRunResult) -> ArtifactManifest | None:

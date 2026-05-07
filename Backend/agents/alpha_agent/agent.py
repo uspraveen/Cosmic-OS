@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from shared.agent_runtime import AgentRuntime
@@ -14,8 +14,8 @@ from .codex_runner import CodexRunResult, CodexWorkspaceRunner
 from .config import AGENT_ROOT, AlphaAgentConfig
 from .cursor_runner import CursorRunResult, CursorWorkspaceRunner
 from .docker_runner import DockerWorkspaceRunner
-from .project_registry import ProjectCandidate, ProjectRecord, ProjectRegistry
-from .workspace_manager import WorkspaceManager
+from .project_registry import HarnessSessionRecord, ProjectCandidate, ProjectRecord, ProjectRegistry
+from .workspace_manager import WorkspaceManager, WorkspacePaths
 
 logger = logging.getLogger(__name__)
 
@@ -317,8 +317,16 @@ class AlphaAgent(AgentRuntime):
                 previous_result=last_result,
             )
             selected_model: str | None = None
+            native_session: HarnessSessionRecord | None = None
             if active_harness == "cursor":
                 selected_model = self._select_cursor_model(task, provider_status)
+                native_session = await self._prepare_cursor_native_session(
+                    task=task,
+                    project=project,
+                    paths=paths,
+                    model=selected_model,
+                    emit=emit_alpha_terminal,
+                )
                 await emit_alpha_terminal(
                     {
                         "stream": "system",
@@ -331,6 +339,7 @@ class AlphaAgent(AgentRuntime):
                     paths=paths,
                     prompt=prompt,
                     model=selected_model,
+                    resume_chat_id=native_session.native_session_id if native_session else None,
                     timeout_sec=self.config.cursor_timeout_sec,
                     event_callback=emit_alpha_terminal,
                     cancel_check=cancel_check,
@@ -355,6 +364,15 @@ class AlphaAgent(AgentRuntime):
                     event_callback=emit_alpha_terminal,
                     cancel_check=cancel_check,
                 )
+            native_session = self._record_observed_native_session(
+                project=project,
+                harness=active_harness,
+                paths=paths,
+                task=task,
+                model=selected_model,
+                result=run_result,
+                existing=native_session,
+            )
 
             last_result = run_result
             artifact_batch = promote_alpha_artifacts(
@@ -389,6 +407,12 @@ class AlphaAgent(AgentRuntime):
                 repo_url=self._optional_string(task.input.get("repo_url")),
                 deployment_url=self._optional_string(task.input.get("deployment_url")),
             )
+            native_session = self._finalize_native_session(
+                session=native_session,
+                task=task,
+                result=run_result,
+                provider=active_harness,
+            )
             await self.emit_event(
                 task.task_id,
                 "task.progress",
@@ -399,6 +423,7 @@ class AlphaAgent(AgentRuntime):
                     "timed_out": run_result.timed_out,
                     "artifact_ids": [item.artifact_id for item in all_artifacts],
                     "attempt": attempt_index + 1,
+                    "native_session_id": native_session.native_session_id if native_session else None,
                 },
             )
 
@@ -415,6 +440,8 @@ class AlphaAgent(AgentRuntime):
                     "attempts": attempt_outputs,
                     "next_action": f"Review {provider_label} output and continue with the same project_ref for follow-up work.",
                 }
+                if native_session:
+                    output["native_session"] = native_session.as_dict()
                 if fallback_from:
                     output["retry_from" if fallback_from.get("retrying_same_provider") else "fallback_from"] = fallback_from
                 return AgentResult(
@@ -812,6 +839,195 @@ class AlphaAgent(AgentRuntime):
         if provider == "cursor":
             return "cursor-agent --print --force --trust --sandbox disabled --output-format stream-json started"
         return "codex exec --json started"
+
+    async def _prepare_cursor_native_session(
+        self,
+        *,
+        task: TaskEnvelope,
+        project: ProjectRecord,
+        paths: WorkspacePaths,
+        model: str | None,
+        emit: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> HarnessSessionRecord | None:
+        policy = self._native_resume_policy(task)
+        if policy == "disabled":
+            return None
+
+        forced_native_id = self._forced_native_session_id(task, harness="cursor")
+        if forced_native_id:
+            session = self.registry.record_harness_session(
+                project_id=project.project_id,
+                harness="cursor",
+                native_session_id=forced_native_id,
+                workspace_path=str(paths.workspace),
+                task_id=task.task_id,
+                model=model,
+                status="active",
+                metadata={"source": "task_input", "policy": policy},
+            )
+            await emit(
+                {
+                    "stream": "system",
+                    "event_type": "cursor.native_session.resuming",
+                    "text": f"Resuming Cursor chat {forced_native_id}.",
+                    "detail": f"project_id={project.project_id}; session_id={session.session_id}",
+                }
+            )
+            return session
+
+        if policy != "fresh":
+            existing = self.registry.best_harness_session(
+                project.project_id,
+                harness="cursor",
+                workspace_path=str(paths.workspace),
+                model=model,
+            )
+            if existing is not None:
+                session = self.registry.record_harness_session(
+                    project_id=project.project_id,
+                    harness="cursor",
+                    native_session_id=existing.native_session_id,
+                    workspace_path=str(paths.workspace),
+                    task_id=task.task_id,
+                    model=model or existing.model,
+                    status="active",
+                    metadata={**existing.metadata, "source": "registry_resume", "policy": policy},
+                )
+                await emit(
+                    {
+                        "stream": "system",
+                        "event_type": "cursor.native_session.resuming",
+                        "text": f"Resuming Cursor chat {session.native_session_id}.",
+                        "detail": f"project_id={project.project_id}; session_id={session.session_id}",
+                    }
+                )
+                return session
+
+        create_chat = getattr(self.cursor_runner, "create_chat", None)
+        if not callable(create_chat):
+            return None
+        try:
+            created_chat_id = await create_chat(paths=paths)
+        except Exception as exc:
+            await emit(
+                {
+                    "stream": "system",
+                    "event_type": "cursor.native_session.create_failed",
+                    "text": "Could not create a Cursor chat; continuing with a fresh headless run.",
+                    "detail": str(exc)[:500],
+                }
+            )
+            return None
+        if not created_chat_id:
+            await emit(
+                {
+                    "stream": "system",
+                    "event_type": "cursor.native_session.unavailable",
+                    "text": "Cursor native chat id unavailable; continuing with a fresh headless run.",
+                }
+            )
+            return None
+        session = self.registry.record_harness_session(
+            project_id=project.project_id,
+            harness="cursor",
+            native_session_id=created_chat_id,
+            workspace_path=str(paths.workspace),
+            task_id=task.task_id,
+            model=model,
+            status="active",
+            metadata={"source": "cursor.create-chat", "policy": policy},
+        )
+        await emit(
+            {
+                "stream": "system",
+                "event_type": "cursor.native_session.created",
+                "text": f"Created Cursor chat {created_chat_id}.",
+                "detail": f"project_id={project.project_id}; session_id={session.session_id}",
+            }
+        )
+        return session
+
+    def _record_observed_native_session(
+        self,
+        *,
+        project: ProjectRecord,
+        harness: str,
+        paths: WorkspacePaths,
+        task: TaskEnvelope,
+        model: str | None,
+        result: CodexRunResult | CursorRunResult,
+        existing: HarnessSessionRecord | None,
+    ) -> HarnessSessionRecord | None:
+        observed = self._optional_string(getattr(result, "native_session_id", None))
+        if not observed:
+            return existing
+        metadata = {
+            "source": "cli_observed",
+            "resume_used": bool(getattr(result, "resume_used", False)),
+            "resume_session_id": self._optional_string(getattr(result, "resume_session_id", None)) or "",
+        }
+        if existing is not None:
+            metadata = {**existing.metadata, **metadata}
+        return self.registry.record_harness_session(
+            project_id=project.project_id,
+            harness=harness,
+            native_session_id=observed,
+            workspace_path=str(paths.workspace),
+            task_id=task.task_id,
+            model=model,
+            status="active",
+            metadata=metadata,
+        )
+
+    def _finalize_native_session(
+        self,
+        *,
+        session: HarnessSessionRecord | None,
+        task: TaskEnvelope,
+        result: CodexRunResult | CursorRunResult,
+        provider: str,
+    ) -> HarnessSessionRecord | None:
+        if session is None:
+            return None
+        if result.ok:
+            return session
+        reason = self._failure_reason(provider, result)
+        return self.registry.mark_harness_session_failed(
+            session.session_id,
+            task_id=task.task_id,
+            reason=reason,
+        )
+
+    def _native_resume_policy(self, task: TaskEnvelope) -> str:
+        if self._coerce_bool(task.input.get("fresh_native_session"), default=False):
+            return "fresh"
+        if self._coerce_bool(task.input.get("disable_native_resume"), default=False):
+            return "disabled"
+        raw = self._optional_string(
+            task.input.get("native_resume_policy")
+            or task.input.get("harness_session_policy")
+            or task.input.get("native_session_policy")
+        )
+        normalized = (raw or "auto").lower().replace("-", "_")
+        if normalized in {"off", "none", "disabled", "disable", "no_resume"}:
+            return "disabled"
+        if normalized in {"fresh", "new", "new_session", "fresh_session"}:
+            return "fresh"
+        if normalized in {"force", "required", "resume_required"}:
+            return "force"
+        return "auto"
+
+    def _forced_native_session_id(self, task: TaskEnvelope, *, harness: str) -> str | None:
+        keys = ["native_session_id", "harness_native_session_id"]
+        if harness == "cursor":
+            keys.extend(["cursor_chat_id", "chat_id"])
+        elif harness == "codex":
+            keys.extend(["codex_session_id"])
+        for key in keys:
+            value = self._optional_string(task.input.get(key))
+            if value:
+                return value
+        return None
 
     def _select_codex_model(self, task: TaskEnvelope, codex_status: dict[str, Any]) -> str | None:
         for value in (

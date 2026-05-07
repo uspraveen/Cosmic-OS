@@ -10,6 +10,7 @@
     "harness": { "type": ["string", "object"] },
     "codex": { "type": "object" },
     "cursor": { "type": "object" },
+    "native_session": { "type": "object" },
     "attempts": { "type": "object" },
     "retry_from": { "type": "object" },
     "fallback_from": { "type": "object" },

@@ -84,6 +84,9 @@ class CursorRunResult:
     duration_sec: float
     requested_model: str | None = None
     observed_model: str | None = None
+    native_session_id: str | None = None
+    resume_session_id: str | None = None
+    resume_used: bool = False
     model_mismatch: bool = False
     cancelled: bool = False
     init_timed_out: bool = False
@@ -105,6 +108,9 @@ class CursorRunResult:
             "command": list(self.command),
             "requested_model": self.requested_model,
             "observed_model": self.observed_model,
+            "native_session_id": self.native_session_id,
+            "resume_session_id": self.resume_session_id,
+            "resume_used": self.resume_used,
             "model_mismatch": self.model_mismatch,
             "cancelled": self.cancelled,
             "init_timed_out": self.init_timed_out,
@@ -127,6 +133,7 @@ class CursorWorkspaceRunner:
         paths: WorkspacePaths,
         prompt: str,
         model: str | None = None,
+        resume_chat_id: str | None = None,
         stream_json: bool = False,
     ) -> list[str]:
         binary = self.cursor_binary() or "cursor-agent"
@@ -140,11 +147,45 @@ class CursorWorkspaceRunner:
             "--output-format",
             "stream-json" if stream_json else "json",
         ]
+        normalized_resume = str(resume_chat_id or "").strip()
+        if normalized_resume:
+            command.extend(["--resume", normalized_resume])
         normalized_model = normalize_cursor_model(model)
         if normalized_model:
             command.extend(["--model", normalized_model])
         command.append(prompt)
         return command
+
+    async def create_chat(self, *, paths: WorkspacePaths) -> str | None:
+        binary = self.cursor_binary()
+        if not binary:
+            return None
+        self.config.cursor_home.mkdir(parents=True, exist_ok=True)
+        process = await asyncio.create_subprocess_exec(
+            binary,
+            "create-chat",
+            stdin=subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(paths.workspace),
+            env=self._env(),
+            **self._process_group_kwargs(),
+        )
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout=30.0)
+        except asyncio.TimeoutError:
+            self._terminate_process_tree(process)
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                self._kill_process_tree(process)
+                await process.wait()
+            return None
+        if process.returncode != 0:
+            return None
+        stdout = stdout_bytes.decode("utf-8", errors="replace")
+        stderr = stderr_bytes.decode("utf-8", errors="replace")
+        return self._parse_chat_id(stdout) or self._parse_chat_id(stderr)
 
     async def run(
         self,
@@ -152,6 +193,7 @@ class CursorWorkspaceRunner:
         paths: WorkspacePaths,
         prompt: str,
         model: str | None = None,
+        resume_chat_id: str | None = None,
         timeout_sec: float | None = None,
         event_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         cancel_check: Callable[[], Awaitable[bool]] | None = None,
@@ -170,6 +212,7 @@ class CursorWorkspaceRunner:
             paths=paths,
             prompt=prompt,
             model=requested_model,
+            resume_chat_id=resume_chat_id,
             stream_json=event_callback is not None,
         )
         started_at = asyncio.get_running_loop().time()
@@ -184,6 +227,8 @@ class CursorWorkspaceRunner:
                 last_message="",
                 duration_sec=0.0,
                 requested_model=requested_model,
+                resume_session_id=resume_chat_id,
+                resume_used=bool(resume_chat_id),
             )
 
         process = await asyncio.create_subprocess_exec(
@@ -229,6 +274,12 @@ class CursorWorkspaceRunner:
         if last_message:
             output_path.write_text(last_message, encoding="utf-8")
         observed_model = self._extract_observed_model(stdout)
+        native_session_id = (
+            self._extract_native_session_id(stdout)
+            or self._parse_chat_id(stdout)
+            or str(resume_chat_id or "").strip()
+            or None
+        )
         model_mismatch = self._model_mismatch(
             requested_model=requested_model,
             observed_model=observed_model,
@@ -250,6 +301,9 @@ class CursorWorkspaceRunner:
             duration_sec=duration_sec,
             requested_model=requested_model,
             observed_model=observed_model,
+            native_session_id=native_session_id,
+            resume_session_id=str(resume_chat_id or "").strip() or None,
+            resume_used=bool(str(resume_chat_id or "").strip()),
             model_mismatch=model_mismatch,
             cancelled=cancelled,
             init_timed_out=init_timed_out,
@@ -537,6 +591,64 @@ class CursorWorkspaceRunner:
                 model = str(payload.get("model") or "").strip()
                 if model:
                     return model
+        return None
+
+    def _extract_native_session_id(self, stdout: str) -> str | None:
+        for line in stdout.splitlines():
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            found = self._find_session_id_in_payload(payload)
+            if found:
+                return found
+        return None
+
+    def _find_session_id_in_payload(self, payload: Any) -> str | None:
+        if isinstance(payload, dict):
+            for key in (
+                "chatId",
+                "chat_id",
+                "sessionId",
+                "session_id",
+                "conversationId",
+                "conversation_id",
+                "threadId",
+                "thread_id",
+            ):
+                value = str(payload.get(key) or "").strip()
+                if value:
+                    return value
+            for value in payload.values():
+                found = self._find_session_id_in_payload(value)
+                if found:
+                    return found
+        if isinstance(payload, list):
+            for item in payload:
+                found = self._find_session_id_in_payload(item)
+                if found:
+                    return found
+        return None
+
+    def _parse_chat_id(self, output: str) -> str | None:
+        text = str(output or "").strip()
+        if not text:
+            return None
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            payload = None
+        found = self._find_session_id_in_payload(payload)
+        if found:
+            return found
+        for pattern in (
+            r"\bchat[_-]?id\b\s*[:=]\s*([A-Za-z0-9._:-]{8,})",
+            r"\b([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b",
+            r"\b([A-Za-z0-9_-]{16,})\b",
+        ):
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
         return None
 
     def _model_mismatch(self, *, requested_model: str | None, observed_model: str | None) -> bool:
