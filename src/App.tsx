@@ -1388,6 +1388,46 @@ interface AlphaConsoleView {
   lines: AlphaTerminalEntry[]
 }
 
+const inferAlphaTerminalLifecycleStatus = (entries: AlphaTerminalEntry[]): AlphaConsoleStatus | null => {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index]
+    const eventType = String(entry.eventType || '').trim().toLowerCase()
+    const text = String(entry.text || '').trim().toLowerCase()
+    const detail = String(entry.detail || '').trim().toLowerCase()
+    const combined = `${eventType} ${text} ${detail}`
+
+    if (
+      eventType === 'task.cancelled' ||
+      eventType.endsWith('.cancelled') ||
+      eventType.endsWith('.canceled') ||
+      combined.includes('subtype: cancelled') ||
+      combined.includes('subtype: canceled')
+    ) {
+      return 'stopped'
+    }
+    if (
+      eventType === 'task.failed' ||
+      eventType.endsWith('.failed') ||
+      combined.includes('subtype: failed') ||
+      combined.includes('subtype: failure') ||
+      combined.includes('subtype: error')
+    ) {
+      return 'failed'
+    }
+    if (
+      eventType === 'task.completed' ||
+      eventType.endsWith('.completed') ||
+      combined.includes('subtype: success') ||
+      text === 'cursor agent completed task' ||
+      text === 'codex completed the task' ||
+      text === 'codex cli completed task'
+    ) {
+      return 'completed'
+    }
+  }
+  return null
+}
+
 const isAlphaActivityEntry = (entry: ActivityLogEntry) => {
   const agentId = String(entry.agentId || '').toLowerCase()
   const agentLabel = String(entry.agentLabel || '').toLowerCase()
@@ -1467,13 +1507,14 @@ const buildAlphaConsoleView = (
     )
   })
   const lifecycleText = `${latestLifecycle?.status || ''} ${latestLifecycle?.stage || ''} ${latestLifecycle?.specialistEventType || ''}`.toLowerCase()
+  const terminalLifecycleStatus = inferAlphaTerminalLifecycleStatus(visibleTerminalEntries)
   const status: AlphaConsoleStatus = Boolean(options.stopped) || lifecycleText.includes('cancelled') || lifecycleText.includes('canceled')
     ? 'stopped'
     : lifecycleText.includes('failed') || lifecycleText.includes('error')
       ? 'failed'
       : lifecycleText.includes('completed')
         ? 'completed'
-        : 'running'
+        : terminalLifecycleStatus || 'running'
 
   return {
     taskId,

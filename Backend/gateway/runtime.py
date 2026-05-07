@@ -5386,7 +5386,7 @@ class GatewayRuntime:
             self._safe_text(progress_state.get("stage"))
             if isinstance(progress_state, dict)
             else None
-        )
+        ) or self._safe_text(event.get("stage"))
         return {
             "id": f"activity_{uuid4().hex}",
             "label": label,
@@ -7344,6 +7344,7 @@ class GatewayRuntime:
             "channel": context["channel"],
             "status": f"specialist_{event_type.split('.', 1)[-1]}",
             "message": message,
+            "stage": self._safe_text(payload.get("stage")),
             "specialist": {
                 "task_id": context["task_id"],
                 "direct_parent_task_id": context["direct_parent_task_id"],
@@ -7474,6 +7475,13 @@ class GatewayRuntime:
         intent_label = intent.replace("_", " ")
         prefix = agent_label[0].upper() + agent_label[1:] if agent_label else "Specialist"
         if event_type == "task.progress":
+            stage = self._safe_text(payload.get("stage"))
+            if stage:
+                normalized_stage = stage.lower()
+                if normalized_stage.startswith("alpha.") and normalized_stage.endswith(".completed"):
+                    return f"{prefix} completed {intent_label}."
+                if normalized_stage.startswith("alpha.") and normalized_stage.endswith(".failed"):
+                    return f"{prefix} failed {intent_label}."
             if payload_type == "agent_plan_created":
                 total_steps = payload.get("total_steps")
                 try:

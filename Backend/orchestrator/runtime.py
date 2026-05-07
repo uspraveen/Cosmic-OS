@@ -419,6 +419,7 @@ class OrchestratorRuntime:
             max_request_message_count = 0
             saw_tool_loop = False
             strict_server_tool_replay_recovery = False
+            strip_thinking_replay_recovery = False
             visual_coordinator = (
                 VisualEnrichmentCoordinator(
                     config=self.config,
@@ -438,6 +439,7 @@ class OrchestratorRuntime:
                 messages = self._prepare_messages_for_anthropic(
                     messages,
                     strip_all_server_tool_blocks=strict_server_tool_replay_recovery,
+                    strip_thinking_blocks=strip_thinking_replay_recovery,
                 )
                 max_request_context_chars = max(
                     max_request_context_chars,
@@ -647,6 +649,32 @@ class OrchestratorRuntime:
                                 "status": "retrying",
                                 "iteration": iteration,
                                 "message": "A malformed server-side tool replay was detected. Recovering and retrying...",
+                            }
+                            continue
+                        if (
+                            self._is_modified_thinking_replay_error(exc)
+                            and not strip_thinking_replay_recovery
+                        ):
+                            strip_thinking_replay_recovery = True
+                            strict_server_tool_replay_recovery = True
+                            messages = self._prepare_messages_for_anthropic(
+                                messages,
+                                strip_all_server_tool_blocks=True,
+                                strip_thinking_blocks=True,
+                            )
+                            logger.warning(
+                                "orchestrator.thinking_replay_recovery task_id=%s request_id=%s iteration=%s reason=%s",
+                                task.task_id,
+                                request_id,
+                                iteration,
+                                self._normalize_anthropic_error_text(str(exc)),
+                            )
+                            yield {
+                                **ev,
+                                "type": "task.progress",
+                                "status": "retrying",
+                                "iteration": iteration,
+                                "message": "A malformed thinking-block replay was detected. Recovering and retrying...",
                             }
                             continue
                         retry_plan = self._plan_anthropic_turn_retry(
@@ -3051,6 +3079,7 @@ class OrchestratorRuntime:
         messages: list[dict[str, Any]],
         *,
         strip_all_server_tool_blocks: bool = False,
+        strip_thinking_blocks: bool = False,
     ) -> list[dict[str, Any]]:
         """Build a replay-safe, canonicalized Anthropic messages list.
 
@@ -3089,6 +3118,8 @@ class OrchestratorRuntime:
                     content, _ = self._sanitize_server_tool_replay_content_blocks(
                         raw_content
                     )
+                if strip_thinking_blocks:
+                    content, _ = self._strip_thinking_replay_content_blocks(content)
             else:
                 content = self._normalize_message_content(raw_content)
             if self._message_content_is_empty(content):
@@ -3202,6 +3233,17 @@ class OrchestratorRuntime:
             and ("_tool_result block" in normalized or "tool_result" in normalized)
         )
 
+    @staticmethod
+    def _is_modified_thinking_replay_error(exc: BaseException) -> bool:
+        normalized = str(exc or "").strip().lower()
+        if not normalized:
+            return False
+        return (
+            ("thinking" in normalized or "redacted_thinking" in normalized)
+            and "latest assistant message" in normalized
+            and "cannot be modified" in normalized
+        )
+
     def _strip_server_tool_replay_content_blocks(
         self,
         content_blocks: list[dict[str, Any]],
@@ -3216,6 +3258,22 @@ class OrchestratorRuntime:
                 block_type == "server_tool_use"
                 or ContentBlock._is_server_tool_result_block(block_type)
             ):
+                dropped_any = True
+                continue
+            sanitized.append(dict(block))
+        return sanitized, dropped_any
+
+    def _strip_thinking_replay_content_blocks(
+        self,
+        content_blocks: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], bool]:
+        sanitized: list[dict[str, Any]] = []
+        dropped_any = False
+        for block in content_blocks:
+            if not isinstance(block, dict):
+                continue
+            block_type = str(block.get("type") or "").strip()
+            if block_type in {"thinking", "redacted_thinking"}:
                 dropped_any = True
                 continue
             sanitized.append(dict(block))

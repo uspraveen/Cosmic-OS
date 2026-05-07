@@ -998,6 +998,38 @@ def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
     return runtime
 
 
+def test_alpha_harness_completion_progress_keeps_activity_stage(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+
+    message = runtime._specialist_progress_message(  # noqa: SLF001 - targeted status formatting
+        event_type="task.progress",
+        payload={"stage": "alpha.cursor.completed"},
+        agent_label="alpha agent",
+        intent="alpha.execute",
+    )
+    assert message == "Alpha agent completed alpha.execute."
+
+    activity = runtime._build_task_activity_entry(  # noqa: SLF001 - targeted activity normalization
+        {
+            "type": "task.progress",
+            "status": "specialist_progress",
+            "message": message,
+            "stage": "alpha.cursor.completed",
+            "specialist": {
+                "task_id": "tsk_alpha_123",
+                "agent_id": "cosmic/alpha-agent:1.0.0",
+                "agent_label": "alpha agent",
+                "intent": "alpha.execute",
+                "event_type": "task.progress",
+            },
+        }
+    )
+
+    assert activity is not None
+    assert activity["stage"] == "alpha.cursor.completed"
+    assert activity["specialist_task_id"] == "tsk_alpha_123"
+
+
 @pytest.mark.asyncio
 async def test_runtime_uses_shared_daily_session_across_channels(tmp_path) -> None:
     runtime = build_runtime(tmp_path)

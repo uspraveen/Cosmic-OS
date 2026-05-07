@@ -1614,6 +1614,101 @@ async def test_orchestrator_runtime_recovers_from_provider_server_tool_replay_er
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_runtime_recovers_from_modified_thinking_replay_error(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_thinking_replay_recovery.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    base_task = _signed_task("signing-secret")
+    task = base_task.model_copy(
+        update={
+            "input": {
+                **dict(base_task.input),
+                "conversation_context": [
+                    {"role": "user", "content": "Earlier question"},
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "thinking", "thinking": "I need a web fetch.", "signature": "sig_hist"},
+                            {"type": "text", "text": "Working..."},
+                            {
+                                "type": "server_tool_use",
+                                "id": "srv_fetch_hist",
+                                "name": "web_fetch",
+                                "input": {"url": "https://example.com"},
+                            },
+                            {
+                                "type": "web_fetch_tool_result",
+                                "tool_use_id": "srv_fetch_hist",
+                                "content": [{"type": "text", "text": "Example"}],
+                            },
+                        ],
+                    },
+                ],
+            }
+        }
+    )
+    task = task.model_copy(update={"signature": sign_task_envelope(task, "signing-secret")})
+    stream_call_count = 0
+
+    async def scripted_stream(
+        *,
+        system_prompt: str,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]] | None = None,
+        container_id: str | None = None,
+        usage_context: dict[str, object] | None = None,
+        model_override: str | None = None,
+    ):
+        del system_prompt, tools, container_id, usage_context, model_override
+        nonlocal stream_call_count
+        stream_call_count += 1
+        if stream_call_count == 1:
+            assert messages[1]["content"] == [
+                {"type": "thinking", "thinking": "I need a web fetch.", "signature": "sig_hist"},
+                {"type": "text", "text": "Working..."},
+            ]
+            raise RuntimeError(
+                "Anthropic API error: messages.1.content.0: `thinking` or "
+                "`redacted_thinking` blocks in the latest assistant message cannot be modified."
+            )
+
+        assert messages[1]["content"] == [{"type": "text", "text": "Working..."}]
+        for event_name, payload in [
+            ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 7}}}),
+            ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+            ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Recovered after thinking retry."}}),
+            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 3}}),
+            ("message_stop", {"type": "message_stop"}),
+        ]:
+            yield type("SSE", (), {"event": event_name, "data": json.dumps(payload)})()
+
+    runtime._stream_anthropic_events = scripted_stream  # type: ignore[method-assign]
+
+    await runtime.start()
+    try:
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+
+    retry_event = next(
+        event
+        for event in streamed_events
+        if event["type"] == "task.progress" and event["status"] == "retrying"
+    )
+    assert "thinking-block replay" in retry_event["message"].lower()
+    complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert complete_event["content"] == "Recovered after thinking retry."
+    assert stream_call_count == 2
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_runtime_emits_local_research_provenance_for_perplexity_and_firecrawl(tmp_path) -> None:
     client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
     config = OrchestratorConfig(
