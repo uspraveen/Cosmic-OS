@@ -7319,6 +7319,7 @@ class GatewayRuntime:
                 )
                 self.session_store.upsert_task_notebook(root_task_id, session_id, notebook)
                 self._refresh_active_working_set(session_id)
+            self._persist_specialist_completion_artifacts(event=event, forwarded=forwarded)
             self._track_forwarded_foreground_event(forwarded)
             await self._deliver_or_queue_channel_event(
                 forwarded,
@@ -7421,6 +7422,57 @@ class GatewayRuntime:
             forwarded["codex_terminal"] = codex_terminal
             forwarded["message"] = ""
         return forwarded
+
+    def _persist_specialist_completion_artifacts(
+        self,
+        *,
+        event: Any,
+        forwarded: dict[str, Any],
+    ) -> None:
+        """Persist a specialist's terminal artifacts into the gateway store.
+
+        The orchestrator's `delegate_to_agent` tool registers artifacts only when
+        it observes the agent's full result inline. When dispatch returns
+        ``in_progress`` (long-running specialists like the slide agent that exceed
+        the wait timeout), the eventual ``task.completed`` event lands here in the
+        gateway specialist consumer and would otherwise be ignored — leaving the
+        agent's deliverables (deck.pptx, deck.pdf, …) orphaned on disk and
+        invisible to the desktop. Persisting on completion closes that gap.
+
+        Idempotent: ``persist_output_artifacts`` does an INSERT OR REPLACE keyed
+        on ``artifact_id``, so re-running over already-registered artifacts is
+        safe. Failures here must never break UI event forwarding.
+        """
+        try:
+            event_type = self._safe_text(getattr(event, "event_type", None))
+            if event_type != "task.completed":
+                return
+            payload = getattr(event, "payload", None)
+            if not isinstance(payload, dict):
+                return
+            raw_artifacts = payload.get("artifacts")
+            if not isinstance(raw_artifacts, list) or not raw_artifacts:
+                return
+            normalized = self._normalize_produced_artifact_list(raw_artifacts)
+            if not normalized:
+                return
+            request_id = self._safe_text(forwarded.get("request_id"))
+            session_id = self._safe_text(forwarded.get("session_id"))
+            channel = self._safe_text(forwarded.get("channel"))
+            if not request_id or not session_id or not channel:
+                return
+            self._cache_artifact_list(
+                request_id=request_id,
+                session_id=session_id,
+                source_channel=channel,
+                source_message_id=None,
+                artifacts=normalized,
+            )
+        except Exception:
+            logger.exception(
+                "gateway.specialist_completion_artifact_persist_failed task_id=%s",
+                self._safe_text(forwarded.get("task_id")),
+            )
 
     def _resolve_specialist_request_context(
         self,
