@@ -379,6 +379,22 @@ def _copy_asset(src: Path, dst: Path) -> Path:
     return dst
 
 
+def _safe_resolve_photo(description: str) -> Path | None:
+    try:
+        return resolve_photo(description)
+    except Exception as exc:  # defensive: never let asset lookup kill the deck
+        logger.warning("html_workflow: resolve_photo('%s') failed: %s", description, exc)
+        return None
+
+
+def _safe_resolve_icon(query: str, *, color: str = "#FFFFFF") -> Path | None:
+    try:
+        return resolve_icon(query, color=color)
+    except Exception as exc:
+        logger.warning("html_workflow: resolve_icon('%s') failed: %s", query, exc)
+        return None
+
+
 def _prepare_slide_assets(slide: dict, slide_dir: Path) -> list[dict]:
     assets_dir = slide_dir / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
@@ -389,7 +405,7 @@ def _prepare_slide_assets(slide: dict, slide_dir: Path) -> list[dict]:
     for block in slide.get("full_content", []):
         block_type = block.get("type")
         if block_type == "image_prompt":
-            path = resolve_photo(str(block.get("description") or ""))
+            path = _safe_resolve_photo(str(block.get("description") or ""))
             if path:
                 photo_idx += 1
                 ext = path.suffix.lower() or ".jpg"
@@ -403,7 +419,7 @@ def _prepare_slide_assets(slide: dict, slide_dir: Path) -> list[dict]:
         elif block_type == "stat":
             query = str(block.get("label") or slide.get("title") or "").strip()
             if query:
-                path = resolve_icon(query, color="#FFFFFF")
+                path = _safe_resolve_icon(query, color="#FFFFFF")
                 if path:
                     icon_idx += 1
                     dst = _copy_asset(path, assets_dir / f"icon-{icon_idx}.png")
@@ -418,7 +434,7 @@ def _prepare_slide_assets(slide: dict, slide_dir: Path) -> list[dict]:
                 query = str(label or "").strip()
                 if not query or icon_idx >= 4:
                     continue
-                path = resolve_icon(query, color="#FFFFFF")
+                path = _safe_resolve_icon(query, color="#FFFFFF")
                 if path:
                     icon_idx += 1
                     dst = _copy_asset(path, assets_dir / f"icon-{icon_idx}.png")
@@ -433,7 +449,7 @@ def _prepare_slide_assets(slide: dict, slide_dir: Path) -> list[dict]:
                 query = str(item.get("title") or "").strip()
                 if not query or icon_idx >= 4:
                     continue
-                path = resolve_icon(query, color="#FFFFFF")
+                path = _safe_resolve_icon(query, color="#FFFFFF")
                 if path:
                     icon_idx += 1
                     dst = _copy_asset(path, assets_dir / f"icon-{icon_idx}.png")

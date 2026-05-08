@@ -33,7 +33,9 @@ import io
 import json
 import logging
 import os
+import random
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -56,7 +58,17 @@ ICON_DEFAULT_COLOR: str = os.getenv("ICON_DEFAULT_COLOR", "#222222")
 
 ICONIFY_API   = "https://api.iconify.design"
 PEXELS_API    = "https://api.pexels.com/v1"
-USER_AGENT    = "cosmic-slides-2/1.0"
+# Browser-shaped UA — Cloudflare's bot management challenges bare tool UAs more
+# aggressively, which caused intermittent 403 interstitials on stock-photo lookups.
+USER_AGENT    = (
+    "Mozilla/5.0 (compatible; cosmic-slides/1.0; +https://thelearnchain.com)"
+)
+
+# Retry policy for Pexels endpoints. Pexels sits behind Cloudflare; transient
+# 403 (HTML challenge), 429, 5xx, and network blips are recoverable.
+_PEXELS_MAX_ATTEMPTS = 3
+_PEXELS_BACKOFF_BASE_SEC = 0.6
+_PEXELS_BACKOFF_CAP_SEC = 4.0
 
 logger = logging.getLogger(__name__)
 
@@ -338,6 +350,102 @@ def download_icon(
 
 # ── Photos — Pexels ───────────────────────────────────────────────────────────
 
+class _PexelsTransientError(RuntimeError):
+    """Recoverable Pexels failure (Cloudflare challenge, 5xx, 429, network)."""
+
+
+def _looks_like_cloudflare_challenge(body: str) -> bool:
+    """Heuristic for Cloudflare interstitial pages returned with 403/503."""
+    if not body:
+        return False
+    head = body[:600].lower()
+    if "<!doctype html" not in head and "<html" not in head:
+        return False
+    return any(
+        marker in head
+        for marker in (
+            "cloudflare",
+            "cf-ray",
+            "cf-browser-verification",
+            "attention required",
+            "checking your browser",
+            "ddos protection",
+        )
+    )
+
+
+def _pexels_request(
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    params: dict[str, object] | None = None,
+    timeout: float = 30.0,
+    follow_redirects: bool = False,
+    op: str = "pexels_request",
+) -> httpx.Response:
+    """Issue a Pexels HTTP request with retries on transient failures.
+
+    Retries Cloudflare challenges (HTML body with 403/503), 429, 5xx, and
+    network-level errors with capped exponential backoff + jitter. Non-transient
+    statuses (401, 404, real 403 JSON) are surfaced immediately so callers can
+    map them to user-actionable errors.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, _PEXELS_MAX_ATTEMPTS + 1):
+        try:
+            with httpx.Client(timeout=timeout, follow_redirects=follow_redirects) as client:
+                resp = client.request(method, url, headers=headers, params=params)
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
+            last_exc = exc
+            if attempt >= _PEXELS_MAX_ATTEMPTS:
+                raise _PexelsTransientError(
+                    f"{op}: network error after {attempt} attempts: {exc}"
+                ) from exc
+            delay = min(_PEXELS_BACKOFF_CAP_SEC, _PEXELS_BACKOFF_BASE_SEC * (2 ** (attempt - 1)))
+            delay += random.uniform(0, 0.25)
+            logger.warning("%s: network error on attempt %d/%d (%s) — retrying in %.2fs",
+                           op, attempt, _PEXELS_MAX_ATTEMPTS, exc, delay)
+            time.sleep(delay)
+            continue
+
+        status = resp.status_code
+        retryable = False
+        reason = ""
+
+        if status == 429:
+            retryable, reason = True, "rate-limit"
+        elif 500 <= status < 600:
+            retryable, reason = True, f"server-{status}"
+        elif status in (403, 503) and _looks_like_cloudflare_challenge(resp.text):
+            retryable, reason = True, f"cloudflare-{status}"
+
+        if not retryable:
+            return resp
+
+        last_exc = _PexelsTransientError(
+            f"{op}: transient {reason} on attempt {attempt}/{_PEXELS_MAX_ATTEMPTS}"
+        )
+        if attempt >= _PEXELS_MAX_ATTEMPTS:
+            raise last_exc
+
+        retry_after = 0.0
+        try:
+            retry_after = float(resp.headers.get("retry-after", "0"))
+        except (TypeError, ValueError):
+            retry_after = 0.0
+        delay = max(retry_after, _PEXELS_BACKOFF_BASE_SEC * (2 ** (attempt - 1)))
+        delay = min(_PEXELS_BACKOFF_CAP_SEC, delay) + random.uniform(0, 0.25)
+        logger.warning(
+            "%s: transient %s on attempt %d/%d — retrying in %.2fs",
+            op, reason, attempt, _PEXELS_MAX_ATTEMPTS, delay,
+        )
+        time.sleep(delay)
+
+    # Defensive: loop should always either return or raise.
+    raise _PexelsTransientError(f"{op}: exhausted retries") from last_exc
+
+
 def search_photos(
     query: str,
     *,
@@ -369,22 +477,29 @@ def search_photos(
         "size":        "large",               # Pexels: filters for >4MP photos
     }
 
-    with httpx.Client(timeout=20) as client:
-        resp = client.get(
-            f"{PEXELS_API}/search",
-            params=params,
-            headers={
-                "Authorization": PEXELS_API_KEY,
-                "User-Agent":    USER_AGENT,
-            },
-        )
-        if resp.status_code == 401:
-            raise ValueError("Pexels API key is invalid or expired.")
-        if resp.status_code == 429:
-            raise RuntimeError("Pexels rate limit reached. Try again shortly.")
-        if resp.status_code >= 400:
-            raise RuntimeError(f"Pexels API error {resp.status_code}: {resp.text[:200]}")
+    resp = _pexels_request(
+        "GET",
+        f"{PEXELS_API}/search",
+        params=params,
+        headers={
+            "Authorization": PEXELS_API_KEY,
+            "User-Agent":    USER_AGENT,
+            "Accept":        "application/json",
+        },
+        timeout=20.0,
+        op=f"pexels.search[{query[:40]}]",
+    )
+    if resp.status_code == 401:
+        raise ValueError("Pexels API key is invalid or expired.")
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Pexels API error {resp.status_code}: {resp.text[:200]}")
+    try:
         data = resp.json()
+    except ValueError as exc:
+        # Non-JSON 2xx is highly unusual — treat as transient so callers can fall back.
+        raise _PexelsTransientError(
+            f"pexels.search: non-JSON response ({resp.status_code}): {resp.text[:200]}"
+        ) from exc
 
     raw_photos = data.get("photos") or []
     results: list[PhotoResult] = []
@@ -441,11 +556,17 @@ def download_photo(
     if not url:
         raise ValueError(f"No URL available for photo {photo.photo_id} at size '{size}'.")
 
-    with httpx.Client(timeout=60, follow_redirects=True) as client:
-        resp = client.get(url, headers={"User-Agent": USER_AGENT})
-        if resp.status_code >= 400:
-            raise RuntimeError(f"Failed to download photo {photo.photo_id}: HTTP {resp.status_code}")
-        image_bytes = resp.content
+    resp = _pexels_request(
+        "GET",
+        url,
+        headers={"User-Agent": USER_AGENT, "Accept": "image/*"},
+        timeout=60.0,
+        follow_redirects=True,
+        op=f"pexels.download[{photo.photo_id}]",
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Failed to download photo {photo.photo_id}: HTTP {resp.status_code}")
+    image_bytes = resp.content
 
     cache_path.write_bytes(image_bytes)
     logger.info(
@@ -533,7 +654,15 @@ def resolve_photo(
     if not PEXELS_API_KEY:
         logger.warning("resolve_photo: PEXELS_API_KEY not set — skipping photo search")
         return None
-    results = search_photos(prompt, limit=3, orientation=orientation, min_width=min_width)
+    try:
+        results = search_photos(prompt, limit=3, orientation=orientation, min_width=min_width)
+    except ValueError as exc:
+        # Auth / config — surface so the deck owner notices, but don't kill the deck.
+        logger.warning("resolve_photo('%s'): search rejected: %s", prompt, exc)
+        return None
+    except (_PexelsTransientError, RuntimeError) as exc:
+        logger.warning("resolve_photo('%s'): search failed (transient): %s", prompt, exc)
+        return None
     if not results:
         logger.warning("resolve_photo('%s'): no results found", prompt)
         return None
@@ -542,7 +671,11 @@ def resolve_photo(
         "resolve_photo('%s'): chose id=%d '%s' (%dx%d) by %s",
         prompt, best.photo_id, best.alt[:60], best.width, best.height, best.photographer,
     )
-    return download_photo(best, size=size)
+    try:
+        return download_photo(best, size=size)
+    except (_PexelsTransientError, RuntimeError, ValueError) as exc:
+        logger.warning("resolve_photo('%s'): download failed: %s", prompt, exc)
+        return None
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
