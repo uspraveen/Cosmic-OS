@@ -26,6 +26,18 @@ _FACTS = VmFacts(
     primary_ip="172.31.0.5",
     kernel="6.1.0-test",
     os_release="Ubuntu 24.04 LTS",
+    public_ip="3.12.241.200",
+    public_hostname="vm-test.thelearnchain.com",
+)
+
+
+_FACTS_NO_PUBLIC = VmFacts(
+    hostname="vm-test",
+    primary_ip="172.31.0.5",
+    kernel="6.1.0-test",
+    os_release="Ubuntu 24.04 LTS",
+    public_ip="",
+    public_hostname="",
 )
 
 
@@ -65,6 +77,32 @@ def test_global_instructions_includes_localhost_eq_production_warning():
     assert "localhost" in text.lower()
     assert "production" in text.lower()
     assert "SSH" in text or "ssh" in text
+
+
+def test_runtime_block_surfaces_public_ip_and_hostname_when_available():
+    text = _global_codex()
+    assert "PRIVATE IP:" in text
+    assert "172.31.0.5" in text
+    assert "PUBLIC IP:" in text
+    assert "3.12.241.200" in text
+    assert "PUBLIC HOSTNAME:" in text
+    assert "vm-test.thelearnchain.com" in text
+
+
+def test_runtime_block_omits_public_lines_when_unavailable():
+    text = _global_codex(vm_facts=_FACTS_NO_PUBLIC)
+    assert "PRIVATE IP:" in text
+    assert "PUBLIC IP:" not in text
+    assert "PUBLIC HOSTNAME:" not in text
+
+
+def test_runtime_block_tells_alpha_to_prefer_public_hostname_for_user_links():
+    """Alpha should share the stable FQDN, not the auto-rotated public IP."""
+    text = _global_codex()
+    runtime_block_start = text.find("PUBLIC HOSTNAME:")
+    runtime_block_end = text.find("OS:", runtime_block_start)
+    fragment = text[runtime_block_start:runtime_block_end].lower()
+    assert "user" in fragment and "fqdn" in fragment
 
 
 def test_global_instructions_lists_detected_capabilities():

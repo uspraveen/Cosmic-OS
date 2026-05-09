@@ -91,10 +91,12 @@ class VmFacts:
     primary_ip: str
     kernel: str
     os_release: str
+    public_ip: str = ""        # auto-detected via IMDSv2; "" when unavailable
+    public_hostname: str = ""  # operator-configured user-facing FQDN; "" when unset
 
 
 def _primary_ip() -> str:
-    """Best-effort detection of the VM's primary outbound IPv4."""
+    """Best-effort detection of the VM's primary outbound IPv4 (private)."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             # Connecting a UDP socket doesn't actually send a packet — it just
@@ -106,11 +108,70 @@ def _primary_ip() -> str:
         return "127.0.0.1"
 
 
-def _read_first_line(path: str) -> str:
+def _detect_public_ip() -> str:
+    """Best-effort public IPv4 via AWS IMDSv2.
+
+    Token-based metadata is the supported path on EC2. We give it a hard 1.5s
+    budget split across both calls so a non-AWS host (or a host that blocks
+    IMDS) never stalls instruction-write. Failures are silent — public_ip
+    falls back to "" and the renderer omits the line.
+    """
     try:
-        return Path(path).read_text(encoding="utf-8", errors="replace").splitlines()[0]
-    except (OSError, IndexError):
+        import urllib.request
+
+        token_req = urllib.request.Request(
+            "http://169.254.169.254/latest/api/token",
+            method="PUT",
+            headers={"X-aws-ec2-metadata-token-ttl-seconds": "60"},
+        )
+        with urllib.request.urlopen(token_req, timeout=0.75) as resp:
+            token = resp.read().decode("utf-8", errors="replace").strip()
+        if not token:
+            return ""
+        ip_req = urllib.request.Request(
+            "http://169.254.169.254/latest/meta-data/public-ipv4",
+            headers={"X-aws-ec2-metadata-token": token},
+        )
+        with urllib.request.urlopen(ip_req, timeout=0.75) as resp:
+            ip = resp.read().decode("utf-8", errors="replace").strip()
+        # IMDS returns body even on synthetic 200s for missing fields; sanity-check.
+        if ip and all(part.isdigit() and 0 <= int(part) <= 255 for part in ip.split(".") if part):
+            return ip
         return ""
+    except Exception:
+        return ""
+
+
+def _read_public_hostname_from_env() -> str:
+    """User-facing FQDN, configured by VM provisioning.
+
+    On a COSMIC VM this is set by `/etc/cosmic/gateway.env:GATEWAY_PUBLIC_HOST`
+    and exported into the relevant systemd units. We honor a small set of
+    plausible names so this works whether the env var is exported into the
+    Alpha process or not.
+    """
+    for key in (
+        "GATEWAY_PUBLIC_HOST",
+        "COSMIC_VM_PUBLIC_HOSTNAME",
+        "COSMIC_PUBLIC_HOST",
+        "PUBLIC_HOSTNAME",
+    ):
+        value = (os.getenv(key) or "").strip()
+        if value:
+            return value
+    # Fall back to reading the gateway env file directly — IMDS works, but the
+    # operator-stamped FQDN is the more useful signal for Alpha because it is
+    # the URL the user actually references.
+    try:
+        for line in Path("/etc/cosmic/gateway.env").read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines():
+            stripped = line.strip()
+            if stripped.startswith("GATEWAY_PUBLIC_HOST="):
+                return stripped.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
 
 
 def collect_vm_facts() -> VmFacts:
@@ -133,6 +194,8 @@ def collect_vm_facts() -> VmFacts:
         primary_ip=_primary_ip(),
         kernel=kernel,
         os_release=os_release,
+        public_ip=_detect_public_ip(),
+        public_hostname=_read_public_hostname_from_env(),
     )
 
 
@@ -310,18 +373,31 @@ def _render_runtime_block(runtime_mode: RuntimeMode, vm_facts: VmFacts) -> str:
             "RUNTIME:    Codex sandbox = danger-full-access. Treat this as "
             "host-equivalent power: you can write anywhere and reach the network."
         )
-    return (
-        f"{runtime_line}\n"
-        f"HOSTNAME:   {vm_facts.hostname}\n"
-        f"PRIMARY IP: {vm_facts.primary_ip}\n"
-        f"OS:         {vm_facts.os_release or 'linux (unknown distro)'}\n"
-        f"KERNEL:     {vm_facts.kernel or 'unknown'}\n"
-        f"CRITICAL:   localhost on this machine == the user's production "
-        f"environment. The COSMIC gateway, orchestrator, and every specialist "
-        f"agent run on this same host. The user's deployed projects live on "
-        f"this same filesystem. Do NOT default to SSH/SCP/rsync-over-network "
-        f"for paths under /home, /var/www, /srv, /tmp, /opt — those are local."
+    lines = [
+        runtime_line,
+        f"HOSTNAME:        {vm_facts.hostname}",
+        f"PRIVATE IP:      {vm_facts.primary_ip}  (intra-VPC; bind addresses, internal calls)",
+    ]
+    if vm_facts.public_ip:
+        lines.append(
+            f"PUBLIC IP:       {vm_facts.public_ip}  (this VM's external IPv4)"
+        )
+    if vm_facts.public_hostname:
+        lines.append(
+            f"PUBLIC HOSTNAME: {vm_facts.public_hostname}  "
+            f"(stable FQDN with TLS — this is the URL the user references; "
+            f"prefer it over raw IPs when sharing links back to the user)"
+        )
+    lines.append(f"OS:              {vm_facts.os_release or 'linux (unknown distro)'}")
+    lines.append(f"KERNEL:          {vm_facts.kernel or 'unknown'}")
+    lines.append(
+        "CRITICAL:        localhost on this machine == the user's production "
+        "environment. The COSMIC gateway, orchestrator, and every specialist "
+        "agent run on this same host. The user's deployed projects live on "
+        "this same filesystem. Do NOT default to SSH/SCP/rsync-over-network "
+        "for paths under /home, /var/www, /srv, /tmp, /opt — those are local."
     )
+    return "\n".join(lines)
 
 
 def _cli_identity_line(cli: str) -> str:
