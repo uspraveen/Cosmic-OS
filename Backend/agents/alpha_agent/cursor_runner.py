@@ -16,6 +16,7 @@ from shared.cursor_cli_config import ensure_cursor_cli_non_fast_config
 from shared.contracts import ArtifactManifest
 
 from .config import AlphaAgentConfig
+from .instructions import ensure_cursor_global_instructions
 from .streaming import compact_for_memory, iter_stream_lines
 from .workspace_manager import WorkspacePaths
 
@@ -206,6 +207,9 @@ class CursorWorkspaceRunner:
             ensure_cursor_cli_non_fast_config(self.config.cursor_home)
         except OSError as exc:
             config_warning = f"Unable to update Cursor CLI non-Fast config: {exc}"
+        # Idempotent — same content produces no disk write. Keeps the
+        # global cosmic.md rule in sync with current VM state.
+        ensure_cursor_global_instructions(cursor_home=self.config.cursor_home)
         output_path = paths.artifacts / "cursor-last-message.md"
         requested_model = normalize_cursor_model(model)
         command = self.build_command(

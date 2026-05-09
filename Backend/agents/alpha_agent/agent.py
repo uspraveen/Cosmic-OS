@@ -14,6 +14,7 @@ from .codex_runner import CodexRunResult, CodexWorkspaceRunner
 from .config import AGENT_ROOT, AlphaAgentConfig
 from .cursor_runner import CursorRunResult, CursorWorkspaceRunner
 from .docker_runner import DockerWorkspaceRunner
+from .instructions import seed_workspace_instructions
 from .project_registry import HarnessSessionRecord, ProjectCandidate, ProjectRecord, ProjectRegistry
 from .workspace_manager import WorkspaceManager, WorkspacePaths
 
@@ -148,6 +149,22 @@ class AlphaAgent(AgentRuntime):
             repo_url=self._optional_string(task.input.get("repo_url")),
             deployment_url=self._optional_string(task.input.get("deployment_url")),
         )
+
+        # Drop a project-aware AGENTS.md into the workspace so Codex/Cursor
+        # pick it up via cwd-walk. Idempotent: same content => no rewrite.
+        # Best-effort — never block task execution on instruction seeding.
+        try:
+            seed_workspace_instructions(
+                workspace_path=paths.workspace,
+                artifacts_path=paths.artifacts,
+                project=project,
+            )
+        except Exception:
+            logger.exception(
+                "alpha.workspace_instructions_seed_failed task_id=%s project_id=%s",
+                task.task_id,
+                project.project_id,
+            )
 
         if self.step_plan is not None:
             await self.step_plan.update(2, "completed", f"Workspace prepared at {paths.workspace}")

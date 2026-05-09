@@ -12193,6 +12193,23 @@ class GatewayRuntime:
 
         await self._stop_codex_login_session()
         self.config.alpha_codex_home.mkdir(parents=True, exist_ok=True)
+        # Best-effort: seed the global Alpha AGENTS.md so the user's Day-1
+        # Codex session already has the operator instructions in place. The
+        # per-run hook in codex_runner regenerates this from current VM state.
+        try:
+            from agents.alpha_agent.instructions import (
+                ensure_codex_global_instructions,
+            )
+
+            ensure_codex_global_instructions(
+                codex_home=self.config.alpha_codex_home,
+                codex_sandbox=getattr(self.config, "alpha_codex_sandbox", None),
+            )
+        except Exception:
+            logger.exception(
+                "gateway.alpha_codex_instructions_seed_failed codex_home=%s",
+                self.config.alpha_codex_home,
+            )
         env = self._codex_env()
         process = await asyncio.create_subprocess_exec(
             binary,
@@ -12310,6 +12327,22 @@ class GatewayRuntime:
 
         await self._stop_cursor_login_session()
         self.config.alpha_cursor_home.mkdir(parents=True, exist_ok=True)
+        # Best-effort: seed the global Alpha cosmic.md rule so the user's
+        # Day-1 Cursor session already has the operator instructions. The
+        # per-run hook in cursor_runner regenerates this from current state.
+        try:
+            from agents.alpha_agent.instructions import (
+                ensure_cursor_global_instructions,
+            )
+
+            ensure_cursor_global_instructions(
+                cursor_home=self.config.alpha_cursor_home,
+            )
+        except Exception:
+            logger.exception(
+                "gateway.alpha_cursor_instructions_seed_failed cursor_home=%s",
+                self.config.alpha_cursor_home,
+            )
         process = await asyncio.create_subprocess_exec(
             binary,
             "login",

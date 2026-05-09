@@ -15,6 +15,7 @@ from typing import Any, Awaitable, Callable, Sequence
 from shared.contracts import ArtifactManifest
 
 from .config import AlphaAgentConfig
+from .instructions import ensure_codex_global_instructions
 from .streaming import compact_for_memory, iter_stream_lines
 from .workspace_manager import WorkspacePaths
 
@@ -134,6 +135,12 @@ class CodexWorkspaceRunner:
         paths.workspace.mkdir(parents=True, exist_ok=True)
         paths.artifacts.mkdir(parents=True, exist_ok=True)
         self.config.codex_home.mkdir(parents=True, exist_ok=True)
+        # Idempotent — same content produces no disk write. Keeps the
+        # global AGENTS.md in sync with current VM state on every run.
+        ensure_codex_global_instructions(
+            codex_home=self.config.codex_home,
+            codex_sandbox=sandbox or self.config.codex_sandbox,
+        )
         output_path = paths.artifacts / "codex-last-message.md"
         command = self.build_command(
             paths=paths,
