@@ -2579,6 +2579,7 @@ def build_alpha_agent_env_rendered(
     system_env_dir: Optional[Path] = None,
     existing_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
     external_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+    gateway_public_host: Optional[str] = None,
 ) -> Tuple[Path, str, Dict[str, str]]:
     source_path = resolve_alpha_agent_env_source()
     source_raw = source_path.read_text(encoding="utf-8")
@@ -2599,10 +2600,24 @@ def build_alpha_agent_env_rendered(
     orchestrator_url = pick_env("ORCHESTRATOR_URL", "http://127.0.0.1:8743")
     instance_id = pick_env("INSTANCE_ID", ALPHA_AGENT_DEFAULT_INSTANCE_ID)
 
+    # GATEWAY_PUBLIC_HOST is the user-facing FQDN. The canonical source is
+    # /etc/cosmic/gateway.env (root-owned, 0600), which Alpha cannot read.
+    # Mirror it into alpha-agent.env so the operator instructions can include
+    # the URL the user actually references — without granting Alpha access
+    # to gateway.env's secrets.
+    resolved_public_host = first_meaningful_value(
+        gateway_public_host,
+        external_env.get("GATEWAY_PUBLIC_HOST"),
+        existing_env.get("GATEWAY_PUBLIC_HOST"),
+        source_data.get("GATEWAY_PUBLIC_HOST"),
+        "",
+    ) or ""
+
     overrides = {
         "REDIS_URL": redis_url or "redis://127.0.0.1:6379/0",
         "GATEWAY_URL": gateway_url or "http://127.0.0.1:8080",
         "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
+        "GATEWAY_PUBLIC_HOST": resolved_public_host,
         "ORCHESTRATOR_URL": orchestrator_url or "http://127.0.0.1:8743",
         "ORCHESTRATOR_INTERNAL_TOKEN": pick_env("ORCHESTRATOR_INTERNAL_TOKEN", shared_internal_token)
         or shared_internal_token,
@@ -4340,6 +4355,7 @@ def materialize_bootstrap_env_files(
         system_env_dir=system_env_dir,
         existing_env_by_name=existing_env_by_name,
         external_env_by_name=external_env_by_name,
+        gateway_public_host=overrides_by_dest["gateway.env"].get("GATEWAY_PUBLIC_HOST"),
     )
     alpha_repo_path.parent.mkdir(parents=True, exist_ok=True)
     alpha_repo_path.write_text(alpha_rendered, encoding="utf-8")
@@ -4558,6 +4574,7 @@ def install_service_env_files(
             "GATEWAY_INTERNAL_TOKEN"
         ],
         system_env_dir=system_env_dir,
+        gateway_public_host=overrides_by_dest["gateway.env"].get("GATEWAY_PUBLIC_HOST"),
     )
     run(["install", "-d", "-m", "755", str(alpha_dest_path.parent)], use_sudo=True)
     if alpha_dest_path.exists():
@@ -5576,6 +5593,9 @@ def sync_service_env_files(
                 ],
                 system_env_dir=system_env_dir,
                 existing_env_by_name=alpha_existing_by_name,
+                gateway_public_host=overrides_by_dest["gateway.env"].get(
+                    "GATEWAY_PUBLIC_HOST"
+                ),
             )
         )
         changed_keys = sync_env_file(
