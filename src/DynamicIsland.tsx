@@ -5,6 +5,7 @@ import './island.css'
 import Settings from './Settings'
 import WeatherAnimation from './WeatherAnimation'
 import DotBurstCheckmark from './DotBurstCheckmark'
+import AgentWorkSlide, { type AgentWorkPayload } from './AgentWorkSlide'
 import type { SearchPosition } from './App'
 import CalendarMonthView from './CalendarMonthView'
 import {
@@ -386,6 +387,10 @@ export default function DynamicIsland({
   const [voiceHistory, setVoiceHistory] = useState<string[]>([])
   const [lastFinalTranscript, setLastFinalTranscript] = useState('')
 
+  // Agent-at-work slide (orchestrator's current tool/specialist).
+  // Driven by `cosmic:island-agent-work` CustomEvent — `null` clears the slide.
+  const [agentWorkPayload, setAgentWorkPayload] = useState<AgentWorkPayload | null>(null)
+
   // New State for Notification
   const [notificationEvent, setNotificationEvent] = useState<CalendarAgendaEvent | null>(null)
   const [mailInboundNotification, setMailInboundNotification] = useState<CosmicMailIslandPayload | null>(null)
@@ -519,7 +524,8 @@ export default function DynamicIsland({
     !!integrationToast ||
     !!selectedCalendarEvent ||
     voiceActive ||
-    weatherAlertPeek
+    weatherAlertPeek ||
+    !!agentWorkPayload
   const [expanded, setExpanded] = useState(shouldExpand)
 
   useEffect(() => {
@@ -958,6 +964,61 @@ export default function DynamicIsland({
       off?.()
       window.removeEventListener('cosmic:island-notification', onCustom as EventListener)
     }
+  }, [])
+
+  // Agent-at-work slide listener.
+  // detail === null (or `{ stop: true }`) clears the slide.
+  useEffect(() => {
+    const apply = (detail: unknown) => {
+      if (!detail || (detail as { stop?: boolean }).stop) {
+        console.log('[island] agent-work cleared')
+        setAgentWorkPayload(null)
+        return
+      }
+      const payload = detail as AgentWorkPayload
+      if (!payload.agentId) {
+        console.warn('[island] agent-work payload missing agentId:', detail)
+        return
+      }
+      console.log('[island] agent-work →', payload)
+      setAgentWorkPayload(payload)
+    }
+
+    const onAgentWork = (e: Event) => {
+      apply((e as CustomEvent).detail)
+    }
+    window.addEventListener('cosmic:island-agent-work', onAgentWork)
+
+    // DevTools-friendly global helper:
+    //   __cosmicSmokeIsland({ agentId: 'web-search' })
+    //   __cosmicSmokeIsland(null)  // clear
+    ;(window as any).__cosmicSmokeIsland = (payload: AgentWorkPayload | { stop: true } | null) => {
+      apply(payload)
+    }
+
+    return () => {
+      window.removeEventListener('cosmic:island-agent-work', onAgentWork)
+      try { delete (window as any).__cosmicSmokeIsland } catch { /* ignore */ }
+    }
+  }, [])
+
+  // Smoke-script bootstrap: if the dev build was launched with VITE_SMOKE_ISLAND_AGENT,
+  // auto-fire the slide once after the island has mounted so the visual is visible
+  // immediately without manual interaction.
+  useEffect(() => {
+    const env = import.meta.env as unknown as Record<string, string | undefined>
+    const agentId = env.VITE_SMOKE_ISLAND_AGENT
+    if (!agentId) return
+    const label = env.VITE_SMOKE_ISLAND_LABEL
+    const detail = env.VITE_SMOKE_ISLAND_DETAIL
+    const t = setTimeout(() => {
+      window.dispatchEvent(
+        new CustomEvent('cosmic:island-agent-work', {
+          detail: { agentId, label, detail } satisfies AgentWorkPayload,
+        }),
+      )
+    }, 600)
+    return () => clearTimeout(t)
   }, [])
 
   useEffect(() => {
@@ -2137,6 +2198,7 @@ export default function DynamicIsland({
 
   const renderContent = () => {
     if (integrationToast) return renderIntegrationToast()
+    if (agentWorkPayload) return <AgentWorkSlide payload={agentWorkPayload} />
     if (notificationEvent) return renderNotification()
     if (selectedCalendarEvent) return renderCalendarDetail()
     if (mailInboundNotification) return renderCosmicMailNotification()
@@ -2153,7 +2215,7 @@ export default function DynamicIsland({
   return (
     <>
       <div
-        className={`island ${expanded ? 'expanded' : ''} ${integrationToast ? `integration-open tone-${integrationToast.tone}` : ''} ${expanded && notificationIslandActive ? 'island-notification-slide' : ''}`}
+        className={`island ${expanded ? 'expanded' : ''} ${integrationToast ? `integration-open tone-${integrationToast.tone}` : ''} ${expanded && notificationIslandActive ? 'island-notification-slide' : ''} ${agentWorkPayload ? 'agent-work-active' : ''}`}
         onMouseEnter={() => {
           if (weatherAlertPeekRef.current && Date.now() >= peekUserCancelArmTimestampRef.current) {
             cancelWeatherPeekForUserHover()
@@ -2174,7 +2236,7 @@ export default function DynamicIsland({
 
         {expanded && (
           <>
-            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !mailInboundNotification && !approvalRequestNotification && !integrationToast && (
+            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !mailInboundNotification && !approvalRequestNotification && !integrationToast && !agentWorkPayload && (
               <>
                 <div style={{ position: 'absolute', top: 0, bottom: '50px', left: 0, width: '40px', zIndex: 50, cursor: activeSlide > 0 ? 'w-resize' : 'default' }} onMouseEnter={() => switchSlide('prev')} />
                 <div style={{ position: 'absolute', top: 0, bottom: '50px', right: 0, width: '40px', zIndex: 50, cursor: activeSlide < TOTAL_SLIDES - 1 ? 'e-resize' : 'default' }} onMouseEnter={() => switchSlide('next')} />
@@ -2194,7 +2256,7 @@ export default function DynamicIsland({
               </button>
             )}
 
-            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !mailInboundNotification && !approvalRequestNotification && !integrationToast && (
+            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !mailInboundNotification && !approvalRequestNotification && !integrationToast && !agentWorkPayload && (
               <>
                 <div className="island-anchor-container">
                   <button className={`anchor-btn ${isAnchored ? 'active' : ''}`} onClick={(e) => { e.stopPropagation(); setIsAnchored(!isAnchored) }}>
