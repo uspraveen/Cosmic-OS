@@ -29,6 +29,8 @@ intents:
       - For attachment-specific requests in an email thread, use this to resolve the correct attachment and cached docs bundle first; then continue with the normal docs tools for actual document reading.
       - For new outbound drafts, attached_input_artifact_count is the attachment upload signal; resolved_attachment is only for resolving thread attachments.
       - Do not use this specialist for simple already-final cron or heartbeat delivery to an email channel.
+      - Cosmic Mail enforces a per-agent approval gate when an outbound mailbox's agent has approval_required enabled. A response with queued_for_approval=true (equivalently delivery_status="queued_for_approval" or a non-null approval_id) means the draft was successfully handed off to a human reviewer — this is a successful outcome, not a stall or failure. Treat the intent as complete, surface the approval_id and the queued status to the user, and do not retry or recompose the draft.
+      - The user maintains a trusted-senders allowlist (managed in Spaces > Agent Email > Settings) that is mirrored into Cosmic Mail. Outbound to addresses on that list bypasses the approval gate, so the same agent may return sent=true for a trusted recipient and queued_for_approval=true for an untrusted recipient on the same draft path; this is expected and per-recipient.
 
   - name: email.reason
     description: Legacy alias for `email.handle`. Prefer `email.handle` for new work.
