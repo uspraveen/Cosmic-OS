@@ -792,6 +792,15 @@ class GatewayRuntime:
             Exception
         ) as exc:  # pragma: no cover - startup health is environment-dependent
             self.adapter_errors["agent-email"] = str(exc)
+            return
+
+        # Reconcile the trusted-senders allowlist with Cosmic Mail. Cosmic-OS owns the
+        # user-facing list, so on every adapter (re)connect we push it again — that way a
+        # Cosmic Mail restart, key rotation, or token-scope change cannot leave the
+        # allowlist out of sync, and approval-bypass behavior stays consistent.
+        stored = self.agent_email_integration_store.get_primary()
+        if stored is not None:
+            await self._sync_trusted_senders_to_cosmic_mail(list(stored.trusted_senders))
 
     async def get_agent_email_connection_status(self) -> dict[str, Any]:
         settings = self._effective_agent_email_settings()
@@ -868,11 +877,53 @@ class GatewayRuntime:
     async def save_agent_email_trusted_senders(
         self, trusted_senders: list[str]
     ) -> dict[str, Any]:
-        self.agent_email_integration_store.save_trusted_senders(
+        record = self.agent_email_integration_store.save_trusted_senders(
             trusted_senders,
             updated_at=utcnow_iso(),
         )
+        # Push the *normalized* list (lowercased + de-duped) so Cosmic Mail and the local
+        # store stay byte-identical — the bypass check is also case-insensitive on both
+        # sides, but mirroring the same canonical form keeps debugging sane.
+        await self._sync_trusted_senders_to_cosmic_mail(list(record.trusted_senders))
         return await self.get_agent_email_connection_status()
+
+    async def _sync_trusted_senders_to_cosmic_mail(
+        self, trusted_senders: list[str]
+    ) -> None:
+        """Push the local trusted-senders list to Cosmic Mail's per-org allowlist.
+
+        Cosmic-OS owns the user-facing list (Spaces > Agent Email > Settings); Cosmic
+        Mail uses it to bypass outbound approval gating when every recipient on a draft
+        is in the allowlist. Best-effort — failures are logged, not raised, so a Cosmic
+        Mail outage can't break local persistence of the list.
+        """
+        adapter = self.registry.adapters.get("agent-email")
+        if not isinstance(adapter, AgentEmailAdapter):
+            return
+        try:
+            auth_context = await adapter.client.get_auth_context()
+        except Exception as exc:  # pragma: no cover - depends on remote
+            logger.warning(
+                "agent_email.trusted_senders auth_context_failed: %s", exc
+            )
+            return
+        organization_id = self._safe_text(auth_context.get("organization_id"))
+        if not organization_id:
+            logger.warning(
+                "agent_email.trusted_senders skipped: cosmic-mail token has no organization_id"
+            )
+            return
+        try:
+            await adapter.client.replace_trusted_recipients(
+                organization_id,
+                list(trusted_senders or []),
+            )
+        except Exception as exc:  # pragma: no cover - depends on remote
+            logger.warning(
+                "agent_email.trusted_senders push_failed org=%s: %s",
+                organization_id,
+                exc,
+            )
 
     def _is_email_thread_session(self, session_id: str | None) -> bool:
         normalized = self._safe_text(session_id)

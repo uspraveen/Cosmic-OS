@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 
+import gateway.channels.agent_email as agent_email_module
 import gateway.runtime as gateway_runtime_module
 from gateway.channels.agent_email import AgentEmailAdapter
 from gateway.config import GatewayConfig
@@ -44,6 +45,7 @@ def _build_runtime(root: Path) -> GatewayRuntime:
             delivery_queue_db_path=root / "delivery_queue.db",
             scheduler_db_path=root / "scheduler.db",
             memory_write_audit_db_path=root / "memory_write_audit.db",
+            agent_email_integrations_db_path=root / "agent_email_integrations.db",
         )
     )
 
@@ -51,6 +53,7 @@ def _build_runtime(root: Path) -> GatewayRuntime:
 class FakeCosmicMailClient:
     mint_calls: list[tuple[str, str, str]] = []
     create_webhook_calls: list[tuple[str, dict[str, object]]] = []
+    replace_trusted_recipients_calls: list[tuple[str, str, list[str]]] = []
 
     def __init__(
         self,
@@ -131,6 +134,19 @@ class FakeCosmicMailClient:
     async def delete_webhook(self, webhook_id: str) -> None:
         raise AssertionError(f"unexpected delete_webhook {webhook_id}")
 
+    async def replace_trusted_recipients(
+        self,
+        organization_id: str,
+        emails: list[str],
+        *,
+        note: str | None = None,
+    ) -> list[dict[str, object]]:
+        del note
+        self.__class__.replace_trusted_recipients_calls.append(
+            (self.api_token, organization_id, list(emails))
+        )
+        return [{"id": f"tr_{i}", "organization_id": organization_id, "email": e} for i, e in enumerate(emails)]
+
 
 @pytest.mark.asyncio
 async def test_sync_agent_email_webhook_mints_org_key_from_admin_connection(
@@ -174,6 +190,76 @@ async def test_sync_agent_email_webhook_mints_org_key_from_admin_connection(
     assert result["status"] == "created"
     assert result["mailbox_id"] == "mbx_123"
     assert result["webhook_id"] == "wh_123"
+
+
+@pytest.mark.asyncio
+async def test_save_agent_email_trusted_senders_pushes_to_cosmic_mail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeCosmicMailClient.replace_trusted_recipients_calls = []
+    monkeypatch.setattr(gateway_runtime_module, "CosmicMailClient", FakeCosmicMailClient)
+    monkeypatch.setattr(agent_email_module, "CosmicMailClient", FakeCosmicMailClient)
+
+    with _runtime_root() as root:
+        runtime = _build_runtime(root)
+        runtime.agent_email_integration_store.initialize()
+        runtime.agent_email_integration_store.save_primary(
+            base_url="https://console.thelearnchain.com",
+            api_token="cm_org_token",
+            primary_mailbox_address="cosmic@example.com",
+            updated_at="2026-05-09T00:00:00Z",
+        )
+        await runtime.reconcile_agent_email_adapter()
+
+        await runtime.save_agent_email_trusted_senders(
+            ["Owner@Example.com", "second@example.com"]
+        )
+
+    # reconcile pushes the existing (empty) list, then save_trusted_senders pushes the
+    # normalized form (lowercased + de-duped) — matches what's persisted locally.
+    assert FakeCosmicMailClient.replace_trusted_recipients_calls == [
+        ("cm_org_token", "org_123", []),
+        (
+            "cm_org_token",
+            "org_123",
+            ["owner@example.com", "second@example.com"],
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_save_agent_email_trusted_senders_swallows_remote_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeCosmicMailClient.replace_trusted_recipients_calls = []
+
+    class _BoomClient(FakeCosmicMailClient):
+        async def replace_trusted_recipients(self, organization_id, emails, *, note=None):
+            del organization_id, emails, note
+            raise RuntimeError("cosmic-mail unreachable")
+
+    monkeypatch.setattr(gateway_runtime_module, "CosmicMailClient", _BoomClient)
+    monkeypatch.setattr(agent_email_module, "CosmicMailClient", _BoomClient)
+
+    with _runtime_root() as root:
+        runtime = _build_runtime(root)
+        runtime.agent_email_integration_store.initialize()
+        runtime.agent_email_integration_store.save_primary(
+            base_url="https://console.thelearnchain.com",
+            api_token="cm_org_token",
+            primary_mailbox_address="cosmic@example.com",
+            updated_at="2026-05-09T00:00:00Z",
+        )
+        await runtime.reconcile_agent_email_adapter()
+
+        # Must NOT raise — local persistence is the source of truth and the
+        # downstream push is best-effort.
+        status = await runtime.save_agent_email_trusted_senders(["x@example.com"])
+        stored = runtime.agent_email_integration_store.get_primary()
+
+    assert stored is not None
+    assert list(stored.trusted_senders) == ["x@example.com"]
+    assert status["trusted_senders"] == ["x@example.com"]
 
 
 @pytest.mark.asyncio

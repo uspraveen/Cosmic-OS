@@ -252,6 +252,32 @@ class CosmicMailClient:
             raise ValueError("webhook_id is required")
         await self._request("DELETE", f"/v1/webhooks/{normalized}", content_type=None)
 
+    async def replace_trusted_recipients(
+        self,
+        organization_id: str,
+        emails: list[str],
+        *,
+        note: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Cosmic-OS is the source of truth for the trusted-recipients allowlist.
+
+        This PUTs the entire list to Cosmic Mail's per-org endpoint; the server replaces
+        whatever it had. Cosmic Mail uses the list to bypass outbound approval gating
+        when every recipient on a draft is in the allowlist.
+        """
+        normalized = str(organization_id or "").strip()
+        if not normalized:
+            raise ValueError("organization_id is required")
+        body: dict[str, Any] = {"emails": list(emails or [])}
+        if note is not None:
+            body["note"] = note
+        payload = await self._request_payload(
+            "PUT",
+            f"/v1/organizations/{normalized}/trusted-recipients",
+            json_body=body,
+        )
+        return self._extract_items(payload)
+
     async def _request_payload(
         self,
         method: str,
