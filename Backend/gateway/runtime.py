@@ -6992,6 +6992,65 @@ class GatewayRuntime:
                 continue
             await adapter.broadcast_to_session(session_id, event)
 
+    async def publish_agent_email_notification(
+        self,
+        event: dict[str, Any],
+        *,
+        push_title: str,
+        push_body: str,
+        push_priority: str = "high",
+    ) -> dict[str, Any]:
+        notification = {
+            "type": "agent_email.notification",
+            "timestamp": utcnow_iso(),
+            **event,
+        }
+        live_targets = 0
+        for adapter in self.registry.adapters.values():
+            if not isinstance(adapter, (DesktopAdapter, MobileAdapter)):
+                continue
+            try:
+                live_targets += await adapter.broadcast_all(notification)
+            except Exception:
+                logger.exception(
+                    "gateway.agent_email_notification.broadcast_failed platform=%s",
+                    adapter.platform,
+                )
+
+        data = {
+            "type": self._safe_text(notification.get("event_type"))
+            or self._safe_text(notification.get("kind"))
+            or "agent_email.notification",
+            "tab": self._safe_text(notification.get("tab")) or "overview",
+            "notification_id": notification.get("notification_id"),
+            "request_id": notification.get("request_id"),
+            "message_id": notification.get("message_id"),
+            "thread_id": notification.get("thread_id"),
+            "approval_id": notification.get("approval_id"),
+            "origin_channel": notification.get("origin_channel")
+            or notification.get("channel"),
+            "channel_id": "cosmic-email",
+        }
+        self._schedule_mobile_push(
+            session_id=self._safe_text(notification.get("session_id")) or None,
+            origin_channel=self._safe_text(
+                notification.get("origin_channel") or notification.get("channel")
+            )
+            or None,
+            event_type=self._safe_text(notification.get("event_type"))
+            or "agent_email.notification",
+            title=push_title,
+            body=push_body,
+            screen="agent-email",
+            priority=push_priority,
+            data=data,
+        )
+        return {
+            "status": "published",
+            "live_targets": live_targets,
+            "notification_id": notification.get("notification_id"),
+        }
+
     def _schedule_mobile_push(
         self,
         *,
@@ -7145,6 +7204,7 @@ class GatewayRuntime:
     ) -> str:
         identifier = (
             self._safe_text(data.get("message_id"))
+            or self._safe_text(data.get("approval_id"))
             or self._safe_text(data.get("task_id"))
             or self._safe_text(data.get("request_id"))
             or self._safe_text(data.get("input_request_id"))
@@ -10004,8 +10064,12 @@ class GatewayRuntime:
                 base_url=str(effective["base_url"]),
                 api_token=str(effective["api_token"]),
                 primary_mailbox_address=effective.get("primary_mailbox_address"),
-                webhook_secret=self.config.cosmic_mail_webhook_secret,
-                webhook_signature_header=self.config.cosmic_mail_webhook_signature_header,
+                webhook_secret=self._safe_text(settings.get("webhook_secret"))
+                or self.config.cosmic_mail_webhook_secret,
+                webhook_signature_header=self._safe_text(
+                    settings.get("webhook_signature_header")
+                )
+                or self.config.cosmic_mail_webhook_signature_header,
                 updated_at=utcnow_iso(),
             )
             settings = {
@@ -10049,54 +10113,93 @@ class GatewayRuntime:
                     webhook, webhook_url=webhook_url
                 )
             ]
-            desired_event_type = "message.received"
-            desired_payload = {
-                "mailbox_id": mailbox_id,
-                "event_type": desired_event_type,
-                "url": webhook_url,
-                "secret": webhook_secret,
-            }
-
-            primary = managed[0] if managed else None
-            action = "created"
-            result_webhook: dict[str, Any]
-            if primary is None:
-                result_webhook = await client.create_webhook(desired_payload)
-            else:
-                webhook_id = self._safe_text(primary.get("id"))
-                patch_needed = (
-                    self._safe_text(primary.get("url")) != webhook_url
-                    or self._safe_text(primary.get("mailbox_id")) != mailbox_id
-                    or self._safe_text(primary.get("event_type")) != desired_event_type
-                    or not bool(primary.get("is_active"))
-                )
-                if patch_needed and webhook_id:
-                    result_webhook = await client.update_webhook(
-                        webhook_id,
-                        {
-                            "mailbox_id": mailbox_id,
-                            "event_type": desired_event_type,
-                            "url": webhook_url,
-                            "secret": webhook_secret,
-                            "is_active": True,
-                        },
-                    )
-                    action = "updated"
+            desired_event_types = ("message.received", "approval.created")
+            results: list[dict[str, Any]] = []
+            actions: list[str] = []
+            retained_ids: set[str] = set()
+            for desired_event_type in desired_event_types:
+                candidates = [
+                    webhook
+                    for webhook in managed
+                    if self._safe_text(webhook.get("event_type"))
+                    == desired_event_type
+                ]
+                primary = candidates[0] if candidates else None
+                desired_payload = {
+                    "mailbox_id": mailbox_id,
+                    "event_type": desired_event_type,
+                    "url": webhook_url,
+                    "secret": webhook_secret,
+                }
+                if primary is None:
+                    result_webhook = await client.create_webhook(desired_payload)
+                    action = "created"
                 else:
-                    result_webhook = primary
-                    action = "unchanged"
+                    webhook_id = self._safe_text(primary.get("id"))
+                    patch_needed = (
+                        self._safe_text(primary.get("url")) != webhook_url
+                        or self._safe_text(primary.get("mailbox_id")) != mailbox_id
+                        or self._safe_text(primary.get("event_type"))
+                        != desired_event_type
+                        or not bool(primary.get("is_active"))
+                    )
+                    if patch_needed and webhook_id:
+                        result_webhook = await client.update_webhook(
+                            webhook_id,
+                            {
+                                "mailbox_id": mailbox_id,
+                                "event_type": desired_event_type,
+                                "url": webhook_url,
+                                "secret": webhook_secret,
+                                "is_active": True,
+                            },
+                        )
+                        action = "updated"
+                    else:
+                        result_webhook = primary
+                        action = "unchanged"
 
-                primary_id = self._safe_text(result_webhook.get("id")) or webhook_id
-                for duplicate in managed[1:]:
-                    duplicate_id = self._safe_text(duplicate.get("id"))
-                    if duplicate_id and duplicate_id != primary_id:
-                        await client.delete_webhook(duplicate_id)
+                    primary_id = self._safe_text(result_webhook.get("id")) or webhook_id
+                    for duplicate in candidates[1:]:
+                        duplicate_id = self._safe_text(duplicate.get("id"))
+                        if duplicate_id and duplicate_id != primary_id:
+                            await client.delete_webhook(duplicate_id)
+                    if primary_id:
+                        retained_ids.add(primary_id)
 
+                result_id = self._safe_text(result_webhook.get("id"))
+                if result_id:
+                    retained_ids.add(result_id)
+                actions.append(action)
+                results.append(result_webhook)
+
+            for webhook in managed:
+                webhook_id = self._safe_text(webhook.get("id"))
+                if not webhook_id or webhook_id in retained_ids:
+                    continue
+                await client.delete_webhook(webhook_id)
+
+            action = (
+                "created"
+                if "created" in actions
+                else "updated"
+                if "updated" in actions
+                else "unchanged"
+            )
+            webhook_ids = {
+                self._safe_text(item.get("event_type")): self._safe_text(
+                    item.get("id")
+                )
+                for item in results
+                if self._safe_text(item.get("event_type"))
+            }
             return {
                 "status": action,
                 "url": webhook_url,
                 "mailbox_id": mailbox_id,
-                "webhook_id": self._safe_text(result_webhook.get("id")),
+                "webhook_id": webhook_ids.get("message.received"),
+                "webhook_ids": webhook_ids,
+                "event_types": list(desired_event_types),
             }
         finally:
             await client.aclose()

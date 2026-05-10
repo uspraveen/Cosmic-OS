@@ -202,6 +202,15 @@ class AgentEmailAdapter(ChannelAdapter):
 
         attachments = self._normalize_attachments(message.get("attachments"), message_id=message_id)
         from_contacts = _normalize_contact_list(message.get("from_recipients"))
+        if not from_contacts:
+            from_address = _safe_text(message.get("from_address"))
+            if from_address:
+                from_contacts = [
+                    {
+                        "email": from_address,
+                        "name": _safe_text(message.get("from_name")) or None,
+                    }
+                ]
         to_contacts = _normalize_contact_list(message.get("to_recipients"))
         cc_contacts = _normalize_contact_list(message.get("cc_recipients"))
         bcc_contacts = _normalize_contact_list(message.get("bcc_recipients"))
@@ -225,6 +234,8 @@ class AgentEmailAdapter(ChannelAdapter):
                 "direction": _safe_text(message.get("direction")) or "inbound",
                 "from_address": from_contacts[0]["email"] if from_contacts else None,
                 "from_name": from_contacts[0]["name"] if from_contacts else None,
+                "received_at": _safe_text(message.get("received_at")) or None,
+                "sent_at": _safe_text(message.get("sent_at")) or None,
                 "internet_message_id": _safe_text(message.get("internet_message_id")) or None,
                 "attachments": attachments,
                 "has_attachments": bool(attachments),
@@ -237,6 +248,68 @@ class AgentEmailAdapter(ChannelAdapter):
             },
         }
         return normalized
+
+    def normalize_approval_notification(self, raw_webhook: Any) -> dict[str, Any]:
+        if not isinstance(raw_webhook, dict):
+            raise TypeError("Cosmic Mail approval webhook payload must be a JSON object.")
+
+        approval = raw_webhook.get("approval")
+        approval_dict = approval if isinstance(approval, dict) else raw_webhook
+        draft = raw_webhook.get("draft")
+        draft_dict = draft if isinstance(draft, dict) else {}
+
+        approval_id = _safe_text(approval_dict.get("id")) or _safe_text(raw_webhook.get("approval_id"))
+        if not approval_id:
+            raise ValueError("Cosmic Mail approval webhook payload is missing approval_id.")
+
+        recipients = _normalize_contact_list(draft_dict.get("to_recipients"))
+        cc_recipients = _normalize_contact_list(draft_dict.get("cc_recipients"))
+        mailbox = raw_webhook.get("mailbox")
+        mailbox_dict = mailbox if isinstance(mailbox, dict) else {}
+        mailbox_id = (
+            _safe_text(approval_dict.get("mailbox_id"))
+            or _safe_text(draft_dict.get("mailbox_id"))
+            or _safe_text(raw_webhook.get("mailbox_id"))
+            or _safe_text(mailbox_dict.get("id"))
+        )
+        mailbox_address = (
+            _safe_text(raw_webhook.get("mailbox_address"))
+            or _safe_text(mailbox_dict.get("address"))
+            or _safe_text(mailbox_dict.get("email"))
+            or self.primary_mailbox_address
+        )
+        subject = (
+            _safe_text(draft_dict.get("subject"))
+            or _safe_text(approval_dict.get("subject"))
+            or "Email approval required"
+        )
+        snippet = (
+            _safe_text(draft_dict.get("text_body"))
+            or re.sub(r"<[^>]+>", " ", _safe_text(draft_dict.get("html_body")))
+        )
+        snippet = re.sub(r"\s+", " ", snippet).strip()
+
+        return {
+            "kind": "approval",
+            "event": _safe_text(raw_webhook.get("event")) or "approval.created",
+            "approval_id": approval_id,
+            "status": _safe_text(approval_dict.get("status")) or "pending",
+            "organization_id": _safe_text(raw_webhook.get("organization_id")) or None,
+            "agent_id": _safe_text(approval_dict.get("agent_id")) or None,
+            "mailbox_id": mailbox_id or None,
+            "mailbox_address": mailbox_address or None,
+            "draft_id": _safe_text(approval_dict.get("draft_id")) or _safe_text(draft_dict.get("id")) or None,
+            "subject": subject,
+            "recipients": recipients,
+            "cc_recipients": cc_recipients,
+            "recipient_summary": ", ".join(
+                contact["email"] for contact in recipients if contact.get("email")
+            ),
+            "snippet": snippet,
+            "created_at": _safe_text(approval_dict.get("created_at"))
+            or _safe_text(raw_webhook.get("timestamp"))
+            or None,
+        }
 
     async def send(self, message: dict[str, Any], channel: str | None = None) -> None:
         if not self._is_sendable_event(message):
@@ -753,6 +826,7 @@ class AgentEmailAdapter(ChannelAdapter):
             _safe_text(message.get("text_body"))
             or _safe_text(message.get("body_text"))
             or _safe_text(message.get("snippet"))
+            or _safe_text(message.get("preview_text"))
             or _safe_text(message.get("body_preview"))
             or _safe_text(message.get("body"))
         )

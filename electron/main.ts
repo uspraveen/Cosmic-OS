@@ -962,6 +962,39 @@ type CosmicMailStoredApprovalNotify = {
   knownIds: string[]
 }
 
+async function recordCosmicMailGatewayNotification(payload: any) {
+  const kind = String(payload?.kind || '').trim()
+  if (kind === 'inbound') {
+    const mailboxId = String(payload?.mailbox_id || payload?.mailboxId || '').trim()
+    const messageId = String(payload?.message_id || payload?.messageId || '').trim()
+    if (mailboxId && messageId) {
+      try {
+        await cosmicMailDbRequest({ op: 'try_mark_seen', mailboxId, messageId })
+      } catch {
+        // Best-effort de-dupe for the legacy direct poller.
+      }
+    }
+  }
+
+  if (kind === 'approval') {
+    const approvalId = String(payload?.approval_id || payload?.approvalId || '').trim()
+    const orgId = String(payload?.organization_id || payload?.organizationId || '').trim()
+    if (approvalId && orgId) {
+      const prev = store.get(COSMIC_MAIL_APPROVAL_NOTIFY_STORE_KEY) as CosmicMailStoredApprovalNotify | undefined
+      const knownIds =
+        prev && prev.orgId === orgId && Array.isArray(prev.knownIds)
+          ? prev.knownIds
+          : []
+      store.set(COSMIC_MAIL_APPROVAL_NOTIFY_STORE_KEY, {
+        orgId,
+        knownIds: [...new Set([...knownIds, approvalId])].slice(-400),
+      })
+    }
+  }
+
+  return { ok: true }
+}
+
 function clipCosmicMailIslandText(value: string, max = 168) {
   const normalized = String(value || '')
     .replace(/\s+/g, ' ')
@@ -2488,6 +2521,10 @@ app.whenReady().then(() => {
       body: payload.body,
       timeoutMs: payload.timeoutMs,
     })
+  })
+
+  ipcMain.handle('cosmic-mail:record-gateway-notification', async (_, payload: any) => {
+    return recordCosmicMailGatewayNotification(payload)
   })
 
   ipcMain.handle('cosmic-mail:upload-draft-attachment', async (_, payload: GatewayConnectionConfig & {

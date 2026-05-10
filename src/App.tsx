@@ -4346,6 +4346,14 @@ export default function App() {
         return
       }
 
+      if (eventType === 'agent_email.notification') {
+        void window.cosmic?.recordCosmicMailGatewayNotification?.(event)
+        window.dispatchEvent(new CustomEvent('cosmic-mail:gateway-notification', {
+          detail: event,
+        }))
+        return
+      }
+
       // Cross-channel sync: messages from WhatsApp/Telegram arriving while desktop is open
       if (eventType === 'crosschannel.message') {
         const role = String(event.role || '').trim()

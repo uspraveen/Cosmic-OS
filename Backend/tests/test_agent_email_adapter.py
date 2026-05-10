@@ -61,6 +61,80 @@ def test_agent_email_adapter_verifies_signature_and_normalizes_payload() -> None
     assert "Need help" in normalized["content"]
 
 
+def test_agent_email_adapter_normalizes_approval_webhook() -> None:
+    adapter = AgentEmailAdapter(
+        cosmic_mail_base_url="http://cosmic-mail.local",
+        cosmic_mail_api_token="token",
+        primary_mailbox_address="assistant@example.com",
+    )
+
+    normalized = adapter.normalize_approval_notification(
+        {
+            "event": "approval.created",
+            "timestamp": "2026-05-10T12:00:00Z",
+            "organization_id": "org_123",
+            "approval": {
+                "id": "apr_123",
+                "status": "pending",
+                "agent_id": "agent_1",
+                "mailbox_id": "mbx_123",
+                "draft_id": "draft_123",
+                "created_at": "2026-05-10T12:00:00Z",
+            },
+            "draft": {
+                "id": "draft_123",
+                "subject": "Review needed",
+                "to_recipients": [{"email": "owner@example.com"}],
+                "text_body": "Please review this outbound reply.",
+            },
+        }
+    )
+
+    assert normalized["kind"] == "approval"
+    assert normalized["approval_id"] == "apr_123"
+    assert normalized["event"] == "approval.created"
+    assert normalized["organization_id"] == "org_123"
+    assert normalized["mailbox_address"] == "assistant@example.com"
+    assert normalized["recipient_summary"] == "owner@example.com"
+    assert normalized["snippet"] == "Please review this outbound reply."
+
+
+def test_agent_email_adapter_normalizes_current_cosmic_mail_message_payload() -> None:
+    adapter = AgentEmailAdapter(
+        cosmic_mail_base_url="http://cosmic-mail.local",
+        cosmic_mail_api_token="token",
+        primary_mailbox_address="assistant@example.com",
+    )
+
+    normalized = adapter.normalize_message(
+        {
+            "event": "message.received",
+            "timestamp": "2026-05-10T12:00:00Z",
+            "mailbox_id": "mbx_123",
+            "thread_id": "thr_123",
+            "message": {
+                "id": "msg_123",
+                "internet_message_id": "<msg@example.com>",
+                "direction": "inbound",
+                "subject": "Hello",
+                "from_address": "sender@example.com",
+                "from_name": "Sender",
+                "to_recipients": [{"email": "assistant@example.com"}],
+                "preview_text": "This is the webhook preview.",
+                "received_at": "2026-05-10T12:00:00Z",
+            },
+            "thread": {"id": "thr_123", "subject": "Hello"},
+        }
+    )
+
+    metadata = normalized["metadata"]
+    assert normalized["channel"] == "agent-email:assistant@example.com"
+    assert metadata["from_address"] == "sender@example.com"
+    assert metadata["from_name"] == "Sender"
+    assert metadata["received_at"] == "2026-05-10T12:00:00Z"
+    assert "This is the webhook preview." in normalized["content"]
+
+
 @pytest.mark.asyncio
 async def test_agent_email_adapter_send_uses_cosmic_mail_draft_send_flow() -> None:
     adapter = AgentEmailAdapter(

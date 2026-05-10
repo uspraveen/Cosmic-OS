@@ -100,6 +100,11 @@ function diNotifyInitials(fromName: string, fromAddress: string): string {
   return (local.slice(0, 2) || '?').toUpperCase()
 }
 
+function gatewayMailNotifyTime(value: unknown): number {
+  const parsed = new Date(String(value || '')).getTime()
+  return Number.isFinite(parsed) ? parsed : Date.now()
+}
+
 interface DynamicIslandProps {
   searchActive: boolean
   hovered: boolean
@@ -657,6 +662,44 @@ export default function DynamicIsland({
       setExpanded(true)
     })
     return () => unsub?.()
+  }, [])
+
+  useEffect(() => {
+    const listener = (raw: Event) => {
+      const detail = (raw as CustomEvent<any>).detail || {}
+      const kind = String(detail.kind || '').trim()
+      if (kind === 'inbound') {
+        setMailInboundNotification({
+          kind: 'single',
+          mailboxId: String(detail.mailbox_id || ''),
+          mailboxAddress: String(detail.mailbox_address || 'Inbox'),
+          threadId: String(detail.thread_id || ''),
+          messageId: String(detail.message_id || ''),
+          subject: String(detail.subject || 'New email received'),
+          fromName: String(detail.from_name || ''),
+          fromAddress: String(detail.from_address || ''),
+          snippet: String(detail.snippet || 'New message'),
+          receivedAt: gatewayMailNotifyTime(detail.received_at || detail.created_at || detail.timestamp),
+        })
+        setExpanded(true)
+        return
+      }
+      if (kind === 'approval') {
+        setApprovalRequestNotification({
+          kind: 'single',
+          approvalId: String(detail.approval_id || ''),
+          subject: String(detail.subject || 'Email approval required'),
+          agentName: String(detail.agent_name || 'Cosmic'),
+          mailboxAddress: String(detail.mailbox_address || 'Agent Email'),
+          recipients: String(detail.recipient_summary || ''),
+          snippet: String(detail.snippet || 'Awaiting your review'),
+          createdAt: gatewayMailNotifyTime(detail.created_at || detail.timestamp),
+        })
+        setExpanded(true)
+      }
+    }
+    window.addEventListener('cosmic-mail:gateway-notification', listener)
+    return () => window.removeEventListener('cosmic-mail:gateway-notification', listener)
   }, [])
 
   useEffect(() => {

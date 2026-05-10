@@ -755,6 +755,49 @@ async def agent_email_incoming(
     if not isinstance(payload, dict):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Agent Email webhook payload must be a JSON object")
 
+    event_name = str(payload.get("event") or "").strip()
+    if event_name.startswith("approval."):
+        if event_name != "approval.created":
+            return {"status": "ignored", "event": event_name}
+        try:
+            approval = adapter.normalize_approval_notification(payload)  # type: ignore[attr-defined]
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+        approval_id = str(approval.get("approval_id") or "").strip()
+        subject = str(approval.get("subject") or "").strip() or "Email approval required"
+        mailbox_address = str(approval.get("mailbox_address") or "").strip()
+        notification_id = f"agent-email:approval:{approval_id}"
+        await runtime.publish_agent_email_notification(
+            {
+                "kind": "approval",
+                "event_type": "agent_email.approval",
+                "notification_id": notification_id,
+                "approval_id": approval_id,
+                "draft_id": approval.get("draft_id"),
+                "organization_id": approval.get("organization_id"),
+                "agent_id": approval.get("agent_id"),
+                "mailbox_id": approval.get("mailbox_id"),
+                "mailbox_address": mailbox_address,
+                "subject": subject,
+                "recipients": approval.get("recipients"),
+                "recipient_summary": approval.get("recipient_summary"),
+                "snippet": approval.get("snippet"),
+                "created_at": approval.get("created_at"),
+                "tab": "approvals",
+                "channel": f"agent-email:{mailbox_address}" if mailbox_address else "agent-email",
+            },
+            push_title="Email approval needed",
+            push_body=subject,
+            push_priority="high",
+        )
+        return {
+            "status": "accepted",
+            "event": event_name,
+            "approval_id": approval_id,
+            "notification_id": notification_id,
+        }
+
     try:
         normalized = adapter.normalize_message(payload)  # type: ignore[attr-defined]
     except (TypeError, ValueError) as exc:
@@ -784,23 +827,32 @@ async def agent_email_incoming(
             or "Agent Email"
         )
         subject = str(metadata.get("subject") or "").strip() or "New email received"
-        runtime._schedule_mobile_push(
-            session_id=str(processed.get("session_id") or normalized.get("session_id") or "").strip() or None,
-            origin_channel=str(processed.get("channel") or normalized.get("channel") or "").strip() or None,
-            event_type="email.inbound",
-            title="New agent email",
-            body=f"{sender}: {subject}",
-            screen="agent-email",
-            priority="high",
-            data={
-                "type": "email.inbound",
-                "tab": "inboxes",
+        message_id = str(metadata.get("message_id") or "").strip()
+        thread_id = str(metadata.get("thread_id") or "").strip()
+        mailbox_address = str(metadata.get("mailbox_address") or "").strip()
+        await runtime.publish_agent_email_notification(
+            {
+                "kind": "inbound",
+                "event_type": "email.inbound",
+                "notification_id": f"agent-email:inbound:{message_id or request_id}",
                 "request_id": processed.get("request_id"),
-                "message_id": metadata.get("message_id"),
-                "thread_id": metadata.get("thread_id"),
-                "origin_channel": processed.get("channel"),
-                "channel_id": "cosmic-email",
+                "session_id": processed.get("session_id") or normalized.get("session_id"),
+                "origin_channel": processed.get("channel") or normalized.get("channel"),
+                "channel": processed.get("channel") or normalized.get("channel"),
+                "message_id": message_id,
+                "thread_id": thread_id,
+                "mailbox_id": metadata.get("mailbox_id"),
+                "mailbox_address": mailbox_address,
+                "subject": subject,
+                "from_name": metadata.get("from_name"),
+                "from_address": metadata.get("from_address"),
+                "received_at": metadata.get("received_at"),
+                "snippet": processed.get("query") or normalized.get("content"),
+                "tab": "inboxes",
             },
+            push_title="New agent email",
+            push_body=f"{sender}: {subject}",
+            push_priority="high",
         )
         if processed.get("dispatch_target") == "redis":
             return {

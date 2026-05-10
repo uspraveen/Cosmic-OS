@@ -103,6 +103,7 @@ interface Window {
       body?: unknown
       timeoutMs?: number
     }) => Promise<any>
+    recordCosmicMailGatewayNotification: (payload: any) => Promise<any>
     cosmicMailUploadDraftAttachment: (payload: GatewayConnectionPayload & {
       draftId: string
       filePath: string

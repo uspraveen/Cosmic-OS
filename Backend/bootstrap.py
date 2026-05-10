@@ -3128,6 +3128,12 @@ def persist_cosmic_mail_provisioning(payload: Dict[str, object]) -> None:
     plaintext = str((api_key_obj or {}).get("plaintext") or "").strip()  # type: ignore[union-attr]
     mailbox_obj = payload.get("mailbox") if isinstance(payload.get("mailbox"), dict) else {}
     primary_mailbox_address = str((mailbox_obj or {}).get("address") or "").strip()  # type: ignore[union-attr]
+    webhook_obj = payload.get("webhook") if isinstance(payload.get("webhook"), dict) else {}
+    webhook_secret = (
+        str(payload.get("webhook_secret") or "").strip()
+        or str((webhook_obj or {}).get("secret") or "").strip()  # type: ignore[union-attr]
+        or secrets.token_urlsafe(32)
+    )
 
     if not base_url or not plaintext:
         raise BootstrapError(
@@ -3139,6 +3145,8 @@ def persist_cosmic_mail_provisioning(payload: Dict[str, object]) -> None:
         base_url=base_url,
         api_token=plaintext,
         primary_mailbox_address=primary_mailbox_address,
+        webhook_secret=webhook_secret,
+        webhook_signature_header="X-Cosmic-Mail-Signature",
         updated_at=datetime.now(timezone.utc).isoformat(),
     )
 

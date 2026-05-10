@@ -234,6 +234,20 @@ class DesktopAdapter(ChannelAdapter):
                 # Connection is dead — let the next receive loop handle cleanup
                 pass
 
+    async def broadcast_all(self, event: dict[str, Any]) -> int:
+        """Send an event to every connected desktop/mobile client."""
+        async with self._lock:
+            targets = list(self._connections.values())
+        sent = 0
+        for conn in targets:
+            try:
+                await conn.websocket.send_json(event)
+                sent += 1
+            except Exception:
+                # Connection is dead — let the next receive loop handle cleanup.
+                pass
+        return sent
+
     async def _resolve_connection(self, channel: str | None) -> DesktopConnection | None:
         async with self._lock:
             if channel and channel != self.platform:

@@ -185,11 +185,21 @@ async def test_sync_agent_email_webhook_mints_org_key_from_admin_connection(
                 "url": "https://gateway.example.com/internal/channels/agent-email/incoming",
                 "secret": None,
             },
-        )
+        ),
+        (
+            "cm_org_token",
+            {
+                "mailbox_id": "mbx_123",
+                "event_type": "approval.created",
+                "url": "https://gateway.example.com/internal/channels/agent-email/incoming",
+                "secret": None,
+            },
+        ),
     ]
     assert result["status"] == "created"
     assert result["mailbox_id"] == "mbx_123"
     assert result["webhook_id"] == "wh_123"
+    assert result["event_types"] == ["message.received", "approval.created"]
 
 
 @pytest.mark.asyncio
