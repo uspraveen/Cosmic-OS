@@ -1696,6 +1696,22 @@ async def get_agent_email_status(
     return await runtime.get_agent_email_connection_status()
 
 
+@router.get("/channels/agent-email/desktop-config")
+async def get_agent_email_desktop_config(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    """One-click connect: hand the desktop the cosmic-mail config that bootstrap
+    already provisioned for this VM.
+
+    The gateway is the source of truth for the org-scoped key; the desktop calls
+    this endpoint with the local gateway API token, gets back `{base_url, api_token,
+    primary_mailbox_address, organization_id}`, and saves them via the existing
+    `gateway:save-agent-email-config` IPC. No copy-paste of credentials.
+    """
+    return await runtime.get_agent_email_desktop_config()
+
+
 @router.post("/channels/agent-email/config")
 async def save_agent_email_config(
     body: AgentEmailConfigRequest,

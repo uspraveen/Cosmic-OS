@@ -193,6 +193,44 @@ async def test_sync_agent_email_webhook_mints_org_key_from_admin_connection(
 
 
 @pytest.mark.asyncio
+async def test_get_agent_email_desktop_config_returns_unavailable_when_unset() -> None:
+    with _runtime_root() as root:
+        runtime = _build_runtime(root)
+        runtime.agent_email_integration_store.initialize()
+        result = await runtime.get_agent_email_desktop_config()
+    assert result == {"available": False}
+
+
+@pytest.mark.asyncio
+async def test_get_agent_email_desktop_config_returns_stored_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gateway_runtime_module, "CosmicMailClient", FakeCosmicMailClient)
+    monkeypatch.setattr(agent_email_module, "CosmicMailClient", FakeCosmicMailClient)
+
+    with _runtime_root() as root:
+        runtime = _build_runtime(root)
+        runtime.agent_email_integration_store.initialize()
+        runtime.agent_email_integration_store.save_primary(
+            base_url="https://console.thelearnchain.com",
+            api_token="cm_org_token",
+            primary_mailbox_address="cosmic@example.com",
+            updated_at="2026-05-10T00:00:00Z",
+        )
+        await runtime.reconcile_agent_email_adapter()
+
+        result = await runtime.get_agent_email_desktop_config()
+
+    assert result == {
+        "available": True,
+        "base_url": "https://console.thelearnchain.com",
+        "api_token": "cm_org_token",
+        "primary_mailbox_address": "cosmic@example.com",
+        "organization_id": "org_123",
+    }
+
+
+@pytest.mark.asyncio
 async def test_save_agent_email_trusted_senders_pushes_to_cosmic_mail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

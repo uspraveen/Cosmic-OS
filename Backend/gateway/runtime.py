@@ -874,6 +874,46 @@ class GatewayRuntime:
         status["webhook"] = webhook
         return status
 
+    async def get_agent_email_desktop_config(self) -> dict[str, Any]:
+        """Return the cosmic-mail config the gateway already holds, plus the resolved
+        organization id, for the desktop's one-click connect flow.
+
+        The gateway is the canonical source of cosmic-mail credentials post-bootstrap;
+        this endpoint lets the desktop adopt them without the user typing anything.
+        Returns `available=False` when no integration is configured yet so the UI can
+        keep the manual connect form visible.
+        """
+        stored = self.agent_email_integration_store.get_primary()
+        configured = bool(
+            stored is not None
+            and getattr(stored, "configured", False)
+            and self._safe_text(stored.base_url)
+            and self._safe_text(stored.api_token)
+        )
+        if not configured or stored is None:
+            return {"available": False}
+
+        organization_id: str | None = None
+        adapter = self.registry.adapters.get("agent-email")
+        if isinstance(adapter, AgentEmailAdapter):
+            try:
+                auth_context = await adapter.client.get_auth_context()
+                organization_id = self._safe_text(auth_context.get("organization_id")) or None
+            except Exception as exc:  # pragma: no cover - depends on remote
+                logger.warning(
+                    "agent_email.desktop_config auth_context_failed: %s", exc
+                )
+
+        return {
+            "available": True,
+            "base_url": self._safe_text(stored.base_url),
+            "api_token": self._safe_text(stored.api_token),
+            "primary_mailbox_address": self._safe_text(
+                stored.primary_mailbox_address
+            ),
+            "organization_id": organization_id,
+        }
+
     async def save_agent_email_trusted_senders(
         self, trusted_senders: list[str]
     ) -> dict[str, Any]:

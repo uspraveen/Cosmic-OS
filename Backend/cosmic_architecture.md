@@ -1507,6 +1507,93 @@ sudo systemctl restart caddy
 
 **Operational note:** the same base domain may be reused for all users, but each VM still needs a unique hostname (for example, `<user_id>.thelearnchain.com`) because the current architecture connects the desktop directly to that user's VM edge.
 
+#### 3.5a.5b Cosmic Mail Auto-Provisioning
+
+After `bootstrap.py` materializes `gateway.env` (and therefore knows the VM's `GATEWAY_LOCAL_API_TOKEN`), it provisions a Cosmic Mail organization, default mailbox, default agent, and a fresh org-scoped API key for the user — without ever exposing the cosmic-mail admin key to the VM. The trusted boundary is a Supabase Edge Function that holds the admin key in Supabase Vault.
+
+##### Naming convention (one org per user)
+
+| Thing | Convention | Example for `full_name="Praveen Raj U S", email="uspraveenraj@gmail.com", id="c2ece0ad-…"` |
+| --- | --- | --- |
+| Cosmic Mail org `name` (display) | `users.full_name` if present, else `email` local-part, else `"Cosmic User"` | `Praveen Raj U S` |
+| Cosmic Mail org `slug` (globally unique) | `cosmic-<short_id>` where `<short_id>` = first 8 hex chars of `users.id` | `cosmic-c2ece0ad` |
+| Cosmic Mail `organizations.cosmic_user_id` | `users.id` verbatim — used by `provision-cosmic-mail-org` to find existing orgs and skip re-creation | `c2ece0ad-4b2d-4af4-ae65-1b07660550dc` |
+| Default mailbox local-part (memorable) | First non-empty of: `cosmic_<first_name>` → `cosmic_<last_name>` → `cosmic_<email_local_part>` → `cosmic_<short_id>`. Each candidate must be `>= 2` chars after slugify. Function tries them in order, falls through on `409 Conflict`. | `cosmic_praveen@mail.thelearnchain.com` |
+| Default agent (`name`/`slug`) | `Cosmic` / `cosmic` (per-org slug uniqueness only) | `Cosmic` |
+| Default agent `default_domain_id` | The platform-shared `mail.thelearnchain.com` domain row (see §3.5a.5c) | shared domain id |
+| Default agent `approval_required` | `true` — bypassed only by the trusted-recipients allowlist (see §3.5a.5d) | `true` |
+| Mailbox `display_name` (visible in From line) | `Cosmic` | `Cosmic <cosmic_praveen@mail.thelearnchain.com>` |
+
+##### Trusted side: Supabase Edge Function `provision-cosmic-mail-org`
+
+The Edge Function is the only component that holds the cosmic-mail admin key. It:
+
+1. Authenticates the caller using the VM's own `GATEWAY_LOCAL_API_TOKEN` (matched against `public.user_vms.api_token, status='active'`). No JWT.
+2. Reads `users.{id, email, full_name}` for naming.
+3. Reads cosmic-mail platform secrets via the SECURITY DEFINER helper RPC `public._get_platform_cosmic_mail_secrets()` (PostgREST does not expose `vault.decrypted_secrets` directly).
+4. Lists cosmic-mail domains via the admin key, finds the `is_shared=true, status=active` platform domain.
+5. Lists cosmic-mail orgs and finds one with `cosmic_user_id = users.id`. If absent, creates it with the naming above.
+6. Mints a fresh org-scoped API key.
+7. Reuses the org's existing mailbox on the shared domain if any (covers legacy local-parts like `iamcosmic001`); otherwise creates one using the candidate cascade.
+8. Reuses the org's existing `cosmic` agent if any; otherwise creates one with `default_domain_id = shared_domain.id, approval_required=true`. Links the agent to the mailbox as primary.
+9. Revokes any prior org-scoped keys for this org (now that the new key is verified by the steps above).
+10. Returns:
+    ```json
+    {
+      "success": true,
+      "base_url": "https://console.thelearnchain.com",
+      "organization": {"id": "...", "name": "...", "slug": "...", "cosmic_user_id": "..."},
+      "api_key":      {"id": "...", "plaintext": "cm_org_...", "name": "..."},
+      "mailbox":      {"id": "...", "address": "cosmic_praveen@mail.thelearnchain.com", "domain": "mail.thelearnchain.com"},
+      "agent":        {"id": "...", "slug": "cosmic", "name": "Cosmic"}
+    }
+    ```
+
+The function is **idempotent**: re-running bootstrap on the same VM rotates only the org key (fresh mint + revoke prior), and reuses the existing org/mailbox/agent. Failure modes return `{"success": false, "error": "..."}` with HTTP status 4xx/5xx.
+
+The cosmic-mail admin key never leaves Supabase. Only the org-scoped key is returned to the VM, where it is stored in `gateway/agent_email_integrations.db` (via `AgentEmailIntegrationStore.save_primary`).
+
+##### Vault secrets
+
+Stored once in `vault.secrets`:
+
+- `platform_cosmic_mail_admin_api_key` — the cosmic-mail admin key. Treat as root credential.
+- `platform_cosmic_mail_base_url` — the cosmic-mail base URL (no trailing slash), e.g. `https://console.thelearnchain.com`.
+
+Read via SECURITY DEFINER RPC `public._get_platform_cosmic_mail_secrets()` (granted `service_role` only).
+
+##### Bootstrap integration
+
+In `bootstrap.py.materialize_bootstrap_env_files()`:
+
+1. `consume_bootstrap_token` returns the env bundle (gateway, orchestrator, meeting, etc.).
+2. **(new)** Extract `gateway.env.GATEWAY_LOCAL_API_TOKEN` and call `provision_cosmic_mail_org_via_edge_function(vm_api_token=...)`. On success, `persist_cosmic_mail_provisioning(payload)` writes the result into `gateway/agent_email_integrations.db` via `AgentEmailIntegrationStore.save_primary`.
+3. The existing `build_email_agent_env_rendered()` reads `agent_email_integration_store` to populate `email-agent.env:COSMIC_MAIL_BASE_URL`/`COSMIC_MAIL_API_TOKEN`/`COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS` — it now picks up the just-provisioned values automatically.
+
+Failures during step 2 are logged and **do not block** the rest of bootstrap; the VM boots without an Agent Email integration and a future re-run of bootstrap retries idempotently.
+
+#### 3.5a.5c Cosmic Mail: Shared Platform Domain
+
+Because `Domain.name` is globally unique in cosmic-mail, only one org can own `mail.thelearnchain.com`. To avoid per-user MX/DKIM provisioning for a single platform domain, cosmic-mail's `Domain` table carries an `is_shared boolean` flag. Mailbox and agent creation accept any domain owned by the caller's org **or** any `is_shared=true` domain, regardless of ownership. Strict ownership is preserved for DKIM rotation, deactivation, and deliverability checks (these still go through `authorize_domain`, not `authorize_domain_for_mailbox`).
+
+The `mail.thelearnchain.com` row is owned by the platform's `cosmic` org and has `is_shared=true`. User-org mailboxes reference it via `domain_id`; the mailbox row's `organization_id` is the user's org, not the platform org's. DKIM, MX, and DMARC are configured once on the platform side.
+
+#### 3.5a.5d Cosmic Mail: Trusted Recipients Bypass
+
+The desktop app maintains a "Trusted senders" list in Spaces > Agent Email > Settings. Cosmic-OS is the source of truth and PUTs the full list to cosmic-mail's `PUT /v1/organizations/{org_id}/trusted-recipients` whenever it changes (and on every gateway adapter reconnect, for drift recovery). When `agent.approval_required = true` and **every** recipient on an outbound draft (to + cc + bcc) is in this allowlist, cosmic-mail bypasses the approval gate and sends directly. Email comparison is case-insensitive. Any single untrusted recipient falls back to the approval queue.
+
+The orchestrator's email-agent card explains this contract so it correctly interprets `delivery_status="queued_for_approval"` / `queued_for_approval=true` as a successful handoff rather than a stuck task.
+
+#### 3.5a.5e Desktop One-Click Connect
+
+After bootstrap completes, the gateway holds the cosmic-mail base URL, org-scoped API token, and primary mailbox address in its local `AgentEmailIntegrationStore`. The desktop adopts them without typing via:
+
+- `GET /channels/agent-email/desktop-config` (gateway, auth: `GATEWAY_LOCAL_API_TOKEN`) → `{available, base_url, api_token, primary_mailbox_address, organization_id}`. Returns `{available: false}` when the gateway has no integration configured.
+- IPC bridge: `gateway:get-agent-email-desktop-config` → renderer.
+- UI: Spaces > Agent Email > Settings > Connection has **two** buttons:
+  1. *Use VM-provisioned config* (primary, recommended): calls the desktop-config endpoint, then immediately persists via the existing `gateway:save-agent-email-config` IPC.
+  2. *Save connection* (secondary): the original manual base URL + API key form, kept for admin overrides.
+
 #### 3.5a.6 Desktop App Auth Flow
 
 The desktop app (Electron) implements a login gate that runs before the main UI loads:

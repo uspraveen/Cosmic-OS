@@ -28,6 +28,7 @@ import getpass
 import re
 import secrets
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, TypeVar
 from urllib.error import HTTPError, URLError
@@ -146,6 +147,7 @@ DEFAULT_SUPABASE_ANON_KEY = (
     "dm6YO4B9SAQ8hnGtR-OZS7jn5FcL-zz4s4XxP-TyCpk"
 )
 DEFAULT_SUPABASE_BOOTSTRAP_RPC = "consume_bootstrap_token"
+DEFAULT_COSMIC_MAIL_PROVISION_FUNCTION = "provision-cosmic-mail-org"
 REQUIRED_SERVICE_ENV_KEYS: Dict[str, Tuple[str, ...]] = {
     "model-router.env": ("GROQ_API_KEY",),
 }
@@ -3036,6 +3038,111 @@ def normalize_bootstrap_env_payload(
     return normalized
 
 
+def provision_cosmic_mail_org_via_edge_function(
+    *,
+    vm_api_token: str,
+    supabase_url: str,
+    supabase_anon_key: str,
+    function_name: str = DEFAULT_COSMIC_MAIL_PROVISION_FUNCTION,
+) -> Dict[str, object]:
+    """Call the Supabase `provision-cosmic-mail-org` Edge Function.
+
+    The function is the trusted boundary that holds the cosmic-mail admin key. It
+    looks up the VM by `vm_api_token` (matched against `public.user_vms.api_token`),
+    reads the user's profile, and idempotently creates / adopts a cosmic-mail
+    organization, default mailbox on the platform-shared `mail.thelearnchain.com`
+    domain, and a default `cosmic` agent. Always mints a fresh org-scoped API key
+    and revokes prior ones, so each bootstrap run starts from a clean credential.
+    """
+    token = meaningful_env_value(vm_api_token)
+    base = meaningful_env_value(supabase_url)
+    anon_key = meaningful_env_value(supabase_anon_key)
+    if token is None:
+        raise BootstrapError("vm_api_token is required to provision Cosmic Mail.")
+    if base is None or anon_key is None:
+        raise BootstrapError(
+            "Supabase URL and anon key are required to provision Cosmic Mail."
+        )
+
+    function_url = "{0}/functions/v1/{1}".format(base.rstrip("/"), function_name)
+    request = Request(
+        function_url,
+        data=json.dumps({"vm_api_token": token}).encode("utf-8"),
+        headers={
+            "Authorization": "Bearer {0}".format(anon_key),
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    def perform_request() -> str:
+        with urlopen(request, timeout=60) as response:
+            return response.read().decode("utf-8")
+
+    try:
+        raw = retry_call(
+            "Cosmic Mail provisioning Edge Function",
+            perform_request,
+            retry_exceptions=(HTTPError, URLError),
+            should_retry=should_retry_bootstrap_http_error,
+        )
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise BootstrapError(
+            "Cosmic Mail provisioning function returned HTTP {0}: {1}".format(
+                exc.code, body or exc.reason
+            )
+        ) from exc
+    except URLError as exc:
+        raise BootstrapError(
+            "Failed to reach Cosmic Mail provisioning function: {0}".format(exc.reason)
+        ) from exc
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise BootstrapError(
+            "Cosmic Mail provisioning function returned invalid JSON."
+        ) from exc
+
+    if not isinstance(payload, dict) or payload.get("success") is not True:
+        raise BootstrapError(
+            "Cosmic Mail provisioning function failed: {0}".format(
+                json.dumps(payload, default=str)
+            )
+        )
+
+    return payload
+
+
+def persist_cosmic_mail_provisioning(payload: Dict[str, object]) -> None:
+    """Persist the Edge Function response into the local AgentEmailIntegrationStore.
+
+    Once stored here, all downstream pieces — `gateway/agent_email_integration_store`,
+    the gateway adapter reconcile, the email-agent.env override, and the desktop's
+    one-click `desktop-config` endpoint — pick up the fresh org key and mailbox
+    automatically on the next read.
+    """
+    base_url = str(payload.get("base_url") or "").strip()
+    api_key_obj = payload.get("api_key") if isinstance(payload.get("api_key"), dict) else {}
+    plaintext = str((api_key_obj or {}).get("plaintext") or "").strip()  # type: ignore[union-attr]
+    mailbox_obj = payload.get("mailbox") if isinstance(payload.get("mailbox"), dict) else {}
+    primary_mailbox_address = str((mailbox_obj or {}).get("address") or "").strip()  # type: ignore[union-attr]
+
+    if not base_url or not plaintext:
+        raise BootstrapError(
+            "Cosmic Mail provisioning response is missing base_url or api_key.plaintext."
+        )
+
+    store = AgentEmailIntegrationStore(agent_email_integrations_db_path())
+    store.save_primary(
+        base_url=base_url,
+        api_token=plaintext,
+        primary_mailbox_address=primary_mailbox_address,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
 def fetch_bootstrap_env_payload(
     *,
     bootstrap_token: str,
@@ -4099,6 +4206,39 @@ def materialize_bootstrap_env_files(
         supabase_url=supabase_url,
         supabase_anon_key=supabase_anon_key,
     )
+
+    # Provision Cosmic Mail before computing service env overrides — the email-agent.env
+    # build pulls COSMIC_MAIL_* values from `AgentEmailIntegrationStore`, so persisting
+    # the provisioning result here makes the rest of bootstrap pick it up automatically.
+    # Best-effort: a Cosmic Mail outage must not block the rest of bootstrap.
+    gateway_env_overrides = external_env_by_name.get("gateway.env", {}) or {}
+    vm_api_token = meaningful_env_value(gateway_env_overrides.get("GATEWAY_LOCAL_API_TOKEN"))
+    if vm_api_token is not None:
+        try:
+            cosmic_mail_payload = provision_cosmic_mail_org_via_edge_function(
+                vm_api_token=vm_api_token,
+                supabase_url=supabase_url,
+                supabase_anon_key=supabase_anon_key,
+            )
+            persist_cosmic_mail_provisioning(cosmic_mail_payload)
+            log(
+                "Provisioned Cosmic Mail org for VM: org={0} mailbox={1}".format(
+                    (cosmic_mail_payload.get("organization") or {}).get("id"),
+                    (cosmic_mail_payload.get("mailbox") or {}).get("address"),
+                )
+            )
+        except BootstrapError as exc:
+            log(
+                "WARNING: Cosmic Mail provisioning skipped — local stack will boot "
+                "without an Agent Email integration. Re-run bootstrap to retry. "
+                "Error: {0}".format(exc)
+            )
+    else:
+        log(
+            "WARNING: Cosmic Mail provisioning skipped — bootstrap response is "
+            "missing GATEWAY_LOCAL_API_TOKEN."
+        )
+
     effective_sources = resolve_effective_service_env_sources(
         system_env_dir,
         include_memory=include_memory,
