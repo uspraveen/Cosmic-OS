@@ -92,7 +92,7 @@ def test_usage_store_dashboard_summary_groups_provider_and_feature(tmp_path: Pat
     assert summary["total_calls"] == 3
     assert summary["total_tokens"] == 335
     assert summary["providers"][0]["name"] == "Anthropic"
-    assert summary["providers"][0]["calls"] == 2
+    assert summary["providers"][0]["count"] == 2
     assert summary["providers"][0]["role"] == "claude-sonnet-4-6"
     assert summary["usage_by_feature"][0]["label"] == "Documents"
     assert summary["usage_by_feature"][0]["count"] == 2
@@ -146,7 +146,7 @@ def test_usage_store_dashboard_summary_derives_missing_cost_and_aggregates_provi
 
     assert summary["total_calls"] == 2
     assert summary["providers"][0]["name"] == "xAI"
-    assert summary["providers"][0]["calls"] == 2
+    assert summary["providers"][0]["count"] == 2
     assert summary["providers"][0]["role"] == "grok-4.20-beta-0309-reasoning +1 more"
     assert summary["providers"][0]["cost_usd"] == 0.016155
     assert summary["total_cost_usd"] == 0.016155

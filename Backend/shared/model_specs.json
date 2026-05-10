@@ -11,12 +11,12 @@
       "max_output_tokens": null,
       "recommended_headroom_reserve_tokens": 8000,
       "pricing": {
-        "input_per_1m_usd": null,
-        "cached_input_per_1m_usd": null,
-        "output_per_1m_usd": null
+        "input_per_1m_usd": 1.0,
+        "cached_input_per_1m_usd": 0.1,
+        "output_per_1m_usd": 5.0
       },
       "capabilities": {
-        "supports_cached_input_tokens": false,
+        "supports_cached_input_tokens": true,
         "supports_reasoning_tokens": false,
         "supports_streaming": true
       },
@@ -39,9 +39,37 @@
       "max_output_tokens": 128000,
       "recommended_headroom_reserve_tokens": 12000,
       "pricing": {
-        "input_per_1m_usd": null,
-        "cached_input_per_1m_usd": null,
-        "output_per_1m_usd": null
+        "input_per_1m_usd": 5.0,
+        "cached_input_per_1m_usd": 0.5,
+        "output_per_1m_usd": 25.0
+      },
+      "capabilities": {
+        "supports_cached_input_tokens": true,
+        "supports_reasoning_tokens": true,
+        "supports_streaming": true
+      },
+      "token_field_map": {
+        "prompt_tokens": ["input_tokens", "prompt_tokens"],
+        "completion_tokens": ["output_tokens", "completion_tokens"],
+        "total_tokens": ["total_tokens"],
+        "cached_tokens": ["cache_read_input_tokens", "cached_tokens"],
+        "reasoning_tokens": ["reasoning_tokens"]
+      },
+      "status": "active"
+    },
+    "anthropic:claude-sonnet-4-6": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "sdk": "anthropic",
+      "base_url": "https://api.anthropic.com/v1",
+      "usage_kind": "messages",
+      "context_window_tokens": 200000,
+      "max_output_tokens": 128000,
+      "recommended_headroom_reserve_tokens": 12000,
+      "pricing": {
+        "input_per_1m_usd": 3.0,
+        "cached_input_per_1m_usd": 0.3,
+        "output_per_1m_usd": 15.0
       },
       "capabilities": {
         "supports_cached_input_tokens": true,
@@ -67,9 +95,9 @@
       "max_output_tokens": null,
       "recommended_headroom_reserve_tokens": 0,
       "pricing": {
-        "input_per_1m_usd": null,
+        "input_per_1m_usd": 1.0,
         "cached_input_per_1m_usd": null,
-        "output_per_1m_usd": null
+        "output_per_1m_usd": 1.0
       },
       "capabilities": {
         "supports_cached_input_tokens": false,
@@ -123,12 +151,12 @@
       "max_output_tokens": null,
       "recommended_headroom_reserve_tokens": 0,
       "pricing": {
-        "input_per_1m_usd": null,
-        "cached_input_per_1m_usd": null,
-        "output_per_1m_usd": null
+        "input_per_1m_usd": 0.075,
+        "cached_input_per_1m_usd": 0.037,
+        "output_per_1m_usd": 0.3
       },
       "capabilities": {
-        "supports_cached_input_tokens": false,
+        "supports_cached_input_tokens": true,
         "supports_reasoning_tokens": false,
         "supports_streaming": false
       },
@@ -136,7 +164,7 @@
         "prompt_tokens": ["prompt_tokens", "input_tokens"],
         "completion_tokens": ["completion_tokens", "output_tokens"],
         "total_tokens": ["total_tokens"],
-        "cached_tokens": [],
+        "cached_tokens": ["cached_tokens", "cache_read_input_tokens"],
         "reasoning_tokens": []
       },
       "status": "active"
