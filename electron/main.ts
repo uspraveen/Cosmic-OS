@@ -2447,6 +2447,17 @@ app.whenReady().then(() => {
     })
   })
 
+  ipcMain.handle('gateway:get-agent-email-desktop-config', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/channels/agent-email/desktop-config', {
+      method: 'GET',
+      timeoutMs: 20000,
+    })
+  })
+
   ipcMain.handle('gateway:save-agent-email-trusted-senders', async (_, payload: {
     trustedSenders?: string[]
   }) => {

@@ -87,6 +87,13 @@ interface Window {
       primaryMailboxAddress?: string | null
     }) => Promise<any>
     clearGatewayAgentEmailConfig: () => Promise<any>
+    getGatewayAgentEmailDesktopConfig: () => Promise<{
+      available: boolean
+      base_url?: string
+      api_token?: string
+      primary_mailbox_address?: string
+      organization_id?: string | null
+    }>
     saveGatewayAgentEmailTrustedSenders: (payload: {
       trustedSenders: string[]
     }) => Promise<any>

@@ -388,6 +388,8 @@ interface AgentEmailApproval {
   agent: string
   mailbox: string
   recipients: string
+  cc: string
+  bcc: string
   state: string
   reason: string
   time: string
@@ -3250,12 +3252,17 @@ export default function SpacesControlCenter({
         }
       })
 
+      const formatRecipientList = (contacts: CosmicMailMailContact[] | undefined) =>
+        contacts?.map((recipient) => recipient.email).filter(Boolean).join(', ') || ''
+
       const mappedApprovals: AgentEmailApproval[] = organizationApprovals.map((approval) => ({
         id: approval.id,
         subject: approval.draft?.subject || 'Untitled draft',
         agent: approval.agent_name || 'Unknown agent',
         mailbox: approval.mailbox_address,
-        recipients: approval.draft?.to_recipients?.map((recipient) => recipient.email).join(', ') || '—',
+        recipients: formatRecipientList(approval.draft?.to_recipients) || '—',
+        cc: formatRecipientList(approval.draft?.cc_recipients),
+        bcc: formatRecipientList(approval.draft?.bcc_recipients),
         state: humanizeAgentEmailValue(approval.status),
         reason: approval.reviewer_note || 'Waiting for review',
         time: formatAgentEmailRelative(approval.created_at),
@@ -3556,6 +3563,50 @@ export default function SpacesControlCenter({
       setAgentEmailConfigSaving(false)
     }
   }, [agentEmailApiToken, agentEmailBaseUrl, requestAgentEmailSnapshot])
+
+  const handleAgentEmailUseVmConfig = useCallback(async () => {
+    if (!window.cosmic?.getGatewayAgentEmailDesktopConfig) {
+      setAgentEmailBanner({
+        tone: 'error',
+        message: 'Gateway Agent Email bridge is unavailable.',
+      })
+      return
+    }
+    try {
+      setAgentEmailConfigSaving(true)
+      const desktopConfig = await window.cosmic.getGatewayAgentEmailDesktopConfig()
+      if (!desktopConfig?.available || !desktopConfig.base_url || !desktopConfig.api_token) {
+        setAgentEmailBanner({
+          tone: 'info',
+          message: 'No VM-provisioned Cosmic Mail config yet. Re-run bootstrap or use the manual form.',
+        })
+        return
+      }
+      const status = normalizeGatewayAgentEmailStatus(
+        await window.cosmic.saveGatewayAgentEmailConfig({
+          baseUrl: desktopConfig.base_url,
+          apiToken: desktopConfig.api_token,
+          primaryMailboxAddress: desktopConfig.primary_mailbox_address ?? null,
+        }),
+      )
+      setAgentEmailBackendStatus(status)
+      const syncedBaseUrl = status.base_url || desktopConfig.base_url
+      const syncedApiToken = status.api_token || desktopConfig.api_token
+      setAgentEmailBaseUrl(syncedBaseUrl)
+      setAgentEmailApiToken(syncedApiToken)
+      window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.baseUrl, syncedBaseUrl)
+      window.cosmic?.saveSetting(AGENT_EMAIL_SETTINGS_KEYS.apiToken, syncedApiToken)
+      await requestAgentEmailSnapshot(true)
+      setAgentEmailBanner({
+        tone: 'success',
+        message: 'Connected via VM-provisioned Cosmic Mail org.',
+      })
+    } catch (error: unknown) {
+      setAgentEmailBanner({ tone: 'error', message: toErrorMessage(error) })
+    } finally {
+      setAgentEmailConfigSaving(false)
+    }
+  }, [requestAgentEmailSnapshot])
 
   const handleAgentEmailDisconnect = useCallback(async () => {
     try {
@@ -4945,6 +4996,15 @@ export default function SpacesControlCenter({
               <button
                 type="button"
                 className="agent-email-console-primary"
+                onClick={() => void handleAgentEmailUseVmConfig()}
+                disabled={agentEmailConfigSaving || !gatewayConnected}
+                title="Use the Cosmic Mail org that bootstrap already provisioned for this VM"
+              >
+                {agentEmailConfigSaving ? 'Connecting…' : 'Use VM-provisioned config'}
+              </button>
+              <button
+                type="button"
+                className="agent-email-console-secondary"
                 onClick={() => void handleAgentEmailSaveConfig()}
                 disabled={agentEmailConfigSaving || !gatewayConnected}
               >
@@ -5898,7 +5958,13 @@ export default function SpacesControlCenter({
                   <div className="agent-email-console-detail-rows">
                     <div className="agent-email-console-detail-row"><span>Agent</span><strong>{agentEmailSelectedApproval.agent}</strong></div>
                     <div className="agent-email-console-detail-row"><span>Mailbox</span><strong>{agentEmailSelectedApproval.mailbox}</strong></div>
-                    <div className="agent-email-console-detail-row"><span>Recipients</span><strong>{agentEmailSelectedApproval.recipients}</strong></div>
+                    <div className="agent-email-console-detail-row"><span>To</span><strong>{agentEmailSelectedApproval.recipients}</strong></div>
+                    {agentEmailSelectedApproval.cc ? (
+                      <div className="agent-email-console-detail-row"><span>Cc</span><strong>{agentEmailSelectedApproval.cc}</strong></div>
+                    ) : null}
+                    {agentEmailSelectedApproval.bcc ? (
+                      <div className="agent-email-console-detail-row"><span>Bcc</span><strong>{agentEmailSelectedApproval.bcc}</strong></div>
+                    ) : null}
                     <div className="agent-email-console-detail-row"><span>Triggered</span><strong>{agentEmailSelectedApproval.time}</strong></div>
                   </div>
                   <div className="agent-email-console-text-block">

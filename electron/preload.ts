@@ -232,6 +232,7 @@ contextBridge.exposeInMainWorld('cosmic', {
   getGatewayAgentEmailStatus: () => ipcRenderer.invoke('gateway:get-agent-email-status'),
   saveGatewayAgentEmailConfig: (payload: any) => ipcRenderer.invoke('gateway:save-agent-email-config', payload),
   clearGatewayAgentEmailConfig: () => ipcRenderer.invoke('gateway:clear-agent-email-config'),
+  getGatewayAgentEmailDesktopConfig: () => ipcRenderer.invoke('gateway:get-agent-email-desktop-config'),
   saveGatewayAgentEmailTrustedSenders: (payload: any) => ipcRenderer.invoke('gateway:save-agent-email-trusted-senders', payload),
   cosmicMailRequest: (payload: any) => ipcRenderer.invoke('cosmic-mail:request', payload),
   cosmicMailUploadDraftAttachment: (payload: any) => ipcRenderer.invoke('cosmic-mail:upload-draft-attachment', payload),
