@@ -622,6 +622,9 @@ class AgentRuntime:
                 enum_values = prop_schema.get("enum")
                 if isinstance(enum_values, list) and enum_values:
                     item["enum"] = [str(value)[:48] for value in enum_values[:6]]
+                for constraint_name in ("minimum", "maximum", "default"):
+                    if constraint_name in prop_schema:
+                        item[constraint_name] = prop_schema[constraint_name]
                 if name in required_set:
                     item["required"] = True
                 property_summaries.append(item)

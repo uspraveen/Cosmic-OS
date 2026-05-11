@@ -253,6 +253,58 @@ class BlockingAgent(AgentRuntime):
         return AgentResult(status="completed", output={"reply": "done"}, artifacts=[], error=None)
 
 
+def test_agent_runtime_schema_summary_includes_numeric_constraints(tmp_path: Path) -> None:
+    schema_dir = tmp_path / "schemas" / "intents"
+    schema_dir.mkdir(parents=True)
+    (schema_dir / "x.search.input.json").write_text(
+        json.dumps(
+            {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The X search query."},
+                    "max_posts": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 30,
+                        "default": 30,
+                        "description": "Maximum number of notable posts.",
+                    },
+                },
+                "required": ["query"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    card_path = tmp_path / "agent_card.yaml"
+    card_path.write_text(
+        """
+agent_id: cosmic/x-twitter-search-agent:1.0.0
+display_name: X Twitter Search Agent
+description: Test X agent.
+intents:
+  - name: x.search
+    description: Search X.
+    input_schema: schemas/intents/x.search.input.json
+stream_key: streams:cosmic/x-twitter-search-agent:1.0.0
+""".strip(),
+        encoding="utf-8",
+    )
+
+    agent = DummyAgent(
+        agent_card_path=card_path,
+        redis_client=FakeRedis(),
+        registry_db_path=tmp_path / "registry.db",
+        instance_id="inst_001",
+        agent_secret="agent-secret",
+    )
+
+    properties = agent.agent_card["intents"][0]["input_schema_summary"]["properties"]
+    max_posts = next(item for item in properties if item["name"] == "max_posts")
+    assert max_posts["minimum"] == 1
+    assert max_posts["maximum"] == 30
+    assert max_posts["default"] == 30
+
+
 @pytest.mark.asyncio
 async def test_agent_runtime_registers_card_and_heartbeats(tmp_path: Path) -> None:
     card_path = _write_agent_card(tmp_path)

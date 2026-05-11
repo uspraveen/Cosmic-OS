@@ -1718,37 +1718,121 @@ class ToolExecutor:
             for item in (tool_input.get("artifact_ids") if isinstance(tool_input.get("artifact_ids"), list) else [])
             if str(item).strip()
         ]
-        if not artifact_ids:
+        transient_explicit_artifact_ids = [
+            str(item.get("artifact_id") or "").strip()
+            for item in explicit_artifacts
+            if self._artifact_descriptor_needs_gateway_resolution(item)
+            and str(item.get("artifact_id") or "").strip()
+        ]
+        resolve_ids = self._dedupe_strings([*artifact_ids, *transient_explicit_artifact_ids])
+        if not resolve_ids:
+            return explicit_artifacts
+        if not self.gateway_url:
+            if artifact_ids:
+                return {"error": True, "message": "Artifact resolution requires Gateway internal API configuration."}
             return explicit_artifacts
         session_id = self._coerce_session_id(tool_input, context)
-        payload = await self._request_gateway_json(
-            "POST",
-            "/internal/session/artifacts/resolve",
-            json_body={
-                "session_id": session_id,
-                "artifact_ids": artifact_ids,
-                "all_sessions": self._coerce_bool(tool_input.get("all_sessions"), default=False),
-            },
+        resolve_all_sessions = self._coerce_bool(tool_input.get("all_sessions"), default=False) or bool(
+            transient_explicit_artifact_ids
         )
+        try:
+            payload = await self._request_gateway_json(
+                "POST",
+                "/internal/session/artifacts/resolve",
+                json_body={
+                    "session_id": session_id,
+                    "artifact_ids": resolve_ids,
+                    "all_sessions": resolve_all_sessions,
+                },
+            )
+        except Exception as exc:
+            if artifact_ids:
+                return {"error": True, "message": f"Artifact resolution failed: {exc}"}
+            logger.warning(
+                "orchestrator.delegate_input_artifact_rehydrate_failed artifact_ids=%s error=%s",
+                transient_explicit_artifact_ids,
+                exc,
+            )
+            return explicit_artifacts
         if payload is None:
             return {"error": True, "message": "Artifact resolution did not return a payload."}
         resolved_artifacts = [item for item in payload.get("artifacts") or [] if isinstance(item, dict)]
-        if len(resolved_artifacts) < len(artifact_ids):
+        requested_ids = set(artifact_ids)
+        resolved_requested_ids = {
+            str(item.get("artifact_id") or "").strip()
+            for item in resolved_artifacts
+            if str(item.get("artifact_id") or "").strip() in requested_ids
+        }
+        if len(resolved_requested_ids) < len(requested_ids):
             return {
                 "error": True,
                 "message": str(payload.get("message") or "One or more requested artifacts could not be resolved."),
             }
+        return self._merge_resolved_delegate_artifacts(
+            explicit_artifacts=explicit_artifacts,
+            resolved_artifacts=resolved_artifacts,
+        )
+
+    def _merge_resolved_delegate_artifacts(
+        self,
+        *,
+        explicit_artifacts: list[dict[str, Any]],
+        resolved_artifacts: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        resolved_by_id = {
+            str(item.get("artifact_id") or "").strip(): item
+            for item in resolved_artifacts
+            if str(item.get("artifact_id") or "").strip()
+        }
         merged: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
-        for item in [*explicit_artifacts, *resolved_artifacts]:
+        replaced_ids: set[str] = set()
+
+        def append_once(item: dict[str, Any]) -> None:
             artifact_id = str(item.get("artifact_id") or "").strip()
             path = str(item.get("path") or "").strip()
             dedupe_key = (artifact_id, path)
             if not any(dedupe_key) or dedupe_key in seen:
-                continue
+                return
             seen.add(dedupe_key)
             merged.append(item)
+
+        for item in explicit_artifacts:
+            artifact_id = str(item.get("artifact_id") or "").strip()
+            replacement = resolved_by_id.get(artifact_id)
+            if replacement is not None and self._artifact_descriptor_needs_gateway_resolution(item):
+                append_once(replacement)
+                replaced_ids.add(artifact_id)
+                continue
+            append_once(item)
+
+        for item in resolved_artifacts:
+            artifact_id = str(item.get("artifact_id") or "").strip()
+            if artifact_id in replaced_ids:
+                continue
+            append_once(item)
         return merged
+
+    def _artifact_descriptor_needs_gateway_resolution(self, artifact: dict[str, Any]) -> bool:
+        artifact_id = str(artifact.get("artifact_id") or "").strip()
+        if not artifact_id:
+            return False
+        path = str(artifact.get("path") or "").strip()
+        if not path:
+            return True
+        normalized = path.replace("\\", "/")
+        return normalized.startswith("/files/input/") or "/files/input/" in normalized
+
+    def _dedupe_strings(self, values: list[str]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            normalized = str(value or "").strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            result.append(normalized)
+        return result
 
     async def _request_gateway_json(
         self,

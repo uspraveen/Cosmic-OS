@@ -1132,3 +1132,81 @@ async def test_tool_executor_delegate_to_agent_resolves_artifact_ids_into_input_
         }
     ]
     assert result["message"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_delegate_rehydrates_transient_explicit_input_artifact() -> None:
+    observed: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url == httpx.URL("http://gateway/internal/session/artifacts/resolve"):
+            payload = json.loads(request.content.decode("utf-8"))
+            assert payload == {
+                "session_id": "email-thread:arun",
+                "artifact_ids": ["anthropic_file_pdf_1"],
+                "all_sessions": True,
+            }
+            return httpx.Response(
+                200,
+                json={
+                    "artifacts": [
+                        {
+                            "artifact_id": "anthropic_file_pdf_1",
+                            "task_id": "tsk_code_output",
+                            "mime": "application/pdf",
+                            "path": "runs/artifacts/tsk_code_output/orchestrator/anthropic_code_execution/file_pdf_1__Strategy.pdf",
+                            "filename": "Strategy.pdf",
+                            "sha256": "abc123",
+                            "audience": "deliverable",
+                        }
+                    ],
+                    "count": 1,
+                },
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    async def dispatcher(**kwargs):
+        observed.update(kwargs)
+        return AgentResult(status="completed", output={"message": "ok"}, artifacts=[])
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    executor = ToolExecutor(
+        gateway_url="http://gateway",
+        gateway_internal_token="internal-token",
+        agent_dispatcher=dispatcher,
+        client=client,
+    )
+    context = ToolExecutionContext(parent_task=_parent_task(), session_id="email-thread:arun")
+    try:
+        raw_result = await executor.execute(
+            "delegate_to_agent",
+            {
+                "intent": "email.handle",
+                "input": {"goal": "Email the doc to Arun."},
+                "input_artifacts": [
+                    {
+                        "artifact_id": "anthropic_file_pdf_1",
+                        "mime": "application/pdf",
+                        "path": "/files/input/stale/Strategy.pdf",
+                        "filename": "Strategy.pdf",
+                    }
+                ],
+            },
+            context=context,
+        )
+    finally:
+        await client.aclose()
+
+    result = json.loads(raw_result)
+    assert result["message"] == "ok"
+    assert observed["input_artifacts"] == [
+        {
+            "artifact_id": "anthropic_file_pdf_1",
+            "task_id": "tsk_code_output",
+            "mime": "application/pdf",
+            "path": "runs/artifacts/tsk_code_output/orchestrator/anthropic_code_execution/file_pdf_1__Strategy.pdf",
+            "filename": "Strategy.pdf",
+            "sha256": "abc123",
+            "audience": "deliverable",
+        }
+    ]

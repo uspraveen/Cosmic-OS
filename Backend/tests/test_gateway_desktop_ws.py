@@ -1357,6 +1357,45 @@ def test_artifact_store_preserves_pre_staged_desktop_document_metadata(tmp_path)
     assert stored[0]["ingest_state"] == "staged"
 
 
+def test_resolve_session_artifacts_falls_back_to_artifact_store(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    runtime.config.artifacts_root = tmp_path / "runs" / "artifacts"
+    runtime.session_store.initialize()
+    runtime.artifact_store.initialize()
+    artifact_path = runtime.config.artifacts_root / "tsk_pdf" / "orchestrator" / "doc.pdf"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_bytes(b"%PDF-1.4\n")
+
+    runtime.artifact_store.persist_output_artifacts(
+        request_id="req_original",
+        session_id="sess_original",
+        source_channel="desktop:desk_a",
+        source_platform="desktop",
+        source_message_id="msg_original",
+        artifacts=[
+            {
+                "artifact_id": "anthropic_file_pdf_1",
+                "task_id": "tsk_pdf",
+                "kind": "output",
+                "mime": "application/pdf",
+                "filename": "doc.pdf",
+                "path": "runs/artifacts/tsk_pdf/orchestrator/doc.pdf",
+                "sha256": "abc123",
+            }
+        ],
+    )
+
+    result = runtime.resolve_session_artifacts(
+        session_id="email-thread:followup",
+        artifact_ids=["anthropic_file_pdf_1"],
+        all_sessions=True,
+    )
+
+    assert result["count"] == 1
+    assert result["artifacts"][0]["path"] == "runs/artifacts/tsk_pdf/orchestrator/doc.pdf"
+    assert result["artifacts"][0]["filename"] == "doc.pdf"
+
+
 @pytest.mark.asyncio
 async def test_docs_autoparse_enriches_request_record_with_bundle_metadata(tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="opus")

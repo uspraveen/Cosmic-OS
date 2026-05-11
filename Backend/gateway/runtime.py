@@ -3517,6 +3517,50 @@ class GatewayRuntime:
             if len(seen) >= len(targets):
                 break
 
+        missing_ids = [artifact_id for artifact_id in normalized_ids if artifact_id not in seen]
+        for artifact_id in missing_ids:
+            stored_artifact = self.artifact_store.get(artifact_id)
+            if stored_artifact is None:
+                stored_artifact = self._lookup_stored_output_artifact(artifact_id)
+            if stored_artifact is None:
+                continue
+            artifact_session_id = self._safe_text(stored_artifact.get("session_id"))
+            if not all_sessions and normalized_session_id and artifact_session_id != normalized_session_id:
+                continue
+            normalized_records = self._normalize_produced_artifact_list([stored_artifact])
+            if not normalized_records:
+                continue
+            record = normalized_records[0]
+            if not bool(record.get("downloadable")):
+                continue
+            resolved_artifacts.append(
+                {
+                    key: value
+                    for key, value in {
+                        "artifact_id": record.get("artifact_id"),
+                        "task_id": record.get("task_id"),
+                        "mime": record.get("mime_type"),
+                        "mime_type": record.get("mime_type"),
+                        "sha256": record.get("sha256"),
+                        "path": record.get("path"),
+                        "source_url": record.get("source_url"),
+                        "created_by_agent": record.get("created_by_agent"),
+                        "created_at": record.get("created_at"),
+                        "kind": record.get("kind") or "output",
+                        "audience": "deliverable",
+                        "filename": record.get("filename"),
+                        "session_id": artifact_session_id or normalized_session_id,
+                        "request_id": self._safe_text(stored_artifact.get("request_id")),
+                        "source_message_id": self._safe_text(
+                            stored_artifact.get("source_message_id")
+                        ),
+                        "label": record.get("filename"),
+                    }.items()
+                    if value not in (None, "", [], {})
+                }
+            )
+            seen.add(artifact_id)
+
         response = {
             "session_id": normalized_session_id,
             "artifact_ids": normalized_ids,

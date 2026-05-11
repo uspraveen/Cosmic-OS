@@ -15,6 +15,7 @@ intents:
     usage_hints:
       - Use exact date windows and handle filters when the request is about recent X reactions or specific accounts.
       - Keep direct X evidence distinct from your own synthesis.
+      - max_posts supports 1 to 30 notable posts. Use max_posts=30 for broad scans or trend discovery instead of launching repeated tiny searches unless you need independent query angles.
 
   - name: x.recall_session
     description: Recall prior X/Twitter search runs from the agent's private session ledger.

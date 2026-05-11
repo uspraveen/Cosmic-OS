@@ -4604,7 +4604,35 @@ def install_service_env_files(
     )
     run(["install", "-d", "-m", "755", str(x_twitter_dest_path.parent)], use_sudo=True)
     if x_twitter_dest_path.exists():
-        log("System env file already exists: {0}".format(x_twitter_dest_path))
+        existing_raw = read_text_file(x_twitter_dest_path, use_sudo=True)
+        existing_data = parse_env_text(existing_raw)
+        rendered_data = parse_env_text(x_twitter_rendered)
+        desired_max_posts_raw = rendered_data.get("X_SEARCH_MAX_POSTS") or "30"
+        try:
+            desired_max_posts = int(desired_max_posts_raw)
+        except ValueError:
+            desired_max_posts = 30
+        try:
+            existing_max_posts = int(existing_data.get("X_SEARCH_MAX_POSTS") or "0")
+        except ValueError:
+            existing_max_posts = 0
+        if existing_max_posts < desired_max_posts:
+            updated_raw = render_env_with_overrides(
+                existing_raw,
+                {"X_SEARCH_MAX_POSTS": str(desired_max_posts)},
+            )
+            install_text_file(
+                x_twitter_dest_path, updated_raw, mode="600", use_sudo=True
+            )
+            installed.append(x_twitter_dest_path)
+            log(
+                "Updated system env file {0}: X_SEARCH_MAX_POSTS={1}".format(
+                    x_twitter_dest_path,
+                    desired_max_posts,
+                )
+            )
+        else:
+            log("System env file already exists: {0}".format(x_twitter_dest_path))
     else:
         install_text_file(
             x_twitter_dest_path, x_twitter_rendered, mode="600", use_sudo=True
