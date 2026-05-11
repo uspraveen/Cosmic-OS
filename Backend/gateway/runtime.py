@@ -247,6 +247,23 @@ class UsageSubmitResult:
     used_sync_fallback: bool = False
 
 
+def _desktop_system_metrics_usage_cache_key(
+    *,
+    usage_days: int | None,
+    usage_hours: int | None,
+    usage_start: str | None,
+    usage_end: str | None,
+) -> str:
+    return "|".join(
+        [
+            f"d={usage_days}" if usage_days is not None else "d=-",
+            f"h={usage_hours}" if usage_hours is not None else "h=-",
+            f"s={(usage_start or '')[:96]}",
+            f"e={(usage_end or '')[:96]}",
+        ]
+    )
+
+
 class GatewayRuntime:
     """Single-process Gateway runtime for channel ingress and control-plane routes."""
 
@@ -375,6 +392,7 @@ class GatewayRuntime:
         }
         self._system_metrics_lock = asyncio.Lock()
         self._system_metrics_snapshot: dict[str, Any] | None = None
+        self._system_metrics_snapshot_usage_key: str | None = None
         self._system_metrics_snapshot_at = 0.0
         self._system_metrics_cpu_sample: tuple[int, int] | None = None
         self._system_metrics_network_sample: tuple[int, int, float] | None = None
@@ -8687,13 +8705,26 @@ class GatewayRuntime:
         return await self.orchestrator.list_registry_agents()
 
     async def get_desktop_system_metrics(
-        self, *, force_refresh: bool = False
+        self,
+        *,
+        force_refresh: bool = False,
+        usage_days: int | None = None,
+        usage_hours: int | None = None,
+        usage_start: str | None = None,
+        usage_end: str | None = None,
     ) -> dict[str, Any]:
+        usage_key = _desktop_system_metrics_usage_cache_key(
+            usage_days=usage_days,
+            usage_hours=usage_hours,
+            usage_start=usage_start,
+            usage_end=usage_end,
+        )
         now = time.monotonic()
         ttl = max(2.0, self.config.desktop_system_metrics_cache_ttl_sec)
         if (
             not force_refresh
             and self._system_metrics_snapshot is not None
+            and self._system_metrics_snapshot_usage_key == usage_key
             and (now - self._system_metrics_snapshot_at) < ttl
         ):
             return dict(self._system_metrics_snapshot)
@@ -8703,17 +8734,42 @@ class GatewayRuntime:
             if (
                 not force_refresh
                 and self._system_metrics_snapshot is not None
+                and self._system_metrics_snapshot_usage_key == usage_key
                 and (now - self._system_metrics_snapshot_at) < ttl
             ):
                 return dict(self._system_metrics_snapshot)
 
-            snapshot = await self._build_desktop_system_metrics_snapshot()
+            snapshot = await self._build_desktop_system_metrics_snapshot(
+                usage_days=usage_days,
+                usage_hours=usage_hours,
+                usage_start=usage_start,
+                usage_end=usage_end,
+            )
             self._system_metrics_snapshot = snapshot
+            self._system_metrics_snapshot_usage_key = usage_key
             self._system_metrics_snapshot_at = time.monotonic()
             return dict(snapshot)
 
-    async def _build_desktop_system_metrics_snapshot(self) -> dict[str, Any]:
-        usage_summary = self.usage_store.dashboard_summary()
+    async def _build_desktop_system_metrics_snapshot(
+        self,
+        *,
+        usage_days: int | None = None,
+        usage_hours: int | None = None,
+        usage_start: str | None = None,
+        usage_end: str | None = None,
+    ) -> dict[str, Any]:
+        summary_kwargs: dict[str, Any] = {}
+        stripped_start = (usage_start or "").strip()
+        if stripped_start:
+            summary_kwargs["range_start_iso"] = stripped_start
+            if (usage_end or "").strip():
+                summary_kwargs["range_end_iso"] = str(usage_end).strip()
+        elif usage_hours is not None:
+            summary_kwargs["period_hours"] = int(usage_hours)
+        elif usage_days is not None:
+            summary_kwargs["period_days"] = int(usage_days)
+        usage_summary = self.usage_store.dashboard_summary(**summary_kwargs)
+        usage_bounds = self.usage_store.usage_time_bounds()
         scheduler_summary = self.scheduler_store.summary()
         delivery_summary = self.delivery_queue_store.summary()
         wishlist_summary = self.capability_wishlist_service.summary()
@@ -8738,6 +8794,7 @@ class GatewayRuntime:
             "calls": int(usage_summary.get("total_calls") or 0),
             "tokens": int(usage_summary.get("total_tokens") or 0),
             "latest_call_at": usage_summary.get("latest_call_at"),
+            "usage_period": usage_summary.get("usage_period"),
         }
 
         services = self._build_desktop_services_snapshot(
@@ -8766,6 +8823,7 @@ class GatewayRuntime:
             "fetched_at": fetched_at_ms,
             "fetchedAt": fetched_at_ms,
             "budget": budget,
+            "usage_bounds": usage_bounds,
             "providers": usage_summary.get("providers") or [],
             "usage_by_feature": usage_summary.get("usage_by_feature") or [],
             "services": services,

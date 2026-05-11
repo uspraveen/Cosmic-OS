@@ -107,7 +107,19 @@ contextBridge.exposeInMainWorld('cosmic', {
   logoutGatewayCursor: () => ipcRenderer.invoke('gateway:logout-cursor'),
   getGatewayAlphaAgentConfig: () => ipcRenderer.invoke('gateway:get-alpha-agent-config'),
   saveGatewayAlphaAgentConfig: (payload: any) => ipcRenderer.invoke('gateway:save-alpha-agent-config', payload),
-  getGatewaySystemMetrics: (forceRefresh?: boolean) => ipcRenderer.invoke('gateway:get-system-metrics', forceRefresh),
+  getGatewaySystemMetrics: (
+    opts?:
+      | boolean
+      | {
+          forceRefresh?: boolean
+          usage?: {
+            usage_days?: number
+            usage_hours?: number
+            usage_start?: string
+            usage_end?: string
+          }
+        },
+  ) => ipcRenderer.invoke('gateway:get-system-metrics', opts ?? false),
   getGatewayRegistryAgents: () => ipcRenderer.invoke('gateway:get-registry-agents'),
   downloadGatewayOutputArtifact: (payload: { messageId: string; artifactId: string; suggestedFilename?: string; mimeType?: string; timeoutMs?: number }) => ipcRenderer.invoke('gateway:download-output-artifact', payload),
   pickGatewayDocuments: () => ipcRenderer.invoke('gateway:pick-documents'),

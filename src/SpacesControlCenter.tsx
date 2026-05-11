@@ -178,6 +178,8 @@ interface GatewaySystemMetrics {
   services?: unknown[] | null
   usage?: Record<string, unknown> | null
   usage_by_feature?: unknown[] | null
+  /** Server MIN/MAX llm_call_placed_at for limiting custom date range */
+  usage_bounds?: Record<string, unknown> | null
   vm?: Record<string, unknown> | null
 }
 
@@ -674,6 +676,89 @@ function isPlausibleTrustedSenderEmail(value: string): boolean {
 
 const MANAGE_REFRESH_MS = 30_000
 const MANAGE_REFRESH_TIMEOUT_MS = 8_000
+
+type ManageUsageMode = '24h' | '7d' | '30d' | 'custom'
+
+type ManageUsagePeriodPayload = {
+  usage_days?: number
+  usage_hours?: number
+  usage_start?: string
+  usage_end?: string
+}
+
+/** HTML date input value (yyyy-mm-dd, local calendar day) → UTC ISO at start of that local day. */
+function localDateYmdToUtcRangeStart(ymd: string): string {
+  const p = ymd.trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(p)) return ''
+  const [y, m, d] = p.split('-').map((x) => Number.parseInt(x, 10))
+  if (!y || !m || !d) return ''
+  const local = new Date(y, m - 1, d, 0, 0, 0, 0)
+  return local.toISOString().replace(/\.\d{3}Z$/, 'Z')
+}
+
+/** End of local calendar day → UTC ISO (inclusive window on gateway). */
+function localDateYmdToUtcRangeEnd(ymd: string): string {
+  const p = ymd.trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(p)) return ''
+  const [y, m, d] = p.split('-').map((x) => Number.parseInt(x, 10))
+  if (!y || !m || !d) return ''
+  const local = new Date(y, m - 1, d, 23, 59, 59, 999)
+  return local.toISOString().replace(/\.\d{3}Z$/, 'Z')
+}
+
+function formatYmdLocaleLong(ymd: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd.trim())) return ''
+  const [y, m, d] = ymd.split('-').map((x) => Number.parseInt(x, 10))
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  })
+}
+
+/** yyyy-mm-dd for min= on date inputs: UTC month containing earliest stored usage row. */
+function utcMonthStartYmdFromIso(iso: string | null | undefined): string {
+  if (!iso || typeof iso !== 'string' || !iso.trim()) return ''
+  const raw = iso.trim()
+  const t = Date.parse(raw.endsWith('Z') ? raw : `${raw.replace(/\.\d+$/, '')}Z`)
+  if (Number.isNaN(t)) return ''
+  const d = new Date(t)
+  const y = d.getUTCFullYear()
+  const m = d.getUTCMonth()
+  return `${y}-${String(m + 1).padStart(2, '0')}-01`
+}
+
+function todayYmdLocal(): string {
+  const n = new Date()
+  return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`
+}
+
+function manageUsageOptionsForMode(
+  mode: ManageUsageMode,
+  customStart: string,
+  customEnd: string,
+  fallback: ManageUsagePeriodPayload,
+): ManageUsagePeriodPayload {
+  switch (mode) {
+    case '24h':
+      return { usage_hours: 24 }
+    case '7d':
+      return { usage_days: 7 }
+    case '30d':
+      return { usage_days: 30 }
+    case 'custom': {
+      const startIso = localDateYmdToUtcRangeStart(customStart)
+      if (!startIso) return fallback
+      const endTrim = customEnd.trim()
+      if (!endTrim) return { usage_start: startIso }
+      const endIso = localDateYmdToUtcRangeEnd(endTrim)
+      return endIso ? { usage_start: startIso, usage_end: endIso } : { usage_start: startIso }
+    }
+    default:
+      return { usage_days: 30 }
+  }
+}
+
 const MANAGE_PROVIDER_ACCENTS: AccentTone[] = ['azure', 'gold', 'mint', 'rose', 'slate']
 
 const MANAGE_PROVIDER_FALLBACK: ManageProviderDatum[] = [
@@ -1301,9 +1386,11 @@ function normalizeServiceMemory(mem: unknown): string {
 }
 
 function parseLiveProviders(source: unknown): ManageProviderDatum[] {
-  const records = toArray(toRecord(source)?.providers || source)
-  if (!records.length) return MANAGE_PROVIDER_FALLBACK
-  return records.slice(0, 5).map((record, index) => {
+  const top = toRecord(source)
+  const list = top?.providers
+  if (Array.isArray(list)) {
+    if (list.length === 0) return []
+    return list.slice(0, 5).map((record, index) => {
     const raw = toRecord(record)
     const name = pickString(raw, ['name', 'provider', 'model']) || `Provider ${index + 1}`
     const role = pickString(raw, ['role', 'type']) || 'External model'
@@ -1318,13 +1405,17 @@ function parseLiveProviders(source: unknown): ManageProviderDatum[] {
       pct: normalizePercent(pct),
       accent: MANAGE_PROVIDER_ACCENTS[index % MANAGE_PROVIDER_ACCENTS.length],
     }
-  })
+    })
+  }
+  return MANAGE_PROVIDER_FALLBACK
 }
 
 function parseLiveUsage(source: unknown): ManageUsageDatum[] {
-  const rows = toArray(toRecord(source)?.usage_by_feature || source)
-  if (!rows.length) return MANAGE_USAGE_FALLBACK
-  return rows.slice(0, 6).map((record, index) => {
+  const top = toRecord(source)
+  const rowsField = top?.usage_by_feature
+  if (Array.isArray(rowsField)) {
+    if (rowsField.length === 0) return []
+    return rowsField.slice(0, 6).map((record, index) => {
     const sourceRecord = toRecord(record)
     const calls = pickNumber(sourceRecord, ['count', 'calls', 'requests']) || 0
     const pct = pickNumber(sourceRecord, ['percent', 'share', 'ratio']) || 0
@@ -1335,7 +1426,9 @@ function parseLiveUsage(source: unknown): ManageUsageDatum[] {
       pct: normalizePercent(pct),
       accent: MANAGE_PROVIDER_ACCENTS[index % MANAGE_PROVIDER_ACCENTS.length],
     }
-  })
+    })
+  }
+  return MANAGE_USAGE_FALLBACK
 }
 
 function parseLiveServices(source: unknown): ManageServiceDatum[] {
@@ -1899,6 +1992,10 @@ export default function SpacesControlCenter({
   const manageMetricsValueRef = useRef<GatewaySystemMetrics | null>(null)
   const manageLastUpdatedAtRef = useRef<number | null>(null)
   const manageMetricsRequestRef = useRef(0)
+  const [manageUsageMode, setManageUsageMode] = useState<ManageUsageMode>('30d')
+  const [manageUsageCustomStart, setManageUsageCustomStart] = useState('')
+  const [manageUsageCustomEnd, setManageUsageCustomEnd] = useState('')
+  const manageUsageAppliedOptionsRef = useRef<ManageUsagePeriodPayload>({ usage_days: 30 })
 
   const [registryAgents, setRegistryAgents] = useState<RegistryAgentRow[]>([])
   const [registryAgentsError, setRegistryAgentsError] = useState<string | null>(null)
@@ -1989,7 +2086,11 @@ export default function SpacesControlCenter({
     }
   }, [active, page, requestCalendarAgenda])
 
-  const requestManageMetrics = useCallback(async (showSpinner = false, forceRefresh = false) => {
+  const requestManageMetrics = useCallback(async (
+    showSpinner = false,
+    forceRefresh = false,
+    usageModeOverride?: ManageUsageMode,
+  ) => {
     if (!gatewayConnected) {
       setManageMetrics(null)
       setManageLastUpdatedAt(null)
@@ -2017,13 +2118,25 @@ export default function SpacesControlCenter({
       }
     }, MANAGE_REFRESH_TIMEOUT_MS)
 
+    const mode = usageModeOverride ?? manageUsageMode
+    const usageOpts = manageUsageOptionsForMode(
+      mode,
+      manageUsageCustomStart,
+      manageUsageCustomEnd,
+      manageUsageAppliedOptionsRef.current,
+    )
+
     try {
-      const snapshot = await window.cosmic.getGatewaySystemMetrics(forceRefresh)
+      const snapshot = await window.cosmic.getGatewaySystemMetrics({
+        forceRefresh: true,
+        usage: usageOpts,
+      })
       if (requestId !== manageMetricsRequestRef.current) {
         return
       }
       setManageMetrics(snapshot ? (snapshot as GatewaySystemMetrics) : null)
       setManageMetricsError(null)
+      manageUsageAppliedOptionsRef.current = usageOpts
       const snapshotRecord = toRecord(snapshot)
       const updatedAt =
         pickTimestamp(snapshotRecord?.fetchedAt) ??
@@ -2050,7 +2163,13 @@ export default function SpacesControlCenter({
         setManageMetricsRefreshing(false)
       }
     }
-  }, [gatewayConnected, gatewayDetail])
+  }, [
+    gatewayConnected,
+    gatewayDetail,
+    manageUsageMode,
+    manageUsageCustomStart,
+    manageUsageCustomEnd,
+  ])
 
   useEffect(() => {
     if (!active || page !== 'manage') return
@@ -6098,7 +6217,7 @@ export default function SpacesControlCenter({
 
     const hardwareRows = [
       { label: 'CPU', value: `${manageSnapshot.cpuPercent}%`, pct: manageSnapshot.cpuPercent },
-      { label: 'Memory', value: `${manageSnapshot.memoryUsedText} / ${manageSnapshot.memoryTotalText}`, pct: manageSnapshot.memoryPercent },
+      { label: 'RAM', value: `${manageSnapshot.memoryUsedText} / ${manageSnapshot.memoryTotalText}`, pct: manageSnapshot.memoryPercent },
       { label: 'Disk', value: `${manageSnapshot.diskUsedText} / ${manageSnapshot.diskTotalText}`, pct: manageSnapshot.diskPercent },
       { label: 'Network', value: manageSnapshot.networkThroughput, pct: networkPercent },
     ]
@@ -6107,6 +6226,12 @@ export default function SpacesControlCenter({
       const c = 2 * Math.PI * r
       return `${(pct / 100) * c} ${c}`
     }
+
+    const usageBounds = toRecord(manageMetrics)?.usage_bounds
+    const earliestCallAt = pickString(usageBounds || {}, ['earliest_call_at'])
+    const minSelectableYmd = utcMonthStartYmdFromIso(earliestCallAt)
+    const maxSelectableYmd = todayYmdLocal()
+    const customStartValid = /^\d{4}-\d{2}-\d{2}$/.test(manageUsageCustomStart.trim())
 
     return (
       <div className="spaces-page mg-page">
@@ -6122,6 +6247,96 @@ export default function SpacesControlCenter({
                 <span className="mg-spend-val">{manageSnapshot.budgetUsed.toFixed(2)}</span>
               </div>
               <span className="mg-spend-cap">of {budgetCap} budget &middot; {budgetUsagePercent}% used</span>
+              <div className="mg-usage-period" role="group" aria-label="Usage and cost time window">
+                <span className="mg-usage-period-label">Spend window</span>
+                <div className="mg-usage-period-presets">
+                  <button
+                    type="button"
+                    className={`mg-usage-period-chip ${manageUsageMode === '24h' ? 'active' : ''}`}
+                    onClick={() => {
+                      setManageUsageMode('24h')
+                      void requestManageMetrics(true, true, '24h')
+                    }}
+                  >
+                    Last 24h
+                  </button>
+                  <button
+                    type="button"
+                    className={`mg-usage-period-chip ${manageUsageMode === '7d' ? 'active' : ''}`}
+                    onClick={() => {
+                      setManageUsageMode('7d')
+                      void requestManageMetrics(true, true, '7d')
+                    }}
+                  >
+                    7 days
+                  </button>
+                  <button
+                    type="button"
+                    className={`mg-usage-period-chip ${manageUsageMode === '30d' ? 'active' : ''}`}
+                    onClick={() => {
+                      setManageUsageMode('30d')
+                      void requestManageMetrics(true, true, '30d')
+                    }}
+                  >
+                    30 days
+                  </button>
+                  <button
+                    type="button"
+                    className={`mg-usage-period-chip ${manageUsageMode === 'custom' ? 'active' : ''}`}
+                    onClick={() => setManageUsageMode('custom')}
+                  >
+                    Custom
+                  </button>
+                </div>
+                {manageUsageMode === 'custom' ? (
+                  <div className="mg-usage-period-custom">
+                    <p className="mg-usage-period-calendar-hint">
+                      Use the date control for each field — it opens your system calendar. Dates below show in your locale; the gateway receives UTC-aligned bounds for those local days.
+                    </p>
+                    <div className="mg-usage-period-date-row">
+                      <label className="mg-usage-period-field">
+                        <span>Start date</span>
+                        <input
+                          type="date"
+                          value={manageUsageCustomStart}
+                          min={minSelectableYmd || undefined}
+                          max={maxSelectableYmd}
+                          onChange={(e) => {
+                            const v = e.target.value
+                            setManageUsageCustomStart(v)
+                            setManageUsageCustomEnd((prev) => (prev && v && prev < v ? v : prev))
+                          }}
+                        />
+                        <span className="mg-usage-period-locale">
+                          {manageUsageCustomStart ? formatYmdLocaleLong(manageUsageCustomStart) : '—'}
+                        </span>
+                      </label>
+                      <label className="mg-usage-period-field">
+                        <span>End date</span>
+                        <span className="mg-usage-period-optional">optional · defaults to now</span>
+                        <input
+                          type="date"
+                          value={manageUsageCustomEnd}
+                          min={(manageUsageCustomStart || minSelectableYmd) || undefined}
+                          max={maxSelectableYmd}
+                          onChange={(e) => setManageUsageCustomEnd(e.target.value)}
+                        />
+                        <span className="mg-usage-period-locale">
+                          {manageUsageCustomEnd ? formatYmdLocaleLong(manageUsageCustomEnd) : 'Open-ended (through now)'}
+                        </span>
+                      </label>
+                      <button
+                        type="button"
+                        className="mg-usage-period-apply"
+                        disabled={!customStartValid || manageMetricsRefreshing}
+                        onClick={() => void requestManageMetrics(true, true, 'custom')}
+                      >
+                        Apply range
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
             </div>
             <div className="mg-ring-wrap">
               <svg viewBox="0 0 100 100" className="mg-ring-svg">
@@ -6136,7 +6351,10 @@ export default function SpacesControlCenter({
             </div>
           </div>
           <div className="mg-provider-row">
-            {manageSnapshot.providers.map((p) => (
+            {manageSnapshot.providers.length === 0 ? (
+              <div className="mg-empty-hint" role="status">No provider spend in this window.</div>
+            ) : (
+              manageSnapshot.providers.map((p) => (
               <div key={p.name} className="mg-provider-chip">
                 <span className={`mg-provider-dot ${p.accent}`} />
                 <div className="mg-provider-info">
@@ -6145,7 +6363,8 @@ export default function SpacesControlCenter({
                 </div>
                 <span className="mg-provider-cost">{p.cost}</span>
               </div>
-            ))}
+            ))
+            )}
           </div>
         </section>
 
@@ -6186,7 +6405,10 @@ export default function SpacesControlCenter({
               <h3>Usage by feature</h3>
             </div>
             <div className="mg-usage-list">
-              {manageSnapshot.usage.map((u) => (
+              {manageSnapshot.usage.length === 0 ? (
+                <div className="mg-empty-hint" role="status">No feature usage in this window.</div>
+              ) : (
+                manageSnapshot.usage.map((u) => (
                 <div key={u.label} className="mg-usage-row">
                   <span className={`mg-usage-dot ${u.accent}`} />
                   <span className="mg-usage-name">{u.label}</span>
@@ -6196,7 +6418,8 @@ export default function SpacesControlCenter({
                   </div>
                   <span className="mg-usage-pct">{u.pct}%</span>
                 </div>
-              ))}
+              ))
+              )}
             </div>
           </section>
 

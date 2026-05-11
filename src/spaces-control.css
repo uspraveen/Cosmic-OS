@@ -6991,6 +6991,141 @@
   color: rgba(255, 255, 255, 0.32);
 }
 
+.mg-usage-period {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.mg-usage-period-label {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.34);
+}
+
+.mg-usage-period-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mg-usage-period-chip {
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.72);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.mg-usage-period-chip:hover {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(121, 201, 255, 0.28);
+}
+
+.mg-usage-period-chip.active {
+  border-color: rgba(121, 201, 255, 0.45);
+  background: rgba(121, 201, 255, 0.12);
+  color: #fff;
+}
+
+.mg-usage-period-custom {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.mg-usage-period-calendar-hint {
+  font-size: 11px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.32);
+  margin: 0;
+}
+
+.mg-usage-period-date-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px 18px;
+}
+
+.mg-usage-period-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.38);
+}
+
+.mg-usage-period-field input[type='datetime-local'],
+.mg-usage-period-field input[type='date'] {
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.35);
+  color: rgba(255, 255, 255, 0.88);
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  min-width: 200px;
+}
+
+.mg-usage-period-apply {
+  border-radius: 10px;
+  padding: 8px 16px;
+  font-size: 12px;
+  font-weight: 700;
+  border: 1px solid rgba(118, 224, 197, 0.35);
+  background: rgba(118, 224, 197, 0.12);
+  color: rgba(255, 255, 255, 0.92);
+  cursor: pointer;
+}
+
+.mg-usage-period-apply:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.mg-usage-period-locale {
+  font-size: 11px;
+  font-weight: 650;
+  color: rgba(118, 224, 197, 0.88);
+  margin-top: 5px;
+}
+
+.mg-usage-period-optional {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.28);
+}
+
+.mg-empty-hint {
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.35);
+  padding: 10px 2px 6px;
+}
+
+.mg-usage-period-hint {
+  flex: 1 1 100%;
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.28);
+}
+
 /* Ring */
 
 .mg-ring-wrap {

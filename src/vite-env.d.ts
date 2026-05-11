@@ -172,7 +172,19 @@ interface Window {
     revokeAllMobileDevices: () => Promise<{ revoked_count: number; device_ids: string[]; revoked_at: string; reason: string }>
     onGatewayEvent: (cb: (data: any) => void) => () => void
     onGatewayStatus: (cb: (data: GatewaySocketState['status']) => void) => () => void
-    getGatewaySystemMetrics: (forceRefresh?: boolean) => Promise<unknown>
+    getGatewaySystemMetrics: (
+      opts?:
+        | boolean
+        | {
+            forceRefresh?: boolean
+            usage?: {
+              usage_days?: number
+              usage_hours?: number
+              usage_start?: string
+              usage_end?: string
+            }
+          },
+    ) => Promise<unknown>
     getGatewayRegistryAgents: () => Promise<unknown>
     downloadGatewayOutputArtifact: (payload: {
       messageId: string

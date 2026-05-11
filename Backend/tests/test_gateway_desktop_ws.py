@@ -3865,8 +3865,8 @@ def test_desktop_system_metrics_endpoint_returns_cached_snapshot(test_client: Te
     runtime = test_client.app.state.gateway_runtime
     calls: list[bool] = []
 
-    async def fake_get_desktop_system_metrics(*, force_refresh: bool = False) -> dict[str, Any]:
-        calls.append(force_refresh)
+    async def fake_get_desktop_system_metrics(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append(bool(kwargs.get("force_refresh")))
         return {
             "sourceEndpoint": "/desktop/system-metrics",
             "services": [{"name": "Gateway", "status": "active", "summary": "1/1 channels healthy"}],

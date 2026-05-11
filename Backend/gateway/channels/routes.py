@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field
 
 from ..runtime import GatewayRuntime
@@ -1451,10 +1451,20 @@ async def list_channels(
 @router.get("/desktop/system-metrics")
 async def get_desktop_system_metrics(
     force_refresh: bool = False,
+    usage_days: int | None = Query(default=None, ge=1, le=366),
+    usage_hours: int | None = Query(default=None, ge=1, le=8784),
+    usage_start: str | None = Query(default=None, max_length=96),
+    usage_end: str | None = Query(default=None, max_length=96),
     _: None = Depends(require_local_api_token),
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
-    return await runtime.get_desktop_system_metrics(force_refresh=force_refresh)
+    return await runtime.get_desktop_system_metrics(
+        force_refresh=force_refresh,
+        usage_days=usage_days,
+        usage_hours=usage_hours,
+        usage_start=usage_start,
+        usage_end=usage_end,
+    )
 
 
 @router.get("/desktop/registry-agents")

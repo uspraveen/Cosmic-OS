@@ -476,6 +476,13 @@ const GATEWAY_SYSTEM_METRIC_FALLBACK_PATHS = [
 ]
 const GATEWAY_SYSTEM_METRICS_CACHE_TTL_MS = 15_000
 
+export type GatewayUsagePeriodOptions = {
+  usage_days?: number
+  usage_hours?: number
+  usage_start?: string
+  usage_end?: string
+}
+
 let gatewaySystemMetricsCache:
   | { cacheKey: string; fetchedAt: number; payload: any }
   | null = null
@@ -483,14 +490,40 @@ let gatewaySystemMetricsInFlight:
   | { cacheKey: string; promise: Promise<any> }
   | null = null
 
-function gatewaySystemMetricsCacheKey(config: GatewayConnectionConfig) {
-  return `${normalizeGatewayBaseUrl(config?.baseUrl || '')}|${String(config?.apiToken || '').trim()}`
+function appendSystemMetricsUsageParams(params: URLSearchParams, usage?: GatewayUsagePeriodOptions) {
+  if (!usage) return
+  if (usage.usage_days != null && Number.isFinite(usage.usage_days)) {
+    params.set('usage_days', String(Math.trunc(Number(usage.usage_days))))
+  }
+  if (usage.usage_hours != null && Number.isFinite(usage.usage_hours)) {
+    params.set('usage_hours', String(Math.trunc(Number(usage.usage_hours))))
+  }
+  const start = usage.usage_start != null ? String(usage.usage_start).trim() : ''
+  if (start) params.set('usage_start', start)
+  const end = usage.usage_end != null ? String(usage.usage_end).trim() : ''
+  if (end) params.set('usage_end', end)
 }
 
-async function fetchGatewaySystemMetrics(config: GatewayConnectionConfig, forceRefresh = false) {
-  const primaryPath = forceRefresh
-    ? `${GATEWAY_SYSTEM_METRIC_PRIMARY_PATH}?force_refresh=1`
-    : GATEWAY_SYSTEM_METRIC_PRIMARY_PATH
+function gatewaySystemMetricsCacheKey(config: GatewayConnectionConfig, usage?: GatewayUsagePeriodOptions) {
+  const base = `${normalizeGatewayBaseUrl(config?.baseUrl || '')}|${String(config?.apiToken || '').trim()}`
+  if (!usage) return base
+  const params = new URLSearchParams()
+  appendSystemMetricsUsageParams(params, usage)
+  const qs = params.toString()
+  return qs ? `${base}|${qs}` : base
+}
+
+async function fetchGatewaySystemMetrics(
+  config: GatewayConnectionConfig,
+  forceRefresh = false,
+  usage?: GatewayUsagePeriodOptions,
+) {
+  const params = new URLSearchParams()
+  if (forceRefresh) params.set('force_refresh', '1')
+  appendSystemMetricsUsageParams(params, usage)
+  const qs = params.toString()
+  const primaryPath =
+    qs.length > 0 ? `${GATEWAY_SYSTEM_METRIC_PRIMARY_PATH}?${qs}` : GATEWAY_SYSTEM_METRIC_PRIMARY_PATH
 
   let lastError: unknown = null
   try {
@@ -541,8 +574,12 @@ async function fetchGatewaySystemMetrics(config: GatewayConnectionConfig, forceR
   throw new Error('Gateway system metrics endpoint is unavailable.')
 }
 
-async function getGatewaySystemMetrics(config: GatewayConnectionConfig, forceRefresh = false) {
-  const cacheKey = gatewaySystemMetricsCacheKey(config)
+async function getGatewaySystemMetrics(
+  config: GatewayConnectionConfig,
+  forceRefresh = false,
+  usage?: GatewayUsagePeriodOptions,
+) {
+  const cacheKey = gatewaySystemMetricsCacheKey(config, usage)
   const now = Date.now()
   if (
     !forceRefresh &&
@@ -559,7 +596,7 @@ async function getGatewaySystemMetrics(config: GatewayConnectionConfig, forceRef
     return gatewaySystemMetricsInFlight.promise
   }
 
-  const request = fetchGatewaySystemMetrics(config, forceRefresh).then((payload) => {
+  const request = fetchGatewaySystemMetrics(config, forceRefresh, usage).then((payload) => {
     gatewaySystemMetricsCache = {
       cacheKey,
       fetchedAt: Date.now(),
@@ -2068,24 +2105,38 @@ app.whenReady().then(() => {
     })
   })
 
-  ipcMain.handle('gateway:get-system-metrics', async (_, forceRefresh?: boolean) => {
-    const config = getStoredGatewayTransportConfig()
-    if (!config) {
-      throw new Error('Gateway connection is not configured.')
-    }
-    const gatewayState = gatewayConnectionManager?.getState()?.status
-    if (gatewayState && !gatewayState.connected) {
-      throw new Error(String(gatewayState.detail || 'The desktop app is not connected to your VM yet.'))
-    }
-    try {
-      return await getGatewaySystemMetrics(config, Boolean(forceRefresh))
-    } catch (error: unknown) {
-      if (error instanceof Error && error.message === 'Gateway request timed out.' && gatewayState?.detail) {
-        throw new Error(gatewayState.detail)
+  ipcMain.handle(
+    'gateway:get-system-metrics',
+    async (
+      _,
+      payload?: boolean | { forceRefresh?: boolean; usage?: GatewayUsagePeriodOptions },
+    ) => {
+      const config = getStoredGatewayTransportConfig()
+      if (!config) {
+        throw new Error('Gateway connection is not configured.')
       }
-      throw error
-    }
-  })
+      const gatewayState = gatewayConnectionManager?.getState()?.status
+      if (gatewayState && !gatewayState.connected) {
+        throw new Error(String(gatewayState.detail || 'The desktop app is not connected to your VM yet.'))
+      }
+      let forceRefresh = false
+      let usage: GatewayUsagePeriodOptions | undefined
+      if (typeof payload === 'boolean') {
+        forceRefresh = payload
+      } else if (payload && typeof payload === 'object') {
+        forceRefresh = Boolean(payload.forceRefresh)
+        usage = payload.usage
+      }
+      try {
+        return await getGatewaySystemMetrics(config, forceRefresh, usage)
+      } catch (error: unknown) {
+        if (error instanceof Error && error.message === 'Gateway request timed out.' && gatewayState?.detail) {
+          throw new Error(gatewayState.detail)
+        }
+        throw error
+      }
+    },
+  )
 
   ipcMain.handle('gateway:get-registry-agents', async () => {
     const config = getStoredGatewayTransportConfig()

@@ -4,7 +4,7 @@ import json
 import sqlite3
 import threading
 from collections import defaultdict
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +12,25 @@ from shared.usage import UsageEvent
 from shared.model_specs import build_model_key
 from shared.usage import estimate_usage_cost_usd
 from shared import utcnow
+
+
+def _usage_timestamp_iso(dt: datetime) -> str:
+    """SQLite usage_events timestamps use Z suffix (UTC)."""
+    utc = dt.astimezone(timezone.utc).replace(tzinfo=timezone.utc)
+    return utc.isoformat().replace("+00:00", "Z")
+
+
+def _parse_usage_iso_datetime(value: str) -> datetime:
+    """Parse ISO-8601 instant to UTC (supports trailing Z)."""
+    raw = value.strip()
+    if not raw:
+        raise ValueError("usage range timestamp is empty")
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _json_dumps(value: Any) -> str | None:
@@ -165,6 +184,22 @@ class UsageStore:
             "latest_call_at": row["latest_call_at"] if row else None,
         }
 
+    def usage_time_bounds(self) -> dict[str, Any]:
+        """Earliest and latest usage row timestamps (ISO Z), for UI range limits."""
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    MIN(llm_call_placed_at) AS earliest_call_at,
+                    MAX(llm_call_placed_at) AS latest_call_at
+                FROM usage_events
+                """
+            ).fetchone()
+        return {
+            "earliest_call_at": row["earliest_call_at"] if row else None,
+            "latest_call_at": row["latest_call_at"] if row else None,
+        }
+
     def list_recent(self, *, limit: int = 100) -> list[dict[str, Any]]:
         with self._lock, self._connect() as connection:
             rows = connection.execute(
@@ -181,13 +216,69 @@ class UsageStore:
     def dashboard_summary(
         self,
         *,
-        period_days: int = 30,
+        period_days: int | None = None,
+        period_hours: int | None = None,
+        range_start_iso: str | None = None,
+        range_end_iso: str | None = None,
         provider_limit: int = 5,
         feature_limit: int = 6,
     ) -> dict[str, Any]:
-        normalized_period = max(1, int(period_days))
-        cutoff = utcnow() - timedelta(days=normalized_period)
-        cutoff_iso = cutoff.isoformat().replace("+00:00", "Z")
+        """
+        Aggregate usage for a time window. Precedence: absolute range → rolling hours → rolling days → default 30d.
+
+        ``range_start_iso`` / ``range_end_iso`` are ISO-8601 instants (UTC or offset). When only start is given,
+        end defaults to now. Maximum span is 366 days.
+        """
+        now = utcnow()
+        period_days_out: int | None = None
+        period_hours_out: int | None = None
+        mode: str
+        period_label: str
+        start_dt: datetime
+        end_dt: datetime
+
+        stripped_start = (range_start_iso or "").strip()
+        if stripped_start:
+            start_dt = _parse_usage_iso_datetime(stripped_start)
+            if (range_end_iso or "").strip():
+                end_dt = _parse_usage_iso_datetime(str(range_end_iso).strip())
+            else:
+                end_dt = now
+            if end_dt > now:
+                end_dt = now
+            if start_dt > end_dt:
+                start_dt, end_dt = end_dt, start_dt
+            max_span = timedelta(days=366)
+            if end_dt - start_dt > max_span:
+                start_dt = end_dt - max_span
+            mode = "absolute"
+            period_label = (
+                f"{start_dt.strftime('%Y-%m-%d %H:%M')}–{end_dt.strftime('%Y-%m-%d %H:%M')} UTC"
+            )
+        elif period_hours is not None:
+            h = max(1, min(int(period_hours), 8784))
+            period_hours_out = h
+            end_dt = now
+            start_dt = now - timedelta(hours=h)
+            mode = "rolling_hours"
+            period_label = f"Last {h}h"
+        elif period_days is not None:
+            d = max(1, min(int(period_days), 366))
+            period_days_out = d
+            end_dt = now
+            start_dt = now - timedelta(days=d)
+            mode = "rolling_days"
+            period_label = f"Rolling {d}d"
+        else:
+            d = 30
+            period_days_out = d
+            end_dt = now
+            start_dt = now - timedelta(days=d)
+            mode = "rolling_days"
+            period_label = f"Rolling {d}d"
+
+        start_iso = _usage_timestamp_iso(start_dt)
+        end_iso = _usage_timestamp_iso(end_dt)
 
         with self._lock, self._connect() as connection:
             totals_row = connection.execute(
@@ -197,9 +288,9 @@ class UsageStore:
                     COALESCE(SUM(total_tokens), 0) AS total_tokens,
                     MAX(llm_call_placed_at) AS latest_call_at
                 FROM usage_events
-                WHERE llm_call_placed_at >= ?
+                WHERE llm_call_placed_at >= ? AND llm_call_placed_at <= ?
                 """,
-                (cutoff_iso,),
+                (start_iso, end_iso),
             ).fetchone()
             provider_model_rows = connection.execute(
                 """
@@ -213,11 +304,11 @@ class UsageStore:
                     COALESCE(SUM(CASE WHEN estimated_cost_usd IS NULL THEN completion_tokens ELSE 0 END), 0) AS missing_completion_tokens,
                     COALESCE(SUM(CASE WHEN estimated_cost_usd IS NULL THEN cached_tokens ELSE 0 END), 0) AS missing_cached_tokens
                 FROM usage_events
-                WHERE llm_call_placed_at >= ?
+                WHERE llm_call_placed_at >= ? AND llm_call_placed_at <= ?
                 GROUP BY provider, model
                 ORDER BY known_cost_usd DESC, total_tokens DESC, call_count DESC
                 """,
-                (cutoff_iso,),
+                (start_iso, end_iso),
             ).fetchall()
             feature_rows = connection.execute(
                 """
@@ -226,11 +317,11 @@ class UsageStore:
                     operation,
                     COUNT(*) AS call_count
                 FROM usage_events
-                WHERE llm_call_placed_at >= ?
+                WHERE llm_call_placed_at >= ? AND llm_call_placed_at <= ?
                 GROUP BY source_component, operation
                 ORDER BY call_count DESC, source_component ASC, operation ASC
                 """,
-                (cutoff_iso,),
+                (start_iso, end_iso),
             ).fetchall()
 
         total_calls = int(totals_row["total_calls"] if totals_row and totals_row["total_calls"] is not None else 0)
@@ -325,9 +416,21 @@ class UsageStore:
                 }
             )
 
+        usage_period: dict[str, Any] = {
+            "mode": mode,
+            "start_iso": start_iso,
+            "end_iso": end_iso,
+        }
+        if period_days_out is not None:
+            usage_period["period_days"] = period_days_out
+        if period_hours_out is not None:
+            usage_period["period_hours"] = period_hours_out
+
         return {
-            "period_days": normalized_period,
-            "period_label": f"Rolling {normalized_period}d",
+            "period_days": period_days_out,
+            "period_hours": period_hours_out,
+            "period_label": period_label,
+            "usage_period": usage_period,
             "total_calls": total_calls,
             "total_tokens": total_tokens,
             "total_cost_usd": round(total_cost_usd, 10),

@@ -150,3 +150,76 @@ def test_usage_store_dashboard_summary_derives_missing_cost_and_aggregates_provi
     assert summary["providers"][0]["role"] == "grok-4.20-beta-0309-reasoning +1 more"
     assert summary["providers"][0]["cost_usd"] == 0.016155
     assert summary["total_cost_usd"] == 0.016155
+
+
+def test_usage_store_dashboard_summary_absolute_range_filters_rows(tmp_path: Path) -> None:
+    store = UsageStore(tmp_path / "usage.db")
+    store.initialize()
+
+    inside = build_usage_event(
+        metered_call=begin_metered_call(prefix="call"),
+        source_component="gateway",
+        source_id="gateway:x",
+        session_id="sess_in",
+        route="opus",
+        operation="gateway.ping",
+        model_key="anthropic:claude-sonnet-4-6",
+        request_id="req_in",
+        raw_usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        metadata_json=None,
+    ).model_copy(update={"llm_call_placed_at": "2025-06-15T12:00:00Z"})
+    outside = build_usage_event(
+        metered_call=begin_metered_call(prefix="call"),
+        source_component="gateway",
+        source_id="gateway:y",
+        session_id="sess_out",
+        route="opus",
+        operation="gateway.ping",
+        model_key="anthropic:claude-sonnet-4-6",
+        request_id="req_out",
+        raw_usage={"prompt_tokens": 20, "completion_tokens": 5, "total_tokens": 25},
+        metadata_json=None,
+    ).model_copy(update={"llm_call_placed_at": "2025-01-10T12:00:00Z"})
+
+    assert store.append(inside) is True
+    assert store.append(outside) is True
+
+    summary = store.dashboard_summary(
+        range_start_iso="2025-06-01T00:00:00Z",
+        range_end_iso="2025-07-01T00:00:00Z",
+    )
+    assert summary["total_calls"] == 1
+    assert summary["total_tokens"] == 15
+    assert summary["usage_period"]["mode"] == "absolute"
+
+
+def test_usage_store_dashboard_summary_last_hours(tmp_path: Path) -> None:
+    store = UsageStore(tmp_path / "usage.db")
+    store.initialize()
+    assert store.summary()["total_events"] == 0
+    summary = store.dashboard_summary(period_hours=24)
+    assert summary["usage_period"]["mode"] == "rolling_hours"
+    assert summary["usage_period"]["period_hours"] == 24
+
+
+def test_usage_store_usage_time_bounds(tmp_path: Path) -> None:
+    store = UsageStore(tmp_path / "usage.db")
+    store.initialize()
+    assert store.usage_time_bounds()["earliest_call_at"] is None
+
+    event = build_usage_event(
+        metered_call=begin_metered_call(prefix="call"),
+        source_component="gateway",
+        source_id="gateway:x",
+        session_id="sess",
+        route="opus",
+        operation="gateway.ping",
+        model_key="anthropic:claude-sonnet-4-6",
+        request_id="req_1",
+        raw_usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        metadata_json=None,
+    ).model_copy(update={"llm_call_placed_at": "2025-03-10T08:00:00Z"})
+    assert store.append(event) is True
+    bounds = store.usage_time_bounds()
+    assert bounds["earliest_call_at"] == "2025-03-10T08:00:00Z"
+    assert bounds["latest_call_at"] == "2025-03-10T08:00:00Z"
