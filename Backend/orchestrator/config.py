@@ -23,6 +23,17 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_optional_positive_int(name: str) -> int | None:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
 def _env_float(name: str, default: float) -> float:
     raw = os.getenv(name)
     if raw is None:
@@ -106,7 +117,7 @@ class OrchestratorConfig:
     fireworks_api_key: str = ""
     fireworks_base_url: str = "https://api.fireworks.ai/inference/v1"
     fireworks_kimi_model: str = "accounts/fireworks/models/kimi-k2p6"
-    fireworks_kimi_max_tokens: int = 16000
+    fireworks_kimi_max_tokens: int | None = None
     fireworks_kimi_temperature: float = 0.6
     max_tokens: int = 16000
     request_timeout_sec: float = 300.0
@@ -201,6 +212,7 @@ class OrchestratorConfig:
                 or os.getenv("FIREWORKS_API_KEY")
                 or os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY")
                 or os.getenv("MODEL_API_KEY")
+                or os.getenv("SLIDE_AGENT_MIMO_API_KEY")
                 or os.getenv("MIMO_API_KEY")
                 or ""
             ).strip(),
@@ -221,13 +233,7 @@ class OrchestratorConfig:
                 or "accounts/fireworks/models/kimi-k2p6"
             ).strip()
             or "accounts/fireworks/models/kimi-k2p6",
-            fireworks_kimi_max_tokens=max(
-                256,
-                _env_int(
-                    "ORCHESTRATOR_FIREWORKS_MAX_TOKENS",
-                    _env_int("OPUS_MAX_TOKENS", 16000),
-                ),
-            ),
+            fireworks_kimi_max_tokens=_env_optional_positive_int("ORCHESTRATOR_FIREWORKS_MAX_TOKENS"),
             fireworks_kimi_temperature=max(
                 0.0,
                 min(2.0, _env_float("ORCHESTRATOR_FIREWORKS_TEMPERATURE", 0.6)),

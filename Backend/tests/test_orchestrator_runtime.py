@@ -249,6 +249,7 @@ async def test_orchestrator_runtime_streams_fireworks_kimi_path() -> None:
             payload = json.loads(request.content.decode("utf-8"))
             assert payload["model"] == "accounts/fireworks/models/kimi-k2p6"
             assert payload["messages"][0]["role"] == "system"
+            assert "max_tokens" not in payload
             tool_names = {
                 tool["function"]["name"]
                 for tool in payload.get("tools", [])
@@ -302,6 +303,68 @@ async def test_orchestrator_runtime_streams_fireworks_kimi_path() -> None:
     assert complete["content"] == "Hello from Kimi."
     assert complete["model_provider"] == "fireworks_kimi"
     assert complete["metrics"]["prompt_tokens"] == 10
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_runtime_separates_fireworks_inline_thinking() -> None:
+    runtime_root = Path.cwd() / "pytest-kimi-runtime" / uuid4().hex
+    runtime_root.mkdir(parents=True, exist_ok=False)
+    chunks = [
+        b'data: {"choices":[{"delta":{"content":"<thi"},"finish_reason":null}]}\n\n',
+        b'data: {"choices":[{"delta":{"content":"nk>Hidden plan."},"finish_reason":null}]}\n\n',
+        b'data: {"choices":[{"delta":{"content":"</thi"},"finish_reason":null}]}\n\n',
+        b'data: {"choices":[{"delta":{"content":"nk>Visible answer."},"finish_reason":null}]}\n\n',
+        b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).endswith("/chat/completions"):
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=SSEByteStream(chunks),
+            )
+        return httpx.Response(204)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="",
+        fireworks_api_key="fireworks-key",
+        task_ledger_db_path=runtime_root / "task_ledger_kimi.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    await runtime.start()
+    try:
+        base_task = _signed_task("signing-secret")
+        task = base_task.model_copy(
+            update={
+                "input": {
+                    **base_task.input,
+                    "cosmic_orchestrator_model": {
+                        "provider": "fireworks_kimi",
+                        "model": "accounts/fireworks/models/kimi-k2p6",
+                    },
+                }
+            }
+        )
+        task = task.model_copy(update={"signature": sign_task_envelope(task, "signing-secret")})
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+        rmtree(runtime_root, ignore_errors=True)
+
+    thinking_text = "".join(
+        str(event.get("content") or "")
+        for event in streamed_events
+        if event["type"] == "response.thinking.chunk"
+    )
+    complete = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert thinking_text == "Hidden plan."
+    assert complete["thinking_text"] == "Hidden plan."
+    assert complete["content"] == "Visible answer."
 
 
 def test_collect_specialist_artifacts_only_keeps_deliverables(tmp_path) -> None:

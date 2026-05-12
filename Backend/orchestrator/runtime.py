@@ -141,6 +141,69 @@ class ContentBlock:
         return {"type": self.block_type}
 
 
+class InlineReasoningSplitter:
+    """Separates Fireworks inline <think> content from visible response text."""
+
+    _OPEN_TAG = "<think>"
+    _CLOSE_TAG = "</think>"
+    _MAX_TAG_LEN = max(len(_OPEN_TAG), len(_CLOSE_TAG))
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._inside_reasoning = False
+
+    def consume(self, chunk: str) -> tuple[str, str]:
+        self._buffer += chunk
+        return self._drain(flush=False)
+
+    def flush(self) -> tuple[str, str]:
+        return self._drain(flush=True)
+
+    def _drain(self, *, flush: bool) -> tuple[str, str]:
+        reasoning_parts: list[str] = []
+        visible_parts: list[str] = []
+
+        while self._buffer:
+            lower = self._buffer.lower()
+            if self._inside_reasoning:
+                close_index = lower.find(self._CLOSE_TAG)
+                if close_index < 0:
+                    safe_len = len(self._buffer) if flush else self._safe_emit_len(lower, self._CLOSE_TAG)
+                    if safe_len <= 0:
+                        break
+                    reasoning_parts.append(self._buffer[:safe_len])
+                    self._buffer = self._buffer[safe_len:]
+                    continue
+                reasoning_parts.append(self._buffer[:close_index])
+                self._buffer = self._buffer[close_index + len(self._CLOSE_TAG) :]
+                self._inside_reasoning = False
+                continue
+
+            open_index = lower.find(self._OPEN_TAG)
+            if open_index < 0:
+                safe_len = len(self._buffer) if flush else self._safe_emit_len(lower, self._OPEN_TAG)
+                if safe_len <= 0:
+                    break
+                visible_parts.append(self._buffer[:safe_len])
+                self._buffer = self._buffer[safe_len:]
+                continue
+
+            if open_index:
+                visible_parts.append(self._buffer[:open_index])
+            self._buffer = self._buffer[open_index + len(self._OPEN_TAG) :]
+            self._inside_reasoning = True
+
+        return "".join(reasoning_parts), "".join(visible_parts)
+
+    @classmethod
+    def _safe_emit_len(cls, lower: str, tag: str) -> int:
+        max_prefix = min(len(lower), cls._MAX_TAG_LEN - 1)
+        for keep in range(max_prefix, 0, -1):
+            if tag.startswith(lower[-keep:]):
+                return len(lower) - keep
+        return len(lower)
+
+
 @dataclass(slots=True)
 class ActiveTaskRun:
     runner_task: asyncio.Task[Any] | None
@@ -1144,6 +1207,76 @@ class OrchestratorRuntime:
                 turn_finish_reason: str | None = None
                 reasoning_announced = False
                 responding_announced = False
+                inline_reasoning_splitter = InlineReasoningSplitter()
+
+                def collect_reasoning_events(reasoning_text: str) -> list[dict[str, Any]]:
+                    nonlocal reasoning_announced
+                    if not reasoning_text:
+                        return []
+                    turn_reasoning_parts.append(reasoning_text)
+                    events: list[dict[str, Any]] = []
+                    if not reasoning_announced:
+                        reasoning_announced = True
+                        events.append(
+                            {
+                                **ev,
+                                "type": "task.progress",
+                                "status": "thinking",
+                                "message": "Cosmic is reasoning through the request.",
+                                "model_provider": "fireworks_kimi",
+                            }
+                        )
+                    if iteration == 1:
+                        events.append(
+                            {
+                                **ev,
+                                "type": "response.thinking.chunk",
+                                "content": reasoning_text,
+                                "done": False,
+                            }
+                        )
+                    return events
+
+                def collect_content_events(visible_text: str) -> list[dict[str, Any]]:
+                    nonlocal responding_announced
+                    if not visible_text:
+                        return []
+                    turn_text_parts.append(visible_text)
+                    events: list[dict[str, Any]] = []
+                    if not responding_announced:
+                        responding_announced = True
+                        events.append(
+                            {
+                                **ev,
+                                "type": "task.progress",
+                                "status": "responding",
+                                "message": "Cosmic is writing the response.",
+                                "model_provider": "fireworks_kimi",
+                            }
+                        )
+                    if visual_coordinator is not None:
+                        visible_chunk, visual_events = visual_coordinator.consume_text(visible_text)
+                        for visual_event in visual_events:
+                            events.append({**ev, **visual_event})
+                        if visible_chunk:
+                            events.append(
+                                {
+                                    **ev,
+                                    "type": "response.chunk",
+                                    "content": visible_chunk,
+                                    "done": False,
+                                }
+                            )
+                    else:
+                        events.append(
+                            {
+                                **ev,
+                                "type": "response.chunk",
+                                "content": visible_text,
+                                "done": False,
+                            }
+                        )
+                    return events
 
                 async for payload in self._stream_openai_chat_events(
                     model_name=model_name,
@@ -1186,54 +1319,16 @@ class OrchestratorRuntime:
                         or ""
                     )
                     if reasoning_chunk:
-                        turn_reasoning_parts.append(reasoning_chunk)
-                        if not reasoning_announced:
-                            reasoning_announced = True
-                            yield {
-                                **ev,
-                                "type": "task.progress",
-                                "status": "thinking",
-                                "message": "Cosmic is reasoning through the request.",
-                                "model_provider": "fireworks_kimi",
-                            }
-                        if iteration == 1:
-                            yield {
-                                **ev,
-                                "type": "response.thinking.chunk",
-                                "content": reasoning_chunk,
-                                "done": False,
-                            }
+                        for event in collect_reasoning_events(reasoning_chunk):
+                            yield event
 
                     content_chunk = str(delta.get("content") or "")
                     if content_chunk:
-                        turn_text_parts.append(content_chunk)
-                        if not responding_announced:
-                            responding_announced = True
-                            yield {
-                                **ev,
-                                "type": "task.progress",
-                                "status": "responding",
-                                "message": "Cosmic is writing the response.",
-                                "model_provider": "fireworks_kimi",
-                            }
-                        if visual_coordinator is not None:
-                            visible_chunk, visual_events = visual_coordinator.consume_text(content_chunk)
-                            for visual_event in visual_events:
-                                yield {**ev, **visual_event}
-                            if visible_chunk:
-                                yield {
-                                    **ev,
-                                    "type": "response.chunk",
-                                    "content": visible_chunk,
-                                    "done": False,
-                                }
-                        else:
-                            yield {
-                                **ev,
-                                "type": "response.chunk",
-                                "content": content_chunk,
-                                "done": False,
-                            }
+                        inline_reasoning, visible_content = inline_reasoning_splitter.consume(content_chunk)
+                        for event in collect_reasoning_events(inline_reasoning):
+                            yield event
+                        for event in collect_content_events(visible_content):
+                            yield event
 
                     for tool_call_delta in self._extract_openai_tool_call_deltas(delta):
                         index = int(tool_call_delta.get("index", 0))
@@ -1256,6 +1351,12 @@ class OrchestratorRuntime:
                                     str(state.get("arguments") or "")
                                     + str(function_delta.get("arguments") or "")
                                 )
+
+                inline_reasoning, visible_content = inline_reasoning_splitter.flush()
+                for event in collect_reasoning_events(inline_reasoning):
+                    yield event
+                for event in collect_content_events(visible_content):
+                    yield event
 
                 cumulative_usage = self._merge_usage(cumulative_usage, turn_usage)
                 stop_reason = turn_finish_reason
@@ -1823,10 +1924,11 @@ class OrchestratorRuntime:
             "model": model_name,
             "messages": messages,
             "stream": True,
-            "max_tokens": self.config.fireworks_kimi_max_tokens,
             "temperature": self.config.fireworks_kimi_temperature,
             "stream_options": {"include_usage": True},
         }
+        if self.config.fireworks_kimi_max_tokens is not None:
+            body["max_tokens"] = self.config.fireworks_kimi_max_tokens
         if tools:
             body["tools"] = tools
             body["tool_choice"] = "auto"
