@@ -716,6 +716,10 @@ function formatYmdLocaleLong(ymd: string): string {
   })
 }
 
+function isValidYmd(ymd: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(ymd.trim())
+}
+
 /** yyyy-mm-dd for min= on date inputs: UTC month containing earliest stored usage row. */
 function utcMonthStartYmdFromIso(iso: string | null | undefined): string {
   if (!iso || typeof iso !== 'string' || !iso.trim()) return ''
@@ -728,9 +732,27 @@ function utcMonthStartYmdFromIso(iso: string | null | undefined): string {
   return `${y}-${String(m + 1).padStart(2, '0')}-01`
 }
 
+function offsetYmdLocal(dayOffset: number): string {
+  const n = new Date()
+  n.setDate(n.getDate() + dayOffset)
+  return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`
+}
+
 function todayYmdLocal(): string {
   const n = new Date()
   return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`
+}
+
+function clampYmdToBounds(ymd: string, minYmd: string, maxYmd: string): string {
+  if (!isValidYmd(ymd)) return ''
+  let next = ymd.trim()
+  if (minYmd && next < minYmd) next = minYmd
+  if (maxYmd && next > maxYmd) next = maxYmd
+  return next
+}
+
+function defaultCustomUsageStartYmd(minYmd: string, maxYmd: string): string {
+  return clampYmdToBounds(offsetYmdLocal(-29), minYmd, maxYmd)
 }
 
 function manageUsageOptionsForMode(
@@ -749,10 +771,8 @@ function manageUsageOptionsForMode(
     case 'custom': {
       const startIso = localDateYmdToUtcRangeStart(customStart)
       if (!startIso) return fallback
-      const endTrim = customEnd.trim()
-      if (!endTrim) return { usage_start: startIso }
-      const endIso = localDateYmdToUtcRangeEnd(endTrim)
-      return endIso ? { usage_start: startIso, usage_end: endIso } : { usage_start: startIso }
+      const endIso = localDateYmdToUtcRangeEnd(customEnd)
+      return endIso ? { usage_start: startIso, usage_end: endIso } : fallback
     }
     default:
       return { usage_days: 30 }
@@ -2128,7 +2148,7 @@ export default function SpacesControlCenter({
 
     try {
       const snapshot = await window.cosmic.getGatewaySystemMetrics({
-        forceRefresh: true,
+        forceRefresh,
         usage: usageOpts,
       })
       if (requestId !== manageMetricsRequestRef.current) {
@@ -2519,6 +2539,42 @@ export default function SpacesControlCenter({
   const gatewayStatus = useMemo(() => normalizeGatewayState(gatewayState), [gatewayState])
   const today = useMemo(() => new Date(), [])
   const manageSnapshot = useMemo(() => buildManageSnapshot(manageMetrics), [manageMetrics])
+  const manageUsageBounds = useMemo(() => {
+    const usageBounds = toRecord(manageMetrics)?.usage_bounds
+    const earliestCallAt = pickString(usageBounds || {}, ['earliest_call_at'])
+    return {
+      minYmd: utcMonthStartYmdFromIso(earliestCallAt),
+      maxYmd: todayYmdLocal(),
+    }
+  }, [manageMetrics])
+
+  useEffect(() => {
+    if (manageUsageMode !== 'custom') return
+    const defaultStart = defaultCustomUsageStartYmd(manageUsageBounds.minYmd, manageUsageBounds.maxYmd)
+    const nextStart = clampYmdToBounds(
+      manageUsageCustomStart || defaultStart,
+      manageUsageBounds.minYmd,
+      manageUsageBounds.maxYmd,
+    )
+    const nextEnd = clampYmdToBounds(
+      manageUsageCustomEnd || manageUsageBounds.maxYmd,
+      nextStart || manageUsageBounds.minYmd,
+      manageUsageBounds.maxYmd,
+    )
+    if (nextStart && nextStart !== manageUsageCustomStart) {
+      setManageUsageCustomStart(nextStart)
+    }
+    if (nextEnd && nextEnd !== manageUsageCustomEnd) {
+      setManageUsageCustomEnd(nextEnd)
+    }
+  }, [
+    manageUsageBounds.maxYmd,
+    manageUsageBounds.minYmd,
+    manageUsageCustomEnd,
+    manageUsageCustomStart,
+    manageUsageMode,
+  ])
+
   const groupedSessions = useMemo(() => {
     const sorted = [...sessionsList].sort((a, b) => {
       const dayDelta = gatewaySessionGroupInfo(b).sortMs - gatewaySessionGroupInfo(a).sortMs
@@ -6227,11 +6283,19 @@ export default function SpacesControlCenter({
       return `${(pct / 100) * c} ${c}`
     }
 
-    const usageBounds = toRecord(manageMetrics)?.usage_bounds
-    const earliestCallAt = pickString(usageBounds || {}, ['earliest_call_at'])
-    const minSelectableYmd = utcMonthStartYmdFromIso(earliestCallAt)
-    const maxSelectableYmd = todayYmdLocal()
-    const customStartValid = /^\d{4}-\d{2}-\d{2}$/.test(manageUsageCustomStart.trim())
+    const minSelectableYmd = manageUsageBounds.minYmd
+    const maxSelectableYmd = manageUsageBounds.maxYmd
+    const customStartValid = isValidYmd(manageUsageCustomStart)
+    const customEndValid = isValidYmd(manageUsageCustomEnd)
+    const customRangeValid =
+      customStartValid &&
+      customEndValid &&
+      manageUsageCustomStart <= manageUsageCustomEnd &&
+      (!minSelectableYmd || manageUsageCustomStart >= minSelectableYmd) &&
+      (!maxSelectableYmd || manageUsageCustomEnd <= maxSelectableYmd)
+    const customRangeHint = minSelectableYmd
+      ? `Calendar starts at ${formatYmdLocaleLong(minSelectableYmd)} and ends at ${formatYmdLocaleLong(maxSelectableYmd)}.`
+      : `Calendar ends at ${formatYmdLocaleLong(maxSelectableYmd)}. Earlier months appear once usage logs exist.`
 
     return (
       <div className="spaces-page mg-page">
@@ -6283,7 +6347,22 @@ export default function SpacesControlCenter({
                   <button
                     type="button"
                     className={`mg-usage-period-chip ${manageUsageMode === 'custom' ? 'active' : ''}`}
-                    onClick={() => setManageUsageMode('custom')}
+                    onClick={() => {
+                      const defaultStart = defaultCustomUsageStartYmd(minSelectableYmd, maxSelectableYmd)
+                      const nextStart = clampYmdToBounds(
+                        manageUsageCustomStart || defaultStart,
+                        minSelectableYmd,
+                        maxSelectableYmd,
+                      )
+                      const nextEnd = clampYmdToBounds(
+                        manageUsageCustomEnd || maxSelectableYmd,
+                        nextStart || minSelectableYmd,
+                        maxSelectableYmd,
+                      )
+                      setManageUsageCustomStart(nextStart || defaultStart)
+                      setManageUsageCustomEnd(nextEnd || maxSelectableYmd)
+                      setManageUsageMode('custom')
+                    }}
                   >
                     Custom
                   </button>
@@ -6291,7 +6370,7 @@ export default function SpacesControlCenter({
                 {manageUsageMode === 'custom' ? (
                   <div className="mg-usage-period-custom">
                     <p className="mg-usage-period-calendar-hint">
-                      Use the date control for each field — it opens your system calendar. Dates below show in your locale; the gateway receives UTC-aligned bounds for those local days.
+                      Pick a bounded calendar range. {customRangeHint}
                     </p>
                     <div className="mg-usage-period-date-row">
                       <label className="mg-usage-period-field">
@@ -6302,9 +6381,9 @@ export default function SpacesControlCenter({
                           min={minSelectableYmd || undefined}
                           max={maxSelectableYmd}
                           onChange={(e) => {
-                            const v = e.target.value
+                            const v = clampYmdToBounds(e.target.value, minSelectableYmd, maxSelectableYmd)
                             setManageUsageCustomStart(v)
-                            setManageUsageCustomEnd((prev) => (prev && v && prev < v ? v : prev))
+                            setManageUsageCustomEnd((prev) => clampYmdToBounds(prev || maxSelectableYmd, v || minSelectableYmd, maxSelectableYmd))
                           }}
                         />
                         <span className="mg-usage-period-locale">
@@ -6313,22 +6392,22 @@ export default function SpacesControlCenter({
                       </label>
                       <label className="mg-usage-period-field">
                         <span>End date</span>
-                        <span className="mg-usage-period-optional">optional · defaults to now</span>
+                        <span className="mg-usage-period-required">required</span>
                         <input
                           type="date"
                           value={manageUsageCustomEnd}
                           min={(manageUsageCustomStart || minSelectableYmd) || undefined}
                           max={maxSelectableYmd}
-                          onChange={(e) => setManageUsageCustomEnd(e.target.value)}
+                          onChange={(e) => setManageUsageCustomEnd(clampYmdToBounds(e.target.value, manageUsageCustomStart || minSelectableYmd, maxSelectableYmd))}
                         />
                         <span className="mg-usage-period-locale">
-                          {manageUsageCustomEnd ? formatYmdLocaleLong(manageUsageCustomEnd) : 'Open-ended (through now)'}
+                          {manageUsageCustomEnd ? formatYmdLocaleLong(manageUsageCustomEnd) : '—'}
                         </span>
                       </label>
                       <button
                         type="button"
                         className="mg-usage-period-apply"
-                        disabled={!customStartValid || manageMetricsRefreshing}
+                        disabled={!customRangeValid || manageMetricsRefreshing}
                         onClick={() => void requestManageMetrics(true, true, 'custom')}
                       >
                         Apply range
