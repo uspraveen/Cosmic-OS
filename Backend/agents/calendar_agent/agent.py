@@ -26,7 +26,7 @@ from shared.sqlite_client import connect_sync
 
 from .config import AGENT_ROOT, BACKEND_ROOT, CalendarAgentConfig
 from .google_calendar_client import GoogleCalendarClient
-from .internal_llm import invoke_calendar_mimo
+from .internal_llm import invoke_calendar_internal_llm
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +238,7 @@ class CalendarAgent(AgentRuntime):
         if not query:
             return None
         tz = task.input.get("timezone") or self._cfg.default_timezone
-        return await invoke_calendar_mimo(
+        return await invoke_calendar_internal_llm(
             cfg=self._cfg,
             http_client=self._http(),
             user_message=query,

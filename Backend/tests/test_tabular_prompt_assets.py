@@ -27,7 +27,7 @@ def test_stage_specific_composition() -> None:
     s = build_internal_context("summarize", include_fpna=False)
     p = build_internal_context("plan", include_fpna=False)
     e = build_internal_context("execute", include_fpna=False)
-    assert "MiMo" in s or "internal" in s.lower()
+    assert "internal LLM" in s or "internal" in s.lower()
     assert "planner" in p.lower() or "query" in p.lower()
     assert "execution" in e.lower() or "validator" in e.lower() or "validate" in e.lower()
     assert s != p != e

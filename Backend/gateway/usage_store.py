@@ -492,6 +492,7 @@ def _display_provider_name(value: str) -> str:
         "xai": "xAI",
         "groq": "Groq",
         "perplexity": "Perplexity",
+        "fireworks": "Fireworks",
     }.get(normalized, normalized.replace("_", " ").title())
 
 

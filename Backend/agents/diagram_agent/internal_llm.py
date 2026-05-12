@@ -146,7 +146,7 @@ Rules:
 """
 
 
-async def invoke_diagram_mimo(
+async def invoke_diagram_internal_llm(
     *,
     cfg: DiagramAgentConfig,
     http_client: httpx.AsyncClient,
@@ -159,7 +159,7 @@ async def invoke_diagram_mimo(
     channel: str | None,
 ) -> dict[str, Any] | None:
     """Call gpt-5-mini for diagram analysis/generation. Returns parsed JSON or None."""
-    if not cfg.enable_internal_llm or not cfg.mimo_api_key or not cfg.mimo_base_url:
+    if not cfg.enable_internal_llm or not cfg.internal_llm_api_key or not cfg.internal_llm_base_url:
         return None
 
     try:
@@ -175,18 +175,18 @@ async def invoke_diagram_mimo(
     ]
 
     started = time.perf_counter()
-    llm_call_id = f"diagram_mimo_{uuid4().hex[:16]}"
+    llm_call_id = f"diagram_internal_llm_{uuid4().hex[:16]}"
     try:
         async with httpx.AsyncClient(
-            timeout=cfg.mimo_timeout_sec,
+            timeout=cfg.internal_llm_timeout_sec,
             http2=False,
             follow_redirects=True,
-        ) as mimo_http:
+        ) as llm_http:
             llm_kwargs: dict[str, Any] = {
-                "model": cfg.mimo_model,
-                "api_key": cfg.mimo_api_key,
-                "base_url": cfg.mimo_base_url,
-                "http_async_client": mimo_http,
+                "model": cfg.internal_llm_model,
+                "api_key": cfg.internal_llm_api_key,
+                "base_url": cfg.internal_llm_base_url,
+                "http_async_client": llm_http,
             }
             llm = ChatOpenAI(**llm_kwargs)
             result = await llm.ainvoke(messages)
@@ -216,7 +216,7 @@ async def invoke_diagram_mimo(
                 source_id=source_id or "",
                 channel=channel or "",
                 provider="openai_compatible",
-                model=cfg.mimo_model,
+                model=cfg.internal_llm_model,
                 usage_kind="chat_completion",
                 ok=True,
                 latency_ms=latency_ms,
@@ -284,7 +284,7 @@ async def analyze_diagram_request(
     if skills_index:
         context += f"\n---\n{skills_index}\n"
 
-    return await invoke_diagram_mimo(
+    return await invoke_diagram_internal_llm(
         cfg=cfg,
         http_client=http_client,
         system_content=_ANALYZE_SYSTEM,
@@ -325,7 +325,7 @@ async def generate_diagram_definition(
     if renderer_skill_context:
         context += f"\n---\n{renderer_skill_context}\n"
 
-    return await invoke_diagram_mimo(
+    return await invoke_diagram_internal_llm(
         cfg=cfg,
         http_client=http_client,
         system_content=_GENERATE_SYSTEM,
@@ -361,7 +361,7 @@ async def modify_diagram(
     if renderer_skill_context:
         context += f"\n---\n{renderer_skill_context}\n"
 
-    return await invoke_diagram_mimo(
+    return await invoke_diagram_internal_llm(
         cfg=cfg,
         http_client=http_client,
         system_content=_MODIFY_SYSTEM,
@@ -436,7 +436,7 @@ async def validate_diagram_render(
     Returns dict with: pass (bool), issues (list), suggestion (str), confidence (float)
     Returns None if validation is unavailable (no vision model, no PNG).
     """
-    if not cfg.enable_internal_llm or not cfg.mimo_api_key or not cfg.mimo_base_url:
+    if not cfg.enable_internal_llm or not cfg.internal_llm_api_key or not cfg.internal_llm_base_url:
         return None
 
     try:
@@ -491,15 +491,15 @@ async def validate_diagram_render(
     llm_call_id = f"diagram_validate_{uuid4().hex[:16]}"
     try:
         async with httpx.AsyncClient(
-            timeout=cfg.mimo_timeout_sec,
+            timeout=cfg.internal_llm_timeout_sec,
             http2=False,
             follow_redirects=True,
-        ) as mimo_http:
+        ) as llm_http:
             llm_kwargs: dict[str, Any] = {
-                "model": cfg.mimo_model,
-                "api_key": cfg.mimo_api_key,
-                "base_url": cfg.mimo_base_url,
-                "http_async_client": mimo_http,
+                "model": cfg.internal_llm_model,
+                "api_key": cfg.internal_llm_api_key,
+                "base_url": cfg.internal_llm_base_url,
+                "http_async_client": llm_http,
             }
             llm = ChatOpenAI(**llm_kwargs)
             result = await llm.ainvoke(messages)
@@ -529,7 +529,7 @@ async def validate_diagram_render(
                 source_id=source_id or "",
                 channel=channel or "",
                 provider="openai_compatible",
-                model=cfg.mimo_model,
+                model=cfg.internal_llm_model,
                 usage_kind="chat_completion",
                 ok=True,
                 latency_ms=latency_ms,
@@ -602,7 +602,7 @@ async def regenerate_diagram_with_feedback(
     if renderer_skill_context:
         context += f"\n---\n{renderer_skill_context}\n"
 
-    return await invoke_diagram_mimo(
+    return await invoke_diagram_internal_llm(
         cfg=cfg,
         http_client=http_client,
         system_content=_REGENERATE_SYSTEM,

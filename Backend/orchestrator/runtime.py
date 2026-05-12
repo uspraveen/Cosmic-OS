@@ -1765,9 +1765,11 @@ class OrchestratorRuntime:
         note = (
             "## COSMIC Runtime Provider\n"
             "You are running on COSMIC's Fireworks Kimi path through an OpenAI-compatible chat API. "
-            "Anthropic's hosted code_execution container and native server web tools are not available on this path. "
-            "Use COSMIC specialist/local tools for research, document lookup, memory, tabular work, and Alpha project execution. "
-            "For code/project execution, prefer Alpha or the relevant specialist instead of pretending you executed code in a hosted container."
+            "Anthropic's hosted code_execution container and native server web tools are not attached on this path. "
+            "When code, shell, project edits, deployment, screenshots, or long-running execution are needed, use COSMIC's specialist routes: "
+            "search the agent catalog and delegate to Alpha (`alpha.execute`) for project/VM work, or the relevant tabular/docs specialist for scoped data work. "
+            "When current web information is needed, use COSMIC's research routes such as Perplexity, Firecrawl, X search, docs tools, and memory instead of claiming native web access. "
+            "Do not say a capability is unavailable until you have considered the available COSMIC specialist/local tools."
         )
         base = str(system_prompt or "").rstrip()
         return f"{base}\n\n{note}" if base else note
@@ -2016,7 +2018,35 @@ class OrchestratorRuntime:
         for key, value in usage.items():
             if isinstance(value, (int, float)):
                 result[str(key)] = int(value)
+        cached_tokens = OrchestratorRuntime._read_openai_usage_detail(
+            usage,
+            "prompt_tokens_details",
+            "cached_tokens",
+        )
+        if cached_tokens is not None:
+            result["cached_tokens"] = result.get("cached_tokens", 0) + cached_tokens
+        reasoning_tokens = OrchestratorRuntime._read_openai_usage_detail(
+            usage,
+            "completion_tokens_details",
+            "reasoning_tokens",
+        )
+        if reasoning_tokens is not None:
+            result["reasoning_tokens"] = result.get("reasoning_tokens", 0) + reasoning_tokens
         return result
+
+    @staticmethod
+    def _read_openai_usage_detail(
+        usage: dict[str, Any],
+        group_key: str,
+        detail_key: str,
+    ) -> int | None:
+        details = usage.get(group_key)
+        if not isinstance(details, dict):
+            return None
+        value = details.get(detail_key)
+        if not isinstance(value, (int, float)):
+            return None
+        return max(0, int(value))
 
     @staticmethod
     def _extract_openai_tool_call_deltas(delta: dict[str, Any]) -> list[dict[str, Any]]:

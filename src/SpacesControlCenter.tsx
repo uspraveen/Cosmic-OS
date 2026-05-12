@@ -783,6 +783,7 @@ const MANAGE_PROVIDER_ACCENTS: AccentTone[] = ['azure', 'gold', 'mint', 'rose', 
 
 const MANAGE_PROVIDER_FALLBACK: ManageProviderDatum[] = [
   { name: 'Anthropic', role: 'Orchestration', tokens: '1.82M tokens', cost: '$14.20', pct: 70, accent: 'azure' },
+  { name: 'Fireworks', role: 'Kimi path', tokens: '0 tokens', cost: '$0.00', pct: 0, accent: 'slate' },
   { name: 'Perplexity', role: 'Search & vectors', tokens: '420K tokens', cost: '$3.60', pct: 18, accent: 'gold' },
   { name: 'Deepgram', role: 'Voice', tokens: '6.2 hrs audio', cost: '$2.10', pct: 10, accent: 'mint' },
   { name: 'Groq', role: 'Fast inference', tokens: '310K tokens', cost: '$0.45', pct: 2, accent: 'rose' },

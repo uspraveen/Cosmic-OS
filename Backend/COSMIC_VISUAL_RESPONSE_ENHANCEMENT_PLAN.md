@@ -436,7 +436,7 @@ Dedicated env keys:
 API-key fallback behavior:
 
 - `VISUAL_ENHANCEMENT_FIREWORKS_API_KEY`
-- falls back to `MODEL_API_KEY`, `FIREWORKS_API_KEY`, then `MIMO_API_KEY`
+- falls back to `MODEL_API_KEY`, `FIREWORKS_API_KEY`, then `OPENAI_COMPAT_API_KEY`
 
 - `VISUAL_ENHANCEMENT_FIRECRAWL_API_KEY`
 - falls back to `FIRECRAWL_API_KEY`

@@ -64,10 +64,10 @@ class CalendarAgentConfig:
     gateway_url: str = "http://127.0.0.1:8080"
     gateway_internal_token: str = ""
     # Internal LLM for natural language parsing (gpt-5-mini)
-    mimo_api_key: str = ""
-    mimo_base_url: str = ""
-    mimo_model: str = "gpt-5-mini"
-    mimo_timeout_sec: float = 120.0
+    internal_llm_api_key: str = ""
+    internal_llm_base_url: str = ""
+    internal_llm_model: str = "gpt-5-mini"
+    internal_llm_timeout_sec: float = 120.0
     enable_internal_llm: bool = True
     calendar_use_langgraph: bool = True
     calendar_max_tool_rounds: int = 6
@@ -85,21 +85,21 @@ class CalendarAgentConfig:
             redis_url=os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0").strip(),
             gateway_url=os.getenv("GATEWAY_URL", "http://127.0.0.1:8080").strip(),
             gateway_internal_token=os.getenv("GATEWAY_INTERNAL_TOKEN", "").strip(),
-            mimo_api_key=(
-                os.getenv("CALENDAR_AGENT_MIMO_API_KEY")
-                or os.getenv("MIMO_API_KEY")
+            internal_llm_api_key=(
+                os.getenv("CALENDAR_AGENT_INTERNAL_LLM_API_KEY")
+                or os.getenv("OPENAI_COMPAT_API_KEY")
                 or ""
             ).strip(),
-            mimo_base_url=_normalize_openai_base_url(
+            internal_llm_base_url=_normalize_openai_base_url(
                 (
-                    os.getenv("CALENDAR_AGENT_MIMO_BASE_URL")
-                    or os.getenv("MIMO_OPENAI_BASE_URL")
+                    os.getenv("CALENDAR_AGENT_INTERNAL_LLM_BASE_URL")
+                    or os.getenv("OPENAI_COMPAT_BASE_URL")
                     or ""
                 ).strip()
             ),
-            mimo_model=(os.getenv("CALENDAR_AGENT_MIMO_MODEL") or "gpt-5-mini").strip()
+            internal_llm_model=(os.getenv("CALENDAR_AGENT_INTERNAL_LLM_MODEL") or "gpt-5-mini").strip()
             or "gpt-5-mini",
-            mimo_timeout_sec=_env_float("CALENDAR_AGENT_MIMO_TIMEOUT_SEC", 120.0),
+            internal_llm_timeout_sec=_env_float("CALENDAR_AGENT_INTERNAL_LLM_TIMEOUT_SEC", 120.0),
             enable_internal_llm=_env_bool("CALENDAR_AGENT_ENABLE_INTERNAL_LLM", True),
             calendar_use_langgraph=_env_bool(
                 "CALENDAR_AGENT_USE_LANGGRAPH",

@@ -440,9 +440,9 @@ def test_materialize_bootstrap_env_files_updates_repo_envs(monkeypatch, tmp_path
         "COSMIC_MAIL_BASE_URL=\n"
         "COSMIC_MAIL_API_TOKEN=\n"
         "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS=\n"
-        "EMAIL_AGENT_MIMO_API_KEY=\n"
-        "EMAIL_AGENT_MIMO_BASE_URL=\n"
-        "EMAIL_AGENT_MIMO_MODEL=gpt-5-mini\n",
+        "EMAIL_AGENT_INTERNAL_LLM_API_KEY=\n"
+        "EMAIL_AGENT_INTERNAL_LLM_BASE_URL=\n"
+        "EMAIL_AGENT_INTERNAL_LLM_MODEL=gpt-5-mini\n",
         encoding="utf-8",
     )
 
@@ -555,9 +555,9 @@ def test_install_service_env_files_installs_firecrawl_agent_env(monkeypatch, tmp
         "COSMIC_MAIL_BASE_URL=\n"
         "COSMIC_MAIL_API_TOKEN=\n"
         "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS=\n"
-        "EMAIL_AGENT_MIMO_API_KEY=\n"
-        "EMAIL_AGENT_MIMO_BASE_URL=\n"
-        "EMAIL_AGENT_MIMO_MODEL=gpt-5-mini\n",
+        "EMAIL_AGENT_INTERNAL_LLM_API_KEY=\n"
+        "EMAIL_AGENT_INTERNAL_LLM_BASE_URL=\n"
+        "EMAIL_AGENT_INTERNAL_LLM_MODEL=gpt-5-mini\n",
         encoding="utf-8",
     )
 
@@ -604,9 +604,9 @@ def test_build_email_agent_env_rendered_prefers_external_values(tmp_path, monkey
         "COSMIC_MAIL_BASE_URL=\n"
         "COSMIC_MAIL_API_TOKEN=\n"
         "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS=\n"
-        "EMAIL_AGENT_MIMO_API_KEY=\n"
-        "EMAIL_AGENT_MIMO_BASE_URL=\n"
-        "EMAIL_AGENT_MIMO_MODEL=gpt-5-mini\n",
+        "EMAIL_AGENT_INTERNAL_LLM_API_KEY=\n"
+        "EMAIL_AGENT_INTERNAL_LLM_BASE_URL=\n"
+        "EMAIL_AGENT_INTERNAL_LLM_MODEL=gpt-5-mini\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(bootstrap, "BACKEND_ROOT", backend_root)
@@ -619,8 +619,8 @@ def test_build_email_agent_env_rendered_prefers_external_values(tmp_path, monkey
                 "COSMIC_MAIL_BASE_URL": "https://mail.example.com",
                 "COSMIC_MAIL_API_TOKEN": "mail-token",
                 "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS": "assistant@example.com",
-                "EMAIL_AGENT_MIMO_API_KEY": "mimo-key",
-                "EMAIL_AGENT_MIMO_BASE_URL": "https://mimo.example.com/v1",
+                "EMAIL_AGENT_INTERNAL_LLM_API_KEY": "internal_llm-key",
+                "EMAIL_AGENT_INTERNAL_LLM_BASE_URL": "https://internal_llm.example.com/v1",
             }
         },
     )
@@ -629,7 +629,7 @@ def test_build_email_agent_env_rendered_prefers_external_values(tmp_path, monkey
     assert "COSMIC_MAIL_BASE_URL=https://mail.example.com" in rendered
     assert parsed["COSMIC_MAIL_API_TOKEN"] == "mail-token"
     assert parsed["COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS"] == "assistant@example.com"
-    assert parsed["EMAIL_AGENT_MIMO_API_KEY"] == "mimo-key"
+    assert parsed["EMAIL_AGENT_INTERNAL_LLM_API_KEY"] == "internal_llm-key"
     assert parsed["AGENT_SECRET"] == "signing-secret"
     assert parsed["GATEWAY_INTERNAL_TOKEN"] == "internal-token"
 
@@ -647,9 +647,9 @@ def test_build_email_agent_env_rendered_respects_explicit_disconnect(tmp_path, m
         "COSMIC_MAIL_BASE_URL=\n"
         "COSMIC_MAIL_API_TOKEN=\n"
         "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS=\n"
-        "EMAIL_AGENT_MIMO_API_KEY=\n"
-        "EMAIL_AGENT_MIMO_BASE_URL=\n"
-        "EMAIL_AGENT_MIMO_MODEL=gpt-5-mini\n",
+        "EMAIL_AGENT_INTERNAL_LLM_API_KEY=\n"
+        "EMAIL_AGENT_INTERNAL_LLM_BASE_URL=\n"
+        "EMAIL_AGENT_INTERNAL_LLM_MODEL=gpt-5-mini\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(bootstrap, "BACKEND_ROOT", backend_root)
@@ -734,7 +734,7 @@ def test_build_slide_agent_env_rendered_inherits_visual_keys_from_peer_agents(
         "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
         "AGENT_SECRET=<agent-shared-secret>\n"
         "INSTANCE_ID=slide-agent-1\n"
-        "SLIDE_AGENT_MIMO_API_KEY=\n"
+        "SLIDE_AGENT_FIREWORKS_API_KEY=\n"
         "PEXELS_API_KEY=\n"
         "FIRECRAWL_API_KEY=\n"
         "FIRECRAWL_API_BASE_URL=https://api.firecrawl.dev\n"
@@ -768,7 +768,7 @@ def test_build_slide_agent_env_rendered_inherits_visual_keys_from_peer_agents(
         system_env_dir=system_env_dir,
         external_env_by_name={
             bootstrap.SLIDE_AGENT_ENV_NAME: {
-                "SLIDE_AGENT_MIMO_API_KEY": "mimo-key",
+                "SLIDE_AGENT_FIREWORKS_API_KEY": "internal_llm-key",
                 "PEXELS_API_KEY": "pexels-key",
             }
         },
@@ -778,7 +778,7 @@ def test_build_slide_agent_env_rendered_inherits_visual_keys_from_peer_agents(
     assert "PEXELS_API_KEY=pexels-key" in rendered
     assert "FIRECRAWL_API_KEY=fc-key" in rendered
     assert "XAI_API_KEY=xai-key" in rendered
-    assert parsed["SLIDE_AGENT_MIMO_API_KEY"] == "mimo-key"
+    assert parsed["SLIDE_AGENT_FIREWORKS_API_KEY"] == "internal_llm-key"
     assert parsed["PEXELS_API_KEY"] == "pexels-key"
     assert parsed["FIRECRAWL_API_KEY"] == "fc-key"
     assert parsed["XAI_API_KEY"] == "xai-key"
@@ -918,9 +918,9 @@ def test_materialize_bootstrap_env_files_can_render_memory_env(monkeypatch, tmp_
         "COSMIC_MAIL_BASE_URL=\n"
         "COSMIC_MAIL_API_TOKEN=\n"
         "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS=\n"
-        "EMAIL_AGENT_MIMO_API_KEY=\n"
-        "EMAIL_AGENT_MIMO_BASE_URL=\n"
-        "EMAIL_AGENT_MIMO_MODEL=gpt-5-mini\n",
+        "EMAIL_AGENT_INTERNAL_LLM_API_KEY=\n"
+        "EMAIL_AGENT_INTERNAL_LLM_BASE_URL=\n"
+        "EMAIL_AGENT_INTERNAL_LLM_MODEL=gpt-5-mini\n",
         encoding="utf-8",
     )
 
@@ -1532,6 +1532,9 @@ def test_run_post_provision_health_checks_uses_core_service_order(monkeypatch) -
         "cosmic-gateway.service",
         "cosmic-docs-parser-agent.service",
         "cosmic-tabular-agent.service",
+        bootstrap.CALENDAR_AGENT_SERVICE_NAME,
+        bootstrap.DIAGRAM_AGENT_SERVICE_NAME,
+        bootstrap.SLIDE_AGENT_SERVICE_NAME,
         "cosmic-whatsapp-bridge.service",
         "cosmic-memory.service",
         bootstrap.TABULAR_AGENT_SERVICE_NAME,
@@ -1580,6 +1583,9 @@ def test_run_post_provision_health_checks_waits_for_firecrawl_agent(monkeypatch)
         "cosmic-gateway.service",
         "cosmic-docs-parser-agent.service",
         "cosmic-tabular-agent.service",
+        bootstrap.CALENDAR_AGENT_SERVICE_NAME,
+        bootstrap.DIAGRAM_AGENT_SERVICE_NAME,
+        bootstrap.SLIDE_AGENT_SERVICE_NAME,
         "cosmic-whatsapp-bridge.service",
         bootstrap.FIRECRAWL_AGENT_SERVICE_NAME,
         bootstrap.TABULAR_AGENT_SERVICE_NAME,

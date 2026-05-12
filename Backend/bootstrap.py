@@ -989,36 +989,36 @@ def build_visual_enhancement_env_rendered(
         source_data.get("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY"),
         orchestrator_external_env.get("MODEL_API_KEY"),
         orchestrator_external_env.get("FIREWORKS_API_KEY"),
-        orchestrator_external_env.get("MIMO_API_KEY"),
+        orchestrator_external_env.get("OPENAI_COMPAT_API_KEY"),
         orchestrator_existing_env.get("MODEL_API_KEY"),
         orchestrator_existing_env.get("FIREWORKS_API_KEY"),
-        orchestrator_existing_env.get("MIMO_API_KEY"),
+        orchestrator_existing_env.get("OPENAI_COMPAT_API_KEY"),
         slide_external_env.get("MODEL_API_KEY"),
-        slide_external_env.get("SLIDE_AGENT_MIMO_API_KEY"),
+        slide_external_env.get("SLIDE_AGENT_FIREWORKS_API_KEY"),
         slide_external_env.get("FIREWORKS_API_KEY"),
-        slide_external_env.get("MIMO_API_KEY"),
+        slide_external_env.get("OPENAI_COMPAT_API_KEY"),
         slide_existing_env.get("MODEL_API_KEY"),
-        slide_existing_env.get("SLIDE_AGENT_MIMO_API_KEY"),
+        slide_existing_env.get("SLIDE_AGENT_FIREWORKS_API_KEY"),
         slide_existing_env.get("FIREWORKS_API_KEY"),
-        slide_existing_env.get("MIMO_API_KEY"),
+        slide_existing_env.get("OPENAI_COMPAT_API_KEY"),
     )
     fireworks_base_url = first_meaningful_value(
         external_env.get("VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL"),
         existing_env.get("VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL"),
         orchestrator_external_env.get("MODEL_BASE_URL"),
         orchestrator_external_env.get("FIREWORKS_BASE_URL"),
-        orchestrator_external_env.get("MIMO_OPENAI_BASE_URL"),
+        orchestrator_external_env.get("OPENAI_COMPAT_BASE_URL"),
         orchestrator_existing_env.get("MODEL_BASE_URL"),
         orchestrator_existing_env.get("FIREWORKS_BASE_URL"),
-        orchestrator_existing_env.get("MIMO_OPENAI_BASE_URL"),
+        orchestrator_existing_env.get("OPENAI_COMPAT_BASE_URL"),
         slide_external_env.get("MODEL_BASE_URL"),
-        slide_external_env.get("SLIDE_AGENT_MIMO_BASE_URL"),
+        slide_external_env.get("SLIDE_AGENT_FIREWORKS_BASE_URL"),
         slide_external_env.get("FIREWORKS_BASE_URL"),
-        slide_external_env.get("MIMO_OPENAI_BASE_URL"),
+        slide_external_env.get("OPENAI_COMPAT_BASE_URL"),
         slide_existing_env.get("MODEL_BASE_URL"),
-        slide_existing_env.get("SLIDE_AGENT_MIMO_BASE_URL"),
+        slide_existing_env.get("SLIDE_AGENT_FIREWORKS_BASE_URL"),
         slide_existing_env.get("FIREWORKS_BASE_URL"),
-        slide_existing_env.get("MIMO_OPENAI_BASE_URL"),
+        slide_existing_env.get("OPENAI_COMPAT_BASE_URL"),
         source_data.get("VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL"),
         "https://api.fireworks.ai/inference/v1",
     )
@@ -1031,10 +1031,10 @@ def build_visual_enhancement_env_rendered(
         orchestrator_existing_env.get("MODEL_NAME"),
         slide_external_env.get("FIREWORKS_KIMI_MODEL"),
         slide_external_env.get("MODEL_NAME"),
-        slide_external_env.get("SLIDE_AGENT_MIMO_MODEL"),
+        slide_external_env.get("SLIDE_AGENT_FIREWORKS_MODEL"),
         slide_existing_env.get("FIREWORKS_KIMI_MODEL"),
         slide_existing_env.get("MODEL_NAME"),
-        slide_existing_env.get("SLIDE_AGENT_MIMO_MODEL"),
+        slide_existing_env.get("SLIDE_AGENT_FIREWORKS_MODEL"),
         source_data.get("VISUAL_ENHANCEMENT_FIREWORKS_MODEL"),
         "accounts/fireworks/models/kimi-k2p6",
     )
@@ -1056,9 +1056,9 @@ def build_visual_enhancement_env_rendered(
         orchestrator_external_env.get("MODEL_TIMEOUT_SEC"),
         orchestrator_existing_env.get("MODEL_TIMEOUT_SEC"),
         slide_external_env.get("MODEL_TIMEOUT_SEC"),
-        slide_external_env.get("SLIDE_AGENT_MIMO_TIMEOUT_SEC"),
+        slide_external_env.get("SLIDE_AGENT_FIREWORKS_TIMEOUT_SEC"),
         slide_existing_env.get("MODEL_TIMEOUT_SEC"),
-        slide_existing_env.get("SLIDE_AGENT_MIMO_TIMEOUT_SEC"),
+        slide_existing_env.get("SLIDE_AGENT_FIREWORKS_TIMEOUT_SEC"),
         source_data.get("VISUAL_ENHANCEMENT_FIREWORKS_TIMEOUT_SEC"),
         "20",
     )
@@ -1351,27 +1351,27 @@ def build_tabular_agent_env_rendered(
         source_data.get("ORCHESTRATOR_URL"),
         "http://127.0.0.1:8743",
     )
-    mimo_api_key = first_meaningful_value(
-        external_env.get("TABULAR_AGENT_MIMO_API_KEY"),
-        external_env.get("MIMO_API_KEY"),
-        existing_env.get("TABULAR_AGENT_MIMO_API_KEY"),
-        existing_env.get("MIMO_API_KEY"),
-        source_data.get("TABULAR_AGENT_MIMO_API_KEY"),
-        source_data.get("MIMO_API_KEY"),
+    internal_llm_api_key = first_meaningful_value(
+        external_env.get("TABULAR_AGENT_INTERNAL_LLM_API_KEY"),
+        external_env.get("OPENAI_COMPAT_API_KEY"),
+        existing_env.get("TABULAR_AGENT_INTERNAL_LLM_API_KEY"),
+        existing_env.get("OPENAI_COMPAT_API_KEY"),
+        source_data.get("TABULAR_AGENT_INTERNAL_LLM_API_KEY"),
+        source_data.get("OPENAI_COMPAT_API_KEY"),
     )
-    mimo_base_url = first_meaningful_value(
-        external_env.get("TABULAR_AGENT_MIMO_BASE_URL"),
-        external_env.get("MIMO_OPENAI_BASE_URL"),
-        existing_env.get("TABULAR_AGENT_MIMO_BASE_URL"),
-        existing_env.get("MIMO_OPENAI_BASE_URL"),
-        source_data.get("TABULAR_AGENT_MIMO_BASE_URL"),
-        source_data.get("MIMO_OPENAI_BASE_URL"),
+    internal_llm_base_url = first_meaningful_value(
+        external_env.get("TABULAR_AGENT_INTERNAL_LLM_BASE_URL"),
+        external_env.get("OPENAI_COMPAT_BASE_URL"),
+        existing_env.get("TABULAR_AGENT_INTERNAL_LLM_BASE_URL"),
+        existing_env.get("OPENAI_COMPAT_BASE_URL"),
+        source_data.get("TABULAR_AGENT_INTERNAL_LLM_BASE_URL"),
+        source_data.get("OPENAI_COMPAT_BASE_URL"),
     )
-    mimo_model = first_meaningful_value(
-        external_env.get("TABULAR_AGENT_MIMO_MODEL"),
-        existing_env.get("TABULAR_AGENT_MIMO_MODEL"),
-        source_data.get("TABULAR_AGENT_MIMO_MODEL"),
-        "mimo-v2-pro",
+    internal_llm_model = first_meaningful_value(
+        external_env.get("TABULAR_AGENT_INTERNAL_LLM_MODEL"),
+        existing_env.get("TABULAR_AGENT_INTERNAL_LLM_MODEL"),
+        source_data.get("TABULAR_AGENT_INTERNAL_LLM_MODEL"),
+        "gpt-5-mini",
     )
     instance_id = first_meaningful_value(
         external_env.get("INSTANCE_ID"),
@@ -1388,12 +1388,12 @@ def build_tabular_agent_env_rendered(
         "INSTANCE_ID": instance_id or TABULAR_AGENT_DEFAULT_INSTANCE_ID,
         "TABULAR_AGENT_ORCHESTRATOR_URL": orchestrator_url or "http://127.0.0.1:8743",
         "TABULAR_AGENT_ORCHESTRATOR_INTERNAL_TOKEN": shared_internal_token,
-        "TABULAR_AGENT_MIMO_MODEL": mimo_model or "mimo-v2-pro",
+        "TABULAR_AGENT_INTERNAL_LLM_MODEL": internal_llm_model or "gpt-5-mini",
     }
-    if mimo_api_key is not None:
-        overrides["TABULAR_AGENT_MIMO_API_KEY"] = mimo_api_key
-    if mimo_base_url is not None:
-        overrides["TABULAR_AGENT_MIMO_BASE_URL"] = mimo_base_url
+    if internal_llm_api_key is not None:
+        overrides["TABULAR_AGENT_INTERNAL_LLM_API_KEY"] = internal_llm_api_key
+    if internal_llm_base_url is not None:
+        overrides["TABULAR_AGENT_INTERNAL_LLM_BASE_URL"] = internal_llm_base_url
 
     rendered = render_env_with_overrides(source_raw, overrides)
     rendered_data = parse_env_text(rendered)
@@ -1530,26 +1530,26 @@ def build_email_agent_env_rendered(
             existing_env.get("COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS"),
             source_data.get("COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS"),
         )
-    mimo_api_key = first_meaningful_value(
-        external_env.get("EMAIL_AGENT_MIMO_API_KEY"),
-        external_env.get("MIMO_API_KEY"),
-        existing_env.get("EMAIL_AGENT_MIMO_API_KEY"),
-        existing_env.get("MIMO_API_KEY"),
-        source_data.get("EMAIL_AGENT_MIMO_API_KEY"),
-        source_data.get("MIMO_API_KEY"),
+    internal_llm_api_key = first_meaningful_value(
+        external_env.get("EMAIL_AGENT_INTERNAL_LLM_API_KEY"),
+        external_env.get("OPENAI_COMPAT_API_KEY"),
+        existing_env.get("EMAIL_AGENT_INTERNAL_LLM_API_KEY"),
+        existing_env.get("OPENAI_COMPAT_API_KEY"),
+        source_data.get("EMAIL_AGENT_INTERNAL_LLM_API_KEY"),
+        source_data.get("OPENAI_COMPAT_API_KEY"),
     )
-    mimo_base_url = first_meaningful_value(
-        external_env.get("EMAIL_AGENT_MIMO_BASE_URL"),
-        external_env.get("MIMO_OPENAI_BASE_URL"),
-        existing_env.get("EMAIL_AGENT_MIMO_BASE_URL"),
-        existing_env.get("MIMO_OPENAI_BASE_URL"),
-        source_data.get("EMAIL_AGENT_MIMO_BASE_URL"),
-        source_data.get("MIMO_OPENAI_BASE_URL"),
+    internal_llm_base_url = first_meaningful_value(
+        external_env.get("EMAIL_AGENT_INTERNAL_LLM_BASE_URL"),
+        external_env.get("OPENAI_COMPAT_BASE_URL"),
+        existing_env.get("EMAIL_AGENT_INTERNAL_LLM_BASE_URL"),
+        existing_env.get("OPENAI_COMPAT_BASE_URL"),
+        source_data.get("EMAIL_AGENT_INTERNAL_LLM_BASE_URL"),
+        source_data.get("OPENAI_COMPAT_BASE_URL"),
     )
-    mimo_model = first_meaningful_value(
-        external_env.get("EMAIL_AGENT_MIMO_MODEL"),
-        existing_env.get("EMAIL_AGENT_MIMO_MODEL"),
-        source_data.get("EMAIL_AGENT_MIMO_MODEL"),
+    internal_llm_model = first_meaningful_value(
+        external_env.get("EMAIL_AGENT_INTERNAL_LLM_MODEL"),
+        existing_env.get("EMAIL_AGENT_INTERNAL_LLM_MODEL"),
+        source_data.get("EMAIL_AGENT_INTERNAL_LLM_MODEL"),
         "gpt-5-mini",
     )
     instance_id = first_meaningful_value(
@@ -1565,7 +1565,7 @@ def build_email_agent_env_rendered(
         "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
         "AGENT_SECRET": signing_secret,
         "INSTANCE_ID": instance_id or EMAIL_AGENT_DEFAULT_INSTANCE_ID,
-        "EMAIL_AGENT_MIMO_MODEL": mimo_model or "gpt-5-mini",
+        "EMAIL_AGENT_INTERNAL_LLM_MODEL": internal_llm_model or "gpt-5-mini",
     }
     if cosmic_mail_base_url is not None:
         overrides["COSMIC_MAIL_BASE_URL"] = cosmic_mail_base_url
@@ -1573,10 +1573,10 @@ def build_email_agent_env_rendered(
         overrides["COSMIC_MAIL_API_TOKEN"] = cosmic_mail_api_token
     if primary_mailbox_address is not None:
         overrides["COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS"] = primary_mailbox_address
-    if mimo_api_key is not None:
-        overrides["EMAIL_AGENT_MIMO_API_KEY"] = mimo_api_key
-    if mimo_base_url is not None:
-        overrides["EMAIL_AGENT_MIMO_BASE_URL"] = mimo_base_url
+    if internal_llm_api_key is not None:
+        overrides["EMAIL_AGENT_INTERNAL_LLM_API_KEY"] = internal_llm_api_key
+    if internal_llm_base_url is not None:
+        overrides["EMAIL_AGENT_INTERNAL_LLM_BASE_URL"] = internal_llm_base_url
 
     rendered = render_env_with_overrides(source_raw, overrides)
     rendered_data = parse_env_text(rendered)
@@ -1826,32 +1826,32 @@ def build_calendar_agent_env_rendered(
         source_data.get("GATEWAY_URL"),
         "http://127.0.0.1:8080",
     )
-    mimo_api_key = first_meaningful_value(
-        external_env.get("CALENDAR_AGENT_MIMO_API_KEY"),
-        external_env.get("MIMO_API_KEY"),
-        existing_env.get("CALENDAR_AGENT_MIMO_API_KEY"),
-        existing_env.get("MIMO_API_KEY"),
-        source_data.get("CALENDAR_AGENT_MIMO_API_KEY"),
-        source_data.get("MIMO_API_KEY"),
+    internal_llm_api_key = first_meaningful_value(
+        external_env.get("CALENDAR_AGENT_INTERNAL_LLM_API_KEY"),
+        external_env.get("OPENAI_COMPAT_API_KEY"),
+        existing_env.get("CALENDAR_AGENT_INTERNAL_LLM_API_KEY"),
+        existing_env.get("OPENAI_COMPAT_API_KEY"),
+        source_data.get("CALENDAR_AGENT_INTERNAL_LLM_API_KEY"),
+        source_data.get("OPENAI_COMPAT_API_KEY"),
     )
-    mimo_base_url = first_meaningful_value(
-        external_env.get("CALENDAR_AGENT_MIMO_BASE_URL"),
-        external_env.get("MIMO_OPENAI_BASE_URL"),
-        existing_env.get("CALENDAR_AGENT_MIMO_BASE_URL"),
-        existing_env.get("MIMO_OPENAI_BASE_URL"),
-        source_data.get("CALENDAR_AGENT_MIMO_BASE_URL"),
-        source_data.get("MIMO_OPENAI_BASE_URL"),
+    internal_llm_base_url = first_meaningful_value(
+        external_env.get("CALENDAR_AGENT_INTERNAL_LLM_BASE_URL"),
+        external_env.get("OPENAI_COMPAT_BASE_URL"),
+        existing_env.get("CALENDAR_AGENT_INTERNAL_LLM_BASE_URL"),
+        existing_env.get("OPENAI_COMPAT_BASE_URL"),
+        source_data.get("CALENDAR_AGENT_INTERNAL_LLM_BASE_URL"),
+        source_data.get("OPENAI_COMPAT_BASE_URL"),
     )
-    mimo_model = first_meaningful_value(
-        external_env.get("CALENDAR_AGENT_MIMO_MODEL"),
-        existing_env.get("CALENDAR_AGENT_MIMO_MODEL"),
-        source_data.get("CALENDAR_AGENT_MIMO_MODEL"),
+    internal_llm_model = first_meaningful_value(
+        external_env.get("CALENDAR_AGENT_INTERNAL_LLM_MODEL"),
+        existing_env.get("CALENDAR_AGENT_INTERNAL_LLM_MODEL"),
+        source_data.get("CALENDAR_AGENT_INTERNAL_LLM_MODEL"),
         "gpt-5-mini",
     )
-    mimo_timeout_sec = first_meaningful_value(
-        external_env.get("CALENDAR_AGENT_MIMO_TIMEOUT_SEC"),
-        existing_env.get("CALENDAR_AGENT_MIMO_TIMEOUT_SEC"),
-        source_data.get("CALENDAR_AGENT_MIMO_TIMEOUT_SEC"),
+    internal_llm_timeout_sec = first_meaningful_value(
+        external_env.get("CALENDAR_AGENT_INTERNAL_LLM_TIMEOUT_SEC"),
+        existing_env.get("CALENDAR_AGENT_INTERNAL_LLM_TIMEOUT_SEC"),
+        source_data.get("CALENDAR_AGENT_INTERNAL_LLM_TIMEOUT_SEC"),
         "120.0",
     )
     enable_internal_llm = first_meaningful_value(
@@ -1921,8 +1921,8 @@ def build_calendar_agent_env_rendered(
         "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
         "AGENT_SECRET": signing_secret,
         "INSTANCE_ID": instance_id or CALENDAR_AGENT_DEFAULT_INSTANCE_ID,
-        "CALENDAR_AGENT_MIMO_MODEL": mimo_model or "gpt-5-mini",
-        "CALENDAR_AGENT_MIMO_TIMEOUT_SEC": mimo_timeout_sec or "120.0",
+        "CALENDAR_AGENT_INTERNAL_LLM_MODEL": internal_llm_model or "gpt-5-mini",
+        "CALENDAR_AGENT_INTERNAL_LLM_TIMEOUT_SEC": internal_llm_timeout_sec or "120.0",
         "CALENDAR_AGENT_ENABLE_INTERNAL_LLM": enable_internal_llm or "true",
         "CALENDAR_AGENT_USE_LANGGRAPH": use_langgraph or "true",
         "CALENDAR_AGENT_MAX_TOOL_ROUNDS": max_tool_rounds or "6",
@@ -1933,10 +1933,10 @@ def build_calendar_agent_env_rendered(
         "CALENDAR_AGENT_BUFFER_MIN": buffer_min or "15",
         "CALENDAR_AGENT_MAX_EVENTS_PER_LIST": max_events_per_list or "50",
     }
-    if mimo_api_key is not None:
-        overrides["CALENDAR_AGENT_MIMO_API_KEY"] = mimo_api_key
-    if mimo_base_url is not None:
-        overrides["CALENDAR_AGENT_MIMO_BASE_URL"] = mimo_base_url
+    if internal_llm_api_key is not None:
+        overrides["CALENDAR_AGENT_INTERNAL_LLM_API_KEY"] = internal_llm_api_key
+    if internal_llm_base_url is not None:
+        overrides["CALENDAR_AGENT_INTERNAL_LLM_BASE_URL"] = internal_llm_base_url
 
     rendered = render_env_with_overrides(source_raw, overrides)
     rendered_data = parse_env_text(rendered)
@@ -2003,32 +2003,32 @@ def build_diagram_agent_env_rendered(
         source_data.get("GATEWAY_URL"),
         "http://127.0.0.1:8080",
     )
-    mimo_api_key = first_meaningful_value(
-        external_env.get("DIAGRAM_AGENT_MIMO_API_KEY"),
-        external_env.get("MIMO_API_KEY"),
-        existing_env.get("DIAGRAM_AGENT_MIMO_API_KEY"),
-        existing_env.get("MIMO_API_KEY"),
-        source_data.get("DIAGRAM_AGENT_MIMO_API_KEY"),
-        source_data.get("MIMO_API_KEY"),
+    internal_llm_api_key = first_meaningful_value(
+        external_env.get("DIAGRAM_AGENT_INTERNAL_LLM_API_KEY"),
+        external_env.get("OPENAI_COMPAT_API_KEY"),
+        existing_env.get("DIAGRAM_AGENT_INTERNAL_LLM_API_KEY"),
+        existing_env.get("OPENAI_COMPAT_API_KEY"),
+        source_data.get("DIAGRAM_AGENT_INTERNAL_LLM_API_KEY"),
+        source_data.get("OPENAI_COMPAT_API_KEY"),
     )
-    mimo_base_url = first_meaningful_value(
-        external_env.get("DIAGRAM_AGENT_MIMO_BASE_URL"),
-        external_env.get("MIMO_OPENAI_BASE_URL"),
-        existing_env.get("DIAGRAM_AGENT_MIMO_BASE_URL"),
-        existing_env.get("MIMO_OPENAI_BASE_URL"),
-        source_data.get("DIAGRAM_AGENT_MIMO_BASE_URL"),
-        source_data.get("MIMO_OPENAI_BASE_URL"),
+    internal_llm_base_url = first_meaningful_value(
+        external_env.get("DIAGRAM_AGENT_INTERNAL_LLM_BASE_URL"),
+        external_env.get("OPENAI_COMPAT_BASE_URL"),
+        existing_env.get("DIAGRAM_AGENT_INTERNAL_LLM_BASE_URL"),
+        existing_env.get("OPENAI_COMPAT_BASE_URL"),
+        source_data.get("DIAGRAM_AGENT_INTERNAL_LLM_BASE_URL"),
+        source_data.get("OPENAI_COMPAT_BASE_URL"),
     )
-    mimo_model = first_meaningful_value(
-        external_env.get("DIAGRAM_AGENT_MIMO_MODEL"),
-        existing_env.get("DIAGRAM_AGENT_MIMO_MODEL"),
-        source_data.get("DIAGRAM_AGENT_MIMO_MODEL"),
+    internal_llm_model = first_meaningful_value(
+        external_env.get("DIAGRAM_AGENT_INTERNAL_LLM_MODEL"),
+        existing_env.get("DIAGRAM_AGENT_INTERNAL_LLM_MODEL"),
+        source_data.get("DIAGRAM_AGENT_INTERNAL_LLM_MODEL"),
         "gpt-5-mini",
     )
-    mimo_timeout_sec = first_meaningful_value(
-        external_env.get("DIAGRAM_AGENT_MIMO_TIMEOUT_SEC"),
-        existing_env.get("DIAGRAM_AGENT_MIMO_TIMEOUT_SEC"),
-        source_data.get("DIAGRAM_AGENT_MIMO_TIMEOUT_SEC"),
+    internal_llm_timeout_sec = first_meaningful_value(
+        external_env.get("DIAGRAM_AGENT_INTERNAL_LLM_TIMEOUT_SEC"),
+        existing_env.get("DIAGRAM_AGENT_INTERNAL_LLM_TIMEOUT_SEC"),
+        source_data.get("DIAGRAM_AGENT_INTERNAL_LLM_TIMEOUT_SEC"),
         "120.0",
     )
     enable_internal_llm = first_meaningful_value(
@@ -2128,8 +2128,8 @@ def build_diagram_agent_env_rendered(
         "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
         "AGENT_SECRET": signing_secret,
         "INSTANCE_ID": instance_id or DIAGRAM_AGENT_DEFAULT_INSTANCE_ID,
-        "DIAGRAM_AGENT_MIMO_MODEL": mimo_model or "gpt-5-mini",
-        "DIAGRAM_AGENT_MIMO_TIMEOUT_SEC": mimo_timeout_sec or "120.0",
+        "DIAGRAM_AGENT_INTERNAL_LLM_MODEL": internal_llm_model or "gpt-5-mini",
+        "DIAGRAM_AGENT_INTERNAL_LLM_TIMEOUT_SEC": internal_llm_timeout_sec or "120.0",
         "DIAGRAM_AGENT_ENABLE_INTERNAL_LLM": enable_internal_llm or "true",
         "DIAGRAM_AGENT_USE_LANGGRAPH": use_langgraph or "true",
         "DIAGRAM_AGENT_MAX_TOOL_ROUNDS": max_tool_rounds or "6",
@@ -2146,10 +2146,10 @@ def build_diagram_agent_env_rendered(
         "DIAGRAM_AGENT_MAX_WIDTH_PX": max_width or "2400",
         "DIAGRAM_AGENT_MAX_HEIGHT_PX": max_height or "1600",
     }
-    if mimo_api_key is not None:
-        overrides["DIAGRAM_AGENT_MIMO_API_KEY"] = mimo_api_key
-    if mimo_base_url is not None:
-        overrides["DIAGRAM_AGENT_MIMO_BASE_URL"] = mimo_base_url
+    if internal_llm_api_key is not None:
+        overrides["DIAGRAM_AGENT_INTERNAL_LLM_API_KEY"] = internal_llm_api_key
+    if internal_llm_base_url is not None:
+        overrides["DIAGRAM_AGENT_INTERNAL_LLM_BASE_URL"] = internal_llm_base_url
 
     rendered = render_env_with_overrides(source_raw, overrides)
     rendered_data = parse_env_text(rendered)
@@ -2158,8 +2158,8 @@ def build_diagram_agent_env_rendered(
 
 def diagram_agent_is_configured(env_values: Dict[str, str]) -> bool:
     return (
-        meaningful_env_value(env_values.get("DIAGRAM_AGENT_MIMO_API_KEY")) is not None
-        or meaningful_env_value(env_values.get("MIMO_API_KEY")) is not None
+        meaningful_env_value(env_values.get("DIAGRAM_AGENT_INTERNAL_LLM_API_KEY")) is not None
+        or meaningful_env_value(env_values.get("OPENAI_COMPAT_API_KEY")) is not None
     )
 
 
@@ -2251,37 +2251,37 @@ def build_slide_agent_env_rendered(
             default,
         )
 
-    mimo_api_key = pick_env(
+    internal_llm_api_key = pick_env(
         (
             "MODEL_API_KEY",
-            "SLIDE_AGENT_MIMO_API_KEY",
+            "SLIDE_AGENT_FIREWORKS_API_KEY",
             "FIREWORKS_API_KEY",
-            "MIMO_API_KEY",
+            "OPENAI_COMPAT_API_KEY",
             "OPENROUTER_API_KEY",
         )
     )
-    mimo_base_url = pick_env(
+    internal_llm_base_url = pick_env(
         (
             "MODEL_BASE_URL",
-            "SLIDE_AGENT_MIMO_BASE_URL",
+            "SLIDE_AGENT_FIREWORKS_BASE_URL",
             "FIREWORKS_BASE_URL",
-            "MIMO_OPENAI_BASE_URL",
+            "OPENAI_COMPAT_BASE_URL",
             "OPENROUTER_BASE_URL",
         ),
         "https://api.fireworks.ai/inference/v1",
     )
-    mimo_model = pick_env(
-        ("MODEL_NAME", "SLIDE_AGENT_MIMO_MODEL", "FIREWORKS_KIMI_MODEL"),
+    internal_llm_model = pick_env(
+        ("MODEL_NAME", "SLIDE_AGENT_FIREWORKS_MODEL", "FIREWORKS_KIMI_MODEL"),
         "accounts/fireworks/models/qwen3p6-plus",
     )
     model_timeout_sec = pick_env(
-        ("MODEL_TIMEOUT_SEC", "SLIDE_AGENT_MIMO_TIMEOUT_SEC"),
+        ("MODEL_TIMEOUT_SEC", "SLIDE_AGENT_FIREWORKS_TIMEOUT_SEC"),
         "300",
     )
     model_http_retries = pick_env(("MODEL_HTTP_RETRIES",), "3")
     model_max_tokens = pick_env(("MODEL_MAX_TOKENS",), "16384")
     html_model_max_tokens = pick_env(("HTML_MODEL_MAX_TOKENS",), "4096")
-    vision_model_name = pick_env(("VISION_MODEL_NAME",), mimo_model)
+    vision_model_name = pick_env(("VISION_MODEL_NAME",), internal_llm_model)
     libreoffice_path = pick_env(
         ("LIBREOFFICE_PATH", "SLIDE_AGENT_LIBREOFFICE_PATH"),
         "soffice",
@@ -2466,12 +2466,12 @@ def build_slide_agent_env_rendered(
         "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
         "AGENT_SECRET": signing_secret,
         "INSTANCE_ID": instance_id or SLIDE_AGENT_DEFAULT_INSTANCE_ID,
-        "SLIDE_AGENT_MIMO_BASE_URL": mimo_base_url
+        "SLIDE_AGENT_FIREWORKS_BASE_URL": internal_llm_base_url
         or "https://api.fireworks.ai/inference/v1",
-        "SLIDE_AGENT_MIMO_MODEL": mimo_model
+        "SLIDE_AGENT_FIREWORKS_MODEL": internal_llm_model
         or "accounts/fireworks/models/qwen3p6-plus",
         "VISION_MODEL_NAME": vision_model_name
-        or mimo_model
+        or internal_llm_model
         or "accounts/fireworks/models/qwen3p6-plus",
         "MODEL_TIMEOUT_SEC": model_timeout_sec or "300",
         "MODEL_HTTP_RETRIES": model_http_retries or "3",
@@ -2520,8 +2520,8 @@ def build_slide_agent_env_rendered(
         "PYTHON_SANDBOX_PIP_TIMEOUT_SEC": python_sandbox_pip_timeout_sec or "120",
         "PYTHON_SANDBOX_VENV_CACHE_ROOT": python_sandbox_venv_cache_root or "",
     }
-    if mimo_api_key is not None:
-        overrides["SLIDE_AGENT_MIMO_API_KEY"] = mimo_api_key
+    if internal_llm_api_key is not None:
+        overrides["SLIDE_AGENT_FIREWORKS_API_KEY"] = internal_llm_api_key
     if pexels_api_key is not None:
         overrides["PEXELS_API_KEY"] = pexels_api_key
     if firecrawl_api_key is not None:
@@ -2536,9 +2536,9 @@ def build_slide_agent_env_rendered(
 
 def slide_agent_is_configured(env_values: Dict[str, str]) -> bool:
     return (
-        meaningful_env_value(env_values.get("SLIDE_AGENT_MIMO_API_KEY")) is not None
+        meaningful_env_value(env_values.get("SLIDE_AGENT_FIREWORKS_API_KEY")) is not None
         or meaningful_env_value(env_values.get("FIREWORKS_API_KEY")) is not None
-        or meaningful_env_value(env_values.get("MIMO_API_KEY")) is not None
+        or meaningful_env_value(env_values.get("OPENAI_COMPAT_API_KEY")) is not None
     )
 
 
@@ -6734,25 +6734,25 @@ def provision_vm(
             "X/Twitter search agent env is not configured; bootstrap will install the unit but skip enabling the agent service."
         )
     tabular_env = read_tabular_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
-    if meaningful_env_value(tabular_env.get("TABULAR_AGENT_MIMO_API_KEY")) is not None:
+    if meaningful_env_value(tabular_env.get("TABULAR_AGENT_INTERNAL_LLM_API_KEY")) is not None:
         log(
-            "Tabular agent env includes MiMo credentials; bootstrap will enable and start the tabular agent service with internal LLM support."
+            "Tabular agent env includes internal LLM credentials; bootstrap will enable and start the tabular agent service with internal LLM support."
         )
     else:
         log(
-            "Tabular agent env does not include MiMo credentials; bootstrap will still enable and start the tabular agent service for deterministic spreadsheet work."
+            "Tabular agent env does not include internal LLM credentials; bootstrap will still enable and start the tabular agent service for deterministic spreadsheet work."
         )
     email_env = read_email_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
     enable_email_agent = email_agent_enabled_via_env_or_integration(email_env)
     if enable_email_agent:
-        if meaningful_env_value(email_env.get("EMAIL_AGENT_MIMO_API_KEY")) is not None:
+        if meaningful_env_value(email_env.get("EMAIL_AGENT_INTERNAL_LLM_API_KEY")) is not None:
             log(
-                "Email agent env is configured with Cosmic Mail + MiMo credentials; bootstrap will enable and start the email agent service."
+                "Email agent env is configured with Cosmic Mail + internal LLM credentials; bootstrap will enable and start the email agent service."
             )
         else:
             if email_agent_is_configured(email_env):
                 log(
-                    "Email agent env is configured with Cosmic Mail credentials but no MiMo key; bootstrap will still enable and start the email agent service."
+                    "Email agent env is configured with Cosmic Mail credentials but no internal LLM key; bootstrap will still enable and start the email agent service."
                 )
             else:
                 log(

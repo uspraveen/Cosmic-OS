@@ -10,8 +10,8 @@ Local dummy orchestrator for the slide agent.
 - Keeps a simple session log keyed by ``task_id`` (delegations, events, terminal status).
 
 Environment (same as slide agent / test_fireworks_kimi):
-  FIREWORKS_API_KEY or SLIDE_AGENT_MIMO_API_KEY
-  FIREWORKS_KIMI_MODEL or SLIDE_AGENT_MIMO_MODEL (optional)
+  FIREWORKS_API_KEY or SLIDE_AGENT_FIREWORKS_API_KEY
+  FIREWORKS_KIMI_MODEL or SLIDE_AGENT_FIREWORKS_MODEL (optional)
   AGENT_SECRET — task HMAC (default: dev-dummy-secret)
 
 Run from repo root:
@@ -127,18 +127,18 @@ def _route_with_kimi(
     user_block: str,
     cfg: SlideAgentConfig,
 ) -> tuple[str, dict[str, object]]:
-    if not cfg.mimo_api_key:
+    if not cfg.internal_llm_api_key:
         raise RuntimeError(
-            "No API key for routing: set FIREWORKS_API_KEY or SLIDE_AGENT_MIMO_API_KEY"
+            "No API key for routing: set FIREWORKS_API_KEY or SLIDE_AGENT_FIREWORKS_API_KEY"
         )
-    client = OpenAI(base_url=cfg.mimo_base_url, api_key=cfg.mimo_api_key)
+    client = OpenAI(base_url=cfg.internal_llm_base_url, api_key=cfg.internal_llm_api_key)
     completion = client.chat.completions.create(
-        model=cfg.mimo_model,
+        model=cfg.internal_llm_model,
         messages=[
             {"role": "system", "content": ROUTER_SYSTEM},
             {"role": "user", "content": user_block},
         ],
-        temperature=min(0.4, cfg.mimo_temperature),
+        temperature=min(0.4, cfg.internal_llm_temperature),
         max_tokens=1024,
     )
     raw = (completion.choices[0].message.content or "").strip()

@@ -323,7 +323,7 @@ class TestConfig:
         assert cfg.working_hour_start == 9
         assert cfg.working_hour_end == 17
         assert cfg.default_event_duration_min == 30
-        assert cfg.mimo_model == "gpt-5-mini"
+        assert cfg.internal_llm_model == "gpt-5-mini"
 
     def test_config_from_env(self):
         from agents.calendar_agent.config import CalendarAgentConfig

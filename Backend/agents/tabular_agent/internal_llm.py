@@ -1,4 +1,4 @@
-"""MiMo-v2-pro via LangChain OpenAI-compatible client + Gateway usage logging."""
+"""internal LLM-v2-pro via LangChain OpenAI-compatible client + Gateway usage logging."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from .config import TabularAgentConfig
 logger = logging.getLogger(__name__)
 
 
-async def invoke_tabular_mimo(
+async def invoke_tabular_internal_llm(
     *,
     cfg: TabularAgentConfig,
     http_client: httpx.AsyncClient,
@@ -32,8 +32,8 @@ async def invoke_tabular_mimo(
     max_output_chars: int = 24_000,
     temperature: float = 0.2,
 ) -> str | None:
-    """Call MiMo with a dedicated httpx client (http2=False). Posts usage to Gateway when configured."""
-    if not cfg.enable_internal_llm or not cfg.mimo_api_key or not cfg.mimo_base_url:
+    """Call internal LLM with a dedicated httpx client (http2=False). Posts usage to Gateway when configured."""
+    if not cfg.enable_internal_llm or not cfg.internal_llm_api_key or not cfg.internal_llm_base_url:
         return None
     try:
         from langchain_openai import ChatOpenAI
@@ -42,25 +42,25 @@ async def invoke_tabular_mimo(
         logger.warning("tabular_agent.langchain_unavailable: %s", exc)
         return None
 
-    base_url = cfg.mimo_base_url
+    base_url = cfg.internal_llm_base_url
     messages = [
         SystemMessage(content=system_content.strip()),
         HumanMessage(content=user_message[:120_000]),
     ]
     started = time.perf_counter()
-    llm_call_id = f"tabular_mimo_{uuid4().hex[:16]}"
+    llm_call_id = f"tabular_internal_llm_{uuid4().hex[:16]}"
     try:
         async with httpx.AsyncClient(
-            timeout=cfg.mimo_timeout_sec,
+            timeout=cfg.internal_llm_timeout_sec,
             http2=False,
             follow_redirects=True,
-        ) as mimo_http:
+        ) as llm_http:
             llm = ChatOpenAI(
-                model=cfg.mimo_model,
-                api_key=cfg.mimo_api_key,
+                model=cfg.internal_llm_model,
+                api_key=cfg.internal_llm_api_key,
                 base_url=base_url,
                 temperature=temperature,
-                http_async_client=mimo_http,
+                http_async_client=llm_http,
             )
             result = await llm.ainvoke(messages)
     except Exception as exc:
@@ -75,14 +75,14 @@ async def invoke_tabular_mimo(
             source_id=source_id,
             channel=channel,
             llm_call_id=llm_call_id,
-            model=cfg.mimo_model,
+            model=cfg.internal_llm_model,
             operation=operation,
             prompt_tokens=0,
             completion_tokens=0,
             latency_ms=int((time.perf_counter() - started) * 1000),
             error=str(exc)[:200],
         )
-        logger.warning("tabular_agent.mimo_invoke_failed: %s", exc)
+        logger.warning("tabular_agent.internal_llm_invoke_failed: %s", exc)
         return None
 
     text = getattr(result, "content", None) or str(result)
@@ -107,7 +107,7 @@ async def invoke_tabular_mimo(
         source_id=source_id,
         channel=channel,
         llm_call_id=llm_call_id,
-        model=cfg.mimo_model,
+        model=cfg.internal_llm_model,
         operation=operation,
         prompt_tokens=pt,
         completion_tokens=ct,
@@ -140,7 +140,7 @@ async def maybe_enrich_preview_summary(
         ),
     ]
     system_content = "\n\n".join(p.strip() for p in system_parts if p and str(p).strip())
-    return await invoke_tabular_mimo(
+    return await invoke_tabular_internal_llm(
         cfg=cfg,
         http_client=http_client,
         system_content=system_content,
@@ -196,7 +196,7 @@ async def _post_usage(
         route="tabular",
         operation=operation,
         usage_kind="llm",
-        provider="mimo",
+        provider="internal_llm",
         model=model,
         request_id=request_id,
         provider_request_id=None,

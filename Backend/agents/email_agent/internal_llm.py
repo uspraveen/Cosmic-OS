@@ -17,7 +17,7 @@ from .config import EmailAgentConfig
 logger = logging.getLogger(__name__)
 
 
-async def invoke_email_mimo(
+async def invoke_email_internal_llm(
     *,
     cfg: EmailAgentConfig,
     http_client: httpx.AsyncClient,
@@ -33,7 +33,7 @@ async def invoke_email_mimo(
     max_output_chars: int = 24_000,
     temperature: float = 0.2,
 ) -> str | None:
-    if not cfg.enable_internal_llm or not cfg.mimo_api_key or not cfg.mimo_base_url:
+    if not cfg.enable_internal_llm or not cfg.internal_llm_api_key or not cfg.internal_llm_base_url:
         return None
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
@@ -47,21 +47,21 @@ async def invoke_email_mimo(
         HumanMessage(content=user_message[:120_000]),
     ]
     started = time.perf_counter()
-    llm_call_id = f"email_mimo_{uuid4().hex[:16]}"
+    llm_call_id = f"email_internal_llm_{uuid4().hex[:16]}"
     try:
         async with httpx.AsyncClient(
-            timeout=cfg.mimo_timeout_sec,
+            timeout=cfg.internal_llm_timeout_sec,
             http2=False,
             follow_redirects=True,
-        ) as mimo_http:
+        ) as llm_http:
             llm_kwargs: dict[str, Any] = {
-                "model": cfg.mimo_model,
-                "api_key": cfg.mimo_api_key,
-                "base_url": cfg.mimo_base_url,
-                "http_async_client": mimo_http,
+                "model": cfg.internal_llm_model,
+                "api_key": cfg.internal_llm_api_key,
+                "base_url": cfg.internal_llm_base_url,
+                "http_async_client": llm_http,
             }
             # OpenAI GPT-5 chat-completions models reject temperature/top_p style sampling knobs.
-            if not _is_gpt5_chat_model(cfg.mimo_model):
+            if not _is_gpt5_chat_model(cfg.internal_llm_model):
                 llm_kwargs["temperature"] = temperature
             llm = ChatOpenAI(**llm_kwargs)
             result = await llm.ainvoke(messages)
@@ -77,14 +77,14 @@ async def invoke_email_mimo(
             source_id=source_id,
             channel=channel,
             llm_call_id=llm_call_id,
-            model=cfg.mimo_model,
+            model=cfg.internal_llm_model,
             operation=operation,
             prompt_tokens=0,
             completion_tokens=0,
             latency_ms=int((time.perf_counter() - started) * 1000),
             error=str(exc)[:200],
         )
-        logger.warning("email_agent.mimo_invoke_failed: %s", exc)
+        logger.warning("email_agent.internal_llm_invoke_failed: %s", exc)
         return None
 
     text = getattr(result, "content", None) or str(result)
@@ -108,7 +108,7 @@ async def invoke_email_mimo(
         source_id=source_id,
         channel=channel,
         llm_call_id=llm_call_id,
-        model=cfg.mimo_model,
+        model=cfg.internal_llm_model,
         operation=operation,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
@@ -118,7 +118,7 @@ async def invoke_email_mimo(
     return str(text).strip()[:max_output_chars] or None
 
 
-async def invoke_email_mimo_json(
+async def invoke_email_internal_llm_json(
     *,
     cfg: EmailAgentConfig,
     http_client: httpx.AsyncClient,
@@ -132,7 +132,7 @@ async def invoke_email_mimo_json(
     channel: str | None,
     operation: str,
 ) -> dict[str, Any] | None:
-    text = await invoke_email_mimo(
+    text = await invoke_email_internal_llm(
         cfg=cfg,
         http_client=http_client,
         system_content=system_content,
@@ -152,7 +152,7 @@ async def invoke_email_mimo_json(
     try:
         return _extract_json_object(text)
     except ValueError:
-        logger.warning("email_agent.mimo_json_parse_failed operation=%s text=%s", operation, text[:400])
+        logger.warning("email_agent.internal_llm_json_parse_failed operation=%s text=%s", operation, text[:400])
         return None
 
 
@@ -216,7 +216,7 @@ async def _post_usage(
         route="email",
         operation=operation,
         usage_kind="llm",
-        provider="mimo",
+        provider="internal_llm",
         model=model,
         request_id=request_id,
         provider_request_id=None,

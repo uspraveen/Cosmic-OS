@@ -218,14 +218,14 @@ async def test_email_agent_reason_compose_draft_uses_compact_brief_and_uploads_i
 
     import agents.email_agent.agent as email_agent_module
 
-    async def fake_invoke_email_mimo_json(**kwargs):
+    async def fake_invoke_email_internal_llm_json(**kwargs):
         return {
             "subject": "YC company sheet",
             "body": "Attached is the latest YC company sheet.",
             "summary": "Prepared an outbound email draft.",
         }
 
-    monkeypatch.setattr(email_agent_module, "invoke_email_mimo_json", fake_invoke_email_mimo_json)
+    monkeypatch.setattr(email_agent_module, "invoke_email_internal_llm_json", fake_invoke_email_internal_llm_json)
 
     uploaded: list[tuple[str, str, bytes, str | None]] = []
 
@@ -672,14 +672,14 @@ async def test_email_agent_compose_new_email_never_uses_raw_goal_as_body(
 
     import agents.email_agent.agent as email_agent_module
 
-    async def fake_invoke_email_mimo_json(**kwargs):
+    async def fake_invoke_email_internal_llm_json(**kwargs):
         return {}
 
-    async def fake_invoke_email_mimo(**kwargs):
+    async def fake_invoke_email_internal_llm(**kwargs):
         return "Hey Praveen!\n\nJust your AI system COSMIC dropping in to say hello.\n\n— COSMIC"
 
-    monkeypatch.setattr(email_agent_module, "invoke_email_mimo_json", fake_invoke_email_mimo_json)
-    monkeypatch.setattr(email_agent_module, "invoke_email_mimo", fake_invoke_email_mimo)
+    monkeypatch.setattr(email_agent_module, "invoke_email_internal_llm_json", fake_invoke_email_internal_llm_json)
+    monkeypatch.setattr(email_agent_module, "invoke_email_internal_llm", fake_invoke_email_internal_llm)
 
     drafted = await agent._compose_new_email(
         task=_make_task(
@@ -1259,7 +1259,7 @@ async def test_email_agent_process_inbound_llm_matches_natural_language_instruct
     async def fake_summarize_thread(**kwargs):
         return "Arun emailed asking for a review."
 
-    async def fake_invoke_email_mimo_json(**kwargs):
+    async def fake_invoke_email_internal_llm_json(**kwargs):
         if kwargs.get("operation") == "email.internal_llm.match_instructions":
             return {
                 "matched_instruction_ids": ["eminst_watch_arun"],
@@ -1284,7 +1284,7 @@ async def test_email_agent_process_inbound_llm_matches_natural_language_instruct
     agent.mail_client = FakeMailClient()  # type: ignore[assignment]
     monkeypatch.setattr(agent, "_fetch_thread_context", fake_fetch_thread_context)
     monkeypatch.setattr(agent, "_summarize_thread", fake_summarize_thread)
-    monkeypatch.setattr(email_agent_module, "invoke_email_mimo_json", fake_invoke_email_mimo_json)
+    monkeypatch.setattr(email_agent_module, "invoke_email_internal_llm_json", fake_invoke_email_internal_llm_json)
 
     task = _make_task(
         intent="email.process_inbound",

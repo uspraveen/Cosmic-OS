@@ -14,7 +14,7 @@ __all__ = [
     "TabularAgentConfig",
     "AGENT_ROOT",
     "BACKEND_ROOT",
-    "normalize_mimo_openai_base_url",
+    "normalize_openai_compatible_base_url",
 ]
 load_dotenv(AGENT_ROOT / "agent.env")
 load_dotenv(BACKEND_ROOT / ".env")
@@ -40,9 +40,9 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-def normalize_mimo_openai_base_url(raw: str) -> str:
+def normalize_openai_compatible_base_url(raw: str) -> str:
     """
-    MiMo (OpenAI-compatible) expects HTTP POST to ``{base}/chat/completions``.
+    OpenAI-compatible LLM expects HTTP POST to ``{base}/chat/completions``.
 
     LangChain/OpenAI SDKs set ``base_url`` to the API root **including** ``/v1`` only.
     Do **not** include ``/chat/completions`` in the env var or requests become
@@ -82,10 +82,10 @@ class TabularAgentConfig:
     sandbox_allow_pip: bool = False
     sandbox_pip_timeout_sec: float = 120.0
     sandbox_venv_cache_root: str = ""
-    mimo_api_key: str = ""
-    mimo_base_url: str = ""
-    mimo_model: str = "mimo-v2-pro"
-    mimo_timeout_sec: float = 120.0
+    internal_llm_api_key: str = ""
+    internal_llm_base_url: str = ""
+    internal_llm_model: str = "gpt-5-mini"
+    internal_llm_timeout_sec: float = 120.0
     enable_internal_llm: bool = True
     include_financial_fpna_prompt: bool = False
     # Multi-step tabular.reason_workbook (LangGraph): max deterministic tool executions per task.
@@ -144,21 +144,21 @@ class TabularAgentConfig:
             sandbox_venv_cache_root=os.getenv(
                 "TABULAR_AGENT_SANDBOX_VENV_CACHE_ROOT", ""
             ).strip(),
-            mimo_api_key=(
-                os.getenv("TABULAR_AGENT_MIMO_API_KEY")
-                or os.getenv("MIMO_API_KEY")
+            internal_llm_api_key=(
+                os.getenv("TABULAR_AGENT_INTERNAL_LLM_API_KEY")
+                or os.getenv("OPENAI_COMPAT_API_KEY")
                 or ""
             ).strip(),
-            mimo_base_url=normalize_mimo_openai_base_url(
+            internal_llm_base_url=normalize_openai_compatible_base_url(
                 (
-                    os.getenv("TABULAR_AGENT_MIMO_BASE_URL")
-                    or os.getenv("MIMO_OPENAI_BASE_URL")
+                    os.getenv("TABULAR_AGENT_INTERNAL_LLM_BASE_URL")
+                    or os.getenv("OPENAI_COMPAT_BASE_URL")
                     or ""
                 ).strip()
             ),
-            mimo_model=os.getenv("TABULAR_AGENT_MIMO_MODEL", "mimo-v2-pro").strip()
-            or "mimo-v2-pro",
-            mimo_timeout_sec=_env_float("TABULAR_AGENT_MIMO_TIMEOUT_SEC", 120.0),
+            internal_llm_model=os.getenv("TABULAR_AGENT_INTERNAL_LLM_MODEL", "gpt-5-mini").strip()
+            or "gpt-5-mini",
+            internal_llm_timeout_sec=_env_float("TABULAR_AGENT_INTERNAL_LLM_TIMEOUT_SEC", 120.0),
             enable_internal_llm=os.getenv("TABULAR_AGENT_ENABLE_INTERNAL_LLM", "true")
             .strip()
             .lower()

@@ -11,7 +11,7 @@ Fallback: **legacy** single-shot plan → execute → validate → summarize whe
 ``TABULAR_AGENT_REASON_USE_LANGGRAPH=false`` or LangGraph is unavailable.
 
 This is **not** a new COSMIC runtime stage. Deterministic DuckDB / Parquet / filesystem operations remain
-source of truth; MiMo proposes JSON actions only.
+source of truth; internal LLM proposes JSON actions only.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ import httpx
 from shared.contracts import TaskEnvelope
 
 from .config import TabularAgentConfig
-from .internal_llm import invoke_tabular_mimo
+from .internal_llm import invoke_tabular_internal_llm
 from .prompt_assets import build_internal_context
 from .sandbox import persist_bundle_python_script, provision_venv, run_python_script, validate_pip_packages, write_execution_receipt
 
@@ -81,9 +81,9 @@ async def run_tabular_reason_workbook(
 
     request_id = agent._safe(task.input.get("request_id")) if isinstance(task.input, dict) else None  # noqa: SLF001
 
-    if not cfg.enable_internal_llm or not cfg.mimo_api_key or not cfg.mimo_base_url:
+    if not cfg.enable_internal_llm or not cfg.internal_llm_api_key or not cfg.internal_llm_base_url:
         return {
-            "response": "Internal tabular reasoning requires TABULAR_AGENT_ENABLE_INTERNAL_LLM and MiMo credentials.",
+            "response": "Internal tabular reasoning requires TABULAR_AGENT_ENABLE_INTERNAL_LLM and internal LLM credentials.",
             "bundle_id": bundle_id,
             "artifact_id": artifact_id,
             "error": "internal_llm_disabled",
@@ -163,7 +163,7 @@ async def _run_tabular_reason_legacy(
         ]
     )
 
-    plan_raw = await invoke_tabular_mimo(
+    plan_raw = await invoke_tabular_internal_llm(
         cfg=cfg,
         http_client=http_client,
         system_content=plan_system,
@@ -322,7 +322,7 @@ async def _run_tabular_reason_legacy(
         f"## Plan\n{json.dumps(plan, ensure_ascii=False)[:6000]}\n\n"
         f"## Execution\n{json.dumps(execution_payload, ensure_ascii=False)[:10000]}\n"
     )
-    final_text = await invoke_tabular_mimo(
+    final_text = await invoke_tabular_internal_llm(
         cfg=cfg,
         http_client=http_client,
         system_content=summary_system,

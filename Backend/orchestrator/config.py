@@ -212,8 +212,8 @@ class OrchestratorConfig:
                 or os.getenv("FIREWORKS_API_KEY")
                 or os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY")
                 or os.getenv("MODEL_API_KEY")
-                or os.getenv("SLIDE_AGENT_MIMO_API_KEY")
-                or os.getenv("MIMO_API_KEY")
+                or os.getenv("SLIDE_AGENT_FIREWORKS_API_KEY")
+                or os.getenv("OPENAI_COMPAT_API_KEY")
                 or ""
             ).strip(),
             fireworks_base_url=_normalize_openai_like_base_url(
@@ -222,7 +222,7 @@ class OrchestratorConfig:
                     or os.getenv("FIREWORKS_BASE_URL")
                     or os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL")
                     or os.getenv("MODEL_BASE_URL")
-                    or os.getenv("MIMO_OPENAI_BASE_URL")
+                    or os.getenv("OPENAI_COMPAT_BASE_URL")
                     or "https://api.fireworks.ai/inference/v1"
                 ).strip(),
                 default="https://api.fireworks.ai/inference/v1",
@@ -325,7 +325,7 @@ class OrchestratorConfig:
                 os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY")
                 or os.getenv("MODEL_API_KEY")
                 or os.getenv("FIREWORKS_API_KEY")
-                or os.getenv("MIMO_API_KEY")
+                or os.getenv("OPENAI_COMPAT_API_KEY")
                 or ""
             ).strip(),
             visual_fireworks_base_url=_normalize_openai_like_base_url(
@@ -333,7 +333,7 @@ class OrchestratorConfig:
                     os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL")
                     or os.getenv("MODEL_BASE_URL")
                     or os.getenv("FIREWORKS_BASE_URL")
-                    or os.getenv("MIMO_OPENAI_BASE_URL")
+                    or os.getenv("OPENAI_COMPAT_BASE_URL")
                     or "https://api.fireworks.ai/inference/v1"
                 ).strip(),
                 default="https://api.fireworks.ai/inference/v1",

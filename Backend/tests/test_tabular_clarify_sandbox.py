@@ -72,8 +72,8 @@ def _make_task(*, parent_task_id=None, channel="desktop:test", **extra):
 def _make_cfg(**overrides):
     defaults = {
         "enable_internal_llm": True,
-        "mimo_api_key": "k",
-        "mimo_base_url": "https://x/v1",
+        "internal_llm_api_key": "k",
+        "internal_llm_base_url": "https://x/v1",
         "include_financial_fpna_prompt": False,
         "sandbox_timeout_sec": 30.0,
         "tabular_reason_use_langgraph": True,
@@ -81,8 +81,8 @@ def _make_cfg(**overrides):
         "tabular_reason_clarify_wait_sec": 30.0,
         "orchestrator_url": "http://127.0.0.1:8743",
         "orchestrator_internal_token": "tok",
-        "mimo_model": "m",
-        "mimo_timeout_sec": 30.0,
+        "internal_llm_model": "m",
+        "internal_llm_timeout_sec": 30.0,
         "sandbox_allow_network": False,
         "sandbox_allow_pip": False,
         "sandbox_pip_timeout_sec": 60.0,
@@ -117,7 +117,7 @@ async def test_clarify_relay_error_surface(monkeypatch, tmp_path: Path) -> None:
     async def fake_orch_error(**kwargs) -> dict:
         raise RuntimeError("orchestrator unreachable")
 
-    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+    monkeypatch.setattr(trg, "invoke_tabular_internal_llm", fake_invoke)
     monkeypatch.setattr(trg, "request_orchestrator_task_input", fake_orch_error)
 
     out = await iw.run_tabular_reason_workbook(agent=agent, task=task, http_client=AsyncMock(), cfg=cfg)  # type: ignore[arg-type]
@@ -152,7 +152,7 @@ async def test_clarify_suspended_status(monkeypatch, tmp_path: Path) -> None:
     async def fake_orch_suspend(**kwargs) -> dict:
         return {"input_request_id": "uir_t", "ok": True}
 
-    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+    monkeypatch.setattr(trg, "invoke_tabular_internal_llm", fake_invoke)
     monkeypatch.setattr(trg, "request_orchestrator_task_input", fake_orch_suspend)
 
     out = await iw.run_tabular_reason_workbook(agent=agent, task=task, http_client=AsyncMock(), cfg=cfg)  # type: ignore[arg-type]
@@ -180,7 +180,7 @@ async def test_clarify_resumed_provenance(monkeypatch, tmp_path: Path) -> None:
             return '{"action":"done","answer":"Used A.","rationale":"done"}'
         return "Final."
 
-    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+    monkeypatch.setattr(trg, "invoke_tabular_internal_llm", fake_invoke)
     resume_task = _make_task(
         parent_task_id="child_tsk",
         task_id="resume_child",
@@ -231,7 +231,7 @@ async def test_clarify_no_awaiting_reply_used(monkeypatch, tmp_path: Path) -> No
     async def fake_orch(**kwargs) -> dict:
         return {"input_request_id": "uir_r"}
 
-    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+    monkeypatch.setattr(trg, "invoke_tabular_internal_llm", fake_invoke)
     monkeypatch.setattr(trg, "request_orchestrator_task_input", fake_orch)
 
     await iw.run_tabular_reason_workbook(agent=agent, task=task, http_client=AsyncMock(), cfg=cfg)  # type: ignore[arg-type]
@@ -397,7 +397,7 @@ async def test_langgraph_python_with_pip_and_receipt_metadata(monkeypatch, tmp_p
             return '{"action":"done","answer":"42","rationale":"done"}'
         return "Done."
 
-    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+    monkeypatch.setattr(trg, "invoke_tabular_internal_llm", fake_invoke)
 
     out = await iw.run_tabular_reason_workbook(agent=agent, task=task, http_client=AsyncMock(), cfg=cfg)  # type: ignore[arg-type]
     assert out.get("workflow") == "langgraph"
@@ -431,7 +431,7 @@ async def test_sql_happy_path_no_regression(monkeypatch, tmp_path: Path) -> None
             return '{"action":"done","answer":"1","rationale":"done"}'
         return "Result."
 
-    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+    monkeypatch.setattr(trg, "invoke_tabular_internal_llm", fake_invoke)
 
     out = await iw.run_tabular_reason_workbook(agent=agent, task=task, http_client=AsyncMock(), cfg=cfg)  # type: ignore[arg-type]
     assert out.get("workflow") == "langgraph"
@@ -462,7 +462,7 @@ async def test_python_no_pip_no_regression(monkeypatch, tmp_path: Path) -> None:
             return '{"action":"done","answer":"hi","rationale":"d"}'
         return "Done."
 
-    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+    monkeypatch.setattr(trg, "invoke_tabular_internal_llm", fake_invoke)
 
     out = await iw.run_tabular_reason_workbook(agent=agent, task=task, http_client=AsyncMock(), cfg=cfg)  # type: ignore[arg-type]
     assert out.get("workflow") == "langgraph"

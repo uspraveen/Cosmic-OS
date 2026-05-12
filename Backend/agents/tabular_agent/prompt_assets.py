@@ -2,7 +2,7 @@
 
 Deep spreadsheet / FP&A guidance lives here—not in the orchestrator system prompt.
 Use :func:`build_internal_context` to compose minimal, stage-specific strings for
-internal MiMo / future planner / executor hooks.
+internal LLM / future planner / executor hooks.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ def build_internal_context(
 ) -> str:
     """Compose minimal internal context for a tabular specialist stage.
 
-    Stages are composition-only hooks (``summarize`` is used by MiMo today;
+    Stages are composition-only hooks (``summarize`` is used by the internal LLM today;
     ``plan`` / ``execute`` are reserved for future internal steps—no new product
     runtime stages are implied).
 

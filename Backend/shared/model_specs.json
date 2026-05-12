@@ -166,8 +166,8 @@
         "prompt_tokens": ["prompt_tokens", "input_tokens"],
         "completion_tokens": ["completion_tokens", "output_tokens"],
         "total_tokens": ["total_tokens"],
-        "cached_tokens": ["cached_tokens", "cache_read_input_tokens"],
-        "reasoning_tokens": ["reasoning_tokens"]
+        "cached_tokens": ["cached_tokens", "cache_read_input_tokens", "prompt_tokens_details.cached_tokens"],
+        "reasoning_tokens": ["reasoning_tokens", "completion_tokens_details.reasoning_tokens"]
       },
       "status": "active"
     },

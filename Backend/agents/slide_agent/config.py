@@ -94,15 +94,15 @@ class SlideAgentConfig:
     def from_env(cls) -> "SlideAgentConfig":
         model_name = _first_env(
             "MODEL_NAME",
-            "SLIDE_AGENT_MIMO_MODEL",
+            "SLIDE_AGENT_FIREWORKS_MODEL",
             "FIREWORKS_KIMI_MODEL",
             default="accounts/fireworks/models/qwen3p6-plus",
         )
         model_base_url = _first_env(
             "MODEL_BASE_URL",
-            "SLIDE_AGENT_MIMO_BASE_URL",
+            "SLIDE_AGENT_FIREWORKS_BASE_URL",
             "FIREWORKS_BASE_URL",
-            "MIMO_OPENAI_BASE_URL",
+            "OPENAI_COMPAT_BASE_URL",
             "OPENROUTER_BASE_URL",
             default="https://api.fireworks.ai/inference/v1",
         ).rstrip("/")
@@ -113,14 +113,14 @@ class SlideAgentConfig:
             model_base_url=model_base_url,
             model_api_key=_first_env(
                 "MODEL_API_KEY",
-                "SLIDE_AGENT_MIMO_API_KEY",
+                "SLIDE_AGENT_FIREWORKS_API_KEY",
                 "FIREWORKS_API_KEY",
-                "MIMO_API_KEY",
+                "OPENAI_COMPAT_API_KEY",
                 "OPENROUTER_API_KEY",
                 default="",
             ),
             model_name=model_name,
-            model_timeout_sec=_env_int("MODEL_TIMEOUT_SEC", _env_int("SLIDE_AGENT_MIMO_TIMEOUT_SEC", 300)),
+            model_timeout_sec=_env_int("MODEL_TIMEOUT_SEC", _env_int("SLIDE_AGENT_FIREWORKS_TIMEOUT_SEC", 300)),
             model_http_retries=_env_int("MODEL_HTTP_RETRIES", 3),
             model_max_tokens=_env_int("MODEL_MAX_TOKENS", 16384),
             html_model_max_tokens=_env_int("HTML_MODEL_MAX_TOKENS", 4096),

@@ -240,7 +240,7 @@ async def test_orchestrator_runtime_streams_fireworks_kimi_path() -> None:
     chunks = [
         b'data: {"choices":[{"delta":{"reasoning_content":"Planning..."},"finish_reason":null}]}\n\n',
         b'data: {"choices":[{"delta":{"content":"Hello from Kimi."},"finish_reason":null}]}\n\n',
-        b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}\n\n',
+        b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14,"prompt_tokens_details":{"cached_tokens":2},"completion_tokens_details":{"reasoning_tokens":1}}}\n\n',
         b"data: [DONE]\n\n",
     ]
 
@@ -303,6 +303,8 @@ async def test_orchestrator_runtime_streams_fireworks_kimi_path() -> None:
     assert complete["content"] == "Hello from Kimi."
     assert complete["model_provider"] == "fireworks_kimi"
     assert complete["metrics"]["prompt_tokens"] == 10
+    assert complete["metrics"]["cached_tokens"] == 2
+    assert complete["metrics"]["reasoning_tokens"] == 1
 
 
 @pytest.mark.asyncio

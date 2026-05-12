@@ -59,15 +59,15 @@ Both paths assume the tabular worker is registered and healthy.
 2. `registry/registry.db` writable; start tabular agent once so the card is upserted.
 3. `AGENT_SECRET` for tabular agent matches signing secret configured for that agent id.
 4. `python -m agents.tabular_agent` (or your process manager) shows healthy heartbeat.
-5. `tabular.reason_workbook` returns **`failed`** (not `completed`) when internal reasoning is unavailable (e.g. MiMo disabled); check `AgentResult.status` and `error.code`.
+5. `tabular.reason_workbook` returns **`failed`** (not `completed`) when internal reasoning is unavailable (e.g. internal LLM disabled); check `AgentResult.status` and `error.code`.
 6. `tabular.create_workbook` returns both:
    - a reusable bundle summary (`bundle_id`, `workbooks[]`, internal `artifact_id`)
    - a downloadable `.xlsx` output artifact under `runs/artifacts/<task_id>/parsed/<artifact_id>/generated/...`
 
-6. Optional: MiMo API smoke test (no Redis):
-   - From **`Backend/`:** `python scripts/local_test_mimo_langchain.py`
-   - From **repo root (`Cosmic-OS/`):** `python scripts/local_test_mimo_langchain.py` (wrapper runs the same file under `Backend/scripts/`)
-   - Full path example: `python "C:\Users\...\Cosmic-OS\Backend\scripts\local_test_mimo_langchain.py"`
+6. Optional: internal LLM API smoke test (no Redis):
+   - From **`Backend/`:** `python scripts/local_test_openai_compat_langchain.py`
+   - From **repo root (`Cosmic-OS/`):** `python scripts/local_test_openai_compat_langchain.py` (wrapper runs the same file under `Backend/scripts/`)
+   - Full path example: `python "C:\Users\...\Cosmic-OS\Backend\scripts\local_test_openai_compat_langchain.py"`
 
 ## Mid-task clarification (`clarify` action, LangGraph)
 

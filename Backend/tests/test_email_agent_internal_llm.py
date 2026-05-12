@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from agents.email_agent.config import EmailAgentConfig
-from agents.email_agent.internal_llm import invoke_email_mimo
+from agents.email_agent.internal_llm import invoke_email_internal_llm
 
 
 class _FakeMessage:
@@ -22,7 +22,7 @@ class _FakeResult:
 
 
 @pytest.mark.asyncio
-async def test_invoke_email_mimo_omits_temperature_for_gpt5_models(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_invoke_email_internal_llm_omits_temperature_for_gpt5_models(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
     class _FakeChatOpenAI:
@@ -45,13 +45,13 @@ async def test_invoke_email_mimo_omits_temperature_for_gpt5_models(monkeypatch: 
 
     cfg = EmailAgentConfig(
         enable_internal_llm=True,
-        mimo_api_key="test-key",
-        mimo_base_url="https://api.openai.com/v1",
-        mimo_model="gpt-5-mini",
+        internal_llm_api_key="test-key",
+        internal_llm_base_url="https://api.openai.com/v1",
+        internal_llm_model="gpt-5-mini",
         gateway_internal_token="",
     )
     async with httpx.AsyncClient() as client:
-        result = await invoke_email_mimo(
+        result = await invoke_email_internal_llm(
             cfg=cfg,
             http_client=client,
             system_content="system",
@@ -70,7 +70,7 @@ async def test_invoke_email_mimo_omits_temperature_for_gpt5_models(monkeypatch: 
 
 
 @pytest.mark.asyncio
-async def test_invoke_email_mimo_keeps_temperature_for_non_gpt5_models(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_invoke_email_internal_llm_keeps_temperature_for_non_gpt5_models(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
     class _FakeChatOpenAI:
@@ -93,13 +93,13 @@ async def test_invoke_email_mimo_keeps_temperature_for_non_gpt5_models(monkeypat
 
     cfg = EmailAgentConfig(
         enable_internal_llm=True,
-        mimo_api_key="test-key",
-        mimo_base_url="https://api.xiaomimimo.com/v1",
-        mimo_model="mimo-v2-pro",
+        internal_llm_api_key="test-key",
+        internal_llm_base_url="https://api.openai.com/v1",
+        internal_llm_model="gpt-4o-mini",
         gateway_internal_token="",
     )
     async with httpx.AsyncClient() as client:
-        result = await invoke_email_mimo(
+        result = await invoke_email_internal_llm(
             cfg=cfg,
             http_client=client,
             system_content="system",
@@ -114,5 +114,5 @@ async def test_invoke_email_mimo_keeps_temperature_for_non_gpt5_models(monkeypat
         )
 
     assert result == "ok"
-    assert captured["model"] == "mimo-v2-pro"
+    assert captured["model"] == "gpt-4o-mini"
     assert captured["temperature"] == 0.2

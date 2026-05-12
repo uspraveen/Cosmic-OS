@@ -79,13 +79,13 @@ async def test_run_tabular_reason_workbook_sql_happy_path(monkeypatch, tmp_path:
         (),
         {
             "enable_internal_llm": True,
-            "mimo_api_key": "k",
-            "mimo_base_url": "https://x/v1",
+            "internal_llm_api_key": "k",
+            "internal_llm_base_url": "https://x/v1",
             "include_financial_fpna_prompt": False,
             "sandbox_timeout_sec": 30.0,
             "tabular_reason_use_langgraph": False,
-            "mimo_model": "m",
-            "mimo_timeout_sec": 30.0,
+            "internal_llm_model": "m",
+            "internal_llm_timeout_sec": 30.0,
         },
     )()
 
@@ -97,7 +97,7 @@ async def test_run_tabular_reason_workbook_sql_happy_path(monkeypatch, tmp_path:
             return '{"mode":"sql","sql":"select 1","python_code":null,"rationale":"test"}'
         return "Summary line."
 
-    monkeypatch.setattr(iw, "invoke_tabular_mimo", fake_invoke)
+    monkeypatch.setattr(iw, "invoke_tabular_internal_llm", fake_invoke)
 
     http = AsyncMock()
     out = await iw.run_tabular_reason_workbook(agent=agent, task=task, http_client=http, cfg=cfg)  # type: ignore[arg-type]
@@ -147,14 +147,14 @@ async def test_langgraph_finishes_on_done_action(monkeypatch, tmp_path: Path) ->
         (),
         {
             "enable_internal_llm": True,
-            "mimo_api_key": "k",
-            "mimo_base_url": "https://x/v1",
+            "internal_llm_api_key": "k",
+            "internal_llm_base_url": "https://x/v1",
             "include_financial_fpna_prompt": False,
             "sandbox_timeout_sec": 30.0,
             "tabular_reason_use_langgraph": True,
             "tabular_reason_max_tool_rounds": 3,
-            "mimo_model": "m",
-            "mimo_timeout_sec": 30.0,
+            "internal_llm_model": "m",
+            "internal_llm_timeout_sec": 30.0,
         },
     )()
 
@@ -165,7 +165,7 @@ async def test_langgraph_finishes_on_done_action(monkeypatch, tmp_path: Path) ->
             return "Wrapped up."
         return ""
 
-    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+    monkeypatch.setattr(trg, "invoke_tabular_internal_llm", fake_invoke)
 
     out = await iw.run_tabular_reason_workbook(agent=agent, task=task, http_client=AsyncMock(), cfg=cfg)  # type: ignore[arg-type]
     assert out.get("workflow") == "langgraph"
@@ -187,7 +187,7 @@ async def test_run_tabular_reason_workbook_disabled_llm() -> None:
 
     agent = _A()
     task = type("T", (), {"task_id": "t", "session_id": "s", "input": {"bundle_id": "b", "artifact_id": "a", "goal": "g"}, "source": None, "source_id": None, "channel": None})()
-    cfg = type("C", (), {"enable_internal_llm": False, "mimo_api_key": "", "mimo_base_url": "", "include_financial_fpna_prompt": False, "sandbox_timeout_sec": 1.0})()
+    cfg = type("C", (), {"enable_internal_llm": False, "internal_llm_api_key": "", "internal_llm_base_url": "", "include_financial_fpna_prompt": False, "sandbox_timeout_sec": 1.0})()
     out = await iw.run_tabular_reason_workbook(agent=agent, task=task, http_client=AsyncMock(), cfg=cfg)  # type: ignore[arg-type]
     assert out.get("error") == "internal_llm_disabled"
     assert out.get("error_code") == "FEATURE_DISABLED"
@@ -246,14 +246,14 @@ async def test_langgraph_sql_step_then_done(monkeypatch, tmp_path: Path) -> None
         (),
         {
             "enable_internal_llm": True,
-            "mimo_api_key": "k",
-            "mimo_base_url": "https://x/v1",
+            "internal_llm_api_key": "k",
+            "internal_llm_base_url": "https://x/v1",
             "include_financial_fpna_prompt": False,
             "sandbox_timeout_sec": 30.0,
             "tabular_reason_use_langgraph": True,
             "tabular_reason_max_tool_rounds": 5,
-            "mimo_model": "m",
-            "mimo_timeout_sec": 30.0,
+            "internal_llm_model": "m",
+            "internal_llm_timeout_sec": 30.0,
         },
     )()
 
@@ -269,7 +269,7 @@ async def test_langgraph_sql_step_then_done(monkeypatch, tmp_path: Path) -> None
             return "Got rows."
         return ""
 
-    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+    monkeypatch.setattr(trg, "invoke_tabular_internal_llm", fake_invoke)
 
     out = await iw.run_tabular_reason_workbook(agent=agent, task=task, http_client=AsyncMock(), cfg=cfg)  # type: ignore[arg-type]
     assert out.get("workflow") == "langgraph"
@@ -319,14 +319,14 @@ async def test_langgraph_max_tool_rounds(monkeypatch, tmp_path: Path) -> None:
         (),
         {
             "enable_internal_llm": True,
-            "mimo_api_key": "k",
-            "mimo_base_url": "https://x/v1",
+            "internal_llm_api_key": "k",
+            "internal_llm_base_url": "https://x/v1",
             "include_financial_fpna_prompt": False,
             "sandbox_timeout_sec": 30.0,
             "tabular_reason_use_langgraph": True,
             "tabular_reason_max_tool_rounds": 2,
-            "mimo_model": "m",
-            "mimo_timeout_sec": 30.0,
+            "internal_llm_model": "m",
+            "internal_llm_timeout_sec": 30.0,
         },
     )()
 
@@ -337,7 +337,7 @@ async def test_langgraph_max_tool_rounds(monkeypatch, tmp_path: Path) -> None:
             return "Stopped."
         return ""
 
-    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+    monkeypatch.setattr(trg, "invoke_tabular_internal_llm", fake_invoke)
 
     out = await iw.run_tabular_reason_workbook(agent=agent, task=task, http_client=AsyncMock(), cfg=cfg)  # type: ignore[arg-type]
     assert out.get("finish_reason") == "max_tool_rounds" or out.get("workflow") == "langgraph"
@@ -382,14 +382,14 @@ async def test_langgraph_python_writes_receipt(monkeypatch, tmp_path: Path) -> N
         (),
         {
             "enable_internal_llm": True,
-            "mimo_api_key": "k",
-            "mimo_base_url": "https://x/v1",
+            "internal_llm_api_key": "k",
+            "internal_llm_base_url": "https://x/v1",
             "include_financial_fpna_prompt": False,
             "sandbox_timeout_sec": 30.0,
             "tabular_reason_use_langgraph": True,
             "tabular_reason_max_tool_rounds": 3,
-            "mimo_model": "m",
-            "mimo_timeout_sec": 30.0,
+            "internal_llm_model": "m",
+            "internal_llm_timeout_sec": 30.0,
         },
     )()
 
@@ -405,7 +405,7 @@ async def test_langgraph_python_writes_receipt(monkeypatch, tmp_path: Path) -> N
             return "Done."
         return ""
 
-    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+    monkeypatch.setattr(trg, "invoke_tabular_internal_llm", fake_invoke)
 
     out = await iw.run_tabular_reason_workbook(agent=agent, task=task, http_client=AsyncMock(), cfg=cfg)  # type: ignore[arg-type]
     assert (tmp_path / "executions").is_dir()
@@ -461,8 +461,8 @@ async def test_langgraph_clarify_uses_orchestrator_task_input(monkeypatch, tmp_p
         (),
         {
             "enable_internal_llm": True,
-            "mimo_api_key": "k",
-            "mimo_base_url": "https://x/v1",
+            "internal_llm_api_key": "k",
+            "internal_llm_base_url": "https://x/v1",
             "include_financial_fpna_prompt": False,
             "sandbox_timeout_sec": 30.0,
             "tabular_reason_use_langgraph": True,
@@ -470,8 +470,8 @@ async def test_langgraph_clarify_uses_orchestrator_task_input(monkeypatch, tmp_p
             "tabular_reason_clarify_wait_sec": 30.0,
             "orchestrator_url": "http://127.0.0.1:8743",
             "orchestrator_internal_token": "tok",
-            "mimo_model": "m",
-            "mimo_timeout_sec": 30.0,
+            "internal_llm_model": "m",
+            "internal_llm_timeout_sec": 30.0,
         },
     )()
 
@@ -492,7 +492,7 @@ async def test_langgraph_clarify_uses_orchestrator_task_input(monkeypatch, tmp_p
         orch_calls.append(dict(kwargs))
         return {"input_request_id": "uir_1", "ok": True}
 
-    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+    monkeypatch.setattr(trg, "invoke_tabular_internal_llm", fake_invoke)
     monkeypatch.setattr(trg, "request_orchestrator_task_input", fake_orch)
 
     out = await iw.run_tabular_reason_workbook(agent=agent, task=task, http_client=AsyncMock(), cfg=cfg)  # type: ignore[arg-type]
@@ -556,14 +556,14 @@ async def test_langgraph_clarify_without_parent_emits_no_orchestrator_call(monke
         (),
         {
             "enable_internal_llm": True,
-            "mimo_api_key": "k",
-            "mimo_base_url": "https://x/v1",
+            "internal_llm_api_key": "k",
+            "internal_llm_base_url": "https://x/v1",
             "include_financial_fpna_prompt": False,
             "sandbox_timeout_sec": 30.0,
             "tabular_reason_use_langgraph": True,
             "tabular_reason_max_tool_rounds": 5,
-            "mimo_model": "m",
-            "mimo_timeout_sec": 30.0,
+            "internal_llm_model": "m",
+            "internal_llm_timeout_sec": 30.0,
         },
     )()
 
@@ -583,7 +583,7 @@ async def test_langgraph_clarify_without_parent_emits_no_orchestrator_call(monke
         orch_calls.append(dict(kwargs))
         return {"status": "answered", "reply": {"content": "n/a"}}
 
-    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+    monkeypatch.setattr(trg, "invoke_tabular_internal_llm", fake_invoke)
     monkeypatch.setattr(trg, "request_orchestrator_task_input", fake_orch)
 
     out = await iw.run_tabular_reason_workbook(agent=agent, task=task, http_client=AsyncMock(), cfg=cfg)  # type: ignore[arg-type]
@@ -637,8 +637,8 @@ async def test_langgraph_second_clarify_finalizes_with_clarify_repeat(monkeypatc
         (),
         {
             "enable_internal_llm": True,
-            "mimo_api_key": "k",
-            "mimo_base_url": "https://x/v1",
+            "internal_llm_api_key": "k",
+            "internal_llm_base_url": "https://x/v1",
             "include_financial_fpna_prompt": False,
             "sandbox_timeout_sec": 30.0,
             "tabular_reason_use_langgraph": True,
@@ -646,8 +646,8 @@ async def test_langgraph_second_clarify_finalizes_with_clarify_repeat(monkeypatc
             "tabular_reason_clarify_wait_sec": 30.0,
             "orchestrator_url": "http://127.0.0.1:8743",
             "orchestrator_internal_token": "tok",
-            "mimo_model": "m",
-            "mimo_timeout_sec": 30.0,
+            "internal_llm_model": "m",
+            "internal_llm_timeout_sec": 30.0,
         },
     )()
 
@@ -665,7 +665,7 @@ async def test_langgraph_second_clarify_finalizes_with_clarify_repeat(monkeypatc
         orch_calls.append(dict(kwargs))
         return {"input_request_id": "uir_2", "ok": True}
 
-    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+    monkeypatch.setattr(trg, "invoke_tabular_internal_llm", fake_invoke)
     monkeypatch.setattr(trg, "request_orchestrator_task_input", fake_orch)
 
     first = await iw.run_tabular_reason_workbook(agent=agent, task=task, http_client=AsyncMock(), cfg=cfg)  # type: ignore[arg-type]
@@ -752,14 +752,14 @@ async def test_langgraph_resume_creates_fresh_step_plan(monkeypatch, tmp_path: P
         (),
         {
             "enable_internal_llm": True,
-            "mimo_api_key": "k",
-            "mimo_base_url": "https://x/v1",
+            "internal_llm_api_key": "k",
+            "internal_llm_base_url": "https://x/v1",
             "include_financial_fpna_prompt": False,
             "sandbox_timeout_sec": 30.0,
             "tabular_reason_use_langgraph": True,
             "tabular_reason_max_tool_rounds": 3,
-            "mimo_model": "m",
-            "mimo_timeout_sec": 30.0,
+            "internal_llm_model": "m",
+            "internal_llm_timeout_sec": 30.0,
         },
     )()
 
@@ -770,12 +770,12 @@ async def test_langgraph_resume_creates_fresh_step_plan(monkeypatch, tmp_path: P
             return "Wrapped up."
         return ""
 
-    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+    monkeypatch.setattr(trg, "invoke_tabular_internal_llm", fake_invoke)
 
     out = await iw.run_tabular_reason_workbook(agent=agent, task=task, http_client=AsyncMock(), cfg=cfg)  # type: ignore[arg-type]
     assert out.get("workflow") == "langgraph"
     # With dynamic planning, resume + immediate "done" skips plan creation
-    # (MiMo decides whether to plan; fake_invoke returns "done" directly)
+    # (internal LLM decides whether to plan; fake_invoke returns "done" directly)
     assert agent.step_plan.created_steps == []
 
 
@@ -833,14 +833,14 @@ async def test_langgraph_delegate_suspends_via_orchestrator(monkeypatch, tmp_pat
         (),
         {
             "enable_internal_llm": True,
-            "mimo_api_key": "k",
-            "mimo_base_url": "https://x/v1",
+            "internal_llm_api_key": "k",
+            "internal_llm_base_url": "https://x/v1",
             "include_financial_fpna_prompt": False,
             "sandbox_timeout_sec": 30.0,
             "tabular_reason_use_langgraph": True,
             "tabular_reason_max_tool_rounds": 5,
-            "mimo_model": "m",
-            "mimo_timeout_sec": 30.0,
+            "internal_llm_model": "m",
+            "internal_llm_timeout_sec": 30.0,
         },
     )()
 
@@ -858,7 +858,7 @@ async def test_langgraph_delegate_suspends_via_orchestrator(monkeypatch, tmp_pat
             return "Waiting."
         return ""
 
-    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+    monkeypatch.setattr(trg, "invoke_tabular_internal_llm", fake_invoke)
 
     out = await iw.run_tabular_reason_workbook(
         agent=agent,
@@ -950,14 +950,14 @@ async def test_langgraph_resume_includes_delegated_result_context(monkeypatch, t
         (),
         {
             "enable_internal_llm": True,
-            "mimo_api_key": "k",
-            "mimo_base_url": "https://x/v1",
+            "internal_llm_api_key": "k",
+            "internal_llm_base_url": "https://x/v1",
             "include_financial_fpna_prompt": False,
             "sandbox_timeout_sec": 30.0,
             "tabular_reason_use_langgraph": True,
             "tabular_reason_max_tool_rounds": 5,
-            "mimo_model": "m",
-            "mimo_timeout_sec": 30.0,
+            "internal_llm_model": "m",
+            "internal_llm_timeout_sec": 30.0,
         },
     )()
 
@@ -970,7 +970,7 @@ async def test_langgraph_resume_includes_delegated_result_context(monkeypatch, t
             return "Use the IRS guidance."
         return ""
 
-    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+    monkeypatch.setattr(trg, "invoke_tabular_internal_llm", fake_invoke)
 
     out = await iw.run_tabular_reason_workbook(
         agent=agent,
@@ -1028,16 +1028,16 @@ async def test_langgraph_active_skill_context_isolated_from_transcript(monkeypat
         (),
         {
             "enable_internal_llm": True,
-            "mimo_api_key": "k",
-            "mimo_base_url": "https://x/v1",
+            "internal_llm_api_key": "k",
+            "internal_llm_base_url": "https://x/v1",
             "include_financial_fpna_prompt": False,
             "sandbox_timeout_sec": 30.0,
             "tabular_reason_use_langgraph": True,
             "tabular_reason_max_tool_rounds": 5,
             "skills_enabled": True,
             "skills_dir": str(skills_dir),
-            "mimo_model": "m",
-            "mimo_timeout_sec": 30.0,
+            "internal_llm_model": "m",
+            "internal_llm_timeout_sec": 30.0,
         },
     )()
 
@@ -1058,7 +1058,7 @@ async def test_langgraph_active_skill_context_isolated_from_transcript(monkeypat
             return "ROE analysis ready"
         return ""
 
-    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+    monkeypatch.setattr(trg, "invoke_tabular_internal_llm", fake_invoke)
 
     out = await iw.run_tabular_reason_workbook(
         agent=agent,
@@ -1137,16 +1137,16 @@ async def test_langgraph_resume_preserves_active_skill_context(monkeypatch, tmp_
         (),
         {
             "enable_internal_llm": True,
-            "mimo_api_key": "k",
-            "mimo_base_url": "https://x/v1",
+            "internal_llm_api_key": "k",
+            "internal_llm_base_url": "https://x/v1",
             "include_financial_fpna_prompt": False,
             "sandbox_timeout_sec": 30.0,
             "tabular_reason_use_langgraph": True,
             "tabular_reason_max_tool_rounds": 5,
             "skills_enabled": True,
             "skills_dir": str(skills_dir),
-            "mimo_model": "m",
-            "mimo_timeout_sec": 30.0,
+            "internal_llm_model": "m",
+            "internal_llm_timeout_sec": 30.0,
         },
     )()
 
@@ -1161,7 +1161,7 @@ async def test_langgraph_resume_preserves_active_skill_context(monkeypatch, tmp_
             return "resume ok"
         return ""
 
-    monkeypatch.setattr(trg, "invoke_tabular_mimo", fake_invoke)
+    monkeypatch.setattr(trg, "invoke_tabular_internal_llm", fake_invoke)
 
     out = await iw.run_tabular_reason_workbook(
         agent=agent,

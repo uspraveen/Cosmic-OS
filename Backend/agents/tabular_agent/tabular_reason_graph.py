@@ -1,7 +1,7 @@
 """
 LangGraph multi-step tabular reasoning (``tabular.reason_workbook``).
 
-Bounded tool rounds; deterministic bundle operations only; MiMo proposes JSON actions.
+Bounded tool rounds; deterministic bundle operations only; internal LLM proposes JSON actions.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from shared.contracts import TaskEnvelope
 from shared.tabular_artifacts import validate_safe_sheet_id
 
 from .config import AGENT_ROOT, TabularAgentConfig
-from .internal_llm import invoke_tabular_mimo
+from .internal_llm import invoke_tabular_internal_llm
 from .internal_workflow import extract_json_object
 from .orchestrator_clarify import request_orchestrator_task_input
 from .prompt_assets import build_internal_context
@@ -767,7 +767,7 @@ def _build_graph(ctx: _GraphCtx) -> Any:
             if isinstance(ctx.task.input, dict)
             else None
         )  # noqa: SLF001
-        raw = await invoke_tabular_mimo(
+        raw = await invoke_tabular_internal_llm(
             cfg=ctx.cfg,
             http_client=ctx.http_client,
             system_content=system,
@@ -1040,7 +1040,7 @@ def _build_graph(ctx: _GraphCtx) -> Any:
             if isinstance(ctx.task.input, dict)
             else None
         )  # noqa: SLF001
-        final_text = await invoke_tabular_mimo(
+        final_text = await invoke_tabular_internal_llm(
             cfg=ctx.cfg,
             http_client=ctx.http_client,
             system_content=summary_system,

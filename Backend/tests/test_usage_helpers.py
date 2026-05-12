@@ -81,6 +81,33 @@ def test_build_usage_event_estimates_cost_from_model_specs_when_provider_cost_mi
     assert event.estimated_cost_usd == 0.00482
 
 
+def test_build_usage_event_estimates_fireworks_kimi_with_nested_usage_details() -> None:
+    event = build_usage_event(
+        metered_call=begin_metered_call(prefix="call"),
+        source_component="orchestrator",
+        source_id="cosmic/orchestrator:1.0.0",
+        operation="orchestrator.process",
+        model_key="fireworks:accounts/fireworks/models/kimi-k2p6",
+        raw_usage={
+            "prompt_tokens": 1000,
+            "completion_tokens": 200,
+            "total_tokens": 1200,
+            "prompt_tokens_details": {"cached_tokens": 100},
+            "completion_tokens_details": {"reasoning_tokens": 40},
+        },
+    )
+
+    assert event.provider == "fireworks"
+    assert event.model == "accounts/fireworks/models/kimi-k2p6"
+    assert event.usage_kind == "chat_completion"
+    assert event.prompt_tokens == 1000
+    assert event.completion_tokens == 200
+    assert event.total_tokens == 1200
+    assert event.cached_tokens == 100
+    assert event.reasoning_tokens == 40
+    assert event.estimated_cost_usd == 0.001671
+
+
 def test_build_usage_event_estimates_flat_image_cost_from_model_specs() -> None:
     event = build_usage_event(
         metered_call=begin_metered_call(prefix="call"),

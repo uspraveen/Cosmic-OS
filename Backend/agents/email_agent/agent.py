@@ -29,7 +29,7 @@ from shared.sqlite_client import connect_sync
 
 from .config import AGENT_ROOT, BACKEND_ROOT, EmailAgentConfig
 from .email_usage import log_email_specialist_operation, monotonic_ms_since
-from .internal_llm import invoke_email_mimo, invoke_email_mimo_json
+from .internal_llm import invoke_email_internal_llm, invoke_email_internal_llm_json
 
 logger = logging.getLogger(__name__)
 
@@ -2548,7 +2548,7 @@ class EmailAgent(AgentRuntime):
         elif matched_instruction:
             prompt += f"\nMatched standing instruction:\n{json.dumps(matched_instruction, ensure_ascii=False)}\n"
         prompt += f"\nThread subject: {self._safe_text(context.get('subject'))}\n\nThread:\n{transcript[:24000]}"
-        summary = await invoke_email_mimo(
+        summary = await invoke_email_internal_llm(
             cfg=self.config,
             http_client=self._http_client,
             system_content=self._build_system_prompt(),
@@ -2584,7 +2584,7 @@ class EmailAgent(AgentRuntime):
         if not thread_id:
             return None
         latest_body = self._safe_text(context.get("latest_body"))
-        generated = await invoke_email_mimo(
+        generated = await invoke_email_internal_llm(
             cfg=self.config,
             http_client=self._http_client,
             system_content=self._build_system_prompt(),
@@ -2661,7 +2661,7 @@ class EmailAgent(AgentRuntime):
             f"Thread subject: {self._safe_text(context.get('subject'))}\n\n"
             f"Latest inbound message:\n{latest_body[:6000]}"
         )
-        body = await invoke_email_mimo(
+        body = await invoke_email_internal_llm(
             cfg=self.config,
             http_client=self._http_client,
             system_content=self._build_system_prompt(),
@@ -2695,7 +2695,7 @@ class EmailAgent(AgentRuntime):
         bcc_recipients: list[dict[str, Any]],
         subject: str | None,
     ) -> dict[str, Any]:
-        payload = await invoke_email_mimo_json(
+        payload = await invoke_email_internal_llm_json(
             cfg=self.config,
             http_client=self._http_client,
             system_content=self._build_system_prompt(),
@@ -2723,7 +2723,7 @@ class EmailAgent(AgentRuntime):
         resolved_subject = self._safe_text(payload.get("subject")) or subject or "COSMIC update"
         resolved_body = self._safe_text(payload.get("body")) or draft_seed
         if not resolved_body:
-            raw_body = await invoke_email_mimo(
+            raw_body = await invoke_email_internal_llm(
                 cfg=self.config,
                 http_client=self._http_client,
                 system_content=self._build_system_prompt(),
@@ -3116,7 +3116,7 @@ class EmailAgent(AgentRuntime):
                 snippet = self._clean_reply_snippet(self._safe_text(top_result.get("snippet")))
                 if snippet:
                     return f"The latest reply says: {snippet}"
-        summary = await invoke_email_mimo(
+        summary = await invoke_email_internal_llm(
             cfg=self.config,
             http_client=self._http_client,
             system_content=self._build_system_prompt(),
@@ -3485,7 +3485,7 @@ class EmailAgent(AgentRuntime):
             for item in thread_messages[-4:]
             if isinstance(item, dict)
         ]
-        payload = await invoke_email_mimo_json(
+        payload = await invoke_email_internal_llm_json(
             cfg=self.config,
             http_client=self._http_client,
             system_content=self._build_system_prompt(),
@@ -3525,7 +3525,7 @@ class EmailAgent(AgentRuntime):
     ) -> dict[str, Any]:
         if not raw_user_instruction:
             return {}
-        payload = await invoke_email_mimo_json(
+        payload = await invoke_email_internal_llm_json(
             cfg=self.config,
             http_client=self._http_client,
             system_content=self._build_system_prompt(),

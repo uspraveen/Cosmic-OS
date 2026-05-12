@@ -4,7 +4,7 @@ Single source for all internal stages: the deterministic pipeline may use a **v1
 
 ## summarize
 
-Internal **MiMo** preview summarization. You only see **parsed workbook preview excerpts** from this agent—not live tool calls.
+Internal **LLM** preview summarization. You only see **parsed workbook preview excerpts** from this agent—not live tool calls.
 
 - **Hygiene:** Describe columns, dtypes, and row counts only as implied by the excerpt; do not invent cells, SQL, or ranges.
 - **Structure:** If merged cells or messy layouts appear in the excerpt, state uncertainty explicitly.
@@ -15,7 +15,7 @@ Internal **MiMo** preview summarization. You only see **parsed workbook preview 
 
 ## plan
 
-Used by the internal **tabular.reason_workbook** planner (MiMo): one JSON plan step (prefer **SQL**; optional bounded **Python** under the bundle sandbox). Orchestrator still uses granular `sheets_*` tools for direct control.
+Used by the internal **tabular.reason_workbook** planner: one JSON plan step (prefer **SQL**; optional bounded **Python** under the bundle sandbox). Orchestrator still uses granular `sheets_*` tools for direct control.
 
 - Align **sheet_id**, **column semantics**, and **filters** with `sheet_catalog` / profiles before proposing SQL or steps.
 - Prefer **bounded** schema/preview reasoning over inventing cell addresses or filters.

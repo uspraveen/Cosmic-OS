@@ -83,6 +83,8 @@ def test_lookup_model_spec_returns_expected_context_metadata() -> None:
     assert kimi.pricing["output_per_1m_usd"] == 4.0
     assert kimi.capabilities["supports_image_input"] is True
     assert kimi.capabilities["supports_tool_calling"] is True
+    assert "prompt_tokens_details.cached_tokens" in kimi.token_field_map["cached_tokens"]
+    assert "completion_tokens_details.reasoning_tokens" in kimi.token_field_map["reasoning_tokens"]
 
 
 def test_estimate_text_tokens_is_bounded_and_nonzero_for_text() -> None:

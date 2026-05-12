@@ -70,7 +70,7 @@ Rules:
 """
 
 
-async def invoke_calendar_mimo(
+async def invoke_calendar_internal_llm(
     *,
     cfg: CalendarAgentConfig,
     http_client: httpx.AsyncClient,
@@ -87,7 +87,7 @@ async def invoke_calendar_mimo(
 
     Returns dict with operation/params/confidence, or None if LLM unavailable/fails.
     """
-    if not cfg.enable_internal_llm or not cfg.mimo_api_key or not cfg.mimo_base_url:
+    if not cfg.enable_internal_llm or not cfg.internal_llm_api_key or not cfg.internal_llm_base_url:
         return None
 
     try:
@@ -115,18 +115,18 @@ async def invoke_calendar_mimo(
     ]
 
     started = time.perf_counter()
-    llm_call_id = f"cal_mimo_{uuid4().hex[:16]}"
+    llm_call_id = f"calendar_internal_llm_{uuid4().hex[:16]}"
     try:
         async with httpx.AsyncClient(
-            timeout=cfg.mimo_timeout_sec,
+            timeout=cfg.internal_llm_timeout_sec,
             http2=False,
             follow_redirects=True,
-        ) as mimo_http:
+        ) as llm_http:
             llm_kwargs: dict[str, Any] = {
-                "model": cfg.mimo_model,
-                "api_key": cfg.mimo_api_key,
-                "base_url": cfg.mimo_base_url,
-                "http_async_client": mimo_http,
+                "model": cfg.internal_llm_model,
+                "api_key": cfg.internal_llm_api_key,
+                "base_url": cfg.internal_llm_base_url,
+                "http_async_client": llm_http,
             }
             llm = ChatOpenAI(**llm_kwargs)
             result = await llm.ainvoke(messages)
@@ -158,7 +158,7 @@ async def invoke_calendar_mimo(
                 source_id=source_id or "",
                 channel=channel or "",
                 provider="openai_compatible",
-                model=cfg.mimo_model,
+                model=cfg.internal_llm_model,
                 usage_kind="chat_completion",
                 ok=True,
                 latency_ms=latency_ms,

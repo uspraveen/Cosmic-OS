@@ -4,7 +4,7 @@
 
 - Redis `TaskEnvelope` transport via `AgentRuntime`
 - registry heartbeat / healthy instance discovery
-- Gateway usage logging for both deterministic operations and MiMo calls
+- Gateway usage logging for both deterministic operations and internal LLM calls
 - per-task artifacts under `runs/artifacts/<task_id>/email_agent/`
 - transport-only cron/final-content delivery still belongs to the `agent-email` Gateway adapter, not this specialist
 

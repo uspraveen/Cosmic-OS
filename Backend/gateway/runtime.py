@@ -6242,8 +6242,19 @@ class GatewayRuntime:
         candidates = [
             ("anthropic", self.config.haiku_model),
             ("anthropic", "claude-opus-4-6"),
+            ("anthropic", "claude-sonnet-4-6"),
             ("perplexity", self.config.perplexity_model),
+            ("fireworks", "accounts/fireworks/models/kimi-k2p6"),
         ]
+        try:
+            cosmic_model = self.preference_store.get_cosmic_orchestrator_model()
+        except Exception:
+            cosmic_model = {}
+        if isinstance(cosmic_model, dict):
+            provider = str(cosmic_model.get("provider") or "").strip().lower()
+            model = str(cosmic_model.get("model") or "").strip()
+            if provider == "fireworks_kimi" and model:
+                candidates.append(("fireworks", model))
         seen: set[str] = set()
         for provider, model in candidates:
             spec = lookup_model_spec(provider, model)

@@ -950,7 +950,7 @@ class TabularAgent(AgentRuntime):
         if self._http_client is None:
             raise TabularAgentError(
                 code="INTERNAL_ERROR",
-                message="HTTP client is required for tabular internal reasoning (MiMo usage + Gateway).",
+                message="HTTP client is required for tabular internal reasoning (internal LLM usage + Gateway).",
                 retryable=True,
                 next_action="retry",
             )
@@ -979,7 +979,7 @@ class TabularAgent(AgentRuntime):
                     code=code[:80],
                     retryable=False,
                     message=msg[:2000],
-                    next_action="configure_tabular_mimo_or_use_sheets_tools",
+                    next_action="configure_tabular_internal_llm_or_use_sheets_tools",
                 ),
             )
         return AgentResult(status="completed", output=out, artifacts=[], error=None)

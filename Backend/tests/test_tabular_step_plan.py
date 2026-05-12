@@ -266,7 +266,7 @@ class TestFinalizeAutoCompletion:
             "Summarize",
         ]))
 
-        # Simulate: MiMo only completed step 1 explicitly during tool rounds
+        # Simulate: the internal LLM only completed step 1 explicitly during tool rounds
         loop.run_until_complete(plan.update(1, "completed"))
 
         # Finalize auto-completion logic (mirrors the actual finalize code)

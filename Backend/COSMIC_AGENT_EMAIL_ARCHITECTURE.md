@@ -29,7 +29,7 @@ Agent Email in COSMIC is deliberately split into two pieces:
   - compose/reply/send email through Cosmic Mail
   - maintain standing instructions
   - store email-private artifacts and session runs
-  - use internal MiMo reasoning where appropriate
+  - use internal internal LLM reasoning where appropriate
 
 This follows the same COSMIC design rule as other channels:
 - adapters do transport and normalization
@@ -138,8 +138,8 @@ Implemented at:
 - `agents/email_agent/`
 
 LLM choice:
-- Xiaomi MiMo via OpenAI-compatible endpoint
-- default model: `mimo-v2-pro`
+- Xiaomi internal LLM via OpenAI-compatible endpoint
+- default model: `gpt-5-mini`
 
 Current specialist intents:
 - `email.process_inbound`
@@ -431,7 +431,7 @@ The email specialist must remain a standard COSMIC specialist:
 
 Usage logging:
 - deterministic specialist operations log to Gateway usage DB
-- internal MiMo calls also log usage to Gateway usage DB
+- internal internal LLM calls also log usage to Gateway usage DB
 
 This keeps email aligned with:
 - tabular
@@ -485,7 +485,7 @@ Bootstrap should:
 The final COSMIC email shape is:
 - **Gateway adapter for transport**
 - **Email specialist for cognition**
-- **MiMo inside the specialist**
+- **internal LLM inside the specialist**
 - **thread-scoped sessions**
 - **lookup-time usage hints**
 - **compact Opus handoff briefs**
