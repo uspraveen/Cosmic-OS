@@ -10,6 +10,7 @@ def test_model_specs_registry_contains_active_runtime_models() -> None:
     assert "anthropic:claude-sonnet-4-6" in specs
     assert "perplexity:sonar" in specs
     assert "perplexity:pplx-embed-v1-4b" in specs
+    assert "fireworks:accounts/fireworks/models/kimi-k2p6" in specs
     assert "groq:openai/gpt-oss-20b" in specs
     assert "openai:gpt-5-mini" in specs
     assert "openai:gpt-image-1.5" in specs
@@ -72,6 +73,16 @@ def test_lookup_model_spec_returns_expected_context_metadata() -> None:
     pplx_embed = get_model_spec("perplexity:pplx-embed-v1-4b")
     assert pplx_embed is not None
     assert pplx_embed.pricing["input_per_1m_usd"] == 0.03
+
+    kimi = get_model_spec("fireworks:accounts/fireworks/models/kimi-k2p6")
+    assert kimi is not None
+    assert kimi.sdk == "openai_compatible"
+    assert kimi.context_window_tokens == 262000
+    assert kimi.pricing["input_per_1m_usd"] == 0.95
+    assert kimi.pricing["cached_input_per_1m_usd"] == 0.16
+    assert kimi.pricing["output_per_1m_usd"] == 4.0
+    assert kimi.capabilities["supports_image_input"] is True
+    assert kimi.capabilities["supports_tool_calling"] is True
 
 
 def test_estimate_text_tokens_is_bounded_and_nonzero_for_text() -> None:

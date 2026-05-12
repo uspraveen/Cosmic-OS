@@ -102,6 +102,12 @@ class OrchestratorConfig:
     anthropic_max_input_images: int = 10
     anthropic_max_staged_input_files: int = 4
     anthropic_max_staged_input_file_bytes: int = 20 * 1024 * 1024
+    orchestrator_default_provider: str = "anthropic"
+    fireworks_api_key: str = ""
+    fireworks_base_url: str = "https://api.fireworks.ai/inference/v1"
+    fireworks_kimi_model: str = "accounts/fireworks/models/kimi-k2p6"
+    fireworks_kimi_max_tokens: int = 16000
+    fireworks_kimi_temperature: float = 0.6
     max_tokens: int = 16000
     request_timeout_sec: float = 300.0
     redis_url: str = ""
@@ -185,6 +191,46 @@ class OrchestratorConfig:
             anthropic_max_staged_input_file_bytes=max(
                 1024,
                 _env_int("ANTHROPIC_MAX_STAGED_INPUT_FILE_BYTES", 20 * 1024 * 1024),
+            ),
+            orchestrator_default_provider=(
+                os.getenv("COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER", "anthropic").strip().lower()
+                or "anthropic"
+            ),
+            fireworks_api_key=(
+                os.getenv("ORCHESTRATOR_FIREWORKS_API_KEY")
+                or os.getenv("FIREWORKS_API_KEY")
+                or os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY")
+                or os.getenv("MODEL_API_KEY")
+                or os.getenv("MIMO_API_KEY")
+                or ""
+            ).strip(),
+            fireworks_base_url=_normalize_openai_like_base_url(
+                (
+                    os.getenv("ORCHESTRATOR_FIREWORKS_BASE_URL")
+                    or os.getenv("FIREWORKS_BASE_URL")
+                    or os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL")
+                    or os.getenv("MODEL_BASE_URL")
+                    or os.getenv("MIMO_OPENAI_BASE_URL")
+                    or "https://api.fireworks.ai/inference/v1"
+                ).strip(),
+                default="https://api.fireworks.ai/inference/v1",
+            ),
+            fireworks_kimi_model=(
+                os.getenv("ORCHESTRATOR_FIREWORKS_KIMI_MODEL")
+                or os.getenv("FIREWORKS_KIMI_MODEL")
+                or "accounts/fireworks/models/kimi-k2p6"
+            ).strip()
+            or "accounts/fireworks/models/kimi-k2p6",
+            fireworks_kimi_max_tokens=max(
+                256,
+                _env_int(
+                    "ORCHESTRATOR_FIREWORKS_MAX_TOKENS",
+                    _env_int("OPUS_MAX_TOKENS", 16000),
+                ),
+            ),
+            fireworks_kimi_temperature=max(
+                0.0,
+                min(2.0, _env_float("ORCHESTRATOR_FIREWORKS_TEMPERATURE", 0.6)),
             ),
             max_tokens=max(256, _env_int("OPUS_MAX_TOKENS", 16000)),
             request_timeout_sec=max(30.0, _env_float("ORCHESTRATOR_REQUEST_TIMEOUT_SEC", 300.0)),

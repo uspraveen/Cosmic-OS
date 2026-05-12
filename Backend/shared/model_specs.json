@@ -141,6 +141,36 @@
       },
       "status": "active"
     },
+    "fireworks:accounts/fireworks/models/kimi-k2p6": {
+      "provider": "fireworks",
+      "model": "accounts/fireworks/models/kimi-k2p6",
+      "sdk": "openai_compatible",
+      "base_url": "https://api.fireworks.ai/inference/v1",
+      "usage_kind": "chat_completion",
+      "context_window_tokens": 262000,
+      "max_output_tokens": 262000,
+      "recommended_headroom_reserve_tokens": 12000,
+      "pricing": {
+        "input_per_1m_usd": 0.95,
+        "cached_input_per_1m_usd": 0.16,
+        "output_per_1m_usd": 4.0
+      },
+      "capabilities": {
+        "supports_cached_input_tokens": true,
+        "supports_reasoning_tokens": true,
+        "supports_streaming": true,
+        "supports_image_input": true,
+        "supports_tool_calling": true
+      },
+      "token_field_map": {
+        "prompt_tokens": ["prompt_tokens", "input_tokens"],
+        "completion_tokens": ["completion_tokens", "output_tokens"],
+        "total_tokens": ["total_tokens"],
+        "cached_tokens": ["cached_tokens", "cache_read_input_tokens"],
+        "reasoning_tokens": ["reasoning_tokens"]
+      },
+      "status": "active"
+    },
     "groq:openai/gpt-oss-20b": {
       "provider": "groq",
       "model": "openai/gpt-oss-20b",

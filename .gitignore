@@ -100,6 +100,9 @@ resources/secret.key
 Backend/manual_memory_smoke/
 Backend/.codex_manual_tmp/
 test_artifact_bundle/
+.pytest_cache/
+pytest-kimi-tmp/
+pytest-tmp-root/
 Backend/.pytest-*/
 Backend/.pytest_cache/
 Backend/pytest-temp-*/

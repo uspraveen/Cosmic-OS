@@ -2160,16 +2160,26 @@ app.whenReady().then(() => {
 
   ipcMain.handle('gateway:save-preferences', async (_, payload: {
     visualResponseEnhancementEnabled?: boolean
+    cosmicOrchestratorProvider?: string
+    cosmicOrchestratorModel?: string
   }) => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {
       throw new Error('Gateway connection is not configured.')
     }
+    const body: Record<string, any> = {}
+    if (typeof payload?.visualResponseEnhancementEnabled === 'boolean') {
+      body.visual_response_enhancement_enabled = payload.visualResponseEnhancementEnabled
+    }
+    if (typeof payload?.cosmicOrchestratorProvider === 'string') {
+      body.cosmic_orchestrator_provider = payload.cosmicOrchestratorProvider
+    }
+    if (typeof payload?.cosmicOrchestratorModel === 'string') {
+      body.cosmic_orchestrator_model = payload.cosmicOrchestratorModel
+    }
     return callGatewayJson(config, '/desktop/preferences', {
       method: 'PATCH',
-      body: {
-        visual_response_enhancement_enabled: payload?.visualResponseEnhancementEnabled !== false,
-      },
+      body,
       timeoutMs: 15000,
     })
   })

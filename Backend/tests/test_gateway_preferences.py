@@ -158,6 +158,7 @@ def test_desktop_preferences_routes_patch_and_broadcast() -> None:
                 initial_payload = initial.json()
                 assert initial_payload["visual_response_enhancement"]["enabled"] is True
                 assert initial_payload["visual_response_enhancement"]["revision"] == 1
+                assert initial_payload["cosmic_orchestrator_model"]["provider"] == "anthropic"
 
                 updated = client.patch(
                     "/desktop/preferences",
@@ -179,6 +180,7 @@ def test_desktop_preferences_routes_patch_and_broadcast() -> None:
                     updated_payload["visual_response_enhancement"]["updated_device_id"]
                     == "desk_pref_1"
                 )
+                assert updated_payload["cosmic_orchestrator_model"]["provider"] == "anthropic"
 
                 event = websocket.receive_json()
                 assert event["type"] == "preferences.updated"
@@ -189,6 +191,10 @@ def test_desktop_preferences_routes_patch_and_broadcast() -> None:
                 assert (
                     event["preferences"]["visual_response_enhancement"]["revision"]
                     == 2
+                )
+                assert (
+                    event["preferences"]["cosmic_orchestrator_model"]["provider"]
+                    == "anthropic"
                 )
 
                 reloaded = client.get(
@@ -218,6 +224,7 @@ def test_desktop_preferences_snapshot_falls_back_when_store_read_fails() -> None
         )
         assert snapshot["visual_response_enhancement"]["updated_device_id"] is None
         assert snapshot["visual_response_enhancement"]["updated_at"]
+        assert snapshot["cosmic_orchestrator_model"]["provider"] == "anthropic"
 
 
 def test_alpha_execution_provider_preference_defaults_and_updates() -> None:
@@ -239,6 +246,29 @@ def test_alpha_execution_provider_preference_defaults_and_updates() -> None:
         assert updated["revision"] == 2
         assert updated["updated_source"] == "test"
         assert updated["updated_device_id"] == "desk_alpha_1"
+
+
+def test_cosmic_orchestrator_model_preference_defaults_and_updates() -> None:
+    with _runtime_root() as root:
+        runtime = build_runtime(root)
+        runtime.preference_store.initialize()
+
+        initial = runtime.preference_store.get_cosmic_orchestrator_model()
+        assert initial["provider"] == "anthropic"
+        assert initial["model"] == ""
+        assert initial["revision"] == 1
+
+        updated = runtime.preference_store.set_cosmic_orchestrator_model(
+            "smarter",
+            source="test",
+            device_id="desk_kimi_1",
+        )
+
+        assert updated["provider"] == "fireworks_kimi"
+        assert updated["model"] == "accounts/fireworks/models/kimi-k2p6"
+        assert updated["revision"] == 2
+        assert updated["updated_source"] == "test"
+        assert updated["updated_device_id"] == "desk_kimi_1"
 
 
 @pytest.mark.asyncio
@@ -267,6 +297,10 @@ async def test_process_incoming_message_pins_gateway_preferences_metadata() -> N
                 result["gateway_preferences"]["visual_response_enhancement"]["enabled"]
                 is False
             )
+            assert (
+                result["gateway_preferences"]["cosmic_orchestrator_model"]["provider"]
+                == "anthropic"
+            )
 
             history = runtime.session_store.get_history(result["session_id"])
             assert len(history) == 1
@@ -284,5 +318,7 @@ async def test_process_incoming_message_pins_gateway_preferences_metadata() -> N
                 channel=result["channel"],
             )
             assert task.input["visual_response_enhancement_enabled"] is False
+            assert task.input["gateway_preferences"]["cosmic_orchestrator_model"]["provider"] == "anthropic"
+            assert task.input["cosmic_orchestrator_model"]["provider"] == "anthropic"
         finally:
             await runtime.stop()

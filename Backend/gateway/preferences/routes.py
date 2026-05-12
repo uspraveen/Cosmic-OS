@@ -19,12 +19,24 @@ class VisualResponseEnhancementPreference(BaseModel):
     updated_device_id: str | None = None
 
 
+class CosmicOrchestratorModelPreference(BaseModel):
+    provider: str
+    model: str
+    revision: int = Field(..., ge=1)
+    updated_at: str
+    updated_source: str | None = None
+    updated_device_id: str | None = None
+
+
 class DesktopPreferencesResponse(BaseModel):
     visual_response_enhancement: VisualResponseEnhancementPreference
+    cosmic_orchestrator_model: CosmicOrchestratorModelPreference
 
 
 class DesktopPreferencesUpdateRequest(BaseModel):
-    visual_response_enhancement_enabled: bool = True
+    visual_response_enhancement_enabled: bool | None = None
+    cosmic_orchestrator_provider: str | None = Field(default=None, max_length=64)
+    cosmic_orchestrator_model: str | None = Field(default=None, max_length=256)
 
 
 def _extract_device_id(request: Request) -> str | None:
@@ -46,8 +58,10 @@ async def update_desktop_preferences(
     _: None = Depends(require_local_api_token),
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
-    return await runtime.save_visual_response_enhancement_preference(
-        enabled=payload.visual_response_enhancement_enabled,
+    return await runtime.save_desktop_preferences(
+        visual_response_enhancement_enabled=payload.visual_response_enhancement_enabled,
+        cosmic_orchestrator_provider=payload.cosmic_orchestrator_provider,
+        cosmic_orchestrator_model=payload.cosmic_orchestrator_model,
         source="desktop_settings",
         device_id=_extract_device_id(request),
     )

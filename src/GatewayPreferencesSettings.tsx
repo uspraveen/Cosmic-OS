@@ -6,34 +6,46 @@ type GatewayConnectionState = {
   detail?: string
 }
 
+type CosmicOrchestratorProvider = 'anthropic' | 'fireworks_kimi'
+
 interface GatewayPreferencesSettingsProps {
   active: boolean
   isAuthenticated: boolean
   gatewayConnection?: GatewayConnectionState
 }
 
-interface VisualResponseEnhancementPreference {
-  enabled: boolean
+interface TimestampedPreference {
   revision: number
   updatedAt: string | null
   updatedSource: string | null
   updatedDeviceId: string | null
 }
 
-function normalizeVisualPreference(payload: any): VisualResponseEnhancementPreference | null {
-  const source = payload?.visual_response_enhancement && typeof payload.visual_response_enhancement === 'object'
-    ? payload.visual_response_enhancement
-    : payload?.preferences?.visual_response_enhancement && typeof payload.preferences.visual_response_enhancement === 'object'
-      ? payload.preferences.visual_response_enhancement
-      : null
+interface VisualResponseEnhancementPreference extends TimestampedPreference {
+  enabled: boolean
+}
 
-  if (!source) {
-    return null
-  }
+interface CosmicOrchestratorModelPreference extends TimestampedPreference {
+  provider: CosmicOrchestratorProvider
+  model: string
+}
 
+interface GatewayPreferenceSnapshot {
+  visual: VisualResponseEnhancementPreference
+  cosmic: CosmicOrchestratorModelPreference
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' ? value as Record<string, unknown> : null
+}
+
+function errorMessage(err: unknown, fallback: string) {
+  return err instanceof Error && err.message ? err.message : fallback
+}
+
+function normalizeTimestampedPreference(source: Record<string, unknown>): TimestampedPreference {
   const revision = Number(source.revision)
   return {
-    enabled: source.enabled !== false,
     revision: Number.isFinite(revision) && revision > 0 ? Math.trunc(revision) : 1,
     updatedAt:
       typeof source.updated_at === 'string'
@@ -56,6 +68,36 @@ function normalizeVisualPreference(payload: any): VisualResponseEnhancementPrefe
   }
 }
 
+function normalizeCosmicProvider(value: unknown): CosmicOrchestratorProvider {
+  const normalized = String(value || '').trim().toLowerCase().replace(/-/g, '_')
+  return normalized === 'fireworks' || normalized === 'fireworks_kimi' || normalized === 'kimi' || normalized === 'smarter'
+    ? 'fireworks_kimi'
+    : 'anthropic'
+}
+
+function normalizePreferences(payload: unknown): GatewayPreferenceSnapshot | null {
+  const payloadRecord = asRecord(payload)
+  const root = asRecord(payloadRecord?.preferences) || payloadRecord
+  const visualSource = asRecord(root?.visual_response_enhancement)
+  const cosmicSource = asRecord(root?.cosmic_orchestrator_model)
+
+  if (!visualSource || !cosmicSource) {
+    return null
+  }
+
+  return {
+    visual: {
+      ...normalizeTimestampedPreference(visualSource),
+      enabled: visualSource.enabled !== false,
+    },
+    cosmic: {
+      ...normalizeTimestampedPreference(cosmicSource),
+      provider: normalizeCosmicProvider(cosmicSource.provider),
+      model: typeof cosmicSource.model === 'string' ? cosmicSource.model : '',
+    },
+  }
+}
+
 function formatUpdatedAt(value: string | null) {
   if (!value) {
     return null
@@ -67,14 +109,27 @@ function formatUpdatedAt(value: string | null) {
   return date.toLocaleString()
 }
 
+function preferenceDetail(preference: TimestampedPreference | null) {
+  if (!preference?.updatedSource) {
+    return null
+  }
+  return (
+    <>
+      Source: {preference.updatedSource}
+      {preference.updatedDeviceId ? ` - ${preference.updatedDeviceId}` : ''}
+      {preference.revision ? ` - rev ${preference.revision}` : ''}
+    </>
+  )
+}
+
 export default function GatewayPreferencesSettings({
   active,
   isAuthenticated,
   gatewayConnection,
 }: GatewayPreferencesSettingsProps) {
-  const [preference, setPreference] = useState<VisualResponseEnhancementPreference | null>(null)
+  const [preferences, setPreferences] = useState<GatewayPreferenceSnapshot | null>(null)
   const [isLoading, setIsLoading] = useState(false)
-  const [isSaving, setIsSaving] = useState(false)
+  const [savingKey, setSavingKey] = useState<'visual' | 'cosmic' | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const loadPreferences = async () => {
@@ -86,13 +141,13 @@ export default function GatewayPreferencesSettings({
     setError(null)
     try {
       const payload = await window.cosmic.getGatewayPreferences()
-      const nextPreference = normalizeVisualPreference(payload)
-      if (!nextPreference) {
+      const nextPreferences = normalizePreferences(payload)
+      if (!nextPreferences) {
         throw new Error('Gateway returned an invalid preferences payload.')
       }
-      setPreference(nextPreference)
-    } catch (err: any) {
-      setError(err?.message || 'Unable to load preferences from your VM.')
+      setPreferences(nextPreferences)
+    } catch (err: unknown) {
+      setError(errorMessage(err, 'Unable to load preferences from your VM.'))
     } finally {
       setIsLoading(false)
     }
@@ -113,22 +168,29 @@ export default function GatewayPreferencesSettings({
       if (String(event?.type || '') !== 'preferences.updated') {
         return
       }
-      const nextPreference = normalizeVisualPreference(event)
-      if (!nextPreference) {
+      const nextPreferences = normalizePreferences(event)
+      if (!nextPreferences) {
         return
       }
-      setPreference(nextPreference)
+      setPreferences(nextPreferences)
       setError(null)
       setIsLoading(false)
-      setIsSaving(false)
+      setSavingKey(null)
     })
   }, [active, isAuthenticated])
 
-  const updatedAtLabel = useMemo(
-    () => formatUpdatedAt(preference?.updatedAt || null),
-    [preference?.updatedAt],
-  )
+  const latestUpdatedAt = useMemo(() => {
+    const candidates = [
+      preferences?.visual.updatedAt || null,
+      preferences?.cosmic.updatedAt || null,
+    ]
+      .map((value) => (value ? new Date(value) : null))
+      .filter((value): value is Date => value instanceof Date && !Number.isNaN(value.getTime()))
+      .sort((a, b) => b.getTime() - a.getTime())
+    return formatUpdatedAt(candidates[0]?.toISOString() || null)
+  }, [preferences?.visual.updatedAt, preferences?.cosmic.updatedAt])
 
+  const isSaving = Boolean(savingKey)
   const statusLabel = !isAuthenticated
     ? 'Sign in required'
     : isSaving
@@ -137,7 +199,7 @@ export default function GatewayPreferencesSettings({
       ? 'Loading from VM...'
       : error
         ? 'VM unavailable'
-        : preference
+        : preferences
           ? 'Saved on your VM'
           : 'Waiting for VM'
 
@@ -145,36 +207,58 @@ export default function GatewayPreferencesSettings({
     ? 'idle'
     : error
     ? 'error'
-    : preference
+    : preferences
       ? 'ready'
       : 'idle'
 
-  const canToggle =
+  const canSave =
     isAuthenticated &&
-    Boolean(preference) &&
+    Boolean(preferences) &&
     !isLoading &&
     !isSaving &&
     Boolean(window.cosmic?.saveGatewayPreferences)
 
-  const handleToggle = async () => {
-    if (!preference || !window.cosmic?.saveGatewayPreferences || !canToggle) {
+  const handleToggleVisual = async () => {
+    if (!preferences || !window.cosmic?.saveGatewayPreferences || !canSave) {
       return
     }
-    setIsSaving(true)
+    setSavingKey('visual')
     setError(null)
     try {
       const payload = await window.cosmic.saveGatewayPreferences({
-        visualResponseEnhancementEnabled: !preference.enabled,
+        visualResponseEnhancementEnabled: !preferences.visual.enabled,
       })
-      const nextPreference = normalizeVisualPreference(payload)
-      if (!nextPreference) {
+      const nextPreferences = normalizePreferences(payload)
+      if (!nextPreferences) {
         throw new Error('Gateway returned an invalid preferences payload.')
       }
-      setPreference(nextPreference)
-    } catch (err: any) {
-      setError(err?.message || 'Unable to save this preference to your VM.')
+      setPreferences(nextPreferences)
+    } catch (err: unknown) {
+      setError(errorMessage(err, 'Unable to save this preference to your VM.'))
     } finally {
-      setIsSaving(false)
+      setSavingKey(null)
+    }
+  }
+
+  const handleSelectProvider = async (provider: CosmicOrchestratorProvider) => {
+    if (!preferences || !window.cosmic?.saveGatewayPreferences || !canSave || preferences.cosmic.provider === provider) {
+      return
+    }
+    setSavingKey('cosmic')
+    setError(null)
+    try {
+      const payload = await window.cosmic.saveGatewayPreferences({
+        cosmicOrchestratorProvider: provider,
+      })
+      const nextPreferences = normalizePreferences(payload)
+      if (!nextPreferences) {
+        throw new Error('Gateway returned an invalid preferences payload.')
+      }
+      setPreferences(nextPreferences)
+    } catch (err: unknown) {
+      setError(errorMessage(err, 'Unable to save this preference to your VM.'))
+    } finally {
+      setSavingKey(null)
     }
   }
 
@@ -192,38 +276,78 @@ export default function GatewayPreferencesSettings({
 
       <div className="preferences-status-row">
         <span className={`preferences-status-chip ${statusTone}`}>{statusLabel}</span>
-        {updatedAtLabel && (
-          <span className="preferences-status-meta">Last updated {updatedAtLabel}</span>
+        {latestUpdatedAt && (
+          <span className="preferences-status-meta">Last updated {latestUpdatedAt}</span>
         )}
       </div>
 
-      <div className={`preferences-card ${!canToggle ? 'muted' : ''}`}>
+      <div className={`preferences-card preferences-card-column ${!canSave ? 'muted' : ''}`}>
+        <div className="preferences-card-copy">
+          <div className="preferences-card-title">Cosmic Brain</div>
+          <div className="preferences-card-note">
+            Choose the model provider behind Cosmic's orchestrator. Claude keeps the current production path; Smarter uses Fireworks Kimi K2.6 through the OpenAI-compatible path.
+          </div>
+          {preferences?.cosmic.model && (
+            <div className="preferences-card-detail">
+              Model: {preferences.cosmic.model}
+            </div>
+          )}
+          {preferenceDetail(preferences?.cosmic || null) && (
+            <div className="preferences-card-detail">
+              {preferenceDetail(preferences?.cosmic || null)}
+            </div>
+          )}
+        </div>
+
+        <div className="preferences-provider-control" aria-label="Cosmic orchestrator provider">
+          <button
+            type="button"
+            className={`preferences-provider-option ${preferences?.cosmic.provider === 'anthropic' ? 'active' : ''}`}
+            onClick={() => { void handleSelectProvider('anthropic') }}
+            disabled={!canSave}
+            aria-pressed={preferences?.cosmic.provider === 'anthropic'}
+          >
+            <span>Claude</span>
+            <small>Current stable path</small>
+          </button>
+          <button
+            type="button"
+            className={`preferences-provider-option ${preferences?.cosmic.provider === 'fireworks_kimi' ? 'active smarter' : ''}`}
+            onClick={() => { void handleSelectProvider('fireworks_kimi') }}
+            disabled={!canSave}
+            aria-pressed={preferences?.cosmic.provider === 'fireworks_kimi'}
+          >
+            <span>Smarter</span>
+            <small>Kimi K2.6</small>
+          </button>
+        </div>
+      </div>
+
+      <div className={`preferences-card ${!canSave ? 'muted' : ''}`}>
         <div className="preferences-card-copy">
           <div className="preferences-card-title">Visual Response Enhancement</div>
           <div className="preferences-card-note">
             Allow richer responses with inline visuals when the backend supports them. This does not force visuals on every turn.
           </div>
-          {preference?.updatedSource && (
+          {preferenceDetail(preferences?.visual || null) && (
             <div className="preferences-card-detail">
-              Source: {preference.updatedSource}
-              {preference.updatedDeviceId ? ` - ${preference.updatedDeviceId}` : ''}
-              {preference.revision ? ` - rev ${preference.revision}` : ''}
+              {preferenceDetail(preferences?.visual || null)}
             </div>
           )}
         </div>
 
         <button
           type="button"
-          className={`preferences-switch ${preference?.enabled ? 'enabled' : 'disabled'}`}
-          onClick={handleToggle}
-          disabled={!canToggle}
-          aria-pressed={preference?.enabled === true}
+          className={`preferences-switch ${preferences?.visual.enabled ? 'enabled' : 'disabled'}`}
+          onClick={handleToggleVisual}
+          disabled={!canSave}
+          aria-pressed={preferences?.visual.enabled === true}
         >
           <span className="preferences-switch-track">
             <span className="preferences-switch-thumb" />
           </span>
           <span className="preferences-switch-label">
-            {preference?.enabled ? 'On' : 'Off'}
+            {preferences?.visual.enabled ? 'On' : 'Off'}
           </span>
         </button>
       </div>

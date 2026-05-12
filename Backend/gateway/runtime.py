@@ -9259,6 +9259,16 @@ class GatewayRuntime:
             if isinstance(request_record.get("input_artifacts"), list)
             else []
         )
+        gateway_preferences = (
+            request_record.get("gateway_preferences")
+            if isinstance(request_record.get("gateway_preferences"), dict)
+            else self.get_desktop_preferences_snapshot()
+        )
+        cosmic_orchestrator_model = (
+            gateway_preferences.get("cosmic_orchestrator_model")
+            if isinstance(gateway_preferences.get("cosmic_orchestrator_model"), dict)
+            else {}
+        )
 
         task = TaskEnvelope(
             task_id=generate_task_id(),
@@ -9278,6 +9288,8 @@ class GatewayRuntime:
                 "visual_response_enhancement_enabled": bool(
                     request_record.get("visual_response_enhancement_enabled", True)
                 ),
+                "gateway_preferences": gateway_preferences,
+                "cosmic_orchestrator_model": cosmic_orchestrator_model,
                 "user_timezone": self._safe_text(request_record.get("cron_timezone"))
                 or self.current_user_timezone(),
             },
@@ -12332,9 +12344,52 @@ class GatewayRuntime:
                 "updated_source": "runtime_fallback",
                 "updated_device_id": None,
             }
+        try:
+            cosmic_orchestrator_model = (
+                self.preference_store.get_cosmic_orchestrator_model()
+            )
+        except Exception:
+            logger.exception(
+                "gateway.cosmic_orchestrator_preference_snapshot_failed; using runtime fallback defaults"
+            )
+            cosmic_orchestrator_model = {
+                "provider": "anthropic",
+                "model": "",
+                "revision": 1,
+                "updated_at": utcnow_iso(),
+                "updated_source": "runtime_fallback",
+                "updated_device_id": None,
+            }
         return {
-            "visual_response_enhancement": visual_response_enhancement
+            "visual_response_enhancement": visual_response_enhancement,
+            "cosmic_orchestrator_model": cosmic_orchestrator_model,
         }
+
+    async def save_desktop_preferences(
+        self,
+        *,
+        visual_response_enhancement_enabled: bool | None = None,
+        cosmic_orchestrator_provider: str | None = None,
+        cosmic_orchestrator_model: str | None = None,
+        source: str | None = None,
+        device_id: str | None = None,
+    ) -> dict[str, Any]:
+        if visual_response_enhancement_enabled is not None:
+            self.preference_store.set_visual_response_enhancement(
+                bool(visual_response_enhancement_enabled),
+                source=source,
+                device_id=device_id,
+            )
+        if cosmic_orchestrator_provider is not None:
+            self.preference_store.set_cosmic_orchestrator_model(
+                cosmic_orchestrator_provider,
+                model=cosmic_orchestrator_model,
+                source=source,
+                device_id=device_id,
+            )
+        snapshot = self.get_desktop_preferences_snapshot()
+        await self._broadcast_desktop_preferences_updated(snapshot)
+        return snapshot
 
     async def save_visual_response_enhancement_preference(
         self,
@@ -12343,17 +12398,11 @@ class GatewayRuntime:
         source: str | None = None,
         device_id: str | None = None,
     ) -> dict[str, Any]:
-        snapshot = {
-            "visual_response_enhancement": (
-                self.preference_store.set_visual_response_enhancement(
-                    enabled,
-                    source=source,
-                    device_id=device_id,
-                )
-            )
-        }
-        await self._broadcast_desktop_preferences_updated(snapshot)
-        return snapshot
+        return await self.save_desktop_preferences(
+            visual_response_enhancement_enabled=enabled,
+            source=source,
+            device_id=device_id,
+        )
 
     async def _broadcast_desktop_preferences_updated(
         self, snapshot: dict[str, Any]

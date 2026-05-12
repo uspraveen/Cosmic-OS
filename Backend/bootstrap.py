@@ -3986,6 +3986,50 @@ def build_service_env_overrides(
         orchestrator_existing.get("ANTHROPIC_MODEL"),
         orchestrator_data.get("ANTHROPIC_MODEL"),
     )
+    orchestrator_fireworks_api_key = first_meaningful_value(
+        orchestrator_external.get("ORCHESTRATOR_FIREWORKS_API_KEY"),
+        orchestrator_external.get("FIREWORKS_API_KEY"),
+        orchestrator_external.get("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY"),
+        orchestrator_existing.get("ORCHESTRATOR_FIREWORKS_API_KEY"),
+        orchestrator_existing.get("FIREWORKS_API_KEY"),
+        orchestrator_existing.get("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY"),
+        orchestrator_data.get("ORCHESTRATOR_FIREWORKS_API_KEY"),
+        orchestrator_data.get("FIREWORKS_API_KEY"),
+        orchestrator_data.get("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY"),
+        gateway_external.get("FIREWORKS_API_KEY"),
+        gateway_existing.get("FIREWORKS_API_KEY"),
+        gateway_data.get("FIREWORKS_API_KEY"),
+        slide_external_env.get("FIREWORKS_API_KEY"),
+        slide_existing_env.get("FIREWORKS_API_KEY"),
+    )
+    orchestrator_fireworks_base_url = first_meaningful_value(
+        orchestrator_external.get("ORCHESTRATOR_FIREWORKS_BASE_URL"),
+        orchestrator_external.get("FIREWORKS_BASE_URL"),
+        orchestrator_existing.get("ORCHESTRATOR_FIREWORKS_BASE_URL"),
+        orchestrator_existing.get("FIREWORKS_BASE_URL"),
+        orchestrator_data.get("ORCHESTRATOR_FIREWORKS_BASE_URL"),
+        orchestrator_data.get("FIREWORKS_BASE_URL"),
+        slide_external_env.get("FIREWORKS_BASE_URL"),
+        slide_existing_env.get("FIREWORKS_BASE_URL"),
+        "https://api.fireworks.ai/inference/v1",
+    )
+    orchestrator_fireworks_kimi_model = first_meaningful_value(
+        orchestrator_external.get("ORCHESTRATOR_FIREWORKS_KIMI_MODEL"),
+        orchestrator_external.get("FIREWORKS_KIMI_MODEL"),
+        orchestrator_existing.get("ORCHESTRATOR_FIREWORKS_KIMI_MODEL"),
+        orchestrator_existing.get("FIREWORKS_KIMI_MODEL"),
+        orchestrator_data.get("ORCHESTRATOR_FIREWORKS_KIMI_MODEL"),
+        orchestrator_data.get("FIREWORKS_KIMI_MODEL"),
+        slide_external_env.get("FIREWORKS_KIMI_MODEL"),
+        slide_existing_env.get("FIREWORKS_KIMI_MODEL"),
+        "accounts/fireworks/models/kimi-k2p6",
+    )
+    cosmic_orchestrator_default_provider = first_meaningful_value(
+        orchestrator_external.get("COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER"),
+        orchestrator_existing.get("COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER"),
+        orchestrator_data.get("COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER"),
+        "anthropic",
+    )
     memory_url = first_meaningful_value(
         gateway_external.get("COSMIC_MEMORY_URL"),
         gateway_existing.get("COSMIC_MEMORY_URL"),
@@ -4159,6 +4203,13 @@ def build_service_env_overrides(
             "GATEWAY_SIGNING_SECRET": signing_secret or secrets.token_urlsafe(32),
             "ANTHROPIC_API_KEY": shared_anthropic_api_key or "<anthropic-api-key>",
             "ANTHROPIC_MODEL": opus_model or "claude-opus-4-6",
+            "COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER": cosmic_orchestrator_default_provider
+            or "anthropic",
+            "ORCHESTRATOR_FIREWORKS_API_KEY": orchestrator_fireworks_api_key or "",
+            "ORCHESTRATOR_FIREWORKS_BASE_URL": orchestrator_fireworks_base_url
+            or "https://api.fireworks.ai/inference/v1",
+            "ORCHESTRATOR_FIREWORKS_KIMI_MODEL": orchestrator_fireworks_kimi_model
+            or "accounts/fireworks/models/kimi-k2p6",
         },
         "whatsapp-bridge.env": {
             "GATEWAY_INTERNAL_TOKEN": shared_internal_token

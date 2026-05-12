@@ -126,7 +126,9 @@ interface Window {
     requestGatewayResume: () => Promise<{ ok: boolean }>
     getGatewayPreferences: () => Promise<any>
     saveGatewayPreferences: (payload: {
-      visualResponseEnhancementEnabled: boolean
+      visualResponseEnhancementEnabled?: boolean
+      cosmicOrchestratorProvider?: 'anthropic' | 'fireworks_kimi'
+      cosmicOrchestratorModel?: string
     }) => Promise<any>
     getGatewayCodexStatus: () => Promise<any>
     saveGatewayCodexConfig: (payload: {

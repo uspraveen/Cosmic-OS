@@ -64,6 +64,7 @@ from .store.ledger import TaskLedger
 from .tools.executor import ToolExecutionContext, ToolExecutor
 from .tools.registry import (
     build_tool_progress_message,
+    get_local_tool_definitions,
     get_model_tool_definitions,
     get_parallel_safe_local_tool_names,
 )
@@ -338,8 +339,6 @@ class OrchestratorRuntime:
     async def stream_task(self, task: TaskEnvelope) -> AsyncIterator[dict[str, Any]]:
         if not verify_task_envelope(task, self.config.signing_secret):
             raise RuntimeError("TaskEnvelope signature verification failed.")
-        if not self.config.anthropic_api_key:
-            raise RuntimeError("ANTHROPIC_API_KEY is not configured in orchestrator.env.")
 
         request_id = str(task.input.get("request_id") or "").strip() or None
         query = str(task.input.get("query") or "").strip()
@@ -347,6 +346,12 @@ class OrchestratorRuntime:
         channel = task.channel
         if not query:
             raise RuntimeError("TaskEnvelope.input.query is required for orchestrator.process")
+        orchestrator_provider = self._select_orchestrator_provider(task)
+        if orchestrator_provider == "fireworks_kimi":
+            if not self.config.fireworks_api_key:
+                raise RuntimeError("FIREWORKS_API_KEY is not configured in orchestrator.env.")
+        elif not self.config.anthropic_api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is not configured in orchestrator.env.")
 
         self.task_ledger.create_task(task)
         self._active_runs[task.task_id] = ActiveTaskRun(
@@ -363,7 +368,22 @@ class OrchestratorRuntime:
             "channel": channel,
         }
 
-        yield {**ev, "type": "task.created", "route": "opus", "status": "running"}
+        yield {
+            **ev,
+            "type": "task.created",
+            "route": "opus",
+            "status": "running",
+            "model_provider": orchestrator_provider,
+        }
+
+        if orchestrator_provider == "fireworks_kimi":
+            async for event in self._stream_fireworks_kimi_task(
+                task=task,
+                ev=ev,
+                query=query,
+            ):
+                yield event
+            return
 
         started_at = time.perf_counter()
         cumulative_usage: dict[str, int] = {}
@@ -1033,6 +1053,496 @@ class OrchestratorRuntime:
             )
             self._active_runs.pop(task.task_id, None)
 
+    async def _stream_fireworks_kimi_task(
+        self,
+        *,
+        task: TaskEnvelope,
+        ev: dict[str, Any],
+        query: str,
+    ) -> AsyncIterator[dict[str, Any]]:
+        request_id = str(ev.get("request_id") or "").strip() or None
+        session_id = task.session_id
+        channel = task.channel
+        started_at = time.perf_counter()
+        cumulative_usage: dict[str, int] = {}
+        stop_reason: str | None = None
+        iteration = 0
+        fireworks_requests = 0
+        max_request_context_chars = 0
+        max_request_message_count = 0
+        full_response_text = ""
+        full_reasoning_text = ""
+        collected_sources: list[dict[str, str]] = []
+        produced_artifacts: list[dict[str, Any]] = []
+        supporting_artifacts: list[dict[str, Any]] = []
+        research_paths: set[str] = set()
+        specialist_receipts: list[dict[str, Any]] = []
+        model_name = self._select_fireworks_kimi_model(task)
+
+        tool_context = ToolExecutionContext(
+            task_id=task.task_id,
+            request_id=request_id,
+            session_id=session_id,
+            channel=channel,
+            source=task.source,
+            source_id=task.source_id,
+            parent_task=task,
+        )
+
+        try:
+            messages = self._build_messages(task)
+            self._refresh_featured_specialists()
+            visual_mode_enabled = VisualEnrichmentCoordinator.is_enabled_for_task(
+                config=self.config,
+                task_input=task.input if isinstance(task.input, dict) else {},
+            )
+            system_prompt = build_agentic_system_prompt(
+                str(task.input.get("memory_context") or "").strip() or None,
+                user_timezone=str(task.input.get("user_timezone") or "").strip() or None,
+                featured_specialists=self._featured_specialists_cache,
+                visual_response_enhancement_enabled=visual_mode_enabled,
+                visual_supported_slot_kinds=VisualEnrichmentCoordinator.supported_slot_kinds(
+                    config=self.config
+                )
+                if visual_mode_enabled
+                else None,
+            )
+            system_prompt = self._with_fireworks_kimi_runtime_note(system_prompt)
+            openai_messages = [
+                {"role": "system", "content": system_prompt},
+                *self._messages_to_openai_chat(messages),
+            ]
+            tools = self._tools_to_openai_chat(get_local_tool_definitions(self._featured_specialist_agent_ids()))
+            max_iterations = self.config.max_tool_iterations
+            visual_coordinator = (
+                VisualEnrichmentCoordinator(
+                    config=self.config,
+                    task_id=task.task_id,
+                    request_id=request_id,
+                    session_id=session_id,
+                    channel=channel,
+                    user_query=query,
+                    http_client=self._client,
+                )
+                if visual_mode_enabled
+                else None
+            )
+
+            while iteration < max_iterations:
+                iteration += 1
+                fireworks_requests += 1
+                max_request_context_chars = max(
+                    max_request_context_chars,
+                    self._estimate_openai_request_context_chars(openai_messages),
+                )
+                max_request_message_count = max(max_request_message_count, len(openai_messages))
+
+                turn_text_parts: list[str] = []
+                turn_reasoning_parts: list[str] = []
+                turn_tool_calls: dict[int, dict[str, Any]] = {}
+                turn_usage: dict[str, int] = {}
+                turn_finish_reason: str | None = None
+                reasoning_announced = False
+                responding_announced = False
+
+                async for payload in self._stream_openai_chat_events(
+                    model_name=model_name,
+                    messages=openai_messages,
+                    tools=tools,
+                    usage_context={
+                        "task_id": task.task_id,
+                        "request_id": request_id,
+                        "session_id": session_id,
+                        "route": "opus",
+                        "operation": "orchestrator.process",
+                        "metadata_json": {
+                            "provider": "fireworks_kimi",
+                            "iteration": iteration,
+                            "source": task.source,
+                            "source_id": task.source_id,
+                            "channel": channel,
+                        },
+                    },
+                ):
+                    usage_batch = self._extract_openai_usage(payload)
+                    if usage_batch:
+                        turn_usage = self._merge_usage(turn_usage, usage_batch)
+                    choices = payload.get("choices")
+                    if not isinstance(choices, list) or not choices:
+                        continue
+                    first = choices[0]
+                    if not isinstance(first, dict):
+                        continue
+                    finish_reason = str(first.get("finish_reason") or "").strip()
+                    if finish_reason:
+                        turn_finish_reason = finish_reason
+                    delta = first.get("delta")
+                    if not isinstance(delta, dict):
+                        continue
+
+                    reasoning_chunk = str(
+                        delta.get("reasoning_content")
+                        or delta.get("reasoning")
+                        or ""
+                    )
+                    if reasoning_chunk:
+                        turn_reasoning_parts.append(reasoning_chunk)
+                        if not reasoning_announced:
+                            reasoning_announced = True
+                            yield {
+                                **ev,
+                                "type": "task.progress",
+                                "status": "thinking",
+                                "message": "Cosmic is reasoning through the request.",
+                                "model_provider": "fireworks_kimi",
+                            }
+                        if iteration == 1:
+                            yield {
+                                **ev,
+                                "type": "response.thinking.chunk",
+                                "content": reasoning_chunk,
+                                "done": False,
+                            }
+
+                    content_chunk = str(delta.get("content") or "")
+                    if content_chunk:
+                        turn_text_parts.append(content_chunk)
+                        if not responding_announced:
+                            responding_announced = True
+                            yield {
+                                **ev,
+                                "type": "task.progress",
+                                "status": "responding",
+                                "message": "Cosmic is writing the response.",
+                                "model_provider": "fireworks_kimi",
+                            }
+                        if visual_coordinator is not None:
+                            visible_chunk, visual_events = visual_coordinator.consume_text(content_chunk)
+                            for visual_event in visual_events:
+                                yield {**ev, **visual_event}
+                            if visible_chunk:
+                                yield {
+                                    **ev,
+                                    "type": "response.chunk",
+                                    "content": visible_chunk,
+                                    "done": False,
+                                }
+                        else:
+                            yield {
+                                **ev,
+                                "type": "response.chunk",
+                                "content": content_chunk,
+                                "done": False,
+                            }
+
+                    for tool_call_delta in self._extract_openai_tool_call_deltas(delta):
+                        index = int(tool_call_delta.get("index", 0))
+                        state = turn_tool_calls.setdefault(
+                            index,
+                            {
+                                "id": "",
+                                "name": "",
+                                "arguments": "",
+                            },
+                        )
+                        if tool_call_delta.get("id"):
+                            state["id"] = str(tool_call_delta.get("id") or "")
+                        function_delta = tool_call_delta.get("function")
+                        if isinstance(function_delta, dict):
+                            if function_delta.get("name"):
+                                state["name"] = str(function_delta.get("name") or "")
+                            if function_delta.get("arguments"):
+                                state["arguments"] = (
+                                    str(state.get("arguments") or "")
+                                    + str(function_delta.get("arguments") or "")
+                                )
+
+                cumulative_usage = self._merge_usage(cumulative_usage, turn_usage)
+                stop_reason = turn_finish_reason
+                turn_text = "".join(turn_text_parts)
+                turn_reasoning = "".join(turn_reasoning_parts)
+                full_response_text = self._append_stream_text(full_response_text, turn_text)
+                full_reasoning_text += turn_reasoning
+
+                normalized_tool_calls = self._normalize_openai_tool_calls(turn_tool_calls)
+                if normalized_tool_calls:
+                    assistant_message: dict[str, Any] = {
+                        "role": "assistant",
+                        "content": turn_text or None,
+                        "tool_calls": [
+                            {
+                                "id": item["id"],
+                                "type": "function",
+                                "function": {
+                                    "name": item["name"],
+                                    "arguments": item["arguments"],
+                                },
+                            }
+                            for item in normalized_tool_calls
+                        ],
+                    }
+                    openai_messages.append(assistant_message)
+
+                    parsed_inputs: list[dict[str, Any]] = []
+                    for item in normalized_tool_calls:
+                        try:
+                            parsed_input = json.loads(item["arguments"]) if item["arguments"] else {}
+                        except json.JSONDecodeError:
+                            parsed_input = {}
+                        if not isinstance(parsed_input, dict):
+                            parsed_input = {}
+                        parsed_inputs.append(parsed_input)
+
+                        progress_msg = build_tool_progress_message(item["name"], parsed_input)
+                        yield {
+                            **ev,
+                            "type": "task.progress",
+                            "status": "tool_call",
+                            "iteration": iteration,
+                            "tool_name": item["name"],
+                            "message": progress_msg,
+                        }
+                        yield {
+                            **ev,
+                            "type": "tool.call",
+                            "iteration": iteration,
+                            "tool_name": item["name"],
+                            "tool_call_id": item["id"],
+                            "tool_input": parsed_input,
+                        }
+
+                    run_state = self._active_runs.get(task.task_id)
+                    if run_state and run_state.cancel_requested:
+                        raise asyncio.CancelledError()
+
+                    assert self._tool_executor is not None
+                    all_read_only = all(
+                        item["name"] in _PARALLEL_SAFE_TOOLS
+                        for item in normalized_tool_calls
+                    )
+                    if all_read_only and len(normalized_tool_calls) > 1:
+                        result_strs = list(await asyncio.gather(*(
+                            self._tool_executor.execute(item["name"], parsed_input, context=tool_context)
+                            for item, parsed_input in zip(normalized_tool_calls, parsed_inputs)
+                        )))
+                    else:
+                        result_strs = []
+                        for item, parsed_input in zip(normalized_tool_calls, parsed_inputs):
+                            result_strs.append(
+                                await self._tool_executor.execute(
+                                    item["name"],
+                                    parsed_input,
+                                    context=tool_context,
+                                )
+                            )
+
+                    for item, parsed_input, result_str in zip(normalized_tool_calls, parsed_inputs, result_strs):
+                        tool_name = item["name"]
+                        if tool_name == "perplexity_research":
+                            research_paths.add("perplexity_research")
+                            self._collect_perplexity_sources(result_str, collected_sources)
+                        elif tool_name in {"firecrawl_scrape", "firecrawl_extract", "firecrawl_recall_session"}:
+                            research_paths.add("firecrawl")
+                        elif tool_name in {"x_search", "x_recall_session"}:
+                            research_paths.add("x_search_specialist")
+                            self._collect_x_specialist_sources(result_str, collected_sources)
+                        elif tool_name == "delegate_to_agent":
+                            self._inherit_specialist_research_provenance(
+                                result_str,
+                                research_paths=research_paths,
+                                sources=collected_sources,
+                            )
+                        self._collect_specialist_artifacts(
+                            result_str,
+                            produced_artifacts=produced_artifacts,
+                        )
+                        self._collect_specialist_receipt(
+                            tool_name,
+                            parsed_input,
+                            result_str,
+                            specialist_receipts=specialist_receipts,
+                        )
+                        yield {
+                            **ev,
+                            "type": "tool.result",
+                            "iteration": iteration,
+                            "tool_name": tool_name,
+                            "tool_call_id": item["id"],
+                            "result_preview": result_str[:500],
+                        }
+                        openai_messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": item["id"],
+                                "name": tool_name,
+                                "content": result_str,
+                            }
+                        )
+                    if visual_coordinator is not None and collected_sources:
+                        for visual_event in visual_coordinator.note_sources(collected_sources):
+                            yield {**ev, **visual_event}
+
+                    followup_content = await self._build_openai_tool_result_followup_content(result_strs)
+                    if followup_content:
+                        openai_messages.append({"role": "user", "content": followup_content})
+
+                    loop_message = self._build_openai_tool_loop_message(
+                        normalized_tool_calls,
+                        parsed_inputs,
+                        result_strs,
+                        parallel=all_read_only and len(normalized_tool_calls) > 1,
+                    )
+                    yield {
+                        **ev,
+                        "type": "task.progress",
+                        "status": "tool_loop",
+                        "iteration": iteration,
+                        "tools_called": [item["name"] for item in normalized_tool_calls],
+                        "message": loop_message,
+                        "specialist_delegations": self._extract_specialist_delegations_from_names(
+                            normalized_tool_calls,
+                            parsed_inputs,
+                            result_strs,
+                        ),
+                    }
+                    continue
+
+                break
+
+            hit_max_iterations = iteration >= max_iterations and bool(stop_reason == "tool_calls")
+            result_type = "max_iterations" if hit_max_iterations else "success"
+
+            final_response_blocks: list[dict[str, Any]] | None = None
+            if visual_coordinator is not None:
+                final_visual = await visual_coordinator.finalize(
+                    produced_artifacts=produced_artifacts,
+                )
+                for visual_event in final_visual.get("events") or []:
+                    if isinstance(visual_event, dict):
+                        yield {**ev, **visual_event}
+                supporting_artifacts = [
+                    item
+                    for item in (final_visual.get("supporting_artifacts") or [])
+                    if isinstance(item, dict)
+                ]
+                display_text = str(final_visual.get("content") or "").rstrip()
+                final_response_blocks = (
+                    final_visual.get("response_blocks")
+                    if isinstance(final_visual.get("response_blocks"), list)
+                    else None
+                )
+            else:
+                display_text = full_response_text.rstrip()
+            awaiting_reply = display_text.endswith(AWAITING_REPLY_TAG)
+            if awaiting_reply:
+                display_text = display_text.removesuffix(AWAITING_REPLY_TAG).rstrip()
+                if final_response_blocks:
+                    for block in reversed(final_response_blocks):
+                        if str(block.get("type")) != "markdown":
+                            continue
+                        text = str(block.get("text") or "")
+                        if text.endswith(AWAITING_REPLY_TAG):
+                            block["text"] = text.removesuffix(AWAITING_REPLY_TAG).rstrip()
+                        break
+
+            result_payload = {
+                "content": display_text,
+                "thinking_text": full_reasoning_text,
+                "awaiting_reply": awaiting_reply,
+                "usage": cumulative_usage,
+                "stop_reason": stop_reason,
+                "result_type": result_type,
+                "tool_iterations": iteration,
+                "loop_diagnostics": {
+                    "fireworks_requests": fireworks_requests,
+                    "model_provider": "fireworks_kimi",
+                    "max_request_context_chars": max_request_context_chars,
+                    "max_request_message_count": max_request_message_count,
+                },
+            }
+            self.task_ledger.mark_completed(task.task_id, result=result_payload)
+            elapsed_ms = max(1, int((time.perf_counter() - started_at) * 1000))
+
+            complete_event: dict[str, Any] = {
+                **ev,
+                "type": "response.complete",
+                "content": display_text,
+                "route": "opus",
+                "result_type": result_type,
+                "awaiting_reply": awaiting_reply,
+                "thinking_text": full_reasoning_text,
+                "model_provider": "fireworks_kimi",
+                "model": model_name,
+                "metrics": {
+                    "rtt_ms": elapsed_ms,
+                    "tool_iterations": iteration,
+                    "fireworks_requests": fireworks_requests,
+                    "model_provider": "fireworks_kimi",
+                    "max_request_context_chars": max_request_context_chars,
+                    "max_request_message_count": max_request_message_count,
+                    **cumulative_usage,
+                },
+            }
+            research_provenance = self._build_research_provenance(
+                research_paths=research_paths,
+                sources=collected_sources,
+            )
+            if research_provenance:
+                complete_event["research_provenance"] = research_provenance
+            if collected_sources:
+                complete_event["sources"] = collected_sources
+            if specialist_receipts:
+                complete_event["specialist_receipts"] = specialist_receipts
+            if produced_artifacts:
+                complete_event["produced_artifacts"] = produced_artifacts
+            if supporting_artifacts:
+                complete_event["supporting_artifacts"] = supporting_artifacts
+            if final_response_blocks:
+                complete_event["response_blocks"] = final_response_blocks
+            yield complete_event
+            yield {
+                **ev,
+                "type": "task.completed",
+                "route": "opus",
+                "status": "completed",
+                "model_provider": "fireworks_kimi",
+            }
+
+        except asyncio.CancelledError:
+            run_state = self._active_runs.get(task.task_id)
+            if run_state and run_state.cancel_requested:
+                message = run_state.cancel_message
+                self.task_ledger.mark_cancelled(task.task_id, message=message)
+                yield {
+                    **ev,
+                    "type": "task.cancelled",
+                    "route": "opus",
+                    "status": "cancelled",
+                    "message": message,
+                    "model_provider": "fireworks_kimi",
+                }
+                return
+            self.task_ledger.mark_failed(
+                task.task_id,
+                code="STREAM_DISCONNECTED",
+                message="The upstream stream ended before the task completed.",
+            )
+            raise
+        except Exception as exc:
+            code = "KIMI_UPSTREAM_ERROR"
+            message = str(exc).strip() or "Kimi orchestrator processing failed."
+            self.task_ledger.mark_failed(task.task_id, code=code, message=message)
+            yield {
+                **ev,
+                "type": "task.failed",
+                "route": "opus",
+                "status": "failed",
+                "model_provider": "fireworks_kimi",
+                "error": {"code": code, "message": message, "retryable": False},
+            }
+        finally:
+            self._active_runs.pop(task.task_id, None)
+
     # ════════════════════════════════════════════════════════════
     #  Task management
     # ════════════════════════════════════════════════════════════
@@ -1108,6 +1618,467 @@ class OrchestratorRuntime:
 
     def get_loop_diagnostics_snapshot(self) -> dict[str, int]:
         return self._anthropic_loop_stats.as_dict()
+
+    def _select_orchestrator_provider(self, task: TaskEnvelope) -> str:
+        task_input = task.input if isinstance(task.input, dict) else {}
+        raw_preference = task_input.get("cosmic_orchestrator_model")
+        if not isinstance(raw_preference, dict):
+            gateway_preferences = task_input.get("gateway_preferences")
+            if isinstance(gateway_preferences, dict):
+                raw_preference = gateway_preferences.get("cosmic_orchestrator_model")
+        if isinstance(raw_preference, dict):
+            provider = self._normalize_orchestrator_provider(raw_preference.get("provider"))
+            if provider:
+                return provider
+        return self._normalize_orchestrator_provider(
+            self.config.orchestrator_default_provider
+        ) or "anthropic"
+
+    def _select_fireworks_kimi_model(self, task: TaskEnvelope) -> str:
+        task_input = task.input if isinstance(task.input, dict) else {}
+        raw_preference = task_input.get("cosmic_orchestrator_model")
+        if not isinstance(raw_preference, dict):
+            gateway_preferences = task_input.get("gateway_preferences")
+            if isinstance(gateway_preferences, dict):
+                raw_preference = gateway_preferences.get("cosmic_orchestrator_model")
+        if isinstance(raw_preference, dict):
+            provider = self._normalize_orchestrator_provider(raw_preference.get("provider"))
+            model = str(raw_preference.get("model") or "").strip()
+            if provider == "fireworks_kimi" and model:
+                return model
+        return self.config.fireworks_kimi_model
+
+    @staticmethod
+    def _normalize_orchestrator_provider(value: Any) -> str | None:
+        normalized = str(value or "").strip().lower().replace("-", "_")
+        if normalized in {"", "auto", "default", "cosmic"}:
+            return None
+        if normalized in {"fireworks", "fireworks_kimi", "kimi", "kimi_k2_6", "smarter"}:
+            return "fireworks_kimi"
+        if normalized in {"anthropic", "claude", "opus", "sonnet"}:
+            return "anthropic"
+        return "anthropic"
+
+    @staticmethod
+    def _with_fireworks_kimi_runtime_note(system_prompt: str) -> str:
+        note = (
+            "## COSMIC Runtime Provider\n"
+            "You are running on COSMIC's Fireworks Kimi path through an OpenAI-compatible chat API. "
+            "Anthropic's hosted code_execution container and native server web tools are not available on this path. "
+            "Use COSMIC specialist/local tools for research, document lookup, memory, tabular work, and Alpha project execution. "
+            "For code/project execution, prefer Alpha or the relevant specialist instead of pretending you executed code in a hosted container."
+        )
+        base = str(system_prompt or "").rstrip()
+        return f"{base}\n\n{note}" if base else note
+
+    def _messages_to_openai_chat(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        converted: list[dict[str, Any]] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "").strip()
+            if role not in {"user", "assistant"}:
+                continue
+            if role == "user":
+                content = self._message_content_to_openai_user(message.get("content"))
+            else:
+                content = self._message_content_to_plain_text(message.get("content"))
+            if isinstance(content, list):
+                if not content:
+                    continue
+            elif not str(content or "").strip():
+                continue
+            if converted and converted[-1].get("role") == role:
+                converted[-1]["content"] = self._merge_openai_message_content(
+                    converted[-1].get("content"),
+                    content,
+                    role=role,
+                )
+                continue
+            converted.append({"role": role, "content": content})
+        while converted and converted[0].get("role") != "user":
+            converted.pop(0)
+        return converted
+
+    def _message_content_to_openai_user(self, value: Any) -> str | list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return str(value or "").strip()
+        parts: list[dict[str, Any]] = []
+        for block in value:
+            if not isinstance(block, dict):
+                continue
+            block_type = str(block.get("type") or "").strip()
+            if block_type == "text":
+                text = str(block.get("text") or "").strip()
+                if text:
+                    parts.append({"type": "text", "text": text})
+                continue
+            if block_type == "image":
+                source = block.get("source") if isinstance(block.get("source"), dict) else {}
+                source_type = str(source.get("type") or "").strip()
+                image_url = ""
+                if source_type == "url":
+                    image_url = str(source.get("url") or "").strip()
+                elif source_type == "base64":
+                    media_type = str(source.get("media_type") or "image/png").strip() or "image/png"
+                    data = str(source.get("data") or "").strip()
+                    if data:
+                        image_url = f"data:{media_type};base64,{data}"
+                if image_url:
+                    parts.append({"type": "image_url", "image_url": {"url": image_url}})
+                continue
+            text = self._message_content_to_plain_text([block]).strip()
+            if text:
+                parts.append({"type": "text", "text": text})
+        if not parts:
+            return ""
+        if all(part.get("type") == "text" for part in parts):
+            return "\n\n".join(str(part.get("text") or "").strip() for part in parts if str(part.get("text") or "").strip())
+        return parts
+
+    def _message_content_to_plain_text(self, value: Any) -> str:
+        if not isinstance(value, list):
+            return str(value or "").strip()
+        pieces: list[str] = []
+        for block in value:
+            if not isinstance(block, dict):
+                continue
+            block_type = str(block.get("type") or "").strip()
+            if block_type == "text":
+                text = str(block.get("text") or "").strip()
+                if text:
+                    pieces.append(text)
+            elif block_type == "tool_result":
+                content = str(block.get("content") or "").strip()
+                if content:
+                    pieces.append(content)
+            elif block_type == "image":
+                pieces.append("[image attachment omitted from assistant replay]")
+            elif block_type in {"tool_use", "server_tool_use"}:
+                name = str(block.get("name") or "tool").strip()
+                pieces.append(f"[{name} tool call omitted from provider replay]")
+            elif block_type.endswith("_tool_result"):
+                pieces.append(f"[{block_type} omitted from provider replay]")
+        return "\n\n".join(piece for piece in pieces if piece)
+
+    def _merge_openai_message_content(
+        self,
+        existing: Any,
+        incoming: Any,
+        *,
+        role: str,
+    ) -> str | list[dict[str, Any]]:
+        if role == "assistant":
+            existing_text = self._message_content_to_plain_text(existing)
+            incoming_text = self._message_content_to_plain_text(incoming)
+            return "\n\n".join(part for part in (existing_text, incoming_text) if part)
+        if isinstance(existing, list) or isinstance(incoming, list):
+            existing_parts = existing if isinstance(existing, list) else [{"type": "text", "text": str(existing or "").strip()}]
+            incoming_parts = incoming if isinstance(incoming, list) else [{"type": "text", "text": str(incoming or "").strip()}]
+            return [
+                part
+                for part in [*existing_parts, *incoming_parts]
+                if isinstance(part, dict)
+                and (
+                    str(part.get("text") or "").strip()
+                    or isinstance(part.get("image_url"), dict)
+                )
+            ]
+        existing_text = str(existing or "").strip()
+        incoming_text = str(incoming or "").strip()
+        return "\n\n".join(part for part in (existing_text, incoming_text) if part)
+
+    @staticmethod
+    def _tools_to_openai_chat(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        converted: list[dict[str, Any]] = []
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            name = str(tool.get("name") or "").strip()
+            parameters = tool.get("input_schema")
+            if not name or not isinstance(parameters, dict):
+                continue
+            converted.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": str(tool.get("description") or "").strip(),
+                        "parameters": parameters,
+                    },
+                }
+            )
+        return converted
+
+    async def _stream_openai_chat_events(
+        self,
+        *,
+        model_name: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        usage_context: dict[str, Any] | None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        base_url = self.config.fireworks_base_url.rstrip("/")
+        body: dict[str, Any] = {
+            "model": model_name,
+            "messages": messages,
+            "stream": True,
+            "max_tokens": self.config.fireworks_kimi_max_tokens,
+            "temperature": self.config.fireworks_kimi_temperature,
+            "stream_options": {"include_usage": True},
+        }
+        if tools:
+            body["tools"] = tools
+            body["tool_choice"] = "auto"
+        headers = {
+            "Authorization": f"Bearer {self.config.fireworks_api_key}",
+            "Content-Type": "application/json",
+        }
+        for attempt in range(3):
+            yielded_any = False
+            usage: dict[str, Any] = {}
+            metered_call = begin_metered_call(prefix="call")
+            provider_request_id: str | None = None
+            try:
+                async with self._client.stream(
+                    "POST",
+                    f"{base_url}/chat/completions",
+                    headers=headers,
+                    json=body,
+                ) as resp:
+                    provider_request_id = (
+                        resp.headers.get("x-request-id")
+                        or resp.headers.get("request-id")
+                        or resp.headers.get("x-fireworks-request-id")
+                        or None
+                    )
+                    if resp.status_code >= 400:
+                        raw = await resp.aread()
+                        raise RuntimeError(self._error_from_response(raw, resp.status_code))
+                    async for line in resp.aiter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data_str = line[5:].strip()
+                        if not data_str:
+                            continue
+                        if data_str == "[DONE]":
+                            break
+                        parsed = json.loads(data_str)
+                        if not isinstance(parsed, dict):
+                            continue
+                        usage = self._merge_usage(usage, self._extract_openai_usage(parsed))
+                        choices = parsed.get("choices")
+                        if isinstance(choices, list) and choices:
+                            yielded_any = True
+                        yield parsed
+                await self._record_internal_usage_event(
+                    metered_call=metered_call,
+                    model_key=build_model_key("fireworks", model_name),
+                    usage_context=usage_context,
+                    provider_request_id=provider_request_id,
+                    raw_usage=usage,
+                    success=True,
+                    error_code=None,
+                    metadata_json={
+                        "attempt": attempt + 1,
+                        "streaming": True,
+                        "yielded_any": yielded_any,
+                    },
+                )
+                return
+            except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+                await self._record_internal_usage_event(
+                    metered_call=metered_call,
+                    model_key=build_model_key("fireworks", model_name),
+                    usage_context=usage_context,
+                    provider_request_id=provider_request_id,
+                    raw_usage=usage,
+                    success=False,
+                    error_code=type(exc).__name__,
+                    metadata_json={
+                        "attempt": attempt + 1,
+                        "streaming": True,
+                        "yielded_any": yielded_any,
+                    },
+                )
+                if yielded_any or attempt == 2:
+                    raise RuntimeError(f"Fireworks Kimi API error: {exc}") from exc
+                await asyncio.sleep(0.5 * (2**attempt))
+
+    @staticmethod
+    def _extract_openai_usage(payload: dict[str, Any]) -> dict[str, int]:
+        usage = payload.get("usage")
+        if not isinstance(usage, dict):
+            return {}
+        result: dict[str, int] = {}
+        for key, value in usage.items():
+            if isinstance(value, (int, float)):
+                result[str(key)] = int(value)
+        return result
+
+    @staticmethod
+    def _extract_openai_tool_call_deltas(delta: dict[str, Any]) -> list[dict[str, Any]]:
+        raw = delta.get("tool_calls")
+        if isinstance(raw, list):
+            return [item for item in raw if isinstance(item, dict)]
+        raw_function = delta.get("function_call")
+        if isinstance(raw_function, dict):
+            return [{"index": 0, "function": raw_function}]
+        return []
+
+    @staticmethod
+    def _normalize_openai_tool_calls(
+        tool_calls: dict[int, dict[str, Any]]
+    ) -> list[dict[str, str]]:
+        normalized: list[dict[str, str]] = []
+        for index in sorted(tool_calls):
+            item = tool_calls[index]
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            tool_id = str(item.get("id") or "").strip() or f"call_{uuid4().hex[:16]}"
+            normalized.append(
+                {
+                    "id": tool_id,
+                    "name": name,
+                    "arguments": str(item.get("arguments") or ""),
+                }
+            )
+        return normalized
+
+    async def _build_openai_tool_result_followup_content(
+        self,
+        result_strs: list[str],
+    ) -> str | list[dict[str, Any]]:
+        artifacts = self._extract_artifacts_from_tool_results(result_strs)
+        if not artifacts:
+            return ""
+        parts: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": (
+                    "Resolved reusable artifact references are available below. "
+                    "Use provider_url/download_url/path metadata directly when a specialist or Alpha task needs the file."
+                ),
+            }
+        ]
+        seen: set[tuple[str, str]] = set()
+        image_blocks = 0
+        for artifact in artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            artifact_id = str(artifact.get("artifact_id") or "").strip()
+            path = str(artifact.get("path") or "").strip()
+            dedupe_key = (artifact_id, path)
+            if not any(dedupe_key) or dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            descriptor = {
+                key: artifact.get(key)
+                for key in (
+                    "artifact_id",
+                    "filename",
+                    "mime",
+                    "kind",
+                    "path",
+                    "provider_url",
+                    "download_url",
+                    "sha256",
+                )
+                if artifact.get(key)
+            }
+            parts.append(
+                {
+                    "type": "text",
+                    "text": json.dumps(descriptor, ensure_ascii=False, default=str),
+                }
+            )
+            image_url = str(artifact.get("provider_url") or artifact.get("download_url") or "").strip()
+            if (
+                image_url.startswith(("http://", "https://"))
+                and image_blocks < max(1, int(self.config.anthropic_max_input_images))
+                and is_supported_image_artifact(artifact)
+            ):
+                parts.append({"type": "image_url", "image_url": {"url": image_url}})
+                image_blocks += 1
+        return parts
+
+    def _build_openai_tool_loop_message(
+        self,
+        tool_calls: list[dict[str, str]],
+        parsed_inputs: list[dict[str, Any]],
+        result_strs: list[str],
+        *,
+        parallel: bool,
+    ) -> str:
+        phrases: list[str] = []
+        for item, tool_input, result_str in zip(tool_calls, parsed_inputs, result_strs):
+            phrase = self._summarize_local_tool_activity(item["name"], tool_input, result_str)
+            if phrase:
+                phrases.append(phrase)
+        if not phrases:
+            tool_names = [item["name"] for item in tool_calls if item.get("name")]
+            if not tool_names:
+                return "Tool work completed. Continuing..."
+            phrases.append(self._format_found_pages_phrase("completed tool work for", tool_names))
+        return self._compose_tool_loop_message(phrases, parallel=parallel)
+
+    def _extract_specialist_delegations_from_names(
+        self,
+        tool_calls: list[dict[str, str]],
+        parsed_inputs: list[dict[str, Any]],
+        result_strs: list[str],
+    ) -> list[dict[str, Any]]:
+        delegations: list[dict[str, Any]] = []
+        for item, tool_input, result_str in zip(tool_calls, parsed_inputs, result_strs):
+            if item.get("name") != "delegate_to_agent":
+                continue
+            data = self._parse_tool_result_json(result_str)
+            delegation = data.get("delegation") if isinstance(data, dict) and isinstance(data.get("delegation"), dict) else {}
+            intent_name = self._activity_excerpt(
+                delegation.get("intent") or tool_input.get("intent"),
+                limit=96,
+            )
+            agent_id = self._activity_excerpt(
+                delegation.get("agent_id") or tool_input.get("agent_id"),
+                limit=120,
+            )
+            task_id = self._activity_excerpt(
+                delegation.get("task_id")
+                or (data.get("delegated_task_id") if isinstance(data, dict) else None)
+                or (data.get("task_id") if isinstance(data, dict) else None),
+                limit=96,
+            )
+            agent_label = self._activity_agent_label(agent_id)
+            activity = self._activity_excerpt(
+                self._summarize_local_tool_activity(item.get("name") or "", tool_input, result_str),
+                limit=160,
+            )
+            if not (intent_name or agent_id or task_id):
+                continue
+            delegations.append(
+                {
+                    key: value
+                    for key, value in {
+                        "intent": intent_name,
+                        "agent_id": agent_id,
+                        "agent_label": agent_label,
+                        "task_id": task_id,
+                        "activity": activity,
+                    }.items()
+                    if value not in (None, "")
+                }
+            )
+        return delegations
+
+    @staticmethod
+    def _estimate_openai_request_context_chars(messages: list[dict[str, Any]]) -> int:
+        try:
+            return len(json.dumps(messages, ensure_ascii=False, separators=(",", ":")))
+        except (TypeError, ValueError):
+            return len(repr(messages))
 
     async def list_registered_agents(self) -> list[dict[str, Any]]:
         rows = self.registry_store.list_agents(status=None)
