@@ -94,6 +94,13 @@ def _delegate_to_agent_progress(tool_input: dict[str, Any]) -> str:
     return f"Delegating to specialist intent: {intent_label}" if intent else "Delegating to a specialist agent..."
 
 
+def _cosmic_code_execution_progress(tool_input: dict[str, Any]) -> str:
+    description = str(tool_input.get("description") or "").strip()
+    if description:
+        return f"Running local code sandbox: {description[:96]}{'...' if len(description) > 96 else ''}"
+    return "Running local code sandbox..."
+
+
 def _artifact_lookup_progress(tool_input: dict[str, Any]) -> str:
     query = str(tool_input.get("query") or "").strip()
     return f"Looking for a previous file: {query}" if query else "Looking for a previous produced file..."
@@ -462,6 +469,54 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Delegate specialist work by exact intent after discovery. For Alpha project work, pass artifact_ids/input_artifacts for large files or parsed documents instead of pasting their full contents into the input; bundle ids alone are metadata, while artifact references let Alpha receive concrete workspace files.",
         progress_builder=_delegate_to_agent_progress,
         handler_method="_delegate_to_agent",
+    ),
+    ToolSpec(
+        name="cosmic_code_execution",
+        api_definition={
+            "name": "cosmic_code_execution",
+            "description": (
+                "Run a bounded local Python sandbox for calculations, quick validation, data transforms, "
+                "small chart/file generation, and artifact-producing snippets. This is not a shell and is not "
+                "for project edits, deployment, screenshots, network access, or long-running work; use Alpha for those. "
+                "Write files that should be delivered to the user under the relative `outputs/` directory."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": (
+                            "Python code to execute. Use print() for concise results. Write deliverable files under "
+                            "`outputs/`, for example outputs/result.csv or outputs/chart.png."
+                        ),
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Short human-readable reason for this sandbox run.",
+                    },
+                    "packages": {
+                        "type": "array",
+                        "description": (
+                            "Optional pip packages. Most production environments keep installation disabled; "
+                            "prefer already installed packages or Alpha for package-heavy work."
+                        ),
+                        "items": {"type": "string"},
+                    },
+                    "timeout_sec": {
+                        "type": "number",
+                        "description": "Optional timeout, capped by the orchestrator sandbox setting.",
+                    },
+                },
+                "required": ["code"],
+            },
+        },
+        group="code",
+        prompt_summary=(
+            "Bounded local Python sandbox for calculations, quick checks, small data transforms, and generated "
+            "files. Write deliverables to `outputs/`. Use Alpha instead for shell/project/deployment/long-running work."
+        ),
+        progress_builder=_cosmic_code_execution_progress,
+        handler_method="_cosmic_code_execution",
     ),
     ToolSpec(
         name="artifact_lookup",
@@ -1871,11 +1926,25 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
 )
 
 _TOOL_BY_NAME = {spec.name: spec for spec in _MODEL_TOOL_SPECS}
-_GROUP_ORDER = ("web", "research", "specialists", "documents", "spreadsheets", "planning", "memory", "history", "scheduling")
+_GROUP_ORDER = (
+    "web",
+    "research",
+    "specialists",
+    "code",
+    "artifacts",
+    "documents",
+    "spreadsheets",
+    "planning",
+    "memory",
+    "history",
+    "scheduling",
+)
 _GROUP_TITLES = {
     "web": "Web",
     "research": "Research",
     "specialists": "Specialists",
+    "code": "Code Execution",
+    "artifacts": "Artifacts",
     "documents": "Documents",
     "spreadsheets": "Spreadsheets",
     "planning": "Planning & Wishlist",

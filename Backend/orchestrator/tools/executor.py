@@ -21,6 +21,7 @@ import httpx
 from shared import begin_metered_call, build_model_key, build_usage_event, post_usage_event, validate_safe_sheet_id
 from shared.contracts import AgentResult, TaskEnvelope, TaskInProgress
 
+from ..local_code_sandbox import LocalCodeSandboxSettings, run_local_code_sandbox
 from .registry import get_local_tool_spec
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,15 @@ class ToolExecutor:
         gateway_internal_token: str = "",
         usage_source_id: str = "orchestrator:tool_executor",
         artifacts_root: str | Path | None = None,
+        local_code_execution_enabled: bool = True,
+        local_code_execution_timeout_sec: float = 45.0,
+        local_code_execution_allow_network: bool = False,
+        local_code_execution_allow_pip: bool = False,
+        local_code_execution_pip_timeout_sec: float = 120.0,
+        local_code_execution_venv_cache_root: str | Path | None = None,
+        local_code_execution_max_script_bytes: int = 256000,
+        local_code_execution_max_files: int = 12,
+        local_code_execution_max_file_bytes: int = 25 * 1024 * 1024,
         agent_dispatcher: Callable[..., Awaitable[AgentResult | TaskInProgress]] | None = None,
         agent_catalog_searcher: Callable[..., Awaitable[dict[str, Any]]] | None = None,
         client: httpx.AsyncClient | None = None,
@@ -68,6 +78,19 @@ class ToolExecutor:
         self.gateway_internal_token = gateway_internal_token.strip()
         self.usage_source_id = usage_source_id.strip() or "orchestrator:tool_executor"
         self.artifacts_root = Path(artifacts_root).expanduser() if artifacts_root else None
+        self.local_code_settings = LocalCodeSandboxSettings(
+            enabled=bool(local_code_execution_enabled),
+            timeout_sec=float(local_code_execution_timeout_sec or 45.0),
+            allow_network=bool(local_code_execution_allow_network),
+            allow_pip=bool(local_code_execution_allow_pip),
+            pip_timeout_sec=float(local_code_execution_pip_timeout_sec or 120.0),
+            venv_cache_root=Path(local_code_execution_venv_cache_root).expanduser()
+            if local_code_execution_venv_cache_root
+            else None,
+            max_script_bytes=int(local_code_execution_max_script_bytes or 256000),
+            max_files=int(local_code_execution_max_files or 12),
+            max_file_bytes=int(local_code_execution_max_file_bytes or 25 * 1024 * 1024),
+        )
         self._agent_dispatcher = agent_dispatcher
         self._agent_catalog_searcher = agent_catalog_searcher
         timeout = httpx.Timeout(30.0, connect=10.0)
@@ -241,6 +264,38 @@ class ToolExecutor:
                 event.operation,
                 event.model,
             )
+
+    # ── Local Code Execution ────────────────────────────────────
+
+    async def _cosmic_code_execution(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        if self.artifacts_root is None:
+            return {"error": True, "message": "Local code execution requires COSMIC_ARTIFACTS_ROOT."}
+        code = str(tool_input.get("code") or "")
+        description = str(tool_input.get("description") or "").strip()
+        packages_raw = tool_input.get("packages")
+        packages = [str(item or "").strip() for item in packages_raw] if isinstance(packages_raw, list) else []
+        timeout_value = tool_input.get("timeout_sec")
+        timeout_sec: float | None = None
+        if timeout_value not in (None, ""):
+            try:
+                timeout_sec = float(timeout_value)
+            except (TypeError, ValueError):
+                return {"error": True, "message": "timeout_sec must be numeric when provided."}
+        task_id = self._coerce_task_id(tool_input, context) or "orchestrator"
+        return run_local_code_sandbox(
+            code=code,
+            artifacts_root=self.artifacts_root,
+            task_id=task_id,
+            description=description,
+            packages=packages,
+            timeout_sec=timeout_sec,
+            settings=self.local_code_settings,
+        )
 
     # ── Specialist Agents ────────────────────────────────────────
 

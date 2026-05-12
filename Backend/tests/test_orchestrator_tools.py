@@ -1,13 +1,95 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 import pytest
 
 from orchestrator.tools.executor import ToolExecutionContext, ToolExecutor
+from orchestrator.tools.registry import get_local_tool_definitions
 from shared import AgentError, AgentResult, TaskEnvelope, TaskInProgress, sign_task_envelope, utcnow
+
+
+def test_cosmic_code_execution_is_registered_as_local_tool() -> None:
+    tool_names = {tool.get("name") for tool in get_local_tool_definitions()}
+    assert "cosmic_code_execution" in tool_names
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_cosmic_code_execution_runs_python_and_captures_stdout() -> None:
+    root = Path.cwd() / ".pytest-local-code-sandbox" / uuid4().hex
+    try:
+        executor = ToolExecutor(artifacts_root=root / "artifacts")
+        raw_result = await executor.execute(
+            "cosmic_code_execution",
+            {
+                "description": "calculate a simple value",
+                "code": "print(6 * 7)",
+            },
+            context=ToolExecutionContext(task_id="tsk_calc", session_id="sess_calc"),
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    result = json.loads(raw_result)
+    assert result["status"] == "completed"
+    assert result["exit_code"] == 0
+    assert "42" in result["stdout"]
+    assert result["artifacts"] == []
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_cosmic_code_execution_collects_output_artifacts() -> None:
+    root = Path.cwd() / ".pytest-local-code-sandbox" / uuid4().hex
+    artifacts_root = root / "artifacts"
+    try:
+        executor = ToolExecutor(artifacts_root=artifacts_root)
+        raw_result = await executor.execute(
+            "cosmic_code_execution",
+            {
+                "description": "write a deliverable text file",
+                "code": (
+                    "from pathlib import Path\n"
+                    "Path('outputs/result.txt').write_text('hello from sandbox', encoding='utf-8')\n"
+                    "print('wrote file')\n"
+                ),
+            },
+            context=ToolExecutionContext(task_id="tsk_file", session_id="sess_file"),
+        )
+        result = json.loads(raw_result)
+        assert result["status"] == "completed"
+        assert result["artifact_count"] == 1
+        artifact = result["artifacts"][0]
+        assert artifact["filename"] == "result.txt"
+        assert artifact["audience"] == "deliverable"
+        assert artifact["path"].startswith("runs/artifacts/")
+        stored_path = artifacts_root / artifact["path"].removeprefix("runs/artifacts/")
+        assert stored_path.read_text(encoding="utf-8") == "hello from sandbox"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_cosmic_code_execution_blocks_path_escape() -> None:
+    root = Path.cwd() / ".pytest-local-code-sandbox" / uuid4().hex
+    try:
+        executor = ToolExecutor(artifacts_root=root / "artifacts")
+        raw_result = await executor.execute(
+            "cosmic_code_execution",
+            {"code": "open('../escape.txt', 'w').write('bad')"},
+            context=ToolExecutionContext(task_id="tsk_escape", session_id="sess_escape"),
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    result = json.loads(raw_result)
+    assert result["status"] == "failed"
+    assert result["exit_code"] != 0
+    assert "Path escapes COSMIC code sandbox" in result["stderr"]
+    assert not (root / "artifacts" / "tsk_escape" / "orchestrator" / "escape.txt").exists()
 
 
 @pytest.mark.asyncio

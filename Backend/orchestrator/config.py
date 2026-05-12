@@ -119,6 +119,15 @@ class OrchestratorConfig:
     fireworks_kimi_model: str = "accounts/fireworks/models/kimi-k2p6"
     fireworks_kimi_max_tokens: int | None = None
     fireworks_kimi_temperature: float = 0.6
+    local_code_execution_enabled: bool = True
+    local_code_execution_timeout_sec: float = 45.0
+    local_code_execution_allow_network: bool = False
+    local_code_execution_allow_pip: bool = False
+    local_code_execution_pip_timeout_sec: float = 120.0
+    local_code_execution_venv_cache_root: Path | None = None
+    local_code_execution_max_script_bytes: int = 256000
+    local_code_execution_max_files: int = 12
+    local_code_execution_max_file_bytes: int = 25 * 1024 * 1024
     max_tokens: int = 16000
     request_timeout_sec: float = 300.0
     redis_url: str = ""
@@ -237,6 +246,31 @@ class OrchestratorConfig:
             fireworks_kimi_temperature=max(
                 0.0,
                 min(2.0, _env_float("ORCHESTRATOR_FIREWORKS_TEMPERATURE", 0.6)),
+            ),
+            local_code_execution_enabled=_env_bool("ORCHESTRATOR_CODE_SANDBOX_ENABLED", True),
+            local_code_execution_timeout_sec=max(
+                1.0,
+                _env_float("ORCHESTRATOR_CODE_SANDBOX_TIMEOUT_SEC", 45.0),
+            ),
+            local_code_execution_allow_network=_env_bool("ORCHESTRATOR_CODE_SANDBOX_ALLOW_NETWORK", False),
+            local_code_execution_allow_pip=_env_bool("ORCHESTRATOR_CODE_SANDBOX_ALLOW_PIP", False),
+            local_code_execution_pip_timeout_sec=max(
+                10.0,
+                _env_float("ORCHESTRATOR_CODE_SANDBOX_PIP_TIMEOUT_SEC", 120.0),
+            ),
+            local_code_execution_venv_cache_root=(
+                Path(os.getenv("ORCHESTRATOR_CODE_SANDBOX_VENV_CACHE_ROOT", "")).expanduser()
+                if os.getenv("ORCHESTRATOR_CODE_SANDBOX_VENV_CACHE_ROOT", "").strip()
+                else None
+            ),
+            local_code_execution_max_script_bytes=max(
+                4096,
+                _env_int("ORCHESTRATOR_CODE_SANDBOX_MAX_SCRIPT_BYTES", 256000),
+            ),
+            local_code_execution_max_files=max(0, _env_int("ORCHESTRATOR_CODE_SANDBOX_MAX_FILES", 12)),
+            local_code_execution_max_file_bytes=max(
+                1024,
+                _env_int("ORCHESTRATOR_CODE_SANDBOX_MAX_FILE_BYTES", 25 * 1024 * 1024),
             ),
             max_tokens=max(256, _env_int("OPUS_MAX_TOKENS", 16000)),
             request_timeout_sec=max(30.0, _env_float("ORCHESTRATOR_REQUEST_TIMEOUT_SEC", 300.0)),

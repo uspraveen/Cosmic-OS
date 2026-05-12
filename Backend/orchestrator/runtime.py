@@ -360,6 +360,15 @@ class OrchestratorRuntime:
             gateway_url=self.config.gateway_url,
             gateway_internal_token=self.config.internal_token,
             artifacts_root=self.config.artifacts_root,
+            local_code_execution_enabled=self.config.local_code_execution_enabled,
+            local_code_execution_timeout_sec=self.config.local_code_execution_timeout_sec,
+            local_code_execution_allow_network=self.config.local_code_execution_allow_network,
+            local_code_execution_allow_pip=self.config.local_code_execution_allow_pip,
+            local_code_execution_pip_timeout_sec=self.config.local_code_execution_pip_timeout_sec,
+            local_code_execution_venv_cache_root=self.config.local_code_execution_venv_cache_root,
+            local_code_execution_max_script_bytes=self.config.local_code_execution_max_script_bytes,
+            local_code_execution_max_files=self.config.local_code_execution_max_files,
+            local_code_execution_max_file_bytes=self.config.local_code_execution_max_file_bytes,
             agent_dispatcher=self.dispatch_agent_task,
             agent_catalog_searcher=self.search_agent_catalog,
         )
@@ -1765,8 +1774,9 @@ class OrchestratorRuntime:
         note = (
             "## COSMIC Runtime Provider\n"
             "You are running on COSMIC's Fireworks Kimi path through an OpenAI-compatible chat API. "
-            "Anthropic's hosted code_execution container and native server web tools are not attached on this path. "
-            "When code, shell, project edits, deployment, screenshots, or long-running execution are needed, use COSMIC's specialist routes: "
+            "Anthropic's hosted code_execution container and native server web tools are not attached on this path, but COSMIC provides `cosmic_code_execution` as a bounded local Python sandbox. "
+            "Use `cosmic_code_execution` for calculations, small Python checks, data transforms, chart/file generation, and artifact-producing snippets; write deliverable files under `outputs/` so COSMIC can attach them. "
+            "For shell commands, project edits, deployment, screenshots, package-heavy setup, or long-running execution, use COSMIC's specialist routes: "
             "search the agent catalog and delegate to Alpha (`alpha.execute`) for project/VM work, or the relevant tabular/docs specialist for scoped data work. "
             "When current web information is needed, use COSMIC's research routes such as Perplexity, Firecrawl, X search, docs tools, and memory instead of claiming native web access. "
             "Do not say a capability is unavailable until you have considered the available COSMIC specialist/local tools."
@@ -5363,6 +5373,20 @@ class OrchestratorRuntime:
             if intent_name:
                 return f"used {intent_name} via a specialist agent"
             return "used a specialist agent"
+
+        if tool_name == "cosmic_code_execution":
+            if isinstance(data, dict):
+                status_value = self._activity_excerpt(data.get("status"), limit=32)
+                artifact_count = data.get("artifact_count")
+                if status_value == "completed" and isinstance(artifact_count, int) and artifact_count > 0:
+                    return f"ran the local code sandbox and produced {artifact_count} file(s)"
+                if status_value == "completed":
+                    return "ran the local code sandbox"
+                if data.get("timed_out"):
+                    return "ran the local code sandbox and it timed out"
+                if status_value:
+                    return f"ran the local code sandbox and it {status_value}"
+            return "ran the local code sandbox"
 
         if tool_name == "cosmics_capability_wishlist_search":
             matches = (data or {}).get("matches") if isinstance(data, dict) else None

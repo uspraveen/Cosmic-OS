@@ -4210,6 +4210,42 @@ def build_service_env_overrides(
             or "https://api.fireworks.ai/inference/v1",
             "ORCHESTRATOR_FIREWORKS_KIMI_MODEL": orchestrator_fireworks_kimi_model
             or "accounts/fireworks/models/kimi-k2p6",
+            "ORCHESTRATOR_CODE_SANDBOX_ENABLED": orchestrator_external.get("ORCHESTRATOR_CODE_SANDBOX_ENABLED")
+            or orchestrator_existing.get("ORCHESTRATOR_CODE_SANDBOX_ENABLED")
+            or orchestrator_data.get("ORCHESTRATOR_CODE_SANDBOX_ENABLED")
+            or "true",
+            "ORCHESTRATOR_CODE_SANDBOX_TIMEOUT_SEC": orchestrator_external.get("ORCHESTRATOR_CODE_SANDBOX_TIMEOUT_SEC")
+            or orchestrator_existing.get("ORCHESTRATOR_CODE_SANDBOX_TIMEOUT_SEC")
+            or orchestrator_data.get("ORCHESTRATOR_CODE_SANDBOX_TIMEOUT_SEC")
+            or "45",
+            "ORCHESTRATOR_CODE_SANDBOX_ALLOW_NETWORK": orchestrator_external.get("ORCHESTRATOR_CODE_SANDBOX_ALLOW_NETWORK")
+            or orchestrator_existing.get("ORCHESTRATOR_CODE_SANDBOX_ALLOW_NETWORK")
+            or orchestrator_data.get("ORCHESTRATOR_CODE_SANDBOX_ALLOW_NETWORK")
+            or "false",
+            "ORCHESTRATOR_CODE_SANDBOX_ALLOW_PIP": orchestrator_external.get("ORCHESTRATOR_CODE_SANDBOX_ALLOW_PIP")
+            or orchestrator_existing.get("ORCHESTRATOR_CODE_SANDBOX_ALLOW_PIP")
+            or orchestrator_data.get("ORCHESTRATOR_CODE_SANDBOX_ALLOW_PIP")
+            or "false",
+            "ORCHESTRATOR_CODE_SANDBOX_PIP_TIMEOUT_SEC": orchestrator_external.get("ORCHESTRATOR_CODE_SANDBOX_PIP_TIMEOUT_SEC")
+            or orchestrator_existing.get("ORCHESTRATOR_CODE_SANDBOX_PIP_TIMEOUT_SEC")
+            or orchestrator_data.get("ORCHESTRATOR_CODE_SANDBOX_PIP_TIMEOUT_SEC")
+            or "120",
+            "ORCHESTRATOR_CODE_SANDBOX_VENV_CACHE_ROOT": orchestrator_external.get("ORCHESTRATOR_CODE_SANDBOX_VENV_CACHE_ROOT")
+            or orchestrator_existing.get("ORCHESTRATOR_CODE_SANDBOX_VENV_CACHE_ROOT")
+            or orchestrator_data.get("ORCHESTRATOR_CODE_SANDBOX_VENV_CACHE_ROOT")
+            or "",
+            "ORCHESTRATOR_CODE_SANDBOX_MAX_SCRIPT_BYTES": orchestrator_external.get("ORCHESTRATOR_CODE_SANDBOX_MAX_SCRIPT_BYTES")
+            or orchestrator_existing.get("ORCHESTRATOR_CODE_SANDBOX_MAX_SCRIPT_BYTES")
+            or orchestrator_data.get("ORCHESTRATOR_CODE_SANDBOX_MAX_SCRIPT_BYTES")
+            or "256000",
+            "ORCHESTRATOR_CODE_SANDBOX_MAX_FILES": orchestrator_external.get("ORCHESTRATOR_CODE_SANDBOX_MAX_FILES")
+            or orchestrator_existing.get("ORCHESTRATOR_CODE_SANDBOX_MAX_FILES")
+            or orchestrator_data.get("ORCHESTRATOR_CODE_SANDBOX_MAX_FILES")
+            or "12",
+            "ORCHESTRATOR_CODE_SANDBOX_MAX_FILE_BYTES": orchestrator_external.get("ORCHESTRATOR_CODE_SANDBOX_MAX_FILE_BYTES")
+            or orchestrator_existing.get("ORCHESTRATOR_CODE_SANDBOX_MAX_FILE_BYTES")
+            or orchestrator_data.get("ORCHESTRATOR_CODE_SANDBOX_MAX_FILE_BYTES")
+            or "26214400",
         },
         "whatsapp-bridge.env": {
             "GATEWAY_INTERNAL_TOKEN": shared_internal_token
