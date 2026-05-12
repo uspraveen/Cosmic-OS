@@ -122,7 +122,7 @@ class OrchestratorConfig:
     local_code_execution_enabled: bool = True
     local_code_execution_timeout_sec: float = 45.0
     local_code_execution_allow_network: bool = False
-    local_code_execution_allow_pip: bool = False
+    local_code_execution_allow_pip: bool = True
     local_code_execution_pip_timeout_sec: float = 120.0
     local_code_execution_venv_cache_root: Path | None = None
     local_code_execution_max_script_bytes: int = 256000
@@ -253,7 +253,7 @@ class OrchestratorConfig:
                 _env_float("ORCHESTRATOR_CODE_SANDBOX_TIMEOUT_SEC", 45.0),
             ),
             local_code_execution_allow_network=_env_bool("ORCHESTRATOR_CODE_SANDBOX_ALLOW_NETWORK", False),
-            local_code_execution_allow_pip=_env_bool("ORCHESTRATOR_CODE_SANDBOX_ALLOW_PIP", False),
+            local_code_execution_allow_pip=_env_bool("ORCHESTRATOR_CODE_SANDBOX_ALLOW_PIP", True),
             local_code_execution_pip_timeout_sec=max(
                 10.0,
                 _env_float("ORCHESTRATOR_CODE_SANDBOX_PIP_TIMEOUT_SEC", 120.0),

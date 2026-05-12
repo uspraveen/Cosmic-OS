@@ -61,7 +61,7 @@ class ToolExecutor:
         local_code_execution_enabled: bool = True,
         local_code_execution_timeout_sec: float = 45.0,
         local_code_execution_allow_network: bool = False,
-        local_code_execution_allow_pip: bool = False,
+        local_code_execution_allow_pip: bool = True,
         local_code_execution_pip_timeout_sec: float = 120.0,
         local_code_execution_venv_cache_root: str | Path | None = None,
         local_code_execution_max_script_bytes: int = 256000,

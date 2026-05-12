@@ -3682,14 +3682,14 @@ WantedBy=multi-user.target
 
 Duplication of a small number of shared inter-service secrets is acceptable. A single all-services env file is not.
 
-**Orchestrator Kimi local code sandbox:** when `COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER=fireworks_kimi`, the orchestrator does not get Anthropic's hosted `code_execution` container. COSMIC exposes a local bounded Python tool named `cosmic_code_execution` for calculations, quick checks, small data transforms, and generated artifacts. The sandbox writes under `COSMIC_ARTIFACTS_ROOT/<task>/orchestrator/local_code_execution/<run>/`, captures deliverables from `outputs/`, and returns standard artifact descriptors so the existing artifact pipeline can surface files. It is not a shell/project runner; Alpha remains responsible for project edits, deployment, screenshots, and long-running VM work.
+**Orchestrator Kimi local code sandbox:** when `COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER=fireworks_kimi`, the orchestrator does not get Anthropic's hosted `code_execution` container. COSMIC exposes a local bounded Python tool named `cosmic_code_execution` for calculations, quick checks, small data transforms, charts, and generated artifacts. The sandbox writes under `COSMIC_ARTIFACTS_ROOT/<task>/orchestrator/local_code_execution/<run>/`, captures deliverables from `outputs/`, and returns standard artifact descriptors so the existing artifact pipeline can surface files. Pip installs are enabled by default inside isolated cached venvs so normal scientific/charting packages can be used, while arbitrary network from executed user code stays disabled by default. It is not a shell/project runner; Alpha remains responsible for project edits, deployment, screenshots, and long-running VM work.
 
 ```ini
 # /etc/cosmic/orchestrator.env
 ORCHESTRATOR_CODE_SANDBOX_ENABLED=true
 ORCHESTRATOR_CODE_SANDBOX_TIMEOUT_SEC=45
 ORCHESTRATOR_CODE_SANDBOX_ALLOW_NETWORK=false
-ORCHESTRATOR_CODE_SANDBOX_ALLOW_PIP=false
+ORCHESTRATOR_CODE_SANDBOX_ALLOW_PIP=true
 ORCHESTRATOR_CODE_SANDBOX_PIP_TIMEOUT_SEC=120
 ORCHESTRATOR_CODE_SANDBOX_VENV_CACHE_ROOT=
 ORCHESTRATOR_CODE_SANDBOX_MAX_SCRIPT_BYTES=256000

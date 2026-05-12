@@ -4225,7 +4225,7 @@ def build_service_env_overrides(
             "ORCHESTRATOR_CODE_SANDBOX_ALLOW_PIP": orchestrator_external.get("ORCHESTRATOR_CODE_SANDBOX_ALLOW_PIP")
             or orchestrator_existing.get("ORCHESTRATOR_CODE_SANDBOX_ALLOW_PIP")
             or orchestrator_data.get("ORCHESTRATOR_CODE_SANDBOX_ALLOW_PIP")
-            or "false",
+            or "true",
             "ORCHESTRATOR_CODE_SANDBOX_PIP_TIMEOUT_SEC": orchestrator_external.get("ORCHESTRATOR_CODE_SANDBOX_PIP_TIMEOUT_SEC")
             or orchestrator_existing.get("ORCHESTRATOR_CODE_SANDBOX_PIP_TIMEOUT_SEC")
             or orchestrator_data.get("ORCHESTRATOR_CODE_SANDBOX_PIP_TIMEOUT_SEC")

@@ -497,8 +497,9 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                     "packages": {
                         "type": "array",
                         "description": (
-                            "Optional pip packages. Most production environments keep installation disabled; "
-                            "prefer already installed packages or Alpha for package-heavy work."
+                            "Optional pip packages to install into this sandbox run's isolated cached venv. "
+                            "Use this for normal scientific/charting packages such as matplotlib, pandas, numpy, or openpyxl. "
+                            "Use Alpha for package-heavy projects or non-Python setup."
                         ),
                         "items": {"type": "string"},
                     },

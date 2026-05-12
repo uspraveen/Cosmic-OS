@@ -120,7 +120,7 @@ class LocalCodeSandboxSettings:
     enabled: bool = True
     timeout_sec: float = 45.0
     allow_network: bool = False
-    allow_pip: bool = False
+    allow_pip: bool = True
     pip_timeout_sec: float = 120.0
     venv_cache_root: Path | None = None
     max_script_bytes: int = 256000
@@ -161,7 +161,7 @@ def run_local_code_sandbox(
         return {
             "error": True,
             "tool": "cosmic_code_execution",
-            "message": "Package installation is disabled for the local code sandbox. Use installed standard/scientific packages or delegate larger setup to Alpha.",
+            "message": "Package installation is disabled for this local code sandbox. Use installed packages or delegate larger setup to Alpha.",
         }
 
     artifacts_root = artifacts_root.expanduser().resolve()
