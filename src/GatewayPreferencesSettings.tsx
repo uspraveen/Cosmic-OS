@@ -285,7 +285,7 @@ export default function GatewayPreferencesSettings({
         <div className="preferences-card-copy">
           <div className="preferences-card-title">Cosmic Brain</div>
           <div className="preferences-card-note">
-            Choose the model provider behind Cosmic's orchestrator. Claude keeps the current production path; Smarter uses Fireworks Kimi K2.6 through the OpenAI-compatible path.
+            Choose the model provider behind Cosmic's orchestrator. Smart uses Claude, the current production path; Kimi uses Fireworks K2.6 through the OpenAI-compatible path.
           </div>
           {preferences?.cosmic.model && (
             <div className="preferences-card-detail">
@@ -302,23 +302,23 @@ export default function GatewayPreferencesSettings({
         <div className="preferences-provider-control" aria-label="Cosmic orchestrator provider">
           <button
             type="button"
-            className={`preferences-provider-option ${preferences?.cosmic.provider === 'anthropic' ? 'active' : ''}`}
+            className={`preferences-provider-option ${preferences?.cosmic.provider === 'anthropic' ? 'active smart' : ''}`}
             onClick={() => { void handleSelectProvider('anthropic') }}
             disabled={!canSave}
             aria-pressed={preferences?.cosmic.provider === 'anthropic'}
           >
-            <span>Claude</span>
-            <small>Current stable path</small>
+            <span>Smart</span>
+            <small>Claude</small>
           </button>
           <button
             type="button"
-            className={`preferences-provider-option ${preferences?.cosmic.provider === 'fireworks_kimi' ? 'active smarter' : ''}`}
+            className={`preferences-provider-option ${preferences?.cosmic.provider === 'fireworks_kimi' ? 'active' : ''}`}
             onClick={() => { void handleSelectProvider('fireworks_kimi') }}
             disabled={!canSave}
             aria-pressed={preferences?.cosmic.provider === 'fireworks_kimi'}
           >
-            <span>Smarter</span>
-            <small>Kimi K2.6</small>
+            <span>Kimi</span>
+            <small>Fireworks K2.6</small>
           </button>
         </div>
       </div>
