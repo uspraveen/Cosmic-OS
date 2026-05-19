@@ -4020,11 +4020,13 @@ def build_service_env_overrides(
     orchestrator_existing = existing_env_by_name.get("orchestrator.env", {})
     bridge_existing = existing_env_by_name.get("whatsapp-bridge.env", {})
     memory_existing = existing_env_by_name.get("memory.env", {})
+    slide_existing_env = existing_env_by_name.get(SLIDE_AGENT_ENV_NAME, {})
     gateway_external = external_env_by_name.get("gateway.env", {})
     model_router_external = external_env_by_name.get("model-router.env", {})
     orchestrator_external = external_env_by_name.get("orchestrator.env", {})
     bridge_external = external_env_by_name.get("whatsapp-bridge.env", {})
     memory_external = external_env_by_name.get("memory.env", {})
+    slide_external_env = external_env_by_name.get(SLIDE_AGENT_ENV_NAME, {})
 
     shared_internal_token = first_meaningful_value(
         gateway_external.get("GATEWAY_INTERNAL_TOKEN"),
