@@ -1319,6 +1319,9 @@ async def get_signed_artifact_content(
         headers={
             "Cache-Control": "private, max-age=300",
             "Content-Disposition": f'inline; filename="{filename}"',
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
         },
     )
 

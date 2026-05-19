@@ -10403,9 +10403,10 @@ class GatewayRuntime:
         base_url = self._public_gateway_base_url()
         if not base_url:
             return None
-        expires_at = int(time.time()) + max(
-            30, int(self.config.artifact_signed_url_ttl_sec)
-        )
+        ttl_sec = max(30, int(self.config.artifact_signed_url_ttl_sec))
+        if purpose == "ui_preview":
+            ttl_sec = max(ttl_sec, 12 * 60 * 60)
+        expires_at = int(time.time()) + ttl_sec
         signature = self._build_artifact_access_signature(
             artifact_id=artifact_id,
             purpose=purpose,
