@@ -2213,6 +2213,10 @@ def build_map_agent_env_rendered(
     source_data = parse_env_text(source_raw)
     existing_env = (existing_env_by_name or {}).get(MAP_AGENT_ENV_NAME, {})
     external_env = (external_env_by_name or {}).get(MAP_AGENT_ENV_NAME, {})
+    docs_parser_existing_env = (existing_env_by_name or {}).get(DOCS_PARSER_AGENT_ENV_NAME, {})
+    docs_parser_external_env = (external_env_by_name or {}).get(DOCS_PARSER_AGENT_ENV_NAME, {})
+    image_existing_env = (existing_env_by_name or {}).get(IMAGE_GENERATOR_AGENT_ENV_NAME, {})
+    image_external_env = (external_env_by_name or {}).get(IMAGE_GENERATOR_AGENT_ENV_NAME, {})
 
     redis_url = first_meaningful_value(
         external_env.get("REDIS_URL"),
@@ -2229,18 +2233,30 @@ def build_map_agent_env_rendered(
     internal_llm_api_key = first_meaningful_value(
         external_env.get("MAP_AGENT_INTERNAL_LLM_API_KEY"),
         external_env.get("OPENAI_COMPAT_API_KEY"),
+        external_env.get("OPENAI_API_KEY"),
+        docs_parser_external_env.get("OPENAI_API_KEY"),
+        image_external_env.get("IMAGE_AGENT_OPENAI_API_KEY"),
         existing_env.get("MAP_AGENT_INTERNAL_LLM_API_KEY"),
         existing_env.get("OPENAI_COMPAT_API_KEY"),
+        existing_env.get("OPENAI_API_KEY"),
+        docs_parser_existing_env.get("OPENAI_API_KEY"),
+        image_existing_env.get("IMAGE_AGENT_OPENAI_API_KEY"),
         source_data.get("MAP_AGENT_INTERNAL_LLM_API_KEY"),
         source_data.get("OPENAI_COMPAT_API_KEY"),
+        source_data.get("OPENAI_API_KEY"),
     )
     internal_llm_base_url = first_meaningful_value(
         external_env.get("MAP_AGENT_INTERNAL_LLM_BASE_URL"),
         external_env.get("OPENAI_COMPAT_BASE_URL"),
+        external_env.get("OPENAI_BASE_URL"),
+        image_external_env.get("IMAGE_AGENT_OPENAI_BASE_URL"),
         existing_env.get("MAP_AGENT_INTERNAL_LLM_BASE_URL"),
         existing_env.get("OPENAI_COMPAT_BASE_URL"),
+        existing_env.get("OPENAI_BASE_URL"),
+        image_existing_env.get("IMAGE_AGENT_OPENAI_BASE_URL"),
         source_data.get("MAP_AGENT_INTERNAL_LLM_BASE_URL"),
         source_data.get("OPENAI_COMPAT_BASE_URL"),
+        source_data.get("OPENAI_BASE_URL"),
     )
     instance_id = first_meaningful_value(
         external_env.get("INSTANCE_ID"),
@@ -2274,6 +2290,8 @@ def build_map_agent_env_rendered(
         overrides["MAP_AGENT_INTERNAL_LLM_API_KEY"] = internal_llm_api_key
     if internal_llm_base_url is not None:
         overrides["MAP_AGENT_INTERNAL_LLM_BASE_URL"] = internal_llm_base_url
+    elif internal_llm_api_key is not None:
+        overrides["MAP_AGENT_INTERNAL_LLM_BASE_URL"] = "https://api.openai.com/v1"
 
     rendered = render_env_with_overrides(source_raw, overrides)
     rendered_data = parse_env_text(rendered)

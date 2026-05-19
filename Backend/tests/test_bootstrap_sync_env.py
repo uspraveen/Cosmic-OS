@@ -788,6 +788,41 @@ def test_build_slide_agent_env_rendered_inherits_visual_keys_from_peer_agents(
     assert parsed["GATEWAY_INTERNAL_TOKEN"] == "internal-token"
 
 
+def test_build_map_agent_env_rendered_inherits_openai_key_from_peer_agents(
+    tmp_path, monkeypatch
+) -> None:
+    backend_root = tmp_path / "Backend"
+    map_dir = backend_root / "agents" / "map_agent"
+    map_dir.mkdir(parents=True)
+    (map_dir / "agent.env.example").write_text(
+        "REDIS_URL=redis://127.0.0.1:6379/0\n"
+        "GATEWAY_URL=http://127.0.0.1:8080\n"
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "AGENT_SECRET=<agent-shared-secret>\n"
+        "INSTANCE_ID=map-agent-1\n"
+        "MAP_AGENT_INTERNAL_LLM_API_KEY=\n"
+        "MAP_AGENT_INTERNAL_LLM_BASE_URL=\n"
+        "MAP_AGENT_INTERNAL_LLM_MODEL=gpt-5-mini\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bootstrap, "BACKEND_ROOT", backend_root)
+
+    dest_path, rendered, parsed = bootstrap.build_map_agent_env_rendered(
+        signing_secret="signing-secret",
+        shared_internal_token="internal-token",
+        existing_env_by_name={
+            bootstrap.DOCS_PARSER_AGENT_ENV_NAME: {"OPENAI_API_KEY": "openai-key"}
+        },
+    )
+
+    assert dest_path.name == bootstrap.MAP_AGENT_ENV_NAME
+    assert "MAP_AGENT_INTERNAL_LLM_API_KEY=openai-key" in rendered
+    assert parsed["MAP_AGENT_INTERNAL_LLM_API_KEY"] == "openai-key"
+    assert parsed["MAP_AGENT_INTERNAL_LLM_BASE_URL"] == "https://api.openai.com/v1"
+    assert parsed["AGENT_SECRET"] == "signing-secret"
+    assert parsed["GATEWAY_INTERNAL_TOKEN"] == "internal-token"
+
+
 def test_build_visual_enhancement_env_rendered_inherits_shared_keys_from_peer_envs(
     tmp_path, monkeypatch
 ) -> None:
