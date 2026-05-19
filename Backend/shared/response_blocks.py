@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .image_artifacts import is_supported_image_artifact
+from .map_artifacts import is_supported_map_artifact
 
 _CODE_FENCE_RE = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
 _ARTIFACT_MARKER_RE = re.compile(r"\[\[artifact:([^\]]+)\]\]", re.IGNORECASE)
@@ -59,7 +60,11 @@ def build_response_blocks(
         consumed_artifact_ids=consumed_artifact_ids,
     )
 
-    artifact_index = 1 + sum(1 for block in blocks if str(block.get("type")) in {"image_artifact", "file_artifact"})
+    artifact_index = 1 + sum(
+        1
+        for block in blocks
+        if str(block.get("type")) in {"image_artifact", "file_artifact", "map_artifact"}
+    )
     for artifact in artifacts:
         artifact_id = str(artifact.get("artifact_id") or "").strip()
         if artifact_id and artifact_id in consumed_artifact_ids:
@@ -102,7 +107,11 @@ def _append_markdown_with_markers(
     if not text:
         return markdown_index
 
-    artifact_index = 1 + sum(1 for block in blocks if str(block.get("type")) in {"image_artifact", "file_artifact"})
+    artifact_index = 1 + sum(
+        1
+        for block in blocks
+        if str(block.get("type")) in {"image_artifact", "file_artifact", "map_artifact"}
+    )
     cursor = 0
     pending_parts: list[str] = []
 
@@ -148,7 +157,12 @@ def _append_markdown_with_markers(
 def _artifact_to_block(artifact: dict[str, Any], *, artifact_index: int) -> dict[str, Any]:
     artifact_id = str(artifact.get("artifact_id") or "").strip()
     filename = str(artifact.get("filename") or artifact_id or f"artifact_{artifact_index}").strip()
-    block_type = "image_artifact" if is_supported_image_artifact(artifact) else "file_artifact"
+    if is_supported_map_artifact(artifact):
+        block_type = "map_artifact"
+    elif is_supported_image_artifact(artifact):
+        block_type = "image_artifact"
+    else:
+        block_type = "file_artifact"
     return {
         key: value
         for key, value in {

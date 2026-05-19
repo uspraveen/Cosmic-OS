@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "query": { "type": "string", "description": "Natural-language map request" },
+    "description": { "type": "string", "description": "Alias for query" },
+    "title": { "type": "string" },
+    "subtitle": { "type": "string" },
+    "context": { "type": "string" },
+    "draw_route": { "type": "boolean", "default": false },
+    "route_profile": { "type": "string", "enum": ["driving", "walking", "cycling"] },
+    "route_waypoints": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Ordered stops for routing"
+    },
+    "stops": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Alias for route_waypoints"
+    },
+    "markers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "label": { "type": "string" },
+          "query": { "type": "string" },
+          "address": { "type": "string" },
+          "lat": { "type": "number" },
+          "lng": { "type": "number" },
+          "color": { "type": "string" },
+          "kind": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      }
+    }
+  }
+}

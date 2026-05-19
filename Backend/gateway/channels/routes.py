@@ -21,6 +21,16 @@ router = APIRouter(tags=["channels"])
 logger = logging.getLogger(__name__)
 
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+GENERIC_MOBILE_DEVICE_NAMES = {
+    "android",
+    "android device",
+    "ipad",
+    "iphone",
+    "mobile",
+    "mobile device",
+    "phone",
+    "unknown",
+}
 
 
 def _format_size_limit(size_bytes: int) -> str:
@@ -191,6 +201,150 @@ def _normalize_device_id(value: str) -> str | None:
     if not DEVICE_ID_PATTERN.fullmatch(value):
         return None
     return value
+
+
+def _normalize_mobile_dedupe_part(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _mobile_device_has_token(device: dict[str, Any]) -> bool:
+    return bool(str(device.get("push_token") or "").strip() or str(device.get("fcm_token") or "").strip())
+
+
+def _mobile_device_dedupe_key(device: dict[str, Any]) -> str:
+    fcm_token = str(device.get("fcm_token") or "").strip()
+    if fcm_token:
+        return f"fcm:{fcm_token}"
+
+    push_token = str(device.get("push_token") or "").strip()
+    if push_token:
+        return f"push:{push_token}"
+
+    platform = _normalize_mobile_dedupe_part(device.get("platform"))
+    model = _normalize_mobile_dedupe_part(device.get("model_name"))
+    brand = _normalize_mobile_dedupe_part(device.get("brand"))
+    manufacturer = _normalize_mobile_dedupe_part(device.get("manufacturer"))
+    os_name = _normalize_mobile_dedupe_part(device.get("os_name"))
+    os_version = _normalize_mobile_dedupe_part(device.get("os_version"))
+    device_type = _normalize_mobile_dedupe_part(device.get("device_type"))
+    device_name = _normalize_mobile_dedupe_part(device.get("device_name"))
+    name_source = _normalize_mobile_dedupe_part(device.get("device_name_source"))
+
+    meaningful_name = (
+        device_name
+        if device_name
+        and device_name not in GENERIC_MOBILE_DEVICE_NAMES
+        and name_source not in {"fallback", "generic_ios"}
+        else ""
+    )
+    if platform and meaningful_name and (model or brand or manufacturer):
+        return "|".join(
+            [
+                "mobile-named",
+                platform,
+                meaningful_name,
+                model,
+                brand,
+                manufacturer,
+                device_type,
+                str(device.get("is_physical_device")),
+            ]
+        )
+
+    if platform and model and (brand or manufacturer or os_version) and device_type:
+        return "|".join(
+            [
+                "mobile-model",
+                platform,
+                model,
+                brand,
+                manufacturer,
+                os_name,
+                os_version,
+                device_type,
+                str(device.get("is_physical_device")),
+            ]
+        )
+
+    return f"id:{str(device.get('device_id') or '').strip()}"
+
+
+def _mobile_device_latest_value(devices: list[dict[str, Any]], key: str) -> Any:
+    values = [device.get(key) for device in devices if str(device.get(key) or "").strip()]
+    return max(values) if values else None
+
+
+def _mobile_device_earliest_value(devices: list[dict[str, Any]], key: str) -> Any:
+    values = [device.get(key) for device in devices if str(device.get(key) or "").strip()]
+    return min(values) if values else None
+
+
+def _mobile_device_rank(device: dict[str, Any]) -> tuple[Any, ...]:
+    revoked = bool(device.get("revoked"))
+    return (
+        1 if device.get("active") and not revoked else 0,
+        1 if not revoked else 0,
+        1 if _mobile_device_has_token(device) else 0,
+        str(device.get("last_seen_at") or ""),
+        str(device.get("last_connected_at") or ""),
+        str(device.get("first_seen_at") or ""),
+        str(device.get("device_id") or ""),
+    )
+
+
+def _merge_mobile_device_group(devices: list[dict[str, Any]]) -> dict[str, Any]:
+    ordered = sorted(devices, key=_mobile_device_rank, reverse=True)
+    canonical = dict(ordered[0])
+    canonical_id = str(canonical.get("device_id") or "").strip()
+    duplicate_ids = [
+        str(device.get("device_id") or "").strip()
+        for device in ordered
+        if str(device.get("device_id") or "").strip() and str(device.get("device_id") or "").strip() != canonical_id
+    ]
+    all_ids = [canonical_id, *duplicate_ids] if canonical_id else duplicate_ids
+
+    canonical["first_seen_at"] = _mobile_device_earliest_value(ordered, "first_seen_at") or canonical.get("first_seen_at")
+    for key in ("last_seen_at", "last_connected_at", "last_disconnected_at", "last_authorized_at", "last_presence_at"):
+        canonical[key] = _mobile_device_latest_value(ordered, key) or canonical.get(key)
+
+    active_device = next((device for device in ordered if device.get("active") and not device.get("revoked")), None)
+    if active_device:
+        canonical["active"] = True
+        canonical["current_channel"] = active_device.get("current_channel")
+        canonical["current_session_id"] = active_device.get("current_session_id")
+    else:
+        canonical["active"] = bool(canonical.get("active"))
+
+    if duplicate_ids:
+        canonical["duplicate_count"] = len(all_ids)
+        canonical["duplicate_device_ids"] = duplicate_ids
+        canonical["deduped_device_ids"] = all_ids
+    return canonical
+
+
+def _dedupe_mobile_devices(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for device in devices:
+        key = _mobile_device_dedupe_key(device)
+        groups.setdefault(key, []).append(device)
+
+    merged: list[dict[str, Any]] = []
+    for members in groups.values():
+        active_members = [device for device in members if device.get("active") and not device.get("revoked")]
+        if len(active_members) > 1:
+            active_ids = {str(device.get("device_id") or "").strip() for device in active_members}
+            merged.extend(dict(device) for device in active_members)
+            inactive_members = [
+                device
+                for device in members
+                if str(device.get("device_id") or "").strip() not in active_ids
+            ]
+            if inactive_members:
+                merged.append(_merge_mobile_device_group(inactive_members))
+            continue
+        merged.append(_merge_mobile_device_group(members))
+
+    return sorted(merged, key=_mobile_device_rank, reverse=True)
 
 
 def _error_payload(request_id: str | None, code: str, message: str) -> dict[str, Any]:
@@ -1019,7 +1173,7 @@ async def list_mobile_devices(
     _: None = Depends(require_local_api_token),
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
-    return {"devices": await runtime.list_mobile_devices()}
+    return {"devices": _dedupe_mobile_devices(await runtime.list_mobile_devices())}
 
 
 @router.post("/channels/mobile/devices/authorize")

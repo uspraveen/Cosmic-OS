@@ -2260,6 +2260,53 @@ def test_mobile_device_routes_authorize_list_and_revoke(test_client: TestClient)
     assert reauthorized.json()["device"]["device_name"] == "Praveen's Pixel 8 Pro"
 
 
+def test_mobile_device_list_deduplicates_re_registered_phone(test_client: TestClient) -> None:
+    metadata = {
+        "device_name": "Praveen's Pixel 8 Pro",
+        "device_name_source": "user_assigned",
+        "model_name": "Pixel 8 Pro",
+        "brand": "Google",
+        "manufacturer": "Google",
+        "platform": "android",
+        "os_name": "Android",
+        "os_version": "14",
+        "device_type": "phone",
+        "is_physical_device": True,
+        "app_version": "1.0.0",
+        "app_build": "1",
+    }
+    for device_id in ("mob_duplicate_old", "mob_duplicate_new"):
+        authorized = test_client.post(
+            "/channels/mobile/devices/authorize",
+            headers={"Authorization": "Bearer test-token"},
+            json={"device_id": device_id, **metadata},
+        )
+        assert authorized.status_code == 200
+        registered = test_client.post(
+            f"/channels/mobile/devices/{device_id}/push-token",
+            headers={"Authorization": "Bearer test-token"},
+            json={"push_token": "ExponentPushToken[duplicate-phone-token]"},
+        )
+        assert registered.status_code == 200
+
+    listed = test_client.get(
+        "/channels/mobile/devices",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert listed.status_code == 200
+    devices = [
+        device
+        for device in listed.json()["devices"]
+        if "mob_duplicate" in device["device_id"]
+        or "mob_duplicate" in " ".join(device.get("duplicate_device_ids") or [])
+    ]
+    assert len(devices) == 1
+    assert devices[0]["device_id"] == "mob_duplicate_new"
+    assert devices[0]["duplicate_count"] == 2
+    assert devices[0]["duplicate_device_ids"] == ["mob_duplicate_old"]
+    assert devices[0]["deduped_device_ids"] == ["mob_duplicate_new", "mob_duplicate_old"]
+
+
 def test_mobile_push_token_routes_register_update_and_delete(test_client: TestClient) -> None:
     authorized = test_client.post(
         "/channels/mobile/devices/authorize",

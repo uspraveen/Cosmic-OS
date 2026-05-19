@@ -43,3 +43,20 @@ def test_build_response_blocks_places_artifact_marker_inline() -> None:
     assert blocks[0]["text"] == "Here is the chart:\n\n"
     assert blocks[1]["artifact_id"] == "art_plot"
     assert blocks[2]["text"] == "\n\nAfter the figure."
+
+
+def test_build_response_blocks_places_map_artifact_marker_inline() -> None:
+    blocks = build_response_blocks(
+        "Here is the route:\n\n[[artifact:map.cosmic-map.json]]\n",
+        [
+            {
+                "artifact_id": "art_map",
+                "filename": "map.cosmic-map.json",
+                "mime_type": "application/vnd.cosmic.map+json",
+                "kind": "map",
+            }
+        ],
+    )
+
+    assert [block["type"] for block in blocks] == ["markdown", "map_artifact", "markdown"]
+    assert blocks[1]["artifact_id"] == "art_map"

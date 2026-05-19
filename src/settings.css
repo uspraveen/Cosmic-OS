@@ -4814,6 +4814,13 @@
   color: rgba(210, 230, 255, 0.82);
 }
 
+.mobile-device-merged-note {
+  margin-top: 8px;
+  color: rgba(215, 226, 246, 0.7);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .mobile-device-pill-wrap {
   display: flex;
   gap: 6px;

@@ -562,7 +562,7 @@ class MobileDeviceStore:
                     ORDER BY last_seen_at DESC
                     """
                 ).fetchall()
-        return [self._row_to_record(row) for row in rows]
+        return self._dedupe_push_targets([self._row_to_record(row) for row in rows])
 
     def is_revoked(self, device_id: str) -> bool:
         row = self.get_device(device_id)
@@ -687,6 +687,22 @@ class MobileDeviceStore:
             "visible_screen": _row_value("visible_screen"),
             "last_presence_at": _row_value("last_presence_at"),
         }
+
+    def _dedupe_push_targets(self, devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        deduped: list[dict[str, Any]] = []
+        seen_fcm_tokens: set[str] = set()
+        seen_push_tokens: set[str] = set()
+        for device in devices:
+            fcm_token = str(device.get("fcm_token") or "").strip()
+            push_token = str(device.get("push_token") or "").strip()
+            if (fcm_token and fcm_token in seen_fcm_tokens) or (push_token and push_token in seen_push_tokens):
+                continue
+            if fcm_token:
+                seen_fcm_tokens.add(fcm_token)
+            if push_token:
+                seen_push_tokens.add(push_token)
+            deduped.append(device)
+        return deduped
 
     def _ensure_metadata_columns(self, connection: sqlite3.Connection) -> None:
         existing = {

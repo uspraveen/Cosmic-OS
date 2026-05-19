@@ -113,6 +113,10 @@ DIAGRAM_AGENT_ENV_NAME = "diagram-agent.env"
 DIAGRAM_AGENT_SERVICE_NAME = "cosmic-diagram-agent.service"
 DIAGRAM_AGENT_ID = "cosmic/diagram-agent:1.0.0"
 DIAGRAM_AGENT_DEFAULT_INSTANCE_ID = "diagram-agent-1"
+MAP_AGENT_ENV_NAME = "map-agent.env"
+MAP_AGENT_SERVICE_NAME = "cosmic-map-agent.service"
+MAP_AGENT_ID = "cosmic/map-agent:1.0.0"
+MAP_AGENT_DEFAULT_INSTANCE_ID = "map-agent-1"
 SLIDE_AGENT_ENV_NAME = "slide-agent.env"
 SLIDE_AGENT_SERVICE_NAME = "cosmic-slide-agent.service"
 SLIDE_AGENT_ID = "cosmic/slide-agent:1.0.0"
@@ -137,6 +141,7 @@ CORE_BACKEND_SERVICE_UNITS = (
     "cosmic-tabular-agent.service",
     "cosmic-calendar-agent.service",
     "cosmic-diagram-agent.service",
+    "cosmic-map-agent.service",
     "cosmic-slide-agent.service",
     "cosmic-whatsapp-bridge.service",
 )
@@ -2167,6 +2172,122 @@ def read_diagram_agent_system_env(
     system_env_dir: Optional[Path] = None,
 ) -> Dict[str, str]:
     env_path = diagram_agent_system_env_path(system_env_dir)
+    if not env_path.exists():
+        return {}
+    return parse_env_text(read_text_file(env_path, use_sudo=True))
+
+
+def map_agent_repo_dir() -> Path:
+    return BACKEND_ROOT / "agents" / "map_agent"
+
+
+def map_agent_repo_env_path() -> Path:
+    return map_agent_repo_dir() / "agent.env"
+
+
+def map_agent_repo_env_example_path() -> Path:
+    return map_agent_repo_dir() / "agent.env.example"
+
+
+def map_agent_system_env_path(system_env_dir: Optional[Path] = None) -> Path:
+    return (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "agents" / MAP_AGENT_ENV_NAME
+
+
+def resolve_map_agent_env_source() -> Path:
+    repo_env = map_agent_repo_env_path()
+    if repo_env.exists():
+        return repo_env
+    return map_agent_repo_env_example_path()
+
+
+def build_map_agent_env_rendered(
+    *,
+    signing_secret: str,
+    shared_internal_token: str,
+    system_env_dir: Optional[Path] = None,
+    existing_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+    external_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Tuple[Path, str, Dict[str, str]]:
+    source_path = resolve_map_agent_env_source()
+    source_raw = source_path.read_text(encoding="utf-8")
+    source_data = parse_env_text(source_raw)
+    existing_env = (existing_env_by_name or {}).get(MAP_AGENT_ENV_NAME, {})
+    external_env = (external_env_by_name or {}).get(MAP_AGENT_ENV_NAME, {})
+
+    redis_url = first_meaningful_value(
+        external_env.get("REDIS_URL"),
+        existing_env.get("REDIS_URL"),
+        source_data.get("REDIS_URL"),
+        "redis://127.0.0.1:6379/0",
+    )
+    gateway_url = first_meaningful_value(
+        external_env.get("GATEWAY_URL"),
+        existing_env.get("GATEWAY_URL"),
+        source_data.get("GATEWAY_URL"),
+        "http://127.0.0.1:8080",
+    )
+    internal_llm_api_key = first_meaningful_value(
+        external_env.get("MAP_AGENT_INTERNAL_LLM_API_KEY"),
+        external_env.get("OPENAI_COMPAT_API_KEY"),
+        existing_env.get("MAP_AGENT_INTERNAL_LLM_API_KEY"),
+        existing_env.get("OPENAI_COMPAT_API_KEY"),
+        source_data.get("MAP_AGENT_INTERNAL_LLM_API_KEY"),
+        source_data.get("OPENAI_COMPAT_API_KEY"),
+    )
+    internal_llm_base_url = first_meaningful_value(
+        external_env.get("MAP_AGENT_INTERNAL_LLM_BASE_URL"),
+        external_env.get("OPENAI_COMPAT_BASE_URL"),
+        existing_env.get("MAP_AGENT_INTERNAL_LLM_BASE_URL"),
+        existing_env.get("OPENAI_COMPAT_BASE_URL"),
+        source_data.get("MAP_AGENT_INTERNAL_LLM_BASE_URL"),
+        source_data.get("OPENAI_COMPAT_BASE_URL"),
+    )
+    instance_id = first_meaningful_value(
+        external_env.get("INSTANCE_ID"),
+        existing_env.get("INSTANCE_ID"),
+        source_data.get("INSTANCE_ID"),
+        MAP_AGENT_DEFAULT_INSTANCE_ID,
+    )
+
+    overrides = {
+        "REDIS_URL": redis_url or "redis://127.0.0.1:6379/0",
+        "GATEWAY_URL": gateway_url or "http://127.0.0.1:8080",
+        "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
+        "AGENT_SECRET": signing_secret,
+        "INSTANCE_ID": instance_id or MAP_AGENT_DEFAULT_INSTANCE_ID,
+        "MAP_AGENT_INTERNAL_LLM_MODEL": first_meaningful_value(
+            external_env.get("MAP_AGENT_INTERNAL_LLM_MODEL"),
+            existing_env.get("MAP_AGENT_INTERNAL_LLM_MODEL"),
+            source_data.get("MAP_AGENT_INTERNAL_LLM_MODEL"),
+            "gpt-5-mini",
+        )
+        or "gpt-5-mini",
+        "MAP_AGENT_ENABLE_INTERNAL_LLM": first_meaningful_value(
+            external_env.get("MAP_AGENT_ENABLE_INTERNAL_LLM"),
+            existing_env.get("MAP_AGENT_ENABLE_INTERNAL_LLM"),
+            source_data.get("MAP_AGENT_ENABLE_INTERNAL_LLM"),
+            "true",
+        )
+        or "true",
+    }
+    if internal_llm_api_key is not None:
+        overrides["MAP_AGENT_INTERNAL_LLM_API_KEY"] = internal_llm_api_key
+    if internal_llm_base_url is not None:
+        overrides["MAP_AGENT_INTERNAL_LLM_BASE_URL"] = internal_llm_base_url
+
+    rendered = render_env_with_overrides(source_raw, overrides)
+    rendered_data = parse_env_text(rendered)
+    return map_agent_system_env_path(system_env_dir), rendered, rendered_data
+
+
+def map_agent_is_configured(env_values: Dict[str, str]) -> bool:
+    return meaningful_env_value(env_values.get("AGENT_SECRET")) is not None
+
+
+def read_map_agent_system_env(
+    system_env_dir: Optional[Path] = None,
+) -> Dict[str, str]:
+    env_path = map_agent_system_env_path(system_env_dir)
     if not env_path.exists():
         return {}
     return parse_env_text(read_text_file(env_path, use_sudo=True))
@@ -4563,6 +4684,19 @@ def materialize_bootstrap_env_files(
         )
     )
 
+    map_repo_path = map_agent_repo_env_path()
+    _map_dest_path, map_rendered, _map_env = build_map_agent_env_rendered(
+        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
+        system_env_dir=system_env_dir,
+        existing_env_by_name=existing_env_by_name,
+        external_env_by_name=external_env_by_name,
+    )
+    map_repo_path.parent.mkdir(parents=True, exist_ok=True)
+    map_repo_path.write_text(map_rendered, encoding="utf-8")
+    written.append(map_repo_path)
+    log("Materialized repo env file from bootstrap inputs: {0}".format(map_repo_path))
+
     slide_repo_path = slide_agent_repo_env_path()
     _slide_dest_path, slide_rendered, _slide_env = build_slide_agent_env_rendered(
         signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
@@ -4815,6 +4949,19 @@ def install_service_env_files(
         )
         installed.append(diagram_dest_path)
         log("Installed system env file: {0}".format(diagram_dest_path))
+
+    map_dest_path, map_rendered, _map_env = build_map_agent_env_rendered(
+        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+        shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
+        system_env_dir=system_env_dir,
+    )
+    run(["install", "-d", "-m", "755", str(map_dest_path.parent)], use_sudo=True)
+    if map_dest_path.exists():
+        log("System env file already exists: {0}".format(map_dest_path))
+    else:
+        install_text_file(map_dest_path, map_rendered, mode="600", use_sudo=True)
+        installed.append(map_dest_path)
+        log("Installed system env file: {0}".format(map_dest_path))
 
     slide_dest_path, slide_rendered, _slide_env = build_slide_agent_env_rendered(
         signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
@@ -5811,6 +5958,28 @@ def sync_service_env_files(
         )
         if changed_keys:
             synced.append(diagram_dest_path)
+    map_dest_path = map_agent_system_env_path(system_env_dir)
+    if map_dest_path.exists():
+        map_existing_by_name: Dict[str, Dict[str, str]] = {
+            MAP_AGENT_ENV_NAME: parse_env_text(
+                read_text_file(map_dest_path, use_sudo=True)
+            ),
+        }
+        _map_dest_path, map_rendered, _map_env = build_map_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+            shared_internal_token=overrides_by_dest["gateway.env"]["GATEWAY_INTERNAL_TOKEN"],
+            system_env_dir=system_env_dir,
+            existing_env_by_name=map_existing_by_name,
+        )
+        changed_keys = sync_env_file(
+            map_dest_path,
+            source_raw=map_rendered,
+            create_missing=False,
+            use_sudo=True,
+            mode="600",
+        )
+        if changed_keys:
+            synced.append(map_dest_path)
     slide_dest_path = slide_agent_system_env_path(system_env_dir)
     if slide_dest_path.exists():
         slide_existing_by_name: Dict[str, Dict[str, str]] = {
@@ -6421,6 +6590,7 @@ def run_post_provision_health_checks(
     include_email_agent: bool = False,
     include_image_generator_agent: bool = False,
     include_diagram_agent: bool = False,
+    include_map_agent: bool = False,
     include_slide_agent: bool = False,
     include_alpha_agent: bool = False,
     timeout_sec: float = DEFAULT_POST_PROVISION_TIMEOUT_SEC,
@@ -6530,6 +6700,18 @@ def run_post_provision_health_checks(
         )
         wait_for_orchestrator_agent_ready(
             DIAGRAM_AGENT_ID,
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+
+    if include_map_agent:
+        wait_for_systemd_unit_active(
+            MAP_AGENT_SERVICE_NAME,
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+        wait_for_orchestrator_agent_ready(
+            MAP_AGENT_ID,
             timeout_sec=timeout_sec,
             poll_interval_sec=poll_interval_sec,
         )
@@ -6818,6 +7000,16 @@ def provision_vm(
         log(
             "Diagram agent env is not configured; bootstrap will install the unit but skip enabling the diagram agent service."
         )
+    map_env = read_map_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+    enable_map_agent = map_agent_is_configured(map_env)
+    if enable_map_agent:
+        log(
+            "Map agent env is configured; bootstrap will enable and start the map agent service."
+        )
+    else:
+        log(
+            "Map agent env is not configured; bootstrap will install the unit but skip enabling the map agent service."
+        )
     slide_env = read_slide_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
     enable_slide_agent = slide_agent_is_configured(slide_env)
     if enable_slide_agent:
@@ -6878,6 +7070,11 @@ def provision_vm(
                 else []
             )
             + (
+                [MAP_AGENT_SERVICE_NAME]
+                if enable_units and enable_map_agent
+                else []
+            )
+            + (
                 [SLIDE_AGENT_SERVICE_NAME]
                 if enable_units and enable_slide_agent
                 else []
@@ -6899,6 +7096,7 @@ def provision_vm(
             include_email_agent=enable_email_agent,
             include_image_generator_agent=enable_image_generator_agent,
             include_diagram_agent=enable_diagram_agent,
+            include_map_agent=enable_map_agent,
             include_slide_agent=enable_slide_agent,
             include_alpha_agent=enable_alpha_agent,
         )
@@ -7193,6 +7391,8 @@ def main() -> int:
             )
             diagram_env = read_diagram_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
             enable_diagram_agent = diagram_agent_is_configured(diagram_env)
+            map_env = read_map_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+            enable_map_agent = map_agent_is_configured(map_env)
             slide_env = read_slide_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
             enable_slide_agent = slide_agent_is_configured(slide_env)
             alpha_env = read_alpha_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
@@ -7245,6 +7445,11 @@ def main() -> int:
                         else []
                     )
                     + (
+                        [MAP_AGENT_SERVICE_NAME]
+                        if enable_map_agent and bool(getattr(args, "enable", False))
+                        else []
+                    )
+                    + (
                         [SLIDE_AGENT_SERVICE_NAME]
                         if enable_slide_agent and bool(getattr(args, "enable", False))
                         else []
@@ -7268,6 +7473,7 @@ def main() -> int:
                     include_email_agent=enable_email_agent,
                     include_image_generator_agent=enable_image_generator_agent,
                     include_diagram_agent=enable_diagram_agent,
+                    include_map_agent=enable_map_agent,
                     include_slide_agent=enable_slide_agent,
                     include_alpha_agent=enable_alpha_agent,
                 )

@@ -2385,7 +2385,8 @@ kbd {
   margin: 0;
 }
 
-.assistant-inline-image-card {
+.assistant-inline-image-card,
+.assistant-inline-map-card {
   width: min(100%, var(--assistant-inline-visual-max-width));
   margin-inline: auto;
   display: flex;
@@ -2401,6 +2402,49 @@ kbd {
   box-shadow:
     0 24px 64px rgba(0, 0, 0, 0.36),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.assistant-inline-map-frame {
+  position: relative;
+  overflow: hidden;
+  border-radius: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(8, 10, 17, 0.94);
+  min-height: clamp(280px, 42vw, 420px);
+}
+
+.assistant-inline-map-canvas {
+  width: 100%;
+  height: clamp(280px, 42vw, 420px);
+  z-index: 1;
+}
+
+.assistant-inline-map-canvas.is-hidden {
+  visibility: hidden;
+  height: 0;
+  min-height: 0;
+}
+
+.assistant-inline-map-canvas.is-ready {
+  visibility: visible;
+}
+
+.assistant-inline-map-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 13px;
+  z-index: 2;
+  background: rgba(8, 10, 18, 0.88);
+}
+
+.assistant-inline-map-card .leaflet-container {
+  width: 100%;
+  height: 100%;
+  background: #0b0f18;
 }
 
 .assistant-inline-image-frame {

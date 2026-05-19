@@ -76,6 +76,14 @@ from .image_artifacts import (
     infer_image_mime_from_extension,
     is_supported_image_artifact,
 )
+from .map_artifacts import (
+    COSMIC_MAP_EXTENSION,
+    COSMIC_MAP_MIME_TYPE,
+    SUPPORTED_MAP_EXTENSIONS,
+    SUPPORTED_MAP_MIME_TYPES,
+    infer_map_mime_from_extension,
+    is_supported_map_artifact,
+)
 from .response_blocks import build_response_blocks
 from .cosmic_mail_client import (
     CosmicMailClient,

@@ -104,6 +104,7 @@ from shared import (
     infer_tabular_mime_from_extension,
     is_supported_document_artifact,
     is_supported_image_artifact,
+    is_supported_map_artifact,
     is_supported_tabular_artifact,
     lookup_model_spec,
     normalize_cosmic_mail_base_url,
@@ -9858,6 +9859,8 @@ class GatewayRuntime:
             return "spreadsheet"
         if is_supported_image_artifact(artifact):
             return "image"
+        if is_supported_map_artifact(artifact):
+            return "map"
         return None
 
     def _default_artifact_filename(
@@ -12237,6 +12240,14 @@ class GatewayRuntime:
                 )
                 if preview_url:
                     enriched["preview_url"] = preview_url
+            if is_supported_map_artifact(enriched) and self._safe_text(
+                enriched.get("path")
+            ):
+                content_url = self.mint_artifact_access_url(
+                    enriched, purpose="ui_preview"
+                )
+                if content_url:
+                    enriched["content_url"] = content_url
             hydrated.append(enriched)
         return hydrated
 
@@ -12277,7 +12288,7 @@ class GatewayRuntime:
                 continue
             block_type = self._safe_text(item.get("type")) or "markdown"
             block: dict[str, Any] = dict(item)
-            if block_type in {"image_artifact", "file_artifact"}:
+            if block_type in {"image_artifact", "file_artifact", "map_artifact"}:
                 artifact = artifact_by_id.get(
                     self._safe_text(item.get("artifact_id"))
                 ) or artifact_by_name.get(self._safe_text(item.get("filename")).lower())
@@ -12290,6 +12301,7 @@ class GatewayRuntime:
                         "kind",
                         "downloadable",
                         "preview_url",
+                        "content_url",
                         "caption",
                     ):
                         if artifact.get(key) not in (None, "", [], {}):

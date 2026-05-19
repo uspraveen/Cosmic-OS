@@ -12,6 +12,7 @@ import CosmicLoginModal from './CosmicLoginModal'
 import LiquidGlassLoader from './LiquidGlassLoader'
 import MeetingMode from './MeetingMode'
 import SpacesControlCenter from './SpacesControlCenter'
+import InlineMap from './components/InlineMap'
 import cosmicBallLogo from './assets/cosmic-ball-logo-v1.1.png'
 import moveToBackgroundIcon from './assets/move-to-background.png'
 import bringToForegroundIcon from './assets/bring-to-foreground.png'
@@ -183,6 +184,19 @@ interface ResponseArtifactBlock {
   provenance?: ResponseBlockProvenance
 }
 
+interface MapArtifactBlock {
+  id: string
+  type: 'map_artifact'
+  artifactId: string
+  filename: string
+  mimeType?: string | null
+  sizeBytes?: number | null
+  kind?: string | null
+  downloadable?: boolean
+  contentUrl?: string | null
+  caption?: string | null
+}
+
 interface ResponseBlockProvenance {
   sourceUrl?: string | null
   sourceTitle?: string | null
@@ -206,6 +220,7 @@ type ResponseBlock =
   | ResponseMarkdownBlock
   | ResponseCodeBlock
   | ResponseArtifactBlock
+  | MapArtifactBlock
   | ResponseSlotBlock
 
 interface ActivityLogEntry {
@@ -492,6 +507,43 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
             ? (item as any).loadingLabel.trim()
             : null,
         timeoutMs: Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : null,
+      })
+      continue
+    }
+    if (type === 'map_artifact') {
+      const artifactId = typeof (item as any).artifact_id === 'string' && (item as any).artifact_id.trim()
+        ? (item as any).artifact_id.trim()
+        : typeof (item as any).artifactId === 'string' && (item as any).artifactId.trim()
+          ? (item as any).artifactId.trim()
+          : ''
+      const filename = typeof (item as any).filename === 'string' && (item as any).filename.trim()
+        ? (item as any).filename.trim()
+        : ''
+      if (!artifactId || !filename) continue
+      const rawSize = Number((item as any).size_bytes ?? (item as any).sizeBytes ?? 0)
+      const contentUrl = typeof (item as any).content_url === 'string' && (item as any).content_url.trim()
+        ? (item as any).content_url.trim()
+        : typeof (item as any).contentUrl === 'string' && (item as any).contentUrl.trim()
+          ? (item as any).contentUrl.trim()
+          : null
+      if (!contentUrl) continue
+      normalized.push({
+        id,
+        type: 'map_artifact',
+        artifactId,
+        filename,
+        mimeType: typeof (item as any).mime_type === 'string'
+          ? (item as any).mime_type.trim()
+          : typeof (item as any).mimeType === 'string'
+            ? (item as any).mimeType.trim()
+            : null,
+        sizeBytes: Number.isFinite(rawSize) && rawSize > 0 ? rawSize : null,
+        kind: typeof (item as any).kind === 'string' ? (item as any).kind.trim() : null,
+        downloadable: (item as any).downloadable !== false,
+        contentUrl,
+        caption: typeof (item as any).caption === 'string' && (item as any).caption.trim()
+          ? (item as any).caption.trim()
+          : null,
       })
       continue
     }
@@ -1997,13 +2049,18 @@ const formatInlineVisualSourceChip = (block: ResponseArtifactBlock) => {
   return ''
 }
 
-const formatInlineVisualTitle = (block: ResponseArtifactBlock) => {
+const formatInlineVisualTitle = (block: ResponseArtifactBlock | MapArtifactBlock) => {
   const caption = String(block.caption || '').trim()
   if (caption) return caption
-  const sourceTitle = String(block.provenance?.sourceTitle || '').trim()
-  if (sourceTitle) return sourceTitle
+  if (block.type === 'image_artifact' || block.type === 'file_artifact') {
+    const sourceTitle = String(block.provenance?.sourceTitle || '').trim()
+    if (sourceTitle) return sourceTitle
+  }
   const filename = humanizeArtifactFilename(block.filename)
   if (filename) return filename
+  if (block.type === 'map_artifact' || formatArtifactKind(block) === 'map') {
+    return 'Interactive map'
+  }
   return formatArtifactKind(block) === 'chart' ? 'Inline chart' : 'Inline visual'
 }
 
@@ -2086,6 +2143,17 @@ const AssistantResponseBlocks = ({
                 </div>
               </div>
             </div>
+          )
+        }
+        if (block.type === 'map_artifact') {
+          const visualTitle = formatInlineVisualTitle(block)
+          return (
+            <InlineMap
+              key={block.id}
+              title={block.caption || visualTitle}
+              subtitle={block.filename}
+              contentUrl={block.contentUrl || ''}
+            />
           )
         }
         if (block.type === 'image_artifact') {

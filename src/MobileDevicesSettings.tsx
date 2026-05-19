@@ -25,6 +25,9 @@ interface MobileDeviceRow {
   revoke_reason?: string | null
   revoked?: boolean
   active?: boolean
+  duplicate_count?: number
+  duplicate_device_ids?: string[]
+  deduped_device_ids?: string[]
 }
 
 interface MobileDevicesSettingsProps {
@@ -49,6 +52,100 @@ function compactParts(parts: Array<string | null | undefined>): string {
     .map((part) => String(part || '').trim())
     .filter(Boolean)
     .join(' • ')
+}
+
+function normalizeDedupePart(value?: string | null): string {
+  return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ')
+}
+
+function getMobileDeviceDedupeKey(device: MobileDeviceRow): string {
+  const platform = normalizeDedupePart(device.platform)
+  const model = normalizeDedupePart(device.model_name)
+  const brand = normalizeDedupePart(device.brand)
+  const manufacturer = normalizeDedupePart(device.manufacturer)
+  const osName = normalizeDedupePart(device.os_name)
+  const osVersion = normalizeDedupePart(device.os_version)
+  const deviceType = normalizeDedupePart(device.device_type)
+  const deviceName = normalizeDedupePart(device.device_name)
+  const nameSource = normalizeDedupePart(device.device_name_source)
+  const genericNames = new Set(['android', 'android device', 'ipad', 'iphone', 'mobile', 'mobile device', 'phone', 'unknown'])
+
+  const meaningfulName = deviceName && !genericNames.has(deviceName) && !['fallback', 'generic_ios'].includes(nameSource)
+    ? deviceName
+    : ''
+  if (platform && meaningfulName && (model || brand || manufacturer)) {
+    return ['mobile-named', platform, meaningfulName, model, brand, manufacturer, deviceType, String(device.is_physical_device)].join('|')
+  }
+  if (platform && model && (brand || manufacturer || osVersion) && deviceType) {
+    return ['mobile-model', platform, model, brand, manufacturer, osName, osVersion, deviceType, String(device.is_physical_device)].join('|')
+  }
+  return `id:${device.device_id}`
+}
+
+function deviceRank(device: MobileDeviceRow): string {
+  return [
+    device.active && !device.revoked ? '1' : '0',
+    !device.revoked ? '1' : '0',
+    device.last_seen_at || '',
+    device.last_connected_at || '',
+    device.first_seen_at || '',
+    device.device_id,
+  ].join('|')
+}
+
+function getDeviceRegistrationIds(device: MobileDeviceRow): string[] {
+  const ids = [
+    device.device_id,
+    ...(Array.isArray(device.deduped_device_ids) ? device.deduped_device_ids : []),
+    ...(Array.isArray(device.duplicate_device_ids) ? device.duplicate_device_ids : []),
+  ]
+  return Array.from(new Set(ids.map((id) => String(id || '').trim()).filter(Boolean)))
+}
+
+function mergeDeviceGroup(group: MobileDeviceRow[]): MobileDeviceRow {
+  const ordered = [...group].sort((a, b) => deviceRank(b).localeCompare(deviceRank(a)))
+  const canonical = { ...ordered[0] }
+  const allIds = Array.from(new Set(ordered.flatMap(getDeviceRegistrationIds)))
+  const duplicateIds = allIds.filter((id) => id !== canonical.device_id)
+
+  const firstSeenValues = ordered.map((device) => device.first_seen_at).filter(Boolean) as string[]
+  const latest = (field: keyof MobileDeviceRow) => {
+    const values = ordered.map((device) => device[field]).filter(Boolean) as string[]
+    const sorted = values.sort()
+    return sorted.length > 0 ? sorted[sorted.length - 1] : canonical[field]
+  }
+  canonical.first_seen_at = firstSeenValues.length > 0 ? firstSeenValues.sort()[0] : canonical.first_seen_at
+  canonical.last_seen_at = latest('last_seen_at') as string | null | undefined
+  canonical.last_connected_at = latest('last_connected_at') as string | null | undefined
+  canonical.last_disconnected_at = latest('last_disconnected_at') as string | null | undefined
+
+  const activeDevice = ordered.find((device) => device.active && !device.revoked)
+  if (activeDevice) {
+    canonical.active = true
+    canonical.current_channel = activeDevice.current_channel
+    canonical.current_session_id = activeDevice.current_session_id
+  }
+  if (duplicateIds.length > 0) {
+    canonical.duplicate_count = allIds.length
+    canonical.duplicate_device_ids = duplicateIds
+    canonical.deduped_device_ids = allIds
+  }
+  return canonical
+}
+
+function dedupeMobileDevices(devices: MobileDeviceRow[]): MobileDeviceRow[] {
+  const groups = new Map<string, MobileDeviceRow[]>()
+  for (const device of devices) {
+    const key = getMobileDeviceDedupeKey(device)
+    groups.set(key, [...(groups.get(key) || []), device])
+  }
+  return Array.from(groups.values())
+    .map(mergeDeviceGroup)
+    .sort((a, b) => deviceRank(b).localeCompare(deviceRank(a)))
+}
+
+function getErrorMessage(err: unknown, fallback: string): string {
+  return err instanceof Error && err.message ? err.message : fallback
 }
 
 function getDeviceTitle(device: MobileDeviceRow): string {
@@ -103,9 +200,9 @@ export default function MobileDevicesSettings({ active }: MobileDevicesSettingsP
     try {
       const payload = await window.cosmic.listMobileDevices()
       const nextDevices = Array.isArray(payload?.devices) ? payload.devices as MobileDeviceRow[] : []
-      setDevices(nextDevices)
-    } catch (err: any) {
-      setError(err?.message ?? 'Failed to load mobile devices.')
+      setDevices(dedupeMobileDevices(nextDevices))
+    } catch (err: unknown) {
+      setError(getErrorMessage(err, 'Failed to load mobile devices.'))
     } finally {
       setLoading(false)
     }
@@ -116,15 +213,18 @@ export default function MobileDevicesSettings({ active }: MobileDevicesSettingsP
     void refreshDevices()
   }, [active, refreshDevices])
 
-  const handleRevokeDevice = useCallback(async (deviceId: string) => {
+  const handleRevokeDevice = useCallback(async (device: MobileDeviceRow) => {
     if (!window.cosmic?.revokeMobileDevice) return
-    setRevokingDeviceId(deviceId)
+    const deviceIds = getDeviceRegistrationIds(device)
+    setRevokingDeviceId(device.device_id)
     setError(null)
     try {
-      await window.cosmic.revokeMobileDevice(deviceId)
+      for (const deviceId of deviceIds) {
+        await window.cosmic.revokeMobileDevice(deviceId)
+      }
       await refreshDevices()
-    } catch (err: any) {
-      setError(err?.message ?? 'Failed to remove device.')
+    } catch (err: unknown) {
+      setError(getErrorMessage(err, 'Failed to remove device.'))
     } finally {
       setRevokingDeviceId(null)
     }
@@ -137,8 +237,8 @@ export default function MobileDevicesSettings({ active }: MobileDevicesSettingsP
     try {
       await window.cosmic.revokeAllMobileDevices()
       await refreshDevices()
-    } catch (err: any) {
-      setError(err?.message ?? 'Failed to remove all devices.')
+    } catch (err: unknown) {
+      setError(getErrorMessage(err, 'Failed to remove all devices.'))
     } finally {
       setRevokingAll(false)
     }
@@ -253,6 +353,11 @@ export default function MobileDevicesSettings({ active }: MobileDevicesSettingsP
                   <div className="mobile-device-id" title={device.device_id}>
                     {device.device_id}
                   </div>
+                  {Number(device.duplicate_count || 0) > 1 ? (
+                    <div className="mobile-device-merged-note">
+                      Merged {device.duplicate_count} registrations for this phone
+                    </div>
+                  ) : null}
                 </div>
               </div>
 
@@ -308,7 +413,7 @@ export default function MobileDevicesSettings({ active }: MobileDevicesSettingsP
                 <button
                   type="button"
                   className="mobile-devices-btn mobile-devices-btn--danger mobile-devices-btn--compact"
-                  onClick={() => void handleRevokeDevice(device.device_id)}
+                  onClick={() => void handleRevokeDevice(device)}
                   disabled={removingThis || !!device.revoked}
                 >
                   {removingThis ? 'Removing…' : device.revoked ? 'Removed' : 'Remove device'}

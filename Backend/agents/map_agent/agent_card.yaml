@@ -1,0 +1,73 @@
+agent_id: cosmic/map-agent:1.0.0
+display_name: Map Agent
+description: >
+  Specialist agent for interactive OpenStreetMap views. Geocodes places, draws
+  custom driving/walking/cycling routes, places markers, and produces inline
+  map artifacts for the COSMIC desktop app.
+
+intents:
+  - name: map.render
+    description: Build an interactive map with markers and optional routed paths
+    input_schema: schemas/intents/map.render.input.json
+    output_schema: schemas/intents/map.render.output.json
+    timeout_sec: 120
+    usage_hints:
+      - Use for directions, routes, place lookups, and "show on a map" requests.
+      - Pass route_waypoints for ordered stops; pass markers for standalone pins.
+      - Natural-language queries are fine when coordinates are not known.
+      - The specialist returns an inline interactive map artifact in chat.
+
+  - name: map.recall_session
+    description: Recall prior map operations from the agent session ledger
+    input_schema: schemas/intents/map.recall_session.input.json
+    output_schema: schemas/intents/map.recall_session.output.json
+    timeout_sec: 30
+    usage_hints:
+      - Recall prior map-agent work when you need exact reuse of an earlier map result.
+
+artifact_types:
+  - interactive_map
+  - map_spec
+
+policies:
+  network_access: true
+  writable_paths:
+    - runs/artifacts
+    - agents/map_agent/store
+    - agents/map_agent/runtime
+  tool_access: []
+  allowed_senders:
+    - cosmic/orchestrator:1.0.0
+  intent_authorization:
+    map.render: [cosmic/orchestrator:1.0.0]
+    map.recall_session: [cosmic/orchestrator:1.0.0]
+
+sla:
+  max_concurrency: 2
+  heartbeat_interval_sec: 10
+  heartbeat_ttl_sec: 30
+  max_task_duration_sec: 180
+  health_endpoint: /health
+  retry_policy:
+    max_attempts: 3
+    backoff: exponential
+    backoff_base_sec: 2
+    backoff_max_sec: 60
+    retryable_codes:
+      - TIMEOUT
+      - NETWORK_ERROR
+      - RATE_LIMITED
+    non_retryable_codes:
+      - INVALID_INPUT
+      - AUTH_ERROR
+      - SCHEMA_VIOLATION
+      - INTERNAL_ERROR
+
+stream_key: streams:cosmic/map-agent:1.0.0
+
+version_info:
+  semver: 1.0.0
+  released_at: "2026-05-19"
+  deprecated_at: null
+  remove_after: null
+  changelog: CHANGELOG.md

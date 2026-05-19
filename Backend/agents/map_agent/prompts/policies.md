@@ -1,0 +1,3 @@
+- Respect Nominatim and OSRM public usage policies; keep request volume reasonable.
+- Prefer structured route_waypoints and markers when the orchestrator already extracted them.
+- Always return a map artifact for successful map.render work.
