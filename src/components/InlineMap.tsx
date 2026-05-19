@@ -41,8 +41,33 @@ export type CosmicMapSpec = {
   routes?: MapRoute[]
 }
 
+type MapBounds = NonNullable<NonNullable<CosmicMapSpec['view']>['bounds']>
+
 const TILE_URL = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
 const TILE_ATTRIBUTION = '© OpenStreetMap contributors'
+
+const isLngLat = (value: unknown): value is [number, number] => {
+  if (!Array.isArray(value) || value.length < 2) return false
+  return Number.isFinite(value[0]) && Number.isFinite(value[1])
+}
+
+const boundsHaveArea = (
+  bounds: NonNullable<CosmicMapSpec['view']>['bounds'],
+): bounds is MapBounds => {
+  if (!bounds || !isLngLat(bounds.southwest) || !isLngLat(bounds.northeast)) return false
+  return (
+    Math.abs(bounds.northeast[0] - bounds.southwest[0]) > 0.00001 ||
+    Math.abs(bounds.northeast[1] - bounds.southwest[1]) > 0.00001
+  )
+}
+
+const invalidateMapSize = (map: L.Map) => {
+  map.invalidateSize({ animate: false })
+  window.requestAnimationFrame(() => {
+    map.invalidateSize({ animate: false })
+    window.setTimeout(() => map.invalidateSize({ animate: false }), 80)
+  })
+}
 
 const formatDistance = (distanceM: number | null | undefined) => {
   if (!distanceM || distanceM <= 0) return null
@@ -121,11 +146,17 @@ const InlineMap = ({
       mapRef.current = null
     }
 
-    const center = spec.view?.center || spec.markers?.[0]?.position || [0, 0]
+    const firstMarkerPosition = spec.markers?.[0]?.position
+    const center = isLngLat(spec.view?.center)
+      ? spec.view.center
+      : isLngLat(firstMarkerPosition)
+        ? firstMarkerPosition
+        : [0, 0]
     const zoom = spec.view?.zoom || 11
     const map = L.map(containerRef.current, {
       zoomControl: true,
       attributionControl: true,
+      preferCanvas: true,
     }).setView([center[1], center[0]], zoom)
 
     L.tileLayer(TILE_URL, {
@@ -170,24 +201,36 @@ const InlineMap = ({
     }
 
     const bounds = spec.view?.bounds
-    if (bounds?.southwest && bounds?.northeast) {
-      map.fitBounds(
-        [
-          [bounds.southwest[1], bounds.southwest[0]],
-          [bounds.northeast[1], bounds.northeast[0]],
-        ],
-        { padding: [24, 24] },
-      )
-    } else {
-      const layers = layerGroup.getLayers()
-      if (layers.length > 0) {
+    const layers = layerGroup.getLayers()
+    try {
+      if (boundsHaveArea(bounds)) {
+        map.fitBounds(
+          [
+            [bounds.southwest[1], bounds.southwest[0]],
+            [bounds.northeast[1], bounds.northeast[0]],
+          ],
+          { padding: [24, 24] },
+        )
+      } else if (layers.length > 1) {
         map.fitBounds(L.featureGroup(layers).getBounds().pad(0.2))
+      } else {
+        map.setView([center[1], center[0]], zoom)
       }
+    } catch {
+      map.setView([center[1], center[0]], zoom)
     }
 
     mapRef.current = map
+    invalidateMapSize(map)
+
+    let resizeObserver: ResizeObserver | null = null
+    if ('ResizeObserver' in window && containerRef.current) {
+      resizeObserver = new ResizeObserver(() => invalidateMapSize(map))
+      resizeObserver.observe(containerRef.current)
+    }
 
     return () => {
+      resizeObserver?.disconnect()
       map.remove()
       mapRef.current = null
     }

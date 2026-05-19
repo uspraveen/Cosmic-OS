@@ -2410,23 +2410,26 @@ kbd {
   border-radius: 22px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(8, 10, 17, 0.94);
-  min-height: clamp(280px, 42vw, 420px);
+  height: clamp(280px, 42vw, 420px);
 }
 
 .assistant-inline-map-canvas {
+  position: absolute;
+  inset: 0;
   width: 100%;
-  height: clamp(280px, 42vw, 420px);
+  height: 100%;
   z-index: 1;
 }
 
 .assistant-inline-map-canvas.is-hidden {
   visibility: hidden;
-  height: 0;
-  min-height: 0;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .assistant-inline-map-canvas.is-ready {
   visibility: visible;
+  opacity: 1;
 }
 
 .assistant-inline-map-placeholder {
