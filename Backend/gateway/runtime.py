@@ -1892,6 +1892,126 @@ class GatewayRuntime:
             return True
         return bool(preference.get("enabled", True))
 
+    async def _heartbeat_delivery_target(
+        self,
+        heartbeat: dict[str, Any],
+        *,
+        session_id: str,
+    ) -> tuple[str, dict[str, Any]]:
+        configured_channel = self._safe_text(heartbeat.get("delivery_channel"))
+        delivery_state: dict[str, Any] = {
+            "configured_channel": configured_channel or "desktop",
+            "selected_channel": "desktop",
+            "selected_platform": "desktop",
+            "selection_reason": "desktop_default",
+            "desktop_connection_count": 0,
+            "mobile_connection_count": 0,
+            "mobile_push_target_count": 0,
+        }
+
+        if configured_channel and configured_channel not in {"auto", "desktop"}:
+            try:
+                resolution = self.resolve_channel_target(
+                    delivery_target=configured_channel,
+                    current_channel=None,
+                    fallback_channel=configured_channel,
+                )
+                resolved_channel = (
+                    self._safe_text(resolution.get("resolved_channel")) or "desktop"
+                )
+                delivery_state.update(
+                    {
+                        "selected_channel": resolved_channel,
+                        "selected_platform": self._channel_platform(resolved_channel)
+                        or "desktop",
+                        "selection_reason": "configured_channel",
+                    }
+                )
+                return resolved_channel, delivery_state
+            except Exception:
+                logger.exception(
+                    "gateway.heartbeat_configured_delivery_channel_failed channel=%s",
+                    configured_channel,
+                )
+
+        desktop_adapter = self.registry.adapters.get("desktop")
+        desktop_connections: list[dict[str, Any]] = []
+        if isinstance(desktop_adapter, DesktopAdapter):
+            try:
+                desktop_connections = await desktop_adapter.list_connections()
+            except Exception:
+                logger.exception("gateway.heartbeat_desktop_presence_failed")
+        delivery_state["desktop_connection_count"] = len(desktop_connections)
+        if desktop_connections:
+            channel = self._safe_text(desktop_connections[0].get("channel")) or "desktop"
+            delivery_state.update(
+                {
+                    "selected_channel": channel,
+                    "selected_platform": "desktop",
+                    "selection_reason": "desktop_connected",
+                }
+            )
+            return channel, delivery_state
+
+        mobile_adapter = self.registry.adapters.get("mobile")
+        mobile_connections: list[dict[str, Any]] = []
+        if isinstance(mobile_adapter, MobileAdapter):
+            try:
+                mobile_connections = await mobile_adapter.list_connections()
+            except Exception:
+                logger.exception("gateway.heartbeat_mobile_presence_failed")
+        delivery_state["mobile_connection_count"] = len(mobile_connections)
+        if mobile_connections:
+            devices_by_id = {
+                self._safe_text(item.get("device_id")): item
+                for item in await self.list_mobile_devices()
+                if self._safe_text(item.get("device_id"))
+            }
+
+            def mobile_rank(connection: dict[str, Any]) -> tuple[int, str]:
+                device_id = self._safe_text(connection.get("device_id")) or ""
+                device = devices_by_id.get(device_id) or {}
+                is_foreground = (
+                    self._safe_text(device.get("presence_state")) == "foreground"
+                    and self._mobile_presence_is_fresh(device)
+                )
+                return (1 if is_foreground else 0, self._safe_text(device.get("last_seen_at")) or "")
+
+            mobile_connections = sorted(
+                mobile_connections,
+                key=mobile_rank,
+                reverse=True,
+            )
+            channel = self._safe_text(mobile_connections[0].get("channel"))
+            if channel:
+                delivery_state.update(
+                    {
+                        "selected_channel": channel,
+                        "selected_platform": "mobile",
+                        "selection_reason": "mobile_connected",
+                    }
+                )
+                return channel, delivery_state
+
+        push_targets = self.mobile_device_store.list_push_targets(session_id=session_id)
+        if not push_targets:
+            push_targets = self.mobile_device_store.list_push_targets(session_id=None)
+        delivery_state["mobile_push_target_count"] = len(push_targets)
+        for target in push_targets:
+            device_id = self._safe_text(target.get("device_id"))
+            if device_id:
+                channel = f"mobile:{device_id}"
+                delivery_state.update(
+                    {
+                        "selected_channel": channel,
+                        "selected_platform": "mobile",
+                        "selection_reason": "mobile_push_target",
+                    }
+                )
+                return channel, delivery_state
+
+        return "desktop", delivery_state
+
     def _build_heartbeat_query(self, context_block: str | None) -> str:
         stored_prompt = ""
         try:
@@ -1905,11 +2025,11 @@ class GatewayRuntime:
             "Think across calendar commitments, inbox and approval pressure, active projects, "
             "background tasks, reminders, open loops, user interests, preferences, relationships, "
             "recent conversations, and what the user would likely want to know at this moment. "
-            "Use specialist/local tools only when a check is clearly worth it. Do not take external "
-            "actions unless the user already granted standing authorization. If there is nothing "
-            f"useful enough to interrupt for, respond exactly {HEARTBEAT_SUPPRESS_TOKEN} and nothing else. "
-            "If there is something useful, respond with a short, concrete, low-drama note; do not say "
-            "this came from a heartbeat."
+            "Use specialist/local tools only when a check is clearly worth it. Use the best COSMIC-owned "
+            "delivery path available; if a proactive item is better sent as email, you may use Cosmic Mail "
+            "or email capabilities when available. If there is nothing useful enough to interrupt for, "
+            f"respond exactly {HEARTBEAT_SUPPRESS_TOKEN} and nothing else. If there is something useful, "
+            "respond with a short, concrete, low-drama note; do not say this came from a heartbeat."
         )
         if not context_block:
             return prompt
@@ -1920,6 +2040,7 @@ class GatewayRuntime:
         *,
         scheduled_for: str | None,
         channel: str,
+        delivery_state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         session_id = self._current_session_id()
         session_metadata = self._ensure_session_state_seeded(session_id)
@@ -1959,6 +2080,8 @@ class GatewayRuntime:
             "current_session_id": session_id,
             "user_timezone": self.current_user_timezone(),
             "delivery_channel": channel,
+            "delivery_state": delivery_state or {},
+            "email_delivery_available": self._agent_email_effectively_enabled(),
             "scheduler": self.scheduler_store.summary(),
             "delivery_queue": self.delivery_queue_store.summary(),
             "active_task_count": len(active_tasks),
@@ -2003,10 +2126,26 @@ class GatewayRuntime:
             ("Current session", "current_session_id"),
             ("User timezone", "user_timezone"),
             ("Scheduled for", "scheduled_for"),
+            ("Delivery channel", "delivery_channel"),
         ):
             value = self._safe_text(context_packet.get(key))
             if value:
                 lines.append(f"- {label}: {value}")
+        delivery_state = (
+            context_packet.get("delivery_state")
+            if isinstance(context_packet.get("delivery_state"), dict)
+            else {}
+        )
+        if delivery_state:
+            lines.extend(
+                [
+                    f"- Active desktop connections: {int(delivery_state.get('desktop_connection_count') or 0)}",
+                    f"- Active mobile connections: {int(delivery_state.get('mobile_connection_count') or 0)}",
+                    f"- Mobile push targets: {int(delivery_state.get('mobile_push_target_count') or 0)}",
+                    f"- Delivery selection: {self._safe_text(delivery_state.get('selection_reason')) or 'desktop_default'}",
+                    f"- Email delivery available: {bool(context_packet.get('email_delivery_available'))}",
+                ]
+            )
         working_set = (
             context_packet.get("working_set_snapshot")
             if isinstance(context_packet.get("working_set_snapshot"), dict)
@@ -2103,9 +2242,12 @@ class GatewayRuntime:
         self, heartbeat: dict[str, Any]
     ) -> dict[str, Any]:
         scheduled_for = self._safe_text(heartbeat.get("next_fire_at"))
-        channel = self._safe_text(heartbeat.get("delivery_channel")) or "desktop"
         request_id, idempotency_key = self._heartbeat_execution_identity(scheduled_for)
         session_id = self._current_session_id()
+        channel, delivery_state = await self._heartbeat_delivery_target(
+            heartbeat,
+            session_id=session_id,
+        )
         session_metadata = self._ensure_session_state_seeded(session_id)
         active_working_set = (
             session_metadata.get("active_working_set")
@@ -2115,6 +2257,7 @@ class GatewayRuntime:
         context_packet = await self._build_heartbeat_context_packet(
             scheduled_for=scheduled_for,
             channel=channel,
+            delivery_state=delivery_state,
         )
         context_block = self._render_heartbeat_context_block(context_packet)
         memory_prompt_context = await self._assemble_memory_prompt_context(
@@ -2152,6 +2295,7 @@ class GatewayRuntime:
                     "heartbeat_id": HEARTBEAT_SOURCE_ID,
                     "scheduled_for": scheduled_for,
                     "delivery_channel": channel,
+                    "delivery_state": delivery_state,
                 },
             },
             "assembled_conversation_context": [],
@@ -7460,6 +7604,8 @@ class GatewayRuntime:
         activity_log: list[dict[str, Any]] | None = None,
         alpha_terminal_log: list[dict[str, Any]] | None = None,
         response_blocks: list[dict[str, Any]] | None = None,
+        source: str | None = None,
+        source_id: str | None = None,
     ) -> None:
         """Push a cross-channel message to connected desktop/mobile clients on other platforms."""
         if not session_id or not channel:
@@ -7486,6 +7632,10 @@ class GatewayRuntime:
         }
         if message_id:
             event["message_id"] = message_id
+        if source:
+            event["source"] = source
+        if source_id:
+            event["source_id"] = source_id
         if sources:
             event["sources"] = sources
         if thinking_text:
@@ -7617,6 +7767,19 @@ class GatewayRuntime:
         data: dict[str, Any],
     ) -> None:
         targets = self.mobile_device_store.list_push_targets(session_id=session_id)
+        if not targets and self._channel_platform(origin_channel) == "mobile":
+            _, separator, device_id = (origin_channel or "").partition(":")
+            device = self.mobile_device_store.get_device(device_id) if separator else None
+            if (
+                isinstance(device, dict)
+                and bool(device.get("notifications_enabled", True))
+                and not self._safe_text(device.get("revoked_at"))
+                and (
+                    self._safe_text(device.get("push_token"))
+                    or self._safe_text(device.get("fcm_token"))
+                )
+            ):
+                targets = [device]
         if not targets and self._channel_platform(origin_channel) != "mobile":
             targets = self.mobile_device_store.list_push_targets(session_id=None)
         if not targets:
@@ -12297,7 +12460,9 @@ class GatewayRuntime:
                 or "Agent Email"
             )
             push_title = (
-                "Email approval needed"
+                "❤️ Cosmic heartbeat"
+                if self._is_heartbeat_event(event)
+                else "Email approval needed"
                 if email_queued_for_approval
                 else "Response ready"
                 if event_channel_platform == "mobile"
@@ -12318,6 +12483,9 @@ class GatewayRuntime:
                 priority="high" if email_queued_for_approval else "default",
                 data={
                     "type": (
+                        "heartbeat.response"
+                        if self._is_heartbeat_event(event)
+                        else
                         "agent_email.approval"
                         if email_queued_for_approval
                         else "response.complete"
@@ -12325,6 +12493,8 @@ class GatewayRuntime:
                     "request_id": request_id,
                     "message_id": assistant_message_id,
                     "origin_channel": event_channel,
+                    "source": self._safe_text(event.get("source")),
+                    "source_id": self._safe_text(event.get("source_id")),
                     "approval_id": self._safe_text(email_delivery.get("approval_id")),
                 },
             )
@@ -12367,6 +12537,8 @@ class GatewayRuntime:
                         activity_log=activity_log,
                         alpha_terminal_log=alpha_terminal_log,
                         response_blocks=response_blocks,
+                        source=self._safe_text(event.get("source")),
+                        source_id=self._safe_text(event.get("source_id")),
                     )
                 )
             if self._is_heartbeat_event(event) and request_id:
@@ -12949,6 +13121,25 @@ class GatewayRuntime:
                 "updated_source": "runtime_fallback",
                 "updated_device_id": None,
             }
+        try:
+            heartbeat_state = self.scheduler_store.get_heartbeat()
+            cosmic_heartbeat = {
+                **cosmic_heartbeat,
+                "interval_sec": int(heartbeat_state.get("interval_sec") or 1800),
+                "next_fire_at": self._safe_text(heartbeat_state.get("next_fire_at")),
+                "last_fired_at": self._safe_text(heartbeat_state.get("last_fired_at")),
+                "last_suppressed_at": self._safe_text(
+                    heartbeat_state.get("last_suppressed_at")
+                ),
+                "last_result_status": self._safe_text(
+                    heartbeat_state.get("last_result_status")
+                ),
+                "last_result_summary": self._safe_text(
+                    heartbeat_state.get("last_result_summary")
+                ),
+            }
+        except Exception:
+            logger.exception("gateway.heartbeat_state_snapshot_failed")
         return {
             "visual_response_enhancement": visual_response_enhancement,
             "cosmic_orchestrator_model": cosmic_orchestrator_model,

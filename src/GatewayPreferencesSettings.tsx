@@ -32,6 +32,12 @@ interface CosmicOrchestratorModelPreference extends TimestampedPreference {
 
 interface CosmicHeartbeatPreference extends TimestampedPreference {
   enabled: boolean
+  intervalSec?: number | null
+  nextFireAt?: string | null
+  lastFiredAt?: string | null
+  lastSuppressedAt?: string | null
+  lastResultStatus?: string | null
+  lastResultSummary?: string | null
 }
 
 interface GatewayPreferenceSnapshot {
@@ -104,6 +110,39 @@ function normalizePreferences(payload: unknown): GatewayPreferenceSnapshot | nul
     heartbeat: {
       ...normalizeTimestampedPreference(heartbeatSource),
       enabled: heartbeatSource.enabled !== false,
+      intervalSec: Number.isFinite(Number(heartbeatSource.interval_sec ?? heartbeatSource.intervalSec))
+        ? Number(heartbeatSource.interval_sec ?? heartbeatSource.intervalSec)
+        : null,
+      nextFireAt:
+        typeof heartbeatSource.next_fire_at === 'string'
+          ? heartbeatSource.next_fire_at
+          : typeof heartbeatSource.nextFireAt === 'string'
+            ? heartbeatSource.nextFireAt
+            : null,
+      lastFiredAt:
+        typeof heartbeatSource.last_fired_at === 'string'
+          ? heartbeatSource.last_fired_at
+          : typeof heartbeatSource.lastFiredAt === 'string'
+            ? heartbeatSource.lastFiredAt
+            : null,
+      lastSuppressedAt:
+        typeof heartbeatSource.last_suppressed_at === 'string'
+          ? heartbeatSource.last_suppressed_at
+          : typeof heartbeatSource.lastSuppressedAt === 'string'
+            ? heartbeatSource.lastSuppressedAt
+            : null,
+      lastResultStatus:
+        typeof heartbeatSource.last_result_status === 'string'
+          ? heartbeatSource.last_result_status
+          : typeof heartbeatSource.lastResultStatus === 'string'
+            ? heartbeatSource.lastResultStatus
+            : null,
+      lastResultSummary:
+        typeof heartbeatSource.last_result_summary === 'string'
+          ? heartbeatSource.last_result_summary
+          : typeof heartbeatSource.lastResultSummary === 'string'
+            ? heartbeatSource.lastResultSummary
+            : null,
     },
   }
 }
@@ -117,6 +156,60 @@ function formatUpdatedAt(value: string | null) {
     return null
   }
   return date.toLocaleString()
+}
+
+function formatRelativeTime(value: string | null | undefined) {
+  if (!value) return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return null
+  const diffMs = Date.now() - date.getTime()
+  if (diffMs < 0) return 'just now'
+  const minute = 60 * 1000
+  const hour = 60 * minute
+  const day = 24 * hour
+  if (diffMs < minute) return 'just now'
+  if (diffMs < hour) {
+    const minutes = Math.max(1, Math.round(diffMs / minute))
+    return `${minutes} min${minutes === 1 ? '' : 's'} ago`
+  }
+  if (diffMs < day) {
+    const hours = Math.max(1, Math.round(diffMs / hour))
+    return `${hours} hour${hours === 1 ? '' : 's'} ago`
+  }
+  const days = Math.max(1, Math.round(diffMs / day))
+  return `${days} day${days === 1 ? '' : 's'} ago`
+}
+
+function formatFutureTime(value: string | null | undefined) {
+  if (!value) return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return null
+  const diffMs = date.getTime() - Date.now()
+  if (diffMs <= 0) return 'due now'
+  const minute = 60 * 1000
+  const hour = 60 * minute
+  const day = 24 * hour
+  if (diffMs < hour) {
+    const minutes = Math.max(1, Math.round(diffMs / minute))
+    return `in ${minutes} min${minutes === 1 ? '' : 's'}`
+  }
+  if (diffMs < day) {
+    const hours = Math.max(1, Math.round(diffMs / hour))
+    return `in ${hours} hour${hours === 1 ? '' : 's'}`
+  }
+  const days = Math.max(1, Math.round(diffMs / day))
+  return `in ${days} day${days === 1 ? '' : 's'}`
+}
+
+function heartbeatIntervalLabel(seconds?: number | null) {
+  const normalized = Number(seconds || 0)
+  if (!Number.isFinite(normalized) || normalized <= 0) return '30 min'
+  if (normalized < 3600) {
+    const minutes = Math.max(1, Math.round(normalized / 60))
+    return `${minutes} min`
+  }
+  const hours = normalized / 3600
+  return Number.isInteger(hours) ? `${hours} hr` : `${hours.toFixed(1)} hr`
 }
 
 function preferenceDetail(preference: TimestampedPreference | null) {
@@ -200,6 +293,17 @@ export default function GatewayPreferencesSettings({
       .sort((a, b) => b.getTime() - a.getTime())
     return formatUpdatedAt(candidates[0]?.toISOString() || null)
   }, [preferences?.visual.updatedAt, preferences?.cosmic.updatedAt, preferences?.heartbeat.updatedAt])
+
+  const lastBeatLabel = useMemo(() => {
+    const relative = formatRelativeTime(preferences?.heartbeat.lastFiredAt || preferences?.heartbeat.lastSuppressedAt)
+    return relative ? `Last beat ${relative}` : 'No beat yet'
+  }, [preferences?.heartbeat.lastFiredAt, preferences?.heartbeat.lastSuppressedAt])
+
+  const nextBeatLabel = useMemo(() => {
+    if (!preferences?.heartbeat.nextFireAt) return 'Next beat pending'
+    const relative = formatFutureTime(preferences.heartbeat.nextFireAt)
+    return relative ? `Next beat ${relative}` : 'Next beat scheduled'
+  }, [preferences?.heartbeat.nextFireAt])
 
   const isSaving = Boolean(savingKey)
   const statusLabel = !isAuthenticated
@@ -297,9 +401,18 @@ export default function GatewayPreferencesSettings({
 
   return (
     <div className="setting-subpage preferences-page">
-      <div className="preferences-intro">
-        These preferences live on your Cosmic VM and apply across desktop sessions connected to this backend.
-      </div>
+      <header className="preferences-hero">
+        <div className="preferences-hero-top">
+          <div className="preferences-hero-text">
+            <span className="preferences-kicker">Gateway</span>
+            <h2 className="preferences-title">Preferences</h2>
+          </div>
+          <span className={`preferences-status-chip ${statusTone}`}>{statusLabel}</span>
+        </div>
+        <p className="preferences-lead">
+          These preferences live on your Cosmic VM and follow the desktop and mobile clients attached to this backend.
+        </p>
+      </header>
 
       {!isAuthenticated && (
         <div className="preferences-status-meta subtle">
@@ -307,10 +420,20 @@ export default function GatewayPreferencesSettings({
         </div>
       )}
 
-      <div className="preferences-status-row">
-        <span className={`preferences-status-chip ${statusTone}`}>{statusLabel}</span>
+      <div className="preferences-stats" aria-label="Preference summary">
+        <div className="preferences-stat">
+          <span className="preferences-stat-value">{preferences?.heartbeat.enabled ? 'On' : 'Off'}</span>
+          <span className="preferences-stat-label">Heartbeat</span>
+        </div>
+        <div className="preferences-stat preferences-stat--accent">
+          <span className="preferences-stat-value">{heartbeatIntervalLabel(preferences?.heartbeat.intervalSec)}</span>
+          <span className="preferences-stat-label">Cadence</span>
+        </div>
         {latestUpdatedAt && (
-          <span className="preferences-status-meta">Last updated {latestUpdatedAt}</span>
+          <div className="preferences-stat">
+            <span className="preferences-stat-value">Saved</span>
+            <span className="preferences-stat-label">{latestUpdatedAt}</span>
+          </div>
         )}
       </div>
 
@@ -387,9 +510,19 @@ export default function GatewayPreferencesSettings({
 
       <div className={`preferences-card ${!canSave ? 'muted' : ''}`}>
         <div className="preferences-card-copy">
-          <div className="preferences-card-title">Cosmic Heartbeat</div>
+          <div className="preferences-card-title-row">
+            <span className="preferences-heart-icon" aria-hidden>❤️</span>
+            <div className="preferences-card-title">Cosmic Heartbeat</div>
+          </div>
           <div className="preferences-card-note">
             Let Cosmic run a quiet ambient check every 30 minutes and only surface a note when there is something genuinely useful.
+          </div>
+          <div className="preferences-heartbeat-meta">
+            <span>{lastBeatLabel}</span>
+            <span>{nextBeatLabel}</span>
+            {preferences?.heartbeat.lastResultStatus ? (
+              <span>{preferences.heartbeat.lastResultStatus}</span>
+            ) : null}
           </div>
           {preferenceDetail(preferences?.heartbeat || null) && (
             <div className="preferences-card-detail">
@@ -398,20 +531,26 @@ export default function GatewayPreferencesSettings({
           )}
         </div>
 
-        <button
-          type="button"
-          className={`preferences-switch ${preferences?.heartbeat.enabled ? 'enabled' : 'disabled'}`}
-          onClick={handleToggleHeartbeat}
-          disabled={!canSave}
-          aria-pressed={preferences?.heartbeat.enabled === true}
-        >
-          <span className="preferences-switch-track">
-            <span className="preferences-switch-thumb" />
+        <div className="preferences-heartbeat-control">
+          <span className="preferences-heartbeat-last">
+            <span aria-hidden>❤️</span>
+            {lastBeatLabel}
           </span>
-          <span className="preferences-switch-label">
-            {preferences?.heartbeat.enabled ? 'On' : 'Off'}
-          </span>
-        </button>
+          <button
+            type="button"
+            className={`preferences-switch ${preferences?.heartbeat.enabled ? 'enabled' : 'disabled'}`}
+            onClick={handleToggleHeartbeat}
+            disabled={!canSave}
+            aria-pressed={preferences?.heartbeat.enabled === true}
+          >
+            <span className="preferences-switch-track">
+              <span className="preferences-switch-thumb" />
+            </span>
+            <span className="preferences-switch-label">
+              {preferences?.heartbeat.enabled ? 'On' : 'Off'}
+            </span>
+          </button>
+        </div>
       </div>
 
       {error && (

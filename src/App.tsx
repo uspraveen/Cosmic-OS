@@ -962,6 +962,14 @@ const historyToMessages = (history: any[] = []): Message[] => {
     }))
 }
 
+const isHeartbeatMessage = (message: Pick<Message, 'role' | 'source' | 'sourceId'>) => (
+  message.role === 'assistant' &&
+  (
+    String(message.source || '').trim() === 'heartbeat' ||
+    String(message.sourceId || '').trim().startsWith('heartbeat:')
+  )
+)
+
 const normalizeForegroundStreamSnapshot = (value: unknown): GatewayForegroundStreamSnapshot | null => {
   if (!value || typeof value !== 'object') {
     return null
@@ -4468,6 +4476,10 @@ export default function App() {
               ? responseBlocks
               : undefined,
             channel: typeof event.channel === 'string' ? event.channel : null,
+            requestId: typeof event.request_id === 'string' ? event.request_id : null,
+            source: role === 'assistant' && typeof event.source === 'string' ? event.source : null,
+            sourceId: role === 'assistant' && typeof event.source_id === 'string' ? event.source_id : null,
+            createdAt: new Date().toISOString(),
             sources: role === 'assistant' && Array.isArray(event.sources) ? event.sources : undefined,
             thinking: role === 'assistant' && typeof event.thinking_text === 'string' ? event.thinking_text : undefined,
           }
@@ -6124,6 +6136,12 @@ export default function App() {
                               </div>
                               {pairedResponse && (
                                 <div className="message-row assistant" style={{ marginBottom: 8, display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
+                                  {isHeartbeatMessage(pairedResponse) && (
+                                    <div className="assistant-heartbeat-badge" title="Proactive Cosmic heartbeat">
+                                      <span aria-hidden>❤️</span>
+                                      <span>Cosmic heartbeat</span>
+                                    </div>
+                                  )}
                                   {pairedResponse.responseBlocks && pairedResponse.responseBlocks.length > 0 ? (
                                     <AssistantResponseBlocks blocks={pairedResponse.responseBlocks} />
                                   ) : (
@@ -6193,6 +6211,12 @@ export default function App() {
                         </>
                       ) : (
                         <>
+                          {isHeartbeatMessage(msg) && (
+                            <div className="assistant-heartbeat-badge" title="Proactive Cosmic heartbeat">
+                              <span aria-hidden>❤️</span>
+                              <span>Cosmic heartbeat</span>
+                            </div>
+                          )}
                           {msg.progress?.kind === 'docs_parse' && !String(msg.content || '').trim() && (
                             <DocsProgressCard progress={msg.progress} />
                           )}

@@ -15,7 +15,7 @@ The heartbeat should look wider than calendars and inboxes. It should consider a
 - `heartbeat_ok` is suppressed by Gateway and is not stored, streamed, pushed, or shown.
 - If there is something useful, COSMIC sends a short, concrete proactive note through the normal response pipeline.
 - Heartbeat is low priority and must not interfere with foreground user work.
-- Heartbeat may inspect state and use tools when justified, but it must not take external action without explicit standing authorization or approval.
+- Heartbeat may inspect state and use tools when justified. It may choose the best COSMIC-owned delivery path, including chat, mobile push, or email, when that channel is the clearest way to help the user.
 
 ## Context Surface
 
@@ -28,6 +28,8 @@ Each heartbeat receives a compact context packet rather than a replayed chat pro
 - Active background tasks and Alpha work.
 - Scheduler status and upcoming user crons.
 - Delivery queue status for offline or deferred items.
+- Mobile/desktop presence and selected delivery channel.
+- Whether Cosmic Mail/email delivery is available.
 - Stable user preferences and interests from carry-forward/memory.
 - Passive memory recall for broad user priorities.
 
@@ -35,7 +37,7 @@ Future expansions should add first-class summaries for:
 
 - Calendar windows and travel/logistics pressure.
 - Inbox and Cosmic Mail approvals.
-- Mobile/desktop presence.
+- Richer presence signals such as desktop foreground state and quiet-hours aware mobile status.
 - Important contacts and relationship context.
 - User watchlists: YC, AI research, products, companies, documents, projects.
 - External world state only when recent context suggests it matters.
@@ -51,7 +53,8 @@ Think across calendar commitments, inbox and approval pressure, active projects,
 background tasks, reminders, open loops, user interests, preferences, relationships,
 recent conversations, and what the user would likely want to know at this moment.
 Use specialist/local tools only when a check is clearly worth it.
-Do not take external actions unless the user already granted standing authorization.
+Use the best COSMIC-owned delivery path available; if a proactive item is better
+sent as email, use Cosmic Mail or email capabilities when available.
 If there is nothing useful enough to interrupt for, respond exactly heartbeat_ok and nothing else.
 If there is something useful, respond with a short, concrete, low-drama note;
 do not say this came from a heartbeat.
@@ -68,6 +71,7 @@ Gateway owns the schedule because Gateway already owns sessions, delivery, prefe
 - The scheduler loop calls the heartbeat after due crons.
 - Gateway builds a normal `TaskEnvelope` with `source="heartbeat"` and `priority="low"`.
 - The heartbeat request uses an empty live conversation context and a compact memory/context block.
+- Gateway resolves delivery at run time: active desktop first, then active mobile, then the latest mobile push target, then queued desktop fallback.
 - `visual_response_enhancement_enabled` is disabled for heartbeat turns unless explicitly changed later.
 - Heartbeat response chunks and progress are not streamed; only a useful final response is delivered.
 - `heartbeat_ok` final responses are suppressed before session storage, push, delivery queue, and UI display.
@@ -77,8 +81,9 @@ Gateway owns the schedule because Gateway already owns sessions, delivery, prefe
 Useful heartbeat responses use the existing response path. That means:
 
 - Desktop receives the note when connected.
-- If desktop is offline, the response can be queued like scheduled cron output.
-- Mobile push can still alert the user through the normal response-complete push path.
+- If desktop is offline, Gateway can target the active mobile app or the latest mobile push target.
+- Mobile push labels heartbeat responses with a heart so the user knows it is proactive.
+- If the heartbeat decides the item is better mailed, it may use Cosmic Mail/email capabilities instead of forcing a chat note.
 - Cross-channel sync continues to work for visible heartbeat notes.
 
 If the user opens and handles an item through mobile, future deduplication should avoid replaying stale proactive items when desktop returns.

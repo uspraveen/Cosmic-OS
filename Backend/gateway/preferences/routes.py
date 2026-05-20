@@ -34,6 +34,12 @@ class CosmicHeartbeatPreference(BaseModel):
     updated_at: str
     updated_source: str | None = None
     updated_device_id: str | None = None
+    interval_sec: int | None = None
+    next_fire_at: str | None = None
+    last_fired_at: str | None = None
+    last_suppressed_at: str | None = None
+    last_result_status: str | None = None
+    last_result_summary: str | None = None
 
 
 class DesktopPreferencesResponse(BaseModel):
