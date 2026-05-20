@@ -13,6 +13,7 @@ PROMPT_DIR = Path(__file__).resolve().parent
 _PROMPT_ASSETS = (
     "thin_system.md",
     "system.md",
+    "soul.md",
     "policies.md",
     "visual_response_policy.md",
     "memory_authority.md",
@@ -26,6 +27,7 @@ def _load_prompt_asset(name: str) -> str:
 
 THIN_ORCHESTRATOR_SYSTEM_PROMPT = _load_prompt_asset("thin_system.md")
 AGENTIC_ORCHESTRATOR_SYSTEM_PROMPT = _load_prompt_asset("system.md")
+ORCHESTRATOR_SOUL_PROMPT = _load_prompt_asset("soul.md")
 ORCHESTRATOR_POLICIES_PROMPT = _load_prompt_asset("policies.md")
 ORCHESTRATOR_VISUAL_RESPONSE_POLICY_PROMPT = _load_prompt_asset(
     "visual_response_policy.md"
@@ -76,6 +78,7 @@ def build_agentic_system_prompt(
     }
     sections = [
         AGENTIC_ORCHESTRATOR_SYSTEM_PROMPT,
+        ORCHESTRATOR_SOUL_PROMPT,
         build_featured_specialists_prompt(featured_specialists),
         build_tool_prompt_catalog(featured_agent_ids),
         ORCHESTRATOR_POLICIES_PROMPT,

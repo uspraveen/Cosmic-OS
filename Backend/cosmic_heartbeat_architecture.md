@@ -2,7 +2,7 @@
 
 ## Purpose
 
-COSMIC Heartbeat is the ambient attention loop for the system. It is not a reminder engine alone. It is a quiet, periodic consciousness pass that asks: "Is there anything Praveen would genuinely want COSMIC to notice, connect, or surface right now?"
+COSMIC Heartbeat is the ambient attention loop for the system. It is not a reminder engine alone. It is a quiet, periodic consciousness pass that asks: "Is there anything the user would genuinely want COSMIC to notice, connect, or surface right now?"
 
 The heartbeat should look wider than calendars and inboxes. It should consider active work, background tasks, approvals, recent conversations, user preferences, long-running interests, open loops, deadlines, relationships, system health, and project context. Its default behavior is silence.
 
