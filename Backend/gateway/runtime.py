@@ -12307,6 +12307,12 @@ class GatewayRuntime:
                     ):
                         if artifact.get(key) not in (None, "", [], {}):
                             block[key] = artifact.get(key)
+                    if is_supported_map_artifact(artifact):
+                        block["type"] = "map_artifact"
+                    elif is_supported_image_artifact(artifact):
+                        block["type"] = "image_artifact"
+                    else:
+                        block["type"] = "file_artifact"
             hydrated.append(
                 {
                     key: val

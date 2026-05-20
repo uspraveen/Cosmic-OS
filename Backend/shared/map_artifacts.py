@@ -10,7 +10,6 @@ SUPPORTED_MAP_MIME_TYPES = frozenset(
     {
         COSMIC_MAP_MIME_TYPE,
         "application/geo+json",
-        "application/json",
     }
 )
 
@@ -34,7 +33,8 @@ def is_supported_map_artifact(artifact: dict[str, Any] | None) -> bool:
         return True
     mime = str(artifact.get("mime") or artifact.get("mime_type") or "").strip().lower()
     filename = str(artifact.get("filename") or artifact.get("path") or "").strip()
+    filename_lower = Path(filename).name.lower() if filename else ""
     extension = Path(filename).suffix.lower() if filename else ""
     if mime in SUPPORTED_MAP_MIME_TYPES:
         return True
-    return extension in SUPPORTED_MAP_EXTENSIONS
+    return filename_lower.endswith(COSMIC_MAP_EXTENSION) or extension in SUPPORTED_MAP_EXTENSIONS

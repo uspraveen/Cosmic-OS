@@ -9,6 +9,11 @@ def test_is_supported_map_artifact() -> None:
     assert is_supported_map_artifact(
         {"mime_type": "application/vnd.cosmic.map+json", "filename": "route.json"}
     )
+    assert is_supported_map_artifact({"filename": "map.cosmic-map.json"})
+    assert is_supported_map_artifact({"filename": "route.geojson"})
+    assert not is_supported_map_artifact(
+        {"mime_type": "application/json", "filename": "scrape_response.json"}
+    )
     assert not is_supported_map_artifact({"kind": "chart", "filename": "plot.png"})
 
 
@@ -26,3 +31,20 @@ def test_build_response_blocks_emits_map_artifact() -> None:
     )
     assert [block["type"] for block in blocks] == ["markdown", "map_artifact", "markdown"]
     assert blocks[1]["artifact_id"] == "art_map_1"
+
+
+def test_build_response_blocks_keeps_generic_json_as_file_artifact() -> None:
+    blocks = build_response_blocks(
+        "Scrape complete.",
+        [
+            {
+                "artifact_id": "art_scrape_json",
+                "filename": "scrape_response.json",
+                "mime_type": "application/json",
+                "downloadable": True,
+            }
+        ],
+    )
+    assert [block["type"] for block in blocks] == ["markdown", "file_artifact"]
+    assert blocks[1]["artifact_id"] == "art_scrape_json"
+    assert blocks[1]["filename"] == "scrape_response.json"
