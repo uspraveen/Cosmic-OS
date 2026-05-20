@@ -129,6 +129,7 @@ interface Window {
       visualResponseEnhancementEnabled?: boolean
       cosmicOrchestratorProvider?: 'anthropic' | 'fireworks_kimi'
       cosmicOrchestratorModel?: string
+      cosmicHeartbeatEnabled?: boolean
     }) => Promise<any>
     getGatewayCodexStatus: () => Promise<any>
     saveGatewayCodexConfig: (payload: {

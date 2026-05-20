@@ -30,9 +30,14 @@ interface CosmicOrchestratorModelPreference extends TimestampedPreference {
   model: string
 }
 
+interface CosmicHeartbeatPreference extends TimestampedPreference {
+  enabled: boolean
+}
+
 interface GatewayPreferenceSnapshot {
   visual: VisualResponseEnhancementPreference
   cosmic: CosmicOrchestratorModelPreference
+  heartbeat: CosmicHeartbeatPreference
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -80,8 +85,9 @@ function normalizePreferences(payload: unknown): GatewayPreferenceSnapshot | nul
   const root = asRecord(payloadRecord?.preferences) || payloadRecord
   const visualSource = asRecord(root?.visual_response_enhancement)
   const cosmicSource = asRecord(root?.cosmic_orchestrator_model)
+  const heartbeatSource = asRecord(root?.cosmic_heartbeat)
 
-  if (!visualSource || !cosmicSource) {
+  if (!visualSource || !cosmicSource || !heartbeatSource) {
     return null
   }
 
@@ -94,6 +100,10 @@ function normalizePreferences(payload: unknown): GatewayPreferenceSnapshot | nul
       ...normalizeTimestampedPreference(cosmicSource),
       provider: normalizeCosmicProvider(cosmicSource.provider),
       model: typeof cosmicSource.model === 'string' ? cosmicSource.model : '',
+    },
+    heartbeat: {
+      ...normalizeTimestampedPreference(heartbeatSource),
+      enabled: heartbeatSource.enabled !== false,
     },
   }
 }
@@ -129,7 +139,7 @@ export default function GatewayPreferencesSettings({
 }: GatewayPreferencesSettingsProps) {
   const [preferences, setPreferences] = useState<GatewayPreferenceSnapshot | null>(null)
   const [isLoading, setIsLoading] = useState(false)
-  const [savingKey, setSavingKey] = useState<'visual' | 'cosmic' | null>(null)
+  const [savingKey, setSavingKey] = useState<'visual' | 'cosmic' | 'heartbeat' | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const loadPreferences = async () => {
@@ -183,12 +193,13 @@ export default function GatewayPreferencesSettings({
     const candidates = [
       preferences?.visual.updatedAt || null,
       preferences?.cosmic.updatedAt || null,
+      preferences?.heartbeat.updatedAt || null,
     ]
       .map((value) => (value ? new Date(value) : null))
       .filter((value): value is Date => value instanceof Date && !Number.isNaN(value.getTime()))
       .sort((a, b) => b.getTime() - a.getTime())
     return formatUpdatedAt(candidates[0]?.toISOString() || null)
-  }, [preferences?.visual.updatedAt, preferences?.cosmic.updatedAt])
+  }, [preferences?.visual.updatedAt, preferences?.cosmic.updatedAt, preferences?.heartbeat.updatedAt])
 
   const isSaving = Boolean(savingKey)
   const statusLabel = !isAuthenticated
@@ -227,6 +238,28 @@ export default function GatewayPreferencesSettings({
     try {
       const payload = await window.cosmic.saveGatewayPreferences({
         visualResponseEnhancementEnabled: !preferences.visual.enabled,
+      })
+      const nextPreferences = normalizePreferences(payload)
+      if (!nextPreferences) {
+        throw new Error('Gateway returned an invalid preferences payload.')
+      }
+      setPreferences(nextPreferences)
+    } catch (err: unknown) {
+      setError(errorMessage(err, 'Unable to save this preference to your VM.'))
+    } finally {
+      setSavingKey(null)
+    }
+  }
+
+  const handleToggleHeartbeat = async () => {
+    if (!preferences || !window.cosmic?.saveGatewayPreferences || !canSave) {
+      return
+    }
+    setSavingKey('heartbeat')
+    setError(null)
+    try {
+      const payload = await window.cosmic.saveGatewayPreferences({
+        cosmicHeartbeatEnabled: !preferences.heartbeat.enabled,
       })
       const nextPreferences = normalizePreferences(payload)
       if (!nextPreferences) {
@@ -348,6 +381,35 @@ export default function GatewayPreferencesSettings({
           </span>
           <span className="preferences-switch-label">
             {preferences?.visual.enabled ? 'On' : 'Off'}
+          </span>
+        </button>
+      </div>
+
+      <div className={`preferences-card ${!canSave ? 'muted' : ''}`}>
+        <div className="preferences-card-copy">
+          <div className="preferences-card-title">Cosmic Heartbeat</div>
+          <div className="preferences-card-note">
+            Let Cosmic run a quiet ambient check every 30 minutes and only surface a note when there is something genuinely useful.
+          </div>
+          {preferenceDetail(preferences?.heartbeat || null) && (
+            <div className="preferences-card-detail">
+              {preferenceDetail(preferences?.heartbeat || null)}
+            </div>
+          )}
+        </div>
+
+        <button
+          type="button"
+          className={`preferences-switch ${preferences?.heartbeat.enabled ? 'enabled' : 'disabled'}`}
+          onClick={handleToggleHeartbeat}
+          disabled={!canSave}
+          aria-pressed={preferences?.heartbeat.enabled === true}
+        >
+          <span className="preferences-switch-track">
+            <span className="preferences-switch-thumb" />
+          </span>
+          <span className="preferences-switch-label">
+            {preferences?.heartbeat.enabled ? 'On' : 'Off'}
           </span>
         </button>
       </div>

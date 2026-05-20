@@ -135,6 +135,7 @@ class GatewayConfig:
     cosmic_mail_webhook_secret: str = ""
     cosmic_mail_webhook_signature_header: str = "X-Cosmic-Mail-Signature"
     scheduler_poll_interval_sec: float = 30.0
+    heartbeat_interval_sec: int = 1800
     delivery_retry_base_sec: float = 1.0
     delivery_retry_max_sec: float = 120.0
     delivery_max_attempts: int = 12
@@ -419,6 +420,10 @@ class GatewayConfig:
             scheduler_poll_interval_sec=max(
                 5.0,
                 _env_float("GATEWAY_SCHEDULER_POLL_INTERVAL_SEC", 30.0),
+            ),
+            heartbeat_interval_sec=max(
+                60,
+                _env_int("GATEWAY_HEARTBEAT_INTERVAL_SEC", 1800),
             ),
             delivery_retry_base_sec=max(
                 0.25,

@@ -132,6 +132,8 @@ DEFAULT_CONTEXT_WINDOW_TOKENS = 48_000
 MEMORY_WRITE_RATE_WINDOW_SEC = 3_600
 MEMORY_WRITE_PREVIEW_CHARS = 400
 SYSTEM_CRON_DAILY_ROLLOVER = "system.daily_rollover"
+HEARTBEAT_SOURCE_ID = "default"
+HEARTBEAT_SUPPRESS_TOKEN = "heartbeat_ok"
 TURN_LEDGER_WINDOW_SIZE = 10
 TASK_NOTEBOOK_WINDOW_SIZE = 5
 TASK_ACTIVITY_LOG_LIMIT = 64
@@ -400,6 +402,7 @@ class GatewayRuntime:
         self._recent_push_dedupe: dict[str, float] = {}
         self._codex_login_session: dict[str, Any] | None = None
         self._cursor_login_session: dict[str, Any] | None = None
+        self._heartbeat_outcomes_by_request_id: dict[str, dict[str, str]] = {}
 
     async def start(self) -> None:
         self.session_store.initialize()
@@ -412,7 +415,8 @@ class GatewayRuntime:
         self.artifact_store.initialize()
         self.delivery_queue_store.initialize()
         self.scheduler_store.initialize(
-            default_timezone=self.config.user_timezone_fallback
+            default_timezone=self.config.user_timezone_fallback,
+            default_heartbeat_interval_sec=self.config.heartbeat_interval_sec,
         )
         self.agent_email_integration_store.initialize()
         self.agent_auth_store.initialize()
@@ -1830,6 +1834,396 @@ class GatewayRuntime:
             f"cron:{cron_id}:{scheduled_for or 'unscheduled'}",
         )
 
+    def _heartbeat_execution_identity(self, scheduled_for: str | None) -> tuple[str, str]:
+        base = f"{HEARTBEAT_SOURCE_ID}:{scheduled_for or 'unscheduled'}".encode(
+            "utf-8"
+        )
+        digest = hashlib.sha256(base).hexdigest()[:16]
+        return (
+            f"req_heartbeat_{digest}",
+            f"heartbeat:{HEARTBEAT_SOURCE_ID}:{scheduled_for or 'unscheduled'}",
+        )
+
+    def _heartbeat_interval_sec(self, heartbeat: dict[str, Any] | None = None) -> int:
+        configured = self.config.heartbeat_interval_sec
+        if isinstance(heartbeat, dict):
+            try:
+                configured = int(heartbeat.get("interval_sec") or configured)
+            except (TypeError, ValueError):
+                configured = self.config.heartbeat_interval_sec
+        return max(60, configured)
+
+    def _heartbeat_next_fire_at(
+        self,
+        *,
+        after: datetime | None = None,
+        heartbeat: dict[str, Any] | None = None,
+    ) -> str:
+        current = after or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        next_fire = current + timedelta(seconds=self._heartbeat_interval_sec(heartbeat))
+        return next_fire.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _parse_utc_iso(self, value: str | None) -> datetime | None:
+        text = self._safe_text(value)
+        if not text:
+            return None
+        try:
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _heartbeat_preference_enabled(self) -> bool:
+        try:
+            snapshot = self.get_desktop_preferences_snapshot()
+        except Exception:
+            logger.exception(
+                "gateway.heartbeat_preference_snapshot_failed; defaulting enabled"
+            )
+            return True
+        preference = snapshot.get("cosmic_heartbeat")
+        if not isinstance(preference, dict):
+            return True
+        return bool(preference.get("enabled", True))
+
+    def _build_heartbeat_query(self, context_block: str | None) -> str:
+        stored_prompt = ""
+        try:
+            heartbeat = self.scheduler_store.get_heartbeat()
+            stored_prompt = self._safe_text(heartbeat.get("prompt")) or ""
+        except Exception:
+            stored_prompt = ""
+        prompt = stored_prompt or (
+            "You are COSMIC's Heartbeat: an ambient consciousness pass for the user. "
+            "Quietly decide whether there is something genuinely useful to surface now. "
+            "Think across calendar commitments, inbox and approval pressure, active projects, "
+            "background tasks, reminders, open loops, user interests, preferences, relationships, "
+            "recent conversations, and what the user would likely want to know at this moment. "
+            "Use specialist/local tools only when a check is clearly worth it. Do not take external "
+            "actions unless the user already granted standing authorization. If there is nothing "
+            f"useful enough to interrupt for, respond exactly {HEARTBEAT_SUPPRESS_TOKEN} and nothing else. "
+            "If there is something useful, respond with a short, concrete, low-drama note; do not say "
+            "this came from a heartbeat."
+        )
+        if not context_block:
+            return prompt
+        return f"{prompt}\n\n{context_block}"
+
+    async def _build_heartbeat_context_packet(
+        self,
+        *,
+        scheduled_for: str | None,
+        channel: str,
+    ) -> dict[str, Any]:
+        session_id = self._current_session_id()
+        session_metadata = self._ensure_session_state_seeded(session_id)
+        history = self.get_session_history(session_id)
+        recent_messages: list[dict[str, str]] = []
+        for item in history[-8:]:
+            if not isinstance(item, dict):
+                continue
+            role = self._safe_text(item.get("role"))
+            content = self._safe_text(item.get("content"))
+            if role not in {"user", "assistant"} or not content:
+                continue
+            recent_messages.append(
+                {
+                    "role": role,
+                    "content": self._bounded_excerpt(content, limit=420) or "",
+                }
+            )
+        active_tasks = await self._active_task_summaries(
+            session_id=session_id,
+            channel=channel,
+        )
+        crons = [
+            {
+                "label": self._safe_text(item.get("name"))
+                or self._safe_text(item.get("cron_id"))
+                or "cron",
+                "next_fire_at": self._safe_text(item.get("next_fire_at")),
+                "paused": bool(item.get("paused")),
+            }
+            for item in self.scheduler_store.list_crons()
+            if self._safe_text(item.get("kind")) != "system"
+        ][:8]
+        packet: dict[str, Any] = {
+            "captured_at": utcnow_iso(),
+            "scheduled_for": scheduled_for,
+            "current_session_id": session_id,
+            "user_timezone": self.current_user_timezone(),
+            "delivery_channel": channel,
+            "scheduler": self.scheduler_store.summary(),
+            "delivery_queue": self.delivery_queue_store.summary(),
+            "active_task_count": len(active_tasks),
+        }
+        working_set = (
+            session_metadata.get("active_working_set")
+            if isinstance(session_metadata.get("active_working_set"), dict)
+            else None
+        )
+        working_set_snapshot = self._compact_scheduler_working_set(working_set)
+        if working_set_snapshot:
+            packet["working_set_snapshot"] = working_set_snapshot
+        if recent_messages:
+            packet["recent_conversation_tail"] = recent_messages
+        if active_tasks:
+            packet["active_tasks"] = active_tasks[:6]
+        if crons:
+            packet["user_crons"] = crons
+        carry_forward = (
+            session_metadata.get("carry_forward_packet")
+            if isinstance(session_metadata.get("carry_forward_packet"), dict)
+            else None
+        )
+        if isinstance(carry_forward, dict):
+            interests = self._normalize_string_list(
+                carry_forward.get("stable_user_preferences"), limit=8
+            )
+            if interests:
+                packet["stable_user_preferences"] = interests
+        return packet
+
+    def _render_heartbeat_context_block(
+        self, context_packet: dict[str, Any] | None
+    ) -> str | None:
+        if not isinstance(context_packet, dict):
+            return None
+        lines: list[str] = [
+            "## Heartbeat Context",
+            "This is a private ambient context packet. It should guide whether to speak now; it is not a user message and must not be repeated back.",
+        ]
+        for label, key in (
+            ("Current session", "current_session_id"),
+            ("User timezone", "user_timezone"),
+            ("Scheduled for", "scheduled_for"),
+        ):
+            value = self._safe_text(context_packet.get(key))
+            if value:
+                lines.append(f"- {label}: {value}")
+        working_set = (
+            context_packet.get("working_set_snapshot")
+            if isinstance(context_packet.get("working_set_snapshot"), dict)
+            else None
+        )
+        if working_set:
+            lines.extend(["", "### Active Work"])
+            goal = self._safe_text(working_set.get("goal"))
+            if goal:
+                lines.append(f"- Goal: {goal}")
+            for key, label in (
+                ("active_workstreams", "Workstreams"),
+                ("open_loops", "Open loops"),
+                ("active_task_refs", "Task refs"),
+                ("current_focus_entities", "Focus entities"),
+            ):
+                values = self._normalize_string_list(working_set.get(key), limit=5)
+                if values:
+                    lines.append(f"- {label}: " + "; ".join(values))
+        preferences = self._normalize_string_list(
+            context_packet.get("stable_user_preferences"), limit=8
+        )
+        if preferences:
+            lines.extend(["", "### Stable Preferences And Interests"])
+            lines.extend(f"- {item}" for item in preferences)
+        recent = (
+            context_packet.get("recent_conversation_tail")
+            if isinstance(context_packet.get("recent_conversation_tail"), list)
+            else []
+        )
+        if recent:
+            lines.extend(["", "### Recent Conversation Tail"])
+            for item in recent[-6:]:
+                if not isinstance(item, dict):
+                    continue
+                role = self._safe_text(item.get("role"))
+                content = self._safe_text(item.get("content"))
+                if role and content:
+                    lines.append(f"- {role}: {content}")
+        active_tasks = (
+            context_packet.get("active_tasks")
+            if isinstance(context_packet.get("active_tasks"), list)
+            else []
+        )
+        if active_tasks:
+            lines.extend(["", "### Active Tasks"])
+            for task in active_tasks[:6]:
+                if not isinstance(task, dict):
+                    continue
+                label = (
+                    self._safe_text(task.get("goal"))
+                    or self._safe_text(task.get("activity"))
+                    or self._safe_text(task.get("task_id"))
+                    or "task"
+                )
+                lines.append(f"- {label}")
+        crons = (
+            context_packet.get("user_crons")
+            if isinstance(context_packet.get("user_crons"), list)
+            else []
+        )
+        if crons:
+            lines.extend(["", "### Upcoming User-Scheduled Work"])
+            for cron in crons[:6]:
+                if not isinstance(cron, dict):
+                    continue
+                label = self._safe_text(cron.get("label")) or "cron"
+                next_fire_at = self._safe_text(cron.get("next_fire_at"))
+                suffix = f" at {next_fire_at}" if next_fire_at else ""
+                if bool(cron.get("paused")):
+                    suffix += " (paused)"
+                lines.append(f"- {label}{suffix}")
+        scheduler = (
+            context_packet.get("scheduler")
+            if isinstance(context_packet.get("scheduler"), dict)
+            else {}
+        )
+        delivery_queue = (
+            context_packet.get("delivery_queue")
+            if isinstance(context_packet.get("delivery_queue"), dict)
+            else {}
+        )
+        lines.extend(
+            [
+                "",
+                "### System State",
+                f"- Scheduler: {json.dumps(scheduler, ensure_ascii=True, sort_keys=True)}",
+                f"- Delivery queue: {json.dumps(delivery_queue, ensure_ascii=True, sort_keys=True)}",
+            ]
+        )
+        return "\n".join(lines)
+
+    async def _build_heartbeat_request_record(
+        self, heartbeat: dict[str, Any]
+    ) -> dict[str, Any]:
+        scheduled_for = self._safe_text(heartbeat.get("next_fire_at"))
+        channel = self._safe_text(heartbeat.get("delivery_channel")) or "desktop"
+        request_id, idempotency_key = self._heartbeat_execution_identity(scheduled_for)
+        session_id = self._current_session_id()
+        session_metadata = self._ensure_session_state_seeded(session_id)
+        active_working_set = (
+            session_metadata.get("active_working_set")
+            if isinstance(session_metadata.get("active_working_set"), dict)
+            else None
+        )
+        context_packet = await self._build_heartbeat_context_packet(
+            scheduled_for=scheduled_for,
+            channel=channel,
+        )
+        context_block = self._render_heartbeat_context_block(context_packet)
+        memory_prompt_context = await self._assemble_memory_prompt_context(
+            query="COSMIC proactive heartbeat user interests preferences open loops current priorities"
+        )
+        combined_memory_context = self._join_context_blocks(
+            context_block,
+            memory_prompt_context.rendered,
+        )
+        prompt = self._build_heartbeat_query(None)
+        request_record = {
+            "status": "accepted",
+            "request_id": request_id,
+            "session_id": session_id,
+            "source": "heartbeat",
+            "source_id": HEARTBEAT_SOURCE_ID,
+            "channel": channel,
+            "route": "opus",
+            "dispatch_target": "orchestrator",
+            "classification": {
+                "route": "opus",
+                "needs_latest": False,
+                "needs_citations": False,
+                "is_task": True,
+                "is_continuation": False,
+                "confidence": 1.0,
+                "signals": ["scheduler_heartbeat"],
+            },
+            "message": {
+                "content": prompt,
+                "channel": channel,
+                "request_id": request_id,
+                "metadata": {
+                    "platform": "scheduler",
+                    "heartbeat_id": HEARTBEAT_SOURCE_ID,
+                    "scheduled_for": scheduled_for,
+                    "delivery_channel": channel,
+                },
+            },
+            "assembled_conversation_context": [],
+            "memory_context": self._compose_prompt_context(
+                active_working_set=active_working_set,
+                memory_context=combined_memory_context,
+            ),
+            "active_working_set": active_working_set,
+            "carry_forward_packet": (
+                session_metadata.get("carry_forward_packet")
+                if isinstance(session_metadata.get("carry_forward_packet"), dict)
+                else None
+            ),
+            "memory_context_payload": {
+                "core_fact_items": memory_prompt_context.core_fact_items,
+                "core_facts_rendered": memory_prompt_context.core_facts_rendered,
+                "items": memory_prompt_context.recall_items,
+                "total_token_count": memory_prompt_context.total_token_count,
+                "diagnostics": memory_prompt_context.diagnostics,
+            },
+            "routing_decision_source": "scheduler_heartbeat",
+            "input_artifacts": [],
+            "accepted_at": utcnow_iso(),
+            "idempotency_key": idempotency_key,
+            "cron_timezone": self.current_user_timezone(),
+            "heartbeat_scheduled_for": scheduled_for,
+            "heartbeat_context": context_packet,
+            "gateway_preferences": self.get_desktop_preferences_snapshot(),
+            "visual_response_enhancement_enabled": False,
+        }
+        self.request_records[request_id] = request_record
+        self.routing_audit_store.append(
+            request_id=request_id,
+            session_id=session_id,
+            channel=channel,
+            source="heartbeat",
+            source_id=HEARTBEAT_SOURCE_ID,
+            query_text="[heartbeat]",
+            route_override=None,
+            sticky_hit=False,
+            decision_source="scheduler_heartbeat",
+            classifier_route="opus",
+            final_route="opus",
+            dispatch_target="orchestrator",
+            confidence=1.0,
+            signals=["scheduler_heartbeat"],
+            conversation_context=[],
+            classifier_payload=None,
+            classifier_metrics=None,
+            classifier_model=None,
+            classifier_latency_ms=None,
+            decision_latency_ms=0.0,
+            error_text=None,
+        )
+        return request_record
+
+    async def _execute_scheduler_heartbeat(
+        self, heartbeat: dict[str, Any]
+    ) -> tuple[str, str, str | None]:
+        request_record = await self._build_heartbeat_request_record(heartbeat)
+        request_id = self._safe_text(request_record.get("request_id")) or ""
+        self._heartbeat_outcomes_by_request_id.pop(request_id, None)
+        await self.fulfill_processed_message(request_record)
+        outcome = self._heartbeat_outcomes_by_request_id.pop(request_id, None) or {}
+        status = self._safe_text(outcome.get("status")) or "completed"
+        summary = (
+            self._safe_text(outcome.get("summary"))
+            or "Heartbeat completed."
+        )
+        next_fire_at = self._heartbeat_next_fire_at(heartbeat=heartbeat)
+        return status, summary, next_fire_at
+
     async def create_scheduler_cron(
         self,
         *,
@@ -2171,6 +2565,48 @@ class GatewayRuntime:
                 summary=summary,
                 next_fire_at=next_fire_at,
             )
+        await self._maybe_run_due_heartbeat()
+
+    async def _maybe_run_due_heartbeat(self) -> None:
+        try:
+            heartbeat = self.scheduler_store.get_heartbeat()
+        except Exception:
+            logger.exception("gateway.heartbeat_load_failed")
+            return
+        if (
+            not bool(heartbeat.get("enabled"))
+            or bool(heartbeat.get("paused"))
+            or not self._heartbeat_preference_enabled()
+        ):
+            return
+
+        now = datetime.now(timezone.utc)
+        next_fire_at = self._safe_text(heartbeat.get("next_fire_at"))
+        due_at = self._parse_utc_iso(next_fire_at)
+        if due_at is None:
+            self.scheduler_store.schedule_heartbeat(
+                next_fire_at=self._heartbeat_next_fire_at(after=now, heartbeat=heartbeat)
+            )
+            return
+        if due_at > now:
+            return
+
+        status = "failed"
+        summary = "Heartbeat failed before completion."
+        next_fire = self._heartbeat_next_fire_at(after=now, heartbeat=heartbeat)
+        try:
+            status, summary, next_fire = await self._execute_scheduler_heartbeat(
+                heartbeat
+            )
+        except Exception as exc:
+            logger.exception("gateway.heartbeat_failed")
+            status = "failed"
+            summary = str(exc)
+        self.scheduler_store.record_heartbeat_result(
+            status=status,
+            summary=summary,
+            next_fire_at=next_fire,
+        )
 
     def scheduler_overview(self) -> dict[str, Any]:
         return {
@@ -2231,10 +2667,18 @@ class GatewayRuntime:
         return self.scheduler_store.get_heartbeat()
 
     def pause_scheduler_heartbeat(self, *, reason: str | None = None) -> dict[str, Any]:
-        return self.scheduler_store.pause_heartbeat(reason=reason)
+        record = self.scheduler_store.pause_heartbeat(reason=reason)
+        self._scheduler_wakeup.set()
+        return record
 
     def resume_scheduler_heartbeat(self) -> dict[str, Any]:
-        return self.scheduler_store.resume_heartbeat()
+        record = self.scheduler_store.resume_heartbeat()
+        if not self._safe_text(record.get("next_fire_at")):
+            record = self.scheduler_store.schedule_heartbeat(
+                next_fire_at=self._heartbeat_next_fire_at(heartbeat=record)
+            )
+        self._scheduler_wakeup.set()
+        return record
 
     async def _register_adapters(self) -> None:
         if "desktop" not in self.registry.adapters:
@@ -8277,7 +8721,8 @@ class GatewayRuntime:
         if event_type == "response.complete":
             if (
                 self._is_realtime_client_channel(channel)
-                and (self._safe_text(event.get("source")) or "user") != "cron"
+                and (self._safe_text(event.get("source")) or "user")
+                not in {"cron", "heartbeat"}
             ):
                 return None
             if request_id:
@@ -11556,6 +12001,51 @@ class GatewayRuntime:
         request_id = self._safe_text(event.get("request_id"))
         task_id = self._safe_text(event.get("task_id"))
         session_id = self._safe_text(event.get("session_id"))
+        if self._is_heartbeat_event(event):
+            if event_type in {
+                "task.created",
+                "task.progress",
+                "response.chunk",
+                "response.thinking.chunk",
+                "response.blocks.snapshot",
+                "tool.call",
+                "tool.result",
+            }:
+                return
+            if event_type in {"task.completed", "task.failed", "task.cancelled", "error"}:
+                if task_id:
+                    self.active_task_channels.pop(task_id, None)
+                    self.active_requests_by_task.pop(task_id, None)
+                status = (
+                    "failed"
+                    if event_type in {"task.failed", "error"}
+                    else "cancelled"
+                    if event_type == "task.cancelled"
+                    else "completed"
+                )
+                if request_id and request_id not in self._heartbeat_outcomes_by_request_id:
+                    self._record_heartbeat_outcome(
+                        request_id=request_id,
+                        status=status,
+                        summary=self._safe_text(event.get("message"))
+                        or self._safe_text(event.get("content"))
+                        or f"Heartbeat {status}.",
+                    )
+                self._trace_request_event(
+                    request_id=request_id,
+                    session_id=session_id,
+                    channel=self._safe_text(event.get("channel")),
+                    route=self._safe_text(event.get("route")) or "opus",
+                    event_type=event_type,
+                    stage="terminal",
+                    status=status,
+                    title="Heartbeat terminal event",
+                    detail=self._safe_text(event.get("message"))
+                    or self._safe_text(event.get("content")),
+                    task_id=task_id,
+                    completed=True,
+                )
+                return
         if request_id and task_id:
             previous_bound_request_id = self.active_requests_by_task.get(task_id)
             self.active_requests_by_task[task_id] = request_id
@@ -11630,6 +12120,27 @@ class GatewayRuntime:
                 event["blocks"] = client_response_blocks
         elif event_type == "response.complete":
             event_channel = self._safe_text(event.get("channel")) or ""
+            if self._is_heartbeat_noop_response(event):
+                if request_id:
+                    self._record_heartbeat_outcome(
+                        request_id=request_id,
+                        status="suppressed",
+                        summary="Heartbeat found nothing useful enough to surface.",
+                    )
+                self._trace_request_event(
+                    request_id=request_id,
+                    session_id=session_id,
+                    channel=event_channel,
+                    route=self._safe_text(event.get("route")) or "opus",
+                    event_type="response.complete",
+                    stage="response",
+                    status="suppressed",
+                    title="Heartbeat suppressed",
+                    detail=HEARTBEAT_SUPPRESS_TOKEN,
+                    task_id=task_id,
+                    completed=False,
+                )
+                return
             research_provenance = self._normalize_research_provenance(
                 event.get("research_provenance"),
                 fallback_sources=event.get("sources")
@@ -11858,6 +12369,13 @@ class GatewayRuntime:
                         response_blocks=response_blocks,
                     )
                 )
+            if self._is_heartbeat_event(event) and request_id:
+                self._record_heartbeat_outcome(
+                    request_id=request_id,
+                    status="delivered",
+                    summary=self._bounded_excerpt(event.get("content"), limit=300)
+                    or "Heartbeat delivered a proactive note.",
+                )
         elif event_type == "task.input_required":
             channel = self._safe_text(event.get("channel"))
             if channel and task_id and session_id:
@@ -11973,6 +12491,34 @@ class GatewayRuntime:
         if source_id:
             normalized.setdefault("source_id", source_id)
         return normalized
+
+    def _is_heartbeat_event(self, event: dict[str, Any]) -> bool:
+        return self._safe_text(event.get("source")) == "heartbeat"
+
+    def _is_heartbeat_noop_response(self, event: dict[str, Any]) -> bool:
+        if not self._is_heartbeat_event(event):
+            return False
+        if self._safe_text(event.get("type")) != "response.complete":
+            return False
+        content = self._safe_text(event.get("content")) or ""
+        normalized = content.strip().strip("`'\"").strip().lower()
+        normalized = re.sub(r"\s+", "_", normalized)
+        return normalized == HEARTBEAT_SUPPRESS_TOKEN
+
+    def _record_heartbeat_outcome(
+        self,
+        *,
+        request_id: str,
+        status: str,
+        summary: str | None,
+    ) -> None:
+        normalized_request_id = self._safe_text(request_id)
+        if not normalized_request_id:
+            return
+        self._heartbeat_outcomes_by_request_id[normalized_request_id] = {
+            "status": self._safe_text(status) or "completed",
+            "summary": self._safe_text(summary) or "",
+        }
 
     def _safe_text(self, value: Any) -> str | None:
         if value is None:
@@ -12390,9 +12936,23 @@ class GatewayRuntime:
                 "updated_source": "runtime_fallback",
                 "updated_device_id": None,
             }
+        try:
+            cosmic_heartbeat = self.preference_store.get_cosmic_heartbeat()
+        except Exception:
+            logger.exception(
+                "gateway.cosmic_heartbeat_preference_snapshot_failed; using runtime fallback defaults"
+            )
+            cosmic_heartbeat = {
+                "enabled": True,
+                "revision": 1,
+                "updated_at": utcnow_iso(),
+                "updated_source": "runtime_fallback",
+                "updated_device_id": None,
+            }
         return {
             "visual_response_enhancement": visual_response_enhancement,
             "cosmic_orchestrator_model": cosmic_orchestrator_model,
+            "cosmic_heartbeat": cosmic_heartbeat,
         }
 
     async def save_desktop_preferences(
@@ -12401,6 +12961,7 @@ class GatewayRuntime:
         visual_response_enhancement_enabled: bool | None = None,
         cosmic_orchestrator_provider: str | None = None,
         cosmic_orchestrator_model: str | None = None,
+        cosmic_heartbeat_enabled: bool | None = None,
         source: str | None = None,
         device_id: str | None = None,
     ) -> dict[str, Any]:
@@ -12417,6 +12978,19 @@ class GatewayRuntime:
                 source=source,
                 device_id=device_id,
             )
+        if cosmic_heartbeat_enabled is not None:
+            self.preference_store.set_cosmic_heartbeat(
+                bool(cosmic_heartbeat_enabled),
+                source=source,
+                device_id=device_id,
+            )
+            if bool(cosmic_heartbeat_enabled):
+                heartbeat = self.scheduler_store.get_heartbeat()
+                if not self._safe_text(heartbeat.get("next_fire_at")):
+                    self.scheduler_store.schedule_heartbeat(
+                        next_fire_at=self._heartbeat_next_fire_at(heartbeat=heartbeat)
+                    )
+            self._scheduler_wakeup.set()
         snapshot = self.get_desktop_preferences_snapshot()
         await self._broadcast_desktop_preferences_updated(snapshot)
         return snapshot

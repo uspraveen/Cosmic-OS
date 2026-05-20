@@ -194,6 +194,47 @@ class FakeOrchestratorClient:
         return False
 
 
+class FakeHeartbeatNoopOrchestratorClient(FakeOrchestratorClient):
+    async def stream_task(self, task) -> object:
+        self.last_task = task
+        yield {
+            "type": "task.created",
+            "task_id": task.task_id,
+            "session_id": task.session_id,
+            "channel": task.channel,
+            "route": "opus",
+            "status": "running",
+        }
+        yield {
+            "type": "response.chunk",
+            "task_id": task.task_id,
+            "request_id": task.input.get("request_id"),
+            "session_id": task.session_id,
+            "channel": task.channel,
+            "content": "heartbeat_ok",
+            "done": False,
+        }
+        yield {
+            "type": "response.complete",
+            "task_id": task.task_id,
+            "request_id": task.input.get("request_id"),
+            "session_id": task.session_id,
+            "channel": task.channel,
+            "content": "heartbeat_ok",
+            "route": "opus",
+            "awaiting_reply": False,
+            "metrics": {"rtt_ms": 24},
+        }
+        yield {
+            "type": "task.completed",
+            "task_id": task.task_id,
+            "session_id": task.session_id,
+            "channel": task.channel,
+            "route": "opus",
+            "status": "completed",
+        }
+
+
 class CapturingDesktopAdapter(DesktopAdapter):
     def __init__(self) -> None:
         super().__init__()
@@ -4326,6 +4367,62 @@ async def test_runtime_executes_due_custom_one_shot_cron_via_orchestrator(tmp_pa
         assert notebook["goal"] == "Check if any new YC companies were added and report the diff."
         assert runtime.session_store.get_turn_ledger_entry(task.input["request_id"]) is None
         assert runtime.list_scheduler_crons(include_system=False, active_only=True) == []
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_due_heartbeat_suppresses_noop_and_does_not_append_history(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    runtime.orchestrator = FakeHeartbeatNoopOrchestratorClient()
+    await runtime.start()
+    try:
+        runtime.scheduler_store.schedule_heartbeat(
+            next_fire_at="2000-01-01T00:00:00Z"
+        )
+
+        await runtime._run_due_crons()  # noqa: SLF001 - targeted scheduler seam
+
+        task = runtime.orchestrator.last_task
+        assert task is not None
+        assert task.source == "heartbeat"
+        assert task.source_id == "default"
+        assert task.priority == "low"
+        assert task.channel == "desktop"
+        assert task.input["conversation_context"] == []
+        assert task.input["visual_response_enhancement_enabled"] is False
+        assert "Heartbeat Context" in str(task.input["memory_context"] or "")
+
+        heartbeat = runtime.scheduler_store.get_heartbeat()
+        assert heartbeat["last_result_status"] == "suppressed"
+        assert heartbeat["next_fire_at"] is not None
+        assert heartbeat["last_suppressed_at"] is not None
+
+        assert runtime.get_session_history(task.session_id) == []
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_heartbeat_preference_toggle_controls_due_execution(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    runtime.orchestrator = FakeHeartbeatNoopOrchestratorClient()
+    await runtime.start()
+    try:
+        snapshot = runtime.get_desktop_preferences_snapshot()
+        assert snapshot["cosmic_heartbeat"]["enabled"] is True
+
+        saved = await runtime.save_desktop_preferences(cosmic_heartbeat_enabled=False)
+        assert saved["cosmic_heartbeat"]["enabled"] is False
+
+        runtime.scheduler_store.schedule_heartbeat(
+            next_fire_at="2000-01-01T00:00:00Z"
+        )
+        await runtime._run_due_crons()  # noqa: SLF001 - targeted scheduler seam
+        assert runtime.orchestrator.last_task is None
+
+        saved = await runtime.save_desktop_preferences(cosmic_heartbeat_enabled=True)
+        assert saved["cosmic_heartbeat"]["enabled"] is True
     finally:
         await runtime.stop()
 

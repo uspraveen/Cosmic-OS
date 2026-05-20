@@ -20,7 +20,12 @@ class SchedulerStore:
         self.db_path = db_path
         self._lock = threading.RLock()
 
-    def initialize(self, *, default_timezone: str) -> None:
+    def initialize(
+        self,
+        *,
+        default_timezone: str,
+        default_heartbeat_interval_sec: int = 1800,
+    ) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock, self._connect() as connection:
             connection.executescript(
@@ -73,16 +78,24 @@ class SchedulerStore:
                 CREATE TABLE IF NOT EXISTS heartbeat_config (
                     config_id TEXT PRIMARY KEY,
                     timezone TEXT NOT NULL,
+                    interval_sec INTEGER NOT NULL DEFAULT 1800,
+                    prompt TEXT,
+                    delivery_channel TEXT DEFAULT 'desktop',
                     enabled INTEGER NOT NULL DEFAULT 1,
                     paused_at TEXT,
                     pause_reason TEXT,
+                    last_fired_at TEXT,
+                    next_fire_at TEXT,
+                    last_suppressed_at TEXT,
                     last_result_status TEXT,
                     last_result_summary TEXT,
                     updated_at TEXT NOT NULL
                 );
                 """
             )
+            self._ensure_heartbeat_columns(connection)
             now = utcnow_iso()
+            heartbeat_interval_sec = max(60, int(default_heartbeat_interval_sec or 1800))
             connection.execute(
                 """
                 INSERT INTO scheduler_profile (
@@ -102,17 +115,38 @@ class SchedulerStore:
                 INSERT INTO heartbeat_config (
                     config_id,
                     timezone,
+                    interval_sec,
+                    prompt,
+                    delivery_channel,
                     enabled,
                     paused_at,
                     pause_reason,
+                    last_fired_at,
+                    next_fire_at,
+                    last_suppressed_at,
                     last_result_status,
                     last_result_summary,
                     updated_at
                 )
-                VALUES ('default', ?, 1, NULL, NULL, NULL, NULL, ?)
+                VALUES ('default', ?, ?, NULL, 'desktop', 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?)
                 ON CONFLICT(config_id) DO NOTHING
                 """,
-                (default_timezone, now),
+                (default_timezone, heartbeat_interval_sec, now),
+            )
+            connection.execute(
+                """
+                UPDATE heartbeat_config
+                SET interval_sec = CASE
+                        WHEN interval_sec IS NULL OR interval_sec < 60 THEN ?
+                        ELSE interval_sec
+                    END,
+                    delivery_channel = CASE
+                        WHEN delivery_channel IS NULL OR TRIM(delivery_channel) = '' THEN 'desktop'
+                        ELSE delivery_channel
+                    END
+                WHERE config_id = 'default'
+                """,
+                (heartbeat_interval_sec,),
             )
             connection.commit()
 
@@ -462,9 +496,15 @@ class SchedulerStore:
                 """
                 SELECT
                     timezone,
+                    interval_sec,
+                    prompt,
+                    delivery_channel,
                     enabled,
                     paused_at,
                     pause_reason,
+                    last_fired_at,
+                    next_fire_at,
+                    last_suppressed_at,
                     last_result_status,
                     last_result_summary,
                     updated_at
@@ -477,7 +517,67 @@ class SchedulerStore:
         record = dict(row)
         record["enabled"] = bool(record.get("enabled"))
         record["paused"] = bool(record.get("paused_at"))
+        try:
+            interval_sec = int(record.get("interval_sec") or 1800)
+        except (TypeError, ValueError):
+            interval_sec = 1800
+        record["interval_sec"] = max(60, interval_sec)
+        record["delivery_channel"] = (
+            str(record.get("delivery_channel") or "").strip() or "desktop"
+        )
         return record
+
+    def schedule_heartbeat(self, *, next_fire_at: str | None) -> dict[str, Any]:
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE heartbeat_config
+                SET next_fire_at = ?,
+                    updated_at = ?
+                WHERE config_id = 'default'
+                """,
+                (next_fire_at, now),
+            )
+            connection.commit()
+        return self.get_heartbeat()
+
+    def record_heartbeat_result(
+        self,
+        *,
+        status: str,
+        summary: str | None,
+        next_fire_at: str | None,
+    ) -> dict[str, Any]:
+        now = utcnow_iso()
+        normalized_status = str(status or "").strip() or "completed"
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE heartbeat_config
+                SET last_fired_at = ?,
+                    next_fire_at = ?,
+                    last_suppressed_at = CASE
+                        WHEN ? = 'suppressed' THEN ?
+                        ELSE last_suppressed_at
+                    END,
+                    last_result_status = ?,
+                    last_result_summary = ?,
+                    updated_at = ?
+                WHERE config_id = 'default'
+                """,
+                (
+                    now,
+                    next_fire_at,
+                    normalized_status,
+                    now,
+                    normalized_status,
+                    summary,
+                    now,
+                ),
+            )
+            connection.commit()
+        return self.get_heartbeat()
 
     def pause_heartbeat(self, *, reason: str | None = None) -> dict[str, Any]:
         now = utcnow_iso()
@@ -521,9 +621,28 @@ class SchedulerStore:
             "cron_count": len(crons),
             "paused_cron_count": sum(1 for cron in crons if cron.get("paused")),
             "heartbeat_paused": bool(heartbeat.get("paused")),
+            "heartbeat_enabled": bool(heartbeat.get("enabled")),
+            "heartbeat_next_fire_at": heartbeat.get("next_fire_at"),
+            "heartbeat_last_result_status": heartbeat.get("last_result_status"),
         }
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(str(self.db_path), check_same_thread=False)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def _ensure_heartbeat_columns(self, connection: sqlite3.Connection) -> None:
+        rows = connection.execute("PRAGMA table_info(heartbeat_config)").fetchall()
+        existing = {str(row["name"]) for row in rows}
+        columns = {
+            "interval_sec": "interval_sec INTEGER NOT NULL DEFAULT 1800",
+            "prompt": "prompt TEXT",
+            "delivery_channel": "delivery_channel TEXT DEFAULT 'desktop'",
+            "last_fired_at": "last_fired_at TEXT",
+            "next_fire_at": "next_fire_at TEXT",
+            "last_suppressed_at": "last_suppressed_at TEXT",
+        }
+        for name, ddl in columns.items():
+            if name in existing:
+                continue
+            connection.execute(f"ALTER TABLE heartbeat_config ADD COLUMN {ddl}")

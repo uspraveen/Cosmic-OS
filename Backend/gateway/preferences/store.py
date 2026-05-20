@@ -11,6 +11,7 @@ from ..session_store import utcnow_iso
 _VISUAL_RESPONSE_ENHANCEMENT_KEY = "visual_response_enhancement"
 _ALPHA_EXECUTION_PROVIDER_KEY = "alpha_execution_provider"
 _COSMIC_ORCHESTRATOR_MODEL_KEY = "cosmic_orchestrator_model"
+_COSMIC_HEARTBEAT_KEY = "cosmic_heartbeat"
 _FIREWORKS_KIMI_MODEL = "accounts/fireworks/models/kimi-k2p6"
 
 
@@ -129,6 +130,91 @@ class GatewayPreferenceStore:
                     "visual_response_enhancement preference could not be reloaded after update"
                 )
             return self._row_to_visual_response_enhancement(row)
+
+    def get_cosmic_heartbeat(self) -> dict[str, Any]:
+        with self._lock, self._connect() as connection:
+            self._seed_defaults(connection)
+            row = connection.execute(
+                """
+                SELECT key, value_json, revision, updated_at, updated_source, updated_device_id
+                FROM app_preferences
+                WHERE key = ?
+                LIMIT 1
+                """,
+                (_COSMIC_HEARTBEAT_KEY,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError(
+                    "cosmic_heartbeat preference is missing after initialization"
+                )
+            return self._row_to_cosmic_heartbeat(row)
+
+    def set_cosmic_heartbeat(
+        self,
+        enabled: bool,
+        *,
+        source: str | None = None,
+        device_id: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_source = str(source or "").strip() or None
+        normalized_device_id = str(device_id or "").strip() or None
+        now = utcnow_iso()
+        value_json = _json_dumps({"enabled": bool(enabled)})
+        with self._lock, self._connect() as connection:
+            self._seed_defaults(connection)
+            existing = connection.execute(
+                """
+                SELECT revision
+                FROM app_preferences
+                WHERE key = ?
+                LIMIT 1
+                """,
+                (_COSMIC_HEARTBEAT_KEY,),
+            ).fetchone()
+            previous_revision = int(existing["revision"]) if existing else 0
+            next_revision = previous_revision + 1
+            connection.execute(
+                """
+                INSERT INTO app_preferences (
+                    key,
+                    value_json,
+                    revision,
+                    updated_at,
+                    updated_source,
+                    updated_device_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value_json = excluded.value_json,
+                    revision = excluded.revision,
+                    updated_at = excluded.updated_at,
+                    updated_source = excluded.updated_source,
+                    updated_device_id = excluded.updated_device_id
+                """,
+                (
+                    _COSMIC_HEARTBEAT_KEY,
+                    value_json,
+                    next_revision,
+                    now,
+                    normalized_source,
+                    normalized_device_id,
+                ),
+            )
+            connection.commit()
+            row = connection.execute(
+                """
+                SELECT key, value_json, revision, updated_at, updated_source, updated_device_id
+                FROM app_preferences
+                WHERE key = ?
+                LIMIT 1
+                """,
+                (_COSMIC_HEARTBEAT_KEY,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError(
+                    "cosmic_heartbeat preference could not be reloaded after update"
+                )
+            return self._row_to_cosmic_heartbeat(row)
 
     def get_alpha_execution_provider(self) -> dict[str, Any]:
         with self._lock, self._connect() as connection:
@@ -315,6 +401,7 @@ class GatewayPreferenceStore:
     def _seed_defaults(self, connection: sqlite3.Connection) -> None:
         defaults = {
             _VISUAL_RESPONSE_ENHANCEMENT_KEY: {"enabled": True},
+            _COSMIC_HEARTBEAT_KEY: {"enabled": True},
             _ALPHA_EXECUTION_PROVIDER_KEY: {"preferred_harness": "codex"},
             _COSMIC_ORCHESTRATOR_MODEL_KEY: {
                 "provider": "anthropic",
@@ -353,6 +440,27 @@ class GatewayPreferenceStore:
     def _row_to_visual_response_enhancement(
         self, row: sqlite3.Row
     ) -> dict[str, Any]:
+        try:
+            value = json.loads(row["value_json"]) if row["value_json"] else {}
+        except json.JSONDecodeError:
+            value = {}
+        if not isinstance(value, dict):
+            value = {}
+        return {
+            "enabled": bool(value.get("enabled", True)),
+            "revision": int(row["revision"]) if row["revision"] is not None else 1,
+            "updated_at": str(row["updated_at"] or "").strip() or utcnow_iso(),
+            "updated_source": (
+                str(row["updated_source"]).strip() if row["updated_source"] else None
+            ),
+            "updated_device_id": (
+                str(row["updated_device_id"]).strip()
+                if row["updated_device_id"]
+                else None
+            ),
+        }
+
+    def _row_to_cosmic_heartbeat(self, row: sqlite3.Row) -> dict[str, Any]:
         try:
             value = json.loads(row["value_json"]) if row["value_json"] else {}
         except json.JSONDecodeError:
