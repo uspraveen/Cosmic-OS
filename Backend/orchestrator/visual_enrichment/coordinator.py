@@ -7,6 +7,7 @@ import json
 import logging
 import mimetypes
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from io import BytesIO
@@ -92,6 +93,7 @@ _FAILED_INLINE_IMAGE_LABEL = "Couldn't find a reliable inline image for this ans
 _FAILED_INLINE_CHART_LABEL = "Couldn't generate a clear inline chart for this answer."
 _TIMED_OUT_INLINE_IMAGE_LABEL = "This inline image took too long to finish."
 _TIMED_OUT_INLINE_CHART_LABEL = "This inline chart took too long to finish."
+_IMPLICIT_IMAGE_SLOT_TIMEOUT_CAP_MS = 6000
 
 
 def _utcnow_iso() -> str:
@@ -783,6 +785,39 @@ class VisualEnrichmentCoordinator:
             else _FAILED_INLINE_IMAGE_LABEL
         )
 
+    @staticmethod
+    def _is_automatic_image_slot(slot: VisualSlotDirective) -> bool:
+        return slot.kind == "image" and slot.id.startswith("img_auto_")
+
+    async def _timed_stage(self, slot_id: str, stage: str, awaitable: Any) -> Any:
+        started = time.perf_counter()
+        try:
+            result = await awaitable
+        except asyncio.CancelledError:
+            logger.warning(
+                "visual_enrichment.stage_cancelled slot_id=%s stage=%s elapsed_ms=%.1f",
+                slot_id,
+                stage,
+                (time.perf_counter() - started) * 1000.0,
+            )
+            raise
+        except Exception as exc:
+            logger.warning(
+                "visual_enrichment.stage_failed slot_id=%s stage=%s elapsed_ms=%.1f error=%s",
+                slot_id,
+                stage,
+                (time.perf_counter() - started) * 1000.0,
+                exc,
+            )
+            raise
+        logger.info(
+            "visual_enrichment.stage_completed slot_id=%s stage=%s elapsed_ms=%.1f",
+            slot_id,
+            stage,
+            (time.perf_counter() - started) * 1000.0,
+        )
+        return result
+
     def _has_any_visual_blocks(self) -> bool:
         return any(
             str(block.get("type")) in {"image_slot", "chart_slot", "image_artifact"}
@@ -840,7 +875,10 @@ class VisualEnrichmentCoordinator:
             query=query,
             caption=None,
             loading_label="Finding a relevant image",
-            timeout_ms=min(7000, max(250, int(self.config.visual_image_slot_timeout_ms))),
+            timeout_ms=min(
+                _IMPLICIT_IMAGE_SLOT_TIMEOUT_CAP_MS,
+                max(250, int(self.config.visual_image_slot_timeout_ms)),
+            ),
             source_urls=source_urls,
             context_excerpt=visible_text[-1200:].strip(),
         )
@@ -1474,13 +1512,25 @@ class VisualEnrichmentCoordinator:
                 raise ValueError("No trusted source URLs were available for this image slot.")
 
             explicit_image_request = self._slot_explicitly_requests_image(slot)
+            automatic_image_slot = self._is_automatic_image_slot(slot)
             trusted_candidates: list[ImageCandidate] = []
             search_candidates: list[ImageCandidate] = []
 
             if explicit_image_request and image_search_allowed:
                 trusted_result, search_result = await asyncio.gather(
-                    self._collect_trusted_image_candidates(slot=slot, source_infos=source_infos),
-                    self._search_image_candidates(slot),
+                    self._timed_stage(
+                        slot.id,
+                        "trusted_image_candidates",
+                        self._collect_trusted_image_candidates(
+                            slot=slot,
+                            source_infos=source_infos,
+                        ),
+                    ),
+                    self._timed_stage(
+                        slot.id,
+                        "image_search_candidates",
+                        self._search_image_candidates(slot),
+                    ),
                     return_exceptions=True,
                 )
                 if isinstance(trusted_result, Exception):
@@ -1491,14 +1541,40 @@ class VisualEnrichmentCoordinator:
                     logger.warning("visual_enrichment.image_search_failed slot_id=%s error=%s", slot.id, search_result)
                 else:
                     search_candidates = search_result
+            elif automatic_image_slot and image_search_allowed:
+                try:
+                    search_candidates = await self._timed_stage(
+                        slot.id,
+                        "image_search_candidates",
+                        self._search_image_candidates(slot),
+                    )
+                except Exception as exc:
+                    logger.warning("visual_enrichment.image_search_failed slot_id=%s error=%s", slot.id, exc)
+                if not search_candidates and source_infos:
+                    trusted_candidates = await self._timed_stage(
+                        slot.id,
+                        "trusted_image_candidates",
+                        self._collect_trusted_image_candidates(
+                            slot=slot,
+                            source_infos=source_infos,
+                        ),
+                    )
             else:
-                trusted_candidates = await self._collect_trusted_image_candidates(
-                    slot=slot,
-                    source_infos=source_infos,
+                trusted_candidates = await self._timed_stage(
+                    slot.id,
+                    "trusted_image_candidates",
+                    self._collect_trusted_image_candidates(
+                        slot=slot,
+                        source_infos=source_infos,
+                    ),
                 )
                 if self._should_use_image_search_fallback(slot, trusted_candidates):
                     try:
-                        search_candidates = await self._search_image_candidates(slot)
+                        search_candidates = await self._timed_stage(
+                            slot.id,
+                            "image_search_candidates",
+                            self._search_image_candidates(slot),
+                        )
                     except Exception as exc:
                         logger.warning("visual_enrichment.image_search_failed slot_id=%s error=%s", slot.id, exc)
 
@@ -1515,9 +1591,13 @@ class VisualEnrichmentCoordinator:
                     "No usable image candidates were found on the trusted source pages or direct image search."
                 )
 
-            attempt_candidates = await self._build_attempt_candidates(
-                slot=slot,
-                candidates=all_candidates,
+            attempt_candidates = await self._timed_stage(
+                slot.id,
+                "image_candidate_ranking",
+                self._build_attempt_candidates(
+                    slot=slot,
+                    candidates=all_candidates,
+                ),
             )
 
             if not attempt_candidates:
@@ -1532,8 +1612,10 @@ class VisualEnrichmentCoordinator:
             height: int | None = None
             for candidate, verdict in attempt_candidates:
                 try:
-                    image_bytes, detected_mime, width, height = await self._download_image_bytes(
-                        candidate.image_url
+                    image_bytes, detected_mime, width, height = await self._timed_stage(
+                        slot.id,
+                        "image_download",
+                        self._download_image_bytes(candidate.image_url),
                     )
                     if _is_low_information_image_size(width, height):
                         raise ValueError(

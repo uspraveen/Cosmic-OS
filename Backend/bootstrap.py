@@ -915,7 +915,7 @@ def build_visual_enhancement_env_rendered(
         ("VISUAL_ENHANCEMENT_MAX_CONCURRENT_SIDECARS",), "2"
     )
     image_slot_timeout_ms = pick_visual(
-        ("VISUAL_ENHANCEMENT_IMAGE_SLOT_TIMEOUT_MS",), "3500"
+        ("VISUAL_ENHANCEMENT_IMAGE_SLOT_TIMEOUT_MS",), "6000"
     )
     chart_slot_timeout_ms = pick_visual(
         ("VISUAL_ENHANCEMENT_CHART_SLOT_TIMEOUT_MS",), "4000"
@@ -945,7 +945,7 @@ def build_visual_enhancement_env_rendered(
         ("VISUAL_ENHANCEMENT_IMAGE_SEARCH_BASE_URL",), "https://www.bing.com/images/search"
     )
     image_search_timeout_sec = pick_visual(
-        ("VISUAL_ENHANCEMENT_IMAGE_SEARCH_TIMEOUT_SEC",), "12"
+        ("VISUAL_ENHANCEMENT_IMAGE_SEARCH_TIMEOUT_SEC",), "5"
     )
     image_search_result_limit = pick_visual(
         ("VISUAL_ENHANCEMENT_IMAGE_SEARCH_RESULT_LIMIT",), "8"
@@ -957,7 +957,7 @@ def build_visual_enhancement_env_rendered(
         ("VISUAL_ENHANCEMENT_CHART_MAX_BYTES",), "4194304"
     )
     download_timeout_sec = pick_visual(
-        ("VISUAL_ENHANCEMENT_DOWNLOAD_TIMEOUT_SEC",), "20"
+        ("VISUAL_ENHANCEMENT_DOWNLOAD_TIMEOUT_SEC",), "6"
     )
 
     firecrawl_api_key = first_meaningful_value(
@@ -1074,7 +1074,7 @@ def build_visual_enhancement_env_rendered(
         "VISUAL_ENHANCEMENT_MAX_IMAGE_SLOTS_PER_TURN": max_image_slots or "1",
         "VISUAL_ENHANCEMENT_MAX_CHART_SLOTS_PER_TURN": max_chart_slots or "1",
         "VISUAL_ENHANCEMENT_MAX_CONCURRENT_SIDECARS": max_concurrent_sidecars or "2",
-        "VISUAL_ENHANCEMENT_IMAGE_SLOT_TIMEOUT_MS": image_slot_timeout_ms or "3500",
+        "VISUAL_ENHANCEMENT_IMAGE_SLOT_TIMEOUT_MS": image_slot_timeout_ms or "6000",
         "VISUAL_ENHANCEMENT_CHART_SLOT_TIMEOUT_MS": chart_slot_timeout_ms or "4000",
         "VISUAL_ENHANCEMENT_FINALIZATION_GRACE_MS": finalization_grace_ms or "750",
         "VISUAL_ENHANCEMENT_IMAGE_SOURCE_PAGE_LIMIT": image_source_page_limit or "3",
@@ -1085,11 +1085,11 @@ def build_visual_enhancement_env_rendered(
         "VISUAL_ENHANCEMENT_IMAGE_SEARCH_ENABLED": image_search_enabled or "true",
         "VISUAL_ENHANCEMENT_IMAGE_SEARCH_BASE_URL": image_search_base_url
         or "https://www.bing.com/images/search",
-        "VISUAL_ENHANCEMENT_IMAGE_SEARCH_TIMEOUT_SEC": image_search_timeout_sec or "12",
+        "VISUAL_ENHANCEMENT_IMAGE_SEARCH_TIMEOUT_SEC": image_search_timeout_sec or "5",
         "VISUAL_ENHANCEMENT_IMAGE_SEARCH_RESULT_LIMIT": image_search_result_limit or "8",
         "VISUAL_ENHANCEMENT_CHART_MAX_POINTS": chart_max_points or "200",
         "VISUAL_ENHANCEMENT_CHART_MAX_BYTES": chart_max_bytes or "4194304",
-        "VISUAL_ENHANCEMENT_DOWNLOAD_TIMEOUT_SEC": download_timeout_sec or "20",
+        "VISUAL_ENHANCEMENT_DOWNLOAD_TIMEOUT_SEC": download_timeout_sec or "6",
         "VISUAL_ENHANCEMENT_FIRECRAWL_BASE_URL": firecrawl_base_url
         or "https://api.firecrawl.dev",
         "VISUAL_ENHANCEMENT_FIRECRAWL_REQUEST_TIMEOUT_SEC": firecrawl_request_timeout_sec

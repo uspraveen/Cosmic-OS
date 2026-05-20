@@ -1,4 +1,5 @@
 import base64
+import asyncio
 import json
 import httpx
 import pytest
@@ -420,6 +421,54 @@ def _build_auto_slot_query_transport() -> httpx.MockTransport:
                 200,
                 content=image_bytes,
                 headers={"Content-Type": "image/png"},
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url!s}")
+
+    return httpx.MockTransport(handler)
+
+
+def _build_auto_slot_fast_search_slow_firecrawl_transport() -> httpx.MockTransport:
+    image_bytes = _solid_png_bytes(1600, 900)
+    useful_image_url = "https://cdn.example.test/karuppu-reviews-talk-still.jpg"
+    bing_html = f"""
+    <html><body>
+      <a class="iusc" m='{{&quot;murl&quot;:&quot;{useful_image_url}&quot;,&quot;purl&quot;:&quot;https://example.com/karuppu-review&quot;,&quot;t&quot;:&quot;Karuppu reviews and talk movie still&quot;,&quot;desc&quot;:&quot;Reference still for Karuppu reviews and audience discussion&quot;,&quot;imgw&quot;:1600,&quot;imgh&quot;:900}}'></a>
+    </body></html>
+    """
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.endswith("/v2/scrape"):
+            await asyncio.sleep(1.6)
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {
+                        "images": [
+                            {
+                                "src": "https://cdn.example.test/slow-trusted-karuppu.jpg",
+                                "alt": "Karuppu review still from trusted source",
+                                "width": 1600,
+                                "height": 900,
+                            }
+                        ],
+                        "metadata": {"title": "Karuppu Reviews & Talk"},
+                    },
+                },
+            )
+        if request.method == "GET" and request.url.path == "/images/search":
+            return httpx.Response(200, text=bing_html, headers={"Content-Type": "text/html"})
+        if request.method == "GET" and str(request.url) == useful_image_url:
+            return httpx.Response(
+                200,
+                content=image_bytes,
+                headers={"Content-Type": "image/jpeg"},
+            )
+        if request.method == "GET" and str(request.url) == "https://cdn.example.test/slow-trusted-karuppu.jpg":
+            return httpx.Response(
+                200,
+                content=image_bytes,
+                headers={"Content-Type": "image/jpeg"},
             )
         raise AssertionError(f"unexpected request {request.method} {request.url!s}")
 
@@ -859,7 +908,7 @@ def test_visual_enrichment_final_blocks_keep_failed_explicit_image_slot_without_
     assert cleaned == blocks
 
 
-def test_visual_enrichment_default_image_timeout_allows_real_image_retrieval_budget(
+def test_visual_enrichment_default_image_timeout_keeps_inline_images_fast(
 ) -> None:
     config = OrchestratorConfig()
     assert config.visual_max_visuals_per_turn == 5
@@ -867,7 +916,9 @@ def test_visual_enrichment_default_image_timeout_allows_real_image_retrieval_bud
     assert config.visual_image_candidate_limit == 24
     assert config.visual_image_verify_top_k == 3
     assert config.visual_image_search_result_limit == 12
-    assert config.visual_image_slot_timeout_ms == 30000
+    assert config.visual_image_slot_timeout_ms == 6000
+    assert config.visual_image_search_timeout_sec == 5.0
+    assert config.visual_download_timeout_sec == 6.0
 
 
 @pytest.mark.asyncio
@@ -1444,6 +1495,70 @@ async def test_visual_enrichment_auto_injects_image_slot_for_concrete_follow_up(
         )
         assert image_block["provenance"]["source_image_url"] == "https://cdn.example.test/xai-macrohard-campus.jpg"
         assert len(final_payload["supporting_artifacts"]) == 1
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_visual_enrichment_auto_slot_prefers_fast_search_before_slow_firecrawl() -> None:
+    root = _make_test_dir("visual-image-auto-fast-search-")
+    try:
+        config = OrchestratorConfig(
+            artifacts_root=root / "artifacts",
+            internal_token="internal-token",
+            signing_secret="signing-secret",
+            anthropic_api_key="anthropic-key",
+            anthropic_model="claude-opus-4-6",
+            task_ledger_db_path=root / "task_ledger.db",
+            visual_enhancement_enabled=True,
+            visual_finalization_grace_ms=100,
+            visual_image_slot_timeout_ms=1200,
+            visual_max_concurrent_sidecars=1,
+            visual_max_image_slots_per_turn=1,
+            visual_firecrawl_api_key="firecrawl-key",
+            visual_image_search_enabled=True,
+            visual_image_search_base_url="https://www.bing.com/images/search",
+        )
+        transport = _build_auto_slot_fast_search_slow_firecrawl_transport()
+
+        async with httpx.AsyncClient(transport=transport) as client:
+            coordinator = VisualEnrichmentCoordinator(
+                config=config,
+                task_id="tsk_visual_image_auto_fast_search_1",
+                request_id="req_visual_image_auto_fast_search_1",
+                session_id="sess_visual_image_auto_fast_search_1",
+                channel="desktop:desk_visual_image_auto_fast_search_1",
+                user_query="What about Karuppu reviews and talk?",
+                http_client=client,
+            )
+            coordinator.note_sources(
+                [
+                    {
+                        "url": "https://example.com/karuppu-review",
+                        "title": "Karuppu Reviews & Talk audience reaction",
+                        "domain": "example.com",
+                    }
+                ]
+            )
+
+            coordinator.consume_text(
+                (
+                    "Karuppu is getting discussed because the early reviews and audience talk "
+                    "are centered on the lead performance, the music, and whether the film's "
+                    "mass moments land outside the core fanbase. The useful visual here is a "
+                    "clean reference still tied to the Karuppu reviews discussion, not a slow "
+                    "page scrape that delays the whole response."
+                )
+            )
+
+            final_payload = await coordinator.finalize()
+
+        image_block = next(
+            block for block in final_payload["response_blocks"] if block["type"] == "image_artifact"
+        )
+        assert image_block["provenance"]["source_image_url"] == (
+            "https://cdn.example.test/karuppu-reviews-talk-still.jpg"
+        )
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

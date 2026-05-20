@@ -155,7 +155,7 @@ class OrchestratorConfig:
     visual_max_image_slots_per_turn: int = 5
     visual_max_chart_slots_per_turn: int = 1
     visual_max_concurrent_sidecars: int = 2
-    visual_image_slot_timeout_ms: int = 30000
+    visual_image_slot_timeout_ms: int = 6000
     visual_chart_slot_timeout_ms: int = 4000
     visual_finalization_grace_ms: int = 750
     visual_image_source_page_limit: int = 3
@@ -165,13 +165,13 @@ class OrchestratorConfig:
     visual_image_min_confidence: float = 0.58
     visual_chart_max_points: int = 200
     visual_chart_max_bytes: int = 4 * 1024 * 1024
-    visual_download_timeout_sec: float = 20.0
+    visual_download_timeout_sec: float = 6.0
     visual_firecrawl_api_key: str = ""
     visual_firecrawl_base_url: str = "https://api.firecrawl.dev"
     visual_firecrawl_request_timeout_sec: float = 20.0
     visual_image_search_enabled: bool = True
     visual_image_search_base_url: str = "https://www.bing.com/images/search"
-    visual_image_search_timeout_sec: float = 12.0
+    visual_image_search_timeout_sec: float = 5.0
     visual_image_search_result_limit: int = 12
     visual_fireworks_api_key: str = ""
     visual_fireworks_base_url: str = "https://api.fireworks.ai/inference/v1"
@@ -309,7 +309,7 @@ class OrchestratorConfig:
             visual_max_image_slots_per_turn=max(0, _env_int("VISUAL_ENHANCEMENT_MAX_IMAGE_SLOTS_PER_TURN", 5)),
             visual_max_chart_slots_per_turn=max(0, _env_int("VISUAL_ENHANCEMENT_MAX_CHART_SLOTS_PER_TURN", 1)),
             visual_max_concurrent_sidecars=max(1, _env_int("VISUAL_ENHANCEMENT_MAX_CONCURRENT_SIDECARS", 2)),
-            visual_image_slot_timeout_ms=max(250, _env_int("VISUAL_ENHANCEMENT_IMAGE_SLOT_TIMEOUT_MS", 30000)),
+            visual_image_slot_timeout_ms=max(250, _env_int("VISUAL_ENHANCEMENT_IMAGE_SLOT_TIMEOUT_MS", 6000)),
             visual_chart_slot_timeout_ms=max(250, _env_int("VISUAL_ENHANCEMENT_CHART_SLOT_TIMEOUT_MS", 4000)),
             visual_finalization_grace_ms=max(0, _env_int("VISUAL_ENHANCEMENT_FINALIZATION_GRACE_MS", 750)),
             visual_image_source_page_limit=max(1, _env_int("VISUAL_ENHANCEMENT_IMAGE_SOURCE_PAGE_LIMIT", 3)),
@@ -322,7 +322,7 @@ class OrchestratorConfig:
             ),
             visual_chart_max_points=max(2, _env_int("VISUAL_ENHANCEMENT_CHART_MAX_POINTS", 200)),
             visual_chart_max_bytes=max(1024, _env_int("VISUAL_ENHANCEMENT_CHART_MAX_BYTES", 4 * 1024 * 1024)),
-            visual_download_timeout_sec=max(5.0, _env_float("VISUAL_ENHANCEMENT_DOWNLOAD_TIMEOUT_SEC", 20.0)),
+            visual_download_timeout_sec=max(5.0, _env_float("VISUAL_ENHANCEMENT_DOWNLOAD_TIMEOUT_SEC", 6.0)),
             visual_firecrawl_api_key=(
                 os.getenv("VISUAL_ENHANCEMENT_FIRECRAWL_API_KEY")
                 or os.getenv("FIRECRAWL_API_KEY")
@@ -349,7 +349,7 @@ class OrchestratorConfig:
             or "https://www.bing.com/images/search",
             visual_image_search_timeout_sec=max(
                 3.0,
-                _env_float("VISUAL_ENHANCEMENT_IMAGE_SEARCH_TIMEOUT_SEC", 12.0),
+                _env_float("VISUAL_ENHANCEMENT_IMAGE_SEARCH_TIMEOUT_SEC", 5.0),
             ),
             visual_image_search_result_limit=max(
                 1,
