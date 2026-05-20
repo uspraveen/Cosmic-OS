@@ -31,6 +31,45 @@ _DENY_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b(?:open)\s*\(\s*[0-9]+"), "Opening raw file descriptors is blocked in the local code sandbox."),
 )
 
+_MAP_VISUAL_PACKAGE_NAMES = frozenset(
+    {
+        "folium",
+        "leafmap",
+        "geopandas",
+        "geopy",
+        "osmnx",
+        "cartopy",
+        "contextily",
+    }
+)
+_MAP_VISUAL_DESCRIPTION_RE = re.compile(
+    r"\b(?:map|route|directions|geocod(?:e|ing)|location|campus|office|building|address|marker|pin)\b"
+    r".*\b(?:box|rectangle|boundary|outline|circle|polygon|route|directions|marker|pin|map)\b"
+    r"|"
+    r"\b(?:box|rectangle|boundary|outline|circle|polygon|marker|pin)\b"
+    r".*\b(?:map|location|campus|office|building|address)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_MAP_VISUAL_CODE_RE = re.compile(
+    r"\b(?:folium|leaflet|openstreetmap|tileLayer|L\.map|mapbox|osmnx|geopandas|geopy)\b"
+    r"|"
+    r"outputs[/\\][^\"']*\.html",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_inline_map_request(*, description: str, code: str, packages: list[str]) -> bool:
+    normalized_packages = {
+        str(package or "").strip().split("[", 1)[0].split("=", 1)[0].split("<", 1)[0].split(">", 1)[0].casefold()
+        for package in packages
+    }
+    if normalized_packages & _MAP_VISUAL_PACKAGE_NAMES:
+        return True
+    combined = f"{description}\n{code}"
+    if _MAP_VISUAL_DESCRIPTION_RE.search(description or ""):
+        return True
+    return bool(_MAP_VISUAL_CODE_RE.search(combined))
+
 
 _FS_PRELUDE = r'''
 import builtins as _cosmic_builtins
@@ -145,6 +184,24 @@ def run_local_code_sandbox(
     code = str(code or "")
     if not code.strip():
         return {"error": True, "tool": "cosmic_code_execution", "message": "code is required."}
+    if _looks_like_inline_map_request(
+        description=description,
+        code=code,
+        packages=packages or [],
+    ):
+        return {
+            "error": True,
+            "tool": "cosmic_code_execution",
+            "code": "USE_MAP_RENDER",
+            "retryable": False,
+            "next_action": "delegate_to_agent",
+            "message": (
+                "Map, route, geocoding, place, and map-overlay visuals must use the map.render specialist so COSMIC "
+                "can return an inline interactive map artifact. Do not generate Folium/Leaflet/HTML maps with "
+                "cosmic_code_execution; search the agent catalog and delegate to map.render with markers, route_options, "
+                "or shapes/overlays."
+            ),
+        }
     encoded = code.encode("utf-8")
     if len(encoded) > settings.max_script_bytes:
         return {

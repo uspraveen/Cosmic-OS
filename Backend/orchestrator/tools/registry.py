@@ -480,7 +480,8 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "for project edits, deployment, screenshots, network access, or long-running work; use Alpha for those. "
                 "Do not use this for maps, directions, route alternatives, place lookup visuals, or geocoding workflows; "
                 "use the map.render specialist instead because local HTML/Folium outputs are delivered as downloads, "
-                "while map.render produces inline COSMIC map artifacts. "
+                "while map.render produces inline COSMIC map artifacts. The executor rejects map-like sandbox requests "
+                "so you can retry through map.render with markers, route_options, or shapes/overlays. "
                 "Write files that should be delivered to the user under the relative `outputs/` directory."
             ),
             "input_schema": {
