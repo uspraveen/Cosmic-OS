@@ -240,6 +240,260 @@ async def test_map_render_with_named_route_options(agent: MapAgent, monkeypatch:
 
 
 @pytest.mark.asyncio
+async def test_map_render_route_options_with_same_waypoints_use_distinct_alternatives(
+    agent: MapAgent,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await agent.on_startup()
+
+    async def fake_geocode_query(**kwargs):
+        query = kwargs["query"]
+        if "Little Rock" in query:
+            return {
+                "query": query,
+                "label": "Little Rock",
+                "lat": 34.7465,
+                "lng": -92.2896,
+                "position": [-92.2896, 34.7465],
+            }
+        return {
+            "query": query,
+            "label": "Chicago",
+            "lat": 41.8781,
+            "lng": -87.6298,
+            "position": [-87.6298, 41.8781],
+        }
+
+    fetch_calls = []
+
+    async def fake_fetch_routes(**kwargs):
+        fetch_calls.append(kwargs)
+        assert kwargs["alternatives"] == 3
+        return [
+            {
+                "geometry": {"type": "LineString", "coordinates": [[-92.2896, 34.7465], [-90.0, 38.0], [-87.6298, 41.8781]]},
+                "distance_m": 1040000,
+                "duration_s": 38700,
+            },
+            {
+                "geometry": {"type": "LineString", "coordinates": [[-92.2896, 34.7465], [-90.0, 38.0], [-87.6298, 41.8781]]},
+                "distance_m": 1040000,
+                "duration_s": 38700,
+            },
+            {
+                "geometry": {"type": "LineString", "coordinates": [[-92.2896, 34.7465], [-89.2, 38.4], [-87.6298, 41.8781]]},
+                "distance_m": 1080000,
+                "duration_s": 40400,
+            },
+        ]
+
+    monkeypatch.setattr("agents.map_agent.agent.geocode_query", fake_geocode_query)
+    monkeypatch.setattr("agents.map_agent.agent.fetch_routes", fake_fetch_routes)
+
+    task = TaskEnvelope(
+        task_id="task_map_duplicate_route_options",
+        task_list_id="tl_map_duplicate_route_options",
+        session_id="sess_map_duplicate_route_options",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/map-agent:1.0.0",
+        intent="map.render",
+        input={
+            "title": "Little Rock to Chicago options",
+            "route_options": [
+                {
+                    "label": "Fastest",
+                    "route_waypoints": ["Little Rock, Arkansas", "Chicago, Illinois"],
+                },
+                {
+                    "label": "Shortest",
+                    "route_waypoints": ["Little Rock, Arkansas", "Chicago, Illinois"],
+                },
+                {
+                    "label": "Scenic",
+                    "route_waypoints": ["Little Rock, Arkansas", "Chicago, Illinois"],
+                },
+            ],
+        },
+        idempotency_key="idem_map_duplicate_route_options",
+        signature="test_sig",
+        source="agent",
+        source_id="orch_1",
+        channel="desktop:test",
+    )
+
+    result = await agent.handle_map_render(task)
+    assert result.status == "completed"
+    assert len(fetch_calls) == 1
+
+    map_path = agent.artifacts_root / task.task_id / "map_agent" / "map.cosmic-map.json"
+    payload = json.loads(map_path.read_text(encoding="utf-8"))
+    assert [route["label"] for route in payload["routes"]] == ["Fastest", "Scenic"]
+    assert len(payload["routes"]) == 2
+    assert "Routes: 2 options." in result.output["summary"]
+
+
+@pytest.mark.asyncio
+async def test_map_render_route_option_extracts_via_points_from_label(
+    agent: MapAgent,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await agent.on_startup()
+
+    coordinates = {
+        "Little Rock, Arkansas": (-92.2896, 34.7465),
+        "Memphis": (-90.0490, 35.1495),
+        "St. Louis": (-90.1994, 38.6270),
+        "Chicago, Illinois": (-87.6298, 41.8781),
+    }
+
+    async def fake_geocode_query(**kwargs):
+        query = kwargs["query"]
+        lng, lat = coordinates[query]
+        return {"query": query, "label": query, "lat": lat, "lng": lng, "position": [lng, lat]}
+
+    fetch_calls = []
+
+    async def fake_fetch_routes(**kwargs):
+        fetch_calls.append(kwargs)
+        coords = kwargs["coordinates"]
+        return [
+            {
+                "geometry": {"type": "LineString", "coordinates": [[lng, lat] for lng, lat in coords]},
+                "distance_m": 1000000,
+                "duration_s": 36000,
+            }
+        ]
+
+    monkeypatch.setattr("agents.map_agent.agent.geocode_query", fake_geocode_query)
+    monkeypatch.setattr("agents.map_agent.agent.fetch_routes", fake_fetch_routes)
+
+    task = TaskEnvelope(
+        task_id="task_map_via_label",
+        task_list_id="tl_map_via_label",
+        session_id="sess_map_via_label",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/map-agent:1.0.0",
+        intent="map.render",
+        input={
+            "route_options": [
+                {
+                    "label": "Fastest via Memphis and St. Louis",
+                    "route_waypoints": ["Little Rock, Arkansas", "Chicago, Illinois"],
+                }
+            ],
+        },
+        idempotency_key="idem_map_via_label",
+        signature="test_sig",
+        source="agent",
+        source_id="orch_1",
+        channel="desktop:test",
+    )
+
+    result = await agent.handle_map_render(task)
+    assert result.status == "completed"
+    assert fetch_calls[0]["coordinates"] == [
+        (-92.2896, 34.7465),
+        (-90.0490, 35.1495),
+        (-90.1994, 38.6270),
+        (-87.6298, 41.8781),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_map_render_uses_llm_to_expand_abstract_duplicate_route_options(
+    agent: MapAgent,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await agent.on_startup()
+
+    coordinates = {
+        "Little Rock, Arkansas": (-92.2896, 34.7465),
+        "Ozark National Forest, Arkansas": (-93.7552, 35.7273),
+        "Great River Road, Illinois": (-90.1568, 38.7398),
+        "Chicago, Illinois": (-87.6298, 41.8781),
+    }
+
+    async def fake_expand_route_options(**kwargs):
+        return [
+            {
+                "label": "Fastest",
+                "route_waypoints": ["Little Rock, Arkansas", "Chicago, Illinois"],
+            },
+            {
+                "label": "Scenic",
+                "route_waypoints": [
+                    "Little Rock, Arkansas",
+                    "Ozark National Forest, Arkansas",
+                    "Great River Road, Illinois",
+                    "Chicago, Illinois",
+                ],
+            },
+        ]
+
+    async def fake_geocode_query(**kwargs):
+        query = kwargs["query"]
+        lng, lat = coordinates[query]
+        return {"query": query, "label": query, "lat": lat, "lng": lng, "position": [lng, lat]}
+
+    fetch_calls = []
+
+    async def fake_fetch_routes(**kwargs):
+        fetch_calls.append(kwargs)
+        coords = kwargs["coordinates"]
+        return [
+            {
+                "geometry": {"type": "LineString", "coordinates": [[lng, lat] for lng, lat in coords]},
+                "distance_m": 1000000 + len(coords) * 1000,
+                "duration_s": 36000 + len(coords) * 60,
+            }
+        ]
+
+    monkeypatch.setattr("agents.map_agent.agent.expand_route_options", fake_expand_route_options)
+    monkeypatch.setattr("agents.map_agent.agent.geocode_query", fake_geocode_query)
+    monkeypatch.setattr("agents.map_agent.agent.fetch_routes", fake_fetch_routes)
+
+    task = TaskEnvelope(
+        task_id="task_map_llm_route_expansion",
+        task_list_id="tl_map_llm_route_expansion",
+        session_id="sess_map_llm_route_expansion",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/map-agent:1.0.0",
+        intent="map.render",
+        input={
+            "route_options": [
+                {
+                    "label": "Fastest",
+                    "route_waypoints": ["Little Rock, Arkansas", "Chicago, Illinois"],
+                },
+                {
+                    "label": "Scenic",
+                    "route_waypoints": ["Little Rock, Arkansas", "Chicago, Illinois"],
+                },
+            ],
+        },
+        idempotency_key="idem_map_llm_route_expansion",
+        signature="test_sig",
+        source="agent",
+        source_id="orch_1",
+        channel="desktop:test",
+    )
+
+    result = await agent.handle_map_render(task)
+    assert result.status == "completed"
+    assert len(fetch_calls) == 2
+    assert fetch_calls[1]["coordinates"] == [
+        (-92.2896, 34.7465),
+        (-93.7552, 35.7273),
+        (-90.1568, 38.7398),
+        (-87.6298, 41.8781),
+    ]
+
+    map_path = agent.artifacts_root / task.task_id / "map_agent" / "map.cosmic-map.json"
+    payload = json.loads(map_path.read_text(encoding="utf-8"))
+    assert [route["label"] for route in payload["routes"]] == ["Fastest", "Scenic"]
+
+
+@pytest.mark.asyncio
 async def test_map_render_requires_input(agent: MapAgent) -> None:
     await agent.on_startup()
     task = TaskEnvelope(

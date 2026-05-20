@@ -19,7 +19,7 @@ from shared.sqlite_client import connect_sync
 
 from .config import AGENT_ROOT, MapAgentConfig
 from .geocoding import GeocodingError, geocode_many, geocode_query
-from .internal_llm import parse_map_request
+from .internal_llm import expand_route_options, parse_map_request
 from .map_builder import build_map_spec, format_distance_meters, format_duration_seconds
 from .routing import RoutingError, fetch_routes
 
@@ -77,6 +77,81 @@ def _looks_like_alternative_request(text: str) -> bool:
             "route choices",
         )
     )
+
+
+def _waypoint_key(waypoints: list[str]) -> tuple[str, ...]:
+    return tuple(re.sub(r"\s+", " ", _safe_text(item)).casefold() for item in waypoints)
+
+
+def _endpoint_key(waypoints: list[str]) -> tuple[str, str] | None:
+    normalized = [_safe_text(item) for item in waypoints if _safe_text(item)]
+    if len(normalized) < 2:
+        return None
+    return (
+        re.sub(r"\s+", " ", normalized[0]).casefold(),
+        re.sub(r"\s+", " ", normalized[-1]).casefold(),
+    )
+
+
+def _route_geometry_signature(route: dict[str, Any]) -> tuple[tuple[float, float], ...] | None:
+    geometry = route.get("geometry")
+    if not isinstance(geometry, dict):
+        return None
+    coords = geometry.get("coordinates")
+    if not isinstance(coords, list) or not coords:
+        return None
+    signature: list[tuple[float, float]] = []
+    for coord in coords:
+        if not isinstance(coord, list) or len(coord) < 2:
+            continue
+        lng = _coerce_float(coord[0])
+        lat = _coerce_float(coord[1])
+        if lng is None or lat is None:
+            continue
+        signature.append((round(lng, 5), round(lat, 5)))
+    return tuple(signature) or None
+
+
+def _looks_like_road_token(text: str) -> bool:
+    normalized = _safe_text(text)
+    return bool(
+        re.search(
+            r"\b(i[-\s]?\d+|interstate\s+\d+|us[-\s]?\d+|u\.s\.\s*\d+|hwy\s+\d+|highway\s+\d+|route\s+\d+)\b",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _extract_via_points_from_text(text: str) -> list[str]:
+    source = _safe_text(text)
+    if not source:
+        return []
+    matches = re.findall(
+        r"\b(?:via|through|by way of)\s+([^;()\n]+)",
+        source,
+        flags=re.IGNORECASE,
+    )
+    via_points: list[str] = []
+    for raw_match in matches:
+        cleaned = re.sub(
+            r"\b(?:route|option|corridor|path|drive|driving|walk|walking|cycle|cycling)\b.*$",
+            "",
+            raw_match,
+            flags=re.IGNORECASE,
+        )
+        parts = re.split(r"\s*(?:,|/|&|\band\b|→|->)\s*", cleaned)
+        for part in parts:
+            candidate = _safe_text(part).strip(" -:;")
+            if not candidate:
+                continue
+            if _looks_like_road_token(candidate):
+                continue
+            if len(candidate) < 3 or candidate.casefold() in {"north", "south", "east", "west"}:
+                continue
+            if candidate not in via_points:
+                via_points.append(candidate)
+    return via_points[:4]
 
 
 def _clean_route_endpoint(text: str) -> str:
@@ -299,15 +374,21 @@ class MapAgent(AgentRuntime):
         ]
         if len(waypoints) < 2:
             return None
+        label = _safe_text(raw.get("label") or raw.get("name")) or f"Route {index + 1}"
+        description = _safe_text(raw.get("description")) or None
+        if len(waypoints) == 2:
+            via_points = _extract_via_points_from_text(" ".join([label, description or ""]))
+            if via_points:
+                waypoints = [waypoints[0], *via_points, waypoints[-1]]
         profile = _safe_text(raw.get("route_profile") or raw.get("profile")) or "driving"
         if profile not in {"driving", "walking", "cycling"}:
             profile = "driving"
         return {
-            "label": _safe_text(raw.get("label") or raw.get("name")) or f"Route {index + 1}",
+            "label": label,
             "route_profile": profile,
             "route_waypoints": waypoints,
             "color": _safe_text(raw.get("color")) or None,
-            "description": _safe_text(raw.get("description")) or None,
+            "description": description,
             "alternatives": max(1, _coerce_int(raw.get("alternatives"), 1)),
         }
 
@@ -330,6 +411,80 @@ class MapAgent(AgentRuntime):
                 "markers": [{"label": place, "query": place, "kind": "marker"}],
             }
         return {}
+
+    async def _expand_ambiguous_route_options(
+        self,
+        plan: dict[str, Any],
+        *,
+        context: str | None = None,
+    ) -> None:
+        route_options = [
+            item
+            for item in (
+                self._normalize_route_option_input(raw, index)
+                for index, raw in enumerate(
+                    plan.get("route_options") if isinstance(plan.get("route_options"), list) else []
+                )
+            )
+            if item
+        ]
+        if len(route_options) < 2:
+            return
+
+        grouped: dict[tuple[str, str], list[tuple[int, dict[str, Any]]]] = {}
+        for index, option in enumerate(route_options):
+            waypoints = option.get("route_waypoints")
+            if not isinstance(waypoints, list) or len(waypoints) != 2:
+                continue
+            key = _endpoint_key([_safe_text(item) for item in waypoints])
+            if key:
+                grouped.setdefault(key, []).append((index, option))
+
+        if not any(len(items) > 1 for items in grouped.values()):
+            plan["route_options"] = route_options
+            return
+
+        refined = list(route_options)
+        for group in grouped.values():
+            if len(group) < 2:
+                continue
+            _, first_option = group[0]
+            waypoints = first_option["route_waypoints"]
+            expanded = await expand_route_options(
+                cfg=self._cfg,
+                http_client=self._http(),
+                origin=waypoints[0],
+                destination=waypoints[-1],
+                route_options=[option for _, option in group],
+                context=context,
+            )
+            expanded_options = [
+                item
+                for item in (
+                    self._normalize_route_option_input(raw, index)
+                    for index, raw in enumerate(expanded or [])
+                )
+                if item
+            ]
+            if not expanded_options:
+                continue
+            expanded_keys = {
+                _waypoint_key(option["route_waypoints"])
+                for option in expanded_options
+                if isinstance(option.get("route_waypoints"), list)
+            }
+            has_added_constraints = any(
+                isinstance(option.get("route_waypoints"), list)
+                and len(option["route_waypoints"]) > 2
+                for option in expanded_options
+            )
+            if not has_added_constraints and len(expanded_keys) <= 1:
+                continue
+            for offset, (original_index, _) in enumerate(group):
+                if offset < len(expanded_options):
+                    refined[original_index] = expanded_options[offset]
+
+        plan["route_options"] = refined
 
     def _structured_plan_from_input(self, task: TaskEnvelope) -> dict[str, Any]:
         payload = task.input if isinstance(task.input, dict) else {}
@@ -457,6 +612,8 @@ class MapAgent(AgentRuntime):
                     structured[key] = value
                 elif value and not structured.get(key):
                     structured[key] = value
+        if structured.get("route_options"):
+            await self._expand_ambiguous_route_options(structured, context=context)
         if query and not structured.get("title"):
             structured["title"] = query[:120]
         return structured
@@ -513,6 +670,34 @@ class MapAgent(AgentRuntime):
             return route_coordinates
 
         routes: list[dict[str, Any]] = []
+        seen_route_signatures: set[tuple[tuple[float, float], ...]] = set()
+
+        def append_route(
+            route: dict[str, Any],
+            *,
+            label: str,
+            color: str | None = None,
+            description: str | None = None,
+            width: int = 5,
+        ) -> bool:
+            signature = _route_geometry_signature(route)
+            if signature and signature in seen_route_signatures:
+                return False
+            if signature:
+                seen_route_signatures.add(signature)
+            routes.append(
+                {
+                    "label": label,
+                    "color": color,
+                    "description": description,
+                    "geometry": route["geometry"],
+                    "distance_m": route["distance_m"],
+                    "duration_s": route["duration_s"],
+                    "width": width,
+                }
+            )
+            return True
+
         route_options = [
             item
             for item in (
@@ -524,32 +709,46 @@ class MapAgent(AgentRuntime):
             if item
         ]
         if route_options:
+            grouped_options: dict[tuple[str, ...], list[tuple[int, dict[str, Any]]]] = {}
             for option_index, option in enumerate(route_options):
-                route_waypoints = option["route_waypoints"]
+                grouped_options.setdefault(_waypoint_key(option["route_waypoints"]), []).append(
+                    (option_index, option)
+                )
+
+            for option_group in grouped_options.values():
+                first_option_index, first_option = option_group[0]
+                route_waypoints = first_option["route_waypoints"]
                 route_coordinates = await resolve_waypoints(route_waypoints)
                 if len(route_coordinates) < 2:
                     continue
+                alternatives = max(
+                    1,
+                    max(
+                        _coerce_int(option.get("alternatives"), 1)
+                        for _, option in option_group
+                    ),
+                    len(option_group),
+                )
                 fetched_routes = await fetch_routes(
                     cfg=self._cfg,
                     http_client=self._http(),
                     coordinates=route_coordinates,
-                    profile=option["route_profile"],
-                    alternatives=option.get("alternatives") or 1,
+                    profile=first_option["route_profile"],
+                    alternatives=alternatives,
                 )
                 for variant_index, route in enumerate(fetched_routes):
+                    option_index, option = option_group[min(variant_index, len(option_group) - 1)]
                     label = option["label"]
-                    if len(fetched_routes) > 1:
+                    if len(option_group) == 1 and len(fetched_routes) > 1:
                         label = f"{label} alt {variant_index + 1}"
-                    routes.append(
-                        {
-                            "label": label,
-                            "color": option.get("color"),
-                            "description": option.get("description"),
-                            "geometry": route["geometry"],
-                            "distance_m": route["distance_m"],
-                            "duration_s": route["duration_s"],
-                            "width": 6 if option_index == 0 and variant_index == 0 else 5,
-                        }
+                    elif variant_index >= len(option_group):
+                        label = f"{first_option['label']} alt {variant_index + 1}"
+                    append_route(
+                        route,
+                        label=label,
+                        color=option.get("color"),
+                        description=option.get("description"),
+                        width=6 if first_option_index == 0 and variant_index == 0 else 5,
                     )
 
         route_waypoints = [
@@ -573,14 +772,10 @@ class MapAgent(AgentRuntime):
                 alternatives=max(1, _coerce_int(plan.get("route_alternatives"), 1)),
             )
             for index, route in enumerate(fetched_routes):
-                routes.append(
-                    {
-                        "label": "Route" if index == 0 else f"Alternative {index + 1}",
-                        "geometry": route["geometry"],
-                        "distance_m": route["distance_m"],
-                        "duration_s": route["duration_s"],
-                        "width": 6 if index == 0 else 5,
-                    }
+                append_route(
+                    route,
+                    label="Route" if index == 0 else f"Alternative {index + 1}",
+                    width=6 if index == 0 else 5,
                 )
 
         if not resolved_markers and route_coordinates:

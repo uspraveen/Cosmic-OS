@@ -60,6 +60,38 @@ Rules:
 - Keep lists concise and practical.
 """
 
+_EXPAND_ROUTE_OPTIONS_SYSTEM = """\
+You improve route alternatives for a routing agent.
+
+The user or orchestrator may provide multiple abstract route labels with the
+same origin and destination, such as "fastest", "shortest", or "scenic". Labels
+alone do not create different routes. Convert each option into concrete,
+geocodable route_waypoints.
+
+Output ONLY valid JSON:
+{
+  "route_options": [
+    {
+      "label": "short human label",
+      "route_profile": "driving",
+      "route_waypoints": ["origin", "via city or landmark", "destination"],
+      "color": "#2563eb",
+      "description": "optional one-line explanation or null"
+    }
+  ]
+}
+
+Rules:
+- Preserve the same origin and destination for every option.
+- Add intermediate waypoints only when they are concrete, well-known, and likely geocodable.
+- Prefer cities, towns, named parks, named landmarks, or named regions over highway numbers alone.
+- If a label already mentions "via" or "through", include those places as waypoints.
+- For "scenic", use plausible scenic corridors or named natural/cultural landmarks when obvious.
+- For "fastest" or "shortest", it is valid to keep only origin and destination if no reliable via point is known.
+- Do not invent obscure places.
+- Keep every route_waypoints list short and practical, normally 2-5 items.
+"""
+
 
 def _safe_text(value: Any) -> str:
     return str(value or "").strip()
@@ -86,26 +118,22 @@ def _parse_loose_json(raw: str) -> dict[str, Any] | None:
     return None
 
 
-async def parse_map_request(
+async def _chat_json(
     *,
     cfg: MapAgentConfig,
     http_client: httpx.AsyncClient,
-    query: str,
-    context: str | None = None,
+    system: str,
+    user_parts: list[str],
 ) -> dict[str, Any] | None:
     if not cfg.enable_internal_llm:
         return None
     if not cfg.internal_llm_api_key or not cfg.internal_llm_base_url:
         return None
 
-    user_parts = [f"Map request:\n{query.strip()}"]
-    if context:
-        user_parts.append(f"Supporting context:\n{context.strip()[:2000]}")
-
     payload = {
         "model": cfg.internal_llm_model,
         "messages": [
-            {"role": "system", "content": _PARSE_SYSTEM},
+            {"role": "system", "content": system},
             {"role": "user", "content": "\n\n".join(user_parts)},
         ],
         "response_format": {"type": "json_object"},
@@ -132,3 +160,70 @@ async def parse_map_request(
     except Exception as exc:
         logger.warning("map_agent.parse_request_llm_error: %s", exc)
         return None
+
+
+async def parse_map_request(
+    *,
+    cfg: MapAgentConfig,
+    http_client: httpx.AsyncClient,
+    query: str,
+    context: str | None = None,
+) -> dict[str, Any] | None:
+    user_parts = [f"Map request:\n{query.strip()}"]
+    if context:
+        user_parts.append(f"Supporting context:\n{context.strip()[:2000]}")
+    return await _chat_json(
+        cfg=cfg,
+        http_client=http_client,
+        system=_PARSE_SYSTEM,
+        user_parts=user_parts,
+    )
+
+
+async def expand_route_options(
+    *,
+    cfg: MapAgentConfig,
+    http_client: httpx.AsyncClient,
+    origin: str,
+    destination: str,
+    route_options: list[dict[str, Any]],
+    context: str | None = None,
+) -> list[dict[str, Any]] | None:
+    options = []
+    for option in route_options:
+        if not isinstance(option, dict):
+            continue
+        options.append(
+            {
+                "label": _safe_text(option.get("label")),
+                "description": _safe_text(option.get("description")) or None,
+                "route_profile": _safe_text(option.get("route_profile")) or "driving",
+                "route_waypoints": option.get("route_waypoints"),
+                "color": _safe_text(option.get("color")) or None,
+            }
+        )
+    if not options:
+        return None
+
+    user_parts = [
+        "Expand these route options into concrete, geocodable waypoints.",
+        f"Origin: {origin}",
+        f"Destination: {destination}",
+        "Route options JSON:",
+        json.dumps(options, ensure_ascii=True),
+    ]
+    if context:
+        user_parts.append(f"Supporting context:\n{context.strip()[:2000]}")
+
+    parsed = await _chat_json(
+        cfg=cfg,
+        http_client=http_client,
+        system=_EXPAND_ROUTE_OPTIONS_SYSTEM,
+        user_parts=user_parts,
+    )
+    if not isinstance(parsed, dict):
+        return None
+    expanded = parsed.get("route_options")
+    if not isinstance(expanded, list):
+        return None
+    return [item for item in expanded if isinstance(item, dict)]
