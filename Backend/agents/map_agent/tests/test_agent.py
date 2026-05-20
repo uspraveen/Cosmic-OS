@@ -240,6 +240,140 @@ async def test_map_render_with_named_route_options(agent: MapAgent, monkeypatch:
 
 
 @pytest.mark.asyncio
+async def test_map_render_accepts_waypoints_alias_and_coordinate_objects(
+    agent: MapAgent,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await agent.on_startup()
+
+    async def fake_geocode_query(**kwargs):
+        raise AssertionError(f"coordinate waypoints should not be geocoded: {kwargs}")
+
+    fetch_calls = []
+
+    async def fake_fetch_routes(**kwargs):
+        fetch_calls.append(kwargs)
+        coords = kwargs["coordinates"]
+        return [
+            {
+                "geometry": {"type": "LineString", "coordinates": [[lng, lat] for lng, lat in coords]},
+                "distance_m": 1000000 + len(coords) * 1000,
+                "duration_s": 36000 + len(coords) * 60,
+            }
+        ]
+
+    monkeypatch.setattr("agents.map_agent.agent.geocode_query", fake_geocode_query)
+    monkeypatch.setattr("agents.map_agent.agent.fetch_routes", fake_fetch_routes)
+
+    task = TaskEnvelope(
+        task_id="task_map_coordinate_route_options",
+        task_list_id="tl_map_coordinate_route_options",
+        session_id="sess_map_coordinate_route_options",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/map-agent:1.0.0",
+        intent="map.render",
+        input={
+            "route_options": [
+                {
+                    "label": "Fastest Route",
+                    "color": "#ff0000",
+                    "waypoints": [
+                        {"lat": 34.7465, "lon": -92.2896, "label": "Little Rock, AR"},
+                        {"lat": 35.1495, "lon": -90.0490, "label": "Memphis, TN"},
+                        {"lat": 38.6270, "lon": -90.1994, "label": "St. Louis, MO"},
+                        {"lat": 41.8781, "lon": -87.6298, "label": "Chicago, IL"},
+                    ],
+                },
+                {
+                    "label": "Western Route",
+                    "color": "#2563eb",
+                    "waypoints": [
+                        {"lat": 34.7465, "lon": -92.2896, "label": "Little Rock, AR"},
+                        {"lat": 36.1540, "lon": -95.9928, "label": "Tulsa, OK"},
+                        {"lat": 37.0842, "lon": -94.5133, "label": "Joplin, MO"},
+                        {"lat": 41.8781, "lon": -87.6298, "label": "Chicago, IL"},
+                    ],
+                },
+            ],
+        },
+        idempotency_key="idem_map_coordinate_route_options",
+        signature="test_sig",
+        source="agent",
+        source_id="orch_1",
+        channel="desktop:test",
+    )
+
+    result = await agent.handle_map_render(task)
+    assert result.status == "completed"
+    assert [call["coordinates"] for call in fetch_calls] == [
+        [(-92.2896, 34.7465), (-90.0490, 35.1495), (-90.1994, 38.6270), (-87.6298, 41.8781)],
+        [(-92.2896, 34.7465), (-95.9928, 36.1540), (-94.5133, 37.0842), (-87.6298, 41.8781)],
+    ]
+
+    map_path = agent.artifacts_root / task.task_id / "map_agent" / "map.cosmic-map.json"
+    payload = json.loads(map_path.read_text(encoding="utf-8"))
+    assert [route["label"] for route in payload["routes"]] == ["Fastest Route", "Western Route"]
+    assert payload["routes"][0]["color"] == "#ff0000"
+
+
+@pytest.mark.asyncio
+async def test_map_render_recovers_route_options_misfiled_as_route_waypoints(
+    agent: MapAgent,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await agent.on_startup()
+
+    async def fake_geocode_query(**kwargs):
+        raise AssertionError(f"misfiled coordinate route options should not be geocoded: {kwargs}")
+
+    async def fake_fetch_routes(**kwargs):
+        coords = kwargs["coordinates"]
+        return [
+            {
+                "geometry": {"type": "LineString", "coordinates": [[lng, lat] for lng, lat in coords]},
+                "distance_m": 1000000,
+                "duration_s": 36000,
+            }
+        ]
+
+    monkeypatch.setattr("agents.map_agent.agent.geocode_query", fake_geocode_query)
+    monkeypatch.setattr("agents.map_agent.agent.fetch_routes", fake_fetch_routes)
+
+    task = TaskEnvelope(
+        task_id="task_map_misfiled_route_options",
+        task_list_id="tl_map_misfiled_route_options",
+        session_id="sess_map_misfiled_route_options",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/map-agent:1.0.0",
+        intent="map.render",
+        input={
+            "route_waypoints": [
+                {
+                    "label": "Fastest Route",
+                    "waypoints": [
+                        {"lat": 34.7465, "lon": -92.2896, "label": "Little Rock, AR"},
+                        {"lat": 35.1495, "lon": -90.0490, "label": "Memphis, TN"},
+                        {"lat": 41.8781, "lon": -87.6298, "label": "Chicago, IL"},
+                    ],
+                }
+            ],
+        },
+        idempotency_key="idem_map_misfiled_route_options",
+        signature="test_sig",
+        source="agent",
+        source_id="orch_1",
+        channel="desktop:test",
+    )
+
+    result = await agent.handle_map_render(task)
+    assert result.status == "completed"
+
+    map_path = agent.artifacts_root / task.task_id / "map_agent" / "map.cosmic-map.json"
+    payload = json.loads(map_path.read_text(encoding="utf-8"))
+    assert [route["label"] for route in payload["routes"]] == ["Fastest Route"]
+
+
+@pytest.mark.asyncio
 async def test_map_render_route_options_with_same_waypoints_use_distinct_alternatives(
     agent: MapAgent,
     monkeypatch: pytest.MonkeyPatch,

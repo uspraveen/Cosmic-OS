@@ -15,6 +15,7 @@ intents:
       - Use for directions, routes, distance/travel-time questions, place lookups, and "show on a map" requests.
       - Prefer this specialist over local code/HTML map generation whenever the user expects to see an inline map in chat.
       - Pass route_waypoints for one ordered route; pass route_options for multiple named alternatives/corridors on the same map.
+      - route_options items may use route_waypoints, stops, or waypoints; waypoints may be place strings or {label, lat, lon/lng} coordinate objects.
       - For "show route alternatives" without named corridors, pass route_waypoints plus route_alternatives between 2 and 6.
       - Pass markers for standalone pins, POIs, or places that should not be connected as a route.
       - Natural-language queries are fine when coordinates are not known.

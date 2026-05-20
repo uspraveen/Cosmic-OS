@@ -23,12 +23,45 @@
     "route_profile": { "type": "string", "enum": ["driving", "walking", "cycling"] },
     "route_waypoints": {
       "type": "array",
-      "items": { "type": "string" },
-      "description": "Ordered stops for routing"
+      "items": {
+        "anyOf": [
+          { "type": "string" },
+          {
+            "type": "object",
+            "properties": {
+              "label": { "type": "string" },
+              "name": { "type": "string" },
+              "query": { "type": "string" },
+              "address": { "type": "string" },
+              "lat": { "type": "number" },
+              "lng": { "type": "number" },
+              "lon": { "type": "number" },
+              "latitude": { "type": "number" },
+              "longitude": { "type": "number" }
+            }
+          }
+        ]
+      },
+      "description": "Ordered stops for routing. Items may be place strings or coordinate objects."
     },
     "stops": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "anyOf": [
+          { "type": "string" },
+          { "type": "object" }
+        ]
+      },
+      "description": "Alias for route_waypoints"
+    },
+    "waypoints": {
+      "type": "array",
+      "items": {
+        "anyOf": [
+          { "type": "string" },
+          { "type": "object" }
+        ]
+      },
       "description": "Alias for route_waypoints"
     },
     "route_options": {
@@ -43,12 +76,32 @@
           "profile": { "type": "string", "enum": ["driving", "walking", "cycling"] },
           "route_waypoints": {
             "type": "array",
-            "items": { "type": "string" },
-            "description": "Ordered stops for this route choice"
+            "items": {
+              "anyOf": [
+                { "type": "string" },
+                { "type": "object" }
+              ]
+            },
+            "description": "Ordered stops for this route choice. Items may be place strings or coordinate objects."
           },
           "stops": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "anyOf": [
+                { "type": "string" },
+                { "type": "object" }
+              ]
+            },
+            "description": "Alias for route_waypoints"
+          },
+          "waypoints": {
+            "type": "array",
+            "items": {
+              "anyOf": [
+                { "type": "string" },
+                { "type": "object" }
+              ]
+            },
             "description": "Alias for route_waypoints"
           },
           "color": { "type": "string" },
@@ -61,7 +114,8 @@
         },
         "anyOf": [
           { "required": ["route_waypoints"] },
-          { "required": ["stops"] }
+          { "required": ["stops"] },
+          { "required": ["waypoints"] }
         ]
       }
     },
@@ -75,6 +129,9 @@
           "address": { "type": "string" },
           "lat": { "type": "number" },
           "lng": { "type": "number" },
+          "lon": { "type": "number" },
+          "latitude": { "type": "number" },
+          "longitude": { "type": "number" },
           "color": { "type": "string" },
           "kind": { "type": "string" },
           "description": { "type": "string" }

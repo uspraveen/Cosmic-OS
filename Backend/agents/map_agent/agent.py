@@ -79,12 +79,23 @@ def _looks_like_alternative_request(text: str) -> bool:
     )
 
 
-def _waypoint_key(waypoints: list[str]) -> tuple[str, ...]:
-    return tuple(re.sub(r"\s+", " ", _safe_text(item)).casefold() for item in waypoints)
+def _waypoint_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return (
+            _safe_text(value.get("query"))
+            or _safe_text(value.get("address"))
+            or _safe_text(value.get("label"))
+            or _safe_text(value.get("name"))
+        )
+    return _safe_text(value)
 
 
-def _endpoint_key(waypoints: list[str]) -> tuple[str, str] | None:
-    normalized = [_safe_text(item) for item in waypoints if _safe_text(item)]
+def _waypoint_key(waypoints: list[Any]) -> tuple[str, ...]:
+    return tuple(re.sub(r"\s+", " ", _waypoint_text(item)).casefold() for item in waypoints)
+
+
+def _endpoint_key(waypoints: list[Any]) -> tuple[str, str] | None:
+    normalized = [_waypoint_text(item) for item in waypoints if _waypoint_text(item)]
     if len(normalized) < 2:
         return None
     return (
@@ -152,6 +163,57 @@ def _extract_via_points_from_text(text: str) -> list[str]:
             if candidate not in via_points:
                 via_points.append(candidate)
     return via_points[:4]
+
+
+def _normalize_lng(raw: dict[str, Any]) -> float | None:
+    lng = _coerce_float(raw.get("lng"))
+    if lng is None:
+        lng = _coerce_float(raw.get("lon"))
+    if lng is None:
+        lng = _coerce_float(raw.get("longitude"))
+    return lng
+
+
+def _normalize_lat(raw: dict[str, Any]) -> float | None:
+    lat = _coerce_float(raw.get("lat"))
+    if lat is None:
+        lat = _coerce_float(raw.get("latitude"))
+    return lat
+
+
+def _normalize_waypoint_input(raw: Any) -> str | dict[str, Any] | None:
+    if isinstance(raw, str):
+        text = _safe_text(raw)
+        return text or None
+    if isinstance(raw, dict):
+        label = _safe_text(raw.get("label")) or _safe_text(raw.get("name"))
+        query = (
+            _safe_text(raw.get("query"))
+            or _safe_text(raw.get("address"))
+            or _safe_text(raw.get("place"))
+            or label
+        )
+        lat = _normalize_lat(raw)
+        lng = _normalize_lng(raw)
+        if lat is not None and lng is not None:
+            return {
+                "label": label or query or f"{lat:.6f}, {lng:.6f}",
+                "query": query or label or "",
+                "lat": lat,
+                "lng": lng,
+                "position": [lng, lat],
+            }
+        return query or None
+    return None
+
+
+def _looks_like_route_option(raw: Any) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    for key in ("route_waypoints", "stops", "waypoints"):
+        if isinstance(raw.get(key), list):
+            return True
+    return False
 
 
 def _clean_route_endpoint(text: str) -> str:
@@ -328,8 +390,8 @@ class MapAgent(AgentRuntime):
             return None
         label = _safe_text(raw.get("label")) or _safe_text(raw.get("name"))
         query = _safe_text(raw.get("query")) or _safe_text(raw.get("address")) or label
-        lat = _coerce_float(raw.get("lat"))
-        lng = _coerce_float(raw.get("lng"))
+        lat = _normalize_lat(raw)
+        lng = _normalize_lng(raw)
         if not query and lat is None and lng is None:
             return None
         marker = {
@@ -361,16 +423,19 @@ class MapAgent(AgentRuntime):
             }
         if not isinstance(raw, dict):
             return None
+        raw_waypoints = (
+            raw.get("route_waypoints")
+            if isinstance(raw.get("route_waypoints"), list)
+            else raw.get("stops")
+            if isinstance(raw.get("stops"), list)
+            else raw.get("waypoints")
+            if isinstance(raw.get("waypoints"), list)
+            else []
+        )
         waypoints = [
-            _safe_text(item)
-            for item in (
-                raw.get("route_waypoints")
-                if isinstance(raw.get("route_waypoints"), list)
-                else raw.get("stops")
-                if isinstance(raw.get("stops"), list)
-                else []
-            )
-            if _safe_text(item)
+            waypoint
+            for waypoint in (_normalize_waypoint_input(item) for item in raw_waypoints)
+            if waypoint
         ]
         if len(waypoints) < 2:
             return None
@@ -450,11 +515,15 @@ class MapAgent(AgentRuntime):
                 continue
             _, first_option = group[0]
             waypoints = first_option["route_waypoints"]
+            origin = _waypoint_text(waypoints[0])
+            destination = _waypoint_text(waypoints[-1])
+            if not origin or not destination:
+                continue
             expanded = await expand_route_options(
                 cfg=self._cfg,
                 http_client=self._http(),
-                origin=waypoints[0],
-                destination=waypoints[-1],
+                origin=origin,
+                destination=destination,
                 route_options=[option for _, option in group],
                 context=context,
             )
@@ -496,22 +565,31 @@ class MapAgent(AgentRuntime):
             )
             if item
         ]
-        route_waypoints = [
-            _safe_text(item)
-            for item in (payload.get("route_waypoints") if isinstance(payload.get("route_waypoints"), list) else [])
-            if _safe_text(item)
+        raw_route_waypoints = (
+            payload.get("route_waypoints")
+            if isinstance(payload.get("route_waypoints"), list)
+            else payload.get("stops")
+            if isinstance(payload.get("stops"), list)
+            else payload.get("waypoints")
+            if isinstance(payload.get("waypoints"), list)
+            else []
+        )
+        route_waypoint_objects_are_options = any(_looks_like_route_option(item) for item in raw_route_waypoints)
+        route_waypoints = [] if route_waypoint_objects_are_options else [
+            waypoint
+            for waypoint in (_normalize_waypoint_input(item) for item in raw_route_waypoints)
+            if waypoint
         ]
-        if not route_waypoints:
-            stops = payload.get("stops")
-            if isinstance(stops, list):
-                route_waypoints = [_safe_text(item) for item in stops if _safe_text(item)]
+        route_option_inputs = list(
+            payload.get("route_options") if isinstance(payload.get("route_options"), list) else []
+        )
+        if route_waypoint_objects_are_options:
+            route_option_inputs.extend(raw_route_waypoints)
         route_options = [
             item
             for item in (
                 self._normalize_route_option_input(raw, index)
-                for index, raw in enumerate(
-                    payload.get("route_options") if isinstance(payload.get("route_options"), list) else []
-                )
+                for index, raw in enumerate(route_option_inputs)
             )
             if item
         ]
@@ -565,9 +643,9 @@ class MapAgent(AgentRuntime):
                     structured["route_profile"] = profile
                 if not structured.get("route_waypoints"):
                     structured["route_waypoints"] = [
-                        _safe_text(item)
+                        waypoint
                         for item in (parsed.get("route_waypoints") if isinstance(parsed.get("route_waypoints"), list) else [])
-                        if _safe_text(item)
+                        if (waypoint := _normalize_waypoint_input(item))
                     ]
                 if not structured.get("route_options"):
                     structured["route_options"] = [
@@ -651,30 +729,46 @@ class MapAgent(AgentRuntime):
                 resolved_markers.append(resolved)
 
         async def resolve_waypoint(
-            waypoint: str,
+            waypoint: Any,
             *,
             bias_coordinates: list[tuple[float, float]] | None = None,
         ) -> tuple[float, float]:
-            if waypoint in coordinate_lookup:
-                return coordinate_lookup[waypoint]
+            query = _waypoint_text(waypoint)
+            if isinstance(waypoint, dict):
+                lat = _normalize_lat(waypoint)
+                lng = _normalize_lng(waypoint)
+                if lat is not None and lng is not None:
+                    key = query or f"{lat:.6f}, {lng:.6f}"
+                    coordinate_lookup[key] = (lng, lat)
+                    resolved_markers.append(
+                        {
+                            "label": _safe_text(waypoint.get("label")) or key,
+                            "query": query,
+                            "position": [lng, lat],
+                            "kind": "waypoint",
+                        }
+                    )
+                    return (lng, lat)
+            if query in coordinate_lookup:
+                return coordinate_lookup[query]
             geocoded = await geocode_query(
                 cfg=self._cfg,
                 http_client=self._http(),
-                query=waypoint,
+                query=query,
                 bias_coordinates=bias_coordinates,
             )
-            coordinate_lookup[waypoint] = (geocoded["lng"], geocoded["lat"])
+            coordinate_lookup[query] = (geocoded["lng"], geocoded["lat"])
             resolved_markers.append(
                 {
                     "label": geocoded["label"],
-                    "query": waypoint,
+                    "query": query,
                     "position": geocoded["position"],
                     "kind": "waypoint",
                 }
             )
-            return coordinate_lookup[waypoint]
+            return coordinate_lookup[query]
 
-        async def resolve_waypoints(route_waypoints: list[str]) -> list[tuple[float, float]]:
+        async def resolve_waypoints(route_waypoints: list[Any]) -> list[tuple[float, float]]:
             limited_waypoints = route_waypoints[: self._cfg.max_route_waypoints]
             if len(limited_waypoints) >= 3:
                 origin = await resolve_waypoint(limited_waypoints[0])
@@ -777,9 +871,9 @@ class MapAgent(AgentRuntime):
                     )
 
         route_waypoints = [
-            _safe_text(item)
+            waypoint
             for item in (plan.get("route_waypoints") if isinstance(plan.get("route_waypoints"), list) else [])
-            if _safe_text(item)
+            if (waypoint := _normalize_waypoint_input(item))
         ][: self._cfg.max_route_waypoints]
         route_coordinates: list[tuple[float, float]] = []
         if not route_options:
@@ -807,8 +901,8 @@ class MapAgent(AgentRuntime):
             for index, (lng, lat) in enumerate(route_coordinates):
                 resolved_markers.append(
                     {
-                        "label": route_waypoints[index] if index < len(route_waypoints) else f"Stop {index + 1}",
-                        "query": route_waypoints[index] if index < len(route_waypoints) else "",
+                        "label": _waypoint_text(route_waypoints[index]) if index < len(route_waypoints) else f"Stop {index + 1}",
+                        "query": _waypoint_text(route_waypoints[index]) if index < len(route_waypoints) else "",
                         "position": [lng, lat],
                         "kind": "waypoint",
                     }
@@ -844,7 +938,7 @@ class MapAgent(AgentRuntime):
                 error=AgentError(
                     code="INVALID_INPUT",
                     retryable=False,
-                    message="map.render requires a query, markers, or route_waypoints.",
+                    message="map.render requires a query, markers, route_waypoints, or route_options.",
                     next_action="escalate",
                 ),
             )
