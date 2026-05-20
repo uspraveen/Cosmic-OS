@@ -478,6 +478,9 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "Run a bounded local Python sandbox for calculations, quick validation, data transforms, "
                 "small chart/file generation, and artifact-producing snippets. This is not a shell and is not "
                 "for project edits, deployment, screenshots, network access, or long-running work; use Alpha for those. "
+                "Do not use this for maps, directions, route alternatives, place lookup visuals, or geocoding workflows; "
+                "use the map.render specialist instead because local HTML/Folium outputs are delivered as downloads, "
+                "while map.render produces inline COSMIC map artifacts. "
                 "Write files that should be delivered to the user under the relative `outputs/` directory."
             ),
             "input_schema": {
@@ -514,7 +517,8 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         group="code",
         prompt_summary=(
             "Bounded local Python sandbox for calculations, quick checks, small data transforms, and generated "
-            "files. Write deliverables to `outputs/`. Use Alpha instead for shell/project/deployment/long-running work."
+            "files. Write deliverables to `outputs/`. Use map.render, not this sandbox, for maps/routes/place visuals "
+            "that should appear inline. Use Alpha instead for shell/project/deployment/long-running work."
         ),
         progress_builder=_cosmic_code_execution_progress,
         handler_method="_cosmic_code_execution",

@@ -9,13 +9,24 @@ import httpx
 import pytest
 
 from orchestrator.tools.executor import ToolExecutionContext, ToolExecutor
-from orchestrator.tools.registry import get_local_tool_definitions
+from orchestrator.tools.registry import build_tool_prompt_catalog, get_local_tool_definitions
 from shared import AgentError, AgentResult, TaskEnvelope, TaskInProgress, sign_task_envelope, utcnow
 
 
 def test_cosmic_code_execution_is_registered_as_local_tool() -> None:
     tool_names = {tool.get("name") for tool in get_local_tool_definitions()}
     assert "cosmic_code_execution" in tool_names
+
+
+def test_cosmic_code_execution_warns_maps_must_use_map_specialist() -> None:
+    tool = next(tool for tool in get_local_tool_definitions() if tool.get("name") == "cosmic_code_execution")
+    description = str(tool.get("description") or "")
+    assert "map.render" in description
+    assert "inline COSMIC map artifacts" in description
+    assert "Folium" in description
+
+    catalog = build_tool_prompt_catalog()
+    assert "Use map.render, not this sandbox, for maps/routes/place visuals" in catalog
 
 
 @pytest.mark.asyncio

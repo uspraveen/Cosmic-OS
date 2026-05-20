@@ -1776,6 +1776,7 @@ class OrchestratorRuntime:
             "You are running on COSMIC's Fireworks Kimi path through an OpenAI-compatible chat API. "
             "Anthropic's hosted code_execution container and native server web tools are not attached on this path, but COSMIC provides `cosmic_code_execution` as a bounded local Python sandbox. "
             "Use `cosmic_code_execution` for calculations, small Python checks, data transforms, chart/file generation, and artifact-producing snippets; write deliverable files under `outputs/` so COSMIC can attach them. "
+            "Do not use `cosmic_code_execution` to generate maps, route visuals, geocoding displays, or Folium/HTML map files when the user expects an inline map; search the specialist catalog and delegate to `map.render` because it returns COSMIC inline map artifacts. "
             "For shell commands, project edits, deployment, screenshots, package-heavy setup, or long-running execution, use COSMIC's specialist routes: "
             "search the agent catalog and delegate to Alpha (`alpha.execute`) for project/VM work, or the relevant tabular/docs specialist for scoped data work. "
             "When current web information is needed, use COSMIC's research routes such as Perplexity, Firecrawl, X search, docs tools, and memory instead of claiming native web access. "

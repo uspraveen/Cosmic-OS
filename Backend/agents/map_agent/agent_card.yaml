@@ -13,6 +13,7 @@ intents:
     timeout_sec: 120
     usage_hints:
       - Use for directions, routes, distance/travel-time questions, place lookups, and "show on a map" requests.
+      - Prefer this specialist over local code/HTML map generation whenever the user expects to see an inline map in chat.
       - Pass route_waypoints for one ordered route; pass route_options for multiple named alternatives/corridors on the same map.
       - For "show route alternatives" without named corridors, pass route_waypoints plus route_alternatives between 2 and 6.
       - Pass markers for standalone pins, POIs, or places that should not be connected as a route.
