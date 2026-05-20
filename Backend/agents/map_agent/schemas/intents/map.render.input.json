@@ -8,6 +8,18 @@
     "subtitle": { "type": "string" },
     "context": { "type": "string" },
     "draw_route": { "type": "boolean", "default": false },
+    "route_alternatives": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 6,
+      "description": "Number of OSRM route alternatives to request for a single origin/destination route"
+    },
+    "alternatives": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 6,
+      "description": "Alias for route_alternatives"
+    },
     "route_profile": { "type": "string", "enum": ["driving", "walking", "cycling"] },
     "route_waypoints": {
       "type": "array",
@@ -18,6 +30,40 @@
       "type": "array",
       "items": { "type": "string" },
       "description": "Alias for route_waypoints"
+    },
+    "route_options": {
+      "type": "array",
+      "description": "Multiple route choices to draw on the same map",
+      "items": {
+        "type": "object",
+        "properties": {
+          "label": { "type": "string" },
+          "name": { "type": "string" },
+          "route_profile": { "type": "string", "enum": ["driving", "walking", "cycling"] },
+          "profile": { "type": "string", "enum": ["driving", "walking", "cycling"] },
+          "route_waypoints": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Ordered stops for this route choice"
+          },
+          "stops": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Alias for route_waypoints"
+          },
+          "color": { "type": "string" },
+          "description": { "type": "string" },
+          "alternatives": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 6
+          }
+        },
+        "anyOf": [
+          { "required": ["route_waypoints"] },
+          { "required": ["stops"] }
+        ]
+      }
     },
     "markers": {
       "type": "array",

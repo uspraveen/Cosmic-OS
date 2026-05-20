@@ -33,11 +33,24 @@ Output ONLY valid JSON:
       "description": "optional note or null"
     }
   ],
-  "route_waypoints": ["place A", "place B"]
+  "route_waypoints": ["place A", "place B"],
+  "route_alternatives": 1,
+  "route_options": [
+    {
+      "label": "Fastest via Memphis and St. Louis",
+      "route_profile": "driving",
+      "route_waypoints": ["Little Rock, Arkansas", "Memphis, Tennessee", "St. Louis, Missouri", "Chicago, Illinois"],
+      "color": "#dc2626",
+      "description": "optional note or null"
+    }
+  ]
 }
 
 Rules:
 - Use route_waypoints when the user wants a path between ordered stops.
+- Use route_options when the user asks for multiple routes, alternative routes, corridors, or named route choices.
+- For each route_options item, include the same origin and destination plus any explicit via/intermediate places.
+- If the user asks for alternatives but does not name specific corridors, set route_waypoints to origin/destination and route_alternatives to 3 or 4.
 - Use markers for standalone pins, highlights, or POIs that are not necessarily connected as a route.
 - If both apply, include both.
 - Prefer explicit geocodable queries in route_waypoints/markers.query.
@@ -95,7 +108,6 @@ async def parse_map_request(
             {"role": "system", "content": _PARSE_SYSTEM},
             {"role": "user", "content": "\n\n".join(user_parts)},
         ],
-        "temperature": 0.1,
         "response_format": {"type": "json_object"},
     }
     headers = {

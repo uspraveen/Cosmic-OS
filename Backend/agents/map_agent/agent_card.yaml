@@ -12,8 +12,10 @@ intents:
     output_schema: schemas/intents/map.render.output.json
     timeout_sec: 120
     usage_hints:
-      - Use for directions, routes, place lookups, and "show on a map" requests.
-      - Pass route_waypoints for ordered stops; pass markers for standalone pins.
+      - Use for directions, routes, distance/travel-time questions, place lookups, and "show on a map" requests.
+      - Pass route_waypoints for one ordered route; pass route_options for multiple named alternatives/corridors on the same map.
+      - For "show route alternatives" without named corridors, pass route_waypoints plus route_alternatives between 2 and 6.
+      - Pass markers for standalone pins, POIs, or places that should not be connected as a route.
       - Natural-language queries are fine when coordinates are not known.
       - The specialist returns an inline interactive map artifact in chat.
 
