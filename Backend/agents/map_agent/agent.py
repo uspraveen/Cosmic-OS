@@ -650,23 +650,48 @@ class MapAgent(AgentRuntime):
             if resolved:
                 resolved_markers.append(resolved)
 
+        async def resolve_waypoint(
+            waypoint: str,
+            *,
+            bias_coordinates: list[tuple[float, float]] | None = None,
+        ) -> tuple[float, float]:
+            if waypoint in coordinate_lookup:
+                return coordinate_lookup[waypoint]
+            geocoded = await geocode_query(
+                cfg=self._cfg,
+                http_client=self._http(),
+                query=waypoint,
+                bias_coordinates=bias_coordinates,
+            )
+            coordinate_lookup[waypoint] = (geocoded["lng"], geocoded["lat"])
+            resolved_markers.append(
+                {
+                    "label": geocoded["label"],
+                    "query": waypoint,
+                    "position": geocoded["position"],
+                    "kind": "waypoint",
+                }
+            )
+            return coordinate_lookup[waypoint]
+
         async def resolve_waypoints(route_waypoints: list[str]) -> list[tuple[float, float]]:
+            limited_waypoints = route_waypoints[: self._cfg.max_route_waypoints]
+            if len(limited_waypoints) >= 3:
+                origin = await resolve_waypoint(limited_waypoints[0])
+                destination = await resolve_waypoint(limited_waypoints[-1])
+                bias_coordinates = [origin, destination]
+                middle = [
+                    await resolve_waypoint(waypoint, bias_coordinates=bias_coordinates)
+                    for waypoint in limited_waypoints[1:-1]
+                ]
+                return [origin, *middle, destination]
+
             route_coordinates: list[tuple[float, float]] = []
-            for waypoint in route_waypoints[: self._cfg.max_route_waypoints]:
+            for waypoint in limited_waypoints:
                 if waypoint in coordinate_lookup:
                     route_coordinates.append(coordinate_lookup[waypoint])
                     continue
-                geocoded = await geocode_query(cfg=self._cfg, http_client=self._http(), query=waypoint)
-                coordinate_lookup[waypoint] = (geocoded["lng"], geocoded["lat"])
-                route_coordinates.append((geocoded["lng"], geocoded["lat"]))
-                resolved_markers.append(
-                    {
-                        "label": geocoded["label"],
-                        "query": waypoint,
-                        "position": geocoded["position"],
-                        "kind": "waypoint",
-                    }
-                )
+                route_coordinates.append(await resolve_waypoint(waypoint))
             return route_coordinates
 
         routes: list[dict[str, Any]] = []

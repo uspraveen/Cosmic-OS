@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 import httpx
@@ -23,11 +24,53 @@ def _safe_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
+    lng1, lat1 = math.radians(a[0]), math.radians(a[1])
+    lng2, lat2 = math.radians(b[0]), math.radians(b[1])
+    d_lng = lng2 - lng1
+    d_lat = lat2 - lat1
+    h = math.sin(d_lat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(d_lng / 2) ** 2
+    return 6371.0 * 2 * math.asin(min(1.0, math.sqrt(h)))
+
+
+def _coerce_candidate(raw: Any, *, query: str) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        lat = float(raw.get("lat"))
+        lng = float(raw.get("lon"))
+    except (TypeError, ValueError):
+        return None
+    return {
+        "query": query,
+        "label": _safe_text(raw.get("display_name")) or query,
+        "lat": lat,
+        "lng": lng,
+        "position": [lng, lat],
+        "place_id": raw.get("place_id"),
+        "category": _safe_text(raw.get("category")) or None,
+        "type": _safe_text(raw.get("type")) or None,
+    }
+
+
+def _candidate_score(
+    candidate: dict[str, Any],
+    *,
+    bias_coordinates: list[tuple[float, float]] | None,
+) -> float:
+    if not bias_coordinates:
+        return 0.0
+    point = (float(candidate["lng"]), float(candidate["lat"]))
+    distances = [_haversine_km(point, bias) for bias in bias_coordinates]
+    return sum(distances) / max(1, len(distances))
+
+
 async def geocode_query(
     *,
     cfg: MapAgentConfig,
     http_client: httpx.AsyncClient,
     query: str,
+    bias_coordinates: list[tuple[float, float]] | None = None,
 ) -> dict[str, Any]:
     text = _safe_text(query)
     if not text:
@@ -39,7 +82,7 @@ async def geocode_query(
         params={
             "q": text,
             "format": "jsonv2",
-            "limit": 1,
+            "limit": 8 if bias_coordinates else 1,
             "addressdetails": 0,
         },
         headers={"User-Agent": cfg.nominatim_user_agent},
@@ -50,27 +93,20 @@ async def geocode_query(
     if not isinstance(payload, list) or not payload:
         raise GeocodingError(query, f"No geocode result for '{text}'.")
 
-    top = payload[0]
-    if not isinstance(top, dict):
-        raise GeocodingError(query, f"Unexpected geocode payload for '{text}'.")
-
-    try:
-        lat = float(top.get("lat"))
-        lng = float(top.get("lon"))
-    except (TypeError, ValueError) as exc:
-        raise GeocodingError(query, f"Invalid coordinates for '{text}'.") from exc
-
-    display_name = _safe_text(top.get("display_name")) or text
-    return {
-        "query": text,
-        "label": display_name,
-        "lat": lat,
-        "lng": lng,
-        "position": [lng, lat],
-        "place_id": top.get("place_id"),
-        "category": _safe_text(top.get("category")) or None,
-        "type": _safe_text(top.get("type")) or None,
-    }
+    candidates = [
+        candidate
+        for candidate in (_coerce_candidate(item, query=text) for item in payload)
+        if candidate
+    ]
+    if not candidates:
+        raise GeocodingError(query, f"Invalid coordinates for '{text}'.")
+    return min(
+        candidates,
+        key=lambda candidate: _candidate_score(
+            candidate,
+            bias_coordinates=bias_coordinates,
+        ),
+    )
 
 
 async def geocode_many(
