@@ -374,6 +374,112 @@ async def test_map_render_recovers_route_options_misfiled_as_route_waypoints(
 
 
 @pytest.mark.asyncio
+async def test_map_render_draws_rectangle_shape_around_target(
+    agent: MapAgent,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await agent.on_startup()
+
+    async def fake_geocode_query(**kwargs):
+        query = kwargs["query"]
+        assert "560 20th Street" in query
+        return {
+            "query": query,
+            "label": "Y Combinator, 560 20th Street",
+            "lat": 37.7595,
+            "lng": -122.3885,
+            "position": [-122.3885, 37.7595],
+        }
+
+    monkeypatch.setattr("agents.map_agent.agent.geocode_query", fake_geocode_query)
+
+    task = TaskEnvelope(
+        task_id="task_map_shape_target",
+        task_list_id="tl_map_shape_target",
+        session_id="sess_map_shape_target",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/map-agent:1.0.0",
+        intent="map.render",
+        input={
+            "title": "YC office boundary",
+            "shapes": [
+                {
+                    "type": "rectangle",
+                    "label": "YC building box",
+                    "target": "560 20th Street, San Francisco, CA",
+                    "color": "orange",
+                    "weight": 5,
+                }
+            ],
+        },
+        idempotency_key="idem_map_shape_target",
+        signature="test_sig",
+        source="agent",
+        source_id="orch_1",
+        channel="desktop:test",
+    )
+
+    result = await agent.handle_map_render(task)
+    assert result.status == "completed"
+    assert result.output["shape_count"] == 1
+
+    map_path = agent.artifacts_root / task.task_id / "map_agent" / "map.cosmic-map.json"
+    payload = json.loads(map_path.read_text(encoding="utf-8"))
+    assert payload["shapes"][0]["type"] == "rectangle"
+    assert payload["shapes"][0]["color"] == "#f97316"
+    assert payload["shapes"][0]["bounds"]["southwest"][0] < -122.3885
+    assert payload["features"]["features"][-1]["properties"]["feature_kind"] == "shape"
+
+
+@pytest.mark.asyncio
+async def test_map_render_query_box_fallback_creates_shape(
+    agent: MapAgent,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await agent.on_startup()
+
+    async def fake_parse_map_request(**kwargs):
+        return None
+
+    async def fake_geocode_query(**kwargs):
+        query = kwargs["query"]
+        return {
+            "query": query,
+            "label": query,
+            "lat": 37.7595,
+            "lng": -122.3885,
+            "position": [-122.3885, 37.7595],
+        }
+
+    monkeypatch.setattr("agents.map_agent.agent.parse_map_request", fake_parse_map_request)
+    monkeypatch.setattr("agents.map_agent.agent.geocode_query", fake_geocode_query)
+
+    task = TaskEnvelope(
+        task_id="task_map_shape_query",
+        task_list_id="tl_map_shape_query",
+        session_id="sess_map_shape_query",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/map-agent:1.0.0",
+        intent="map.render",
+        input={"query": "Draw an orange box around 560 20th Street, San Francisco"},
+        idempotency_key="idem_map_shape_query",
+        signature="test_sig",
+        source="agent",
+        source_id="orch_1",
+        channel="desktop:test",
+    )
+
+    result = await agent.handle_map_render(task)
+    assert result.status == "completed"
+    assert result.output["shape_count"] == 1
+
+    map_path = agent.artifacts_root / task.task_id / "map_agent" / "map.cosmic-map.json"
+    payload = json.loads(map_path.read_text(encoding="utf-8"))
+    assert payload["shapes"][0]["label"].startswith("560 20th Street")
+    assert payload["markers"][0]["position"] == [-122.3885, 37.7595]
+
+
+@pytest.mark.asyncio
 async def test_map_render_route_options_with_same_waypoints_use_distinct_alternatives(
     agent: MapAgent,
     monkeypatch: pytest.MonkeyPatch,

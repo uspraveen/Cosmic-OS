@@ -22,6 +22,10 @@ def _route_id(prefix: str = "route") -> str:
     return f"{prefix}_{uuid4().hex[:8]}"
 
 
+def _shape_id(prefix: str = "shape") -> str:
+    return f"{prefix}_{uuid4().hex[:8]}"
+
+
 def _bounds_from_positions(positions: list[list[float]]) -> dict[str, list[float]] | None:
     if not positions:
         return None
@@ -82,6 +86,7 @@ def build_map_spec(
     title: str,
     markers: list[dict[str, Any]],
     routes: list[dict[str, Any]] | None = None,
+    shapes: list[dict[str, Any]] | None = None,
     subtitle: str | None = None,
 ) -> dict[str, Any]:
     normalized_markers: list[dict[str, Any]] = []
@@ -140,6 +145,61 @@ def build_map_spec(
             }
         )
 
+    normalized_shapes: list[dict[str, Any]] = []
+    for index, shape in enumerate(shapes or []):
+        if not isinstance(shape, dict):
+            continue
+        shape_type = _safe_text(shape.get("type") or shape.get("kind") or "polygon").casefold()
+        if shape_type not in {"rectangle", "polygon", "circle"}:
+            shape_type = "polygon"
+        normalized: dict[str, Any] = {
+            "id": _safe_text(shape.get("id")) or _shape_id(),
+            "type": shape_type,
+            "label": _safe_text(shape.get("label")) or f"Shape {index + 1}",
+            "color": _safe_text(shape.get("color")) or "#f97316",
+            "fillColor": _safe_text(shape.get("fillColor") or shape.get("fill_color")) or _safe_text(shape.get("color")) or "#f97316",
+            "fillOpacity": shape.get("fillOpacity", shape.get("fill_opacity", 0.18)),
+            "weight": int(shape.get("weight") or 3),
+            "description": _safe_text(shape.get("description")) or None,
+        }
+
+        bounds = shape.get("bounds")
+        if isinstance(bounds, dict):
+            southwest = bounds.get("southwest")
+            northeast = bounds.get("northeast")
+            if (
+                isinstance(southwest, list)
+                and len(southwest) >= 2
+                and isinstance(northeast, list)
+                and len(northeast) >= 2
+            ):
+                sw = [float(southwest[0]), float(southwest[1])]
+                ne = [float(northeast[0]), float(northeast[1])]
+                normalized["bounds"] = {"southwest": sw, "northeast": ne}
+                positions.extend([sw, ne])
+
+        coordinates = shape.get("coordinates")
+        if isinstance(coordinates, list):
+            normalized_coordinates: list[list[float]] = []
+            for coord in coordinates:
+                if isinstance(coord, list) and len(coord) >= 2:
+                    point = [float(coord[0]), float(coord[1])]
+                    normalized_coordinates.append(point)
+                    positions.append(point)
+            if normalized_coordinates:
+                normalized["coordinates"] = normalized_coordinates
+
+        center = shape.get("center")
+        if isinstance(center, list) and len(center) >= 2:
+            normalized["center"] = [float(center[0]), float(center[1])]
+            positions.append(normalized["center"])
+        radius_m = shape.get("radius_m")
+        if radius_m is not None:
+            normalized["radius_m"] = float(radius_m)
+
+        if normalized.get("bounds") or normalized.get("coordinates") or normalized.get("center"):
+            normalized_shapes.append(normalized)
+
     center, zoom = _fit_center_zoom(positions)
     bounds = _bounds_from_positions(positions)
 
@@ -171,6 +231,40 @@ def build_map_spec(
                 },
             }
         )
+    for shape in normalized_shapes:
+        geometry: dict[str, Any] | None = None
+        if shape["type"] == "rectangle" and isinstance(shape.get("bounds"), dict):
+            southwest = shape["bounds"]["southwest"]
+            northeast = shape["bounds"]["northeast"]
+            west, south = southwest
+            east, north = northeast
+            ring = [[west, south], [east, south], [east, north], [west, north], [west, south]]
+            geometry = {"type": "Polygon", "coordinates": [ring]}
+        elif shape["type"] == "polygon" and isinstance(shape.get("coordinates"), list):
+            ring = list(shape["coordinates"])
+            if ring and ring[0] != ring[-1]:
+                ring.append(ring[0])
+            geometry = {"type": "Polygon", "coordinates": [ring]}
+        elif shape["type"] == "circle" and isinstance(shape.get("center"), list):
+            geometry = {"type": "Point", "coordinates": shape["center"]}
+        if geometry:
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": geometry,
+                    "properties": {
+                        "feature_kind": "shape",
+                        "shape_id": shape["id"],
+                        "shape_type": shape["type"],
+                        "label": shape["label"],
+                        "color": shape["color"],
+                        "fillColor": shape["fillColor"],
+                        "fillOpacity": shape["fillOpacity"],
+                        "weight": shape["weight"],
+                        "radius_m": shape.get("radius_m"),
+                    },
+                }
+            )
 
     return {
         "version": 1,
@@ -184,6 +278,7 @@ def build_map_spec(
         },
         "markers": normalized_markers,
         "routes": normalized_routes,
+        "shapes": normalized_shapes,
         "features": {
             "type": "FeatureCollection",
             "features": features,

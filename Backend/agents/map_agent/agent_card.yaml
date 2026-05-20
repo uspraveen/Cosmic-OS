@@ -16,6 +16,7 @@ intents:
       - Prefer this specialist over local code/HTML map generation whenever the user expects to see an inline map in chat.
       - Pass route_waypoints for one ordered route; pass route_options for multiple named alternatives/corridors on the same map.
       - route_options items may use route_waypoints, stops, or waypoints; waypoints may be place strings or {label, lat, lon/lng} coordinate objects.
+      - Pass shapes/overlays for boxes, rectangles, circles, polygons, campus boundaries, or highlighted areas; use target/around for "draw a box around this place" when exact corners are not known.
       - For "show route alternatives" without named corridors, pass route_waypoints plus route_alternatives between 2 and 6.
       - Pass markers for standalone pins, POIs, or places that should not be connected as a route.
       - Natural-language queries are fine when coordinates are not known.

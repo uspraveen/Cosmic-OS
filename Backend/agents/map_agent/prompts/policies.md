@@ -1,3 +1,4 @@
 - Respect Nominatim and OSRM public usage policies; keep request volume reasonable.
 - Prefer structured route_waypoints and markers when the orchestrator already extracted them.
+- Prefer structured shapes/overlays for boxes, polygons, circles, campus boundaries, or highlighted areas. If exact corners are not known, use a geocodable target rather than fake corner place names.
 - Always return a map artifact for successful map.render work.

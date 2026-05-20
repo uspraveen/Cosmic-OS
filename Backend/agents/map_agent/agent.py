@@ -216,6 +216,112 @@ def _looks_like_route_option(raw: Any) -> bool:
     return False
 
 
+_COLOR_ALIASES = {
+    "blue": "#2563eb",
+    "red": "#dc2626",
+    "green": "#16a34a",
+    "purple": "#9333ea",
+    "orange": "#f97316",
+    "yellow": "#f59e0b",
+    "black": "#111827",
+    "white": "#ffffff",
+}
+
+
+def _normalize_color(value: Any, default: str = "#f97316") -> str:
+    text = _safe_text(value).casefold()
+    if not text:
+        return default
+    if text in _COLOR_ALIASES:
+        return _COLOR_ALIASES[text]
+    if re.fullmatch(r"#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?", text):
+        return text
+    return default
+
+
+def _coerce_opacity(value: Any, default: float = 0.18) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, min(parsed, 1.0))
+
+
+def _normalize_shape_point(raw: Any) -> dict[str, Any] | str | None:
+    waypoint = _normalize_waypoint_input(raw)
+    if waypoint:
+        return waypoint
+    if isinstance(raw, list) and len(raw) >= 2:
+        lng = _coerce_float(raw[0])
+        lat = _coerce_float(raw[1])
+        if lat is not None and lng is not None:
+            return {
+                "label": f"{lat:.6f}, {lng:.6f}",
+                "query": "",
+                "lat": lat,
+                "lng": lng,
+                "position": [lng, lat],
+            }
+    return None
+
+
+def _rectangle_bounds_around(lng: float, lat: float, *, radius_m: float = 120.0) -> dict[str, list[float]]:
+    import math
+
+    lat_delta = radius_m / 111_320.0
+    lng_scale = max(0.2, math.cos(math.radians(lat)))
+    lng_delta = radius_m / (111_320.0 * lng_scale)
+    return {
+        "southwest": [lng - lng_delta, lat - lat_delta],
+        "northeast": [lng + lng_delta, lat + lat_delta],
+    }
+
+
+def _rectangle_bounds_from_points(points: list[tuple[float, float]]) -> dict[str, list[float]] | None:
+    if not points:
+        return None
+    lngs = [point[0] for point in points]
+    lats = [point[1] for point in points]
+    return {
+        "southwest": [min(lngs), min(lats)],
+        "northeast": [max(lngs), max(lats)],
+    }
+
+
+def _extract_shape_request(query: str) -> dict[str, Any] | None:
+    text = re.sub(r"\s+", " ", _safe_text(query))
+    if not text:
+        return None
+    lowered = text.casefold()
+    if not any(token in lowered for token in ("box", "rectangle", "boundary", "outline", "circle", "polygon")):
+        return None
+    color = "#f97316" if "orange" in lowered else _normalize_color(None)
+    shape_type = "circle" if "circle" in lowered else "rectangle"
+    patterns = (
+        r"\b(?:box|rectangle|boundary|outline|circle)\s+around\s+(?P<target>.+?)(?:\s+(?:in|with)\s+\w+)?$",
+        r"\baround\s+(?P<target>.+?)(?:\s+(?:in|with)\s+\w+)?$",
+        r"\bshow\s+(?P<target>.+?)\s+(?:with|and)\s+(?:a\s+)?(?:box|rectangle|boundary|outline|circle)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        target = _clean_route_endpoint(match.group("target"))
+        target = re.sub(r"\b(?:in|with)\s+(orange|blue|red|green|purple|yellow|black|white)\b", "", target, flags=re.IGNORECASE)
+        target = target.strip(" ,.;:-")
+        if target:
+            return {
+                "type": shape_type,
+                "label": f"{target} boundary" if shape_type == "rectangle" else f"{target} radius",
+                "target": target,
+                "color": color,
+                "fillColor": color,
+                "fillOpacity": 0.16,
+                "weight": 4,
+            }
+    return None
+
+
 def _clean_route_endpoint(text: str) -> str:
     cleaned = re.sub(r"\s+", " ", _safe_text(text))
     cleaned = re.sub(
@@ -457,6 +563,85 @@ class MapAgent(AgentRuntime):
             "alternatives": max(1, _coerce_int(raw.get("alternatives"), 1)),
         }
 
+    def _normalize_shape_input(self, raw: Any, index: int) -> dict[str, Any] | None:
+        if not isinstance(raw, dict):
+            return None
+        shape_type = _safe_text(raw.get("type") or raw.get("shape") or raw.get("kind") or "rectangle").casefold()
+        if shape_type in {"box", "bbox", "boundary", "outline"}:
+            shape_type = "rectangle"
+        if shape_type not in {"rectangle", "polygon", "circle"}:
+            shape_type = "rectangle"
+        label = _safe_text(raw.get("label") or raw.get("name")) or f"Shape {index + 1}"
+        color = _normalize_color(raw.get("color") or raw.get("stroke") or raw.get("strokeColor"))
+        fill_color = _normalize_color(raw.get("fillColor") or raw.get("fill_color") or raw.get("fill") or color, color)
+        shape: dict[str, Any] = {
+            "type": shape_type,
+            "label": label,
+            "color": color,
+            "fillColor": fill_color,
+            "fillOpacity": _coerce_opacity(raw.get("fillOpacity", raw.get("fill_opacity", 0.18))),
+            "weight": max(1, _coerce_int(raw.get("weight") or raw.get("stroke_width"), 3)),
+            "description": _safe_text(raw.get("description")) or None,
+        }
+
+        target = (
+            _safe_text(raw.get("target"))
+            or _safe_text(raw.get("around"))
+            or _safe_text(raw.get("query"))
+            or _safe_text(raw.get("place"))
+            or _safe_text(raw.get("address"))
+        )
+        if target:
+            shape["target"] = target
+        radius_m = _coerce_float(raw.get("radius_m") or raw.get("radius") or raw.get("padding_m"))
+        if radius_m is not None:
+            shape["radius_m"] = max(10.0, radius_m)
+
+        bounds = raw.get("bounds")
+        if isinstance(bounds, dict):
+            southwest = _normalize_shape_point(bounds.get("southwest") or bounds.get("sw"))
+            northeast = _normalize_shape_point(bounds.get("northeast") or bounds.get("ne"))
+            if isinstance(southwest, dict) and isinstance(northeast, dict):
+                shape["bounds"] = {
+                    "southwest": southwest["position"],
+                    "northeast": northeast["position"],
+                }
+        west = _coerce_float(raw.get("west") or raw.get("min_lng") or raw.get("min_lon"))
+        east = _coerce_float(raw.get("east") or raw.get("max_lng") or raw.get("max_lon"))
+        south = _coerce_float(raw.get("south") or raw.get("min_lat"))
+        north = _coerce_float(raw.get("north") or raw.get("max_lat"))
+        if all(value is not None for value in (west, east, south, north)):
+            shape["bounds"] = {"southwest": [west, south], "northeast": [east, north]}
+
+        northwest = _normalize_shape_point(raw.get("northwest") or raw.get("nw"))
+        southeast = _normalize_shape_point(raw.get("southeast") or raw.get("se"))
+        if isinstance(northwest, dict) and isinstance(southeast, dict):
+            west = min(float(northwest["lng"]), float(southeast["lng"]))
+            east = max(float(northwest["lng"]), float(southeast["lng"]))
+            south = min(float(northwest["lat"]), float(southeast["lat"]))
+            north = max(float(northwest["lat"]), float(southeast["lat"]))
+            shape["bounds"] = {"southwest": [west, south], "northeast": [east, north]}
+
+        raw_coordinates = raw.get("coordinates") or raw.get("points") or raw.get("corners")
+        if isinstance(raw_coordinates, list):
+            coordinates: list[Any] = []
+            for point in raw_coordinates:
+                normalized_point = _normalize_shape_point(point)
+                if normalized_point:
+                    coordinates.append(normalized_point)
+            if len(coordinates) >= 2:
+                shape["coordinates"] = coordinates
+
+        center = _normalize_shape_point(raw.get("center"))
+        if isinstance(center, dict):
+            shape["center"] = center
+        if shape_type == "circle" and "radius_m" not in shape:
+            shape["radius_m"] = 160.0
+
+        if any(key in shape for key in ("target", "bounds", "coordinates", "center")):
+            return shape
+        return None
+
     def _fallback_plan_from_query(self, query: str) -> dict[str, Any]:
         route = _extract_basic_route(query)
         if route:
@@ -468,6 +653,14 @@ class MapAgent(AgentRuntime):
                 "route_profile": "driving",
                 "route_waypoints": [origin, destination],
                 "route_alternatives": alternatives,
+            }
+        shape = _extract_shape_request(query)
+        if shape:
+            target = _safe_text(shape.get("target"))
+            return {
+                "title": f"{target} map" if target else "Map highlight",
+                "markers": [{"label": target, "query": target, "kind": "marker"}] if target else [],
+                "shapes": [shape],
             }
         place = _extract_basic_place(query)
         if place:
@@ -565,6 +758,19 @@ class MapAgent(AgentRuntime):
             )
             if item
         ]
+        shape_inputs: list[Any] = []
+        for key in ("shapes", "overlays", "drawings", "areas", "boundaries"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                shape_inputs.extend(value)
+        shapes = [
+            item
+            for item in (
+                self._normalize_shape_input(raw, index)
+                for index, raw in enumerate(shape_inputs)
+            )
+            if item
+        ]
         raw_route_waypoints = (
             payload.get("route_waypoints")
             if isinstance(payload.get("route_waypoints"), list)
@@ -605,6 +811,7 @@ class MapAgent(AgentRuntime):
             "draw_route": bool(payload.get("draw_route", bool(route_waypoints or route_options))),
             "route_profile": _safe_text(payload.get("route_profile")) or "driving",
             "markers": markers,
+            "shapes": shapes,
             "route_waypoints": route_waypoints,
             "route_options": route_options,
             "route_alternatives": max(1, min(alternatives, 6)),
@@ -620,6 +827,7 @@ class MapAgent(AgentRuntime):
         )
         needs_llm = bool(query) and (
             not structured.get("markers")
+            and not structured.get("shapes")
             and not structured.get("route_waypoints")
             and not structured.get("route_options")
             or (query and not has_coords)
@@ -675,9 +883,21 @@ class MapAgent(AgentRuntime):
                         )
                         if item
                     ]
+                if not structured.get("shapes"):
+                    structured["shapes"] = [
+                        item
+                        for item in (
+                            self._normalize_shape_input(raw, index)
+                            for index, raw in enumerate(
+                                parsed.get("shapes") if isinstance(parsed.get("shapes"), list) else []
+                            )
+                        )
+                        if item
+                    ]
         if (
             query
             and not structured.get("markers")
+            and not structured.get("shapes")
             and not structured.get("route_waypoints")
             and not structured.get("route_options")
         ):
@@ -690,13 +910,23 @@ class MapAgent(AgentRuntime):
                     structured[key] = value
                 elif value and not structured.get(key):
                     structured[key] = value
+        if query and not structured.get("shapes"):
+            shape = _extract_shape_request(query)
+            if shape:
+                structured["shapes"] = [shape]
+                target = _safe_text(shape.get("target"))
+                if target and not structured.get("markers"):
+                    structured["markers"] = [{"label": target, "query": target, "kind": "marker"}]
         if structured.get("route_options"):
             await self._expand_ambiguous_route_options(structured, context=context)
         if query and not structured.get("title"):
             structured["title"] = query[:120]
         return structured
 
-    async def _materialize_plan(self, plan: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    async def _materialize_plan(
+        self,
+        plan: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         resolved_markers: list[dict[str, Any]] = []
         coordinate_lookup: dict[str, tuple[float, float]] = {}
 
@@ -782,11 +1012,99 @@ class MapAgent(AgentRuntime):
 
             route_coordinates: list[tuple[float, float]] = []
             for waypoint in limited_waypoints:
-                if waypoint in coordinate_lookup:
-                    route_coordinates.append(coordinate_lookup[waypoint])
+                key = _waypoint_text(waypoint)
+                if key in coordinate_lookup:
+                    route_coordinates.append(coordinate_lookup[key])
                     continue
                 route_coordinates.append(await resolve_waypoint(waypoint))
             return route_coordinates
+
+        async def resolve_shape(raw_shape: Any, index: int) -> dict[str, Any] | None:
+            shape = self._normalize_shape_input(raw_shape, index)
+            if not shape:
+                return None
+            shape_type = _safe_text(shape.get("type")) or "rectangle"
+            resolved: dict[str, Any] = {
+                "type": shape_type,
+                "label": _safe_text(shape.get("label")) or f"Shape {index + 1}",
+                "color": _safe_text(shape.get("color")) or "#f97316",
+                "fillColor": _safe_text(shape.get("fillColor")) or _safe_text(shape.get("color")) or "#f97316",
+                "fillOpacity": _coerce_opacity(shape.get("fillOpacity"), 0.18),
+                "weight": max(1, _coerce_int(shape.get("weight"), 3)),
+                "description": _safe_text(shape.get("description")) or None,
+            }
+            bounds = shape.get("bounds")
+            if isinstance(bounds, dict):
+                southwest = bounds.get("southwest")
+                northeast = bounds.get("northeast")
+                if (
+                    isinstance(southwest, list)
+                    and len(southwest) >= 2
+                    and isinstance(northeast, list)
+                    and len(northeast) >= 2
+                ):
+                    resolved["type"] = "rectangle"
+                    resolved["bounds"] = {
+                        "southwest": [float(southwest[0]), float(southwest[1])],
+                        "northeast": [float(northeast[0]), float(northeast[1])],
+                    }
+                    return resolved
+
+            coordinates: list[tuple[float, float]] = []
+            raw_coordinates = shape.get("coordinates")
+            if isinstance(raw_coordinates, list):
+                for point in raw_coordinates[: self._cfg.max_route_waypoints]:
+                    if isinstance(point, dict) and isinstance(point.get("position"), list):
+                        position = point["position"]
+                        if len(position) >= 2:
+                            coordinates.append((float(position[0]), float(position[1])))
+                            continue
+                    coordinates.append(await resolve_waypoint(point))
+                if shape_type == "rectangle" and len(coordinates) >= 2:
+                    bounds_from_points = _rectangle_bounds_from_points(coordinates)
+                    if bounds_from_points:
+                        resolved["bounds"] = bounds_from_points
+                        return resolved
+                if len(coordinates) >= 3:
+                    resolved["type"] = "polygon"
+                    resolved["coordinates"] = [[lng, lat] for lng, lat in coordinates]
+                    return resolved
+
+            center = shape.get("center")
+            if center:
+                lng, lat = await resolve_waypoint(center)
+                if shape_type == "circle":
+                    resolved["center"] = [lng, lat]
+                    resolved["radius_m"] = _coerce_float(shape.get("radius_m")) or 160.0
+                    return resolved
+                resolved["bounds"] = _rectangle_bounds_around(
+                    lng,
+                    lat,
+                    radius_m=_coerce_float(shape.get("radius_m")) or 120.0,
+                )
+                return resolved
+
+            target = _safe_text(shape.get("target"))
+            if target:
+                lng, lat = await resolve_waypoint(target)
+                if shape_type == "circle":
+                    resolved["center"] = [lng, lat]
+                    resolved["radius_m"] = _coerce_float(shape.get("radius_m")) or 160.0
+                    return resolved
+                resolved["type"] = "rectangle"
+                resolved["bounds"] = _rectangle_bounds_around(
+                    lng,
+                    lat,
+                    radius_m=_coerce_float(shape.get("radius_m")) or 120.0,
+                )
+                return resolved
+            return None
+
+        resolved_shapes: list[dict[str, Any]] = []
+        for index, raw in enumerate(plan.get("shapes") if isinstance(plan.get("shapes"), list) else []):
+            shape = await resolve_shape(raw, index)
+            if shape:
+                resolved_shapes.append(shape)
 
         routes: list[dict[str, Any]] = []
         seen_route_signatures: set[tuple[tuple[float, float], ...]] = set()
@@ -920,13 +1238,14 @@ class MapAgent(AgentRuntime):
             seen_positions.add(key)
             deduped_markers.append(marker)
 
-        return deduped_markers, routes
+        return deduped_markers, routes, resolved_shapes
 
     async def handle_map_render(self, task: TaskEnvelope) -> AgentResult:
         query = _safe_text(task.input.get("query")) or _safe_text(task.input.get("description"))
         plan = await self._resolve_plan(task)
         if (
             not plan.get("markers")
+            and not plan.get("shapes")
             and not plan.get("route_waypoints")
             and not plan.get("route_options")
             and not query
@@ -938,13 +1257,13 @@ class MapAgent(AgentRuntime):
                 error=AgentError(
                     code="INVALID_INPUT",
                     retryable=False,
-                    message="map.render requires a query, markers, route_waypoints, or route_options.",
+                    message="map.render requires a query, markers, shapes, route_waypoints, or route_options.",
                     next_action="escalate",
                 ),
             )
 
-        markers, routes = await self._materialize_plan(plan)
-        if not markers and not routes:
+        markers, routes, shapes = await self._materialize_plan(plan)
+        if not markers and not routes and not shapes:
             return AgentResult(
                 status="failed",
                 output={},
@@ -963,6 +1282,7 @@ class MapAgent(AgentRuntime):
             subtitle=_safe_text(plan.get("subtitle")) or None,
             markers=markers,
             routes=routes,
+            shapes=shapes,
         )
 
         task_dir = self._task_artifact_dir(task.task_id)
@@ -976,6 +1296,8 @@ class MapAgent(AgentRuntime):
         )
 
         summary_parts = [f"Interactive map ready: {title}."]
+        if shapes:
+            summary_parts.append(f"Shapes: {len(shapes)} overlay{'s' if len(shapes) != 1 else ''}.")
         if routes:
             if len(routes) > 1:
                 summary_parts.append(f"Routes: {len(routes)} options.")
@@ -1016,6 +1338,7 @@ class MapAgent(AgentRuntime):
                 "summary": summary,
                 "marker_count": len(markers),
                 "route_count": len(routes),
+                "shape_count": len(shapes),
                 "map_artifact_id": artifact.artifact_id,
             },
             artifacts=[artifact],

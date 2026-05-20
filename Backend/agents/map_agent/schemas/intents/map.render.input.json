@@ -119,6 +119,75 @@
         ]
       }
     },
+    "shapes": {
+      "type": "array",
+      "description": "Visual overlays to draw on the map, such as boxes, polygons, circles, or highlighted boundaries.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string", "enum": ["rectangle", "box", "polygon", "circle", "boundary", "outline"] },
+          "label": { "type": "string" },
+          "name": { "type": "string" },
+          "target": { "type": "string", "description": "Geocodable place to draw the shape around when exact coordinates are not known." },
+          "around": { "type": "string", "description": "Alias for target." },
+          "query": { "type": "string", "description": "Alias for target." },
+          "color": { "type": "string" },
+          "fillColor": { "type": "string" },
+          "fill_color": { "type": "string" },
+          "fillOpacity": { "type": "number" },
+          "fill_opacity": { "type": "number" },
+          "weight": { "type": "integer" },
+          "radius_m": { "type": "number" },
+          "bounds": {
+            "type": "object",
+            "properties": {
+              "southwest": { "anyOf": [{ "type": "object" }, { "type": "array" }, { "type": "string" }] },
+              "northeast": { "anyOf": [{ "type": "object" }, { "type": "array" }, { "type": "string" }] },
+              "sw": { "anyOf": [{ "type": "object" }, { "type": "array" }, { "type": "string" }] },
+              "ne": { "anyOf": [{ "type": "object" }, { "type": "array" }, { "type": "string" }] }
+            }
+          },
+          "northwest": { "anyOf": [{ "type": "object" }, { "type": "array" }, { "type": "string" }] },
+          "southeast": { "anyOf": [{ "type": "object" }, { "type": "array" }, { "type": "string" }] },
+          "nw": { "anyOf": [{ "type": "object" }, { "type": "array" }, { "type": "string" }] },
+          "se": { "anyOf": [{ "type": "object" }, { "type": "array" }, { "type": "string" }] },
+          "north": { "type": "number" },
+          "south": { "type": "number" },
+          "east": { "type": "number" },
+          "west": { "type": "number" },
+          "center": { "anyOf": [{ "type": "object" }, { "type": "array" }, { "type": "string" }] },
+          "coordinates": {
+            "type": "array",
+            "items": {
+              "anyOf": [
+                { "type": "string" },
+                { "type": "object" },
+                {
+                  "type": "array",
+                  "items": { "type": "number" },
+                  "minItems": 2
+                }
+              ]
+            }
+          },
+          "points": {
+            "type": "array",
+            "items": {
+              "anyOf": [
+                { "type": "string" },
+                { "type": "object" }
+              ]
+            }
+          },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "overlays": {
+      "type": "array",
+      "description": "Alias for shapes.",
+      "items": { "type": "object" }
+    },
     "markers": {
       "type": "array",
       "items": {

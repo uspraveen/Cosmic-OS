@@ -24,6 +24,24 @@ type MapRoute = {
   duration_s?: number | null
 }
 
+type MapShape = {
+  id: string
+  type: 'rectangle' | 'polygon' | 'circle'
+  label: string
+  color?: string | null
+  fillColor?: string | null
+  fillOpacity?: number | string | null
+  weight?: number | null
+  description?: string | null
+  bounds?: {
+    southwest: [number, number]
+    northeast: [number, number]
+  }
+  coordinates?: number[][]
+  center?: [number, number]
+  radius_m?: number | null
+}
+
 export type CosmicMapSpec = {
   version: number
   title: string
@@ -39,6 +57,7 @@ export type CosmicMapSpec = {
   }
   markers?: MapMarker[]
   routes?: MapRoute[]
+  shapes?: MapShape[]
 }
 
 type MapBounds = NonNullable<NonNullable<CosmicMapSpec['view']>['bounds']>
@@ -82,6 +101,15 @@ const formatDuration = (durationS: number | null | undefined) => {
   const hours = Math.floor(minutes / 60)
   const rem = minutes % 60
   return rem ? `${hours} hr ${rem} min` : `${hours} hr`
+}
+
+const coerceOpacity = (value: number | string | null | undefined, fallback: number) => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string') {
+    const parsed = Number.parseFloat(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return fallback
 }
 
 const InlineMap = ({
@@ -198,6 +226,49 @@ const InlineMap = ({
       if (duration) popupLines.push(duration)
       polyline.bindPopup(popupLines.join('<br/>'))
       polyline.addTo(layerGroup)
+    }
+
+    for (const shape of spec.shapes || []) {
+      const color = shape.color || '#f97316'
+      const fillColor = shape.fillColor || color
+      const fillOpacity = coerceOpacity(shape.fillOpacity, 0.18)
+      const weight = shape.weight || 3
+      const options = {
+        color,
+        fillColor,
+        fillOpacity,
+        weight,
+        opacity: 0.95,
+      }
+      let layer: L.Layer | null = null
+      if (shape.type === 'rectangle' && boundsHaveArea(shape.bounds)) {
+        layer = L.rectangle(
+          [
+            [shape.bounds.southwest[1], shape.bounds.southwest[0]],
+            [shape.bounds.northeast[1], shape.bounds.northeast[0]],
+          ],
+          options,
+        )
+      } else if (shape.type === 'polygon' && Array.isArray(shape.coordinates)) {
+        const latLngs = shape.coordinates
+          .filter((coord) => Array.isArray(coord) && coord.length >= 2)
+          .map((coord) => [coord[1], coord[0]] as [number, number])
+        if (latLngs.length >= 3) {
+          layer = L.polygon(latLngs, options)
+        }
+      } else if (shape.type === 'circle' && isLngLat(shape.center)) {
+        layer = L.circle([shape.center[1], shape.center[0]], {
+          ...options,
+          radius: shape.radius_m || 100,
+        })
+      }
+      if (!layer) continue
+      const popupLines = [shape.label]
+      if (shape.description) popupLines.push(shape.description)
+      if ('bindPopup' in layer && typeof layer.bindPopup === 'function') {
+        layer.bindPopup(popupLines.join('<br/>'))
+      }
+      layer.addTo(layerGroup)
     }
 
     const bounds = spec.view?.bounds

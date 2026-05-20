@@ -27,14 +27,27 @@ def test_build_map_spec_includes_markers_and_route() -> None:
                 "duration_s": 240,
             }
         ],
+        shapes=[
+            {
+                "type": "rectangle",
+                "label": "Boundary",
+                "color": "#f97316",
+                "bounds": {
+                    "southwest": [1.95, 47.95],
+                    "northeast": [2.1, 48.1],
+                },
+            }
+        ],
     )
 
     assert spec["title"] == "Test route"
     assert len(spec["markers"]) == 2
     assert len(spec["routes"]) == 1
+    assert len(spec["shapes"]) == 1
+    assert spec["shapes"][0]["color"] == "#f97316"
     assert spec["features"]["type"] == "FeatureCollection"
-    assert len(spec["features"]["features"]) == 3
-    assert spec["view"]["center"][0] == 2.25
+    assert len(spec["features"]["features"]) == 4
+    assert spec["view"]["center"][0] == 2.225
 
 
 def test_format_distance_and_duration() -> None:

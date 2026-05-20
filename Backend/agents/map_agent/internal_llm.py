@@ -43,6 +43,18 @@ Output ONLY valid JSON:
       "color": "#dc2626",
       "description": "optional note or null"
     }
+  ],
+  "shapes": [
+    {
+      "type": "rectangle",
+      "label": "YC building box",
+      "target": "560 20th Street, San Francisco, CA",
+      "color": "#f97316",
+      "fillColor": "#f97316",
+      "fillOpacity": 0.16,
+      "weight": 4,
+      "description": "optional note or null"
+    }
   ]
 }
 
@@ -52,6 +64,9 @@ Rules:
 - For each route_options item, include the same origin and destination plus any explicit via/intermediate places.
 - If the user asks for alternatives but does not name specific corridors, set route_waypoints to origin/destination and route_alternatives to 3 or 4.
 - Use markers for standalone pins, highlights, or POIs that are not necessarily connected as a route.
+- Use shapes when the user asks to draw a box, rectangle, circle, polygon, boundary, outline, or highlighted area on the map.
+- For "box around PLACE" or "boundary around PLACE", prefer a shape with type "rectangle" and target set to a geocodable place. Do not invent geocoded strings like "northwest corner"; only use exact coordinates if the user gave them.
+- Convert color names to hex, for example orange -> "#f97316".
 - If both apply, include both.
 - Prefer explicit geocodable queries in route_waypoints/markers.query.
 - If the user already gives coordinates, fill lat/lng and keep query as the label.
