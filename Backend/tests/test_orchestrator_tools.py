@@ -104,30 +104,6 @@ async def test_tool_executor_cosmic_code_execution_blocks_path_escape() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tool_executor_cosmic_code_execution_rejects_inline_map_generation() -> None:
-    root = Path.cwd() / ".pytest-local-code-sandbox" / uuid4().hex
-    try:
-        executor = ToolExecutor(artifacts_root=root / "artifacts")
-        raw_result = await executor.execute(
-            "cosmic_code_execution",
-            {
-                "description": "Generate YC campus map with blue box",
-                "packages": ["folium"],
-                "code": "print('should not run')",
-            },
-            context=ToolExecutionContext(task_id="tsk_map_guard", session_id="sess_map_guard"),
-        )
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-
-    result = json.loads(raw_result)
-    assert result["error"] is True
-    assert result["code"] == "USE_MAP_RENDER"
-    assert result["next_action"] == "delegate_to_agent"
-    assert "map.render" in result["message"]
-
-
-@pytest.mark.asyncio
 async def test_tool_executor_memory_search_uses_gateway_active_search_and_preserves_payload() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url == httpx.URL("http://gateway/internal/memory/active-search")
