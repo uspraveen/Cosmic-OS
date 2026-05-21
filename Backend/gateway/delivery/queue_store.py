@@ -260,7 +260,7 @@ class DeliveryQueueStore:
             ).fetchall()
         return [json.loads(row["payload_json"]) for row in rows]
 
-    def summary(self) -> dict[str, Any]:
+    def summary(self, *, since: str | None = None) -> dict[str, Any]:
         with self._lock, self._connect() as connection:
             pending_count = int(
                 connection.execute(
@@ -281,10 +281,34 @@ class DeliveryQueueStore:
                 LIMIT 1
                 """
             ).fetchone()
+            latest_deadletter = connection.execute(
+                """
+                SELECT updated_at
+                FROM delivery_queue
+                WHERE status = 'deadletter'
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            new_deadletter_count = None
+            if since:
+                new_deadletter_count = int(
+                    connection.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM delivery_queue
+                        WHERE status = 'deadletter'
+                          AND updated_at > ?
+                        """,
+                        (since,),
+                    ).fetchone()[0]
+                )
         return {
             "pending_count": pending_count,
             "deadletter_count": deadletter_count,
             "oldest_pending_at": oldest_pending["created_at"] if oldest_pending is not None else None,
+            "latest_deadletter_at": latest_deadletter["updated_at"] if latest_deadletter is not None else None,
+            "new_deadletter_count_since": new_deadletter_count,
         }
 
     def _connect(self) -> sqlite3.Connection:

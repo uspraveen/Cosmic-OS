@@ -87,6 +87,8 @@ class SchedulerStore:
                     last_fired_at TEXT,
                     next_fire_at TEXT,
                     last_suppressed_at TEXT,
+                    last_delivered_at TEXT,
+                    last_delivered_summary TEXT,
                     last_result_status TEXT,
                     last_result_summary TEXT,
                     updated_at TEXT NOT NULL
@@ -124,11 +126,13 @@ class SchedulerStore:
                     last_fired_at,
                     next_fire_at,
                     last_suppressed_at,
+                    last_delivered_at,
+                    last_delivered_summary,
                     last_result_status,
                     last_result_summary,
                     updated_at
                 )
-                VALUES ('default', ?, ?, NULL, 'desktop', 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?)
+                VALUES ('default', ?, ?, NULL, 'desktop', 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?)
                 ON CONFLICT(config_id) DO NOTHING
                 """,
                 (default_timezone, heartbeat_interval_sec, now),
@@ -147,6 +151,16 @@ class SchedulerStore:
                 WHERE config_id = 'default'
                 """,
                 (heartbeat_interval_sec,),
+            )
+            connection.execute(
+                """
+                UPDATE heartbeat_config
+                SET last_delivered_at = COALESCE(last_delivered_at, last_fired_at),
+                    last_delivered_summary = COALESCE(last_delivered_summary, last_result_summary)
+                WHERE config_id = 'default'
+                  AND last_result_status = 'delivered'
+                  AND (last_delivered_summary IS NULL OR TRIM(last_delivered_summary) = '')
+                """
             )
             connection.commit()
 
@@ -505,6 +519,8 @@ class SchedulerStore:
                     last_fired_at,
                     next_fire_at,
                     last_suppressed_at,
+                    last_delivered_at,
+                    last_delivered_summary,
                     last_result_status,
                     last_result_summary,
                     updated_at
@@ -561,6 +577,14 @@ class SchedulerStore:
                         WHEN ? = 'suppressed' THEN ?
                         ELSE last_suppressed_at
                     END,
+                    last_delivered_at = CASE
+                        WHEN ? = 'delivered' THEN ?
+                        ELSE last_delivered_at
+                    END,
+                    last_delivered_summary = CASE
+                        WHEN ? = 'delivered' THEN ?
+                        ELSE last_delivered_summary
+                    END,
                     last_result_status = ?,
                     last_result_summary = ?,
                     updated_at = ?
@@ -571,6 +595,10 @@ class SchedulerStore:
                     next_fire_at,
                     normalized_status,
                     now,
+                    normalized_status,
+                    now,
+                    normalized_status,
+                    summary,
                     normalized_status,
                     summary,
                     now,
@@ -641,6 +669,8 @@ class SchedulerStore:
             "last_fired_at": "last_fired_at TEXT",
             "next_fire_at": "next_fire_at TEXT",
             "last_suppressed_at": "last_suppressed_at TEXT",
+            "last_delivered_at": "last_delivered_at TEXT",
+            "last_delivered_summary": "last_delivered_summary TEXT",
         }
         for name, ddl in columns.items():
             if name in existing:

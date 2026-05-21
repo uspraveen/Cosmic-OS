@@ -235,6 +235,42 @@ class FakeHeartbeatNoopOrchestratorClient(FakeOrchestratorClient):
         }
 
 
+class FakeHeartbeatNoteOrchestratorClient(FakeOrchestratorClient):
+    def __init__(self, note: str) -> None:
+        super().__init__()
+        self.note = note
+
+    async def stream_task(self, task) -> object:
+        self.last_task = task
+        yield {
+            "type": "task.created",
+            "task_id": task.task_id,
+            "session_id": task.session_id,
+            "channel": task.channel,
+            "route": "opus",
+            "status": "running",
+        }
+        yield {
+            "type": "response.complete",
+            "task_id": task.task_id,
+            "request_id": task.input.get("request_id"),
+            "session_id": task.session_id,
+            "channel": task.channel,
+            "content": self.note,
+            "route": "opus",
+            "awaiting_reply": False,
+            "metrics": {"rtt_ms": 24},
+        }
+        yield {
+            "type": "task.completed",
+            "task_id": task.task_id,
+            "session_id": task.session_id,
+            "channel": task.channel,
+            "route": "opus",
+            "status": "completed",
+        }
+
+
 class CapturingDesktopAdapter(DesktopAdapter):
     def __init__(self) -> None:
         super().__init__()
@@ -4399,6 +4435,42 @@ async def test_runtime_due_heartbeat_suppresses_noop_and_does_not_append_history
         assert heartbeat["last_suppressed_at"] is not None
 
         assert runtime.get_session_history(task.session_id) == []
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_due_heartbeat_suppresses_repeated_delivered_note(tmp_path) -> None:
+    note = "Your delivery queue has 13 deadlettered items."
+    runtime = build_runtime(tmp_path, route="opus")
+    runtime.orchestrator = FakeHeartbeatNoteOrchestratorClient(note)
+    await runtime.start()
+    try:
+        runtime.scheduler_store.schedule_heartbeat(
+            next_fire_at="2000-01-01T00:00:00Z"
+        )
+        await runtime._run_due_crons()  # noqa: SLF001 - targeted scheduler seam
+
+        first_task = runtime.orchestrator.last_task
+        assert first_task is not None
+        history = runtime.get_session_history(first_task.session_id)
+        assert [item["content"] for item in history] == [note]
+        heartbeat = runtime.scheduler_store.get_heartbeat()
+        assert heartbeat["last_result_status"] == "delivered"
+        assert heartbeat["last_delivered_summary"] == note
+
+        runtime.scheduler_store.schedule_heartbeat(
+            next_fire_at="2000-01-01T00:30:00Z"
+        )
+        await runtime._run_due_crons()  # noqa: SLF001 - targeted scheduler seam
+
+        second_task = runtime.orchestrator.last_task
+        assert second_task is not None
+        assert second_task.task_id != first_task.task_id
+        assert runtime.get_session_history(first_task.session_id) == history
+        heartbeat = runtime.scheduler_store.get_heartbeat()
+        assert heartbeat["last_result_status"] == "suppressed"
+        assert heartbeat["last_delivered_summary"] == note
     finally:
         await runtime.stop()
 

@@ -2032,7 +2032,11 @@ class GatewayRuntime:
             "delivery path available; if a proactive item is better sent as email, you may use Cosmic Mail "
             "or email capabilities when available. If there is nothing useful enough to interrupt for, "
             f"respond exactly {HEARTBEAT_SUPPRESS_TOKEN} and nothing else. If there is something useful, "
-            "respond with a short, concrete, low-drama note; do not say this came from a heartbeat."
+            "respond with a short, concrete, low-drama note; do not say this came from a heartbeat. "
+            "Do not repeat the last delivered heartbeat note unless something material changed. "
+            "Treat historical delivery-queue deadletters as diagnostic background, not a reason to speak; "
+            "only surface delivery-queue issues when there are pending items, new deadletters since the "
+            "last delivered heartbeat, or the user is actively debugging delivery."
         )
         if not context_block:
             return prompt
@@ -2047,6 +2051,18 @@ class GatewayRuntime:
     ) -> dict[str, Any]:
         session_id = self._current_session_id()
         session_metadata = self._ensure_session_state_seeded(session_id)
+        heartbeat_state = self.scheduler_store.get_heartbeat()
+        last_delivered_summary = self._safe_text(
+            heartbeat_state.get("last_delivered_summary")
+        )
+        last_delivered_at = self._safe_text(heartbeat_state.get("last_delivered_at"))
+        if not last_delivered_summary:
+            recovered_note = self._latest_delivered_heartbeat_note(session_id)
+            last_delivered_summary = self._safe_text(recovered_note.get("content"))
+            last_delivered_at = self._safe_text(recovered_note.get("created_at"))
+        last_delivered_at = self._safe_text(
+            last_delivered_at
+        ) or self._safe_text(heartbeat_state.get("last_fired_at"))
         history = self.get_session_history(session_id)
         recent_messages: list[dict[str, str]] = []
         for item in history[-8:]:
@@ -2086,9 +2102,19 @@ class GatewayRuntime:
             "delivery_state": delivery_state or {},
             "email_delivery_available": self._agent_email_effectively_enabled(),
             "scheduler": self.scheduler_store.summary(),
-            "delivery_queue": self.delivery_queue_store.summary(),
+            "delivery_queue": self.delivery_queue_store.summary(
+                since=last_delivered_at
+            ),
             "active_task_count": len(active_tasks),
         }
+        if last_delivered_summary:
+            packet["last_delivered_heartbeat_note"] = {
+                "delivered_at": last_delivered_at,
+                "summary": self._bounded_excerpt(
+                    last_delivered_summary,
+                    limit=300,
+                ),
+            }
         working_set = (
             session_metadata.get("active_working_set")
             if isinstance(session_metadata.get("active_working_set"), dict)
@@ -2174,6 +2200,18 @@ class GatewayRuntime:
         if preferences:
             lines.extend(["", "### Stable Preferences And Interests"])
             lines.extend(f"- {item}" for item in preferences)
+        last_note = (
+            context_packet.get("last_delivered_heartbeat_note")
+            if isinstance(context_packet.get("last_delivered_heartbeat_note"), dict)
+            else {}
+        )
+        if last_note:
+            summary = self._safe_text(last_note.get("summary"))
+            if summary:
+                delivered_at = self._safe_text(last_note.get("delivered_at"))
+                suffix = f" at {delivered_at}" if delivered_at else ""
+                lines.extend(["", "### Last Delivered Heartbeat Note"])
+                lines.append(f"- Delivered{suffix}: {summary}")
         recent = (
             context_packet.get("recent_conversation_tail")
             if isinstance(context_packet.get("recent_conversation_tail"), list)
@@ -12312,7 +12350,31 @@ class GatewayRuntime:
                 return
             is_heartbeat_response = self._is_heartbeat_event(event)
             if is_heartbeat_response:
-                event.pop("thinking_text", None)
+                duplicate_summary = self._heartbeat_duplicate_response_summary(
+                    event.get("content"),
+                    session_id=session_id,
+                )
+                if duplicate_summary:
+                    if request_id:
+                        self._record_heartbeat_outcome(
+                            request_id=request_id,
+                            status="suppressed",
+                            summary=duplicate_summary,
+                        )
+                    self._trace_request_event(
+                        request_id=request_id,
+                        session_id=session_id,
+                        channel=event_channel,
+                        route=self._safe_text(event.get("route")) or "opus",
+                        event_type="response.complete",
+                        stage="response",
+                        status="suppressed",
+                        title="Heartbeat repeated previous note",
+                        detail=duplicate_summary,
+                        task_id=task_id,
+                        completed=False,
+                    )
+                    return
             research_provenance = self._normalize_research_provenance(
                 event.get("research_provenance"),
                 fallback_sources=event.get("sources")
@@ -12383,9 +12445,7 @@ class GatewayRuntime:
                 metadata={
                     "task_id": self._safe_text(event.get("task_id")),
                     "metrics": event.get("metrics"),
-                    "thinking_text": None
-                    if is_heartbeat_response
-                    else self._safe_text(event.get("thinking_text")),
+                    "thinking_text": self._safe_text(event.get("thinking_text")),
                     "source": self._safe_text(event.get("source")),
                     "source_id": self._safe_text(event.get("source_id")),
                     "research_provenance": research_provenance,
@@ -12542,9 +12602,7 @@ class GatewayRuntime:
                         sources=event.get("sources")
                         if isinstance(event.get("sources"), list)
                         else None,
-                        thinking_text=None
-                        if is_heartbeat_response
-                        else self._safe_text(event.get("thinking_text")),
+                        thinking_text=self._safe_text(event.get("thinking_text")),
                         produced_artifacts=produced_artifacts,
                         supporting_artifacts=supporting_artifacts,
                         activity_log=activity_log,
@@ -12689,6 +12747,64 @@ class GatewayRuntime:
         normalized = content.strip().strip("`'\"").strip().lower()
         normalized = re.sub(r"\s+", "_", normalized)
         return normalized == HEARTBEAT_SUPPRESS_TOKEN
+
+    def _normalize_heartbeat_note(self, value: Any) -> str:
+        text = self._safe_text(value) or ""
+        return re.sub(r"\s+", " ", text).strip().casefold()
+
+    def _latest_delivered_heartbeat_note(
+        self, session_id: str | None
+    ) -> dict[str, str]:
+        normalized_session_id = self._safe_text(session_id)
+        if not normalized_session_id:
+            return {}
+        try:
+            history = self.session_store.get_history(normalized_session_id)
+        except Exception:
+            return {}
+        for item in reversed(history):
+            if not isinstance(item, dict) or item.get("role") != "assistant":
+                continue
+            metadata = (
+                item.get("metadata")
+                if isinstance(item.get("metadata"), dict)
+                else {}
+            )
+            if self._safe_text(metadata.get("source")) != "heartbeat":
+                continue
+            content = self._safe_text(item.get("content"))
+            if not content:
+                continue
+            if self._normalize_heartbeat_note(content) == HEARTBEAT_SUPPRESS_TOKEN:
+                continue
+            return {
+                "content": content,
+                "created_at": self._safe_text(item.get("created_at")) or "",
+            }
+        return {}
+
+    def _heartbeat_duplicate_response_summary(
+        self,
+        content: Any,
+        *,
+        session_id: str | None = None,
+    ) -> str | None:
+        current_note = self._normalize_heartbeat_note(content)
+        if not current_note:
+            return None
+        try:
+            heartbeat = self.scheduler_store.get_heartbeat()
+        except Exception:
+            return None
+        previous_note = self._normalize_heartbeat_note(
+            heartbeat.get("last_delivered_summary")
+        )
+        if not previous_note:
+            previous = self._latest_delivered_heartbeat_note(session_id)
+            previous_note = self._normalize_heartbeat_note(previous.get("content"))
+        if previous_note and current_note == previous_note:
+            return "Heartbeat repeated its last delivered note; suppressed."
+        return None
 
     def _record_heartbeat_outcome(
         self,
