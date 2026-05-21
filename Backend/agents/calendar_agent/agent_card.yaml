@@ -68,6 +68,16 @@ intents:
     usage_hints:
       - Recall prior calendar-agent work when you need exact reuse of a previous calendar action instead of recomputing it.
 
+  - name: calendar.heartbeat_digest
+    description: Build a bounded, structured upcoming-event digest for COSMIC heartbeats without natural-language parsing
+    input_schema: schemas/intents/calendar.heartbeat_digest.input.json
+    output_schema: schemas/intents/calendar.heartbeat_digest.output.json
+    timeout_sec: 20
+    usage_hints:
+      - Gateway uses this before heartbeat turns to fetch a small upcoming-event digest.
+      - Inputs must be structured (`time_min`, `time_max`, max counts); do not use the internal LLM for this intent.
+      - Include account and calendar identity on every event so the heartbeat can reason across multiple connected accounts.
+
 auth_requirements:
   calendar.list_events:
     provider: google
@@ -94,6 +104,11 @@ auth_requirements:
     scopes:
       - https://www.googleapis.com/auth/calendar
       - https://www.googleapis.com/auth/calendar.events
+  calendar.heartbeat_digest:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/calendar
+      - https://www.googleapis.com/auth/calendar.events
 
 artifact_types:
   - calendar_event
@@ -109,6 +124,7 @@ policies:
   tool_access: []
   allowed_senders:
     - cosmic/orchestrator:1.0.0
+    - cosmic/gateway:1.0.0
   intent_authorization:
     calendar.list_events: [cosmic/orchestrator:1.0.0]
     calendar.create_event: [cosmic/orchestrator:1.0.0]
@@ -116,6 +132,7 @@ policies:
     calendar.update_event: [cosmic/orchestrator:1.0.0]
     calendar.cancel_event: [cosmic/orchestrator:1.0.0]
     calendar.recall_session: [cosmic/orchestrator:1.0.0]
+    calendar.heartbeat_digest: [cosmic/gateway:1.0.0, cosmic/orchestrator:1.0.0]
 
 sla:
   max_concurrency: 2

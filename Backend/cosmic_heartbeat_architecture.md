@@ -33,15 +33,17 @@ Each heartbeat receives a compact context packet rather than a replayed chat pro
 - Whether Cosmic Mail/email delivery is available.
 - Stable user preferences and interests from carry-forward/memory.
 - Passive memory recall for broad user priorities.
+- Heartbeat runtime state: interval, last fired time, last delivered note, last suppression, current scheduled fire, and projected next fire.
+- Private heartbeat notes from `Backend/agents/orchestrator/store/heartbeat_notes.md`.
+- Calendar Digest: a bounded upcoming-event window from connected calendar accounts, including account/calendar identity and new/changed/seen markers.
 
 Future expansions should add first-class summaries for:
 
-- Calendar windows and travel/logistics pressure.
 - Inbox and Cosmic Mail approvals.
 - Richer presence signals such as desktop foreground state and quiet-hours aware mobile status.
 - Important contacts and relationship context.
 - User watchlists: YC, AI research, products, companies, documents, projects.
-- External world state only when recent context suggests it matters.
+- External world state when recent context or stable interests suggest it matters.
 
 ## Prompt Shape
 
@@ -49,6 +51,8 @@ The heartbeat prompt should be stable and strict:
 
 ```text
 You are COSMIC's Heartbeat: an ambient consciousness pass for the user.
+This turn was triggered automatically by COSMIC's scheduler, not by a user chat message.
+Do not infer that the user manually asked for this heartbeat.
 Quietly decide whether there is something genuinely useful to surface now.
 Think across calendar commitments, inbox and approval pressure, active projects,
 background tasks, reminders, open loops, user interests, preferences, relationships,
@@ -56,7 +60,20 @@ recent conversations, and what the user would likely want to know at this moment
 Also think about active or recently touched projects, websites, agents, documents,
 deployments, and automations; surface a concrete improvement, bug fix, polish pass,
 deployment check, follow-up, or next step only if it would meaningfully help now.
-Use specialist/local tools only when a check is clearly worth it.
+Regularly consider whether current news, research, product changes, company updates,
+people, places, or topics the user recently discussed or consistently cares about
+need a lightweight web, Perplexity, X, Firecrawl, memory, or specialist check.
+Use specialist/local tools when a check would materially improve the heartbeat.
+If the context includes a Calendar Digest, it may contain both new and already-seen
+events across multiple accounts/calendars. Do not speak just because an event
+exists; prioritize new, changed, imminent, preparation-heavy, or user-goal-relevant
+events, and avoid repeating calendar items already handled unless timing or
+context changed.
+You know this is a repeating heartbeat; use the runtime state to reason about the
+last beat, this beat, and the next one.
+Use heartbeat_notes as your private scratchpad for compact self-notes across beats:
+read it when continuity matters, append or replace short watchpoints, and remove
+stale notes.
 Use the best COSMIC-owned delivery path available; if a proactive item is better
 sent as email, use Cosmic Mail or email capabilities when available.
 If there is nothing useful enough to interrupt for, respond exactly heartbeat_ok and nothing else.
@@ -64,7 +81,7 @@ If there is something useful, respond with a short, concrete, low-drama note;
 do not say this came from a heartbeat.
 ```
 
-The model must treat the context packet as private state, not as a user message to quote back.
+The model must treat the heartbeat itself and the context packet as scheduler-owned private state, not as a user message or user request to quote back.
 
 ## Gateway Implementation
 
@@ -77,8 +94,40 @@ Gateway owns the schedule because Gateway already owns sessions, delivery, prefe
 - The heartbeat request uses an empty live conversation context and a compact memory/context block.
 - Gateway resolves delivery at run time: active desktop first, then active mobile, then the latest mobile push target, then queued desktop fallback.
 - `visual_response_enhancement_enabled` is disabled for heartbeat turns unless explicitly changed later.
-- Heartbeat response chunks and progress are not streamed; only a useful final response is delivered.
+- Heartbeat response chunks and progress are not streamed live; useful final responses still retain their compact Flow/activity log for later inspection.
 - `heartbeat_ok` final responses are suppressed before session storage, push, delivery queue, and UI display.
+
+## Heartbeat Notes
+
+Heartbeat notes are COSMIC's private continuity scratchpad for recurring ambient thought. They are not chat history and should not be quoted to the user. The file lives at:
+
+```text
+Backend/agents/orchestrator/store/heartbeat_notes.md
+```
+
+The orchestrator gets a `heartbeat_notes` tool that can read, append, replace, remove, or clear this markdown. This reuses the existing orchestrator tool execution path instead of creating a separate note service.
+
+Expected use:
+
+- Keep notes compact: watchpoints, project follow-ups, future checks, and ideas worth revisiting on later beats.
+- Remove stale notes once acted on or no longer relevant.
+- Use durable memory/core facts for stable user preferences and identity-level facts; use heartbeat notes for ambient operational continuity.
+- Do not append a note every beat. Silence is valid when there is nothing to remember.
+
+## Calendar Digest
+
+Gateway performs a bounded read-only calendar pre-check before building the heartbeat context when the user has connected Google Calendar accounts. This is intentionally not a free-form orchestration task.
+
+- Gateway resolves each active connected calendar account independently, with no primary-account fallback.
+- Gateway dispatches `calendar.heartbeat_digest` to the Calendar Agent with structured `time_min`, `time_max`, and max-count inputs.
+- The Calendar Agent skips its natural-language/graph planning path for this intent and directly calls Google Calendar APIs.
+- Each returned event carries `account_id`, account label/email, `calendar_id`, calendar name/color, event id, start/end, location, meeting-link presence, and status.
+- Gateway stores a compact event fingerprint keyed by `account_id:calendar_id:event_id`.
+- Every heartbeat marks events as `NEW`, `CHANGED`, or `SEEN` before passing them to the orchestrator.
+- The orchestrator sees which account and calendar produced each event, so multiple connected calendars remain distinguishable.
+- The digest is bounded by account count, event count, selected/visible calendars, and a short agent timeout so heartbeats stay low priority.
+
+The goal is not to make the model announce every calendar item. The goal is to give COSMIC enough situational awareness to notice events that are newly added, materially changed, imminent, preparation-heavy, or connected to the user's current goals.
 
 ## Delivery Behavior
 
@@ -112,7 +161,7 @@ Bad heartbeat notes are:
 
 ## Future Work
 
-- Add explicit calendar/inbox summarizers into the heartbeat context packet.
+- Add explicit inbox and Cosmic Mail approval summarizers into the heartbeat context packet.
 - Add a "quiet hours" policy once user preference UI exists.
 - Add deduplication against recently surfaced heartbeat insights.
 - Add a heartbeat insight ledger for analytics without polluting chat history.

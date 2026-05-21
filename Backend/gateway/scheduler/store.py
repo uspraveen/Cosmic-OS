@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -93,6 +93,25 @@ class SchedulerStore:
                     last_result_summary TEXT,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS heartbeat_calendar_events (
+                    event_key TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    calendar_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    signature TEXT NOT NULL,
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    last_changed_at TEXT,
+                    last_included_at TEXT,
+                    start_at TEXT,
+                    end_at TEXT,
+                    summary TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_heartbeat_calendar_seen
+                    ON heartbeat_calendar_events(last_seen_at DESC);
                 """
             )
             self._ensure_heartbeat_columns(connection)
@@ -654,10 +673,152 @@ class SchedulerStore:
             "heartbeat_last_result_status": heartbeat.get("last_result_status"),
         }
 
+    def annotate_heartbeat_calendar_events(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        included_at: str | None = None,
+    ) -> dict[str, Any]:
+        now = included_at or utcnow_iso()
+        annotated: list[dict[str, Any]] = []
+        new_count = 0
+        changed_count = 0
+        seen_count = 0
+        with self._lock, self._connect() as connection:
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                event_key = self._heartbeat_calendar_event_key(event)
+                if not event_key:
+                    continue
+                signature = self._heartbeat_calendar_event_signature(event)
+                row = connection.execute(
+                    """
+                    SELECT signature, first_seen_at, last_seen_at, last_changed_at
+                    FROM heartbeat_calendar_events
+                    WHERE event_key = ?
+                    """,
+                    (event_key,),
+                ).fetchone()
+                is_new = row is None
+                is_changed = bool(row is not None and row["signature"] != signature)
+                if is_new:
+                    new_count += 1
+                    first_seen_at = now
+                    last_changed_at = None
+                    previous_seen_at = None
+                else:
+                    seen_count += 1
+                    first_seen_at = str(row["first_seen_at"] or now)
+                    previous_seen_at = str(row["last_seen_at"] or "") or None
+                    last_changed_at = str(row["last_changed_at"] or "") or None
+                    if is_changed:
+                        changed_count += 1
+                        last_changed_at = now
+                payload = dict(event)
+                payload.update(
+                    {
+                        "heartbeat_event_key": event_key,
+                        "heartbeat_seen_before": not is_new,
+                        "heartbeat_new": is_new,
+                        "heartbeat_changed": is_changed,
+                        "heartbeat_first_seen_at": first_seen_at,
+                        "heartbeat_previous_seen_at": previous_seen_at,
+                        "heartbeat_last_changed_at": last_changed_at,
+                    }
+                )
+                annotated.append(payload)
+                connection.execute(
+                    """
+                    INSERT INTO heartbeat_calendar_events (
+                        event_key,
+                        account_id,
+                        calendar_id,
+                        event_id,
+                        signature,
+                        first_seen_at,
+                        last_seen_at,
+                        last_changed_at,
+                        last_included_at,
+                        start_at,
+                        end_at,
+                        summary,
+                        metadata_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(event_key) DO UPDATE SET
+                        signature = excluded.signature,
+                        last_seen_at = excluded.last_seen_at,
+                        last_changed_at = COALESCE(excluded.last_changed_at, heartbeat_calendar_events.last_changed_at),
+                        last_included_at = excluded.last_included_at,
+                        start_at = excluded.start_at,
+                        end_at = excluded.end_at,
+                        summary = excluded.summary,
+                        metadata_json = excluded.metadata_json
+                    """,
+                    (
+                        event_key,
+                        str(event.get("account_id") or ""),
+                        str(event.get("calendar_id") or ""),
+                        str(event.get("event_id") or event.get("id") or ""),
+                        signature,
+                        first_seen_at,
+                        now,
+                        last_changed_at,
+                        now,
+                        str(event.get("start") or ""),
+                        str(event.get("end") or ""),
+                        str(event.get("summary") or ""),
+                        json.dumps(event, sort_keys=True),
+                    ),
+                )
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=120)).isoformat().replace(
+                "+00:00",
+                "Z",
+            )
+            connection.execute(
+                """
+                DELETE FROM heartbeat_calendar_events
+                WHERE last_seen_at < ?
+                """,
+                (cutoff,),
+            )
+            connection.commit()
+        return {
+            "events": annotated,
+            "event_count": len(annotated),
+            "new_event_count": new_count,
+            "changed_event_count": changed_count,
+            "seen_event_count": seen_count,
+            "included_at": now,
+        }
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(str(self.db_path), check_same_thread=False)
         connection.row_factory = sqlite3.Row
         return connection
+
+    @staticmethod
+    def _heartbeat_calendar_event_key(event: dict[str, Any]) -> str:
+        account_id = str(event.get("account_id") or "").strip()
+        calendar_id = str(event.get("calendar_id") or "").strip()
+        event_id = str(event.get("event_id") or event.get("id") or "").strip()
+        if not account_id or not calendar_id or not event_id:
+            return ""
+        return f"{account_id}:{calendar_id}:{event_id}"
+
+    @staticmethod
+    def _heartbeat_calendar_event_signature(event: dict[str, Any]) -> str:
+        payload = {
+            "summary": str(event.get("summary") or "").strip(),
+            "start": str(event.get("start") or "").strip(),
+            "end": str(event.get("end") or "").strip(),
+            "location": str(event.get("location") or "").strip(),
+            "status": str(event.get("status") or "").strip(),
+            "meetingLink": str(event.get("meetingLink") or event.get("meeting_link") or "").strip(),
+            "calendar_id": str(event.get("calendar_id") or "").strip(),
+        }
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
     def _ensure_heartbeat_columns(self, connection: sqlite3.Connection) -> None:
         rows = connection.execute("PRAGMA table_info(heartbeat_config)").fetchall()

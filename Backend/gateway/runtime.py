@@ -134,6 +134,7 @@ MEMORY_WRITE_PREVIEW_CHARS = 400
 SYSTEM_CRON_DAILY_ROLLOVER = "system.daily_rollover"
 HEARTBEAT_SOURCE_ID = "default"
 HEARTBEAT_SUPPRESS_TOKEN = "heartbeat_ok"
+HEARTBEAT_NOTES_CHAR_LIMIT = 4000
 TURN_LEDGER_WINDOW_SIZE = 10
 TASK_NOTEBOOK_WINDOW_SIZE = 5
 TASK_ACTIVITY_LOG_LIMIT = 64
@@ -403,6 +404,7 @@ class GatewayRuntime:
         self._codex_login_session: dict[str, Any] | None = None
         self._cursor_login_session: dict[str, Any] | None = None
         self._heartbeat_outcomes_by_request_id: dict[str, dict[str, str]] = {}
+        self._heartbeat_activity_by_request_id: dict[str, list[dict[str, Any]]] = {}
 
     async def start(self) -> None:
         self.session_store.initialize()
@@ -2021,6 +2023,8 @@ class GatewayRuntime:
             stored_prompt = ""
         prompt = stored_prompt or (
             "You are COSMIC's Heartbeat: an ambient consciousness pass for the user. "
+            "This turn was triggered automatically by COSMIC's scheduler, not by a user chat message. "
+            "Do not infer that the user manually asked for this heartbeat. "
             "Quietly decide whether there is something genuinely useful to surface now. "
             "Think across calendar commitments, inbox and approval pressure, active projects, "
             "background tasks, reminders, open loops, user interests, preferences, relationships, "
@@ -2028,19 +2032,313 @@ class GatewayRuntime:
             "Also think about active or recently touched projects, websites, agents, documents, "
             "deployments, and automations; surface a concrete improvement, bug fix, polish pass, "
             "deployment check, follow-up, or next step only if it would meaningfully help now. "
-            "Use specialist/local tools only when a check is clearly worth it. Use the best COSMIC-owned "
+            "Regularly consider whether current news, research, product changes, company updates, "
+            "people, places, or topics the user recently discussed or consistently cares about need "
+            "a lightweight web, Perplexity, X, Firecrawl, memory, or specialist check. "
+            "Use specialist/local tools when a check would materially improve the heartbeat. "
+            "If the context includes a Calendar Digest, it may contain both new and already-seen "
+            "events across multiple accounts/calendars. Do not speak just because an event exists; "
+            "prioritize new, changed, imminent, preparation-heavy, or user-goal-relevant events, "
+            "and avoid repeating calendar items already handled unless timing or context changed. "
+            "You know this is a repeating heartbeat; use the runtime state to avoid repeating yourself "
+            "and to reason about the last beat, this beat, and the next one. "
+            "Use heartbeat_notes as your private scratchpad for compact self-notes across beats: "
+            "read it when continuity matters, append or replace short watchpoints, and remove stale notes. "
+            "Use the best COSMIC-owned "
             "delivery path available; if a proactive item is better sent as email, you may use Cosmic Mail "
             "or email capabilities when available. If there is nothing useful enough to interrupt for, "
             f"respond exactly {HEARTBEAT_SUPPRESS_TOKEN} and nothing else. If there is something useful, "
             "respond with a short, concrete, low-drama note; do not say this came from a heartbeat. "
             "Do not repeat the last delivered heartbeat note unless something material changed. "
             "Treat historical delivery-queue deadletters as diagnostic background, not a reason to speak; "
-            "only surface delivery-queue issues when there are pending items, new deadletters since the "
+            "surface delivery-queue issues when there are pending items, new deadletters since the "
             "last delivered heartbeat, or the user is actively debugging delivery."
         )
         if not context_block:
             return prompt
         return f"{prompt}\n\n{context_block}"
+
+    def _read_heartbeat_notes_excerpt(self) -> str:
+        path = self.config.heartbeat_notes_path
+        try:
+            if not path.exists():
+                return ""
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            logger.exception("gateway.heartbeat_notes_read_failed path=%s", path)
+            return ""
+        return self._bounded_excerpt(text, limit=HEARTBEAT_NOTES_CHAR_LIMIT) or ""
+
+    async def _build_heartbeat_calendar_digest(
+        self,
+        *,
+        session_id: str,
+        channel: str,
+        scheduled_for: str | None,
+    ) -> dict[str, Any] | None:
+        if not self.config.heartbeat_calendar_digest_enabled:
+            return None
+        accounts = [
+            account
+            for account in self.credential_manager.list_accounts("google")
+            if self._safe_text(account.get("status")) == "active"
+            and bool(account.get("has_refresh_token"))
+        ]
+        if not accounts:
+            return None
+        window_start = datetime.now(timezone.utc)
+        window_end = window_start + timedelta(
+            hours=max(1, int(self.config.heartbeat_calendar_window_hours))
+        )
+        time_min = window_start.isoformat().replace("+00:00", "Z")
+        time_max = window_end.isoformat().replace("+00:00", "Z")
+        selected_accounts = accounts[: max(1, int(self.config.heartbeat_calendar_max_accounts))]
+        digest: dict[str, Any] = {
+            "state": "ready",
+            "source": "calendar_agent",
+            "window": {
+                "time_min": time_min,
+                "time_max": time_max,
+                "hours": int(self.config.heartbeat_calendar_window_hours),
+            },
+            "connected_account_count": len(accounts),
+            "queried_account_count": len(selected_accounts),
+            "accounts": [],
+            "events": [],
+        }
+        if self._redis is None:
+            digest["state"] = "skipped"
+            digest["reason"] = "redis_unavailable"
+            return digest
+
+        scopes = [
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/calendar.events",
+        ]
+        dispatch_inputs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for account in selected_accounts:
+            account_summary = self._heartbeat_calendar_account_summary(account)
+            try:
+                auth = await self.credential_manager.resolve_credential(
+                    provider="google",
+                    required_scopes=scopes,
+                    account_id=self._safe_text(account.get("account_id")),
+                    operation_mode="read",
+                    allow_primary_fallback=False,
+                )
+            except Exception as exc:
+                account_summary.update(
+                    {
+                        "status": "failed",
+                        "error": str(exc).strip()[:240],
+                    }
+                )
+                digest["accounts"].append(account_summary)
+                continue
+            if not auth:
+                account_summary.update(
+                    {
+                        "status": "needs_reconnect",
+                        "error": "Unable to resolve calendar credential.",
+                    }
+                )
+                digest["accounts"].append(account_summary)
+                continue
+            dispatch_inputs.append((account_summary, auth))
+
+        async def dispatch_one(
+            account_summary: dict[str, Any],
+            auth: dict[str, Any],
+        ) -> dict[str, Any]:
+            try:
+                return await self._dispatch_calendar_heartbeat_digest(
+                    session_id=session_id,
+                    channel=channel,
+                    scheduled_for=scheduled_for,
+                    account_summary=account_summary,
+                    auth=auth,
+                    time_min=time_min,
+                    time_max=time_max,
+                )
+            except Exception as exc:
+                return {
+                    "account": {
+                        **account_summary,
+                        "status": "failed",
+                        "error": str(exc).strip()[:240],
+                    },
+                    "events": [],
+                }
+
+        if dispatch_inputs:
+            results = await asyncio.gather(
+                *[
+                    dispatch_one(account_summary, auth)
+                    for account_summary, auth in dispatch_inputs
+                ]
+            )
+            for result in results:
+                account_summary = result.get("account") if isinstance(result, dict) else {}
+                if isinstance(account_summary, dict):
+                    digest["accounts"].append(account_summary)
+                raw_events = result.get("events") if isinstance(result, dict) else []
+                if isinstance(raw_events, list):
+                    digest["events"].extend(
+                        self._normalize_heartbeat_calendar_event(item)
+                        for item in raw_events
+                        if isinstance(item, dict)
+                    )
+
+        digest["events"] = [
+            item
+            for item in digest["events"]
+            if isinstance(item, dict)
+            and self._safe_text(item.get("account_id"))
+            and self._safe_text(item.get("calendar_id"))
+            and (
+                self._safe_text(item.get("event_id"))
+                or self._safe_text(item.get("id"))
+            )
+        ]
+        digest["events"].sort(
+            key=lambda item: (
+                self._safe_text(item.get("start")),
+                self._safe_text(item.get("summary")),
+            )
+        )
+        digest["events"] = digest["events"][
+            : max(1, int(self.config.heartbeat_calendar_max_events))
+        ]
+        annotated = self.scheduler_store.annotate_heartbeat_calendar_events(
+            digest["events"]
+        )
+        digest.update(
+            {
+                "events": annotated["events"],
+                "event_count": annotated["event_count"],
+                "new_event_count": annotated["new_event_count"],
+                "changed_event_count": annotated["changed_event_count"],
+                "seen_event_count": annotated["seen_event_count"],
+                "included_at": annotated["included_at"],
+            }
+        )
+        if digest["accounts"] or digest["events"]:
+            return digest
+        return None
+
+    async def _dispatch_calendar_heartbeat_digest(
+        self,
+        *,
+        session_id: str,
+        channel: str,
+        scheduled_for: str | None,
+        account_summary: dict[str, Any],
+        auth: dict[str, Any],
+        time_min: str,
+        time_max: str,
+    ) -> dict[str, Any]:
+        task = TaskEnvelope(
+            task_id=generate_task_id(),
+            task_list_id=session_id,
+            session_id=session_id,
+            sender="cosmic/gateway:1.0.0",
+            recipient=self.config.calendar_agent_id,
+            intent="calendar.heartbeat_digest",
+            input={
+                "time_min": time_min,
+                "time_max": time_max,
+                "max_results": max(1, int(self.config.heartbeat_calendar_max_events)),
+                "max_results_per_calendar": max(1, int(self.config.heartbeat_calendar_max_events)),
+                "selected_only": True,
+                "timezone": self.current_user_timezone(),
+                "account": account_summary,
+                "auth": auth,
+            },
+            input_artifacts=[],
+            idempotency_key=(
+                "heartbeat-calendar:"
+                f"{scheduled_for or 'unscheduled'}:"
+                f"{self._safe_text(account_summary.get('account_id'))}"
+            ),
+            priority="low",
+            signature="",
+            created_at=utcnow(),
+            source="heartbeat",
+            source_id=HEARTBEAT_SOURCE_ID,
+            channel=channel,
+        )
+        task = task.model_copy(
+            update={"signature": sign_task_envelope(task, self.config.signing_secret)}
+        )
+        await dispatch_task(task, self._redis)
+        result = await self._wait_for_agent_terminal_result(
+            task.task_id,
+            timeout_sec=float(self.config.heartbeat_calendar_agent_timeout_sec),
+            poll_interval_sec=0.25,
+        )
+        if self._safe_text(result.get("status")) != "completed":
+            return {
+                "account": {
+                    **account_summary,
+                    "status": self._safe_text(result.get("status")) or "failed",
+                    "error": self._safe_text(result.get("error_message")),
+                },
+                "events": [],
+            }
+        output = result.get("output") if isinstance(result.get("output"), dict) else {}
+        events = output.get("events") if isinstance(output.get("events"), list) else []
+        return {
+            "account": {
+                **account_summary,
+                "status": "ready",
+                "calendar_count": int(output.get("calendar_count") or 0),
+                "event_count": len(events),
+                "calendar_error_count": len(output.get("calendar_errors") or []),
+            },
+            "events": events,
+        }
+
+    def _heartbeat_calendar_account_summary(self, account: dict[str, Any]) -> dict[str, Any]:
+        account_id = self._safe_text(account.get("account_id"))
+        return {
+            "account_id": account_id,
+            "account_label": self._safe_text(account.get("account_label"))
+            or self._safe_text(account.get("display_name"))
+            or self._safe_text(account.get("email"))
+            or account_id
+            or "Google account",
+            "email": self._safe_text(account.get("email")),
+            "display_name": self._safe_text(account.get("display_name")),
+            "is_primary": bool(account.get("is_primary")),
+        }
+
+    def _normalize_heartbeat_calendar_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        meeting_link = self._safe_text(event.get("meetingLink")) or self._safe_text(
+            event.get("meeting_link")
+        )
+        html_link = self._safe_text(event.get("htmlLink")) or self._safe_text(
+            event.get("html_link")
+        )
+        return {
+            "event_id": self._safe_text(event.get("event_id"))
+            or self._safe_text(event.get("id")),
+            "summary": self._safe_text(event.get("summary")) or "Untitled event",
+            "start": self._safe_text(event.get("start")),
+            "end": self._safe_text(event.get("end")),
+            "is_all_day": bool(event.get("is_all_day") or event.get("isAllDay")),
+            "location": self._safe_text(event.get("location")),
+            "status": self._safe_text(event.get("status")) or "confirmed",
+            "meeting_link": meeting_link,
+            "has_meeting_link": bool(meeting_link),
+            "html_link": html_link,
+            "account_id": self._safe_text(event.get("account_id")),
+            "account_label": self._safe_text(event.get("account_label")),
+            "email": self._safe_text(event.get("email")),
+            "calendar_id": self._safe_text(event.get("calendar_id")),
+            "calendar_name": self._safe_text(event.get("calendar_name"))
+            or self._safe_text(event.get("calendar_id")),
+            "calendar_primary": bool(event.get("calendar_primary")),
+        }
 
     async def _build_heartbeat_context_packet(
         self,
@@ -2052,6 +2350,33 @@ class GatewayRuntime:
         session_id = self._current_session_id()
         session_metadata = self._ensure_session_state_seeded(session_id)
         heartbeat_state = self.scheduler_store.get_heartbeat()
+        interval_sec = self._heartbeat_interval_sec(heartbeat_state)
+        heartbeat_runtime = {
+            "interval_sec": interval_sec,
+            "last_fired_at": self._safe_text(heartbeat_state.get("last_fired_at")),
+            "last_suppressed_at": self._safe_text(
+                heartbeat_state.get("last_suppressed_at")
+            ),
+            "last_result_status": self._safe_text(
+                heartbeat_state.get("last_result_status")
+            ),
+            "last_result_summary": self._safe_text(
+                heartbeat_state.get("last_result_summary")
+            ),
+            "last_delivered_at": self._safe_text(
+                heartbeat_state.get("last_delivered_at")
+            ),
+            "last_delivered_summary": self._safe_text(
+                heartbeat_state.get("last_delivered_summary")
+            ),
+            "current_scheduled_for": scheduled_for,
+            "configured_next_fire_at": self._safe_text(
+                heartbeat_state.get("next_fire_at")
+            ),
+            "projected_next_fire_after_this_run": self._heartbeat_next_fire_at(
+                heartbeat=heartbeat_state
+            ),
+        }
         last_delivered_summary = self._safe_text(
             heartbeat_state.get("last_delivered_summary")
         )
@@ -2082,6 +2407,11 @@ class GatewayRuntime:
             session_id=session_id,
             channel=channel,
         )
+        calendar_digest = await self._build_heartbeat_calendar_digest(
+            session_id=session_id,
+            channel=channel,
+            scheduled_for=scheduled_for,
+        )
         crons = [
             {
                 "label": self._safe_text(item.get("name"))
@@ -2105,8 +2435,18 @@ class GatewayRuntime:
             "delivery_queue": self.delivery_queue_store.summary(
                 since=last_delivered_at
             ),
+            "heartbeat_runtime": {
+                key: value
+                for key, value in heartbeat_runtime.items()
+                if value not in ("", None)
+            },
             "active_task_count": len(active_tasks),
         }
+        heartbeat_notes = self._read_heartbeat_notes_excerpt()
+        if heartbeat_notes:
+            packet["heartbeat_notes"] = heartbeat_notes
+        if calendar_digest:
+            packet["calendar_digest"] = calendar_digest
         if last_delivered_summary:
             packet["last_delivered_heartbeat_note"] = {
                 "delivered_at": last_delivered_at,
@@ -2149,7 +2489,7 @@ class GatewayRuntime:
             return None
         lines: list[str] = [
             "## Heartbeat Context",
-            "This is a private ambient context packet. It should guide whether to speak now; it is not a user message and must not be repeated back.",
+            "This is a private ambient context packet for an automatic scheduler-triggered heartbeat. It should guide whether to speak now; it is not a user message and must not be repeated back.",
         ]
         for label, key in (
             ("Current session", "current_session_id"),
@@ -2160,6 +2500,27 @@ class GatewayRuntime:
             value = self._safe_text(context_packet.get(key))
             if value:
                 lines.append(f"- {label}: {value}")
+        heartbeat_runtime = (
+            context_packet.get("heartbeat_runtime")
+            if isinstance(context_packet.get("heartbeat_runtime"), dict)
+            else {}
+        )
+        if heartbeat_runtime:
+            lines.extend(["", "### Heartbeat Runtime State"])
+            for label, key in (
+                ("Interval seconds", "interval_sec"),
+                ("Last fired", "last_fired_at"),
+                ("Last suppressed", "last_suppressed_at"),
+                ("Last result status", "last_result_status"),
+                ("Last result summary", "last_result_summary"),
+                ("Last delivered", "last_delivered_at"),
+                ("Current scheduled fire", "current_scheduled_for"),
+                ("Configured next fire", "configured_next_fire_at"),
+                ("Projected next fire after this run", "projected_next_fire_after_this_run"),
+            ):
+                value = heartbeat_runtime.get(key)
+                if value not in ("", None, [], {}):
+                    lines.append(f"- {label}: {value}")
         delivery_state = (
             context_packet.get("delivery_state")
             if isinstance(context_packet.get("delivery_state"), dict)
@@ -2200,6 +2561,84 @@ class GatewayRuntime:
         if preferences:
             lines.extend(["", "### Stable Preferences And Interests"])
             lines.extend(f"- {item}" for item in preferences)
+        heartbeat_notes = self._safe_text(context_packet.get("heartbeat_notes"))
+        if heartbeat_notes:
+            lines.extend(["", "### Heartbeat Notes"])
+            lines.append(heartbeat_notes)
+        calendar_digest = (
+            context_packet.get("calendar_digest")
+            if isinstance(context_packet.get("calendar_digest"), dict)
+            else {}
+        )
+        if calendar_digest:
+            lines.extend(["", "### Calendar Digest"])
+            window = (
+                calendar_digest.get("window")
+                if isinstance(calendar_digest.get("window"), dict)
+                else {}
+            )
+            lines.append(
+                "- Source: "
+                f"{self._safe_text(calendar_digest.get('source')) or 'calendar'}; "
+                f"state={self._safe_text(calendar_digest.get('state')) or 'unknown'}; "
+                f"window={self._safe_text(window.get('time_min'))} to {self._safe_text(window.get('time_max'))}"
+            )
+            lines.append(
+                "- Counts: "
+                f"accounts={int(calendar_digest.get('connected_account_count') or 0)}, "
+                f"queried={int(calendar_digest.get('queried_account_count') or 0)}, "
+                f"events={int(calendar_digest.get('event_count') or 0)}, "
+                f"new={int(calendar_digest.get('new_event_count') or 0)}, "
+                f"changed={int(calendar_digest.get('changed_event_count') or 0)}, "
+                f"seen_before={int(calendar_digest.get('seen_event_count') or 0)}"
+            )
+            accounts = (
+                calendar_digest.get("accounts")
+                if isinstance(calendar_digest.get("accounts"), list)
+                else []
+            )
+            for account in accounts[:4]:
+                if not isinstance(account, dict):
+                    continue
+                label = self._safe_text(account.get("account_label")) or self._safe_text(account.get("account_id")) or "account"
+                email = self._safe_text(account.get("email"))
+                status = self._safe_text(account.get("status")) or "unknown"
+                calendar_count = int(account.get("calendar_count") or 0)
+                event_count = int(account.get("event_count") or 0)
+                suffix = f" ({email})" if email else ""
+                lines.append(
+                    f"- Account: {label}{suffix}; status={status}; calendars={calendar_count}; events={event_count}"
+                )
+            events = (
+                calendar_digest.get("events")
+                if isinstance(calendar_digest.get("events"), list)
+                else []
+            )
+            if events:
+                lines.append("- Events:")
+            for event in events[:8]:
+                if not isinstance(event, dict):
+                    continue
+                flags = []
+                if bool(event.get("heartbeat_new")):
+                    flags.append("NEW")
+                if bool(event.get("heartbeat_changed")):
+                    flags.append("CHANGED")
+                if bool(event.get("heartbeat_seen_before")):
+                    flags.append("SEEN")
+                flag_text = f"[{','.join(flags)}] " if flags else ""
+                account_label = self._safe_text(event.get("account_label")) or self._safe_text(event.get("account_id"))
+                calendar_name = self._safe_text(event.get("calendar_name")) or self._safe_text(event.get("calendar_id"))
+                location = self._safe_text(event.get("location"))
+                meeting = " meeting_link=yes" if bool(event.get("has_meeting_link")) else ""
+                lines.append(
+                    "- "
+                    f"{flag_text}{self._safe_text(event.get('start'))} -> {self._safe_text(event.get('end'))}: "
+                    f"{self._safe_text(event.get('summary')) or 'Untitled event'} "
+                    f"({account_label} / {calendar_name})"
+                    f"{'; location=' + location if location else ''}"
+                    f"{meeting}"
+                )
         last_note = (
             context_packet.get("last_delivered_heartbeat_note")
             if isinstance(context_packet.get("last_delivered_heartbeat_note"), dict)
@@ -2304,7 +2743,8 @@ class GatewayRuntime:
         memory_prompt_context = await self._assemble_memory_prompt_context(
             query=(
                 "COSMIC proactive heartbeat user interests preferences open loops current priorities "
-                "active recent projects websites agents deployments automations improvements follow ups"
+                "active recent projects websites agents deployments automations improvements follow ups "
+                "recently discussed topics current news research papers companies people products events watchlists"
             )
         )
         combined_memory_context = self._join_context_blocks(
@@ -2404,6 +2844,7 @@ class GatewayRuntime:
         self._heartbeat_outcomes_by_request_id.pop(request_id, None)
         await self.fulfill_processed_message(request_record)
         outcome = self._heartbeat_outcomes_by_request_id.pop(request_id, None) or {}
+        self._heartbeat_activity_by_request_id.pop(request_id, None)
         status = self._safe_text(outcome.get("status")) or "completed"
         summary = (
             self._safe_text(outcome.get("summary"))
@@ -12218,6 +12659,7 @@ class GatewayRuntime:
                 "tool.call",
                 "tool.result",
             }:
+                self._collect_heartbeat_activity_event(event)
                 return
             if event_type in {"task.completed", "task.failed", "task.cancelled", "error"}:
                 if task_id:
@@ -12238,6 +12680,8 @@ class GatewayRuntime:
                         or self._safe_text(event.get("content"))
                         or f"Heartbeat {status}.",
                     )
+                if event_type in {"task.failed", "task.cancelled", "error"} and request_id:
+                    self._heartbeat_activity_by_request_id.pop(request_id, None)
                 self._trace_request_event(
                     request_id=request_id,
                     session_id=session_id,
@@ -12327,6 +12771,7 @@ class GatewayRuntime:
                 event["blocks"] = client_response_blocks
         elif event_type == "response.complete":
             event_channel = self._safe_text(event.get("channel")) or ""
+            is_heartbeat_response = self._is_heartbeat_event(event)
             if self._is_heartbeat_noop_response(event):
                 if request_id:
                     self._record_heartbeat_outcome(
@@ -12334,6 +12779,7 @@ class GatewayRuntime:
                         status="suppressed",
                         summary="Heartbeat found nothing useful enough to surface.",
                     )
+                    self._heartbeat_activity_by_request_id.pop(request_id, None)
                 self._trace_request_event(
                     request_id=request_id,
                     session_id=session_id,
@@ -12348,7 +12794,6 @@ class GatewayRuntime:
                     completed=False,
                 )
                 return
-            is_heartbeat_response = self._is_heartbeat_event(event)
             if is_heartbeat_response:
                 duplicate_summary = self._heartbeat_duplicate_response_summary(
                     event.get("content"),
@@ -12361,6 +12806,7 @@ class GatewayRuntime:
                             status="suppressed",
                             summary=duplicate_summary,
                         )
+                        self._heartbeat_activity_by_request_id.pop(request_id, None)
                     self._trace_request_event(
                         request_id=request_id,
                         session_id=session_id,
@@ -12425,10 +12871,26 @@ class GatewayRuntime:
             task_notebook = (
                 self.session_store.get_task_notebook(task_id) if task_id else None
             )
+            heartbeat_activity = (
+                self._heartbeat_activity_by_request_id.pop(request_id, [])
+                if is_heartbeat_response and request_id
+                else []
+            )
+            activity_source: list[dict[str, Any]] = []
+            if isinstance(heartbeat_activity, list):
+                activity_source.extend(
+                    dict(item) for item in heartbeat_activity if isinstance(item, dict)
+                )
+            if isinstance(task_notebook, dict) and isinstance(
+                task_notebook.get("activity_log"), list
+            ):
+                activity_source.extend(
+                    dict(item)
+                    for item in task_notebook.get("activity_log", [])
+                    if isinstance(item, dict)
+                )
             activity_log = self._normalize_activity_log(
-                task_notebook.get("activity_log")
-                if isinstance(task_notebook, dict)
-                else None,
+                activity_source,
                 limit=TASK_ACTIVITY_LOG_LIMIT,
             )
             alpha_terminal_log = (
@@ -12747,6 +13209,35 @@ class GatewayRuntime:
         normalized = content.strip().strip("`'\"").strip().lower()
         normalized = re.sub(r"\s+", "_", normalized)
         return normalized == HEARTBEAT_SUPPRESS_TOKEN
+
+    def _collect_heartbeat_activity_event(self, event: dict[str, Any]) -> None:
+        request_id = self._safe_text(event.get("request_id"))
+        if not request_id:
+            return
+        event_type = self._safe_text(event.get("type")) or ""
+        activity_event = dict(event)
+        if event_type == "tool.call":
+            tool_name = self._safe_text(event.get("tool_name")) or "tool"
+            activity_event["type"] = "task.progress"
+            activity_event.setdefault("status", "tool_call")
+            if not self._safe_text(activity_event.get("message")):
+                activity_event["message"] = f"Using tool: {tool_name}..."
+        elif event_type == "tool.result":
+            tool_name = self._safe_text(event.get("tool_name")) or "tool"
+            activity_event["type"] = "task.progress"
+            activity_event.setdefault("status", "tool_result")
+            if not self._safe_text(activity_event.get("message")):
+                activity_event["message"] = f"Completed tool work: {tool_name}"
+        elif event_type not in {"task.created", "task.progress"}:
+            return
+        entry = self._build_task_activity_entry(activity_event)
+        if not entry:
+            return
+        existing = self._heartbeat_activity_by_request_id.get(request_id, [])
+        self._heartbeat_activity_by_request_id[request_id] = self._normalize_activity_log(
+            [*existing, entry],
+            limit=TASK_ACTIVITY_LOG_LIMIT,
+        )
 
     def _normalize_heartbeat_note(self, value: Any) -> str:
         text = self._safe_text(value) or ""

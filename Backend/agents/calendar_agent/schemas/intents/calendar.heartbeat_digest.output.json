@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "events": {
+      "type": "array",
+      "description": "Bounded upcoming events with account/calendar identity",
+      "items": { "type": "object" }
+    },
+    "count": { "type": "integer" },
+    "calendars": {
+      "type": "array",
+      "description": "Visible calendars considered for this account",
+      "items": { "type": "object" }
+    },
+    "calendar_count": { "type": "integer" },
+    "calendar_errors": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "account": {
+      "type": "object",
+      "properties": {
+        "account_id": { "type": "string" },
+        "account_label": { "type": "string" },
+        "email": { "type": "string" },
+        "display_name": { "type": "string" },
+        "is_primary": { "type": "boolean" }
+      }
+    },
+    "time_min": { "type": "string" },
+    "time_max": { "type": "string" }
+  },
+  "required": ["events", "count", "time_min", "time_max"]
+}

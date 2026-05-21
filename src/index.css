@@ -455,6 +455,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 100%;
+}
+
 .weather-alert-badge--advisory {
   color: rgba(255, 200, 140, 0.85);
   font-weight: 600;

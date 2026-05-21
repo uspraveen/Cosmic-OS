@@ -9,6 +9,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -249,6 +250,16 @@ class FakeHeartbeatNoteOrchestratorClient(FakeOrchestratorClient):
             "channel": task.channel,
             "route": "opus",
             "status": "running",
+        }
+        yield {
+            "type": "task.progress",
+            "task_id": task.task_id,
+            "request_id": task.input.get("request_id"),
+            "session_id": task.session_id,
+            "channel": task.channel,
+            "route": "opus",
+            "status": "thinking",
+            "message": "Checking heartbeat context.",
         }
         yield {
             "type": "response.complete",
@@ -1008,6 +1019,7 @@ def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
             artifacts_db_path=tmp_path / "artifacts.db",
             delivery_queue_db_path=tmp_path / "delivery_queue.db",
             scheduler_db_path=tmp_path / "scheduler.db",
+            heartbeat_notes_path=tmp_path / "heartbeat_notes.md",
             memory_write_audit_db_path=tmp_path / "memory_write_audit.db",
         )
     )
@@ -4413,6 +4425,10 @@ async def test_runtime_due_heartbeat_suppresses_noop_and_does_not_append_history
     runtime.orchestrator = FakeHeartbeatNoopOrchestratorClient()
     await runtime.start()
     try:
+        runtime.config.heartbeat_notes_path.write_text(
+            "# COSMIC Heartbeat Notes\n\n- Watch current AI research/news when it matters.\n",
+            encoding="utf-8",
+        )
         runtime.scheduler_store.schedule_heartbeat(
             next_fire_at="2000-01-01T00:00:00Z"
         )
@@ -4427,7 +4443,13 @@ async def test_runtime_due_heartbeat_suppresses_noop_and_does_not_append_history
         assert task.channel == "desktop"
         assert task.input["conversation_context"] == []
         assert task.input["visual_response_enhancement_enabled"] is False
+        assert "triggered automatically by COSMIC's scheduler" in task.input["query"]
         assert "Heartbeat Context" in str(task.input["memory_context"] or "")
+        assert "automatic scheduler-triggered heartbeat" in str(task.input["memory_context"] or "")
+        assert "Heartbeat Runtime State" in str(task.input["memory_context"] or "")
+        assert "Projected next fire after this run" in str(task.input["memory_context"] or "")
+        assert "Heartbeat Notes" in str(task.input["memory_context"] or "")
+        assert "Watch current AI research/news" in str(task.input["memory_context"] or "")
 
         heartbeat = runtime.scheduler_store.get_heartbeat()
         assert heartbeat["last_result_status"] == "suppressed"
@@ -4435,6 +4457,159 @@ async def test_runtime_due_heartbeat_suppresses_noop_and_does_not_append_history
         assert heartbeat["last_suppressed_at"] is not None
 
         assert runtime.get_session_history(task.session_id) == []
+        assert runtime._heartbeat_activity_by_request_id == {}  # noqa: SLF001 - verifies suppressed beats stay ephemeral
+    finally:
+        await runtime.stop()
+
+
+def test_scheduler_store_annotates_heartbeat_calendar_event_dedupe(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    runtime.scheduler_store.initialize(default_timezone="America/Chicago")
+    event = {
+        "account_id": "acct_google_1",
+        "account_label": "Work",
+        "calendar_id": "primary",
+        "calendar_name": "Primary",
+        "event_id": "evt_pitch",
+        "summary": "Pitch prep",
+        "start": "2026-05-21T16:00:00Z",
+        "end": "2026-05-21T16:30:00Z",
+        "location": "Zoom",
+    }
+
+    first = runtime.scheduler_store.annotate_heartbeat_calendar_events(
+        [event],
+        included_at="2026-05-21T14:00:00Z",
+    )
+    assert first["new_event_count"] == 1
+    assert first["seen_event_count"] == 0
+    assert first["changed_event_count"] == 0
+    assert first["events"][0]["heartbeat_new"] is True
+    assert first["events"][0]["heartbeat_seen_before"] is False
+
+    second = runtime.scheduler_store.annotate_heartbeat_calendar_events(
+        [event],
+        included_at="2026-05-21T14:30:00Z",
+    )
+    assert second["new_event_count"] == 0
+    assert second["seen_event_count"] == 1
+    assert second["changed_event_count"] == 0
+    assert second["events"][0]["heartbeat_new"] is False
+    assert second["events"][0]["heartbeat_seen_before"] is True
+    assert second["events"][0]["heartbeat_previous_seen_at"] == "2026-05-21T14:00:00Z"
+
+    changed = dict(event, summary="Pitch prep with Arun")
+    third = runtime.scheduler_store.annotate_heartbeat_calendar_events(
+        [changed],
+        included_at="2026-05-21T15:00:00Z",
+    )
+    assert third["new_event_count"] == 0
+    assert third["seen_event_count"] == 1
+    assert third["changed_event_count"] == 1
+    assert third["events"][0]["heartbeat_changed"] is True
+    assert third["events"][0]["heartbeat_last_changed_at"] == "2026-05-21T15:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_runtime_heartbeat_calendar_digest_queries_multiple_accounts(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    await runtime.start()
+    try:
+        runtime._redis = FakeRedis()  # noqa: SLF001 - avoids live Redis for this bounded dispatch seam
+        accounts = [
+            {
+                "account_id": "acct_work",
+                "account_label": "Work",
+                "email": "work@example.com",
+                "status": "active",
+                "has_refresh_token": True,
+                "is_primary": True,
+            },
+            {
+                "account_id": "acct_personal",
+                "account_label": "Personal",
+                "email": "me@example.com",
+                "status": "active",
+                "has_refresh_token": True,
+                "is_primary": False,
+            },
+        ]
+
+        async def resolve_credential(**kwargs):
+            return {"access_token": f"token-{kwargs['account_id']}"}
+
+        async def dispatch_digest(**kwargs):
+            account = kwargs["account_summary"]
+            return {
+                "account": {
+                    **account,
+                    "status": "ready",
+                    "calendar_count": 1,
+                    "event_count": 1,
+                },
+                "events": [
+                    {
+                        "event_id": f"evt_{account['account_id']}",
+                        "summary": f"{account['account_label']} event",
+                        "start": "2026-05-21T16:00:00Z",
+                        "end": "2026-05-21T16:30:00Z",
+                        "account_id": account["account_id"],
+                        "account_label": account["account_label"],
+                        "email": account["email"],
+                        "calendar_id": "primary",
+                        "calendar_name": "Primary",
+                        "status": "confirmed",
+                    }
+                ],
+            }
+
+        with (
+            patch.object(runtime.credential_manager, "list_accounts", return_value=accounts),
+            patch.object(
+                runtime.credential_manager,
+                "resolve_credential",
+                AsyncMock(side_effect=resolve_credential),
+            ),
+            patch.object(
+                runtime,
+                "_dispatch_calendar_heartbeat_digest",
+                AsyncMock(side_effect=dispatch_digest),
+            ),
+        ):
+            first = await runtime._build_heartbeat_calendar_digest(  # noqa: SLF001 - targeted heartbeat context seam
+                session_id="sess_heartbeat_calendar",
+                channel="desktop",
+                scheduled_for="2026-05-21T14:00:00Z",
+            )
+            second = await runtime._build_heartbeat_calendar_digest(  # noqa: SLF001 - verifies dedupe across beats
+                session_id="sess_heartbeat_calendar",
+                channel="desktop",
+                scheduled_for="2026-05-21T14:30:00Z",
+            )
+
+        assert first is not None
+        assert first["queried_account_count"] == 2
+        assert first["event_count"] == 2
+        assert first["new_event_count"] == 2
+        assert first["changed_event_count"] == 0
+        assert {event["account_id"] for event in first["events"]} == {
+            "acct_work",
+            "acct_personal",
+        }
+        rendered = runtime._render_heartbeat_context_block(  # noqa: SLF001
+            {"calendar_digest": first}
+        )
+        assert rendered is not None
+        assert "Calendar Digest" in rendered
+        assert "Work (work@example.com)" in rendered
+        assert "Personal (me@example.com)" in rendered
+        assert "Work event" in rendered
+        assert "Personal event" in rendered
+
+        assert second is not None
+        assert second["new_event_count"] == 0
+        assert second["seen_event_count"] == 2
+        assert all(event["heartbeat_seen_before"] for event in second["events"])
     finally:
         await runtime.stop()
 
@@ -4455,6 +4630,8 @@ async def test_runtime_due_heartbeat_suppresses_repeated_delivered_note(tmp_path
         assert first_task is not None
         history = runtime.get_session_history(first_task.session_id)
         assert [item["content"] for item in history] == [note]
+        activity_log = history[0]["metadata"]["activity_log"]
+        assert any(item["label"] == "Checking heartbeat context." for item in activity_log)
         heartbeat = runtime.scheduler_store.get_heartbeat()
         assert heartbeat["last_result_status"] == "delivered"
         assert heartbeat["last_delivered_summary"] == note

@@ -25,6 +25,8 @@ from ..local_code_sandbox import LocalCodeSandboxSettings, run_local_code_sandbo
 from .registry import get_local_tool_spec
 
 logger = logging.getLogger(__name__)
+HEARTBEAT_NOTES_HEADER = "# COSMIC Heartbeat Notes\n\n"
+HEARTBEAT_NOTES_MAX_CHARS = 32000
 
 
 class ToolHTTPError(RuntimeError):
@@ -70,6 +72,7 @@ class ToolExecutor:
         agent_dispatcher: Callable[..., Awaitable[AgentResult | TaskInProgress]] | None = None,
         agent_catalog_searcher: Callable[..., Awaitable[dict[str, Any]]] | None = None,
         client: httpx.AsyncClient | None = None,
+        heartbeat_notes_path: str | Path | None = None,
     ) -> None:
         self.perplexity_api_key = perplexity_api_key.strip()
         self.perplexity_model = perplexity_model.strip() or "sonar"
@@ -78,6 +81,15 @@ class ToolExecutor:
         self.gateway_internal_token = gateway_internal_token.strip()
         self.usage_source_id = usage_source_id.strip() or "orchestrator:tool_executor"
         self.artifacts_root = Path(artifacts_root).expanduser() if artifacts_root else None
+        self.heartbeat_notes_path = (
+            Path(heartbeat_notes_path).expanduser()
+            if heartbeat_notes_path
+            else Path(__file__).resolve().parents[2]
+            / "agents"
+            / "orchestrator"
+            / "store"
+            / "heartbeat_notes.md"
+        )
         self.local_code_settings = LocalCodeSandboxSettings(
             enabled=bool(local_code_execution_enabled),
             timeout_sec=float(local_code_execution_timeout_sec or 45.0),
@@ -1407,6 +1419,68 @@ class ToolExecutor:
 
         raise RuntimeError("Memory service is not configured.")
 
+    async def _heartbeat_notes(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        del context
+        action = str(tool_input.get("action") or "read").strip().lower() or "read"
+        if action not in {"read", "append", "replace", "remove", "clear"}:
+            return {
+                "error": True,
+                "message": "Unsupported heartbeat_notes action. Use read, append, replace, remove, or clear.",
+            }
+
+        current = self._read_heartbeat_notes_text()
+        changed = False
+        message = "Heartbeat notes read."
+        if action == "append":
+            content = self._normalize_heartbeat_notes_content(tool_input.get("content"))
+            if not content:
+                return {"error": True, "message": "content is required for append"}
+            body = current.rstrip()
+            current = f"{body}\n\n{content}\n" if body else f"{HEARTBEAT_NOTES_HEADER}{content}\n"
+            changed = True
+            message = "Heartbeat notes appended."
+        elif action == "replace":
+            content = self._normalize_heartbeat_notes_content(tool_input.get("content"))
+            if not content:
+                return {"error": True, "message": "content is required for replace"}
+            current = content
+            changed = True
+            message = "Heartbeat notes replaced."
+        elif action == "remove":
+            match = str(tool_input.get("match") or "").strip()
+            if not match:
+                return {"error": True, "message": "match is required for remove"}
+            if match not in current:
+                return {
+                    "updated": False,
+                    "message": "No matching heartbeat note text found.",
+                    "content": current,
+                    "bytes": len(current.encode("utf-8")),
+                    "path": str(self.heartbeat_notes_path),
+                }
+            current = current.replace(match, "").strip() + "\n"
+            changed = True
+            message = "Heartbeat notes removed matching text."
+        elif action == "clear":
+            current = HEARTBEAT_NOTES_HEADER
+            changed = True
+            message = "Heartbeat notes cleared."
+
+        if changed:
+            current = self._write_heartbeat_notes_text(current)
+        return {
+            "updated": changed,
+            "message": message,
+            "content": current,
+            "bytes": len(current.encode("utf-8")),
+            "path": str(self.heartbeat_notes_path),
+        }
+
     async def _memory_write_core_fact(
         self,
         tool_input: dict[str, Any],
@@ -2053,6 +2127,40 @@ class ToolExecutor:
         if len(title) > 72:
             title = title[:69].rstrip() + "..."
         return title or "Untitled memory"
+
+    def _read_heartbeat_notes_text(self) -> str:
+        path = self.heartbeat_notes_path
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                path.write_text(HEARTBEAT_NOTES_HEADER, encoding="utf-8")
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise RuntimeError(f"Unable to read heartbeat notes: {exc}") from exc
+        if not text.strip():
+            return HEARTBEAT_NOTES_HEADER
+        return text
+
+    def _normalize_heartbeat_notes_content(self, value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if len(text) > HEARTBEAT_NOTES_MAX_CHARS:
+            text = text[:HEARTBEAT_NOTES_MAX_CHARS].rstrip()
+        return text
+
+    def _write_heartbeat_notes_text(self, value: str) -> str:
+        text = self._normalize_heartbeat_notes_content(value) or HEARTBEAT_NOTES_HEADER
+        if not text.lstrip().startswith("# COSMIC Heartbeat Notes"):
+            text = f"{HEARTBEAT_NOTES_HEADER}{text}"
+        if not text.endswith("\n"):
+            text += "\n"
+        try:
+            self.heartbeat_notes_path.parent.mkdir(parents=True, exist_ok=True)
+            self.heartbeat_notes_path.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError(f"Unable to write heartbeat notes: {exc}") from exc
+        return text
 
     def _normalize_memory_write_kind(self, kind: str) -> str | None:
         normalized = str(kind or "").strip().lower()

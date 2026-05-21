@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "time_min": { "type": "string", "description": "ISO 8601 start of heartbeat agenda window" },
+    "time_max": { "type": "string", "description": "ISO 8601 end of heartbeat agenda window" },
+    "max_results": { "type": "integer", "description": "Maximum total events to return", "default": 10 },
+    "max_results_per_calendar": { "type": "integer", "description": "Maximum events to fetch per calendar", "default": 10 },
+    "selected_only": { "type": "boolean", "description": "Only include primary/selected visible calendars", "default": true },
+    "timezone": { "type": "string", "description": "IANA timezone for downstream display context" },
+    "account": {
+      "type": "object",
+      "description": "Gateway-resolved connected account metadata",
+      "properties": {
+        "account_id": { "type": "string" },
+        "account_label": { "type": "string" },
+        "email": { "type": "string" },
+        "display_name": { "type": "string" },
+        "is_primary": { "type": "boolean" }
+      }
+    }
+  },
+  "required": ["time_min", "time_max"]
+}

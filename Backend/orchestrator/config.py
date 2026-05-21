@@ -144,6 +144,7 @@ class OrchestratorConfig:
     task_input_replies_stream: str = "user_input:replies"
     task_input_orchestrator_group: str = "orchestrator"
     task_ledger_db_path: Path = BACKEND_ROOT / "agents" / "orchestrator" / "store" / "data" / "task_ledger.db"
+    heartbeat_notes_path: Path = BACKEND_ROOT / "agents" / "orchestrator" / "store" / "heartbeat_notes.md"
     # Tool executor service endpoints
     perplexity_api_key: str = ""
     perplexity_model: str = "sonar"
@@ -297,6 +298,12 @@ class OrchestratorConfig:
                 os.getenv(
                     "ORCHESTRATOR_TASK_LEDGER_DB_PATH",
                     str(BACKEND_ROOT / "agents" / "orchestrator" / "store" / "data" / "task_ledger.db"),
+                )
+            ).expanduser(),
+            heartbeat_notes_path=Path(
+                os.getenv(
+                    "COSMIC_HEARTBEAT_NOTES_PATH",
+                    str(BACKEND_ROOT / "agents" / "orchestrator" / "store" / "heartbeat_notes.md"),
                 )
             ).expanduser(),
             perplexity_api_key=os.getenv("PERPLEXITY_API_KEY", "").strip(),

@@ -285,6 +285,13 @@ def _memory_write_progress(tool_input: dict[str, Any]) -> str:
     return f"Saving {kind} to memory..." if kind else "Saving to memory..."
 
 
+def _heartbeat_notes_progress(tool_input: dict[str, Any]) -> str:
+    action = str(tool_input.get("action") or "read").strip().lower()
+    if action in {"append", "replace", "remove", "clear"}:
+        return f"Updating heartbeat notes ({action})..."
+    return "Reading heartbeat notes..."
+
+
 def _memory_core_fact_progress(tool_input: dict[str, Any]) -> str:
     title = str(tool_input.get("title") or "").strip()
     if title:
@@ -1627,6 +1634,39 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Persist retrievable shared memory. Prefer user_data for durable user/project facts and agent_note for notable implementation context.",
         progress_builder=_memory_write_progress,
         handler_method="_memory_write",
+    ),
+    ToolSpec(
+        name="heartbeat_notes",
+        api_definition={
+            "name": "heartbeat_notes",
+            "description": (
+                "Read or maintain COSMIC's private heartbeat notes markdown file. Use this during heartbeat turns as a compact self-scratchpad "
+                "for watchpoints, future checks, project improvement ideas, and stale notes to remove. Keep notes short and do not expose them verbatim."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "Operation to perform.",
+                        "enum": ["read", "append", "replace", "remove", "clear"],
+                        "default": "read",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Markdown content for append or replace. For append, write only the new concise note(s). For replace, provide the complete notes body.",
+                    },
+                    "match": {
+                        "type": "string",
+                        "description": "Exact text to remove when action=remove.",
+                    },
+                },
+            },
+        },
+        group="memory",
+        prompt_summary="Private heartbeat self-notes markdown. Use during heartbeat turns to read, append, replace, or remove compact watchpoints across beats without polluting chat history.",
+        progress_builder=_heartbeat_notes_progress,
+        handler_method="_heartbeat_notes",
     ),
     ToolSpec(
         name="memory_write_core_fact",

@@ -353,6 +353,8 @@ class TestSchemas:
             "calendar.cancel_event.output.json",
             "calendar.recall_session.input.json",
             "calendar.recall_session.output.json",
+            "calendar.heartbeat_digest.input.json",
+            "calendar.heartbeat_digest.output.json",
         ]
         for name in expected:
             path = schemas_dir / name
@@ -373,7 +375,7 @@ class TestAgentCard:
         card_path = Path(__file__).resolve().parent.parent / "agent_card.yaml"
         data = yaml.safe_load(card_path.read_text())
         assert data["agent_id"] == "cosmic/calendar-agent:1.0.0"
-        assert len(data["intents"]) == 6
+        assert len(data["intents"]) == 7
         intent_names = [i["name"] for i in data["intents"]]
         assert "calendar.list_events" in intent_names
         assert "calendar.create_event" in intent_names
@@ -381,6 +383,7 @@ class TestAgentCard:
         assert "calendar.update_event" in intent_names
         assert "calendar.cancel_event" in intent_names
         assert "calendar.recall_session" in intent_names
+        assert "calendar.heartbeat_digest" in intent_names
 
     def test_auth_requirements_present(self):
         import yaml
@@ -390,6 +393,7 @@ class TestAgentCard:
         auth_req = data.get("auth_requirements", {})
         assert "calendar.list_events" in auth_req
         assert auth_req["calendar.list_events"]["provider"] == "google"
+        assert "calendar.heartbeat_digest" in auth_req
         assert "calendar.recall_session" not in auth_req
 
     def test_all_schemas_referenced(self):
@@ -403,6 +407,97 @@ class TestAgentCard:
             output_path = schemas_dir / intent["output_schema"].split("/")[-1]
             assert input_path.exists(), f"Missing input schema for {intent['name']}"
             assert output_path.exists(), f"Missing output schema for {intent['name']}"
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_digest_uses_structured_fetch_without_internal_llm():
+    from agents.calendar_agent.agent import CalendarAgent
+    from agents.calendar_agent.config import CalendarAgentConfig
+
+    agent = CalendarAgent(
+        redis_client=MagicMock(),
+        config=CalendarAgentConfig(enable_internal_llm=True, calendar_use_langgraph=True),
+    )
+
+    task = TaskEnvelope(
+        task_id="tsk_heartbeat_digest",
+        task_list_id="sess_heartbeat",
+        parent_task_id=None,
+        session_id="sess_heartbeat",
+        sender="cosmic/gateway:1.0.0",
+        recipient="cosmic/calendar-agent:1.0.0",
+        intent="calendar.heartbeat_digest",
+        input={
+            "time_min": "2026-05-21T14:00:00Z",
+            "time_max": "2026-05-22T14:00:00Z",
+            "max_results": 5,
+            "max_results_per_calendar": 3,
+            "selected_only": True,
+            "account": {
+                "account_id": "acct_google_1",
+                "account_label": "Work Calendar",
+                "email": "user@example.com",
+                "display_name": "User",
+                "is_primary": True,
+            },
+        },
+        input_artifacts=[],
+        idempotency_key="idem_heartbeat_digest",
+        priority="low",
+        signature="sig",
+        created_at=utcnow(),
+        source="heartbeat",
+        source_id="default",
+        channel="desktop",
+    )
+
+    fake_client = AsyncMock()
+    fake_client.list_calendars.return_value = [
+        {
+            "id": "primary",
+            "name": "Primary",
+            "color": "#4285f4",
+            "primary": True,
+            "selected": True,
+        },
+        {
+            "id": "muted",
+            "name": "Muted",
+            "primary": False,
+            "selected": False,
+        },
+    ]
+    fake_client.list_events.return_value = [
+        {
+            "event_id": "evt_1",
+            "summary": "Pitch prep",
+            "start": "2026-05-21T16:00:00Z",
+            "end": "2026-05-21T16:30:00Z",
+            "status": "confirmed",
+        }
+    ]
+
+    with (
+        patch.object(agent, "_get_calendar_client", return_value=fake_client),
+        patch.object(
+            agent,
+            "_parse_natural_language",
+            AsyncMock(side_effect=AssertionError("heartbeat digest must not parse NL")),
+        ),
+    ):
+        result = await agent.execute(task)
+
+    assert result.status == "completed"
+    fake_client.list_events.assert_awaited_once()
+    assert fake_client.list_events.await_args.kwargs["calendar_id"] == "primary"
+    event = result.output["events"][0]
+    assert event["event_id"] == "evt_1"
+    assert event["account_id"] == "acct_google_1"
+    assert event["account_label"] == "Work Calendar"
+    assert event["email"] == "user@example.com"
+    assert event["calendar_id"] == "primary"
+    assert event["calendar_name"] == "Primary"
+    assert result.output["calendar_count"] == 1
 
 
 @pytest.mark.asyncio

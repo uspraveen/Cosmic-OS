@@ -16,6 +16,7 @@ from shared import AgentError, AgentResult, TaskEnvelope, TaskInProgress, sign_t
 def test_cosmic_code_execution_is_registered_as_local_tool() -> None:
     tool_names = {tool.get("name") for tool in get_local_tool_definitions()}
     assert "cosmic_code_execution" in tool_names
+    assert "heartbeat_notes" in tool_names
 
 
 def test_cosmic_code_execution_warns_maps_must_use_map_specialist() -> None:
@@ -313,6 +314,51 @@ async def test_tool_executor_memory_write_core_fact_uses_gateway_and_enriches_co
     assert seen_payload["metadata"]["task_id"] == "tsk_current"
     assert seen_payload["provenance"]["created_by"] == "cosmic/orchestrator:1.0.0"
     assert seen_payload["provenance"]["request_id"] == "req_current"
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_heartbeat_notes_manages_private_markdown(tmp_path: Path) -> None:
+    notes_path = tmp_path / "heartbeat_notes.md"
+    executor = ToolExecutor(heartbeat_notes_path=notes_path)
+
+    read_initial = json.loads(await executor.execute("heartbeat_notes", {"action": "read"}))
+    assert read_initial["updated"] is False
+    assert read_initial["content"].startswith("# COSMIC Heartbeat Notes")
+
+    appended = json.loads(
+        await executor.execute(
+            "heartbeat_notes",
+            {
+                "action": "append",
+                "content": "- Recheck active portfolio polish on a future beat.",
+            },
+        )
+    )
+    assert appended["updated"] is True
+    assert "portfolio polish" in appended["content"]
+    assert notes_path.read_text(encoding="utf-8") == appended["content"]
+
+    removed = json.loads(
+        await executor.execute(
+            "heartbeat_notes",
+            {
+                "action": "remove",
+                "match": "- Recheck active portfolio polish on a future beat.",
+            },
+        )
+    )
+    assert removed["updated"] is True
+    assert "portfolio polish" not in removed["content"]
+
+    replaced = json.loads(
+        await executor.execute(
+            "heartbeat_notes",
+            {"action": "replace", "content": "- Watch YC and AI research when current context warrants it."},
+        )
+    )
+    assert replaced["updated"] is True
+    assert replaced["content"].startswith("# COSMIC Heartbeat Notes")
+    assert "Watch YC" in replaced["content"]
 
 
 @pytest.mark.asyncio
@@ -917,6 +963,7 @@ async def test_tool_executor_delegate_to_agent_dispatches_specialist_agent_and_r
     assert result["delegation"] == {
         "intent": "firecrawl.scrape",
         "agent_id": "cosmic/firecrawl-web-scrape-agent:1.0.0",
+        "task_id": None,
     }
 
 
@@ -957,7 +1004,7 @@ async def test_tool_executor_delegate_to_agent_returns_agent_failure_payload() -
         "retryable": True,
         "next_action": "retry",
         "message": "Firecrawl rate limit exceeded.",
-        "delegation": {"intent": "firecrawl.extract", "agent_id": None},
+        "delegation": {"intent": "firecrawl.extract", "agent_id": None, "task_id": None},
     }
 
 
@@ -994,7 +1041,11 @@ async def test_tool_executor_delegate_to_agent_handles_in_progress_result() -> N
         "idempotency_key": "idem_child",
         "check_after_sec": 8,
         "message": "firecrawl.recall_session is still running in the specialist agent.",
-        "delegation": {"intent": "firecrawl.recall_session", "agent_id": None},
+        "delegation": {
+            "intent": "firecrawl.recall_session",
+            "agent_id": None,
+            "task_id": "tsk_child_firecrawl",
+        },
     }
 
 

@@ -85,6 +85,9 @@ class GatewayConfig:
     orchestrator_task_ledger_db_path: Path = (
         BACKEND_ROOT / "agents" / "orchestrator" / "store" / "data" / "task_ledger.db"
     )
+    heartbeat_notes_path: Path = (
+        BACKEND_ROOT / "agents" / "orchestrator" / "store" / "heartbeat_notes.md"
+    )
     task_input_requests_stream: str = "user_input:requests"
     task_input_replies_stream: str = "user_input:replies"
     task_input_gateway_group: str = "gateway"
@@ -136,6 +139,11 @@ class GatewayConfig:
     cosmic_mail_webhook_signature_header: str = "X-Cosmic-Mail-Signature"
     scheduler_poll_interval_sec: float = 30.0
     heartbeat_interval_sec: int = 1800
+    heartbeat_calendar_digest_enabled: bool = True
+    heartbeat_calendar_window_hours: int = 24
+    heartbeat_calendar_max_accounts: int = 4
+    heartbeat_calendar_max_events: int = 10
+    heartbeat_calendar_agent_timeout_sec: float = 12.0
     delivery_retry_base_sec: float = 1.0
     delivery_retry_max_sec: float = 120.0
     delivery_max_attempts: int = 12
@@ -160,6 +168,7 @@ class GatewayConfig:
     tabular_parse_reconcile_timeout_sec: float = 900.0
     tabular_parse_poll_interval_sec: float = 0.25
     email_agent_id: str = "cosmic/email-agent:1.0.0"
+    calendar_agent_id: str = "cosmic/calendar-agent:1.0.0"
     email_process_inbound_timeout_sec: float = 180.0
     email_process_inbound_poll_interval_sec: float = 0.25
     haiku_api_key: str = ""
@@ -244,6 +253,18 @@ class GatewayConfig:
                         / "store"
                         / "data"
                         / "task_ledger.db"
+                    ),
+                )
+            ).expanduser(),
+            heartbeat_notes_path=Path(
+                os.getenv(
+                    "COSMIC_HEARTBEAT_NOTES_PATH",
+                    str(
+                        BACKEND_ROOT
+                        / "agents"
+                        / "orchestrator"
+                        / "store"
+                        / "heartbeat_notes.md"
                     ),
                 )
             ).expanduser(),
@@ -425,6 +446,25 @@ class GatewayConfig:
                 60,
                 _env_int("GATEWAY_HEARTBEAT_INTERVAL_SEC", 1800),
             ),
+            heartbeat_calendar_digest_enabled=_env_bool(
+                "GATEWAY_HEARTBEAT_CALENDAR_DIGEST_ENABLED", True
+            ),
+            heartbeat_calendar_window_hours=max(
+                1,
+                _env_int("GATEWAY_HEARTBEAT_CALENDAR_WINDOW_HOURS", 24),
+            ),
+            heartbeat_calendar_max_accounts=max(
+                1,
+                _env_int("GATEWAY_HEARTBEAT_CALENDAR_MAX_ACCOUNTS", 4),
+            ),
+            heartbeat_calendar_max_events=max(
+                1,
+                _env_int("GATEWAY_HEARTBEAT_CALENDAR_MAX_EVENTS", 10),
+            ),
+            heartbeat_calendar_agent_timeout_sec=max(
+                2.0,
+                _env_float("GATEWAY_HEARTBEAT_CALENDAR_AGENT_TIMEOUT_SEC", 12.0),
+            ),
             delivery_retry_base_sec=max(
                 0.25,
                 _env_float("GATEWAY_DELIVERY_RETRY_BASE_SEC", 1.0),
@@ -520,6 +560,13 @@ class GatewayConfig:
             email_agent_id=(
                 os.getenv("GATEWAY_EMAIL_AGENT_ID", "cosmic/email-agent:1.0.0").strip()
                 or "cosmic/email-agent:1.0.0"
+            ),
+            calendar_agent_id=(
+                os.getenv(
+                    "GATEWAY_CALENDAR_AGENT_ID",
+                    "cosmic/calendar-agent:1.0.0",
+                ).strip()
+                or "cosmic/calendar-agent:1.0.0"
             ),
             email_process_inbound_timeout_sec=max(
                 5.0,

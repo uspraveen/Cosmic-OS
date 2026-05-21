@@ -76,6 +76,7 @@ class GoogleCalendarClient:
                         item.get("backgroundColor") or item.get("foregroundColor") or ""
                     ).strip(),
                     "primary": bool(item.get("primary")),
+                    "selected": bool(item.get("primary")) or item.get("selected") is not False,
                     "access_role": access_role or "reader",
                 }
             )

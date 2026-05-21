@@ -360,6 +360,7 @@ class OrchestratorRuntime:
             gateway_url=self.config.gateway_url,
             gateway_internal_token=self.config.internal_token,
             artifacts_root=self.config.artifacts_root,
+            heartbeat_notes_path=self.config.heartbeat_notes_path,
             local_code_execution_enabled=self.config.local_code_execution_enabled,
             local_code_execution_timeout_sec=self.config.local_code_execution_timeout_sec,
             local_code_execution_allow_network=self.config.local_code_execution_allow_network,

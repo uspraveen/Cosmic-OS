@@ -1,5 +1,5 @@
 import { ArrowDownToLine, ChevronDown, ChevronRight, Square, Terminal } from 'lucide-react'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -1374,7 +1374,58 @@ const UserMessageAttachments = ({ attachments }: { attachments?: MessageAttachme
   )
 }
 
-const AssistantFlowTimeline = ({ entries }: { entries?: ActivityLogEntry[] }) => {
+const AssistantCollapsibleSection = ({
+  title,
+  accent = 'default',
+  streaming = false,
+  children,
+}: {
+  title: string
+  accent?: 'thinking' | 'flow' | 'default'
+  streaming?: boolean
+  children: ReactNode
+}) => {
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null)
+  const wasStreamingRef = useRef(streaming)
+  const isOpen = streaming ? manualOpen !== false : manualOpen === true
+
+  useEffect(() => {
+    const wasStreaming = wasStreamingRef.current
+    if (wasStreaming !== streaming) {
+      setManualOpen(null)
+      wasStreamingRef.current = streaming
+    }
+  }, [streaming])
+
+  const handleToggle = () => {
+    setManualOpen((current) => {
+      const currentlyOpen = streaming ? current !== false : current === true
+      return !currentlyOpen
+    })
+  }
+
+  return (
+    <div className={`assistant-collapsible ${isOpen ? 'open' : 'collapsed'} ${streaming ? 'streaming' : ''}`}>
+      <button
+        type="button"
+        className={`assistant-collapsible-header ${accent}`}
+        onClick={handleToggle}
+        aria-expanded={isOpen}
+      >
+        {isOpen ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
+        <span>{title}</span>
+        {streaming && <span className="assistant-collapsible-live">Live</span>}
+      </button>
+      {isOpen && (
+        <div className="assistant-collapsible-body">
+          {children}
+        </div>
+      )}
+    </div>
+  )
+}
+
+const AssistantFlowTimeline = ({ entries, showLabel = true }: { entries?: ActivityLogEntry[]; showLabel?: boolean }) => {
   if (!entries || entries.length <= 0) {
     return null
   }
@@ -1398,7 +1449,7 @@ const AssistantFlowTimeline = ({ entries }: { entries?: ActivityLogEntry[] }) =>
   }
   return (
     <div className="assistant-flow" title="Agentic flow captured during this response">
-      <div className="assistant-flow-label">Flow</div>
+      {showLabel && <div className="assistant-flow-label">Flow</div>}
       <div className="assistant-flow-list">
         {rootEntries.map((entry, index) => {
           const children = childEntriesByParent.get(String(entry.delegatedTaskId || '').trim()) || []
@@ -5879,12 +5930,25 @@ export default function App() {
                                           <div className="assistant-activity task-background-activity">{task.activity}</div>
                                         )}
                                         {task.partialThinking && (
-                                          <div className="thinking-block task-thinking-block">
-                                            <div className="thinking-label">Thinking</div>
-                                            <div className="thinking-text">{task.partialThinking}</div>
-                                          </div>
+                                          <AssistantCollapsibleSection
+                                            title="Thinking"
+                                            accent="thinking"
+                                            streaming={!task.completed && !task.failed}
+                                          >
+                                            <div className="thinking-block task-thinking-block">
+                                              <div className="thinking-text">{task.partialThinking}</div>
+                                            </div>
+                                          </AssistantCollapsibleSection>
                                         )}
-                                        <AssistantFlowTimeline entries={task.activityLog} />
+                                        {task.activityLog && task.activityLog.length > 0 && (
+                                          <AssistantCollapsibleSection
+                                            title="Flow"
+                                            accent="flow"
+                                            streaming={!task.completed && !task.failed}
+                                          >
+                                            <AssistantFlowTimeline entries={task.activityLog} showLabel={false} />
+                                          </AssistantCollapsibleSection>
+                                        )}
                                         {String(task.partialContent || '').trim() ? (
                                           <div className="task-background-preview">
                                             <ReactMarkdown
@@ -6180,6 +6244,18 @@ export default function App() {
                         return null // Already rendered as part of the collapsed group
                       }
                     }
+                    const activeRequestId = String(activeStreamingRequestIdRef.current || '').trim()
+                    const activeTaskId = String(activeStreamingTaskIdRef.current || '').trim()
+                    const messageIsStreaming = Boolean(
+                      isStreaming &&
+                      msg.role === 'assistant' &&
+                      !msg.stopped &&
+                      (
+                        (activeRequestId && msg.requestId === activeRequestId) ||
+                        (activeTaskId && msg.sourceId === activeTaskId) ||
+                        (!activeRequestId && !activeTaskId && idx === messages.length - 1)
+                      ),
+                    )
 
                     return (
                     <div key={msg.id} className={`message-row ${msg.role}`} style={{ marginBottom: 24, display: 'flex', flexDirection: 'column', alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
@@ -6242,12 +6318,25 @@ export default function App() {
                             </div>
                           )}
                           {msg.thinking && (
-                            <div className="thinking-block">
-                              <div className="thinking-label">Thinking</div>
-                              <div className="thinking-text">{msg.thinking}</div>
-                            </div>
+                            <AssistantCollapsibleSection
+                              title="Thinking"
+                              accent="thinking"
+                              streaming={messageIsStreaming}
+                            >
+                              <div className="thinking-block">
+                                <div className="thinking-text">{msg.thinking}</div>
+                              </div>
+                            </AssistantCollapsibleSection>
                           )}
-                          <AssistantFlowTimeline entries={msg.activityLog} />
+                          {msg.activityLog && msg.activityLog.length > 0 && (
+                            <AssistantCollapsibleSection
+                              title="Flow"
+                              accent="flow"
+                              streaming={messageIsStreaming}
+                            >
+                              <AssistantFlowTimeline entries={msg.activityLog} showLabel={false} />
+                            </AssistantCollapsibleSection>
+                          )}
                           <AlphaAgentConsole
                             entries={msg.activityLog}
                             terminalLog={msg.alphaTerminalLog}

@@ -95,7 +95,7 @@ class CalendarAgent(AgentRuntime):
         """Core execution. Dispatches to intent handlers."""
         self._load_task_context()
 
-        if task.intent != "calendar.recall_session" and self._cfg.calendar_use_langgraph:
+        if task.intent not in {"calendar.recall_session", "calendar.heartbeat_digest"} and self._cfg.calendar_use_langgraph:
             try:
                 from .calendar_graph import run_calendar_langgraph
             except ImportError as exc:
@@ -694,6 +694,145 @@ class CalendarAgent(AgentRuntime):
             artifacts=[],
             error=None,
         )
+
+    async def handle_calendar_heartbeat_digest(self, task: TaskEnvelope) -> AgentResult:
+        """Build a bounded, structured agenda digest for Gateway heartbeats."""
+        client = self._get_calendar_client()
+        time_min = str(task.input.get("time_min") or "").strip()
+        time_max = str(task.input.get("time_max") or "").strip()
+        if not time_min or not time_max:
+            now = datetime.now(tz=timezone.utc)
+            time_min = now.isoformat()
+            time_max = (now + timedelta(hours=24)).isoformat()
+        max_total = self._bounded_int(
+            task.input.get("max_results"),
+            default=10,
+            minimum=1,
+            maximum=50,
+        )
+        max_per_calendar = self._bounded_int(
+            task.input.get("max_results_per_calendar"),
+            default=max_total,
+            minimum=1,
+            maximum=25,
+        )
+        raw_selected_only = task.input.get("selected_only")
+        selected_only = (
+            raw_selected_only
+            if isinstance(raw_selected_only, bool)
+            else str(raw_selected_only or "true").strip().lower()
+            not in {"0", "false", "no", "off"}
+        )
+        account = (
+            task.input.get("account")
+            if isinstance(task.input.get("account"), dict)
+            else {}
+        )
+        account_id = str(account.get("account_id") or "").strip()
+        account_label = (
+            str(
+                account.get("account_label")
+                or account.get("display_name")
+                or account.get("email")
+                or account_id
+                or "Google account"
+            ).strip()
+            or "Google account"
+        )
+        account_email = str(account.get("email") or "").strip()
+
+        calendars = await client.list_calendars()
+        if selected_only:
+            calendars = [
+                item
+                for item in calendars
+                if bool(item.get("primary")) or bool(item.get("selected"))
+            ]
+        if not calendars:
+            calendars = [
+                {
+                    "id": "primary",
+                    "name": "Primary",
+                    "color": "",
+                    "primary": True,
+                    "selected": True,
+                    "access_role": "owner",
+                }
+            ]
+
+        events: list[dict[str, Any]] = []
+        calendar_errors: list[dict[str, str]] = []
+        for calendar in calendars[:25]:
+            calendar_id = str(calendar.get("id") or "").strip()
+            if not calendar_id:
+                continue
+            try:
+                calendar_events = await client.list_events(
+                    calendar_id=calendar_id,
+                    time_min=time_min,
+                    time_max=time_max,
+                    max_results=max_per_calendar,
+                )
+            except Exception as exc:
+                calendar_errors.append(
+                    {
+                        "calendar_id": calendar_id,
+                        "calendar_name": str(calendar.get("name") or calendar_id),
+                        "message": str(exc).strip()[:240],
+                    }
+                )
+                continue
+            for event in calendar_events:
+                payload = dict(event)
+                payload.update(
+                    {
+                        "account_id": account_id,
+                        "account_label": account_label,
+                        "email": account_email,
+                        "calendar_id": calendar_id,
+                        "calendar_name": str(calendar.get("name") or calendar_id),
+                        "calendar_color": str(calendar.get("color") or ""),
+                        "calendar_primary": bool(calendar.get("primary")),
+                    }
+                )
+                events.append(payload)
+
+        events.sort(
+            key=lambda item: (
+                str(item.get("start") or ""),
+                str(item.get("summary") or ""),
+            )
+        )
+        events = events[:max_total]
+        return AgentResult(
+            status="completed",
+            output={
+                "events": events,
+                "count": len(events),
+                "calendars": calendars,
+                "calendar_count": len(calendars),
+                "calendar_errors": calendar_errors,
+                "account": {
+                    "account_id": account_id,
+                    "account_label": account_label,
+                    "email": account_email,
+                    "display_name": str(account.get("display_name") or "").strip(),
+                    "is_primary": bool(account.get("is_primary")),
+                },
+                "time_min": time_min,
+                "time_max": time_max,
+            },
+            artifacts=[],
+            error=None,
+        )
+
+    @staticmethod
+    def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        return max(minimum, min(parsed, maximum))
 
     async def handle_calendar_create_event(self, task: TaskEnvelope) -> AgentResult:
         """Create a calendar event. Supports structured params or natural language."""
