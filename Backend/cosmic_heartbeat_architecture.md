@@ -26,6 +26,7 @@ Each heartbeat receives a compact context packet rather than a replayed chat pro
 - Active working set: goals, workstreams, open loops, focus entities, task refs.
 - Recent conversation tail, bounded and summarized.
 - Active background tasks and Alpha work.
+- Active or recently touched projects, websites, agents, documents, deployments, and automations.
 - Scheduler status and upcoming user crons.
 - Delivery queue status for offline or deferred items.
 - Mobile/desktop presence and selected delivery channel.
@@ -52,6 +53,9 @@ Quietly decide whether there is something genuinely useful to surface now.
 Think across calendar commitments, inbox and approval pressure, active projects,
 background tasks, reminders, open loops, user interests, preferences, relationships,
 recent conversations, and what the user would likely want to know at this moment.
+Also think about active or recently touched projects, websites, agents, documents,
+deployments, and automations; surface a concrete improvement, bug fix, polish pass,
+deployment check, follow-up, or next step only if it would meaningfully help now.
 Use specialist/local tools only when a check is clearly worth it.
 Use the best COSMIC-owned delivery path available; if a proactive item is better
 sent as email, use Cosmic Mail or email capabilities when available.

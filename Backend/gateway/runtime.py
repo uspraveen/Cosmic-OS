@@ -2025,6 +2025,9 @@ class GatewayRuntime:
             "Think across calendar commitments, inbox and approval pressure, active projects, "
             "background tasks, reminders, open loops, user interests, preferences, relationships, "
             "recent conversations, and what the user would likely want to know at this moment. "
+            "Also think about active or recently touched projects, websites, agents, documents, "
+            "deployments, and automations; surface a concrete improvement, bug fix, polish pass, "
+            "deployment check, follow-up, or next step only if it would meaningfully help now. "
             "Use specialist/local tools only when a check is clearly worth it. Use the best COSMIC-owned "
             "delivery path available; if a proactive item is better sent as email, you may use Cosmic Mail "
             "or email capabilities when available. If there is nothing useful enough to interrupt for, "
@@ -2261,7 +2264,10 @@ class GatewayRuntime:
         )
         context_block = self._render_heartbeat_context_block(context_packet)
         memory_prompt_context = await self._assemble_memory_prompt_context(
-            query="COSMIC proactive heartbeat user interests preferences open loops current priorities"
+            query=(
+                "COSMIC proactive heartbeat user interests preferences open loops current priorities "
+                "active recent projects websites agents deployments automations improvements follow ups"
+            )
         )
         combined_memory_context = self._join_context_blocks(
             context_block,
