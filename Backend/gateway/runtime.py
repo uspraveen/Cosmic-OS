@@ -12310,6 +12310,9 @@ class GatewayRuntime:
                     completed=False,
                 )
                 return
+            is_heartbeat_response = self._is_heartbeat_event(event)
+            if is_heartbeat_response:
+                event.pop("thinking_text", None)
             research_provenance = self._normalize_research_provenance(
                 event.get("research_provenance"),
                 fallback_sources=event.get("sources")
@@ -12380,7 +12383,9 @@ class GatewayRuntime:
                 metadata={
                     "task_id": self._safe_text(event.get("task_id")),
                     "metrics": event.get("metrics"),
-                    "thinking_text": self._safe_text(event.get("thinking_text")),
+                    "thinking_text": None
+                    if is_heartbeat_response
+                    else self._safe_text(event.get("thinking_text")),
                     "source": self._safe_text(event.get("source")),
                     "source_id": self._safe_text(event.get("source_id")),
                     "research_provenance": research_provenance,
@@ -12537,7 +12542,9 @@ class GatewayRuntime:
                         sources=event.get("sources")
                         if isinstance(event.get("sources"), list)
                         else None,
-                        thinking_text=self._safe_text(event.get("thinking_text")),
+                        thinking_text=None
+                        if is_heartbeat_response
+                        else self._safe_text(event.get("thinking_text")),
                         produced_artifacts=produced_artifacts,
                         supporting_artifacts=supporting_artifacts,
                         activity_log=activity_log,

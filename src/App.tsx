@@ -79,6 +79,7 @@ interface BackgroundTask {
 
 interface CronResultNotification {
   id: string
+  kind?: 'cron' | 'heartbeat'
   requestId?: string | null
   sourceId?: string | null
   sessionId?: string | null
@@ -4389,9 +4390,10 @@ export default function App() {
         })
         const eventSource = String(event.source || '').trim()
         const eventContent = String(event.content || '').trim()
-        if (eventSource === 'cron' && eventContent && isCronResultChatInactive()) {
+        if ((eventSource === 'cron' || eventSource === 'heartbeat') && eventContent && isCronResultChatInactive()) {
           enqueueCronResultNotification({
-            id: `cron_result_${String(event.request_id || event.source_id || crypto.randomUUID())}`,
+            id: `${eventSource}_result_${String(event.request_id || event.source_id || crypto.randomUUID())}`,
+            kind: eventSource === 'heartbeat' ? 'heartbeat' : 'cron',
             requestId: typeof event.request_id === 'string' ? event.request_id : null,
             sourceId: typeof event.source_id === 'string' ? event.source_id : null,
             sessionId: typeof event.session_id === 'string' ? event.session_id : null,
@@ -5408,6 +5410,9 @@ export default function App() {
             onScroll={handleCronResultScroll}
           >
             {orderedCronResultNotifications.map((notification, index) => (
+              (() => {
+                const isHeartbeatNotification = notification.kind === 'heartbeat'
+                return (
               <LiquidGlass
                 key={notification.id}
                 disableTilt={true}
@@ -5427,11 +5432,15 @@ export default function App() {
                         />
                       </div>
                       <div className="task-interrupt-copy">
-                        <div className="task-interrupt-kicker">Scheduled result ready</div>
+                        <div className="task-interrupt-kicker">
+                          {isHeartbeatNotification ? '❤️ Cosmic heartbeat' : 'Scheduled result ready'}
+                        </div>
                         <div className="task-interrupt-meta">
                           {orderedCronResultNotifications.length > 1
                             ? `${index + 1} of ${orderedCronResultNotifications.length} waiting`
-                            : 'Open chat to review the latest reminder result'}
+                            : isHeartbeatNotification
+                              ? 'Open chat to review the proactive note'
+                              : 'Open chat to review the latest reminder result'}
                         </div>
                       </div>
                     </div>
@@ -5439,7 +5448,9 @@ export default function App() {
                       {orderedCronResultNotifications.length > 1 && (
                         <div className="task-interrupt-chip count">{orderedCronResultNotifications.length} waiting</div>
                       )}
-                      <div className="task-interrupt-chip cron-result-chip">Reminder</div>
+                      <div className="task-interrupt-chip cron-result-chip">
+                        {isHeartbeatNotification ? 'Heartbeat' : 'Reminder'}
+                      </div>
                     </div>
                   </div>
                   <div className="task-interrupt-preview cron-result-preview">{notification.content}</div>
@@ -5461,6 +5472,8 @@ export default function App() {
                   </div>
                 </div>
               </LiquidGlass>
+                )
+              })()
             ))}
           </div>
           {orderedCronResultNotifications.length > 1 && (
