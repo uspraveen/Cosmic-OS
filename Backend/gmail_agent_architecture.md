@@ -48,14 +48,14 @@ Standing instructions such as "when Arun emails me, create the requested doc" sh
 Implemented core primitives:
 
 - **Event**: `gmail.inbound` today; the registry is generic enough for calendar updates, files, custom webhooks, and other provider events later.
-- **Condition**: compact semantic matcher such as sender identity, subject/topic, attachment hint, urgency, or "needs reply".
+- **Condition**: compact semantic intent such as sender identity, subject/topic, attachment hint, urgency, or "needs reply".
 - **Context resolver**: Gateway passes Gmail refs plus active working set and memory context to the orchestrator. The future task then delegates `gmail.read_thread`, `gmail.draft_reply`, Alpha, docs, memory, or other specialists as needed.
 - **Action plan**: high-level orchestrator task such as draft reply, create doc, notify user, run Alpha, or schedule reminder.
 - **Confidence policy**: auto-run high-confidence safe work, ask/verify on medium confidence, suppress low-confidence.
 - **Approval policy**: prep work and draft creation can run autonomously; sending, deletion, sharing, external commitments, and irreversible changes require approval unless the user has given a standing trusted policy.
 - **Learning loop**: confirmations/corrections update identity bindings and preferences so future matches become deterministic.
 
-Unresolved people are valid. A rule can store `person_ref="Arun"` with no email address and `resolution_mode="resolve_on_event"`. On each inbound event, identity evidence comes from display name, email local part/domain, thread metadata, topic overlap, triage reason, and shared memory passed to the orchestrator. High confidence fires the rule; medium confidence asks/verifies; low confidence stays quiet.
+Unresolved people are valid. A rule can store `person_ref="Arun"` with no email address and `resolution_mode="resolve_on_event"`. On each inbound event, Gateway uses an LLM-first semantic adjudicator to decide whether the standing instruction applies to the Gmail event. The adjudicator sees the raw instruction, structured condition/action, sender identity, account, subject, snippet, Gmail-agent triage reason, and safety policy, then returns `matched`, `needs_confirmation`, or `ignore` with confidence and evidence. Exact sender email/domain mismatches remain deterministic safety rails, and a small deterministic fallback exists only for degraded operation when the LLM path is unavailable.
 
 Current implementation:
 

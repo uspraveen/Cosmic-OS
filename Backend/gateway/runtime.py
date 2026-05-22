@@ -154,62 +154,32 @@ RECENT_RESEARCH_RECEIPT_LIMIT = 3
 RECENT_SPECIALIST_RECEIPT_LIMIT = 4
 EVENT_AUTOMATION_AUTO_CONFIDENCE = 0.78
 EVENT_AUTOMATION_CONFIRM_CONFIDENCE = 0.52
-EVENT_AUTOMATION_STOPWORDS = {
-    "a",
-    "about",
-    "after",
-    "all",
-    "also",
-    "an",
-    "and",
-    "any",
-    "as",
-    "at",
-    "be",
-    "by",
-    "can",
-    "could",
-    "create",
-    "do",
-    "doc",
-    "document",
-    "email",
-    "emails",
-    "for",
-    "from",
-    "get",
-    "gets",
-    "give",
-    "has",
-    "have",
-    "if",
-    "in",
-    "into",
-    "it",
-    "just",
-    "mail",
-    "make",
-    "me",
-    "my",
-    "of",
-    "on",
-    "or",
-    "reply",
-    "requested",
-    "says",
-    "should",
-    "soon",
-    "start",
-    "that",
-    "the",
-    "then",
-    "this",
-    "to",
-    "up",
-    "when",
-    "with",
-    "you",
+EVENT_AUTOMATION_MATCH_SYSTEM_PROMPT = """You are COSMIC's semantic event automation matcher.
+
+Decide whether a standing user instruction should fire for one inbound event.
+Use the user's standing instruction, structured condition, action, and the event
+metadata. Do not require exact contact identity when the instruction is naturally
+resolvable from sender name, email, domain, thread subject, message snippet,
+Gmail-agent reason, active work, or memory hints. Do not invent facts that are
+missing. Treat ambiguity as needs_confirmation instead of matched.
+
+Return only strict JSON with this shape:
+{
+  "decision": "matched" | "needs_confirmation" | "ignore",
+  "confidence": 0.0,
+  "reason": "short reason",
+  "evidence": ["brief concrete evidence"],
+  "identity": {"resolved": true, "basis": "how sender/context was resolved"},
+  "safety": {"requires_user_approval": true, "approval_reason": "why or empty"}
 }
+
+Use matched only when the event clearly satisfies the standing instruction.
+Use needs_confirmation when it plausibly satisfies the instruction but identity,
+intent, requested action, or safety is unclear.
+Use ignore when the event does not satisfy the instruction or there is too little
+evidence. Consequential external actions should usually require approval even
+when the match itself is clear.
+"""
 RECENT_MEMORY_TOOL_RECEIPT_SCAN_LIMIT = 12
 CONTESTED_MEMORY_RECENT_WRITE_LIMIT = 3
 CONTESTED_MEMORY_AUDIT_SCAN_LIMIT = 40
@@ -3302,15 +3272,29 @@ class GatewayRuntime:
             if not event_ref:
                 continue
             for automation in automations:
-                match = self._score_gmail_event_automation_match(automation, event)
+                match = await self._adjudicate_gmail_event_automation_match(
+                    automation,
+                    event,
+                )
+                if match is None:
+                    match = self._fallback_gmail_event_automation_match(
+                        automation,
+                        event,
+                    )
+                if self._safe_text(match.get("decision")) == "ignore":
+                    continue
                 confidence = self._coerce_float(match.get("confidence"), 0.0)
                 if confidence < EVENT_AUTOMATION_CONFIRM_CONFIDENCE:
                     continue
-                decision = (
-                    "matched"
-                    if confidence >= EVENT_AUTOMATION_AUTO_CONFIDENCE
-                    else "needs_confirmation"
-                )
+                decision_hint = self._safe_text(match.get("decision"))
+                if decision_hint == "needs_confirmation":
+                    decision = "needs_confirmation"
+                else:
+                    decision = (
+                        "matched"
+                        if confidence >= EVENT_AUTOMATION_AUTO_CONFIDENCE
+                        else "needs_confirmation"
+                    )
                 try:
                     stored_match = self.event_automation_store.record_match(
                         {
@@ -3411,7 +3395,124 @@ class GatewayRuntime:
             "source_task_id": self._safe_text(result.get("task_id")),
         }
 
-    def _score_gmail_event_automation_match(
+    async def _adjudicate_gmail_event_automation_match(
+        self,
+        automation: dict[str, Any],
+        event: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        adapter = getattr(self, "haiku_adapter", None)
+        if not adapter or not getattr(adapter, "api_key", None) or not getattr(
+            adapter,
+            "model",
+            None,
+        ):
+            return None
+        identity_rail = self._event_automation_identity_rail(automation, event)
+        if identity_rail.get("hard_identity_mismatch"):
+            return {
+                "decision": "ignore",
+                "confidence": 0.0,
+                "evidence": {
+                    "matcher": "identity_rail",
+                    **identity_rail,
+                },
+            }
+
+        payload = {
+            "standing_instruction": self._safe_text(automation.get("raw_instruction")),
+            "condition": automation.get("condition")
+            if isinstance(automation.get("condition"), dict)
+            else {},
+            "action": automation.get("action")
+            if isinstance(automation.get("action"), dict)
+            else {},
+            "approval_policy": automation.get("approval_policy")
+            if isinstance(automation.get("approval_policy"), dict)
+            else {},
+            "event": {
+                "event_type": event.get("event_type"),
+                "event_ref": event.get("event_ref"),
+                "account_email": event.get("account_email"),
+                "account_id": event.get("account_id"),
+                "sender": event.get("sender"),
+                "sender_email": event.get("sender_email"),
+                "sender_domain": event.get("sender_domain"),
+                "subject": event.get("subject"),
+                "snippet": self._bounded_excerpt(event.get("snippet"), limit=1000),
+                "category": event.get("category"),
+                "priority": event.get("priority"),
+                "reason": event.get("reason"),
+                "suggested_action": event.get("suggested_action"),
+                "label_ids": event.get("label_ids"),
+                "thread_id": event.get("thread_id"),
+                "message_id": event.get("message_id"),
+                "surfaced_id": event.get("surfaced_id"),
+            },
+            "identity_safety_rail": identity_rail,
+        }
+        try:
+            session_id = self._current_session_id()
+        except Exception:
+            session_id = None
+        try:
+            usage_recorder = self._build_gateway_usage_recorder(
+                source_id="gateway:event_automation_matcher",
+                operation="gateway.event_automation.match",
+                route="haiku",
+                request_id=None,
+                session_id=session_id,
+                extra_metadata={
+                    "event_type": "gmail.inbound",
+                    "automation_id": self._safe_text(automation.get("automation_id")),
+                },
+            )
+        except Exception:
+            usage_recorder = None
+        try:
+            response_text, _usage, _stop_reason = await adapter.generate_text(
+                system_prompt=EVENT_AUTOMATION_MATCH_SYSTEM_PROMPT,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": json.dumps(payload, ensure_ascii=False, indent=2),
+                    }
+                ],
+                max_tokens=700,
+                usage_recorder=usage_recorder,
+            )
+        except Exception:
+            logger.exception(
+                "gateway.event_automation.semantic_match_failed automation_id=%s event_ref=%s",
+                self._safe_text(automation.get("automation_id")),
+                self._safe_text(event.get("event_ref")),
+            )
+            return None
+
+        parsed = self._parse_json_object_from_text(response_text)
+        if not parsed:
+            logger.warning(
+                "gateway.event_automation.semantic_match_invalid_json automation_id=%s event_ref=%s",
+                self._safe_text(automation.get("automation_id")),
+                self._safe_text(event.get("event_ref")),
+            )
+            return None
+        decision = self._safe_text(parsed.get("decision")).lower()
+        if decision not in {"matched", "needs_confirmation", "ignore"}:
+            decision = "ignore"
+        confidence = max(0.0, min(1.0, self._coerce_float(parsed.get("confidence"), 0.0)))
+        if decision == "ignore":
+            confidence = min(confidence, EVENT_AUTOMATION_CONFIRM_CONFIDENCE - 0.01)
+        return {
+            "decision": decision,
+            "confidence": confidence,
+            "evidence": {
+                "matcher": "llm",
+                "llm": parsed,
+                "identity_rail": identity_rail,
+            },
+        }
+
+    def _fallback_gmail_event_automation_match(
         self,
         automation: dict[str, Any],
         event: dict[str, Any],
@@ -3422,19 +3523,21 @@ class GatewayRuntime:
             else {}
         )
         raw_instruction = self._safe_text(automation.get("raw_instruction")) or ""
-        evidence: dict[str, Any] = {"signals": []}
+        evidence: dict[str, Any] = {"matcher": "fallback", "signals": []}
         score = 0.0
-        hard_identity_present = False
-        hard_identity_matched = False
-
+        identity_rail = self._event_automation_identity_rail(automation, event)
+        if identity_rail.get("hard_identity_mismatch"):
+            return {
+                "decision": "ignore",
+                "confidence": 0.0,
+                "evidence": {
+                    **evidence,
+                    **identity_rail,
+                },
+            }
         sender = self._safe_text(event.get("sender")) or ""
-        sender_email = (
-            self._safe_text(event.get("sender_email"))
-            or self._extract_email_from_text(sender)
-        )
-        sender_domain = self._safe_text(event.get("sender_domain")) or (
-            sender_email.split("@", 1)[1].lower() if sender_email and "@" in sender_email else ""
-        )
+        sender_email = self._safe_text(identity_rail.get("sender_email")) or None
+        sender_domain = self._safe_text(identity_rail.get("sender_domain")) or None
         subject = self._safe_text(event.get("subject")) or ""
         snippet = self._safe_text(event.get("snippet")) or ""
         searchable = self._normalize_match_text(
@@ -3459,16 +3562,87 @@ class GatewayRuntime:
             score += amount
             evidence["signals"].append({"name": name, "score": round(amount, 3), "detail": detail})
 
+        for signal in identity_rail.get("signals", []):
+            if not isinstance(signal, dict):
+                continue
+            add_signal(
+                self._safe_text(signal.get("name")) or "identity_signal",
+                self._coerce_float(signal.get("score"), 0.0),
+                signal.get("detail"),
+            )
+
+        for key in ("person_ref", "person", "sender", "from", "contact", "from_person"):
+            for value in self._condition_values(condition.get(key)):
+                if self._person_reference_match(value, sender, sender_email or ""):
+                    add_signal("person_ref_strong", 0.55, value)
+
+        for key in ("subject_contains", "subject", "subject_keywords"):
+            for value in self._condition_values(condition.get(key)):
+                if self._contains_normalized_phrase(value, subject):
+                    add_signal("subject_match", 0.32, value)
+
+        for key in ("body_contains", "snippet_contains", "message_contains"):
+            for value in self._condition_values(condition.get(key)):
+                if self._contains_normalized_phrase(value, snippet):
+                    add_signal("body_match", 0.28, value)
+
+        for key in ("topic", "query", "any_text", "keywords"):
+            for value in self._condition_values(condition.get(key)):
+                if self._contains_normalized_phrase(value, searchable):
+                    add_signal("topic_strong", 0.34, value)
+
+        if condition.get("has_attachment") is True:
+            label_ids = event.get("label_ids") if isinstance(event.get("label_ids"), list) else []
+            if any("attachment" in str(label).lower() for label in label_ids):
+                add_signal("attachment_hint", 0.2, True)
+
+        if self._contains_normalized_phrase(raw_instruction, searchable):
+            add_signal("instruction_phrase_match", 0.22, True)
+
+        confidence = max(0.0, min(1.0, score))
+        evidence["sender_email"] = sender_email
+        evidence["sender_domain"] = sender_domain
+        evidence["subject"] = subject
+        return {"confidence": confidence, "evidence": evidence}
+
+    def _event_automation_identity_rail(
+        self,
+        automation: dict[str, Any],
+        event: dict[str, Any],
+    ) -> dict[str, Any]:
+        condition = (
+            automation.get("condition")
+            if isinstance(automation.get("condition"), dict)
+            else {}
+        )
+        sender = self._safe_text(event.get("sender")) or ""
+        sender_email = (
+            self._safe_text(event.get("sender_email"))
+            or self._extract_email_from_text(sender)
+        )
+        sender_domain = self._safe_text(event.get("sender_domain")) or (
+            sender_email.split("@", 1)[1].lower()
+            if sender_email and "@" in sender_email
+            else ""
+        )
+        signals: list[dict[str, Any]] = []
+        hard_identity_present = False
+        hard_identity_matched = False
+
         for key in ("sender_email", "from_email", "email"):
             for value in self._condition_values(condition.get(key)):
                 hard_identity_present = True
                 normalized_value = value.lower()
                 if sender_email and sender_email.lower() == normalized_value:
                     hard_identity_matched = True
-                    add_signal("sender_email_exact", 0.72, value)
+                    signals.append(
+                        {"name": "sender_email_exact", "score": 0.72, "detail": value}
+                    )
                 elif sender_email and normalized_value in sender_email.lower():
                     hard_identity_matched = True
-                    add_signal("sender_email_partial", 0.42, value)
+                    signals.append(
+                        {"name": "sender_email_partial", "score": 0.42, "detail": value}
+                    )
 
         for key in ("sender_domain", "domain", "from_domain"):
             for value in self._condition_values(condition.get(key)):
@@ -3476,58 +3650,18 @@ class GatewayRuntime:
                 normalized_value = value.lower().removeprefix("@")
                 if sender_domain and sender_domain.lower() == normalized_value:
                     hard_identity_matched = True
-                    add_signal("sender_domain_exact", 0.46, value)
+                    signals.append(
+                        {"name": "sender_domain_exact", "score": 0.46, "detail": value}
+                    )
 
-        for key in ("person_ref", "person", "sender", "from", "contact", "from_person"):
-            for value in self._condition_values(condition.get(key)):
-                overlap = self._token_overlap(value, f"{sender} {sender_email or ''}")
-                if overlap >= 0.8:
-                    add_signal("person_ref_strong", 0.55, value)
-                elif overlap >= 0.5:
-                    add_signal("person_ref_partial", 0.34, value)
-
-        for key in ("subject_contains", "subject", "subject_keywords"):
-            for value in self._condition_values(condition.get(key)):
-                if self._phrase_or_token_match(value, subject):
-                    add_signal("subject_match", 0.32, value)
-
-        for key in ("body_contains", "snippet_contains", "message_contains"):
-            for value in self._condition_values(condition.get(key)):
-                if self._phrase_or_token_match(value, snippet):
-                    add_signal("body_match", 0.28, value)
-
-        for key in ("topic", "query", "any_text", "keywords"):
-            for value in self._condition_values(condition.get(key)):
-                overlap = self._token_overlap(value, searchable)
-                if overlap >= 0.8:
-                    add_signal("topic_strong", 0.34, value)
-                elif overlap >= 0.45:
-                    add_signal("topic_partial", 0.22, value)
-
-        if condition.get("has_attachment") is True:
-            label_ids = event.get("label_ids") if isinstance(event.get("label_ids"), list) else []
-            if any("attachment" in str(label).lower() for label in label_ids):
-                add_signal("attachment_hint", 0.2, True)
-
-        raw_overlap = self._token_overlap(raw_instruction, searchable)
-        if raw_overlap >= 0.55:
-            add_signal("instruction_text_overlap", 0.22, round(raw_overlap, 2))
-        elif raw_overlap >= 0.28:
-            add_signal("instruction_text_weak_overlap", 0.1, round(raw_overlap, 2))
-
-        if hard_identity_present and not hard_identity_matched:
-            evidence["hard_identity_mismatch"] = True
-            confidence = 0.0
-            evidence["sender_email"] = sender_email
-            evidence["sender_domain"] = sender_domain
-            evidence["subject"] = subject
-            return {"confidence": confidence, "evidence": evidence}
-
-        confidence = max(0.0, min(1.0, score))
-        evidence["sender_email"] = sender_email
-        evidence["sender_domain"] = sender_domain
-        evidence["subject"] = subject
-        return {"confidence": confidence, "evidence": evidence}
+        return {
+            "hard_identity_present": hard_identity_present,
+            "hard_identity_matched": hard_identity_matched,
+            "hard_identity_mismatch": hard_identity_present and not hard_identity_matched,
+            "sender_email": sender_email,
+            "sender_domain": sender_domain,
+            "signals": signals,
+        }
 
     async def _dispatch_event_automation_match(
         self,
@@ -3749,31 +3883,29 @@ class GatewayRuntime:
             return values
         return []
 
-    def _token_overlap(self, needle: Any, haystack: Any) -> float:
-        needle_tokens = self._match_tokens(str(needle or ""))
-        if not needle_tokens:
-            return 0.0
-        haystack_tokens = set(self._match_tokens(str(haystack or "")))
-        if not haystack_tokens:
-            return 0.0
-        matched = sum(1 for token in needle_tokens if token in haystack_tokens)
-        return matched / max(1, len(needle_tokens))
-
-    def _phrase_or_token_match(self, needle: Any, haystack: Any) -> bool:
+    def _contains_normalized_phrase(self, needle: Any, haystack: Any) -> bool:
         needle_text = self._normalize_match_text(str(needle or ""))
         haystack_text = self._normalize_match_text(str(haystack or ""))
         if not needle_text or not haystack_text:
             return False
-        if needle_text in haystack_text:
-            return True
-        return self._token_overlap(needle_text, haystack_text) >= 0.65
+        return needle_text in haystack_text
 
-    def _match_tokens(self, value: str) -> list[str]:
-        return [
-            token
-            for token in re.findall(r"[a-z0-9][a-z0-9._+-]{1,}", value.lower())
-            if token not in EVENT_AUTOMATION_STOPWORDS and len(token) >= 3
-        ][:32]
+    def _person_reference_match(
+        self,
+        reference: Any,
+        sender: str,
+        sender_email: str,
+    ) -> bool:
+        reference_text = self._normalize_match_text(str(reference or ""))
+        if not reference_text:
+            return False
+        sender_text = self._normalize_match_text(f"{sender} {sender_email}")
+        if reference_text in sender_text:
+            return True
+        if sender_email and "@" in sender_email:
+            local_part = sender_email.split("@", 1)[0].replace(".", " ").replace("_", " ")
+            return reference_text in self._normalize_match_text(local_part)
+        return False
 
     def _normalize_match_text(self, value: str) -> str:
         return " ".join(re.findall(r"[a-z0-9._@+-]+", str(value or "").lower()))
