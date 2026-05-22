@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["message_id", "attachment_id"],
+  "properties": {
+    "message_id": { "type": "string" },
+    "attachment_id": { "type": "string" },
+    "filename": { "type": "string" },
+    "mime_type": { "type": "string" },
+    "account_id": { "type": "string" },
+    "account_hint": { "type": "string" }
+  }
+}

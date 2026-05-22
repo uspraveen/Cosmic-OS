@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import hashlib
+import mimetypes
+import re
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -13,7 +16,7 @@ import httpx
 
 from shared import utcnow
 from shared.agent_runtime import AgentRuntime
-from shared.contracts import AgentError, AgentResult, TaskEnvelope
+from shared.contracts import AgentError, AgentResult, ArtifactManifest, TaskEnvelope
 from shared.sqlite_client import connect_sync
 
 from .config import AGENT_ROOT, BACKEND_ROOT, GmailAgentConfig
@@ -85,6 +88,7 @@ class GmailAgent(AgentRuntime):
     READ_THREAD = "gmail.read_thread"
     TRIAGE_INBOX = "gmail.triage_inbox"
     DRAFT_REPLY = "gmail.draft_reply"
+    FETCH_ATTACHMENT = "gmail.fetch_attachment"
     PROCESS_INBOUND = "gmail.process_inbound"
     HEARTBEAT_DIGEST = "gmail.heartbeat_digest"
     MORNING_BRIEFING_DIGEST = "gmail.morning_briefing_digest"
@@ -104,10 +108,16 @@ class GmailAgent(AgentRuntime):
         http_client: httpx.AsyncClient | None = None,
         agent_root: str | Path | None = None,
         store_root: str | Path | None = None,
+        artifacts_root: str | Path | None = None,
     ) -> None:
         self.config = config or GmailAgentConfig.from_env()
         self.agent_root = (Path(agent_root).expanduser() if agent_root else AGENT_ROOT).resolve()
         self.store_root = (Path(store_root).expanduser() if store_root else self.agent_root / "store").resolve()
+        self.artifacts_root = (
+            Path(artifacts_root).expanduser()
+            if artifacts_root
+            else BACKEND_ROOT / "runs" / "artifacts"
+        ).resolve()
         self.data_root = self.store_root / "data"
         self.session_db_path = self.data_root / "gmail_agent.db"
         self.prefilter = SenderPrefilter(self.store_root / "sender_prefilter.json")
@@ -129,6 +139,7 @@ class GmailAgent(AgentRuntime):
         self.data_root.mkdir(parents=True, exist_ok=True)
         (self.agent_root / "runtime" / "cache").mkdir(parents=True, exist_ok=True)
         (self.agent_root / "runtime" / "logs").mkdir(parents=True, exist_ok=True)
+        self.artifacts_root.mkdir(parents=True, exist_ok=True)
         if not self.learnings_path.exists():
             self.learnings_path.write_text("# Gmail Agent - Learnings\n", encoding="utf-8")
         with connect_sync(self.session_db_path) as conn:
@@ -295,6 +306,38 @@ class GmailAgent(AgentRuntime):
                 "notes": draft_plan.get("notes") or "",
             },
             artifacts=[],
+        )
+
+    async def handle_gmail_fetch_attachment(self, task: TaskEnvelope) -> AgentResult:
+        await self._maybe_create_plan(task, ["Resolve Gmail account", "Download attachment", "Store private artifact"])
+        message_id = str(task.input.get("message_id") or "").strip()
+        attachment_id = str(task.input.get("attachment_id") or "").strip()
+        if not message_id or not attachment_id:
+            raise ValueError("gmail.fetch_attachment requires message_id and attachment_id.")
+        filename = str(task.input.get("filename") or attachment_id).strip() or attachment_id
+        mime_type = str(task.input.get("mime_type") or "").strip()
+        content = await self._client().get_attachment(message_id, attachment_id)
+        if not content:
+            raise ValueError("Gmail attachment was empty or could not be decoded.")
+        artifact = self._write_binary_artifact(
+            task=task,
+            filename=filename,
+            content=content,
+            mime=mime_type or mimetypes.guess_type(filename)[0] or "application/octet-stream",
+        )
+        await self._maybe_step(3, "completed", f"Stored attachment artifact {artifact.artifact_id}.")
+        return AgentResult(
+            status="completed",
+            output={
+                "status": "completed",
+                "account": self._account_info(),
+                "message_id": message_id,
+                "attachment_id": attachment_id,
+                "filename": filename,
+                "mime_type": artifact.mime,
+                "artifact": artifact.model_dump(mode="json"),
+            },
+            artifacts=[artifact],
         )
 
     async def handle_gmail_process_inbound(self, task: TaskEnvelope) -> AgentResult:
@@ -734,6 +777,7 @@ class GmailAgent(AgentRuntime):
                     messages=compact,
                     context_brief=context_brief,
                     memory_context=memory_context,
+                    task_context=self._task_context(task),
                 )
                 llm_used = True
             except Exception as exc:
@@ -793,6 +837,7 @@ class GmailAgent(AgentRuntime):
             thread=self._compact_thread(thread),
             context_brief=str(task.input.get("context_brief") or ""),
             memory_context=memory_context,
+            task_context=self._task_context(task),
         )
         if not self._string_list(plan.get("to")) and thread:
             latest = (thread.get("messages") or [])[-1] if thread.get("messages") else {}
@@ -882,6 +927,8 @@ class GmailAgent(AgentRuntime):
                     "subject": msg.get("subject"),
                     "date": msg.get("date"),
                     "snippet": msg.get("snippet"),
+                    "attachments": msg.get("attachments") or [],
+                    "has_attachments": bool(msg.get("attachments")),
                     "category": category,
                     "confidence": confidence,
                     "priority": priority,
@@ -906,6 +953,8 @@ class GmailAgent(AgentRuntime):
                         "subject": msg.get("subject"),
                         "date": msg.get("date"),
                         "snippet": msg.get("snippet"),
+                        "attachments": msg.get("attachments") or [],
+                        "has_attachments": bool(msg.get("attachments")),
                         "category": "needs_review",
                         "confidence": 0.0,
                         "priority": 0,
@@ -1280,6 +1329,17 @@ class GmailAgent(AgentRuntime):
         del task
         return {**item, **self._account_info()}
 
+    def _task_context(self, task: TaskEnvelope) -> dict[str, Any]:
+        return {
+            "task_id": task.task_id,
+            "parent_task_id": task.parent_task_id,
+            "session_id": task.session_id,
+            "request_id": task.input.get("request_id"),
+            "source": task.source,
+            "source_id": task.source_id,
+            "channel": task.channel,
+        }
+
     def _compact_thread(self, thread: dict[str, Any] | None) -> dict[str, Any]:
         if not isinstance(thread, dict):
             return {}
@@ -1306,6 +1366,39 @@ class GmailAgent(AgentRuntime):
         messages = thread.get("messages") if isinstance(thread, dict) else []
         latest = messages[-1] if messages else {}
         return str((latest or {}).get(key) or "").strip()
+
+    def _write_binary_artifact(
+        self,
+        *,
+        task: TaskEnvelope,
+        filename: str,
+        content: bytes,
+        mime: str,
+    ) -> ArtifactManifest:
+        task_dir = self.artifacts_root / task.task_id / "gmail_agent"
+        task_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = self._safe_filename(filename)
+        path = task_dir / safe_name
+        path.write_bytes(content)
+        try:
+            artifact_path = path.relative_to(BACKEND_ROOT).as_posix()
+        except ValueError:
+            artifact_path = path.as_posix()
+        return ArtifactManifest(
+            artifact_id=f"art_gmail_{hashlib.sha256(content).hexdigest()[:16]}",
+            task_id=task.task_id,
+            mime=mime or "application/octet-stream",
+            sha256=hashlib.sha256(content).hexdigest(),
+            path=artifact_path,
+            source_url=None,
+            created_by_agent=self.agent_id,
+            audience="supporting",
+        )
+
+    def _safe_filename(self, filename: str) -> str:
+        normalized = str(filename or "attachment").strip().replace("\\", "/").split("/")[-1]
+        normalized = re.sub(r"[^A-Za-z0-9._ -]+", "_", normalized).strip(" .")
+        return normalized[:160] or "attachment"
 
     def _err(self, code: str, message: str, retryable: bool, next_action: str) -> AgentResult:
         return AgentResult(

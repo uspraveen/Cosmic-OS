@@ -41,6 +41,8 @@ When Gmail Agent marks an inbound item `surface_to_user=true`, Gateway stores a 
 
 Full email bodies remain in Gmail. Later user turns receive a **Recent Surfaced Gmail Items** context block. If the user says "reply to this", "open that email", or "make the doc from it", the orchestrator can resolve the most recent matching surfaced item and delegate `gmail.read_thread` or `gmail.draft_reply` with exact refs. If multiple surfaced items plausibly match, it should ask a concise clarifying question.
 
+Attachment continuity follows the same rule. Gmail triage and thread reads include attachment metadata (`message_id`, `attachment_id`, filename, MIME type, size), but the agent does not push raw attachment bytes into prompts or auto-parse every attachment. When the user/task actually needs the file, the orchestrator delegates `gmail.fetch_attachment`; Gmail Agent downloads that single attachment into a private COSMIC artifact and returns it through the normal `TaskEnvelope` artifact path so docs, tabular, Alpha, or another specialist can consume it via `input_artifacts`.
+
 ## Semantic Event Automations
 
 Standing instructions such as "when Arun emails me, create the requested doc" should be represented as generic event automations, not Gmail-specific hardcoded rules.
@@ -102,6 +104,7 @@ The Gmail API treats Gmail scopes as separate strings, so an account granted `gm
 | --- | --- |
 | `gmail.search` | Search messages/threads by query, sender, subject, unread state, or time window. |
 | `gmail.read_thread` | Fetch and normalize a complete Gmail thread. |
+| `gmail.fetch_attachment` | Download one Gmail attachment into a private COSMIC artifact for downstream specialist handoff. |
 | `gmail.triage_inbox` | Run LLM-based inbox triage across bounded recent messages. |
 | `gmail.draft_reply` | Create a Gmail draft for a new message or thread reply. Sending remains approval-gated. |
 | `gmail.process_inbound` | Process a push/poll inbound notification with account, history, or message refs. |
@@ -160,6 +163,7 @@ Safe by default:
 - Summarize
 - Triage
 - Create Gmail drafts
+- Download specific Gmail attachments into private COSMIC artifacts
 
 Approval required or explicit user confirmation required:
 

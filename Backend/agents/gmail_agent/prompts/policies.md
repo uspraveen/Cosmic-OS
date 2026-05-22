@@ -4,6 +4,7 @@
 - Include `account_id`, `account_email`, and `account_label` in outputs.
 - Use Gmail threads as the primary conversation unit.
 - Keep full message bodies out of final output unless the user clearly asks to read the email.
+- Treat attachments as refs first: surface filename/MIME/size/attachment_id metadata, and download a specific attachment only when a downstream task needs the file.
 - Triage spam/noise with the LLM. Prefilters only skip learned repeated noise.
 - Add senders/domains to the prefilter only when the user asks or when the LLM gives high confidence for recurring low-value noise.
 - Do not send Gmail messages in V1. Create Gmail drafts and mark them as pending user approval.

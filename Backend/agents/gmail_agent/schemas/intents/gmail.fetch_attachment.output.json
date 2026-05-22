@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["status", "account", "message_id", "attachment_id", "artifact"],
+  "properties": {
+    "status": { "type": "string" },
+    "account": { "type": "object" },
+    "message_id": { "type": "string" },
+    "attachment_id": { "type": "string" },
+    "filename": { "type": "string" },
+    "mime_type": { "type": "string" },
+    "artifact": { "type": "object" }
+  }
+}

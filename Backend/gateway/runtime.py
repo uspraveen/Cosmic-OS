@@ -1873,6 +1873,25 @@ class GatewayRuntime:
             suggested_action = self._safe_text(item.get("suggested_action"))
             if suggested_action:
                 parts.append(f"suggested_action={suggested_action}")
+            payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            attachments = (
+                payload.get("attachments")
+                if isinstance(payload.get("attachments"), list)
+                else []
+            )
+            if attachments:
+                attachment_bits = []
+                for attachment in attachments[:4]:
+                    if not isinstance(attachment, dict):
+                        continue
+                    filename = self._safe_text(attachment.get("filename")) or "attachment"
+                    attachment_id = self._safe_text(attachment.get("attachment_id"))
+                    if attachment_id:
+                        attachment_bits.append(f"{filename}:attachment_id={attachment_id}")
+                    else:
+                        attachment_bits.append(filename)
+                if attachment_bits:
+                    parts.append(f"attachments={', '.join(attachment_bits)}")
             updated_at = self._safe_text(item.get("updated_at"))
             if updated_at:
                 parts.append(f"surfaced_at={updated_at}")
@@ -3231,6 +3250,9 @@ class GatewayRuntime:
                 "category": self._safe_text(item.get("category")),
                 "confidence": item.get("confidence"),
                 "label_ids": item.get("label_ids"),
+                "attachments": item.get("attachments")
+                if isinstance(item.get("attachments"), list)
+                else [],
                 "snippet": self._bounded_excerpt(item.get("snippet"), limit=240),
             },
         }
@@ -3392,6 +3414,13 @@ class GatewayRuntime:
             "suggested_action": self._safe_text(raw_item.get("suggested_action"))
             or self._safe_text(stored_item.get("suggested_action")),
             "label_ids": raw_item.get("label_ids") if isinstance(raw_item.get("label_ids"), list) else payload.get("label_ids"),
+            "attachments": (
+                raw_item.get("attachments")
+                if isinstance(raw_item.get("attachments"), list)
+                else payload.get("attachments")
+                if isinstance(payload.get("attachments"), list)
+                else []
+            ),
             "source_task_id": self._safe_text(result.get("task_id")),
         }
 
@@ -3444,6 +3473,9 @@ class GatewayRuntime:
                 "reason": event.get("reason"),
                 "suggested_action": event.get("suggested_action"),
                 "label_ids": event.get("label_ids"),
+                "attachments": event.get("attachments")
+                if isinstance(event.get("attachments"), list)
+                else [],
                 "thread_id": event.get("thread_id"),
                 "message_id": event.get("message_id"),
                 "surfaced_id": event.get("surfaced_id"),
@@ -3593,7 +3625,8 @@ class GatewayRuntime:
 
         if condition.get("has_attachment") is True:
             label_ids = event.get("label_ids") if isinstance(event.get("label_ids"), list) else []
-            if any("attachment" in str(label).lower() for label in label_ids):
+            attachments = event.get("attachments") if isinstance(event.get("attachments"), list) else []
+            if attachments or any("attachment" in str(label).lower() for label in label_ids):
                 add_signal("attachment_hint", 0.2, True)
 
         if self._contains_normalized_phrase(raw_instruction, searchable):
@@ -3850,6 +3883,19 @@ class GatewayRuntime:
         suggested_action = self._safe_text(event.get("suggested_action"))
         if suggested_action:
             lines.append(f"- Gmail Agent suggested action: {suggested_action}")
+        attachments = event.get("attachments") if isinstance(event.get("attachments"), list) else []
+        if attachments:
+            lines.append("- Attachments:")
+            for attachment in attachments[:8]:
+                if not isinstance(attachment, dict):
+                    continue
+                filename = self._safe_text(attachment.get("filename")) or "attachment"
+                attachment_id = self._safe_text(attachment.get("attachment_id")) or "unknown"
+                mime_type = self._safe_text(attachment.get("mime_type")) or "unknown"
+                size = attachment.get("size")
+                lines.append(
+                    f"  - {filename} ({mime_type}, id={attachment_id}, size={size})"
+                )
         if evidence:
             lines.extend(["", "## Matching Evidence", json.dumps(evidence, ensure_ascii=False, indent=2)[:3000]])
         lines.extend(
@@ -3857,6 +3903,7 @@ class GatewayRuntime:
                 "",
                 "## Execution Guidance",
                 "- Use Gmail Agent with account_id plus thread_id/message_id to read exact thread context before drafting or producing work.",
+                "- If the task depends on an email attachment, use Gmail Agent `gmail.fetch_attachment` with message_id and attachment_id, then pass the produced artifact to the right specialist through TaskEnvelope.input_artifacts.",
                 "- Use shared memory and active context to resolve people, projects, and prior commitments.",
                 "- Drafts, local analysis, document creation, and summaries are allowed when consistent with the user instruction.",
                 "- Sending email, sharing externally, deleting/modifying important data, making purchases, or committing the user requires approval unless the approval policy clearly says otherwise.",

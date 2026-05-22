@@ -61,6 +61,24 @@ class GoogleGmailClient:
             resp.raise_for_status()
             return normalize_message(resp.json())
 
+    async def get_attachment(self, message_id: str, attachment_id: str) -> bytes:
+        if not message_id:
+            raise ValueError("message_id is required.")
+        if not attachment_id:
+            raise ValueError("attachment_id is required.")
+        async with httpx.AsyncClient(timeout=max(30.0, self._timeout)) as client:
+            resp = await client.get(
+                f"{_GMAIL_BASE}/users/me/messages/{message_id}/attachments/{attachment_id}",
+                headers=self._headers,
+            )
+            if resp.status_code == 401:
+                raise PermissionError("Google access token expired.")
+            if resp.status_code == 404:
+                raise ValueError(f"Gmail attachment not found: {attachment_id}")
+            resp.raise_for_status()
+            payload = resp.json()
+        return _decode_body_bytes(str(payload.get("data") or ""))
+
     async def get_thread(self, thread_id: str) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             resp = await client.get(
@@ -230,6 +248,7 @@ def normalize_message(raw: dict[str, Any]) -> dict[str, Any]:
     payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
     headers = _headers_map(payload.get("headers") or [])
     body_text = extract_text_from_payload(payload)
+    attachments = extract_attachments_from_payload(payload)
     snippet = str(raw.get("snippet") or "").strip()
     if not snippet and body_text:
         snippet = _SPACE_RE.sub(" ", body_text).strip()[:220]
@@ -250,6 +269,8 @@ def normalize_message(raw: dict[str, Any]) -> dict[str, Any]:
         "references": headers.get("references", ""),
         "in_reply_to": headers.get("in-reply-to", ""),
         "body_text": body_text,
+        "attachments": attachments,
+        "has_attachments": bool(attachments),
     }
 
 
@@ -280,6 +301,18 @@ def compact_message_for_llm(message: dict[str, Any], *, max_body_chars: int = 12
         "label_ids": message.get("label_ids") or [],
         "snippet": message.get("snippet"),
         "body_preview": body[:max_body_chars],
+        "attachments": [
+            {
+                "attachment_id": item.get("attachment_id"),
+                "filename": item.get("filename"),
+                "mime_type": item.get("mime_type"),
+                "size": item.get("size"),
+                "disposition": item.get("disposition"),
+            }
+            for item in (message.get("attachments") or [])
+            if isinstance(item, dict)
+        ],
+        "has_attachments": bool(message.get("attachments")),
     }
 
 
@@ -300,6 +333,12 @@ def extract_text_from_payload(payload: dict[str, Any]) -> str:
     return _SPACE_RE.sub(" ", text).strip()
 
 
+def extract_attachments_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    attachments: list[dict[str, Any]] = []
+    _walk_attachments(payload, attachments)
+    return attachments
+
+
 def _walk_payload(payload: dict[str, Any], parts: list[str]) -> None:
     mime_type = str(payload.get("mimeType") or "").lower()
     body = payload.get("body") if isinstance(payload.get("body"), dict) else {}
@@ -315,9 +354,44 @@ def _walk_payload(payload: dict[str, Any], parts: list[str]) -> None:
             _walk_payload(child, parts)
 
 
+def _walk_attachments(payload: dict[str, Any], attachments: list[dict[str, Any]]) -> None:
+    mime_type = str(payload.get("mimeType") or "").strip()
+    filename = str(payload.get("filename") or "").strip()
+    part_id = str(payload.get("partId") or "").strip()
+    headers = _headers_map(payload.get("headers") or [])
+    body = payload.get("body") if isinstance(payload.get("body"), dict) else {}
+    attachment_id = str(body.get("attachmentId") or "").strip()
+    size = body.get("size")
+    content_disposition = headers.get("content-disposition", "")
+    is_attachment = bool(filename and attachment_id)
+    if is_attachment:
+        disposition = "inline" if "inline" in content_disposition.lower() else "attachment"
+        attachments.append(
+            {
+                "attachment_id": attachment_id,
+                "filename": filename,
+                "mime_type": mime_type or "application/octet-stream",
+                "size": size,
+                "part_id": part_id,
+                "content_id": headers.get("content-id", ""),
+                "disposition": disposition,
+            }
+        )
+    for child in payload.get("parts") or []:
+        if isinstance(child, dict):
+            _walk_attachments(child, attachments)
+
+
 def _decode_body(data: str) -> str:
-    padded = data + ("=" * ((4 - len(data) % 4) % 4))
     try:
-        return base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8", errors="replace")
+        return _decode_body_bytes(data).decode("utf-8", errors="replace")
     except Exception:
         return ""
+
+
+def _decode_body_bytes(data: str) -> bytes:
+    padded = data + ("=" * ((4 - len(data) % 4) % 4))
+    try:
+        return base64.urlsafe_b64decode(padded.encode("ascii"))
+    except Exception:
+        return b""

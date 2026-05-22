@@ -25,6 +25,17 @@ intents:
     usage_hints:
       - Use this when the user asks what a Gmail conversation says or needs exact thread context.
       - Gmail threads are the canonical conversation unit; prefer thread reads over isolated message reads.
+      - Thread/message outputs include attachment metadata refs when present; fetch attachment bytes only when a downstream task needs the file.
+
+  - name: gmail.fetch_attachment
+    description: Download one Gmail attachment by message_id and attachment_id into a private COSMIC artifact.
+    input_schema: schemas/intents/gmail.fetch_attachment.input.json
+    output_schema: schemas/intents/gmail.fetch_attachment.output.json
+    timeout_sec: 60
+    usage_hints:
+      - Use this after gmail.read_thread or inbound Gmail triage exposes attachment metadata and the user/task needs the actual file.
+      - Do not paste attachment bytes into prompts; return the produced artifact so the orchestrator can pass it to docs, tabular, Alpha, or another specialist through TaskEnvelope.input_artifacts.
+      - Preserve Gmail account identity because users may connect multiple Gmail accounts.
 
   - name: gmail.triage_inbox
     description: LLM-triage recent Gmail inbox items, using learned sender/domain prefilters before model calls.
@@ -122,6 +133,10 @@ auth_requirements:
     provider: google
     scopes:
       - https://www.googleapis.com/auth/gmail.modify
+  gmail.fetch_attachment:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/gmail.modify
   gmail.triage_inbox:
     provider: google
     scopes:
@@ -153,9 +168,21 @@ auth_requirements:
 
 artifact_types:
   - gmail_thread_snapshot
+  - gmail_attachment
   - gmail_triage_digest
   - gmail_draft
   - gmail_prefilter
+
+model_requirements:
+  internal_llm:
+    default_model_key: openai:gpt-5-mini
+    env_model: GMAIL_AGENT_INTERNAL_LLM_MODEL
+    env_api_key: GMAIL_AGENT_INTERNAL_LLM_API_KEY
+    env_base_url: GMAIL_AGENT_INTERNAL_LLM_BASE_URL
+    operations:
+      - gmail.internal_llm.triage
+      - gmail.internal_llm.draft
+    usage_reporting: Gateway /internal/usage/log
 
 policies:
   network_access: true
@@ -170,6 +197,7 @@ policies:
   intent_authorization:
     gmail.search: [cosmic/orchestrator:1.0.0]
     gmail.read_thread: [cosmic/orchestrator:1.0.0]
+    gmail.fetch_attachment: [cosmic/orchestrator:1.0.0]
     gmail.triage_inbox: [cosmic/orchestrator:1.0.0]
     gmail.draft_reply: [cosmic/orchestrator:1.0.0]
     gmail.process_inbound: [cosmic/gateway:1.0.0, cosmic/orchestrator:1.0.0]

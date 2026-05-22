@@ -66,6 +66,20 @@ def test_normalize_message_extracts_thread_metadata() -> None:
                 {"name": "Date", "value": "Thu, 21 May 2026 10:00:00 -0500"},
             ],
             "body": {"data": "Q2FuIHlvdSByZXZpZXcgdGhpcz8="},
+            "parts": [
+                {
+                    "partId": "1",
+                    "mimeType": "application/pdf",
+                    "filename": "brief.pdf",
+                    "headers": [
+                        {
+                            "name": "Content-Disposition",
+                            "value": 'attachment; filename="brief.pdf"',
+                        }
+                    ],
+                    "body": {"attachmentId": "att_1", "size": 1234},
+                }
+            ],
         },
     }
 
@@ -76,6 +90,9 @@ def test_normalize_message_extracts_thread_metadata() -> None:
     assert message["from"] == "Alex <alex@example.com>"
     assert message["body_text"] == "Can you review this?"
     assert "UNREAD" in message["label_ids"]
+    assert message["has_attachments"] is True
+    assert message["attachments"][0]["attachment_id"] == "att_1"
+    assert message["attachments"][0]["filename"] == "brief.pdf"
 
 
 def test_all_gmail_schemas_are_valid_json() -> None:
@@ -98,6 +115,7 @@ def test_agent_card_references_all_gmail_schemas() -> None:
     assert {
         "gmail.search",
         "gmail.read_thread",
+        "gmail.fetch_attachment",
         "gmail.triage_inbox",
         "gmail.draft_reply",
         "gmail.process_inbound",
@@ -114,6 +132,156 @@ def test_agent_card_references_all_gmail_schemas() -> None:
     authz = card["policies"]["intent_authorization"]
     assert "cosmic/gateway:1.0.0" in authz["gmail.sync_watch"]
     assert "cosmic/gateway:1.0.0" in authz["gmail.stop_watch"]
+    assert card["model_requirements"]["internal_llm"]["default_model_key"] == "openai:gpt-5-mini"
+
+
+@pytest.mark.asyncio
+async def test_gmail_internal_llm_omits_temperature_for_gpt5_and_logs_usage() -> None:
+    from agents.gmail_agent.config import GmailAgentConfig
+    from agents.gmail_agent.internal_llm import invoke_gmail_triage_llm
+
+    class FakeResponse:
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+            self.status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return self._payload
+
+    class FakeHttp:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def post(self, url: str, **kwargs):
+            self.calls.append({"url": url, **kwargs})
+            if url.endswith("/chat/completions"):
+                return FakeResponse(
+                    {
+                        "id": "chatcmpl_test",
+                        "model": "gpt-5-mini",
+                        "usage": {
+                            "prompt_tokens": 12,
+                            "completion_tokens": 8,
+                            "total_tokens": 20,
+                        },
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": json.dumps(
+                                        {
+                                            "items": [],
+                                            "summary": "No actionable mail.",
+                                        }
+                                    )
+                                }
+                            }
+                        ],
+                    }
+                )
+            return FakeResponse({"ok": True})
+
+    cfg = GmailAgentConfig(
+        gateway_url="http://gateway.local",
+        gateway_internal_token="token",
+        internal_llm_api_key="key",
+        internal_llm_base_url="https://api.openai.com/v1",
+        internal_llm_model="gpt-5-mini",
+    )
+    http = FakeHttp()
+
+    result = await invoke_gmail_triage_llm(
+        cfg=cfg,
+        http_client=http,  # type: ignore[arg-type]
+        messages=[],
+        task_context={
+            "task_id": "tsk_1",
+            "session_id": "sess_1",
+            "request_id": "req_1",
+            "source": "webhook",
+            "source_id": "gmail-pubsub",
+            "channel": "desktop",
+        },
+    )
+
+    assert result["summary"] == "No actionable mail."
+    chat_call = http.calls[0]
+    assert "temperature" not in chat_call["json"]
+    usage_call = http.calls[1]
+    assert usage_call["url"] == "http://gateway.local/internal/usage/log"
+    assert usage_call["json"]["source_id"] == "cosmic/gmail-agent:1.0.0"
+    assert usage_call["json"]["provider"] == "openai"
+    assert usage_call["json"]["model"] == "gpt-5-mini"
+    assert usage_call["json"]["prompt_tokens"] == 12
+    assert usage_call["json"]["completion_tokens"] == 8
+
+
+@pytest.mark.asyncio
+async def test_fetch_attachment_writes_private_artifact() -> None:
+    from agents.gmail_agent.agent import GmailAgent
+
+    class FakeGmailClient:
+        async def get_attachment(self, message_id: str, attachment_id: str) -> bytes:
+            assert message_id == "msg_1"
+            assert attachment_id == "att_1"
+            return b"hello attachment"
+
+    temp_dir = Path(__file__).resolve().parent / f".tmp_{uuid.uuid4().hex}"
+    agent = None
+    try:
+        temp_dir.mkdir(parents=True, exist_ok=False)
+        agent = GmailAgent(
+            redis_client=MagicMock(),
+            store_root=temp_dir / "store",
+            artifacts_root=temp_dir / "artifacts",
+        )
+        agent.auth = {
+            "access_token": "token",
+            "account_id": "acct_gmail_1",
+            "account_email": "user@example.com",
+        }
+        await agent.on_startup()
+        agent._client = MagicMock(return_value=FakeGmailClient())
+        task = TaskEnvelope(
+            task_id="tsk_gmail_attachment",
+            task_list_id="sess_attachment",
+            parent_task_id=None,
+            session_id="sess_attachment",
+            sender="cosmic/orchestrator:1.0.0",
+            recipient="cosmic/gmail-agent:1.0.0",
+            intent="gmail.fetch_attachment",
+            input={
+                "message_id": "msg_1",
+                "attachment_id": "att_1",
+                "filename": "../brief.pdf",
+                "mime_type": "application/pdf",
+            },
+            input_artifacts=[],
+            idempotency_key="idem_gmail_attachment",
+            priority="normal",
+            signature="sig",
+            created_at=utcnow(),
+            source="user",
+            source_id=None,
+            channel="desktop",
+        )
+
+        result = await agent.handle_gmail_fetch_attachment(task)
+
+        assert result.status == "completed"
+        assert result.artifacts
+        artifact = result.artifacts[0]
+        assert artifact.mime == "application/pdf"
+        assert artifact.created_by_agent == "cosmic/gmail-agent:1.0.0"
+        assert artifact.path.endswith("brief.pdf")
+        assert (temp_dir / "artifacts" / task.task_id / "gmail_agent" / "brief.pdf").exists()
+    finally:
+        if agent is not None:
+            await agent.stop()
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 @pytest.mark.asyncio

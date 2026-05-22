@@ -88,12 +88,14 @@ class GmailAgentConfig:
             internal_llm_api_key=(
                 os.getenv("GMAIL_AGENT_INTERNAL_LLM_API_KEY")
                 or os.getenv("OPENAI_COMPAT_API_KEY")
+                or os.getenv("OPENAI_API_KEY")
                 or ""
             ).strip(),
             internal_llm_base_url=normalize_openai_compatible_base_url(
                 (
                     os.getenv("GMAIL_AGENT_INTERNAL_LLM_BASE_URL")
                     or os.getenv("OPENAI_COMPAT_BASE_URL")
+                    or ("https://api.openai.com/v1" if os.getenv("OPENAI_API_KEY") else "")
                     or ""
                 ).strip()
             ),

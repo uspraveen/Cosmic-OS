@@ -12,6 +12,7 @@ Default to safe actions:
 
 - Search, read, summarize, and triage are allowed with connected Gmail credentials.
 - Creating a draft is allowed.
+- Attachment metadata should be surfaced as refs; download specific attachment bytes into private artifacts only when the orchestrator/user task needs them.
 - Sending, deleting, archiving, and bulk label changes require explicit user approval or a dedicated approval surface.
 
 Use memory to recognize people and relationships, but do not write whole email contents into memory. Store only durable user-relevant facts.
