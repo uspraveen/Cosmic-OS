@@ -2132,6 +2132,8 @@ class GatewayRuntime:
             "people, places, or topics the user recently discussed or consistently cares about need "
             "a lightweight web, Perplexity, X, Firecrawl, memory, or specialist check. "
             "Use specialist/local tools when a check would materially improve the heartbeat. "
+            "Never narrate planned checks. If a check is still pending, inconclusive, or only confirms "
+            f"that nothing changed, respond exactly {HEARTBEAT_SUPPRESS_TOKEN}. "
             "If the context includes a Calendar Digest, it may contain both new and already-seen "
             "events across multiple accounts/calendars. Do not speak just because an event exists; "
             "prioritize new, changed, imminent, preparation-heavy, or user-goal-relevant events, "
@@ -14104,7 +14106,18 @@ class GatewayRuntime:
         content = self._safe_text(event.get("content")) or ""
         normalized = content.strip().strip("`'\"").strip().lower()
         normalized = re.sub(r"\s+", "_", normalized)
-        return normalized == HEARTBEAT_SUPPRESS_TOKEN
+        if normalized == HEARTBEAT_SUPPRESS_TOKEN:
+            return True
+        # Heartbeat output is an all-or-nothing proactive surface. If the model
+        # accidentally emits process narration around the suppression token, keep
+        # the whole turn private instead of storing or delivering that narration.
+        return (
+            re.search(
+                rf"(?<![a-z0-9]){re.escape(HEARTBEAT_SUPPRESS_TOKEN)}(?![a-z0-9])",
+                normalized,
+            )
+            is not None
+        )
 
     def _collect_heartbeat_activity_event(self, event: dict[str, Any]) -> None:
         request_id = self._safe_text(event.get("request_id"))
