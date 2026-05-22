@@ -1,0 +1,1 @@
+"""Gateway event automation API."""

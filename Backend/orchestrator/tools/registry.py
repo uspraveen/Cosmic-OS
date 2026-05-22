@@ -335,6 +335,17 @@ def _create_reminder_progress(tool_input: dict[str, Any]) -> str:
     return f"Creating reminder: {label}" if label else "Creating reminder..."
 
 
+def _create_event_automation_progress(tool_input: dict[str, Any]) -> str:
+    label = str(tool_input.get("label") or "").strip()
+    event_type = str(tool_input.get("event_type") or "event").strip()
+    return f"Creating event automation for {event_type}: {label}" if label else f"Creating event automation for {event_type}..."
+
+
+def _delete_event_automation_progress(tool_input: dict[str, Any]) -> str:
+    automation_id = str(tool_input.get("automation_id") or "").strip()
+    return f"Removing event automation {automation_id}..." if automation_id else "Removing event automation..."
+
+
 def _delete_reminder_progress(tool_input: dict[str, Any]) -> str:
     cron_id = str(tool_input.get("cron_id") or "").strip()
     return f"Removing reminder {cron_id}..." if cron_id else "Removing reminder..."
@@ -1869,6 +1880,120 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         read_only=True,
     ),
     ToolSpec(
+        name="create_event_automation",
+        api_definition={
+            "name": "create_event_automation",
+            "description": (
+                "Create or update a standing event automation. Use this when the user gives an instruction like "
+                "'when X happens, do Y', especially for inbound Gmail, future webhooks, calendar changes, files, or other external events. "
+                "Store the user's exact instruction plus a compact structured condition/action; unresolved people are allowed and can be resolved on future events."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "automation_id": {
+                        "type": "string",
+                        "description": "Optional existing automation id when updating a rule.",
+                    },
+                    "event_type": {
+                        "type": "string",
+                        "description": "Event family such as gmail.inbound. Default gmail.inbound for user-owned Gmail standing instructions.",
+                        "default": "gmail.inbound",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Short human-readable name for the standing automation.",
+                    },
+                    "raw_instruction": {
+                        "type": "string",
+                        "description": "The user's exact standing instruction in natural language.",
+                    },
+                    "condition": {
+                        "type": "object",
+                        "description": (
+                            "Compact match condition. For Gmail, useful keys include person_ref, sender_email, sender_domain, "
+                            "subject_contains, body_contains, topic, keywords, has_attachment, and resolution_mode. "
+                            "Do not require exact email addresses when the user named a person naturally."
+                        ),
+                    },
+                    "action": {
+                        "type": "object",
+                        "description": (
+                            "What COSMIC should do after a match. Prefer type=orchestrator_task with a high-level goal. "
+                            "Do not encode provider-specific hardcoded steps when the orchestrator should reason from context."
+                        ),
+                    },
+                    "approval_policy": {
+                        "type": "object",
+                        "description": (
+                            "Approval boundaries. Typical policy: drafts/local prep allowed; sending, external sharing, deletion, purchases, or irreversible changes require approval."
+                        ),
+                    },
+                },
+                "required": ["raw_instruction"],
+            },
+        },
+        group="automations",
+        prompt_summary=(
+            "Create standing event automations for 'when X happens, do Y' instructions. "
+            "Use for Gmail/webhook/calendar/file triggers instead of merely saving a memory."
+        ),
+        progress_builder=_create_event_automation_progress,
+        handler_method="_create_event_automation",
+    ),
+    ToolSpec(
+        name="list_event_automations",
+        api_definition={
+            "name": "list_event_automations",
+            "description": "List active or all standing event automations.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "event_type": {
+                        "type": "string",
+                        "description": "Optional event type filter such as gmail.inbound.",
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "Status filter: active, paused, inactive, or all. Default active.",
+                        "default": "active",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of automations to return. Default 50.",
+                        "default": 50,
+                    },
+                },
+            },
+        },
+        group="automations",
+        prompt_summary="Inspect existing standing event automations before changing or deleting them.",
+        progress_builder=lambda _tool_input: "Checking event automations...",
+        handler_method="_list_event_automations",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="delete_event_automation",
+        api_definition={
+            "name": "delete_event_automation",
+            "description": "Deactivate a standing event automation by id.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "automation_id": {
+                        "type": "string",
+                        "description": "Automation id returned by create_event_automation or list_event_automations.",
+                    },
+                },
+                "required": ["automation_id"],
+            },
+        },
+        group="automations",
+        prompt_summary="Deactivate a standing event automation when the user cancels or no longer wants it.",
+        progress_builder=_delete_event_automation_progress,
+        handler_method="_delete_event_automation",
+    ),
+    ToolSpec(
         name="create_reminder",
         api_definition={
             "name": "create_reminder",
@@ -1982,6 +2107,7 @@ _GROUP_ORDER = (
     "planning",
     "memory",
     "history",
+    "automations",
     "scheduling",
 )
 _GROUP_TITLES = {
@@ -1995,6 +2121,7 @@ _GROUP_TITLES = {
     "planning": "Planning & Wishlist",
     "memory": "Memory",
     "history": "History",
+    "automations": "Event Automations",
     "scheduling": "Scheduling",
 }
 

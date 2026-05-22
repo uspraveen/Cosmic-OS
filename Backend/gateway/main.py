@@ -7,6 +7,7 @@ import uvicorn
 
 from .channels.routes import router as channel_router
 from .config import GatewayConfig
+from .automations.routes import router as automation_router
 from .credentials.routes import router as credential_router
 from .gmail_routes import router as gmail_router
 from .memory.routes import router as memory_router
@@ -34,6 +35,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(channel_router)
+app.include_router(automation_router)
 app.include_router(credential_router)
 app.include_router(gmail_router)
 app.include_router(memory_router)

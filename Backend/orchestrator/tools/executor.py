@@ -1661,6 +1661,99 @@ class ToolExecutor:
             json_body=payload,
         )
 
+    # ── Event Automations (Gateway Registry) ────────────────────
+
+    async def _create_event_automation(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        raw_instruction = str(tool_input.get("raw_instruction") or "").strip()
+        if not raw_instruction:
+            return {"error": True, "message": "raw_instruction is required"}
+        if not self.gateway_url:
+            return {"error": True, "message": "Gateway event automation registry is not configured."}
+        request_body: dict[str, Any] = {
+            "event_type": str(tool_input.get("event_type") or "gmail.inbound").strip() or "gmail.inbound",
+            "raw_instruction": raw_instruction,
+            "condition": tool_input.get("condition") if isinstance(tool_input.get("condition"), dict) else {},
+            "action": tool_input.get("action") if isinstance(tool_input.get("action"), dict) else {},
+            "approval_policy": (
+                tool_input.get("approval_policy")
+                if isinstance(tool_input.get("approval_policy"), dict)
+                else {}
+            ),
+            "status": "active",
+            "source": "orchestrator",
+        }
+        automation_id = str(tool_input.get("automation_id") or "").strip()
+        if automation_id:
+            request_body["automation_id"] = automation_id
+        label = str(tool_input.get("label") or "").strip()
+        if label:
+            request_body["label"] = label
+        if context:
+            if context.request_id:
+                request_body["request_id"] = context.request_id
+            if context.session_id:
+                request_body["session_id"] = context.session_id
+            if context.channel:
+                request_body["channel"] = context.channel
+        response = await self._request_gateway_json(
+            "POST",
+            "/internal/automations/events",
+            json_body=request_body,
+        )
+        return {
+            "created": True,
+            "automation_id": response.get("automation_id"),
+            "event_type": response.get("event_type"),
+            "label": response.get("label"),
+            "status": response.get("status"),
+            "condition": response.get("condition"),
+            "action": response.get("action"),
+            "approval_policy": response.get("approval_policy"),
+            "message": f"Event automation created: {response.get('label') or response.get('automation_id')}",
+        }
+
+    async def _list_event_automations(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        del context
+        if not self.gateway_url:
+            return {"error": True, "message": "Gateway event automation registry is not configured."}
+        params: dict[str, Any] = {}
+        event_type = str(tool_input.get("event_type") or "").strip()
+        if event_type:
+            params["event_type"] = event_type
+        params["status_filter"] = str(tool_input.get("status") or "active").strip() or "active"
+        params["limit"] = min(max(1, self._coerce_int(tool_input.get("limit"), 50)), 200)
+        payload = await self._request_gateway_json(
+            "GET",
+            "/internal/automations/events",
+            params=params,
+        )
+        return {"automations": payload.get("automations") or []}
+
+    async def _delete_event_automation(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        del context
+        automation_id = str(tool_input.get("automation_id") or "").strip()
+        if not automation_id:
+            return {"error": True, "message": "automation_id is required"}
+        if not self.gateway_url:
+            return {"error": True, "message": "Gateway event automation registry is not configured."}
+        await self._request_gateway_json("DELETE", f"/internal/automations/events/{automation_id}")
+        return {"deleted": True, "automation_id": automation_id, "message": "Event automation deactivated."}
+
     # ── Create Reminder (Gateway Scheduler) ─────────────────────
 
     async def _create_reminder(

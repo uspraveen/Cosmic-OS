@@ -434,6 +434,109 @@ async def test_tool_executor_perplexity_research_posts_usage_to_gateway() -> Non
 
 
 @pytest.mark.asyncio
+async def test_tool_executor_event_automation_crud_uses_gateway_routes() -> None:
+    seen_payload: dict[str, object] = {}
+    seen_delete = ""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_delete
+        assert request.headers["X-Internal-Token"] == "internal-token"
+        if request.url.path == "/internal/automations/events":
+            if request.method == "POST":
+                seen_payload.update(json.loads(request.content.decode("utf-8")))
+                return httpx.Response(
+                    200,
+                    json={
+                        "automation_id": "aut_arun_doc",
+                        "event_type": "gmail.inbound",
+                        "label": "Arun doc request",
+                        "raw_instruction": "When Arun emails me, create the requested doc.",
+                        "condition": {"person_ref": "Arun", "resolution_mode": "resolve_on_event"},
+                        "action": {"type": "orchestrator_task", "goal": "Read the thread and create the doc."},
+                        "approval_policy": {"send_email": "requires_approval"},
+                        "status": "active",
+                    },
+                )
+            if request.method == "GET":
+                assert request.url.params["event_type"] == "gmail.inbound"
+                assert request.url.params["status_filter"] == "active"
+                return httpx.Response(
+                    200,
+                    json={
+                        "automations": [
+                            {
+                                "automation_id": "aut_arun_doc",
+                                "event_type": "gmail.inbound",
+                                "label": "Arun doc request",
+                                "status": "active",
+                            }
+                        ]
+                    },
+                )
+        if request.url == httpx.URL("http://gateway/internal/automations/events/aut_arun_doc"):
+            assert request.method == "DELETE"
+            seen_delete = request.url.path
+            return httpx.Response(200, json={"deleted": True, "automation_id": "aut_arun_doc"})
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    executor = ToolExecutor(
+        gateway_url="http://gateway",
+        gateway_internal_token="internal-token",
+        client=client,
+    )
+    context = ToolExecutionContext(
+        task_id="tsk_current",
+        request_id="req_current",
+        session_id="sess_current",
+        channel="desktop:desk_a",
+    )
+    try:
+        created_raw = await executor.execute(
+            "create_event_automation",
+            {
+                "event_type": "gmail.inbound",
+                "label": "Arun doc request",
+                "raw_instruction": "When Arun emails me, create the requested doc.",
+                "condition": {"person_ref": "Arun", "resolution_mode": "resolve_on_event"},
+                "action": {"type": "orchestrator_task", "goal": "Read the thread and create the doc."},
+                "approval_policy": {"send_email": "requires_approval"},
+            },
+            context=context,
+        )
+        listed_raw = await executor.execute(
+            "list_event_automations",
+            {"event_type": "gmail.inbound", "status": "active"},
+            context=context,
+        )
+        deleted_raw = await executor.execute(
+            "delete_event_automation",
+            {"automation_id": "aut_arun_doc"},
+            context=context,
+        )
+    finally:
+        await client.aclose()
+
+    assert seen_payload == {
+        "event_type": "gmail.inbound",
+        "raw_instruction": "When Arun emails me, create the requested doc.",
+        "condition": {"person_ref": "Arun", "resolution_mode": "resolve_on_event"},
+        "action": {"type": "orchestrator_task", "goal": "Read the thread and create the doc."},
+        "approval_policy": {"send_email": "requires_approval"},
+        "status": "active",
+        "source": "orchestrator",
+        "label": "Arun doc request",
+        "request_id": "req_current",
+        "session_id": "sess_current",
+        "channel": "desktop:desk_a",
+    }
+    assert json.loads(created_raw)["automation_id"] == "aut_arun_doc"
+    assert json.loads(listed_raw)["automations"][0]["label"] == "Arun doc request"
+    assert json.loads(deleted_raw)["deleted"] is True
+    assert seen_delete == "/internal/automations/events/aut_arun_doc"
+
+
+@pytest.mark.asyncio
 async def test_tool_executor_create_reminder_uses_internal_scheduler_route_and_passes_gateway_resolution_inputs() -> None:
     seen_payload: dict[str, object] = {}
 

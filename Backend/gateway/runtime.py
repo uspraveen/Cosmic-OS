@@ -41,6 +41,7 @@ from .config import GatewayConfig
 from .credentials import CredentialManager
 from .credentials.store import CredentialStore
 from .delivery.queue_store import DeliveryQueueStore, utcnow_iso
+from .event_automation_store import EventAutomationStore
 from .gmail_context_store import GmailContextStore
 from .memory import MemoryWriteAuditStore
 from .memory.client import (
@@ -151,6 +152,64 @@ TASK_ACTIVITY_LOG_LIMIT = 64
 RECENT_MEMORY_TOOL_RECEIPT_LIMIT = 4
 RECENT_RESEARCH_RECEIPT_LIMIT = 3
 RECENT_SPECIALIST_RECEIPT_LIMIT = 4
+EVENT_AUTOMATION_AUTO_CONFIDENCE = 0.78
+EVENT_AUTOMATION_CONFIRM_CONFIDENCE = 0.52
+EVENT_AUTOMATION_STOPWORDS = {
+    "a",
+    "about",
+    "after",
+    "all",
+    "also",
+    "an",
+    "and",
+    "any",
+    "as",
+    "at",
+    "be",
+    "by",
+    "can",
+    "could",
+    "create",
+    "do",
+    "doc",
+    "document",
+    "email",
+    "emails",
+    "for",
+    "from",
+    "get",
+    "gets",
+    "give",
+    "has",
+    "have",
+    "if",
+    "in",
+    "into",
+    "it",
+    "just",
+    "mail",
+    "make",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "reply",
+    "requested",
+    "says",
+    "should",
+    "soon",
+    "start",
+    "that",
+    "the",
+    "then",
+    "this",
+    "to",
+    "up",
+    "when",
+    "with",
+    "you",
+}
 RECENT_MEMORY_TOOL_RECEIPT_SCAN_LIMIT = 12
 CONTESTED_MEMORY_RECENT_WRITE_LIMIT = 3
 CONTESTED_MEMORY_AUDIT_SCAN_LIMIT = 40
@@ -308,6 +367,7 @@ class GatewayRuntime:
         self.artifact_store = ArtifactStore(config.artifacts_db_path)
         self.delivery_queue_store = DeliveryQueueStore(config.delivery_queue_db_path)
         self.gmail_context_store = GmailContextStore(config.gmail_context_db_path)
+        self.event_automation_store = EventAutomationStore(config.event_automation_db_path)
         self.scheduler_store = SchedulerStore(config.scheduler_db_path)
         self.agent_email_integration_store = AgentEmailIntegrationStore(
             config.agent_email_integrations_db_path
@@ -429,6 +489,7 @@ class GatewayRuntime:
         self.artifact_store.initialize()
         self.delivery_queue_store.initialize()
         self.gmail_context_store.initialize()
+        self.event_automation_store.initialize()
         self.scheduler_store.initialize(
             default_timezone=self.config.user_timezone_fallback,
             default_heartbeat_interval_sec=self.config.heartbeat_interval_sec,
@@ -3174,6 +3235,11 @@ class GatewayRuntime:
                 "channel_id": "cosmic-gmail",
             },
         )
+        await self._evaluate_gmail_event_automations(
+            result=result,
+            raw_items=items,
+            stored_items=stored_items,
+        )
 
     def _upsert_surfaced_gmail_item(
         self,
@@ -3203,6 +3269,518 @@ class GatewayRuntime:
         except Exception:
             logger.exception("gateway.gmail_context_store_upsert_failed")
             return {}
+
+    async def _evaluate_gmail_event_automations(
+        self,
+        *,
+        result: dict[str, Any],
+        raw_items: list[dict[str, Any]],
+        stored_items: list[dict[str, Any]],
+    ) -> None:
+        try:
+            automations = self.event_automation_store.list_automations(
+                event_type="gmail.inbound",
+                status="active",
+                limit=100,
+            )
+        except Exception:
+            logger.exception("gateway.event_automation.list_failed event_type=gmail.inbound")
+            return
+        if not automations:
+            return
+
+        for index, raw_item in enumerate(raw_items):
+            if not isinstance(raw_item, dict):
+                continue
+            stored_item = stored_items[index] if index < len(stored_items) else {}
+            event = self._gmail_automation_event(
+                result=result,
+                raw_item=raw_item,
+                stored_item=stored_item if isinstance(stored_item, dict) else {},
+            )
+            event_ref = self._safe_text(event.get("event_ref"))
+            if not event_ref:
+                continue
+            for automation in automations:
+                match = self._score_gmail_event_automation_match(automation, event)
+                confidence = self._coerce_float(match.get("confidence"), 0.0)
+                if confidence < EVENT_AUTOMATION_CONFIRM_CONFIDENCE:
+                    continue
+                decision = (
+                    "matched"
+                    if confidence >= EVENT_AUTOMATION_AUTO_CONFIDENCE
+                    else "needs_confirmation"
+                )
+                try:
+                    stored_match = self.event_automation_store.record_match(
+                        {
+                            "automation_id": automation.get("automation_id"),
+                            "event_type": "gmail.inbound",
+                            "event_ref": event_ref,
+                            "decision": decision,
+                            "confidence": confidence,
+                            "evidence": {
+                                **(
+                                    match.get("evidence")
+                                    if isinstance(match.get("evidence"), dict)
+                                    else {}
+                                ),
+                                "event": event,
+                            },
+                        }
+                    )
+                except Exception:
+                    logger.exception(
+                        "gateway.event_automation.record_match_failed automation_id=%s event_ref=%s",
+                        self._safe_text(automation.get("automation_id")),
+                        event_ref,
+                    )
+                    continue
+                if not stored_match.get("created"):
+                    continue
+                self._schedule_background_task(
+                    self._dispatch_event_automation_match(
+                        automation=automation,
+                        event=event,
+                        match=stored_match,
+                    ),
+                    name=f"event-automation:{automation.get('automation_id')}",
+                )
+
+    def _gmail_automation_event(
+        self,
+        *,
+        result: dict[str, Any],
+        raw_item: dict[str, Any],
+        stored_item: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = (
+            stored_item.get("payload")
+            if isinstance(stored_item.get("payload"), dict)
+            else {}
+        )
+        account_id = (
+            self._safe_text(raw_item.get("account_id"))
+            or self._safe_text(stored_item.get("account_id"))
+            or self._safe_text(result.get("account_id"))
+        )
+        account_email = (
+            self._safe_text(raw_item.get("account_email"))
+            or self._safe_text(stored_item.get("account_email"))
+            or self._safe_text(result.get("email"))
+        )
+        message_id = self._safe_text(raw_item.get("message_id")) or self._safe_text(
+            stored_item.get("message_id")
+        )
+        thread_id = self._safe_text(raw_item.get("thread_id")) or self._safe_text(
+            stored_item.get("thread_id")
+        )
+        surfaced_id = self._safe_text(stored_item.get("surfaced_id"))
+        event_ref_parts = [
+            "gmail",
+            account_id or account_email or "account",
+            message_id or thread_id or surfaced_id or "message",
+        ]
+        if surfaced_id:
+            event_ref_parts.append(surfaced_id)
+        return {
+            "event_type": "gmail.inbound",
+            "event_ref": ":".join(event_ref_parts),
+            "surfaced_id": surfaced_id,
+            "account_id": account_id,
+            "account_email": account_email,
+            "message_id": message_id,
+            "thread_id": thread_id,
+            "sender": self._safe_text(raw_item.get("sender"))
+            or self._safe_text(raw_item.get("from"))
+            or self._safe_text(stored_item.get("sender")),
+            "sender_email": self._safe_text(raw_item.get("sender_email")),
+            "sender_domain": self._safe_text(raw_item.get("sender_domain")),
+            "subject": self._safe_text(raw_item.get("subject"))
+            or self._safe_text(stored_item.get("subject")),
+            "snippet": self._safe_text(raw_item.get("snippet"))
+            or self._safe_text(payload.get("snippet")),
+            "category": self._safe_text(raw_item.get("category"))
+            or self._safe_text(stored_item.get("category")),
+            "priority": raw_item.get("priority", stored_item.get("priority")),
+            "reason": self._safe_text(raw_item.get("reason"))
+            or self._safe_text(stored_item.get("reason")),
+            "suggested_action": self._safe_text(raw_item.get("suggested_action"))
+            or self._safe_text(stored_item.get("suggested_action")),
+            "label_ids": raw_item.get("label_ids") if isinstance(raw_item.get("label_ids"), list) else payload.get("label_ids"),
+            "source_task_id": self._safe_text(result.get("task_id")),
+        }
+
+    def _score_gmail_event_automation_match(
+        self,
+        automation: dict[str, Any],
+        event: dict[str, Any],
+    ) -> dict[str, Any]:
+        condition = (
+            automation.get("condition")
+            if isinstance(automation.get("condition"), dict)
+            else {}
+        )
+        raw_instruction = self._safe_text(automation.get("raw_instruction")) or ""
+        evidence: dict[str, Any] = {"signals": []}
+        score = 0.0
+        hard_identity_present = False
+        hard_identity_matched = False
+
+        sender = self._safe_text(event.get("sender")) or ""
+        sender_email = (
+            self._safe_text(event.get("sender_email"))
+            or self._extract_email_from_text(sender)
+        )
+        sender_domain = self._safe_text(event.get("sender_domain")) or (
+            sender_email.split("@", 1)[1].lower() if sender_email and "@" in sender_email else ""
+        )
+        subject = self._safe_text(event.get("subject")) or ""
+        snippet = self._safe_text(event.get("snippet")) or ""
+        searchable = self._normalize_match_text(
+            " ".join(
+                [
+                    sender,
+                    sender_email or "",
+                    sender_domain or "",
+                    subject,
+                    snippet,
+                    self._safe_text(event.get("category")) or "",
+                    self._safe_text(event.get("reason")) or "",
+                    self._safe_text(event.get("suggested_action")) or "",
+                ]
+            )
+        )
+
+        def add_signal(name: str, amount: float, detail: Any) -> None:
+            nonlocal score
+            if amount <= 0:
+                return
+            score += amount
+            evidence["signals"].append({"name": name, "score": round(amount, 3), "detail": detail})
+
+        for key in ("sender_email", "from_email", "email"):
+            for value in self._condition_values(condition.get(key)):
+                hard_identity_present = True
+                normalized_value = value.lower()
+                if sender_email and sender_email.lower() == normalized_value:
+                    hard_identity_matched = True
+                    add_signal("sender_email_exact", 0.72, value)
+                elif sender_email and normalized_value in sender_email.lower():
+                    hard_identity_matched = True
+                    add_signal("sender_email_partial", 0.42, value)
+
+        for key in ("sender_domain", "domain", "from_domain"):
+            for value in self._condition_values(condition.get(key)):
+                hard_identity_present = True
+                normalized_value = value.lower().removeprefix("@")
+                if sender_domain and sender_domain.lower() == normalized_value:
+                    hard_identity_matched = True
+                    add_signal("sender_domain_exact", 0.46, value)
+
+        for key in ("person_ref", "person", "sender", "from", "contact", "from_person"):
+            for value in self._condition_values(condition.get(key)):
+                overlap = self._token_overlap(value, f"{sender} {sender_email or ''}")
+                if overlap >= 0.8:
+                    add_signal("person_ref_strong", 0.55, value)
+                elif overlap >= 0.5:
+                    add_signal("person_ref_partial", 0.34, value)
+
+        for key in ("subject_contains", "subject", "subject_keywords"):
+            for value in self._condition_values(condition.get(key)):
+                if self._phrase_or_token_match(value, subject):
+                    add_signal("subject_match", 0.32, value)
+
+        for key in ("body_contains", "snippet_contains", "message_contains"):
+            for value in self._condition_values(condition.get(key)):
+                if self._phrase_or_token_match(value, snippet):
+                    add_signal("body_match", 0.28, value)
+
+        for key in ("topic", "query", "any_text", "keywords"):
+            for value in self._condition_values(condition.get(key)):
+                overlap = self._token_overlap(value, searchable)
+                if overlap >= 0.8:
+                    add_signal("topic_strong", 0.34, value)
+                elif overlap >= 0.45:
+                    add_signal("topic_partial", 0.22, value)
+
+        if condition.get("has_attachment") is True:
+            label_ids = event.get("label_ids") if isinstance(event.get("label_ids"), list) else []
+            if any("attachment" in str(label).lower() for label in label_ids):
+                add_signal("attachment_hint", 0.2, True)
+
+        raw_overlap = self._token_overlap(raw_instruction, searchable)
+        if raw_overlap >= 0.55:
+            add_signal("instruction_text_overlap", 0.22, round(raw_overlap, 2))
+        elif raw_overlap >= 0.28:
+            add_signal("instruction_text_weak_overlap", 0.1, round(raw_overlap, 2))
+
+        if hard_identity_present and not hard_identity_matched:
+            evidence["hard_identity_mismatch"] = True
+            confidence = 0.0
+            evidence["sender_email"] = sender_email
+            evidence["sender_domain"] = sender_domain
+            evidence["subject"] = subject
+            return {"confidence": confidence, "evidence": evidence}
+
+        confidence = max(0.0, min(1.0, score))
+        evidence["sender_email"] = sender_email
+        evidence["sender_domain"] = sender_domain
+        evidence["subject"] = subject
+        return {"confidence": confidence, "evidence": evidence}
+
+    async def _dispatch_event_automation_match(
+        self,
+        *,
+        automation: dict[str, Any],
+        event: dict[str, Any],
+        match: dict[str, Any],
+    ) -> None:
+        request_record = await self._build_event_automation_request_record(
+            automation=automation,
+            event=event,
+            match=match,
+        )
+        request_id = self._safe_text(request_record.get("request_id"))
+        try:
+            self.event_automation_store.update_match_dispatch(
+                match_id=self._safe_text(match.get("match_id")) or "",
+                orchestrator_request_id=request_id,
+            )
+            await self.fulfill_processed_message(request_record)
+        except Exception:
+            logger.exception(
+                "gateway.event_automation.dispatch_failed automation_id=%s match_id=%s",
+                self._safe_text(automation.get("automation_id")),
+                self._safe_text(match.get("match_id")),
+            )
+
+    async def _build_event_automation_request_record(
+        self,
+        *,
+        automation: dict[str, Any],
+        event: dict[str, Any],
+        match: dict[str, Any],
+    ) -> dict[str, Any]:
+        automation_id = self._safe_text(automation.get("automation_id")) or "unknown"
+        match_id = self._safe_text(match.get("match_id")) or uuid4().hex
+        event_ref = self._safe_text(event.get("event_ref")) or match_id
+        request_id = f"req_evt_{uuid4().hex[:12]}"
+        session_id = self._current_session_id()
+        session_metadata = self._ensure_session_state_seeded(session_id)
+        active_working_set = (
+            session_metadata.get("active_working_set")
+            if isinstance(session_metadata.get("active_working_set"), dict)
+            else None
+        )
+        query = self._render_event_automation_orchestrator_prompt(
+            automation=automation,
+            event=event,
+            match=match,
+        )
+        memory_prompt_context = await self._assemble_memory_prompt_context(query=query)
+        request_record = {
+            "status": "accepted",
+            "request_id": request_id,
+            "session_id": session_id,
+            "source": "webhook",
+            "source_id": f"event_automation:{automation_id}",
+            "channel": "desktop",
+            "route": "opus",
+            "dispatch_target": "orchestrator",
+            "classification": {
+                "route": "opus",
+                "needs_latest": False,
+                "needs_citations": False,
+                "is_task": True,
+                "is_continuation": False,
+                "confidence": 1.0,
+                "signals": ["event_automation", "gmail.inbound"],
+            },
+            "message": {
+                "content": query,
+                "channel": "desktop",
+                "request_id": request_id,
+                "metadata": {
+                    "platform": "event_automation",
+                    "automation_id": automation_id,
+                    "match_id": match_id,
+                    "event_ref": event_ref,
+                    "event_type": "gmail.inbound",
+                },
+            },
+            "assembled_conversation_context": [],
+            "memory_context": self._compose_prompt_context(
+                active_working_set=active_working_set,
+                memory_context=memory_prompt_context.rendered,
+            ),
+            "active_working_set": active_working_set,
+            "carry_forward_packet": (
+                session_metadata.get("carry_forward_packet")
+                if isinstance(session_metadata.get("carry_forward_packet"), dict)
+                else None
+            ),
+            "memory_context_payload": {
+                "core_fact_items": memory_prompt_context.core_fact_items,
+                "core_facts_rendered": memory_prompt_context.core_facts_rendered,
+                "items": memory_prompt_context.recall_items,
+                "total_token_count": memory_prompt_context.total_token_count,
+                "diagnostics": memory_prompt_context.diagnostics,
+            },
+            "routing_decision_source": "event_automation",
+            "input_artifacts": [],
+            "accepted_at": utcnow_iso(),
+            "idempotency_key": f"event-automation:{automation_id}:{event_ref}",
+        }
+        self.request_records[request_id] = request_record
+        self.routing_audit_store.append(
+            request_id=request_id,
+            session_id=session_id,
+            channel="desktop",
+            source="webhook",
+            source_id=f"event_automation:{automation_id}",
+            query_text=query,
+            route_override=None,
+            sticky_hit=False,
+            decision_source="event_automation",
+            classifier_route="opus",
+            final_route="opus",
+            dispatch_target="orchestrator",
+            confidence=1.0,
+            signals=["event_automation", "gmail.inbound"],
+            conversation_context=[],
+            classifier_payload=None,
+            classifier_metrics=None,
+            classifier_model=None,
+            classifier_latency_ms=None,
+            decision_latency_ms=0.0,
+            error_text=None,
+        )
+        return request_record
+
+    def _render_event_automation_orchestrator_prompt(
+        self,
+        *,
+        automation: dict[str, Any],
+        event: dict[str, Any],
+        match: dict[str, Any],
+    ) -> str:
+        action = automation.get("action") if isinstance(automation.get("action"), dict) else {}
+        approval_policy = (
+            automation.get("approval_policy")
+            if isinstance(automation.get("approval_policy"), dict)
+            else {}
+        )
+        evidence = match.get("evidence") if isinstance(match.get("evidence"), dict) else {}
+        decision = self._safe_text(match.get("decision")) or "matched"
+        goal = (
+            self._safe_text(action.get("goal"))
+            or self._safe_text(action.get("instruction"))
+            or self._safe_text(automation.get("raw_instruction"))
+            or "Handle this matched event."
+        )
+        lines = [
+            "A standing event automation matched a user-owned Gmail inbound event.",
+            "",
+            "## Standing Instruction",
+            self._safe_text(automation.get("raw_instruction")) or "",
+            "",
+            "## Automation Action",
+            goal,
+            "",
+            "## Match Policy",
+            f"- Decision: {decision}",
+            f"- Confidence: {match.get('confidence')}",
+        ]
+        if decision == "needs_confirmation":
+            lines.append(
+                "- Confidence is medium. Verify the sender/thread context before doing consequential work; ask the user if identity or intent is ambiguous."
+            )
+        if approval_policy:
+            lines.extend(["", "## Approval Policy", json.dumps(approval_policy, ensure_ascii=False, indent=2)])
+        lines.extend(
+            [
+                "",
+                "## Gmail Event Reference",
+                f"- Account: {self._safe_text(event.get('account_email')) or self._safe_text(event.get('account_id')) or 'unknown'}",
+                f"- Sender: {self._safe_text(event.get('sender')) or 'unknown'}",
+                f"- Subject: {self._safe_text(event.get('subject')) or 'unknown'}",
+                f"- Thread ID: {self._safe_text(event.get('thread_id')) or 'unknown'}",
+                f"- Message ID: {self._safe_text(event.get('message_id')) or 'unknown'}",
+                f"- Surfaced ID: {self._safe_text(event.get('surfaced_id')) or 'unknown'}",
+            ]
+        )
+        snippet = self._safe_text(event.get("snippet"))
+        if snippet:
+            lines.append(f"- Snippet: {self._bounded_excerpt(snippet, limit=500)}")
+        suggested_action = self._safe_text(event.get("suggested_action"))
+        if suggested_action:
+            lines.append(f"- Gmail Agent suggested action: {suggested_action}")
+        if evidence:
+            lines.extend(["", "## Matching Evidence", json.dumps(evidence, ensure_ascii=False, indent=2)[:3000]])
+        lines.extend(
+            [
+                "",
+                "## Execution Guidance",
+                "- Use Gmail Agent with account_id plus thread_id/message_id to read exact thread context before drafting or producing work.",
+                "- Use shared memory and active context to resolve people, projects, and prior commitments.",
+                "- Drafts, local analysis, document creation, and summaries are allowed when consistent with the user instruction.",
+                "- Sending email, sharing externally, deleting/modifying important data, making purchases, or committing the user requires approval unless the approval policy clearly says otherwise.",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _condition_values(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value.strip()] if value.strip() else []
+        if isinstance(value, (int, float)):
+            return [str(value)]
+        if isinstance(value, list):
+            values: list[str] = []
+            for item in value:
+                values.extend(self._condition_values(item))
+            return values
+        if isinstance(value, dict):
+            values = []
+            for key in ("value", "name", "text", "query", "label"):
+                values.extend(self._condition_values(value.get(key)))
+            return values
+        return []
+
+    def _token_overlap(self, needle: Any, haystack: Any) -> float:
+        needle_tokens = self._match_tokens(str(needle or ""))
+        if not needle_tokens:
+            return 0.0
+        haystack_tokens = set(self._match_tokens(str(haystack or "")))
+        if not haystack_tokens:
+            return 0.0
+        matched = sum(1 for token in needle_tokens if token in haystack_tokens)
+        return matched / max(1, len(needle_tokens))
+
+    def _phrase_or_token_match(self, needle: Any, haystack: Any) -> bool:
+        needle_text = self._normalize_match_text(str(needle or ""))
+        haystack_text = self._normalize_match_text(str(haystack or ""))
+        if not needle_text or not haystack_text:
+            return False
+        if needle_text in haystack_text:
+            return True
+        return self._token_overlap(needle_text, haystack_text) >= 0.65
+
+    def _match_tokens(self, value: str) -> list[str]:
+        return [
+            token
+            for token in re.findall(r"[a-z0-9][a-z0-9._+-]{1,}", value.lower())
+            if token not in EVENT_AUTOMATION_STOPWORDS and len(token) >= 3
+        ][:32]
+
+    def _normalize_match_text(self, value: str) -> str:
+        return " ".join(re.findall(r"[a-z0-9._@+-]+", str(value or "").lower()))
+
+    def _extract_email_from_text(self, value: str) -> str | None:
+        match = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", str(value or ""))
+        return match.group(0).lower() if match else None
 
     async def _build_heartbeat_context_packet(
         self,
@@ -3851,6 +4429,77 @@ class GatewayRuntime:
         )
         next_fire_at = self._heartbeat_next_fire_at(heartbeat=heartbeat)
         return status, summary, next_fire_at
+
+    def create_event_automation(
+        self,
+        *,
+        automation_id: str | None = None,
+        event_type: str,
+        label: str | None,
+        raw_instruction: str,
+        condition: dict[str, Any] | None = None,
+        action: dict[str, Any] | None = None,
+        approval_policy: dict[str, Any] | None = None,
+        status: str = "active",
+        created_by: str | None = None,
+        created_request_id: str | None = None,
+        created_session_id: str | None = None,
+        created_channel: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_event_type = self._safe_text(event_type) or "gmail.inbound"
+        normalized_instruction = self._safe_text(raw_instruction)
+        if not normalized_instruction:
+            raise ValueError("raw_instruction is required")
+        normalized_status = self._safe_text(status) or "active"
+        if normalized_status not in {"active", "paused", "inactive"}:
+            raise ValueError("status must be one of: active, paused, inactive")
+        automation = self.event_automation_store.create_or_update_automation(
+            {
+                "automation_id": self._safe_text(automation_id),
+                "event_type": normalized_event_type,
+                "label": self._safe_text(label),
+                "raw_instruction": normalized_instruction,
+                "condition": condition or {},
+                "action": action or {},
+                "approval_policy": approval_policy or {},
+                "status": normalized_status,
+                "created_by": self._safe_text(created_by) or "orchestrator",
+                "created_request_id": self._safe_text(created_request_id),
+                "created_session_id": self._safe_text(created_session_id),
+                "created_channel": self._safe_text(created_channel),
+            }
+        )
+        return automation
+
+    def list_event_automations(
+        self,
+        *,
+        event_type: str | None = None,
+        status: str | None = "active",
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        return self.event_automation_store.list_automations(
+            event_type=self._safe_text(event_type),
+            status=self._safe_text(status) or "active",
+            limit=max(1, min(200, self._coerce_int(limit) or 50)),
+        )
+
+    def get_event_automation(self, automation_id: str) -> dict[str, Any] | None:
+        return self.event_automation_store.get_automation(automation_id)
+
+    def set_event_automation_status(
+        self,
+        *,
+        automation_id: str,
+        status: str,
+    ) -> dict[str, Any] | None:
+        normalized_status = self._safe_text(status) or "inactive"
+        if normalized_status not in {"active", "paused", "inactive"}:
+            raise ValueError("status must be one of: active, paused, inactive")
+        return self.event_automation_store.set_automation_status(
+            automation_id,
+            normalized_status,
+        )
 
     async def create_scheduler_cron(
         self,

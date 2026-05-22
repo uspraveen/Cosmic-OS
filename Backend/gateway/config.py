@@ -174,6 +174,7 @@ class GatewayConfig:
     email_agent_id: str = "cosmic/email-agent:1.0.0"
     gmail_agent_id: str = "cosmic/gmail-agent:1.0.0"
     gmail_context_db_path: Path = BACKEND_ROOT / "gateway" / "gmail_context.db"
+    event_automation_db_path: Path = BACKEND_ROOT / "gateway" / "event_automations.db"
     gmail_webhook_secret: str = ""
     gmail_process_inbound_timeout_sec: float = 180.0
     gmail_process_inbound_poll_interval_sec: float = 0.25
@@ -595,6 +596,12 @@ class GatewayConfig:
                 os.getenv(
                     "GATEWAY_GMAIL_CONTEXT_DB_PATH",
                     str(BACKEND_ROOT / "gateway" / "gmail_context.db"),
+                )
+            ).expanduser(),
+            event_automation_db_path=Path(
+                os.getenv(
+                    "GATEWAY_EVENT_AUTOMATION_DB_PATH",
+                    str(BACKEND_ROOT / "gateway" / "event_automations.db"),
                 )
             ).expanduser(),
             gmail_webhook_secret=(
