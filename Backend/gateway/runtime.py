@@ -2133,7 +2133,7 @@ class GatewayRuntime:
             "a lightweight web, Perplexity, X, Firecrawl, memory, or specialist check. "
             "Use specialist/local tools when a check would materially improve the heartbeat. "
             "Never narrate planned checks. If a check is still pending, inconclusive, or only confirms "
-            f"that nothing changed, respond exactly {HEARTBEAT_SUPPRESS_TOKEN}. "
+            "that nothing changed, choose the suppress decision. "
             "If the context includes a Calendar Digest, it may contain both new and already-seen "
             "events across multiple accounts/calendars. Do not speak just because an event exists; "
             "prioritize new, changed, imminent, preparation-heavy, or user-goal-relevant events, "
@@ -2148,9 +2148,13 @@ class GatewayRuntime:
             "read it when continuity matters, append or replace short watchpoints, and remove stale notes. "
             "Use the best COSMIC-owned "
             "delivery path available; if a proactive item is better sent as email, you may use Cosmic Mail "
-            "or email capabilities when available. If there is nothing useful enough to interrupt for, "
-            f"respond exactly {HEARTBEAT_SUPPRESS_TOKEN} and nothing else. If there is something useful, "
-            "respond with a short, concrete, low-drama note; do not say this came from a heartbeat. "
+            "or email capabilities when available. "
+            "Your final response must be one JSON object and nothing else. Do not use Markdown. "
+            "Schema: {\"decision\":\"suppress\"|\"deliver\",\"message\":\"\",\"reason\":\"\","
+            "\"confidence\":0.0,\"pending_checks\":[],\"notes\":\"\"}. "
+            "For suppress, message must be empty. For deliver, message must be the exact short, "
+            "concrete, low-drama note to show the user. "
+            "Do not say this came from a heartbeat. "
             "Do not repeat the last delivered heartbeat note unless something material changed. "
             "Treat historical delivery-queue deadletters as diagnostic background, not a reason to speak; "
             "surface delivery-queue issues when there are pending items, new deadletters since the "
@@ -13658,12 +13662,18 @@ class GatewayRuntime:
         elif event_type == "response.complete":
             event_channel = self._safe_text(event.get("channel")) or ""
             is_heartbeat_response = self._is_heartbeat_event(event)
-            if self._is_heartbeat_noop_response(event):
+            heartbeat_decision = (
+                self._parse_heartbeat_decision(event)
+                if is_heartbeat_response
+                else None
+            )
+            if heartbeat_decision and heartbeat_decision["decision"] == "suppress":
                 if request_id:
                     self._record_heartbeat_outcome(
                         request_id=request_id,
                         status="suppressed",
-                        summary="Heartbeat found nothing useful enough to surface.",
+                        summary=self._safe_text(heartbeat_decision.get("reason"))
+                        or "Heartbeat found nothing useful enough to surface.",
                     )
                     self._heartbeat_activity_by_request_id.pop(request_id, None)
                 self._trace_request_event(
@@ -13675,11 +13685,15 @@ class GatewayRuntime:
                     stage="response",
                     status="suppressed",
                     title="Heartbeat suppressed",
-                    detail=HEARTBEAT_SUPPRESS_TOKEN,
+                    detail=self._safe_text(heartbeat_decision.get("reason"))
+                    or HEARTBEAT_SUPPRESS_TOKEN,
                     task_id=task_id,
                     completed=False,
                 )
                 return
+            if heartbeat_decision and heartbeat_decision["decision"] == "deliver":
+                event["content"] = self._safe_text(heartbeat_decision.get("message"))
+                event["heartbeat_decision"] = heartbeat_decision
             if is_heartbeat_response:
                 duplicate_summary = self._heartbeat_duplicate_response_summary(
                     event.get("content"),
@@ -13796,6 +13810,9 @@ class GatewayRuntime:
                     "thinking_text": self._safe_text(event.get("thinking_text")),
                     "source": self._safe_text(event.get("source")),
                     "source_id": self._safe_text(event.get("source_id")),
+                    "heartbeat_decision": heartbeat_decision
+                    if is_heartbeat_response
+                    else None,
                     "research_provenance": research_provenance,
                     "sources": self._normalize_source_list(
                         event.get("sources")
@@ -14118,6 +14135,111 @@ class GatewayRuntime:
             )
             is not None
         )
+
+    def _parse_heartbeat_decision(self, event: dict[str, Any]) -> dict[str, Any]:
+        if not self._is_heartbeat_event(event):
+            return {
+                "decision": "suppress",
+                "reason": "not_heartbeat_event",
+                "message": "",
+            }
+        content = self._safe_text(event.get("content")) or ""
+        payload = self._parse_json_object_from_text(content)
+        if payload is None:
+            if self._is_heartbeat_noop_response(event):
+                return {
+                    "decision": "suppress",
+                    "reason": "legacy_heartbeat_ok",
+                    "message": "",
+                    "confidence": 1.0,
+                    "pending_checks": [],
+                    "notes": "",
+                    "raw_format": "legacy_token",
+                }
+            return {
+                "decision": "suppress",
+                "reason": "invalid_heartbeat_decision_envelope",
+                "message": "",
+                "confidence": 0.0,
+                "pending_checks": [],
+                "notes": "",
+                "raw_format": "invalid",
+            }
+        decision = self._safe_text(payload.get("decision")).lower()
+        if decision not in {"suppress", "deliver"}:
+            return {
+                "decision": "suppress",
+                "reason": "invalid_heartbeat_decision",
+                "message": "",
+                "confidence": 0.0,
+                "pending_checks": [],
+                "notes": "",
+                "raw_format": "json",
+            }
+        message = self._safe_text(payload.get("message"))
+        reason = self._safe_text(payload.get("reason"))
+        pending_checks = (
+            [
+                self._safe_text(item)
+                for item in payload.get("pending_checks")
+                if self._safe_text(item)
+            ]
+            if isinstance(payload.get("pending_checks"), list)
+            else []
+        )
+        confidence_raw = payload.get("confidence")
+        try:
+            confidence = max(0.0, min(1.0, float(confidence_raw)))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if decision == "deliver" and not message:
+            return {
+                "decision": "suppress",
+                "reason": reason or "deliver_decision_missing_message",
+                "message": "",
+                "confidence": confidence,
+                "pending_checks": pending_checks,
+                "notes": self._safe_text(payload.get("notes")),
+                "raw_format": "json",
+            }
+        if decision == "suppress":
+            message = ""
+        return {
+            "decision": decision,
+            "message": message,
+            "reason": reason,
+            "confidence": confidence,
+            "pending_checks": pending_checks,
+            "notes": self._safe_text(payload.get("notes")),
+            "raw_format": "json",
+        }
+
+    def _parse_json_object_from_text(self, text: str) -> dict[str, Any] | None:
+        candidate = self._safe_text(text)
+        if not candidate:
+            return None
+        candidate = candidate.strip()
+        if candidate.startswith("```"):
+            lines = candidate.splitlines()
+            if lines and lines[0].strip().startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            candidate = "\n".join(lines).strip()
+        try:
+            parsed = json.loads(candidate)
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            pass
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        try:
+            parsed = json.loads(candidate[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
     def _collect_heartbeat_activity_event(self, event: dict[str, Any]) -> None:
         request_id = self._safe_text(event.get("request_id"))

@@ -11,9 +11,10 @@ The heartbeat should look wider than calendars and inboxes. It should consider a
 - Runs every 30 minutes by default.
 - User can turn it on or off from Settings -> Preferences.
 - Heartbeat prompts are never appended as user messages to chat history.
-- If nothing is worth surfacing, the orchestrator must respond exactly `heartbeat_ok`.
-- `heartbeat_ok` is suppressed by Gateway and is not stored, streamed, pushed, or shown.
-- If there is something useful, COSMIC sends a short, concrete proactive note through the normal response pipeline.
+- The orchestrator must return a structured heartbeat decision envelope as a single JSON object.
+- `decision="suppress"` is suppressed by Gateway and is not stored, streamed, pushed, or shown.
+- `decision="deliver"` with a non-empty `message` sends that message as a short, concrete proactive note through the normal response pipeline.
+- Invalid or malformed heartbeat envelopes are suppressed by default. Proactive systems should fail quiet rather than leak private scheduler reasoning.
 - Heartbeat is low priority and must not interfere with foreground user work.
 - Heartbeat may inspect state and use tools when justified. It may choose the best COSMIC-owned delivery path, including chat, mobile push, or email, when that channel is the clearest way to help the user.
 
@@ -76,9 +77,12 @@ read it when continuity matters, append or replace short watchpoints, and remove
 stale notes.
 Use the best COSMIC-owned delivery path available; if a proactive item is better
 sent as email, use Cosmic Mail or email capabilities when available.
-If there is nothing useful enough to interrupt for, respond exactly heartbeat_ok and nothing else.
-If there is something useful, respond with a short, concrete, low-drama note;
-do not say this came from a heartbeat.
+Your final response must be one JSON object and nothing else. Do not use Markdown.
+Schema:
+{"decision":"suppress"|"deliver","message":"","reason":"","confidence":0.0,"pending_checks":[],"notes":""}
+For suppress, message must be empty.
+For deliver, message must be the exact short, concrete, low-drama note to show the user.
+Do not say this came from a heartbeat.
 ```
 
 The model must treat the heartbeat itself and the context packet as scheduler-owned private state, not as a user message or user request to quote back.
@@ -95,7 +99,10 @@ Gateway owns the schedule because Gateway already owns sessions, delivery, prefe
 - Gateway resolves delivery at run time: active desktop first, then active mobile, then the latest mobile push target, then queued desktop fallback.
 - `visual_response_enhancement_enabled` is disabled for heartbeat turns unless explicitly changed later.
 - Heartbeat response chunks and progress are not streamed live; useful final responses still retain their compact Flow/activity log for later inspection.
-- `heartbeat_ok` final responses are suppressed before session storage, push, delivery queue, and UI display.
+- Gateway parses the final heartbeat JSON decision before storage or delivery.
+- `decision="suppress"` responses are suppressed before session storage, push, delivery queue, and UI display.
+- `decision="deliver"` responses are reduced to the validated `message` field before they enter the normal response pipeline.
+- Malformed envelopes are suppressed. The legacy `heartbeat_ok` token remains supported only as a backward-compatibility fallback.
 
 ## Heartbeat Notes
 
