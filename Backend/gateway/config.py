@@ -176,6 +176,7 @@ class GatewayConfig:
     gmail_webhook_secret: str = ""
     gmail_process_inbound_timeout_sec: float = 180.0
     gmail_process_inbound_poll_interval_sec: float = 0.25
+    gmail_watch_renewal_interval_sec: float = 21_600.0
     calendar_agent_id: str = "cosmic/calendar-agent:1.0.0"
     email_process_inbound_timeout_sec: float = 180.0
     email_process_inbound_poll_interval_sec: float = 0.25
@@ -601,6 +602,10 @@ class GatewayConfig:
             gmail_process_inbound_poll_interval_sec=max(
                 0.05,
                 _env_float("GATEWAY_GMAIL_PROCESS_INBOUND_POLL_INTERVAL_SEC", 0.25),
+            ),
+            gmail_watch_renewal_interval_sec=max(
+                3600.0,
+                _env_float("GATEWAY_GMAIL_WATCH_RENEWAL_INTERVAL_SEC", 21_600.0),
             ),
             calendar_agent_id=(
                 os.getenv(

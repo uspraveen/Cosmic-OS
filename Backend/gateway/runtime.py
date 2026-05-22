@@ -394,6 +394,7 @@ class GatewayRuntime:
         self._delivery_wakeup = asyncio.Event()
         self._scheduler_worker: asyncio.Task[None] | None = None
         self._scheduler_wakeup = asyncio.Event()
+        self._gmail_watch_renewal_worker: asyncio.Task[None] | None = None
         self._task_input_worker: asyncio.Task[None] | None = None
         self._specialist_event_worker: asyncio.Task[None] | None = None
         self._rollover_finalize_lock = asyncio.Lock()
@@ -475,6 +476,10 @@ class GatewayRuntime:
             self._scheduler_loop(),
             name="gateway-scheduler",
         )
+        self._gmail_watch_renewal_worker = asyncio.create_task(
+            self._gmail_watch_renewal_loop(),
+            name="gateway-gmail-watch-renewal",
+        )
         if self._redis is not None:
             self._task_input_worker = asyncio.create_task(
                 self._task_input_consumer_loop(),
@@ -506,6 +511,12 @@ class GatewayRuntime:
             self._scheduler_worker.cancel()
             await asyncio.gather(self._scheduler_worker, return_exceptions=True)
             self._scheduler_worker = None
+        if self._gmail_watch_renewal_worker is not None:
+            self._gmail_watch_renewal_worker.cancel()
+            await asyncio.gather(
+                self._gmail_watch_renewal_worker, return_exceptions=True
+            )
+            self._gmail_watch_renewal_worker = None
         if self._task_input_worker is not None:
             self._task_input_worker.cancel()
             await asyncio.gather(self._task_input_worker, return_exceptions=True)
@@ -2868,6 +2879,80 @@ class GatewayRuntime:
             timeout_sec=self.config.gmail_process_inbound_timeout_sec,
             poll_interval_sec=self.config.gmail_process_inbound_poll_interval_sec,
         )
+
+    async def _gmail_watch_renewal_loop(self) -> None:
+        try:
+            await asyncio.sleep(15.0)
+            await self._sync_enabled_gmail_watches(reason="startup")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("gateway.gmail_watch_startup_sync_failed")
+
+        while True:
+            try:
+                await asyncio.sleep(self.config.gmail_watch_renewal_interval_sec)
+                await self._sync_enabled_gmail_watches(reason="periodic")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("gateway.gmail_watch_periodic_sync_failed")
+
+    async def _sync_enabled_gmail_watches(self, *, reason: str) -> None:
+        if self._redis is None:
+            logger.debug("gateway.gmail_watch_sync_skipped redis_unavailable")
+            return
+        gmail_scope = "https://www.googleapis.com/auth/gmail.modify"
+        accounts = [
+            account
+            for account in self.credential_manager.list_accounts("google")
+            if self._safe_text(account.get("status")) == "active"
+            and bool(account.get("has_refresh_token"))
+            and self._google_account_has_tool(account, "gmail")
+            and gmail_scope in set(account.get("granted_scopes") or [])
+        ]
+        if not accounts:
+            return
+        for account in accounts:
+            account_id = self._safe_text(account.get("account_id"))
+            if not account_id:
+                continue
+            try:
+                result = await self.sync_gmail_watch_for_account(account_id)
+            except Exception:
+                logger.exception(
+                    "gateway.gmail_watch_sync_failed account_id=%s reason=%s",
+                    account_id,
+                    reason,
+                )
+                continue
+            status = self._safe_text(result.get("status"))
+            error = result.get("error") if isinstance(result.get("error"), dict) else {}
+            error_code = self._safe_text(error.get("code"))
+            error_message = self._safe_text(result.get("error_message"))
+            if status == "completed":
+                logger.info(
+                    "gateway.gmail_watch_synced account_id=%s reason=%s",
+                    account_id,
+                    reason,
+                )
+            elif (
+                error_code == "CONFIG_REQUIRED"
+                or "GMAIL_WATCH_TOPIC_NAME" in error_message
+            ):
+                logger.debug(
+                    "gateway.gmail_watch_sync_skipped account_id=%s reason=%s missing_topic=true",
+                    account_id,
+                    reason,
+                )
+            else:
+                logger.warning(
+                    "gateway.gmail_watch_sync_unsuccessful account_id=%s reason=%s status=%s error=%s",
+                    account_id,
+                    reason,
+                    status or "unknown",
+                    error_message or error_code or "unknown",
+                )
 
     async def _dispatch_gmail_process_inbound(
         self,

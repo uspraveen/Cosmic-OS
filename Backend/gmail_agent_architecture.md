@@ -149,6 +149,7 @@ Watch lifecycle:
 
 - Google OAuth connect or enabling the Gmail tool schedules `gmail.sync_watch`.
 - Disabling the Gmail toggle or disconnecting a Google account calls `gmail.stop_watch` before Gmail use is disabled/revoked.
+- Gateway periodically renews enabled Gmail watches with `gmail.sync_watch` so watch expiration does not silently disable inbound Gmail awareness.
 - Heartbeats only use Gmail accounts whose Gmail tool is enabled.
 
 COSMIC must not pretend webhook delivery is active unless the VM has a Pub/Sub topic configured in `GMAIL_WATCH_TOPIC_NAME` and the Pub/Sub push subscription points at the Gateway endpoint above. Until then, explicit triage and morning briefing scans can provide inbox awareness; heartbeat reconciliation should remain cheap and state-based.
