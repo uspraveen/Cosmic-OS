@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "topic_name": { "type": "string" },
+    "label_ids": { "type": "array", "items": { "type": "string" } },
+    "account_id": { "type": "string" },
+    "account_hint": { "type": "string" }
+  }
+}

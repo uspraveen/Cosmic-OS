@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["status", "account"],
+  "properties": {
+    "status": { "type": "string" },
+    "account": { "type": "object" },
+    "topic_name": { "type": "string" },
+    "label_ids": { "type": "array", "items": { "type": "string" } },
+    "history_id": { "type": ["string", "null"] },
+    "expiration": { "type": ["string", "number", "null"] }
+  }
+}

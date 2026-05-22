@@ -1,0 +1,197 @@
+agent_id: cosmic/gmail-agent:1.0.0
+display_name: Gmail Agent
+description: >
+  Specialist agent for user-owned Gmail and Google Workspace inboxes. Handles
+  searching, reading threads, LLM-based inbox triage, Gmail draft creation,
+  heartbeat digests, and learned sender/domain prefilters across connected
+  Google accounts.
+
+intents:
+  - name: gmail.search
+    description: Search Gmail messages by natural Gmail query, sender, subject, unread state, or date filters.
+    input_schema: schemas/intents/gmail.search.input.json
+    output_schema: schemas/intents/gmail.search.output.json
+    timeout_sec: 60
+    usage_hints:
+      - Use this for user-owned Gmail inbox searches, not Cosmic Mail.
+      - Pass account hints naturally when the user mentions work, personal, or a specific email account.
+      - Return compact results with account identity; do not paste full message bodies unless requested.
+
+  - name: gmail.read_thread
+    description: Read and normalize a full Gmail thread by thread_id or message_id.
+    input_schema: schemas/intents/gmail.read_thread.input.json
+    output_schema: schemas/intents/gmail.read_thread.output.json
+    timeout_sec: 60
+    usage_hints:
+      - Use this when the user asks what a Gmail conversation says or needs exact thread context.
+      - Gmail threads are the canonical conversation unit; prefer thread reads over isolated message reads.
+
+  - name: gmail.triage_inbox
+    description: LLM-triage recent Gmail inbox items, using learned sender/domain prefilters before model calls.
+    input_schema: schemas/intents/gmail.triage_inbox.input.json
+    output_schema: schemas/intents/gmail.triage_inbox.output.json
+    timeout_sec: 90
+    usage_hints:
+      - Use this for inbox triage, prioritization, spam/noise detection, morning briefings, and "what needs my attention" requests.
+      - Spam/noise judgment is owned by the Gmail agent LLM; deterministic prefilters are only learned shortcuts for repeated senders/domains.
+      - The agent may update its sender prefilter for high-confidence recurring noise.
+
+  - name: gmail.draft_reply
+    description: Create a Gmail draft for a new message or reply to an existing thread; sending remains approval-gated.
+    input_schema: schemas/intents/gmail.draft_reply.input.json
+    output_schema: schemas/intents/gmail.draft_reply.output.json
+    timeout_sec: 90
+    usage_hints:
+      - Use this for Gmail compose/reply requests.
+      - Creating a draft is allowed; actual sending requires explicit user approval or a future Gmail-specific approval surface.
+      - Include thread_id or message_id when replying to an existing Gmail thread.
+
+  - name: gmail.process_inbound
+    description: Process an inbound Gmail notification or known message/thread reference.
+    input_schema: schemas/intents/gmail.process_inbound.input.json
+    output_schema: schemas/intents/gmail.process_inbound.output.json
+    timeout_sec: 90
+    usage_hints:
+      - Use this from Gateway push/poll notifications when Gmail changes arrive.
+      - If only history_id is present, pair it with stored account cursor support; if message_id/thread_id is present, read that thread directly.
+
+  - name: gmail.heartbeat_digest
+    description: Reconcile cached Gmail triage state for COSMIC heartbeats without re-triaging the inbox by default.
+    input_schema: schemas/intents/gmail.heartbeat_digest.input.json
+    output_schema: schemas/intents/gmail.heartbeat_digest.output.json
+    timeout_sec: 45
+    usage_hints:
+      - Gateway/orchestrator uses this before heartbeat turns to find bounded, already-triaged actionable inbox items.
+      - Do not run live LLM inbox triage on every heartbeat; prefer cached triage from webhook/inbound processing and explicit triage runs.
+      - Use allow_live_check only for small reconciliation fallbacks when webhook/cursor state is unavailable or stale.
+      - Return an empty items list when there is nothing cached worth surfacing.
+      - Preserve account identity on every item because users may connect multiple Gmail accounts.
+
+  - name: gmail.morning_briefing_digest
+    description: Run a deliberate broader Gmail scan for morning briefings.
+    input_schema: schemas/intents/gmail.morning_briefing_digest.input.json
+    output_schema: schemas/intents/gmail.morning_briefing_digest.output.json
+    timeout_sec: 120
+    usage_hints:
+      - Use this for scheduled morning briefings, daily inbox summaries, or explicit "brief my inbox" requests.
+      - Unlike heartbeat reconciliation, this may run live LLM triage over a bounded overnight/recent inbox window.
+      - Preserve account identity on every item because users may connect multiple Gmail accounts.
+
+  - name: gmail.manage_prefilter
+    description: List, add, or remove learned Gmail sender/domain prefilters.
+    input_schema: schemas/intents/gmail.manage_prefilter.input.json
+    output_schema: schemas/intents/gmail.manage_prefilter.output.json
+    timeout_sec: 30
+    usage_hints:
+      - Use this when the user explicitly asks to ignore, unignore, block, unblock, or list learned Gmail sender/domain prefilters.
+      - This is not the primary spam classifier; the LLM is. Prefilters only skip repeated known noise.
+
+  - name: gmail.sync_watch
+    description: Register or renew a Gmail users.watch push notification subscription when Pub/Sub is configured.
+    input_schema: schemas/intents/gmail.sync_watch.input.json
+    output_schema: schemas/intents/gmail.sync_watch.output.json
+    timeout_sec: 45
+    usage_hints:
+      - Use only when GMAIL_WATCH_TOPIC_NAME or input.topic_name is configured.
+      - Gmail push requires Google Cloud Pub/Sub topic permissions outside COSMIC.
+
+  - name: gmail.recall_session
+    description: Recall previous Gmail-agent runs from the private session ledger.
+    input_schema: schemas/intents/gmail.recall_session.input.json
+    output_schema: schemas/intents/gmail.recall_session.output.json
+    timeout_sec: 30
+    usage_hints:
+      - Recall prior Gmail work when an answer needs exact reuse of a previous Gmail-agent result.
+
+auth_requirements:
+  gmail.search:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/gmail.modify
+  gmail.read_thread:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/gmail.modify
+  gmail.triage_inbox:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/gmail.modify
+  gmail.draft_reply:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/gmail.modify
+  gmail.process_inbound:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/gmail.modify
+  gmail.heartbeat_digest:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/gmail.modify
+  gmail.morning_briefing_digest:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/gmail.modify
+  gmail.sync_watch:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/gmail.modify
+
+artifact_types:
+  - gmail_thread_snapshot
+  - gmail_triage_digest
+  - gmail_draft
+  - gmail_prefilter
+
+policies:
+  network_access: true
+  writable_paths:
+    - runs/artifacts
+    - agents/gmail_agent/store
+    - agents/gmail_agent/runtime
+  tool_access: []
+  allowed_senders:
+    - cosmic/orchestrator:1.0.0
+    - cosmic/gateway:1.0.0
+  intent_authorization:
+    gmail.search: [cosmic/orchestrator:1.0.0]
+    gmail.read_thread: [cosmic/orchestrator:1.0.0]
+    gmail.triage_inbox: [cosmic/orchestrator:1.0.0]
+    gmail.draft_reply: [cosmic/orchestrator:1.0.0]
+    gmail.process_inbound: [cosmic/gateway:1.0.0, cosmic/orchestrator:1.0.0]
+    gmail.heartbeat_digest: [cosmic/gateway:1.0.0, cosmic/orchestrator:1.0.0]
+    gmail.morning_briefing_digest: [cosmic/gateway:1.0.0, cosmic/orchestrator:1.0.0]
+    gmail.manage_prefilter: [cosmic/orchestrator:1.0.0]
+    gmail.sync_watch: [cosmic/orchestrator:1.0.0]
+    gmail.recall_session: [cosmic/orchestrator:1.0.0]
+
+sla:
+  max_concurrency: 2
+  heartbeat_interval_sec: 10
+  heartbeat_ttl_sec: 30
+  max_task_duration_sec: 180
+  health_endpoint: /health
+  retry_policy:
+    max_attempts: 3
+    backoff: exponential
+    backoff_base_sec: 2
+    backoff_max_sec: 60
+    retryable_codes:
+      - TIMEOUT
+      - NETWORK_ERROR
+      - RATE_LIMITED
+    non_retryable_codes:
+      - INVALID_INPUT
+      - AUTH_ERROR
+      - CONFIG_REQUIRED
+      - SCHEMA_VIOLATION
+      - INTERNAL_ERROR
+
+stream_key: streams:cosmic/gmail-agent:1.0.0
+
+version_info:
+  semver: 1.0.0
+  released_at: "2026-05-21"
+  deprecated_at: null
+  remove_after: null
+  changelog: CHANGELOG.md

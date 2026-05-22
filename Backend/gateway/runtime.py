@@ -135,6 +135,15 @@ SYSTEM_CRON_DAILY_ROLLOVER = "system.daily_rollover"
 HEARTBEAT_SOURCE_ID = "default"
 HEARTBEAT_SUPPRESS_TOKEN = "heartbeat_ok"
 HEARTBEAT_NOTES_CHAR_LIMIT = 4000
+# Heartbeats get two very different kinds of context:
+# - durable context: compaction, memory, task notebooks, active working set
+# - raw chat tail: a short-lived temporal grounding aid
+#
+# This limit applies only to raw role/content snippets so a scheduler-triggered
+# heartbeat cannot mistake an old user utterance for the current prompt. It does
+# not affect 4AM rollover, compaction, task notebooks, passive memory retrieval,
+# or active working-set carry-forward.
+HEARTBEAT_RAW_CONVERSATION_TAIL_MAX_AGE_SEC = 12 * 60 * 60
 TURN_LEDGER_WINDOW_SIZE = 10
 TASK_NOTEBOOK_WINDOW_SIZE = 5
 TASK_ACTIVITY_LOG_LIMIT = 64
@@ -1551,11 +1560,15 @@ class GatewayRuntime:
             return None
         snapshot: dict[str, Any] = {}
         goal = self._safe_text(working_set.get("goal"))
-        if goal:
+        if goal and not self._is_ephemeral_working_set_goal(goal):
             snapshot["goal"] = self._bounded_excerpt(goal, limit=240)
-        active_workstreams = self._normalize_string_list(
-            working_set.get("active_workstreams"), limit=4
-        )
+        active_workstreams = [
+            item
+            for item in self._normalize_string_list(
+                working_set.get("active_workstreams"), limit=4
+            )
+            if not self._is_ephemeral_working_set_goal(item)
+        ]
         if active_workstreams:
             snapshot["active_workstreams"] = active_workstreams
         open_loops = self._normalize_string_list(working_set.get("open_loops"), limit=4)
@@ -1576,6 +1589,15 @@ class GatewayRuntime:
                 or "entity"
                 for item in focus_entities
             ]
+        last_updated_at = self._safe_text(working_set.get("last_updated_at"))
+        if last_updated_at:
+            snapshot["last_updated_at"] = last_updated_at
+        turn_window_start = self._safe_text(working_set.get("turn_window_start_at"))
+        turn_window_end = self._safe_text(working_set.get("turn_window_end_at"))
+        if turn_window_start:
+            snapshot["turn_window_start_at"] = turn_window_start
+        if turn_window_end:
+            snapshot["turn_window_end_at"] = turn_window_end
         return snapshot or None
 
     def _build_scheduler_context_packet(
@@ -1881,6 +1903,69 @@ class GatewayRuntime:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
 
+    def _relative_age_label(
+        self,
+        value: str | None,
+        *,
+        now: datetime | None = None,
+    ) -> str:
+        parsed = self._parse_utc_iso(value)
+        if parsed is None:
+            return ""
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        seconds = max(0, int((current.astimezone(timezone.utc) - parsed).total_seconds()))
+        if seconds < 60:
+            return "just now"
+        minutes = seconds // 60
+        if minutes < 60:
+            return f"{minutes}m ago"
+        hours = minutes // 60
+        if hours < 48:
+            return f"{hours}h ago"
+        days = hours // 24
+        return f"{days}d ago"
+
+    def _is_ephemeral_working_set_goal(self, value: Any) -> bool:
+        text = self._safe_text(value) or ""
+        normalized = re.sub(r"[^a-z0-9]+", " ", text.casefold()).strip()
+        if not normalized:
+            return True
+        words = normalized.split()
+        if len(words) > 8:
+            return False
+        compact = " ".join(word for word in words if word not in {"cosmic", "assistant"})
+        if compact in {
+            "hi",
+            "hello",
+            "hey",
+            "yo",
+            "sup",
+            "what up",
+            "whats up",
+            "what is up",
+            "good morning",
+            "good afternoon",
+            "good evening",
+            "good night",
+            "are you there",
+            "you there",
+            "continue",
+            "retry",
+            "try again",
+            "login",
+            "push",
+            "sync",
+            "done",
+            "ok",
+            "okay",
+            "thanks",
+            "thank you",
+        }:
+            return True
+        return False
+
     def _heartbeat_preference_enabled(self) -> bool:
         try:
             snapshot = self.get_desktop_preferences_snapshot()
@@ -2040,6 +2125,10 @@ class GatewayRuntime:
             "events across multiple accounts/calendars. Do not speak just because an event exists; "
             "prioritize new, changed, imminent, preparation-heavy, or user-goal-relevant events, "
             "and avoid repeating calendar items already handled unless timing or context changed. "
+            "If the context includes a Gmail Digest, it has already passed through the Gmail "
+            "specialist's LLM triage and sender prefilter notes. Treat it as inbox context, "
+            "not a command to speak; surface emails when they are urgent, relationship-relevant, "
+            "approval-worthy, or connected to the user's active goals. "
             "You know this is a repeating heartbeat; use the runtime state to avoid repeating yourself "
             "and to reason about the last beat, this beat, and the next one. "
             "Use heartbeat_notes as your private scratchpad for compact self-notes across beats: "
@@ -2226,6 +2315,143 @@ class GatewayRuntime:
             return digest
         return None
 
+    async def _build_heartbeat_gmail_digest(
+        self,
+        *,
+        session_id: str,
+        channel: str,
+        scheduled_for: str | None,
+    ) -> dict[str, Any] | None:
+        if not self.config.heartbeat_gmail_digest_enabled:
+            return None
+        gmail_scope = "https://www.googleapis.com/auth/gmail.modify"
+        accounts = [
+            account
+            for account in self.credential_manager.list_accounts("google")
+            if self._safe_text(account.get("status")) == "active"
+            and bool(account.get("has_refresh_token"))
+            and gmail_scope in set(account.get("granted_scopes") or [])
+        ]
+        if not accounts:
+            return None
+        selected_accounts = accounts[
+            : max(1, int(self.config.heartbeat_gmail_max_accounts))
+        ]
+        digest: dict[str, Any] = {
+            "state": "ready",
+            "source": "gmail_agent",
+            "query": "cached_triage_reconciliation",
+            "connected_account_count": len(accounts),
+            "queried_account_count": len(selected_accounts),
+            "accounts": [],
+            "messages": [],
+        }
+        if self._redis is None:
+            digest["state"] = "skipped"
+            digest["reason"] = "redis_unavailable"
+            return digest
+
+        dispatch_inputs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for account in selected_accounts:
+            account_summary = self._heartbeat_gmail_account_summary(account)
+            try:
+                auth = await self.credential_manager.resolve_credential(
+                    provider="google",
+                    required_scopes=[gmail_scope],
+                    account_id=self._safe_text(account.get("account_id")),
+                    operation_mode="read",
+                    allow_primary_fallback=False,
+                )
+            except Exception as exc:
+                account_summary.update(
+                    {
+                        "status": "failed",
+                        "error": str(exc).strip()[:240],
+                    }
+                )
+                digest["accounts"].append(account_summary)
+                continue
+            if not auth:
+                account_summary.update(
+                    {
+                        "status": "needs_reconnect",
+                        "error": "Unable to resolve Gmail credential.",
+                    }
+                )
+                digest["accounts"].append(account_summary)
+                continue
+            dispatch_inputs.append((account_summary, auth))
+
+        async def dispatch_one(
+            account_summary: dict[str, Any],
+            auth: dict[str, Any],
+        ) -> dict[str, Any]:
+            try:
+                return await self._dispatch_gmail_heartbeat_digest(
+                    session_id=session_id,
+                    channel=channel,
+                    scheduled_for=scheduled_for,
+                    account_summary=account_summary,
+                    auth=auth,
+                )
+            except Exception as exc:
+                return {
+                    "account": {
+                        **account_summary,
+                        "status": "failed",
+                        "error": str(exc).strip()[:240],
+                    },
+                    "messages": [],
+                }
+
+        if dispatch_inputs:
+            results = await asyncio.gather(
+                *[
+                    dispatch_one(account_summary, auth)
+                    for account_summary, auth in dispatch_inputs
+                ]
+            )
+            for result in results:
+                account_summary = (
+                    result.get("account") if isinstance(result, dict) else {}
+                )
+                if isinstance(account_summary, dict):
+                    digest["accounts"].append(account_summary)
+                raw_messages = (
+                    result.get("messages") if isinstance(result, dict) else []
+                )
+                if isinstance(raw_messages, list):
+                    digest["messages"].extend(
+                        self._normalize_heartbeat_gmail_item(item)
+                        for item in raw_messages
+                        if isinstance(item, dict)
+                    )
+
+        digest["messages"] = [
+            item
+            for item in digest["messages"]
+            if isinstance(item, dict)
+            and self._safe_text(item.get("account_id"))
+            and self._safe_text(item.get("message_id"))
+        ]
+        digest["messages"].sort(
+            key=lambda item: (
+                self._safe_text(item.get("date")),
+                self._safe_text(item.get("from")),
+            ),
+            reverse=True,
+        )
+        digest["messages"] = digest["messages"][
+            : max(1, int(self.config.heartbeat_gmail_max_items))
+        ]
+        digest["message_count"] = len(digest["messages"])
+        digest["surfaceable_count"] = sum(
+            1 for item in digest["messages"] if bool(item.get("surface_to_user"))
+        )
+        if digest["accounts"] or digest["messages"]:
+            return digest
+        return None
+
     async def _dispatch_calendar_heartbeat_digest(
         self,
         *,
@@ -2298,6 +2524,75 @@ class GatewayRuntime:
             "events": events,
         }
 
+    async def _dispatch_gmail_heartbeat_digest(
+        self,
+        *,
+        session_id: str,
+        channel: str,
+        scheduled_for: str | None,
+        account_summary: dict[str, Any],
+        auth: dict[str, Any],
+    ) -> dict[str, Any]:
+        task = TaskEnvelope(
+            task_id=generate_task_id(),
+            task_list_id=session_id,
+            session_id=session_id,
+            sender="cosmic/gateway:1.0.0",
+            recipient=self.config.gmail_agent_id,
+            intent="gmail.heartbeat_digest",
+            input={
+                "mode": "reconcile",
+                "max_results": max(1, int(self.config.heartbeat_gmail_max_items)),
+                "max_items": max(1, int(self.config.heartbeat_gmail_max_items)),
+                "lookback_hours": 24,
+                "allow_live_check": False,
+                "account": account_summary,
+                "auth": auth,
+            },
+            input_artifacts=[],
+            idempotency_key=(
+                "heartbeat-gmail:"
+                f"{scheduled_for or 'unscheduled'}:"
+                f"{self._safe_text(account_summary.get('account_id'))}"
+            ),
+            priority="low",
+            signature="",
+            created_at=utcnow(),
+            source="heartbeat",
+            source_id=HEARTBEAT_SOURCE_ID,
+            channel=channel,
+        )
+        task = task.model_copy(
+            update={"signature": sign_task_envelope(task, self.config.signing_secret)}
+        )
+        await dispatch_task(task, self._redis)
+        result = await self._wait_for_agent_terminal_result(
+            task.task_id,
+            timeout_sec=float(self.config.heartbeat_gmail_agent_timeout_sec),
+            poll_interval_sec=0.25,
+        )
+        if self._safe_text(result.get("status")) != "completed":
+            return {
+                "account": {
+                    **account_summary,
+                    "status": self._safe_text(result.get("status")) or "failed",
+                    "error": self._safe_text(result.get("error_message")),
+                },
+                "messages": [],
+            }
+        output = result.get("output") if isinstance(result.get("output"), dict) else {}
+        messages = output.get("messages") if isinstance(output.get("messages"), list) else []
+        if not messages and isinstance(output.get("items"), list):
+            messages = output.get("items") or []
+        return {
+            "account": {
+                **account_summary,
+                "status": "ready",
+                "message_count": len(messages),
+            },
+            "messages": messages,
+        }
+
     def _heartbeat_calendar_account_summary(self, account: dict[str, Any]) -> dict[str, Any]:
         account_id = self._safe_text(account.get("account_id"))
         return {
@@ -2307,6 +2602,20 @@ class GatewayRuntime:
             or self._safe_text(account.get("email"))
             or account_id
             or "Google account",
+            "email": self._safe_text(account.get("email")),
+            "display_name": self._safe_text(account.get("display_name")),
+            "is_primary": bool(account.get("is_primary")),
+        }
+
+    def _heartbeat_gmail_account_summary(self, account: dict[str, Any]) -> dict[str, Any]:
+        account_id = self._safe_text(account.get("account_id"))
+        return {
+            "account_id": account_id,
+            "account_label": self._safe_text(account.get("account_label"))
+            or self._safe_text(account.get("display_name"))
+            or self._safe_text(account.get("email"))
+            or account_id
+            or "Gmail account",
             "email": self._safe_text(account.get("email")),
             "display_name": self._safe_text(account.get("display_name")),
             "is_primary": bool(account.get("is_primary")),
@@ -2340,6 +2649,38 @@ class GatewayRuntime:
             "calendar_primary": bool(event.get("calendar_primary")),
         }
 
+    def _normalize_heartbeat_gmail_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        message = item.get("message") if isinstance(item.get("message"), dict) else {}
+        return {
+            "message_id": self._safe_text(message.get("id"))
+            or self._safe_text(item.get("message_id")),
+            "thread_id": self._safe_text(message.get("thread_id"))
+            or self._safe_text(item.get("thread_id")),
+            "subject": self._safe_text(message.get("subject"))
+            or self._safe_text(item.get("subject"))
+            or "(no subject)",
+            "from": self._safe_text(message.get("from"))
+            or self._safe_text(item.get("from")),
+            "date": self._safe_text(message.get("date"))
+            or self._safe_text(item.get("date")),
+            "snippet": self._bounded_excerpt(
+                self._safe_text(message.get("snippet"))
+                or self._safe_text(item.get("snippet")),
+                limit=220,
+            ),
+            "category": self._safe_text(item.get("category")) or "unknown",
+            "confidence": item.get("confidence"),
+            "surface_to_user": bool(item.get("surface_to_user")),
+            "suggested_action": self._safe_text(item.get("suggested_action")),
+            "reason": self._bounded_excerpt(
+                self._safe_text(item.get("reason")),
+                limit=220,
+            ),
+            "account_id": self._safe_text(item.get("account_id")),
+            "account_label": self._safe_text(item.get("account_label")),
+            "email": self._safe_text(item.get("email")),
+        }
+
     async def _build_heartbeat_context_packet(
         self,
         *,
@@ -2349,6 +2690,16 @@ class GatewayRuntime:
     ) -> dict[str, Any]:
         session_id = self._current_session_id()
         session_metadata = self._ensure_session_state_seeded(session_id)
+        try:
+            working_set = self._refresh_active_working_set(session_id)
+            session_metadata = self.session_store.get_session_metadata(session_id)
+        except Exception:
+            logger.exception("gateway.heartbeat_working_set_refresh_failed")
+            working_set = (
+                session_metadata.get("active_working_set")
+                if isinstance(session_metadata.get("active_working_set"), dict)
+                else None
+            )
         heartbeat_state = self.scheduler_store.get_heartbeat()
         interval_sec = self._heartbeat_interval_sec(heartbeat_state)
         heartbeat_runtime = {
@@ -2388,19 +2739,31 @@ class GatewayRuntime:
         last_delivered_at = self._safe_text(
             last_delivered_at
         ) or self._safe_text(heartbeat_state.get("last_fired_at"))
+        now = datetime.now(timezone.utc)
         history = self.get_session_history(session_id)
         recent_messages: list[dict[str, str]] = []
         for item in history[-8:]:
             if not isinstance(item, dict):
                 continue
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            if self._safe_text(metadata.get("source")) == "heartbeat":
+                continue
             role = self._safe_text(item.get("role"))
             content = self._safe_text(item.get("content"))
             if role not in {"user", "assistant"} or not content:
                 continue
+            created_at = self._safe_text(item.get("created_at"))
+            created_dt = self._parse_utc_iso(created_at)
+            if created_dt is not None:
+                age_sec = (now - created_dt).total_seconds()
+                if age_sec > HEARTBEAT_RAW_CONVERSATION_TAIL_MAX_AGE_SEC:
+                    continue
             recent_messages.append(
                 {
                     "role": role,
                     "content": self._bounded_excerpt(content, limit=420) or "",
+                    "created_at": created_at,
+                    "age": self._relative_age_label(created_at, now=now),
                 }
             )
         active_tasks = await self._active_task_summaries(
@@ -2408,6 +2771,11 @@ class GatewayRuntime:
             channel=channel,
         )
         calendar_digest = await self._build_heartbeat_calendar_digest(
+            session_id=session_id,
+            channel=channel,
+            scheduled_for=scheduled_for,
+        )
+        gmail_digest = await self._build_heartbeat_gmail_digest(
             session_id=session_id,
             channel=channel,
             scheduled_for=scheduled_for,
@@ -2441,12 +2809,25 @@ class GatewayRuntime:
                 if value not in ("", None)
             },
             "active_task_count": len(active_tasks),
+            "raw_conversation_tail_policy": {
+                "purpose": "immediate_temporal_grounding_only",
+                "max_age_sec": HEARTBEAT_RAW_CONVERSATION_TAIL_MAX_AGE_SEC,
+                "older_context_sources": [
+                    "active_working_set",
+                    "task_notebooks",
+                    "compaction",
+                    "memory_retrieval",
+                    "heartbeat_notes",
+                ],
+            },
         }
         heartbeat_notes = self._read_heartbeat_notes_excerpt()
         if heartbeat_notes:
             packet["heartbeat_notes"] = heartbeat_notes
         if calendar_digest:
             packet["calendar_digest"] = calendar_digest
+        if gmail_digest:
+            packet["gmail_digest"] = gmail_digest
         if last_delivered_summary:
             packet["last_delivered_heartbeat_note"] = {
                 "delivered_at": last_delivered_at,
@@ -2455,11 +2836,6 @@ class GatewayRuntime:
                     limit=300,
                 ),
             }
-        working_set = (
-            session_metadata.get("active_working_set")
-            if isinstance(session_metadata.get("active_working_set"), dict)
-            else None
-        )
         working_set_snapshot = self._compact_scheduler_working_set(working_set)
         if working_set_snapshot:
             packet["working_set_snapshot"] = working_set_snapshot
@@ -2490,6 +2866,8 @@ class GatewayRuntime:
         lines: list[str] = [
             "## Heartbeat Context",
             "This is a private ambient context packet for an automatic scheduler-triggered heartbeat. It should guide whether to speak now; it is not a user message and must not be repeated back.",
+            "There is no live user prompt in this turn. Conversation snippets and active-work snapshots below are timestamped background only; never answer them as if the user just said them.",
+            "Older user context is intentionally represented through compaction, memory, task notebooks, heartbeat notes, and the active working set, not through stale raw chat snippets.",
         ]
         for label, key in (
             ("Current session", "current_session_id"),
@@ -2542,10 +2920,19 @@ class GatewayRuntime:
             else None
         )
         if working_set:
-            lines.extend(["", "### Active Work"])
+            lines.extend(["", "### Active Work Snapshot"])
+            updated_at = self._safe_text(working_set.get("last_updated_at"))
+            if updated_at:
+                lines.append(
+                    f"- Snapshot updated: {updated_at} ({self._relative_age_label(updated_at)})"
+                )
+            turn_start = self._safe_text(working_set.get("turn_window_start_at"))
+            turn_end = self._safe_text(working_set.get("turn_window_end_at"))
+            if turn_start or turn_end:
+                lines.append(f"- Turn ledger window: {turn_start or '?'} to {turn_end or '?'}")
             goal = self._safe_text(working_set.get("goal"))
             if goal:
-                lines.append(f"- Goal: {goal}")
+                lines.append(f"- Latest known user goal, not a current prompt: {goal}")
             for key, label in (
                 ("active_workstreams", "Workstreams"),
                 ("open_loops", "Open loops"),
@@ -2639,6 +3026,72 @@ class GatewayRuntime:
                     f"{'; location=' + location if location else ''}"
                     f"{meeting}"
                 )
+        gmail_digest = (
+            context_packet.get("gmail_digest")
+            if isinstance(context_packet.get("gmail_digest"), dict)
+            else {}
+        )
+        if gmail_digest:
+            lines.extend(["", "### Gmail Digest"])
+            lines.append(
+                "- Source: "
+                f"{self._safe_text(gmail_digest.get('source')) or 'gmail'}; "
+                f"state={self._safe_text(gmail_digest.get('state')) or 'unknown'}; "
+                f"query={self._safe_text(gmail_digest.get('query'))}"
+            )
+            lines.append(
+                "- Counts: "
+                f"accounts={int(gmail_digest.get('connected_account_count') or 0)}, "
+                f"queried={int(gmail_digest.get('queried_account_count') or 0)}, "
+                f"messages={int(gmail_digest.get('message_count') or 0)}, "
+                f"surfaceable={int(gmail_digest.get('surfaceable_count') or 0)}"
+            )
+            accounts = (
+                gmail_digest.get("accounts")
+                if isinstance(gmail_digest.get("accounts"), list)
+                else []
+            )
+            for account in accounts[:4]:
+                if not isinstance(account, dict):
+                    continue
+                label = (
+                    self._safe_text(account.get("account_label"))
+                    or self._safe_text(account.get("account_id"))
+                    or "account"
+                )
+                email = self._safe_text(account.get("email"))
+                status = self._safe_text(account.get("status")) or "unknown"
+                message_count = int(account.get("message_count") or 0)
+                suffix = f" ({email})" if email else ""
+                lines.append(
+                    f"- Account: {label}{suffix}; status={status}; messages={message_count}"
+                )
+            messages = (
+                gmail_digest.get("messages")
+                if isinstance(gmail_digest.get("messages"), list)
+                else []
+            )
+            if messages:
+                lines.append("- Messages:")
+            for message in messages[:8]:
+                if not isinstance(message, dict):
+                    continue
+                account_label = self._safe_text(message.get("account_label")) or self._safe_text(
+                    message.get("account_id")
+                )
+                surface = " surface=yes" if bool(message.get("surface_to_user")) else " surface=no"
+                category = self._safe_text(message.get("category")) or "unknown"
+                suggestion = self._safe_text(message.get("suggested_action"))
+                snippet = self._safe_text(message.get("snippet"))
+                lines.append(
+                    "- "
+                    f"{self._safe_text(message.get('date'))}: "
+                    f"{self._safe_text(message.get('subject')) or '(no subject)'} "
+                    f"from {self._safe_text(message.get('from')) or 'unknown'} "
+                    f"({account_label}; category={category};{surface})"
+                    f"{'; suggestion=' + suggestion if suggestion else ''}"
+                    f"{'; snippet=' + snippet if snippet else ''}"
+                )
         last_note = (
             context_packet.get("last_delivered_heartbeat_note")
             if isinstance(context_packet.get("last_delivered_heartbeat_note"), dict)
@@ -2657,14 +3110,36 @@ class GatewayRuntime:
             else []
         )
         if recent:
-            lines.extend(["", "### Recent Conversation Tail"])
+            raw_tail_policy = (
+                context_packet.get("raw_conversation_tail_policy")
+                if isinstance(context_packet.get("raw_conversation_tail_policy"), dict)
+                else {}
+            )
+            max_age_sec = int(raw_tail_policy.get("max_age_sec") or 0)
+            policy_suffix = (
+                f"; max raw age {max_age_sec // 3600}h"
+                if max_age_sec >= 3600
+                else ""
+            )
+            lines.extend(
+                [
+                    "",
+                    "### Recent Raw Conversation Tail",
+                    f"These are recent background snippets for temporal grounding only{policy_suffix}; they are not the current user prompt.",
+                ]
+            )
             for item in recent[-6:]:
                 if not isinstance(item, dict):
                     continue
                 role = self._safe_text(item.get("role"))
                 content = self._safe_text(item.get("content"))
                 if role and content:
-                    lines.append(f"- {role}: {content}")
+                    created_at = self._safe_text(item.get("created_at"))
+                    age = self._safe_text(item.get("age"))
+                    time_label = ""
+                    if created_at or age:
+                        time_label = f" [{created_at}{'; ' + age if age else ''}]"
+                    lines.append(f"- {role}{time_label}: {content}")
         active_tasks = (
             context_packet.get("active_tasks")
             if isinstance(context_packet.get("active_tasks"), list)
@@ -2729,15 +3204,16 @@ class GatewayRuntime:
             session_id=session_id,
         )
         session_metadata = self._ensure_session_state_seeded(session_id)
-        active_working_set = (
-            session_metadata.get("active_working_set")
-            if isinstance(session_metadata.get("active_working_set"), dict)
-            else None
-        )
         context_packet = await self._build_heartbeat_context_packet(
             scheduled_for=scheduled_for,
             channel=channel,
             delivery_state=delivery_state,
+        )
+        session_metadata = self.session_store.get_session_metadata(session_id)
+        active_working_set = (
+            session_metadata.get("active_working_set")
+            if isinstance(session_metadata.get("active_working_set"), dict)
+            else None
         )
         context_block = self._render_heartbeat_context_block(context_packet)
         memory_prompt_context = await self._assemble_memory_prompt_context(
@@ -6793,9 +7269,13 @@ class GatewayRuntime:
         session_artifacts = self.artifact_store.list_for_session(session_id, limit=24)
 
         active_task_refs = []
-        workstreams = self._normalize_string_list(
-            carry_forward.get("active_workstreams")
-        )
+        workstreams = [
+            item
+            for item in self._normalize_string_list(
+                carry_forward.get("active_workstreams")
+            )
+            if not self._is_ephemeral_working_set_goal(item)
+        ]
         recent_decisions: list[str] = []
         open_loops = self._normalize_string_list(carry_forward.get("open_loops"))
         entities = self._normalize_entity_list(
@@ -6812,17 +7292,33 @@ class GatewayRuntime:
         contested_keys, contested_ids, contested_claims = (
             self._active_contested_memory_refs(session_id)
         )
-        goal = self._safe_text(carry_forward.get("goal")) or ""
+        raw_carry_forward_goal = self._safe_text(carry_forward.get("goal")) or ""
+        carry_forward_goal = (
+            ""
+            if self._is_ephemeral_working_set_goal(raw_carry_forward_goal)
+            else raw_carry_forward_goal
+        )
+        latest_turn_goal = ""
+        turn_window_start_at = ""
+        turn_window_end_at = ""
         recent_research_receipts: list[dict[str, Any]] = []
         recent_specialist_receipts: list[dict[str, Any]] = []
         backgrounded_task_ids = self._backgrounded_active_task_ids(session_id)
 
         for turn in recent_turns:
-            if not goal:
-                goal = self._safe_text(turn.get("user_goal")) or ""
-            workstreams = self._normalize_string_list(
-                [*workstreams, self._safe_text(turn.get("user_goal"))], limit=8
-            )
+            turn_started_at = self._safe_text(turn.get("started_at"))
+            turn_completed_at = self._safe_text(turn.get("completed_at"))
+            if turn_started_at and not turn_window_start_at:
+                turn_window_start_at = turn_started_at
+            if turn_completed_at:
+                turn_window_end_at = turn_completed_at
+            turn_goal = self._safe_text(turn.get("user_goal")) or ""
+            goal_is_ephemeral = self._is_ephemeral_working_set_goal(turn_goal)
+            if turn_goal and not goal_is_ephemeral:
+                latest_turn_goal = turn_goal
+                workstreams = self._normalize_string_list(
+                    [*workstreams, turn_goal], limit=8
+                )
             recent_decisions = self._normalize_string_list(
                 [
                     *recent_decisions,
@@ -7048,6 +7544,7 @@ class GatewayRuntime:
             limit=8,
         )
 
+        goal = latest_turn_goal or carry_forward_goal
         working_set = {
             "session_id": session_id,
             "goal": goal,
@@ -7066,6 +7563,8 @@ class GatewayRuntime:
             "contested_memory_keys": sorted(contested_keys),
             "contested_memory_ids": sorted(contested_ids),
             "user_preferences_in_play": preferences,
+            "turn_window_start_at": turn_window_start_at,
+            "turn_window_end_at": turn_window_end_at,
             "last_updated_at": utcnow_iso(),
         }
         self.session_store.update_session_metadata(
@@ -13198,7 +13697,19 @@ class GatewayRuntime:
         return normalized
 
     def _is_heartbeat_event(self, event: dict[str, Any]) -> bool:
-        return self._safe_text(event.get("source")) == "heartbeat"
+        if self._safe_text(event.get("source")) == "heartbeat":
+            return True
+        request_id = self._safe_text(event.get("request_id"))
+        if request_id:
+            request_record = self.request_records.get(request_id)
+            if (
+                isinstance(request_record, dict)
+                and self._safe_text(request_record.get("source")) == "heartbeat"
+            ):
+                return True
+            if request_id.startswith("req_heartbeat_"):
+                return True
+        return False
 
     def _is_heartbeat_noop_response(self, event: dict[str, Any]) -> bool:
         if not self._is_heartbeat_event(event):

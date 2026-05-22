@@ -2066,6 +2066,94 @@ async def test_orchestrator_runtime_emits_x_search_sources_as_research_provenanc
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_runtime_keeps_heartbeat_tool_artifacts_internal(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_heartbeat_artifacts.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+
+    async def scripted_stream(**kwargs):
+        del kwargs
+        first_call = not getattr(scripted_stream, "_called", False)
+        scripted_stream._called = True  # type: ignore[attr-defined]
+        if first_call:
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 10}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "tool_x_heartbeat", "name": "x_search"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"query\":\"YC S26 invites\",\"max_posts\":8}"}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 4}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        else:
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 12}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "heartbeat_ok"}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 5}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        for event_name, payload in events:
+            yield type("SSE", (), {"event": event_name, "data": json.dumps(payload)})()
+
+    async def fake_execute(tool_name: str, tool_input: dict[str, object], *, context=None) -> str:
+        del context
+        assert tool_name == "x_search"
+        assert tool_input == {"query": "YC S26 invites", "max_posts": 8}
+        return json.dumps(
+            {
+                "summary": "No new YC S26 invite wave found.",
+                "artifacts": [
+                    {
+                        "artifact_id": "art_heartbeat_x_search_report",
+                        "filename": "x_search_report.md",
+                        "mime": "text/markdown",
+                        "kind": "file",
+                        "audience": "deliverable",
+                        "path": "runs/artifacts/heartbeat/x_search_report.md",
+                    }
+                ],
+            }
+        )
+
+    runtime._stream_anthropic_events = scripted_stream  # type: ignore[method-assign]
+    task = _signed_task("signing-secret").model_copy(
+        update={
+            "task_id": "tsk_heartbeat_artifacts",
+            "source": "heartbeat",
+            "source_id": "default",
+            "priority": "low",
+            "input": {
+                "query": "COSMIC HEARTBEAT",
+                "request_id": "req_heartbeat_artifacts",
+                "conversation_context": [],
+            },
+        }
+    )
+    task = task.model_copy(update={"signature": sign_task_envelope(task, "signing-secret")})
+
+    await runtime.start()
+    assert runtime._tool_executor is not None
+    runtime._tool_executor.execute = fake_execute  # type: ignore[method-assign]
+    try:
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+
+    complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert complete_event["source"] == "heartbeat"
+    assert complete_event["source_id"] == "default"
+    assert complete_event["content"] == "heartbeat_ok"
+    assert "produced_artifacts" not in complete_event
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_runtime_inherits_x_search_provenance_from_delegate_to_agent(tmp_path) -> None:
     client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
     config = OrchestratorConfig(

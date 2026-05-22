@@ -224,6 +224,16 @@ class FakeHeartbeatNoopOrchestratorClient(FakeOrchestratorClient):
             "content": "heartbeat_ok",
             "route": "opus",
             "awaiting_reply": False,
+            "produced_artifacts": [
+                {
+                    "artifact_id": "art_internal_x_search_report",
+                    "filename": "x_search_report.md",
+                    "mime": "text/markdown",
+                    "kind": "file",
+                    "audience": "deliverable",
+                    "path": "runs/artifacts/heartbeat/x_search_report.md",
+                }
+            ],
             "metrics": {"rtt_ms": 24},
         }
         yield {
@@ -4457,6 +4467,7 @@ async def test_runtime_due_heartbeat_suppresses_noop_and_does_not_append_history
         assert heartbeat["last_suppressed_at"] is not None
 
         assert runtime.get_session_history(task.session_id) == []
+        assert runtime.search_session_produced_artifacts(task.session_id)["results"] == []
         assert runtime._heartbeat_activity_by_request_id == {}  # noqa: SLF001 - verifies suppressed beats stay ephemeral
     finally:
         await runtime.stop()

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["status", "account", "messages", "count"],
+  "properties": {
+    "status": { "type": "string" },
+    "query": { "type": "string" },
+    "account": { "type": "object" },
+    "messages": { "type": "array", "items": { "type": "object" } },
+    "count": { "type": "integer" }
+  }
+}

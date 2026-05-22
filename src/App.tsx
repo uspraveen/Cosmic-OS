@@ -1,5 +1,5 @@
 import { ArrowDownToLine, ChevronDown, ChevronRight, Square, Terminal } from 'lucide-react'
-import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -1133,6 +1133,132 @@ const channelLabel = (ch: string | null | undefined): string | null => {
 /** Check if a message originated from a non-desktop channel. */
 const isExternalChannel = (msg: Message): boolean => {
   return channelLabel(msg.channel) !== null
+}
+
+const CHAT_READ_CURSORS_STORAGE_KEY = 'cosmic_chat_read_cursors_v1'
+
+interface ChatReadCursor {
+  messageId: string
+  createdAt?: string | null
+  updatedAt: string
+}
+
+const isReadableChatMessage = (message: Message | null | undefined): message is Message => (
+  Boolean(message?.id) &&
+  (message?.role === 'user' || message?.role === 'assistant') &&
+  message?.channel !== '__session_rollover__'
+)
+
+const readChatReadCursors = (): Record<string, ChatReadCursor> => {
+  try {
+    const raw = localStorage.getItem(CHAT_READ_CURSORS_STORAGE_KEY)
+    if (!raw) {
+      return {}
+    }
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {}
+    }
+    const cursors: Record<string, ChatReadCursor> = {}
+    for (const [sessionId, value] of Object.entries(parsed)) {
+      if (!value || typeof value !== 'object') {
+        continue
+      }
+      const messageId = String((value as any).messageId || '').trim()
+      if (!sessionId || !messageId) {
+        continue
+      }
+      cursors[sessionId] = {
+        messageId,
+        createdAt: typeof (value as any).createdAt === 'string' ? (value as any).createdAt : null,
+        updatedAt: typeof (value as any).updatedAt === 'string'
+          ? (value as any).updatedAt
+          : new Date().toISOString(),
+      }
+    }
+    return cursors
+  } catch {
+    return {}
+  }
+}
+
+const getChatReadCursor = (sessionId: string | null | undefined): ChatReadCursor | null => {
+  const normalizedSessionId = String(sessionId || '').trim()
+  if (!normalizedSessionId) {
+    return null
+  }
+  return readChatReadCursors()[normalizedSessionId] || null
+}
+
+const saveChatReadCursor = (sessionId: string | null | undefined, message: Message | null | undefined) => {
+  const normalizedSessionId = String(sessionId || '').trim()
+  if (!normalizedSessionId || !isReadableChatMessage(message)) {
+    return
+  }
+  try {
+    const cursors = readChatReadCursors()
+    const nextEntries = Object.entries({
+      ...cursors,
+      [normalizedSessionId]: {
+        messageId: message.id,
+        createdAt: message.createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    }).slice(-40)
+    localStorage.setItem(CHAT_READ_CURSORS_STORAGE_KEY, JSON.stringify(Object.fromEntries(nextEntries)))
+  } catch {
+    // best-effort UI state only
+  }
+}
+
+const latestReadableChatMessage = (messages: Message[]): Message | null => {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (isReadableChatMessage(messages[index])) {
+      return messages[index]
+    }
+  }
+  return null
+}
+
+const findUnreadBoundaryMessage = (messages: Message[], cursor: ChatReadCursor | null): Message | null => {
+  if (!cursor?.messageId) {
+    return null
+  }
+  const cursorIndex = messages.findIndex((message) => message.id === cursor.messageId)
+  if (cursorIndex >= 0) {
+    for (let index = cursorIndex + 1; index < messages.length; index += 1) {
+      if (!isReadableChatMessage(messages[index])) {
+        continue
+      }
+      const boundary = messages[index]
+      const previous = index > 0 ? messages[index - 1] : null
+      if (boundary.role === 'assistant' && isExternalChannel(boundary) && previous?.role === 'user' && isExternalChannel(previous)) {
+        return previous
+      }
+      return boundary
+    }
+    return null
+  }
+  const cursorTime = Date.parse(cursor.createdAt || '')
+  if (!Number.isFinite(cursorTime)) {
+    return null
+  }
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index]
+    if (!isReadableChatMessage(message)) {
+      continue
+    }
+    const messageTime = Date.parse(message.createdAt || '')
+    if (!Number.isFinite(messageTime) || messageTime <= cursorTime) {
+      continue
+    }
+    const previous = index > 0 ? messages[index - 1] : null
+    if (message.role === 'assistant' && isExternalChannel(message) && previous?.role === 'user' && isExternalChannel(previous)) {
+      return previous
+    }
+    return message
+  }
+  return null
 }
 
 const buildConversationContext = (messages: Message[]) => {
@@ -2389,10 +2515,12 @@ export default function App() {
   const cronResultStackRef = useRef<HTMLDivElement>(null)
   const responseEndRef = useRef<HTMLDivElement>(null)
   const responseContainerRef = useRef<HTMLDivElement>(null)
+  const unreadBoundaryRef = useRef<HTMLDivElement>(null)
   const modelDialSettleTimeoutRef = useRef<number | null>(null)
   const modelDialPulseTimeoutRef = useRef<number | null>(null)
   const modelDialWheelLockUntilRef = useRef(0)
   const surfaceLaunchResetTimeoutRef = useRef<number | null>(null)
+  const openUnreadScanTimeoutRef = useRef<number | null>(null)
   const meetingSurfaceRef = useRef<HTMLDivElement>(null)
   const spacesSurfaceRef = useRef<HTMLDivElement>(null)
   const activeAssistantMessageByRequestRef = useRef<Map<string, string>>(new Map())
@@ -2413,6 +2541,7 @@ export default function App() {
   const selectedModelRef = useRef<GatewayModelSelection>('cosmic')
   const seenCronResultKeysRef = useRef<Set<string>>(new Set())
   const seenArtifactReadyKeysRef = useRef<Set<string>>(new Set())
+  const unreadBoundaryMessageIdRef = useRef<string | null>(null)
 
   // Composer input is uncontrolled — browser holds the value natively via `inputRef`.
   // React only re-renders on the empty↔non-empty transition (via `hasText`), so individual
@@ -2452,6 +2581,7 @@ export default function App() {
   const [showScrollButton, setShowScrollButton] = useState(false)
   const [streamingProgress, setStreamingProgress] = useState('')
   const [expandedCrossChannelIds, setExpandedCrossChannelIds] = useState<Set<string>>(new Set())
+  const [unreadBoundaryMessageId, setUnreadBoundaryMessageId] = useState<string | null>(null)
 
   // --- AUTH STATE ---
   const [authState, setAuthState] = useState<'loading' | 'unauthenticated' | 'authenticated'>('loading')
@@ -2587,6 +2717,69 @@ export default function App() {
     attachments,
     ...overrides,
   })
+
+  const markChatReadThroughLatest = (items: Message[] = messagesRef.current) => {
+    const sessionId = activeSessionIdRef.current
+    const latest = latestReadableChatMessage(items)
+    if (!sessionId || !latest) {
+      return
+    }
+    saveChatReadCursor(sessionId, latest)
+  }
+
+  const scrollToUnreadBoundaryOrBottom = (behavior: ScrollBehavior = 'smooth') => {
+    if (modeRef.current !== 'chat') {
+      return
+    }
+    const sessionId = activeSessionIdRef.current
+    const currentMessages = messagesRef.current
+    const latest = latestReadableChatMessage(currentMessages)
+    if (!sessionId || !latest) {
+      setUnreadBoundaryMessageId(null)
+      shouldAutoScrollRef.current = true
+      return
+    }
+    const cursor = getChatReadCursor(sessionId)
+    if (!cursor) {
+      saveChatReadCursor(sessionId, latest)
+      setUnreadBoundaryMessageId(null)
+      shouldAutoScrollRef.current = true
+      responseEndRef.current?.scrollIntoView({ behavior })
+      return
+    }
+    const boundary = findUnreadBoundaryMessage(currentMessages, cursor)
+    if (!boundary) {
+      setUnreadBoundaryMessageId(null)
+      shouldAutoScrollRef.current = true
+      responseEndRef.current?.scrollIntoView({ behavior })
+      return
+    }
+    shouldAutoScrollRef.current = false
+    setShowScrollButton(currentMessages.length > 1)
+    setUnreadBoundaryMessageId(boundary.id)
+    window.setTimeout(() => {
+      unreadBoundaryRef.current?.scrollIntoView({
+        behavior,
+        block: 'start',
+      })
+    }, 40)
+  }
+
+  const scheduleOpenUnreadScan = (delayMs = 180, behavior: ScrollBehavior = 'smooth') => {
+    if (openUnreadScanTimeoutRef.current !== null) {
+      window.clearTimeout(openUnreadScanTimeoutRef.current)
+    }
+    openUnreadScanTimeoutRef.current = window.setTimeout(() => {
+      openUnreadScanTimeoutRef.current = null
+      scrollToUnreadBoundaryOrBottom(behavior)
+    }, delayMs)
+  }
+
+  const clearUnreadBoundaryAndMarkRead = () => {
+    markChatReadThroughLatest()
+    unreadBoundaryMessageIdRef.current = null
+    setUnreadBoundaryMessageId(null)
+  }
 
   const insertAssistantMessageAfterRequest = (
     current: Message[],
@@ -2832,7 +3025,6 @@ export default function App() {
   }
 
   const openChatFromCronNotification = () => {
-    shouldAutoScrollRef.current = true
     clearCronResultNotifications()
     modeRef.current = 'chat'
     setMode('chat')
@@ -2842,13 +3034,10 @@ export default function App() {
     } else {
       showChatComposer()
     }
-    window.setTimeout(() => {
-      responseEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-    }, 140)
+    scheduleOpenUnreadScan(180, 'smooth')
   }
 
   const openChatFromArtifactNotification = () => {
-    shouldAutoScrollRef.current = true
     clearArtifactReadyNotifications()
     modeRef.current = 'chat'
     setMode('chat')
@@ -2858,9 +3047,7 @@ export default function App() {
     } else {
       showChatComposer()
     }
-    window.setTimeout(() => {
-      responseEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-    }, 140)
+    scheduleOpenUnreadScan(180, 'smooth')
   }
 
   const triggerModelDialPulse = (model: GatewayModelSelection) => {
@@ -3448,6 +3635,19 @@ export default function App() {
   }, [messages])
 
   useEffect(() => {
+    unreadBoundaryMessageIdRef.current = unreadBoundaryMessageId
+  }, [unreadBoundaryMessageId])
+
+  useEffect(() => {
+    if (!unreadBoundaryMessageId) {
+      return
+    }
+    if (!messages.some((message) => message.id === unreadBoundaryMessageId)) {
+      setUnreadBoundaryMessageId(null)
+    }
+  }, [messages, unreadBoundaryMessageId])
+
+  useEffect(() => {
     backgroundTasksRef.current = backgroundTasks
   }, [backgroundTasks])
 
@@ -3471,6 +3671,9 @@ export default function App() {
     return () => {
       if (modelDialPulseTimeoutRef.current !== null) {
         window.clearTimeout(modelDialPulseTimeoutRef.current)
+      }
+      if (openUnreadScanTimeoutRef.current !== null) {
+        window.clearTimeout(openUnreadScanTimeoutRef.current)
       }
     }
   }, [])
@@ -3588,6 +3791,7 @@ export default function App() {
   }
 
   const showChatComposer = () => {
+    const previousMode = modeRef.current
     hideHoverTooltip()
     clearCronResultNotifications()
     modeRef.current = 'chat'
@@ -3600,6 +3804,9 @@ export default function App() {
       inputRef.current.style.height = '24px'
       inputRef.current.focus()
     }, 10)
+    if (previousMode !== 'chat') {
+      scheduleOpenUnreadScan(180, 'smooth')
+    }
   }
 
   const maybeRequestGatewayResumeOnShow = () => {
@@ -3774,6 +3981,10 @@ export default function App() {
   // --- VISIBILITY HANDLERS ---
   const performHide = () => {
     hideHoverTooltip()
+    if (modeRef.current === 'chat' && shouldAutoScrollRef.current) {
+      markChatReadThroughLatest()
+      setUnreadBoundaryMessageId(null)
+    }
     setSearchState('hiding')
     setIsInputFocused(false)
     clearSurfaceLaunch()
@@ -3796,11 +4007,7 @@ export default function App() {
       }
       void syncForegroundStreamsFromGatewayState()
       maybeRequestGatewayResumeOnShow()
-      // Scroll to bottom (or streaming point) on every reopen
-      shouldAutoScrollRef.current = true
-      window.setTimeout(() => {
-        responseEndRef.current?.scrollIntoView({ behavior: 'instant' })
-      }, 80)
+      scheduleOpenUnreadScan(520, 'instant')
     }
     const off1 = window.cosmic?.onShown(handleShown)
     const off2 = window.cosmic?.onHiding(performHide)
@@ -3903,6 +4110,9 @@ export default function App() {
             historyTail: Array.isArray(event.history_tail) ? event.history_tail : [],
             clearIfNone: true,
           })
+        }
+        if (searchStateRef.current === 'visible' && modeRef.current === 'chat') {
+          scheduleOpenUnreadScan(120, 'instant')
         }
         return
       }
@@ -4790,6 +5000,8 @@ export default function App() {
     const userMessage = createUserMessage(displayText, messageAttachments, { requestId })
     clearComposerInput()
     shouldAutoScrollRef.current = true
+    saveChatReadCursor(activeSessionIdRef.current, userMessage)
+    setUnreadBoundaryMessageId(null)
 
     setMessages(prev => [...prev, userMessage])
     if (authState !== 'authenticated') {
@@ -5229,11 +5441,21 @@ export default function App() {
     const isNearBottom = distanceFromBottom < 50
     shouldAutoScrollRef.current = isNearBottom
     setShowScrollButton(!isNearBottom && messages.length > 1)
+    if (isNearBottom && searchStateRef.current === 'visible' && modeRef.current === 'chat') {
+      clearUnreadBoundaryAndMarkRead()
+    }
   }
 
   useEffect(() => {
     if (shouldAutoScrollRef.current) {
       responseEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+      if (searchStateRef.current === 'visible' && modeRef.current === 'chat') {
+        markChatReadThroughLatest(messages)
+        if (unreadBoundaryMessageIdRef.current) {
+          unreadBoundaryMessageIdRef.current = null
+          setUnreadBoundaryMessageId(null)
+        }
+      }
     }
   }, [messages, isStreaming])
 
@@ -6148,6 +6370,19 @@ export default function App() {
                       )
                     }
 
+                    const unreadDivider = unreadBoundaryMessageId === msg.id ? (
+                      <div
+                        ref={unreadBoundaryRef}
+                        className="chat-unread-divider"
+                        role="separator"
+                        aria-label="New unread messages"
+                      >
+                        <span className="chat-unread-divider-line" aria-hidden />
+                        <span className="chat-unread-divider-label">New messages</span>
+                        <span className="chat-unread-divider-line" aria-hidden />
+                      </div>
+                    ) : null
+
                     // Cross-channel messages: show as collapsible row with channel badge
                     const extLabel = channelLabel(msg.channel)
                     if (extLabel && msg.role === 'user') {
@@ -6156,7 +6391,9 @@ export default function App() {
                       const pairedResponse = messages[idx + 1]?.role === 'assistant' && isExternalChannel(messages[idx + 1])
                         ? messages[idx + 1] : null
                       return (
-                        <div key={msg.id} className="cross-channel-group" style={{ marginBottom: 16 }}>
+                        <Fragment key={msg.id}>
+                          {unreadDivider}
+                        <div className="cross-channel-group" style={{ marginBottom: 16 }}>
                           <button
                             className="cross-channel-bar"
                             onClick={() => setExpandedCrossChannelIds((prev) => {
@@ -6235,13 +6472,14 @@ export default function App() {
                             </div>
                           )}
                         </div>
+                        </Fragment>
                       )
                     }
                     // Skip assistant messages that belong to a cross-channel pair (rendered above with their user message)
                     if (extLabel && msg.role === 'assistant') {
                       const prevMsg = idx > 0 ? messages[idx - 1] : null
                       if (prevMsg && prevMsg.role === 'user' && isExternalChannel(prevMsg)) {
-                        return null // Already rendered as part of the collapsed group
+                        return unreadDivider ? <Fragment key={msg.id}>{unreadDivider}</Fragment> : null // Already rendered as part of the collapsed group
                       }
                     }
                     const activeRequestId = String(activeStreamingRequestIdRef.current || '').trim()
@@ -6258,7 +6496,9 @@ export default function App() {
                     )
 
                     return (
-                    <div key={msg.id} className={`message-row ${msg.role}`} style={{ marginBottom: 24, display: 'flex', flexDirection: 'column', alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
+                    <Fragment key={msg.id}>
+                    {unreadDivider}
+                    <div className={`message-row ${msg.role}`} style={{ marginBottom: 24, display: 'flex', flexDirection: 'column', alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
 
                     {msg.role === 'user' ? (
                         <>
@@ -6430,6 +6670,7 @@ export default function App() {
                         </>
                       )}
                     </div>
+                    </Fragment>
                     )
                   })}
 

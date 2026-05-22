@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": ["reconcile", "live_check"],
+      "default": "reconcile",
+      "description": "Heartbeat should normally reconcile cached triage state. live_check allows a tiny live inbox triage fallback."
+    },
+    "query": { "type": "string", "description": "Bounded Gmail query used only when allow_live_check is true." },
+    "context_brief": { "type": "string" },
+    "max_items": { "type": "integer", "minimum": 1, "maximum": 12, "default": 6 },
+    "lookback_hours": { "type": "integer", "minimum": 1, "maximum": 168, "default": 24 },
+    "allow_live_check": { "type": "boolean", "default": false },
+    "account_id": { "type": "string" },
+    "account_hint": { "type": "string" }
+  }
+}

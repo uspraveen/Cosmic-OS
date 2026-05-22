@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["status", "account", "items"],
+  "properties": {
+    "status": { "type": "string" },
+    "account": { "type": "object" },
+    "query": { "type": "string" },
+    "llm_used": { "type": "boolean" },
+    "summary": { "type": "string" },
+    "items": { "type": "array", "items": { "type": "object" } },
+    "skipped_by_prefilter": { "type": "array", "items": { "type": "object" } },
+    "added_prefilters": { "type": "array", "items": { "type": "object" } }
+  }
+}

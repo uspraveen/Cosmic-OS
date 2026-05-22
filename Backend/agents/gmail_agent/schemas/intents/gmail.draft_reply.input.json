@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "request": { "type": "string", "description": "Natural-language drafting request." },
+    "query": { "type": "string" },
+    "thread_id": { "type": "string" },
+    "message_id": { "type": "string" },
+    "to": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }] },
+    "cc": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }] },
+    "bcc": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }] },
+    "subject": { "type": "string" },
+    "body": { "type": "string" },
+    "context_brief": { "type": "string" },
+    "account_id": { "type": "string" },
+    "account_hint": { "type": "string" }
+  }
+}

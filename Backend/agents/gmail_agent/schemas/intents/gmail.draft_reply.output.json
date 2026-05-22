@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["status", "account", "draft_id", "approval_required"],
+  "properties": {
+    "status": { "type": "string" },
+    "account": { "type": "object" },
+    "draft_id": { "type": ["string", "null"] },
+    "message": { "type": "object" },
+    "approval_required": { "type": "boolean" },
+    "delivery_status": { "type": "string" },
+    "draft": { "type": "object" },
+    "notes": { "type": "string" }
+  }
+}

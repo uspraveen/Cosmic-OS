@@ -109,6 +109,10 @@ CALENDAR_AGENT_ENV_NAME = "calendar-agent.env"
 CALENDAR_AGENT_SERVICE_NAME = "cosmic-calendar-agent.service"
 CALENDAR_AGENT_ID = "cosmic/calendar-agent:1.0.0"
 CALENDAR_AGENT_DEFAULT_INSTANCE_ID = "calendar-agent-1"
+GMAIL_AGENT_ENV_NAME = "gmail-agent.env"
+GMAIL_AGENT_SERVICE_NAME = "cosmic-gmail-agent.service"
+GMAIL_AGENT_ID = "cosmic/gmail-agent:1.0.0"
+GMAIL_AGENT_DEFAULT_INSTANCE_ID = "gmail-agent-1"
 DIAGRAM_AGENT_ENV_NAME = "diagram-agent.env"
 DIAGRAM_AGENT_SERVICE_NAME = "cosmic-diagram-agent.service"
 DIAGRAM_AGENT_ID = "cosmic/diagram-agent:1.0.0"
@@ -140,6 +144,7 @@ CORE_BACKEND_SERVICE_UNITS = (
     "cosmic-docs-parser-agent.service",
     "cosmic-tabular-agent.service",
     "cosmic-calendar-agent.service",
+    "cosmic-gmail-agent.service",
     "cosmic-diagram-agent.service",
     "cosmic-map-agent.service",
     "cosmic-slide-agent.service",
@@ -1957,6 +1962,143 @@ def read_calendar_agent_system_env(
     return parse_env_text(read_text_file(env_path, use_sudo=True))
 
 
+def gmail_agent_repo_dir() -> Path:
+    return BACKEND_ROOT / "agents" / "gmail_agent"
+
+
+def gmail_agent_repo_env_path() -> Path:
+    return gmail_agent_repo_dir() / "agent.env"
+
+
+def gmail_agent_repo_env_example_path() -> Path:
+    return gmail_agent_repo_dir() / "agent.env.example"
+
+
+def gmail_agent_system_env_path(system_env_dir: Optional[Path] = None) -> Path:
+    system_env_dir = system_env_dir or DEFAULT_SYSTEM_ENV_DIR
+    return system_env_dir / "agents" / GMAIL_AGENT_ENV_NAME
+
+
+def resolve_gmail_agent_env_source() -> Path:
+    repo_env = gmail_agent_repo_env_path()
+    if repo_env.exists():
+        return repo_env
+    return gmail_agent_repo_env_example_path()
+
+
+def build_gmail_agent_env_rendered(
+    *,
+    signing_secret: str,
+    shared_internal_token: str,
+    system_env_dir: Optional[Path] = None,
+    existing_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+    external_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Tuple[Path, str, Dict[str, str]]:
+    source_path = resolve_gmail_agent_env_source()
+    source_raw = source_path.read_text(encoding="utf-8")
+    source_data = parse_env_text(source_raw)
+    existing_env = (existing_env_by_name or {}).get(GMAIL_AGENT_ENV_NAME, {})
+    external_env = (external_env_by_name or {}).get(GMAIL_AGENT_ENV_NAME, {})
+
+    def pick(key: str, default: Optional[str] = None) -> Optional[str]:
+        return first_meaningful_value(
+            external_env.get(key),
+            existing_env.get(key),
+            source_data.get(key),
+            default,
+        )
+
+    internal_llm_api_key = first_meaningful_value(
+        external_env.get("GMAIL_AGENT_INTERNAL_LLM_API_KEY"),
+        external_env.get("OPENAI_COMPAT_API_KEY"),
+        existing_env.get("GMAIL_AGENT_INTERNAL_LLM_API_KEY"),
+        existing_env.get("OPENAI_COMPAT_API_KEY"),
+        source_data.get("GMAIL_AGENT_INTERNAL_LLM_API_KEY"),
+        source_data.get("OPENAI_COMPAT_API_KEY"),
+    )
+    internal_llm_base_url = first_meaningful_value(
+        external_env.get("GMAIL_AGENT_INTERNAL_LLM_BASE_URL"),
+        external_env.get("OPENAI_COMPAT_BASE_URL"),
+        existing_env.get("GMAIL_AGENT_INTERNAL_LLM_BASE_URL"),
+        existing_env.get("OPENAI_COMPAT_BASE_URL"),
+        source_data.get("GMAIL_AGENT_INTERNAL_LLM_BASE_URL"),
+        source_data.get("OPENAI_COMPAT_BASE_URL"),
+    )
+
+    overrides = {
+        "REDIS_URL": pick("REDIS_URL", "redis://127.0.0.1:6379/0")
+        or "redis://127.0.0.1:6379/0",
+        "GATEWAY_URL": pick("GATEWAY_URL", "http://127.0.0.1:8080")
+        or "http://127.0.0.1:8080",
+        "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
+        "AGENT_SECRET": signing_secret,
+        "INSTANCE_ID": pick("INSTANCE_ID", GMAIL_AGENT_DEFAULT_INSTANCE_ID)
+        or GMAIL_AGENT_DEFAULT_INSTANCE_ID,
+        "GMAIL_AGENT_ENABLED": pick("GMAIL_AGENT_ENABLED", "true") or "true",
+        "GMAIL_AGENT_INTERNAL_LLM_MODEL": pick(
+            "GMAIL_AGENT_INTERNAL_LLM_MODEL", "gpt-5-mini"
+        )
+        or "gpt-5-mini",
+        "GMAIL_AGENT_INTERNAL_LLM_TIMEOUT_SEC": pick(
+            "GMAIL_AGENT_INTERNAL_LLM_TIMEOUT_SEC", "90.0"
+        )
+        or "90.0",
+        "GMAIL_AGENT_ENABLE_INTERNAL_LLM": pick(
+            "GMAIL_AGENT_ENABLE_INTERNAL_LLM", "true"
+        )
+        or "true",
+        "GMAIL_AGENT_MAX_SEARCH_RESULTS": pick("GMAIL_AGENT_MAX_SEARCH_RESULTS", "10")
+        or "10",
+        "GMAIL_AGENT_MAX_TRIAGE_MESSAGES": pick(
+            "GMAIL_AGENT_MAX_TRIAGE_MESSAGES", "12"
+        )
+        or "12",
+        "GMAIL_AGENT_MAX_THREAD_MESSAGES": pick(
+            "GMAIL_AGENT_MAX_THREAD_MESSAGES", "40"
+        )
+        or "40",
+        "GMAIL_AGENT_MAX_BODY_CHARS": pick("GMAIL_AGENT_MAX_BODY_CHARS", "6000")
+        or "6000",
+        "GMAIL_AGENT_MAX_DIGEST_ITEMS": pick("GMAIL_AGENT_MAX_DIGEST_ITEMS", "6")
+        or "6",
+        "GMAIL_AGENT_AUTO_PREFILTER_HIGH_CONFIDENCE_NOISE": pick(
+            "GMAIL_AGENT_AUTO_PREFILTER_HIGH_CONFIDENCE_NOISE", "true"
+        )
+        or "true",
+        "GMAIL_AGENT_PREFILTER_CONFIDENCE_THRESHOLD": pick(
+            "GMAIL_AGENT_PREFILTER_CONFIDENCE_THRESHOLD", "0.92"
+        )
+        or "0.92",
+        "GMAIL_WATCH_TOPIC_NAME": pick("GMAIL_WATCH_TOPIC_NAME", "") or "",
+        "GMAIL_WATCH_LABEL_IDS": pick("GMAIL_WATCH_LABEL_IDS", "INBOX") or "INBOX",
+        "GMAIL_WEBHOOK_SECRET": pick("GMAIL_WEBHOOK_SECRET", "") or "",
+    }
+    if internal_llm_api_key is not None:
+        overrides["GMAIL_AGENT_INTERNAL_LLM_API_KEY"] = internal_llm_api_key
+    if internal_llm_base_url is not None:
+        overrides["GMAIL_AGENT_INTERNAL_LLM_BASE_URL"] = internal_llm_base_url
+
+    rendered = render_env_with_overrides(source_raw, overrides)
+    rendered_data = parse_env_text(rendered)
+    return gmail_agent_system_env_path(system_env_dir), rendered, rendered_data
+
+
+def read_gmail_agent_system_env(
+    system_env_dir: Optional[Path] = None,
+) -> Dict[str, str]:
+    env_path = gmail_agent_system_env_path(system_env_dir)
+    if not env_path.exists():
+        return {}
+    return parse_env_text(read_text_file(env_path, use_sudo=True))
+
+
+def gmail_agent_is_configured(env_values: Dict[str, str]) -> bool:
+    enabled = str(env_values.get("GMAIL_AGENT_ENABLED") or "").strip().lower()
+    if enabled in {"1", "true", "yes", "on"}:
+        return True
+    return meaningful_env_value(env_values.get("GMAIL_AGENT_INTERNAL_LLM_API_KEY")) is not None
+
+
 def diagram_agent_repo_dir() -> Path:
     return BACKEND_ROOT / "agents" / "diagram_agent"
 
@@ -3079,6 +3221,9 @@ def normalize_bootstrap_env_payload(
     email_agent_env = {}
     if isinstance(payload.get("email_agent_env"), dict):
         email_agent_env = dict(payload.get("email_agent_env") or {})
+    gmail_agent_env = {}
+    if isinstance(payload.get("gmail_agent_env"), dict):
+        gmail_agent_env = dict(payload.get("gmail_agent_env") or {})
     image_generator_agent_env = {}
     if isinstance(payload.get("image_generator_agent_env"), dict):
         image_generator_agent_env = dict(payload.get("image_generator_agent_env") or {})
@@ -3149,6 +3294,8 @@ def normalize_bootstrap_env_payload(
         normalized[TABULAR_AGENT_ENV_NAME] = tabular_agent_env
     if email_agent_env:
         normalized[EMAIL_AGENT_ENV_NAME] = email_agent_env
+    if gmail_agent_env:
+        normalized[GMAIL_AGENT_ENV_NAME] = gmail_agent_env
     if image_generator_agent_env:
         normalized[IMAGE_GENERATOR_AGENT_ENV_NAME] = image_generator_agent_env
     required_fields = {
@@ -4683,6 +4830,25 @@ def materialize_bootstrap_env_files(
         )
     )
 
+    gmail_repo_path = gmail_agent_repo_env_path()
+    _gmail_dest_path, gmail_rendered, _gmail_env = build_gmail_agent_env_rendered(
+        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+        shared_internal_token=overrides_by_dest["gateway.env"][
+            "GATEWAY_INTERNAL_TOKEN"
+        ],
+        system_env_dir=system_env_dir,
+        existing_env_by_name=existing_env_by_name,
+        external_env_by_name=external_env_by_name,
+    )
+    gmail_repo_path.parent.mkdir(parents=True, exist_ok=True)
+    gmail_repo_path.write_text(gmail_rendered, encoding="utf-8")
+    written.append(gmail_repo_path)
+    log(
+        "Materialized repo env file from bootstrap inputs: {0}".format(
+            gmail_repo_path
+        )
+    )
+
     diagram_repo_path = diagram_agent_repo_env_path()
     _diagram_dest_path, diagram_rendered, _diagram_env = (
         build_diagram_agent_env_rendered(
@@ -4950,6 +5116,21 @@ def install_service_env_files(
         )
         installed.append(calendar_dest_path)
         log("Installed system env file: {0}".format(calendar_dest_path))
+
+    gmail_dest_path, gmail_rendered, _gmail_env = build_gmail_agent_env_rendered(
+        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+        shared_internal_token=overrides_by_dest["gateway.env"][
+            "GATEWAY_INTERNAL_TOKEN"
+        ],
+        system_env_dir=system_env_dir,
+    )
+    run(["install", "-d", "-m", "755", str(gmail_dest_path.parent)], use_sudo=True)
+    if gmail_dest_path.exists():
+        log("System env file already exists: {0}".format(gmail_dest_path))
+    else:
+        install_text_file(gmail_dest_path, gmail_rendered, mode="600", use_sudo=True)
+        installed.append(gmail_dest_path)
+        log("Installed system env file: {0}".format(gmail_dest_path))
 
     diagram_dest_path, diagram_rendered, _diagram_env = (
         build_diagram_agent_env_rendered(
@@ -5950,6 +6131,32 @@ def sync_service_env_files(
         )
         if changed_keys:
             synced.append(calendar_dest_path)
+    gmail_dest_path = gmail_agent_system_env_path(system_env_dir)
+    if gmail_dest_path.exists():
+        gmail_existing_by_name: Dict[str, Dict[str, str]] = {
+            GMAIL_AGENT_ENV_NAME: parse_env_text(
+                read_text_file(gmail_dest_path, use_sudo=True)
+            ),
+        }
+        _gmail_dest_path, gmail_rendered, _gmail_env = build_gmail_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"][
+                "GATEWAY_SIGNING_SECRET"
+            ],
+            shared_internal_token=overrides_by_dest["gateway.env"][
+                "GATEWAY_INTERNAL_TOKEN"
+            ],
+            system_env_dir=system_env_dir,
+            existing_env_by_name=gmail_existing_by_name,
+        )
+        changed_keys = sync_env_file(
+            gmail_dest_path,
+            source_raw=gmail_rendered,
+            create_missing=False,
+            use_sudo=True,
+            mode="600",
+        )
+        if changed_keys:
+            synced.append(gmail_dest_path)
     diagram_dest_path = diagram_agent_system_env_path(system_env_dir)
     if diagram_dest_path.exists():
         diagram_existing_by_name: Dict[str, Dict[str, str]] = {
@@ -6608,6 +6815,7 @@ def run_post_provision_health_checks(
     include_x_twitter_search_agent: bool = False,
     include_tabular_agent: bool = True,
     include_email_agent: bool = False,
+    include_gmail_agent: bool = False,
     include_image_generator_agent: bool = False,
     include_diagram_agent: bool = False,
     include_map_agent: bool = False,
@@ -6696,6 +6904,18 @@ def run_post_provision_health_checks(
         )
         wait_for_orchestrator_agent_ready(
             EMAIL_AGENT_ID,
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+
+    if include_gmail_agent:
+        wait_for_systemd_unit_active(
+            GMAIL_AGENT_SERVICE_NAME,
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+        wait_for_orchestrator_agent_ready(
+            GMAIL_AGENT_ID,
             timeout_sec=timeout_sec,
             poll_interval_sec=poll_interval_sec,
         )
@@ -7000,6 +7220,21 @@ def provision_vm(
         log(
             "Email agent env is not configured; bootstrap will install the unit but skip enabling the email agent service."
         )
+    gmail_env = read_gmail_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+    enable_gmail_agent = gmail_agent_is_configured(gmail_env)
+    if enable_gmail_agent:
+        if meaningful_env_value(gmail_env.get("GMAIL_AGENT_INTERNAL_LLM_API_KEY")) is not None:
+            log(
+                "Gmail agent env is configured with internal LLM credentials; bootstrap will enable and start the Gmail agent service."
+            )
+        else:
+            log(
+                "Gmail agent env is enabled without an internal LLM key; bootstrap will still start the Gmail agent for deterministic Gmail actions."
+            )
+    else:
+        log(
+            "Gmail agent is installed but disabled; set GMAIL_AGENT_ENABLED=true to enable the Gmail agent service."
+        )
     image_env = read_image_generator_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
     enable_image_generator_agent = image_generator_agent_is_configured(image_env)
     if enable_image_generator_agent:
@@ -7080,6 +7315,11 @@ def provision_vm(
                 else []
             )
             + (
+                [GMAIL_AGENT_SERVICE_NAME]
+                if enable_units and enable_gmail_agent
+                else []
+            )
+            + (
                 [IMAGE_GENERATOR_AGENT_SERVICE_NAME]
                 if enable_units and enable_image_generator_agent
                 else []
@@ -7114,6 +7354,7 @@ def provision_vm(
             include_x_twitter_search_agent=enable_x_twitter_search_agent,
             include_tabular_agent=enable_tabular_agent,
             include_email_agent=enable_email_agent,
+            include_gmail_agent=enable_gmail_agent,
             include_image_generator_agent=enable_image_generator_agent,
             include_diagram_agent=enable_diagram_agent,
             include_map_agent=enable_map_agent,
@@ -7405,6 +7646,8 @@ def main() -> int:
             enable_tabular_agent = True
             email_env = read_email_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
             enable_email_agent = email_agent_enabled_via_env_or_integration(email_env)
+            gmail_env = read_gmail_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+            enable_gmail_agent = gmail_agent_is_configured(gmail_env)
             image_env = read_image_generator_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
             enable_image_generator_agent = image_generator_agent_is_configured(
                 image_env
@@ -7454,6 +7697,11 @@ def main() -> int:
                         else []
                     )
                     + (
+                        [GMAIL_AGENT_SERVICE_NAME]
+                        if enable_gmail_agent and bool(getattr(args, "enable", False))
+                        else []
+                    )
+                    + (
                         [IMAGE_GENERATOR_AGENT_SERVICE_NAME]
                         if enable_image_generator_agent
                         and bool(getattr(args, "enable", False))
@@ -7491,6 +7739,7 @@ def main() -> int:
                     include_x_twitter_search_agent=enable_x_twitter_search_agent,
                     include_tabular_agent=enable_tabular_agent,
                     include_email_agent=enable_email_agent,
+                    include_gmail_agent=enable_gmail_agent,
                     include_image_generator_agent=enable_image_generator_agent,
                     include_diagram_agent=enable_diagram_agent,
                     include_map_agent=enable_map_agent,

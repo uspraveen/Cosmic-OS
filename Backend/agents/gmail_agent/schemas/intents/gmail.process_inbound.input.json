@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "message_id": { "type": "string" },
+    "thread_id": { "type": "string" },
+    "history_id": { "type": "string" },
+    "email_address": { "type": "string" },
+    "account_id": { "type": "string" },
+    "account_hint": { "type": "string" }
+  }
+}

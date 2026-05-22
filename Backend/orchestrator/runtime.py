@@ -439,6 +439,8 @@ class OrchestratorRuntime:
             "request_id": request_id,
             "session_id": session_id,
             "channel": channel,
+            "source": task.source,
+            "source_id": task.source_id,
         }
 
         yield {
@@ -502,6 +504,7 @@ class OrchestratorRuntime:
             collected_sources: list[dict[str, str]] = []
             produced_artifacts: list[dict[str, Any]] = []
             supporting_artifacts: list[dict[str, Any]] = []
+            surface_tool_artifacts = task.source != "heartbeat"
             research_paths: set[str] = set()
             specialist_receipts: list[dict[str, Any]] = []
             container_id: str | None = None
@@ -829,7 +832,7 @@ class OrchestratorRuntime:
                         if b.block_type == "web_search_tool_result" and b.raw_block:
                             self._collect_native_search_sources(b.raw_block, collected_sources)
 
-                if turn_server_blocks:
+                if turn_server_blocks and surface_tool_artifacts:
                     await self._collect_server_tool_artifacts(
                         turn_server_blocks,
                         task=task,
@@ -935,10 +938,11 @@ class OrchestratorRuntime:
                                 research_paths=research_paths,
                                 sources=collected_sources,
                             )
-                        self._collect_specialist_artifacts(
-                            result_str,
-                            produced_artifacts=produced_artifacts,
-                        )
+                        if surface_tool_artifacts:
+                            self._collect_specialist_artifacts(
+                                result_str,
+                                produced_artifacts=produced_artifacts,
+                            )
                         self._collect_specialist_receipt(
                             tb.tool_name,
                             pi,
@@ -962,7 +966,11 @@ class OrchestratorRuntime:
                         for visual_event in visual_coordinator.note_sources(collected_sources):
                             yield {**ev, **visual_event}
 
-                    followup_blocks = await self._build_tool_result_followup_blocks(result_strs)
+                    followup_blocks = (
+                        await self._build_tool_result_followup_blocks(result_strs)
+                        if surface_tool_artifacts
+                        else []
+                    )
                     user_content: list[dict[str, Any]] = list(tool_results)
                     if followup_blocks:
                         user_content.extend(followup_blocks)
@@ -1148,6 +1156,7 @@ class OrchestratorRuntime:
         collected_sources: list[dict[str, str]] = []
         produced_artifacts: list[dict[str, Any]] = []
         supporting_artifacts: list[dict[str, Any]] = []
+        surface_tool_artifacts = task.source != "heartbeat"
         research_paths: set[str] = set()
         specialist_receipts: list[dict[str, Any]] = []
         model_name = self._select_fireworks_kimi_model(task)
@@ -1463,10 +1472,11 @@ class OrchestratorRuntime:
                                 research_paths=research_paths,
                                 sources=collected_sources,
                             )
-                        self._collect_specialist_artifacts(
-                            result_str,
-                            produced_artifacts=produced_artifacts,
-                        )
+                        if surface_tool_artifacts:
+                            self._collect_specialist_artifacts(
+                                result_str,
+                                produced_artifacts=produced_artifacts,
+                            )
                         self._collect_specialist_receipt(
                             tool_name,
                             parsed_input,
@@ -1493,7 +1503,11 @@ class OrchestratorRuntime:
                         for visual_event in visual_coordinator.note_sources(collected_sources):
                             yield {**ev, **visual_event}
 
-                    followup_content = await self._build_openai_tool_result_followup_content(result_strs)
+                    followup_content = (
+                        await self._build_openai_tool_result_followup_content(result_strs)
+                        if surface_tool_artifacts
+                        else ""
+                    )
                     if followup_content:
                         openai_messages.append({"role": "user", "content": followup_content})
 

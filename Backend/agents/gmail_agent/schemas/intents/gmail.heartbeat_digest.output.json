@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["status", "account", "reason", "items"],
+  "properties": {
+    "status": { "type": "string" },
+    "account": { "type": "object" },
+    "reason": { "type": "string" },
+    "source": { "type": "string" },
+    "mode": { "type": "string" },
+    "lookback_hours": { "type": "integer" },
+    "items": { "type": "array", "items": { "type": "object" } },
+    "messages": { "type": "array", "items": { "type": "object" } },
+    "cached_item_count": { "type": "integer" },
+    "live_triage_used": { "type": "boolean" },
+    "llm_used": { "type": "boolean" },
+    "skipped_by_prefilter": { "type": "array", "items": { "type": "object" } },
+    "summary": { "type": "string" }
+  }
+}

@@ -144,6 +144,10 @@ class GatewayConfig:
     heartbeat_calendar_max_accounts: int = 4
     heartbeat_calendar_max_events: int = 10
     heartbeat_calendar_agent_timeout_sec: float = 12.0
+    heartbeat_gmail_digest_enabled: bool = True
+    heartbeat_gmail_max_accounts: int = 4
+    heartbeat_gmail_max_items: int = 6
+    heartbeat_gmail_agent_timeout_sec: float = 12.0
     delivery_retry_base_sec: float = 1.0
     delivery_retry_max_sec: float = 120.0
     delivery_max_attempts: int = 12
@@ -168,6 +172,7 @@ class GatewayConfig:
     tabular_parse_reconcile_timeout_sec: float = 900.0
     tabular_parse_poll_interval_sec: float = 0.25
     email_agent_id: str = "cosmic/email-agent:1.0.0"
+    gmail_agent_id: str = "cosmic/gmail-agent:1.0.0"
     calendar_agent_id: str = "cosmic/calendar-agent:1.0.0"
     email_process_inbound_timeout_sec: float = 180.0
     email_process_inbound_poll_interval_sec: float = 0.25
@@ -465,6 +470,22 @@ class GatewayConfig:
                 2.0,
                 _env_float("GATEWAY_HEARTBEAT_CALENDAR_AGENT_TIMEOUT_SEC", 12.0),
             ),
+            heartbeat_gmail_digest_enabled=_env_bool(
+                "GATEWAY_HEARTBEAT_GMAIL_DIGEST_ENABLED",
+                True,
+            ),
+            heartbeat_gmail_max_accounts=max(
+                1,
+                _env_int("GATEWAY_HEARTBEAT_GMAIL_MAX_ACCOUNTS", 4),
+            ),
+            heartbeat_gmail_max_items=max(
+                1,
+                _env_int("GATEWAY_HEARTBEAT_GMAIL_MAX_ITEMS", 6),
+            ),
+            heartbeat_gmail_agent_timeout_sec=max(
+                2.0,
+                _env_float("GATEWAY_HEARTBEAT_GMAIL_AGENT_TIMEOUT_SEC", 12.0),
+            ),
             delivery_retry_base_sec=max(
                 0.25,
                 _env_float("GATEWAY_DELIVERY_RETRY_BASE_SEC", 1.0),
@@ -560,6 +581,10 @@ class GatewayConfig:
             email_agent_id=(
                 os.getenv("GATEWAY_EMAIL_AGENT_ID", "cosmic/email-agent:1.0.0").strip()
                 or "cosmic/email-agent:1.0.0"
+            ),
+            gmail_agent_id=(
+                os.getenv("GATEWAY_GMAIL_AGENT_ID", "cosmic/gmail-agent:1.0.0").strip()
+                or "cosmic/gmail-agent:1.0.0"
             ),
             calendar_agent_id=(
                 os.getenv(

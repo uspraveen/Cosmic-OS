@@ -3380,6 +3380,39 @@ kbd {
   align-items: flex-start;
 }
 
+.chat-unread-divider {
+  width: min(100%, 720px);
+  display: grid;
+  grid-template-columns: minmax(24px, 1fr) auto minmax(24px, 1fr);
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0 22px;
+  opacity: 0.9;
+  scroll-margin-top: 22px;
+}
+
+.chat-unread-divider-line {
+  height: 1px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, rgba(210, 218, 232, 0.28), transparent);
+}
+
+.chat-unread-divider-label {
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(230, 235, 244, 0.14);
+  background: rgba(10, 12, 18, 0.18);
+  color: rgba(234, 238, 246, 0.68);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 8px 18px rgba(0, 0, 0, 0.16);
+  backdrop-filter: blur(14px);
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .assistant-heartbeat-badge {
   width: fit-content;
   max-width: min(100%, 720px);

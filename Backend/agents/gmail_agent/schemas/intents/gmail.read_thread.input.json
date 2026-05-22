@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "thread_id": { "type": "string" },
+    "message_id": { "type": "string" },
+    "max_thread_messages": { "type": "integer", "minimum": 1, "maximum": 100 },
+    "account_id": { "type": "string" },
+    "account_hint": { "type": "string" }
+  },
+  "anyOf": [
+    { "required": ["thread_id"] },
+    { "required": ["message_id"] }
+  ]
+}
