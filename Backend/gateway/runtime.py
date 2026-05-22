@@ -138,6 +138,10 @@ HEARTBEAT_SOURCE_ID = "default"
 HEARTBEAT_SUPPRESS_TOKEN = "heartbeat_ok"
 HEARTBEAT_NOTES_CHAR_LIMIT = 4000
 GMAIL_SURFACE_DECISION_SOURCE = "gmail_surface"
+TASK_ENVELOPE_ALLOWED_SOURCES = {"user", "cron", "webhook", "heartbeat", "hook", "agent"}
+TASK_ENVELOPE_SOURCE_ALIASES = {
+    GMAIL_SURFACE_DECISION_SOURCE: "webhook",
+}
 # Heartbeats get two very different kinds of context:
 # - durable context: compaction, memory, task notebooks, active working set
 # - raw chat tail: a short-lived temporal grounding aid
@@ -12466,6 +12470,7 @@ class GatewayRuntime:
             if isinstance(gateway_preferences.get("cosmic_orchestrator_model"), dict)
             else {}
         )
+        envelope_source = self._task_envelope_source(request_record)
 
         task = TaskEnvelope(
             task_id=generate_task_id(),
@@ -12498,12 +12503,19 @@ class GatewayRuntime:
             ),
             signature="",
             created_at=utcnow(),
-            source=self._safe_text(request_record.get("source")) or "user",
+            source=envelope_source,
             source_id=self._safe_text(request_record.get("source_id")),
             channel=channel,
         )
         signature = sign_task_envelope(task, self.config.signing_secret)
         return task.model_copy(update={"signature": signature})
+
+    def _task_envelope_source(self, request_record: dict[str, Any]) -> str:
+        source = self._safe_text(request_record.get("source")) or "user"
+        source = TASK_ENVELOPE_SOURCE_ALIASES.get(source, source)
+        if source in TASK_ENVELOPE_ALLOWED_SOURCES:
+            return source
+        return "user"
 
     def _prepare_input_artifacts_for_model(
         self, input_artifacts: list[dict[str, Any]]

@@ -134,3 +134,14 @@ def test_gmail_surface_decision_invalid_output_is_suppressed() -> None:
 
     assert decision["decision"] == "suppress"
     assert decision["reason"] == "invalid_gmail_surface_decision_envelope"
+
+
+def test_gmail_surface_decision_uses_valid_task_envelope_source() -> None:
+    runtime = object.__new__(GatewayRuntime)
+
+    assert (
+        runtime._task_envelope_source({"source": GMAIL_SURFACE_DECISION_SOURCE})
+        == "webhook"
+    )
+    assert runtime._task_envelope_source({"source": "heartbeat"}) == "heartbeat"
+    assert runtime._task_envelope_source({"source": "unknown_private_source"}) == "user"
