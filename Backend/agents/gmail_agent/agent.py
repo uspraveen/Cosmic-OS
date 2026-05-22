@@ -1115,11 +1115,33 @@ class GmailAgent(AgentRuntime):
             for item in messages[:8]
             if str(item.get("from_email") or item.get("sender_email") or "").strip()
         ]
-        if not senders or self.memory_read is None:
+        query_terms: list[str] = []
+        for item in messages[:8]:
+            if not isinstance(item, dict):
+                continue
+            for key in (
+                "subject",
+                "snippet",
+                "from",
+                "sender",
+                "from_email",
+                "sender_email",
+                "sender_domain",
+            ):
+                value = str(item.get(key) or "").strip()
+                if value and value not in query_terms:
+                    query_terms.append(value)
+        if not query_terms and senders:
+            query_terms.extend(senders[:6])
+        if not query_terms or self.memory_read is None:
             return ""
         try:
             result = await self.memory_read.search(
-                "Gmail contacts and context for " + ", ".join(senders[:6]),
+                (
+                    "Gmail event context, sender identity, active projects, prior "
+                    "discussions, and user preferences for: "
+                    + ", ".join(query_terms[:12])
+                ),
                 max_results=6,
             )
         except Exception:

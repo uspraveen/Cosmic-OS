@@ -45,6 +45,7 @@ intents:
       - Use this for Gmail compose/reply requests.
       - Creating a draft is allowed; actual sending requires explicit user approval or a future Gmail-specific approval surface.
       - Include thread_id or message_id when replying to an existing Gmail thread.
+      - When Gateway prompt context includes a Recent Surfaced Gmail Item, use its account_id plus thread_id/message_id for "reply to this" style follow-ups.
 
   - name: gmail.process_inbound
     description: Process an inbound Gmail notification or known message/thread reference.

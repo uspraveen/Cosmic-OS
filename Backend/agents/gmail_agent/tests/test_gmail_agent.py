@@ -46,7 +46,7 @@ def test_sender_prefilter_matches_sender_and_domain() -> None:
         assert domain_match["value"] == "updates.example.org"
     finally:
         if temp_dir.exists():
-            shutil.rmtree(temp_dir)
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def test_normalize_message_extracts_thread_metadata() -> None:
@@ -114,6 +114,57 @@ def test_agent_card_references_all_gmail_schemas() -> None:
     authz = card["policies"]["intent_authorization"]
     assert "cosmic/gateway:1.0.0" in authz["gmail.sync_watch"]
     assert "cosmic/gateway:1.0.0" in authz["gmail.stop_watch"]
+
+
+@pytest.mark.asyncio
+async def test_memory_context_query_uses_sender_subject_and_snippet() -> None:
+    from agents.gmail_agent.agent import GmailAgent
+
+    class FakeMemoryRead:
+        def __init__(self) -> None:
+            self.query = ""
+
+        async def search(self, query: str, max_results: int = 6) -> dict:
+            self.query = query
+            return {
+                "results": [
+                    {
+                        "title": "YC S26 application",
+                        "content": "User is waiting for YC S26 interview invite.",
+                    }
+                ]
+            }
+
+        async def close(self) -> None:
+            return None
+
+    temp_dir = Path(__file__).resolve().parent / f".tmp_{uuid.uuid4().hex}"
+    agent = None
+    try:
+        temp_dir.mkdir(parents=True, exist_ok=False)
+        agent = GmailAgent(redis_client=MagicMock(), store_root=temp_dir / "store")
+        fake_memory = FakeMemoryRead()
+        agent.memory_read = fake_memory
+        context = await agent._memory_context_for_messages(
+            [
+                {
+                    "from": "Y Combinator <interviews@ycombinator.com>",
+                    "from_email": "interviews@ycombinator.com",
+                    "subject": "YC S26 interview invite",
+                    "snippet": "Schedule your interview for the Summer 2026 batch.",
+                }
+            ]
+        )
+
+        assert "YC S26 application" in context
+        assert "interviews@ycombinator.com" in fake_memory.query
+        assert "YC S26 interview invite" in fake_memory.query
+        assert "Schedule your interview" in fake_memory.query
+    finally:
+        if agent is not None:
+            await agent.stop()
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 @pytest.mark.asyncio
@@ -189,4 +240,4 @@ async def test_heartbeat_digest_uses_cached_triage_without_live_llm() -> None:
         if agent is not None:
             await agent.stop()
         if temp_dir.exists():
-            shutil.rmtree(temp_dir)
+            shutil.rmtree(temp_dir, ignore_errors=True)

@@ -41,6 +41,7 @@ from .config import GatewayConfig
 from .credentials import CredentialManager
 from .credentials.store import CredentialStore
 from .delivery.queue_store import DeliveryQueueStore, utcnow_iso
+from .gmail_context_store import GmailContextStore
 from .memory import MemoryWriteAuditStore
 from .memory.client import (
     CosmicMemoryClient,
@@ -306,6 +307,7 @@ class GatewayRuntime:
         )
         self.artifact_store = ArtifactStore(config.artifacts_db_path)
         self.delivery_queue_store = DeliveryQueueStore(config.delivery_queue_db_path)
+        self.gmail_context_store = GmailContextStore(config.gmail_context_db_path)
         self.scheduler_store = SchedulerStore(config.scheduler_db_path)
         self.agent_email_integration_store = AgentEmailIntegrationStore(
             config.agent_email_integrations_db_path
@@ -426,6 +428,7 @@ class GatewayRuntime:
         self.memory_write_audit_store.initialize()
         self.artifact_store.initialize()
         self.delivery_queue_store.initialize()
+        self.gmail_context_store.initialize()
         self.scheduler_store.initialize(
             default_timezone=self.config.user_timezone_fallback,
             default_heartbeat_interval_sec=self.config.heartbeat_interval_sec,
@@ -1791,6 +1794,60 @@ class GatewayRuntime:
             return None
         return "\n\n".join(normalized_blocks)
 
+    def _render_recent_gmail_context(self, *, limit: int = 5) -> str | None:
+        try:
+            items = self.gmail_context_store.list_recent(limit=limit, lookback_hours=96)
+        except Exception:
+            logger.exception("gateway.gmail_context_render_failed")
+            return None
+        if not items:
+            return None
+
+        lines = [
+            "## Recent Surfaced Gmail Items",
+            (
+                "These are compact references to Gmail items COSMIC recently decided were "
+                "worth surfacing. If the user says 'this email', 'that Gmail', or 'reply "
+                "to this', prefer the most recent matching item and delegate to Gmail "
+                "Agent with account_id + thread_id/message_id for exact thread context. "
+                "Ask a clarifying question if more than one item plausibly matches."
+            ),
+        ]
+        for index, item in enumerate(items[:limit], start=1):
+            parts = [
+                f"#{index}",
+                f"surfaced_id={self._safe_text(item.get('surfaced_id'))}",
+            ]
+            account_email = self._safe_text(item.get("account_email"))
+            if account_email:
+                parts.append(f"account={account_email}")
+            sender = self._safe_text(item.get("sender"))
+            if sender:
+                parts.append(f"from={sender}")
+            subject = self._safe_text(item.get("subject"))
+            if subject:
+                parts.append(f"subject={subject}")
+            category = self._safe_text(item.get("category"))
+            if category:
+                parts.append(f"category={category}")
+            priority = item.get("priority")
+            if priority is not None:
+                parts.append(f"priority={priority}")
+            thread_id = self._safe_text(item.get("thread_id"))
+            if thread_id:
+                parts.append(f"thread_id={thread_id}")
+            message_id = self._safe_text(item.get("message_id"))
+            if message_id:
+                parts.append(f"message_id={message_id}")
+            suggested_action = self._safe_text(item.get("suggested_action"))
+            if suggested_action:
+                parts.append(f"suggested_action={suggested_action}")
+            updated_at = self._safe_text(item.get("updated_at"))
+            if updated_at:
+                parts.append(f"surfaced_at={updated_at}")
+            lines.append("- " + "; ".join(part for part in parts if part))
+        return "\n".join(lines)
+
     def _scheduler_record(
         self, record: dict[str, Any], *, include_history: bool = False
     ) -> dict[str, Any]:
@@ -2982,7 +3039,10 @@ class GatewayRuntime:
                 "account": self._heartbeat_gmail_account_summary(account),
                 "auth": auth,
                 "raw_pubsub_payload": raw_payload,
-                "context_brief": "Inbound Gmail Pub/Sub notification.",
+                "context_brief": self._build_gmail_inbound_context_brief(
+                    account=account,
+                    history_id=history_id,
+                ),
             },
             input_artifacts=[],
             idempotency_key=(
@@ -3012,6 +3072,37 @@ class GatewayRuntime:
             **result,
         }
 
+    def _build_gmail_inbound_context_brief(
+        self,
+        *,
+        account: dict[str, Any],
+        history_id: str,
+    ) -> str:
+        session_id = self._current_session_id()
+        working_set = self._refresh_active_working_set(session_id)
+        working_set_snapshot = self._compact_scheduler_working_set(working_set)
+        lines = [
+            "Inbound Gmail Pub/Sub notification.",
+            f"Account: {self._safe_text(account.get('email')) or 'unknown'}",
+            f"History id: {self._safe_text(history_id) or 'unknown'}",
+        ]
+        if working_set_snapshot:
+            lines.append("Current user state:")
+            goal = self._safe_text(working_set_snapshot.get("goal"))
+            if goal:
+                lines.append(f"- Current goal: {goal}")
+            for label, key in (
+                ("Active workstreams", "active_workstreams"),
+                ("Open loops", "open_loops"),
+                ("Focus entities", "current_focus_entities"),
+            ):
+                values = self._normalize_string_list(
+                    working_set_snapshot.get(key), limit=5
+                )
+                if values:
+                    lines.append(f"- {label}: {', '.join(values)}")
+        return "\n".join(lines)
+
     async def _publish_gmail_inbound_notification(self, result: dict[str, Any]) -> None:
         if self._safe_text(result.get("status")) != "completed":
             return
@@ -3026,12 +3117,23 @@ class GatewayRuntime:
         ]
         if not items:
             return
+        stored_items: list[dict[str, Any]] = []
+        for item in items:
+            stored_items.append(
+                self._upsert_surfaced_gmail_item(
+                    result=result,
+                    item=item,
+                    item_count=len(items),
+                )
+            )
         first = items[0]
+        first_stored = stored_items[0] if stored_items else {}
         subject = self._safe_text(first.get("subject")) or "New Gmail item"
         sender = self._safe_text(first.get("sender")) or self._safe_text(first.get("from"))
         event = {
             "type": "gmail.notification",
             "timestamp": utcnow_iso(),
+            "surfaced_id": self._safe_text(first_stored.get("surfaced_id")),
             "account_id": self._safe_text(first.get("account_id"))
             or self._safe_text(result.get("account_id")),
             "account_email": self._safe_text(first.get("account_email"))
@@ -3065,12 +3167,42 @@ class GatewayRuntime:
             priority="high",
             data={
                 "type": "gmail.notification",
+                "surfaced_id": event.get("surfaced_id"),
                 "message_id": event.get("message_id"),
                 "thread_id": event.get("thread_id"),
                 "account_id": event.get("account_id"),
                 "channel_id": "cosmic-gmail",
             },
         )
+
+    def _upsert_surfaced_gmail_item(
+        self,
+        *,
+        result: dict[str, Any],
+        item: dict[str, Any],
+        item_count: int,
+    ) -> dict[str, Any]:
+        payload = {
+            **item,
+            "account_id": self._safe_text(item.get("account_id"))
+            or self._safe_text(result.get("account_id")),
+            "account_email": self._safe_text(item.get("account_email"))
+            or self._safe_text(result.get("email")),
+            "item_count": item_count,
+            "source_task_id": self._safe_text(result.get("task_id")),
+            "payload": {
+                "task_id": self._safe_text(result.get("task_id")),
+                "category": self._safe_text(item.get("category")),
+                "confidence": item.get("confidence"),
+                "label_ids": item.get("label_ids"),
+                "snippet": self._bounded_excerpt(item.get("snippet"), limit=240),
+            },
+        }
+        try:
+            return self.gmail_context_store.upsert_surfaced_item(payload)
+        except Exception:
+            logger.exception("gateway.gmail_context_store_upsert_failed")
+            return {}
 
     async def _build_heartbeat_context_packet(
         self,
@@ -4328,13 +4460,18 @@ class GatewayRuntime:
             session_id=session_id,
             memory_prompt_context=memory_prompt_context,
         )
+        recent_gmail_context = self._render_recent_gmail_context()
+        combined_memory_context = self._join_context_blocks(
+            recent_gmail_context,
+            memory_prompt_context.rendered,
+        )
         routing_decision = await self._classify_message(
             session_id=session_id,
             content=content,
             metadata=metadata,
             channel=channel,
             conversation_context=assembled_conversation_context,
-            memory_context=memory_prompt_context.rendered,
+            memory_context=combined_memory_context,
             route_override=route_override,
         )
         decision_latency_ms = (time.perf_counter() - decision_started_at) * 1000.0
@@ -4414,7 +4551,7 @@ class GatewayRuntime:
             "assembled_conversation_context": assembled_conversation_context,
             "memory_context": self._compose_prompt_context(
                 active_working_set=active_working_set,
-                memory_context=memory_prompt_context.rendered,
+                memory_context=combined_memory_context,
             ),
             "active_working_set": active_working_set,
             "carry_forward_packet": (
@@ -4427,6 +4564,7 @@ class GatewayRuntime:
                 "items": memory_prompt_context.recall_items,
                 "total_token_count": memory_prompt_context.total_token_count,
                 "diagnostics": memory_prompt_context.diagnostics,
+                "recent_gmail_context": recent_gmail_context,
             },
             "routing_decision_source": routing_decision.decision_source,
             "input_artifacts": input_artifacts,

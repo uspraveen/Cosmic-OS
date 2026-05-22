@@ -7045,6 +7045,12 @@ GATEWAY_SIGNING_SECRET=<secret>         # for signing gateway-generated TaskEnve
 
 The Webhook Handler is a Gateway module that receives HTTP POST callbacks from external systems, verifies provider-specific signatures, converts payloads into TaskEnvelopes, and dispatches them to the orchestrator.
 
+**Current Gmail nuance:** user-owned Gmail uses a specialist-first path instead of sending every mailbox change directly to the orchestrator. Gmail Pub/Sub enters the Gateway, Gateway resolves the connected Google credential, dispatches `gmail.process_inbound` to the Gmail Agent, and the Gmail Agent performs semantic triage using thread data, shared memory retrieval, and compact current user state. If an item is worth surfacing, Gateway stores a compact surfaced Gmail reference in `gateway/gmail_context.db` and notifies Desktop/Mobile. Later user turns receive those recent Gmail references, so phrases like "reply to this" can be grounded to the exact Gmail account/thread/message before delegating to `gmail.read_thread` or `gmail.draft_reply`.
+
+This keeps routine inbox noise out of the orchestrator while preserving continuity. Cross-domain action still belongs to the orchestrator: when a surfaced Gmail item affects active goals, or a future semantic automation rule matches an inbound event, Gateway should dispatch an orchestrator task with the Gmail reference, triage summary, matching evidence, and original standing instruction.
+
+Longer term, Gmail should share a generic event automation registry with calendar, files, Slack, GitHub, Cosmic Mail, heartbeats, and custom webhooks. The generic primitives are event, semantic condition, context resolver, action plan, confidence policy, approval policy, and learning loop. Provider-specific agents remain sensors/capability specialists; Gateway matches events; orchestrator plans cross-domain work.
+
 ### 26.1 Architecture
 
 ```

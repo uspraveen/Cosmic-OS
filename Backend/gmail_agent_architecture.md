@@ -9,6 +9,56 @@ Gmail is a first-class user-owned inbox surface for COSMIC. It is separate from 
 
 The Gmail agent lets COSMIC search, read, summarize, triage, and draft replies against one or more user-connected Gmail accounts while preserving explicit approval before high-impact actions.
 
+## Final Autonomy Model
+
+Gmail should be a first-class event surface without making the orchestrator inspect every email. The production split is:
+
+- **Gmail Agent**: inbox sensor, semantic triage, thread reader, draft creator, sender/noise learning.
+- **Gateway**: webhook receiver, credential owner, surfaced-item ledger, delivery router, future semantic trigger matcher.
+- **Orchestrator**: cross-domain reasoning and action planner when a surfaced Gmail item, user follow-up, heartbeat, or standing automation requires broader context.
+
+This means COSMIC can stay quiet for noise, surface important mail quickly, and still escalate to the orchestrator when an email affects active goals, projects, calendar, docs, Alpha work, or user-facing decisions.
+
+## Context Stack
+
+The Gmail agent must not be blind, but it also should not receive the whole orchestrator prompt or raw session history on every inbound message. Gmail tasks use a focused context stack:
+
+1. **Native email context**: Gmail thread, participants, subject, timestamps, labels, snippets, body previews, and attachment metadata.
+2. **Shared memory retrieval**: sender/domain, subject, snippet, entities, project names, and current email facts are used as search keys against COSMIC memory. This lets a YC email retrieve prior YC/S26/application context without hardcoding YC.
+3. **Current user state**: Gateway injects a compact active-working-set brief into inbound Gmail processing so the agent knows current goals, open loops, and focus entities.
+4. **Gmail-local state**: prior triage decisions, learned sender/domain prefilters, watch cursor state, and `learnings.md`.
+
+The Gmail agent should use this stack to decide whether an inbound email is actionable. If the email requires cross-domain work, the agent returns a surfaced item and Gateway/orchestrator take over from the compact Gmail reference.
+
+## Surfaced Gmail Continuity
+
+When Gmail Agent marks an inbound item `surface_to_user=true`, Gateway stores a compact reference in `gateway/gmail_context.db` before notifying Desktop/Mobile. The record contains only metadata:
+
+- `account_id`, `account_email`
+- Gmail `thread_id`, `message_id`
+- subject, sender, category, priority, reason, suggested action
+- source task id and timestamps
+
+Full email bodies remain in Gmail. Later user turns receive a **Recent Surfaced Gmail Items** context block. If the user says "reply to this", "open that email", or "make the doc from it", the orchestrator can resolve the most recent matching surfaced item and delegate `gmail.read_thread` or `gmail.draft_reply` with exact refs. If multiple surfaced items plausibly match, it should ask a concise clarifying question.
+
+## Semantic Event Automations
+
+Standing instructions such as "when Arun emails me, create the requested doc" should be represented as generic event automations, not Gmail-specific hardcoded rules.
+
+Core primitives:
+
+- **Event**: `gmail.inbound`, calendar update, file uploaded, webhook received, reminder due.
+- **Condition**: semantic matcher such as sender identity, subject/topic, attachment type, urgency, or "needs reply".
+- **Context resolver**: gathers domain context plus memory and current user state.
+- **Action plan**: draft reply, create doc, notify user, run Alpha, schedule reminder.
+- **Confidence policy**: auto-run high-confidence safe work, ask on medium confidence, suppress low-confidence.
+- **Approval policy**: prep work and draft creation can run autonomously; sending, deletion, sharing, external commitments, and irreversible changes require approval unless the user has given a standing trusted policy.
+- **Learning loop**: confirmations/corrections update identity bindings and preferences so future matches become deterministic.
+
+Unresolved people are valid. A rule can store `person_ref="Arun"` with no email address and `resolution_mode="resolve_on_event"`. On each inbound event, identity evidence comes from display name, email local part/domain, signature, thread history, Google contacts (when available), and shared memory. High confidence fires the rule; medium confidence asks once and stores the binding; low confidence stays quiet.
+
+The current implementation lays the foundation with context-aware Gmail triage and surfaced-item continuity. A broader cross-provider automation registry should reuse these same primitives instead of adding per-provider hacks.
+
 ## Core Architecture
 
 ```
