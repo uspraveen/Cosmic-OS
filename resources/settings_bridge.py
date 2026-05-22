@@ -326,6 +326,69 @@ def account_event_details(account):
     }
 
 
+def _coerce_timestamp(value):
+    if value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _is_active_google_account(account):
+    return (
+        isinstance(account, dict)
+        and str(account.get("status") or "").strip() == "active"
+        and bool(account.get("has_refresh_token"))
+    )
+
+
+def _selected_tools_match(account, selected_tools):
+    if not selected_tools:
+        return True
+    account_tools = {
+        str(item).strip()
+        for item in (account.get("selected_tools") or [])
+        if str(item).strip()
+    }
+    return set(selected_tools).issubset(account_tools)
+
+
+def _find_oauth_completed_account(
+    accounts,
+    *,
+    account_id,
+    existing_ids,
+    selected_tools,
+    started_at,
+):
+    active_accounts = [account for account in accounts if _is_active_google_account(account)]
+    if account_id and not account_id.startswith("draft-"):
+        for account in active_accounts:
+            if str(account.get("account_id") or "").strip() != account_id:
+                continue
+            if not _selected_tools_match(account, selected_tools):
+                continue
+            if _coerce_timestamp(account.get("last_connected_at")) >= started_at - 5:
+                return account
+        return None
+
+    for account in active_accounts:
+        current_id = str(account.get("account_id") or "").strip()
+        if current_id and current_id not in existing_ids and _selected_tools_match(account, selected_tools):
+            return account
+
+    updated_accounts = [
+        account
+        for account in active_accounts
+        if _selected_tools_match(account, selected_tools)
+        and _coerce_timestamp(account.get("last_connected_at")) >= started_at - 5
+    ]
+    if updated_accounts:
+        return max(updated_accounts, key=lambda item: _coerce_timestamp(item.get("last_connected_at")))
+    return None
+
+
 def run_calendar_agenda_fetch():
     if not CALENDAR_FETCH_LOCK.acquire(blocking=False):
         return
@@ -381,6 +444,7 @@ def run_google_connect(payload):
             if isinstance(item, dict) and str(item.get("account_id") or "").strip()
         }
 
+        flow_started_at = time.time()
         start_payload = _gateway_request(
             "POST",
             "/auth/connect/google",
@@ -409,51 +473,34 @@ def run_google_connect(payload):
 
         deadline = time.time() + max(30, DEFAULT_GOOGLE_CONNECT_TIMEOUT_SECONDS)
         connected_account = None
+        callback_completed = False
         while time.time() < deadline:
-            if callback_done is not None and callback_done.is_set() and callback_result and callback_result.get("error"):
+            if callback_done is None or not callback_done.is_set():
+                time.sleep(0.5)
+                continue
+            callback_completed = True
+            if callback_result and (callback_result.get("error") or not callback_result.get("ok")):
                 raise RuntimeError(str(callback_result.get("error") or "Google sign-in failed."))
             time.sleep(1.0)
             accounts = _list_gateway_google_accounts()
-            if account_id and not account_id.startswith("draft-"):
-                connected_account = next(
-                    (
-                        item
-                        for item in accounts
-                        if str(item.get("account_id") or "").strip() == account_id
-                        and str(item.get("status") or "").strip() == "active"
-                        and bool(item.get("has_refresh_token"))
-                    ),
-                    None,
-                )
-            if connected_account is None:
-                connected_account = next(
-                    (
-                        item
-                        for item in accounts
-                        if str(item.get("account_id") or "").strip() not in existing_ids
-                        and str(item.get("status") or "").strip() == "active"
-                        and bool(item.get("has_refresh_token"))
-                    ),
-                    None,
-                )
-            if connected_account is None and requested_label:
-                connected_account = next(
-                    (
-                        item
-                        for item in accounts
-                        if str(item.get("account_label") or "").strip() == requested_label
-                        and str(item.get("status") or "").strip() == "active"
-                        and bool(item.get("has_refresh_token"))
-                    ),
-                    None,
-                )
+            connected_account = _find_oauth_completed_account(
+                accounts,
+                account_id=account_id,
+                existing_ids=existing_ids,
+                selected_tools=selected_tools,
+                started_at=flow_started_at,
+            )
             if connected_account is not None:
                 break
 
         if connected_account is None:
+            if not callback_completed:
+                if callback_result and callback_result.get("error"):
+                    raise RuntimeError(str(callback_result.get("error") or "Google sign-in failed."))
+                raise RuntimeError("Google sign-in did not finish before the timeout window closed.")
             if callback_result and callback_result.get("error"):
                 raise RuntimeError(str(callback_result.get("error") or "Google sign-in failed."))
-            raise RuntimeError("Google sign-in did not finish before the timeout window closed.")
+            raise RuntimeError("Google sign-in finished, but Cosmic could not find the connected account record.")
 
         account_id = str(connected_account.get("account_id") or account_id).strip()
         emit_event(
