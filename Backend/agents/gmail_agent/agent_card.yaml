@@ -175,7 +175,7 @@ policies:
     gmail.heartbeat_digest: [cosmic/gateway:1.0.0, cosmic/orchestrator:1.0.0]
     gmail.morning_briefing_digest: [cosmic/gateway:1.0.0, cosmic/orchestrator:1.0.0]
     gmail.manage_prefilter: [cosmic/orchestrator:1.0.0]
-    gmail.sync_watch: [cosmic/orchestrator:1.0.0]
+    gmail.sync_watch: [cosmic/gateway:1.0.0, cosmic/orchestrator:1.0.0]
     gmail.stop_watch: [cosmic/gateway:1.0.0, cosmic/orchestrator:1.0.0]
     gmail.recall_session: [cosmic/orchestrator:1.0.0]
 

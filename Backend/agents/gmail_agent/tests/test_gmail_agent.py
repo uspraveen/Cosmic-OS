@@ -111,6 +111,9 @@ def test_agent_card_references_all_gmail_schemas() -> None:
     for intent in card["intents"]:
         assert (schemas_dir / intent["input_schema"].split("/")[-1]).exists()
         assert (schemas_dir / intent["output_schema"].split("/")[-1]).exists()
+    authz = card["policies"]["intent_authorization"]
+    assert "cosmic/gateway:1.0.0" in authz["gmail.sync_watch"]
+    assert "cosmic/gateway:1.0.0" in authz["gmail.stop_watch"]
 
 
 @pytest.mark.asyncio
