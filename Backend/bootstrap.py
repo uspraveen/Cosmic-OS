@@ -1999,6 +1999,39 @@ def build_gmail_agent_env_rendered(
     source_data = parse_env_text(source_raw)
     existing_env = (existing_env_by_name or {}).get(GMAIL_AGENT_ENV_NAME, {})
     external_env = (external_env_by_name or {}).get(GMAIL_AGENT_ENV_NAME, {})
+    email_existing_env = (existing_env_by_name or {}).get(EMAIL_AGENT_ENV_NAME, {})
+    email_external_env = (external_env_by_name or {}).get(EMAIL_AGENT_ENV_NAME, {})
+    image_existing_env = (existing_env_by_name or {}).get(IMAGE_GENERATOR_AGENT_ENV_NAME, {})
+    image_external_env = (external_env_by_name or {}).get(IMAGE_GENERATOR_AGENT_ENV_NAME, {})
+    slide_existing_env = (existing_env_by_name or {}).get(SLIDE_AGENT_ENV_NAME, {})
+    slide_external_env = (external_env_by_name or {}).get(SLIDE_AGENT_ENV_NAME, {})
+    gateway_existing_env = (existing_env_by_name or {}).get("gateway.env", {})
+    gateway_external_env = (external_env_by_name or {}).get("gateway.env", {})
+    orchestrator_existing_env = (existing_env_by_name or {}).get("orchestrator.env", {})
+    orchestrator_external_env = (external_env_by_name or {}).get("orchestrator.env", {})
+
+    def read_peer_env(env_name: str, *, agent_env: bool = True) -> Dict[str, str]:
+        base = system_env_dir or DEFAULT_SYSTEM_ENV_DIR
+        path = (base / "agents" / env_name) if agent_env else (base / env_name)
+        if not path.exists():
+            return {}
+        try:
+            if is_linux():
+                return parse_env_text(read_text_file(path, use_sudo=True))
+            return parse_env_text(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    if not email_existing_env:
+        email_existing_env = read_peer_env(EMAIL_AGENT_ENV_NAME)
+    if not image_existing_env:
+        image_existing_env = read_peer_env(IMAGE_GENERATOR_AGENT_ENV_NAME)
+    if not slide_existing_env:
+        slide_existing_env = read_peer_env(SLIDE_AGENT_ENV_NAME)
+    if not gateway_existing_env:
+        gateway_existing_env = read_peer_env("gateway.env", agent_env=False)
+    if not orchestrator_existing_env:
+        orchestrator_existing_env = read_peer_env("orchestrator.env", agent_env=False)
 
     def pick(key: str, default: Optional[str] = None) -> Optional[str]:
         return first_meaningful_value(
@@ -2011,18 +2044,57 @@ def build_gmail_agent_env_rendered(
     internal_llm_api_key = first_meaningful_value(
         external_env.get("GMAIL_AGENT_INTERNAL_LLM_API_KEY"),
         external_env.get("OPENAI_COMPAT_API_KEY"),
+        email_external_env.get("EMAIL_AGENT_INTERNAL_LLM_API_KEY"),
+        email_external_env.get("OPENAI_COMPAT_API_KEY"),
+        image_external_env.get("IMAGE_AGENT_OPENAI_API_KEY"),
+        image_external_env.get("OPENAI_API_KEY"),
+        slide_external_env.get("MODEL_API_KEY"),
+        slide_external_env.get("OPENAI_COMPAT_API_KEY"),
+        gateway_external_env.get("OPENAI_API_KEY"),
+        gateway_external_env.get("OPENAI_COMPAT_API_KEY"),
+        orchestrator_external_env.get("OPENAI_API_KEY"),
+        orchestrator_external_env.get("OPENAI_COMPAT_API_KEY"),
         existing_env.get("GMAIL_AGENT_INTERNAL_LLM_API_KEY"),
         existing_env.get("OPENAI_COMPAT_API_KEY"),
+        email_existing_env.get("EMAIL_AGENT_INTERNAL_LLM_API_KEY"),
+        email_existing_env.get("OPENAI_COMPAT_API_KEY"),
+        image_existing_env.get("IMAGE_AGENT_OPENAI_API_KEY"),
+        image_existing_env.get("OPENAI_API_KEY"),
+        slide_existing_env.get("MODEL_API_KEY"),
+        slide_existing_env.get("OPENAI_COMPAT_API_KEY"),
+        gateway_existing_env.get("OPENAI_API_KEY"),
+        gateway_existing_env.get("OPENAI_COMPAT_API_KEY"),
+        orchestrator_existing_env.get("OPENAI_API_KEY"),
+        orchestrator_existing_env.get("OPENAI_COMPAT_API_KEY"),
         source_data.get("GMAIL_AGENT_INTERNAL_LLM_API_KEY"),
         source_data.get("OPENAI_COMPAT_API_KEY"),
     )
     internal_llm_base_url = first_meaningful_value(
         external_env.get("GMAIL_AGENT_INTERNAL_LLM_BASE_URL"),
         external_env.get("OPENAI_COMPAT_BASE_URL"),
+        email_external_env.get("EMAIL_AGENT_INTERNAL_LLM_BASE_URL"),
+        email_external_env.get("OPENAI_COMPAT_BASE_URL"),
+        image_external_env.get("IMAGE_AGENT_OPENAI_BASE_URL"),
+        slide_external_env.get("MODEL_BASE_URL"),
+        slide_external_env.get("OPENAI_COMPAT_BASE_URL"),
+        gateway_external_env.get("OPENAI_BASE_URL"),
+        gateway_external_env.get("OPENAI_COMPAT_BASE_URL"),
+        orchestrator_external_env.get("OPENAI_BASE_URL"),
+        orchestrator_external_env.get("OPENAI_COMPAT_BASE_URL"),
         existing_env.get("GMAIL_AGENT_INTERNAL_LLM_BASE_URL"),
         existing_env.get("OPENAI_COMPAT_BASE_URL"),
+        email_existing_env.get("EMAIL_AGENT_INTERNAL_LLM_BASE_URL"),
+        email_existing_env.get("OPENAI_COMPAT_BASE_URL"),
+        image_existing_env.get("IMAGE_AGENT_OPENAI_BASE_URL"),
+        slide_existing_env.get("MODEL_BASE_URL"),
+        slide_existing_env.get("OPENAI_COMPAT_BASE_URL"),
+        gateway_existing_env.get("OPENAI_BASE_URL"),
+        gateway_existing_env.get("OPENAI_COMPAT_BASE_URL"),
+        orchestrator_existing_env.get("OPENAI_BASE_URL"),
+        orchestrator_existing_env.get("OPENAI_COMPAT_BASE_URL"),
         source_data.get("GMAIL_AGENT_INTERNAL_LLM_BASE_URL"),
         source_data.get("OPENAI_COMPAT_BASE_URL"),
+        "https://api.openai.com/v1",
     )
 
     overrides = {
@@ -2071,7 +2143,16 @@ def build_gmail_agent_env_rendered(
         or "0.92",
         "GMAIL_WATCH_TOPIC_NAME": pick("GMAIL_WATCH_TOPIC_NAME", "") or "",
         "GMAIL_WATCH_LABEL_IDS": pick("GMAIL_WATCH_LABEL_IDS", "INBOX") or "INBOX",
-        "GMAIL_WEBHOOK_SECRET": pick("GMAIL_WEBHOOK_SECRET", "") or "",
+        "GMAIL_WEBHOOK_SECRET": first_meaningful_value(
+            external_env.get("GMAIL_WEBHOOK_SECRET"),
+            gateway_external_env.get("GATEWAY_GMAIL_WEBHOOK_SECRET"),
+            gateway_external_env.get("GMAIL_WEBHOOK_SECRET"),
+            existing_env.get("GMAIL_WEBHOOK_SECRET"),
+            gateway_existing_env.get("GATEWAY_GMAIL_WEBHOOK_SECRET"),
+            gateway_existing_env.get("GMAIL_WEBHOOK_SECRET"),
+            source_data.get("GMAIL_WEBHOOK_SECRET"),
+        )
+        or "",
     }
     if internal_llm_api_key is not None:
         overrides["GMAIL_AGENT_INTERNAL_LLM_API_KEY"] = internal_llm_api_key
@@ -4186,12 +4267,14 @@ def build_service_env_overrides(
     bridge_existing = existing_env_by_name.get("whatsapp-bridge.env", {})
     memory_existing = existing_env_by_name.get("memory.env", {})
     slide_existing_env = existing_env_by_name.get(SLIDE_AGENT_ENV_NAME, {})
+    gmail_existing_env = existing_env_by_name.get(GMAIL_AGENT_ENV_NAME, {})
     gateway_external = external_env_by_name.get("gateway.env", {})
     model_router_external = external_env_by_name.get("model-router.env", {})
     orchestrator_external = external_env_by_name.get("orchestrator.env", {})
     bridge_external = external_env_by_name.get("whatsapp-bridge.env", {})
     memory_external = external_env_by_name.get("memory.env", {})
     slide_external_env = external_env_by_name.get(SLIDE_AGENT_ENV_NAME, {})
+    gmail_external_env = external_env_by_name.get(GMAIL_AGENT_ENV_NAME, {})
 
     shared_internal_token = first_meaningful_value(
         gateway_external.get("GATEWAY_INTERNAL_TOKEN"),
@@ -4231,6 +4314,17 @@ def build_service_env_overrides(
         gateway_existing.get("GATEWAY_LOCAL_API_TOKEN"),
         gateway_data.get("GATEWAY_LOCAL_API_TOKEN"),
         secrets.token_urlsafe(24),
+    )
+    gmail_webhook_secret = first_meaningful_value(
+        gateway_external.get("GATEWAY_GMAIL_WEBHOOK_SECRET"),
+        gateway_external.get("GMAIL_WEBHOOK_SECRET"),
+        gmail_external_env.get("GMAIL_WEBHOOK_SECRET"),
+        gateway_existing.get("GATEWAY_GMAIL_WEBHOOK_SECRET"),
+        gateway_existing.get("GMAIL_WEBHOOK_SECRET"),
+        gmail_existing_env.get("GMAIL_WEBHOOK_SECRET"),
+        gateway_data.get("GATEWAY_GMAIL_WEBHOOK_SECRET"),
+        gateway_data.get("GMAIL_WEBHOOK_SECRET"),
+        secrets.token_urlsafe(32),
     )
     whatsapp_auth_dir = first_meaningful_value(
         bridge_external.get("WHATSAPP_AUTH_DIR"),
@@ -4444,6 +4538,7 @@ def build_service_env_overrides(
             "PERPLEXITY_API_KEY": perplexity_api_key or "<perplexity-api-key>",
             "XAI_API_KEY": gateway_xai_api_key or "",
             "GATEWAY_PUBLIC_HOST": gateway_public_host or "<gateway.user.example.com>",
+            "GATEWAY_GMAIL_WEBHOOK_SECRET": gmail_webhook_secret or "",
             "HAIKU_MODEL": haiku_model or "claude-haiku-4-5",
             "ENABLE_PUSH_NOTIFICATIONS": gateway_external.get("ENABLE_PUSH_NOTIFICATIONS")
             or gateway_existing.get("ENABLE_PUSH_NOTIFICATIONS")
@@ -4831,6 +4926,16 @@ def materialize_bootstrap_env_files(
     )
 
     gmail_repo_path = gmail_agent_repo_env_path()
+    gmail_external_for_render = dict(external_env_by_name.get(GMAIL_AGENT_ENV_NAME, {}))
+    if overrides_by_dest.get("gateway.env", {}).get("GATEWAY_GMAIL_WEBHOOK_SECRET"):
+        gmail_external_for_render.setdefault(
+            "GMAIL_WEBHOOK_SECRET",
+            overrides_by_dest["gateway.env"]["GATEWAY_GMAIL_WEBHOOK_SECRET"],
+        )
+    gmail_external_envs = {
+        **external_env_by_name,
+        GMAIL_AGENT_ENV_NAME: gmail_external_for_render,
+    }
     _gmail_dest_path, gmail_rendered, _gmail_env = build_gmail_agent_env_rendered(
         signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
         shared_internal_token=overrides_by_dest["gateway.env"][
@@ -4838,7 +4943,7 @@ def materialize_bootstrap_env_files(
         ],
         system_env_dir=system_env_dir,
         existing_env_by_name=existing_env_by_name,
-        external_env_by_name=external_env_by_name,
+        external_env_by_name=gmail_external_envs,
     )
     gmail_repo_path.parent.mkdir(parents=True, exist_ok=True)
     gmail_repo_path.write_text(gmail_rendered, encoding="utf-8")
@@ -5117,12 +5222,23 @@ def install_service_env_files(
         installed.append(calendar_dest_path)
         log("Installed system env file: {0}".format(calendar_dest_path))
 
+    gmail_external_for_install = dict(external_env_by_name.get(GMAIL_AGENT_ENV_NAME, {}))
+    if overrides_by_dest.get("gateway.env", {}).get("GATEWAY_GMAIL_WEBHOOK_SECRET"):
+        gmail_external_for_install.setdefault(
+            "GMAIL_WEBHOOK_SECRET",
+            overrides_by_dest["gateway.env"]["GATEWAY_GMAIL_WEBHOOK_SECRET"],
+        )
+    gmail_install_external_envs = {
+        **external_env_by_name,
+        GMAIL_AGENT_ENV_NAME: gmail_external_for_install,
+    }
     gmail_dest_path, gmail_rendered, _gmail_env = build_gmail_agent_env_rendered(
         signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
         shared_internal_token=overrides_by_dest["gateway.env"][
             "GATEWAY_INTERNAL_TOKEN"
         ],
         system_env_dir=system_env_dir,
+        external_env_by_name=gmail_install_external_envs,
     )
     run(["install", "-d", "-m", "755", str(gmail_dest_path.parent)], use_sudo=True)
     if gmail_dest_path.exists():
@@ -6147,6 +6263,13 @@ def sync_service_env_files(
             ],
             system_env_dir=system_env_dir,
             existing_env_by_name=gmail_existing_by_name,
+            external_env_by_name={
+                GMAIL_AGENT_ENV_NAME: {
+                    "GMAIL_WEBHOOK_SECRET": overrides_by_dest.get("gateway.env", {}).get(
+                        "GATEWAY_GMAIL_WEBHOOK_SECRET", ""
+                    )
+                }
+            },
         )
         changed_keys = sync_env_file(
             gmail_dest_path,

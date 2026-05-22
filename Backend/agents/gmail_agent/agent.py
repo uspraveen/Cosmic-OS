@@ -91,6 +91,7 @@ class GmailAgent(AgentRuntime):
     MANAGE_PREFILTER = "gmail.manage_prefilter"
     RECALL_SESSION = "gmail.recall_session"
     SYNC_WATCH = "gmail.sync_watch"
+    STOP_WATCH = "gmail.stop_watch"
 
     def __init__(
         self,
@@ -351,6 +352,8 @@ class GmailAgent(AgentRuntime):
                 },
                 artifacts=[],
             )
+        if history_id:
+            return await self._process_history_notification(task, history_id=history_id)
         return AgentResult(
             status="completed",
             output={
@@ -550,9 +553,160 @@ class GmailAgent(AgentRuntime):
             artifacts=[],
         )
 
+    async def handle_gmail_stop_watch(self, task: TaskEnvelope) -> AgentResult:
+        await self._client().stop_watch()
+        self._clear_history_cursor()
+        return AgentResult(
+            status="completed",
+            output={
+                "status": "watch_stopped",
+                "account": self._account_info(),
+                "message": "Gmail watch stopped and local history cursor cleared.",
+            },
+            artifacts=[],
+        )
+
     def _client(self) -> GoogleGmailClient:
         token = self._require_auth()
         return GoogleGmailClient(token, timeout_sec=30.0)
+
+    async def _process_history_notification(
+        self,
+        task: TaskEnvelope,
+        *,
+        history_id: str,
+    ) -> AgentResult:
+        await self._maybe_create_plan(
+            task,
+            [
+                "Load Gmail history cursor",
+                "Replay Gmail history changes",
+                "Fetch changed messages",
+                "Run LLM triage",
+                "Advance history cursor",
+            ],
+        )
+        client = self._client()
+        cursor = self._history_cursor()
+        start_history_id = str(cursor.get("history_id") or "").strip()
+        max_results = self._bounded_int(
+            task.input.get("max_results"),
+            self.config.max_triage_messages,
+            1,
+            40,
+        )
+        if not start_history_id:
+            self._save_history_cursor(history_id=history_id)
+            await self._maybe_step(1, "completed", "Seeded Gmail history cursor.")
+            return AgentResult(
+                status="completed",
+                output={
+                    "status": "cursor_seeded",
+                    "account": self._account_info(),
+                    "history_id": history_id,
+                    "reason": "No previous Gmail history cursor existed; seeded cursor without replay.",
+                    "items": [],
+                    "messages": [],
+                    "llm_used": False,
+                },
+                artifacts=[],
+            )
+
+        await self._maybe_step(1, "completed", f"Using Gmail history cursor {start_history_id}.")
+        try:
+            history = await client.list_history(
+                start_history_id=start_history_id,
+                history_types=["messageAdded"],
+                label_id="INBOX",
+                max_results=max_results,
+            )
+            message_ids = self._message_ids_from_history(history)
+            await self._maybe_step(2, "completed", f"Found {len(message_ids)} changed Gmail messages.")
+            messages = [await client.get_message(message_id) for message_id in message_ids[:max_results]]
+            await self._maybe_step(3, "completed", f"Fetched {len(messages)} changed Gmail messages.")
+            triage_payload = await self._triage_message_batch(
+                task,
+                messages,
+                context_brief=str(task.input.get("context_brief") or "Inbound Gmail push notification."),
+                source="process_inbound",
+            )
+            items = [self._attach_account(item, task) for item in triage_payload["items"]]
+            next_history_id = str(history.get("historyId") or history_id).strip() or history_id
+            self._save_history_cursor(history_id=next_history_id)
+            await self._maybe_step(4, "completed", f"Classified {len(items)} changed messages.")
+            await self._maybe_step(5, "completed", f"Advanced Gmail history cursor to {next_history_id}.")
+            return AgentResult(
+                status="completed",
+                output={
+                    "status": "processed",
+                    "account": self._account_info(),
+                    "reason": "gmail_history_replayed",
+                    "history_id": next_history_id,
+                    "previous_history_id": start_history_id,
+                    "message_count": len(messages),
+                    "items": items,
+                    "messages": items,
+                    "llm_used": bool(triage_payload["llm_used"]),
+                    "skipped_by_prefilter": triage_payload["skipped_by_prefilter"],
+                    "added_prefilters": triage_payload["added_prefilters"],
+                    "summary": triage_payload.get("summary") or "",
+                },
+                artifacts=[],
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code not in {404, 400}:
+                raise
+            logger.warning(
+                "gmail_agent.history_replay_failed_fallback task_id=%s status=%s",
+                task.task_id,
+                exc.response.status_code,
+            )
+            query = str(task.input.get("fallback_query") or "newer_than:1d in:inbox -in:trash").strip()
+            messages = await client.search_messages(query=query, max_results=max_results)
+            triage_payload = await self._triage_message_batch(
+                task,
+                messages,
+                context_brief="Gmail history cursor was invalid or expired; ran bounded recent inbox fallback.",
+                source="process_inbound_fallback",
+            )
+            items = [self._attach_account(item, task) for item in triage_payload["items"]]
+            self._save_history_cursor(history_id=history_id)
+            return AgentResult(
+                status="completed",
+                output={
+                    "status": "processed",
+                    "account": self._account_info(),
+                    "reason": "history_cursor_expired_fallback_recent_scan",
+                    "history_id": history_id,
+                    "previous_history_id": start_history_id,
+                    "query": query,
+                    "message_count": len(messages),
+                    "items": items,
+                    "messages": items,
+                    "llm_used": bool(triage_payload["llm_used"]),
+                    "skipped_by_prefilter": triage_payload["skipped_by_prefilter"],
+                    "added_prefilters": triage_payload["added_prefilters"],
+                    "summary": triage_payload.get("summary") or "",
+                },
+                artifacts=[],
+            )
+
+    def _message_ids_from_history(self, history: dict[str, Any]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for entry in history.get("history") or []:
+            if not isinstance(entry, dict):
+                continue
+            for added in entry.get("messagesAdded") or []:
+                if not isinstance(added, dict):
+                    continue
+                message = added.get("message") if isinstance(added.get("message"), dict) else {}
+                message_id = str(message.get("id") or "").strip()
+                labels = {str(item) for item in (message.get("labelIds") or [])}
+                if message_id and message_id not in seen and (not labels or "INBOX" in labels):
+                    seen.add(message_id)
+                    result.append(message_id)
+        return result
 
     def _require_auth(self) -> str:
         if not self.auth or not self.auth.get("access_token"):
@@ -1038,6 +1192,31 @@ class GmailAgent(AgentRuntime):
                     utcnow().isoformat(),
                 ],
             )
+            conn.commit()
+
+    def _history_cursor(self) -> dict[str, Any]:
+        account = self._account_info()
+        account_id = str(account.get("account_id") or "").strip()
+        if not account_id:
+            return {}
+        with connect_sync(self.session_db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT account_id, account_email, history_id, watch_expiration_ms, updated_at
+                FROM gmail_history_cursors
+                WHERE account_id = ?
+                """,
+                [account_id],
+            ).fetchone()
+            return dict(row) if row else {}
+
+    def _clear_history_cursor(self) -> None:
+        account = self._account_info()
+        account_id = str(account.get("account_id") or "").strip()
+        if not account_id:
+            return
+        with connect_sync(self.session_db_path) as conn:
+            conn.execute("DELETE FROM gmail_history_cursors WHERE account_id = ?", [account_id])
             conn.commit()
 
     def _summary_for_output(self, output: dict[str, Any]) -> dict[str, Any]:

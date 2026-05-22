@@ -184,6 +184,17 @@ class GoogleGmailClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def stop_watch(self) -> dict[str, Any]:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.post(
+                f"{_GMAIL_BASE}/users/me/stop",
+                headers=self._headers,
+            )
+            if resp.status_code == 401:
+                raise PermissionError("Google access token expired.")
+            resp.raise_for_status()
+            return {"status": "stopped"}
+
     async def list_history(
         self,
         *,

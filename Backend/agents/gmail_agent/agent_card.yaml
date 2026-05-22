@@ -95,6 +95,15 @@ intents:
       - Use only when GMAIL_WATCH_TOPIC_NAME or input.topic_name is configured.
       - Gmail push requires Google Cloud Pub/Sub topic permissions outside COSMIC.
 
+  - name: gmail.stop_watch
+    description: Stop Gmail push notifications for a connected mailbox and clear the local history cursor.
+    input_schema: schemas/intents/gmail.stop_watch.input.json
+    output_schema: schemas/intents/gmail.stop_watch.output.json
+    timeout_sec: 45
+    usage_hints:
+      - Use this when a user disables Gmail for a Google account or disconnects that account.
+      - This calls Gmail users.stop before local credentials are revoked.
+
   - name: gmail.recall_session
     description: Recall previous Gmail-agent runs from the private session ledger.
     input_schema: schemas/intents/gmail.recall_session.input.json
@@ -136,6 +145,10 @@ auth_requirements:
     provider: google
     scopes:
       - https://www.googleapis.com/auth/gmail.modify
+  gmail.stop_watch:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/gmail.modify
 
 artifact_types:
   - gmail_thread_snapshot
@@ -163,6 +176,7 @@ policies:
     gmail.morning_briefing_digest: [cosmic/gateway:1.0.0, cosmic/orchestrator:1.0.0]
     gmail.manage_prefilter: [cosmic/orchestrator:1.0.0]
     gmail.sync_watch: [cosmic/orchestrator:1.0.0]
+    gmail.stop_watch: [cosmic/gateway:1.0.0, cosmic/orchestrator:1.0.0]
     gmail.recall_session: [cosmic/orchestrator:1.0.0]
 
 sla:

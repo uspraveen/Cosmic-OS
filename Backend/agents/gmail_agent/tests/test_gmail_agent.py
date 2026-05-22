@@ -104,6 +104,8 @@ def test_agent_card_references_all_gmail_schemas() -> None:
         "gmail.heartbeat_digest",
         "gmail.morning_briefing_digest",
         "gmail.manage_prefilter",
+        "gmail.sync_watch",
+        "gmail.stop_watch",
         "gmail.recall_session",
     }.issubset(intent_names)
     for intent in card["intents"]:

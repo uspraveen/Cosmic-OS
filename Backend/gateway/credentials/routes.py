@@ -12,6 +12,7 @@ Exposed endpoints:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -92,6 +93,38 @@ def _check_internal_token(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Invalid internal token")
 
 
+def _gmail_was_disabled(before: dict[str, Any] | None, after: dict[str, Any] | None) -> bool:
+    if not before or not after:
+        return False
+    before_tools = {
+        str(item).strip()
+        for item in (before.get("selected_tools") or [])
+        if str(item).strip()
+    }
+    after_tools = {
+        str(item).strip()
+        for item in (after.get("selected_tools") or [])
+        if str(item).strip()
+    }
+    return "gmail" in before_tools and "gmail" not in after_tools
+
+
+def _gmail_was_enabled(before: dict[str, Any] | None, after: dict[str, Any] | None) -> bool:
+    if not before or not after:
+        return False
+    before_tools = {
+        str(item).strip()
+        for item in (before.get("selected_tools") or [])
+        if str(item).strip()
+    }
+    after_tools = {
+        str(item).strip()
+        for item in (after.get("selected_tools") or [])
+        if str(item).strip()
+    }
+    return "gmail" not in before_tools and "gmail" in after_tools
+
+
 def _extract_google_meeting_link(item: dict[str, Any]) -> str:
     direct = str(item.get("hangoutLink") or "").strip()
     if direct:
@@ -158,6 +191,12 @@ async def google_oauth_callback(
     except Exception as exc:
         logger.exception("OAuth callback failed")
         raise HTTPException(status_code=500, detail=str(exc))
+    account_id = str(account.get("account_id") or "")
+    account_snapshot = mgr.get_account(account_id) if account_id else account
+    if "gmail" in set((account_snapshot or {}).get("selected_tools") or []):
+        runtime = getattr(request.app.state, "gateway_runtime", None)
+        if runtime is not None:
+            asyncio.create_task(runtime.sync_gmail_watch_for_account(account_id))
     title = "Google Connected"
     subtitle = str(account.get("email") or account.get("account_label") or "Your Google account").strip() or "Your Google account"
     html = f"""<!doctype html>
@@ -212,6 +251,12 @@ async def disconnect_account(request: Request, account_id: str):
     """Disconnect and revoke a Google account."""
     _check_local_token(request)
     mgr = _get_manager(request)
+    runtime = getattr(request.app.state, "gateway_runtime", None)
+    if runtime is not None:
+        try:
+            await runtime.stop_gmail_watch_for_account(account_id)
+        except Exception:
+            logger.exception("gmail watch stop failed before account disconnect")
     try:
         result = await mgr.disconnect_account(account_id)
     except ValueError as exc:
@@ -224,6 +269,7 @@ async def update_account(request: Request, account_id: str, body: UpdateAccountR
     """Update display preferences for a connected account."""
     _check_local_token(request)
     mgr = _get_manager(request)
+    before = mgr.get_account(account_id)
     try:
         result = mgr.update_account_preferences(
             account_id,
@@ -235,6 +281,17 @@ async def update_account(request: Request, account_id: str, body: UpdateAccountR
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    if _gmail_was_disabled(before, result):
+        runtime = getattr(request.app.state, "gateway_runtime", None)
+        if runtime is not None:
+            try:
+                await runtime.stop_gmail_watch_for_account(account_id)
+            except Exception:
+                logger.exception("gmail watch stop failed after Gmail tool disable")
+    elif _gmail_was_enabled(before, result):
+        runtime = getattr(request.app.state, "gateway_runtime", None)
+        if runtime is not None:
+            asyncio.create_task(runtime.sync_gmail_watch_for_account(account_id))
     return {"account": result}
 
 

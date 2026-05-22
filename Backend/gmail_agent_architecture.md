@@ -52,6 +52,8 @@ The Gmail API treats Gmail scopes as separate strings, so an account granted `gm
 | `gmail.heartbeat_digest` | Reconcile cached Gmail triage state for heartbeats without re-triaging the inbox by default. |
 | `gmail.morning_briefing_digest` | Run a deliberate broader Gmail scan for morning briefings. |
 | `gmail.manage_prefilter` | Add/remove/list durable sender/domain prefilters. |
+| `gmail.sync_watch` | Register/renew `users.watch` for a connected Gmail account when Pub/Sub is configured. |
+| `gmail.stop_watch` | Stop Gmail push notifications and clear local history cursor state. |
 | `gmail.recall_session` | Recall prior Gmail-agent work from the agent ledger. |
 
 ## LLM Spam and Triage
@@ -135,7 +137,21 @@ Gmail push notifications require Google Cloud Pub/Sub:
 - Watches expire and must be renewed.
 - Pub/Sub push messages carry Gmail `emailAddress` and `historyId`; the agent then uses `users.history.list` to fetch changes since the last stored `historyId`.
 
-COSMIC should support this path, but it must not pretend webhook delivery is active unless the VM has Pub/Sub topic and webhook verification configured. Until then, explicit triage and morning briefing scans can provide inbox awareness; heartbeat reconciliation should remain cheap and state-based.
+COSMIC supports this path through Gateway endpoint:
+
+```
+POST /webhooks/gmail/pubsub?secret=<GATEWAY_GMAIL_WEBHOOK_SECRET>
+```
+
+The endpoint acknowledges Pub/Sub quickly, then dispatches `gmail.process_inbound` in the background. `gmail.process_inbound` replays Gmail history from the stored cursor, triages changed Inbox messages, records decisions, and advances the cursor. If the stored cursor is missing, the first notification seeds the cursor rather than replaying unknown history. If Gmail reports the cursor is stale, the agent runs a bounded recent-inbox fallback and stores the new cursor.
+
+Watch lifecycle:
+
+- Google OAuth connect or enabling the Gmail tool schedules `gmail.sync_watch`.
+- Disabling the Gmail toggle or disconnecting a Google account calls `gmail.stop_watch` before Gmail use is disabled/revoked.
+- Heartbeats only use Gmail accounts whose Gmail tool is enabled.
+
+COSMIC must not pretend webhook delivery is active unless the VM has a Pub/Sub topic configured in `GMAIL_WATCH_TOPIC_NAME` and the Pub/Sub push subscription points at the Gateway endpoint above. Until then, explicit triage and morning briefing scans can provide inbox awareness; heartbeat reconciliation should remain cheap and state-based.
 
 ## Persistent State
 

@@ -173,6 +173,9 @@ class GatewayConfig:
     tabular_parse_poll_interval_sec: float = 0.25
     email_agent_id: str = "cosmic/email-agent:1.0.0"
     gmail_agent_id: str = "cosmic/gmail-agent:1.0.0"
+    gmail_webhook_secret: str = ""
+    gmail_process_inbound_timeout_sec: float = 180.0
+    gmail_process_inbound_poll_interval_sec: float = 0.25
     calendar_agent_id: str = "cosmic/calendar-agent:1.0.0"
     email_process_inbound_timeout_sec: float = 180.0
     email_process_inbound_poll_interval_sec: float = 0.25
@@ -585,6 +588,19 @@ class GatewayConfig:
             gmail_agent_id=(
                 os.getenv("GATEWAY_GMAIL_AGENT_ID", "cosmic/gmail-agent:1.0.0").strip()
                 or "cosmic/gmail-agent:1.0.0"
+            ),
+            gmail_webhook_secret=(
+                os.getenv("GATEWAY_GMAIL_WEBHOOK_SECRET")
+                or os.getenv("GMAIL_WEBHOOK_SECRET")
+                or ""
+            ).strip(),
+            gmail_process_inbound_timeout_sec=max(
+                5.0,
+                _env_float("GATEWAY_GMAIL_PROCESS_INBOUND_TIMEOUT_SEC", 180.0),
+            ),
+            gmail_process_inbound_poll_interval_sec=max(
+                0.05,
+                _env_float("GATEWAY_GMAIL_PROCESS_INBOUND_POLL_INTERVAL_SEC", 0.25),
             ),
             calendar_agent_id=(
                 os.getenv(

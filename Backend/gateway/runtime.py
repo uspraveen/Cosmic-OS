@@ -2330,6 +2330,7 @@ class GatewayRuntime:
             for account in self.credential_manager.list_accounts("google")
             if self._safe_text(account.get("status")) == "active"
             and bool(account.get("has_refresh_token"))
+            and self._google_account_has_tool(account, "gmail")
             and gmail_scope in set(account.get("granted_scopes") or [])
         ]
         if not accounts:
@@ -2680,6 +2681,305 @@ class GatewayRuntime:
             "account_label": self._safe_text(item.get("account_label")),
             "email": self._safe_text(item.get("email")),
         }
+
+    def _google_account_has_tool(self, account: dict[str, Any], tool_id: str) -> bool:
+        selected = [
+            self._safe_text(item)
+            for item in (account.get("selected_tools") or [])
+            if self._safe_text(item)
+        ]
+        if selected:
+            return tool_id in set(selected)
+        # Legacy connected accounts may predate selected_tools. In that case,
+        # scope coverage remains the compatibility signal.
+        if tool_id == "gmail":
+            return "https://www.googleapis.com/auth/gmail.modify" in set(
+                account.get("granted_scopes") or []
+            )
+        return True
+
+    async def handle_gmail_pubsub_notification(
+        self,
+        *,
+        email_address: str,
+        history_id: str,
+        raw_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        gmail_scope = "https://www.googleapis.com/auth/gmail.modify"
+        email_address = self._safe_text(email_address).lower()
+        history_id = self._safe_text(history_id)
+        if not email_address or not history_id:
+            return {
+                "status": "ignored",
+                "reason": "missing_email_or_history_id",
+            }
+        accounts = [
+            account
+            for account in self.credential_manager.list_accounts("google")
+            if self._safe_text(account.get("status")) == "active"
+            and bool(account.get("has_refresh_token"))
+            and self._google_account_has_tool(account, "gmail")
+            and gmail_scope in set(account.get("granted_scopes") or [])
+            and self._safe_text(account.get("email")).lower() == email_address
+        ]
+        if not accounts:
+            return {
+                "status": "ignored",
+                "reason": "no_active_gmail_account",
+                "email_address": email_address,
+            }
+        results: list[dict[str, Any]] = []
+        for account in accounts:
+            try:
+                auth = await self.credential_manager.resolve_credential(
+                    provider="google",
+                    required_scopes=[gmail_scope],
+                    account_id=self._safe_text(account.get("account_id")),
+                    operation_mode="read",
+                    allow_primary_fallback=False,
+                )
+                if not auth:
+                    results.append(
+                        {
+                            "account_id": self._safe_text(account.get("account_id")),
+                            "status": "needs_reconnect",
+                        }
+                    )
+                    continue
+                result = await self._dispatch_gmail_process_inbound(
+                    account=account,
+                    auth=auth,
+                    history_id=history_id,
+                    raw_payload=raw_payload or {},
+                )
+                results.append(result)
+                await self._publish_gmail_inbound_notification(result)
+            except Exception:
+                logger.exception(
+                    "gateway.gmail_pubsub_process_failed account_id=%s history_id=%s",
+                    self._safe_text(account.get("account_id")),
+                    history_id,
+                )
+                results.append(
+                    {
+                        "account_id": self._safe_text(account.get("account_id")),
+                        "status": "failed",
+                    }
+                )
+        return {
+            "status": "processed",
+            "email_address": email_address,
+            "history_id": history_id,
+            "account_count": len(accounts),
+            "results": results,
+        }
+
+    async def stop_gmail_watch_for_account(self, account_id: str) -> dict[str, Any]:
+        account_id = self._safe_text(account_id)
+        if not account_id:
+            return {"status": "ignored", "reason": "missing_account_id"}
+        gmail_scope = "https://www.googleapis.com/auth/gmail.modify"
+        account = self.credential_manager.get_account(account_id)
+        if not account or self._safe_text(account.get("status")) != "active":
+            return {"status": "ignored", "reason": "account_not_active"}
+        if gmail_scope not in set(account.get("granted_scopes") or []):
+            return {"status": "ignored", "reason": "gmail_scope_not_granted"}
+        auth = await self.credential_manager.resolve_credential(
+            provider="google",
+            required_scopes=[gmail_scope],
+            account_id=account_id,
+            operation_mode="read",
+            allow_primary_fallback=False,
+        )
+        if not auth:
+            return {"status": "skipped", "reason": "credential_unavailable"}
+        task = TaskEnvelope(
+            task_id=generate_task_id(),
+            task_list_id=self._current_session_id(),
+            session_id=self._current_session_id(),
+            sender="cosmic/gateway:1.0.0",
+            recipient=self.config.gmail_agent_id,
+            intent="gmail.stop_watch",
+            input={"account": self._heartbeat_gmail_account_summary(account), "auth": auth},
+            input_artifacts=[],
+            idempotency_key=f"gmail-stop-watch:{account_id}:{int(time.time() // 60)}",
+            priority="normal",
+            signature="",
+            created_at=utcnow(),
+            source="hook",
+            source_id="google-gmail-toggle",
+            channel="desktop",
+        )
+        task = task.model_copy(
+            update={"signature": sign_task_envelope(task, self.config.signing_secret)}
+        )
+        await dispatch_task(task, self._redis)
+        return await self._wait_for_agent_terminal_result(
+            task.task_id,
+            timeout_sec=self.config.gmail_process_inbound_timeout_sec,
+            poll_interval_sec=self.config.gmail_process_inbound_poll_interval_sec,
+        )
+
+    async def sync_gmail_watch_for_account(self, account_id: str) -> dict[str, Any]:
+        account_id = self._safe_text(account_id)
+        if not account_id:
+            return {"status": "ignored", "reason": "missing_account_id"}
+        gmail_scope = "https://www.googleapis.com/auth/gmail.modify"
+        account = self.credential_manager.get_account(account_id)
+        if not account or self._safe_text(account.get("status")) != "active":
+            return {"status": "ignored", "reason": "account_not_active"}
+        if not self._google_account_has_tool(account, "gmail"):
+            return {"status": "ignored", "reason": "gmail_tool_disabled"}
+        if gmail_scope not in set(account.get("granted_scopes") or []):
+            return {"status": "ignored", "reason": "gmail_scope_not_granted"}
+        auth = await self.credential_manager.resolve_credential(
+            provider="google",
+            required_scopes=[gmail_scope],
+            account_id=account_id,
+            operation_mode="read",
+            allow_primary_fallback=False,
+        )
+        if not auth:
+            return {"status": "skipped", "reason": "credential_unavailable"}
+        session_id = self._current_session_id()
+        task = TaskEnvelope(
+            task_id=generate_task_id(),
+            task_list_id=session_id,
+            session_id=session_id,
+            sender="cosmic/gateway:1.0.0",
+            recipient=self.config.gmail_agent_id,
+            intent="gmail.sync_watch",
+            input={"account": self._heartbeat_gmail_account_summary(account), "auth": auth},
+            input_artifacts=[],
+            idempotency_key=f"gmail-sync-watch:{account_id}:{int(time.time() // 3600)}",
+            priority="normal",
+            signature="",
+            created_at=utcnow(),
+            source="hook",
+            source_id="google-gmail-toggle",
+            channel="desktop",
+        )
+        task = task.model_copy(
+            update={"signature": sign_task_envelope(task, self.config.signing_secret)}
+        )
+        await dispatch_task(task, self._redis)
+        return await self._wait_for_agent_terminal_result(
+            task.task_id,
+            timeout_sec=self.config.gmail_process_inbound_timeout_sec,
+            poll_interval_sec=self.config.gmail_process_inbound_poll_interval_sec,
+        )
+
+    async def _dispatch_gmail_process_inbound(
+        self,
+        *,
+        account: dict[str, Any],
+        auth: dict[str, Any],
+        history_id: str,
+        raw_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        session_id = self._current_session_id()
+        task = TaskEnvelope(
+            task_id=generate_task_id(),
+            task_list_id=session_id,
+            session_id=session_id,
+            sender="cosmic/gateway:1.0.0",
+            recipient=self.config.gmail_agent_id,
+            intent="gmail.process_inbound",
+            input={
+                "history_id": history_id,
+                "email_address": self._safe_text(account.get("email")),
+                "account": self._heartbeat_gmail_account_summary(account),
+                "auth": auth,
+                "raw_pubsub_payload": raw_payload,
+                "context_brief": "Inbound Gmail Pub/Sub notification.",
+            },
+            input_artifacts=[],
+            idempotency_key=(
+                "gmail-process-inbound:"
+                f"{self._safe_text(account.get('account_id'))}:{history_id}"
+            ),
+            priority="normal",
+            signature="",
+            created_at=utcnow(),
+            source="webhook",
+            source_id="gmail-pubsub",
+            channel="desktop",
+        )
+        task = task.model_copy(
+            update={"signature": sign_task_envelope(task, self.config.signing_secret)}
+        )
+        await dispatch_task(task, self._redis)
+        result = await self._wait_for_agent_terminal_result(
+            task.task_id,
+            timeout_sec=self.config.gmail_process_inbound_timeout_sec,
+            poll_interval_sec=self.config.gmail_process_inbound_poll_interval_sec,
+        )
+        return {
+            "account_id": self._safe_text(account.get("account_id")),
+            "email": self._safe_text(account.get("email")),
+            "task_id": task.task_id,
+            **result,
+        }
+
+    async def _publish_gmail_inbound_notification(self, result: dict[str, Any]) -> None:
+        if self._safe_text(result.get("status")) != "completed":
+            return
+        output = result.get("output") if isinstance(result.get("output"), dict) else {}
+        raw_items = output.get("messages") if isinstance(output.get("messages"), list) else []
+        if not raw_items and isinstance(output.get("items"), list):
+            raw_items = output.get("items") or []
+        items = [
+            item
+            for item in raw_items
+            if isinstance(item, dict) and bool(item.get("surface_to_user"))
+        ]
+        if not items:
+            return
+        first = items[0]
+        subject = self._safe_text(first.get("subject")) or "New Gmail item"
+        sender = self._safe_text(first.get("sender")) or self._safe_text(first.get("from"))
+        event = {
+            "type": "gmail.notification",
+            "timestamp": utcnow_iso(),
+            "account_id": self._safe_text(first.get("account_id"))
+            or self._safe_text(result.get("account_id")),
+            "account_email": self._safe_text(first.get("account_email"))
+            or self._safe_text(result.get("email")),
+            "message_id": self._safe_text(first.get("message_id")),
+            "thread_id": self._safe_text(first.get("thread_id")),
+            "subject": subject,
+            "sender": sender,
+            "category": self._safe_text(first.get("category")),
+            "priority": first.get("priority"),
+            "suggested_action": self._safe_text(first.get("suggested_action")),
+            "item_count": len(items),
+        }
+        for adapter in self.registry.adapters.values():
+            if not isinstance(adapter, (DesktopAdapter, MobileAdapter)):
+                continue
+            try:
+                await adapter.broadcast_all(event)
+            except Exception:
+                logger.exception(
+                    "gateway.gmail_notification.broadcast_failed platform=%s",
+                    adapter.platform,
+                )
+        self._schedule_mobile_push(
+            session_id=None,
+            origin_channel="gmail",
+            event_type="gmail.notification",
+            title="Gmail needs attention",
+            body=f"{sender + ': ' if sender else ''}{subject}",
+            screen="chat",
+            priority="high",
+            data={
+                "type": "gmail.notification",
+                "message_id": event.get("message_id"),
+                "thread_id": event.get("thread_id"),
+                "account_id": event.get("account_id"),
+                "channel_id": "cosmic-gmail",
+            },
+        )
 
     async def _build_heartbeat_context_packet(
         self,
