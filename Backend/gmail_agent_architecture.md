@@ -41,6 +41,8 @@ When Gmail Agent marks an inbound item `surface_to_user=true`, Gateway stores a 
 
 Full email bodies remain in Gmail. Later user turns receive a **Recent Surfaced Gmail Items** context block. If the user says "reply to this", "open that email", or "make the doc from it", the orchestrator can resolve the most recent matching surfaced item and delegate `gmail.read_thread` or `gmail.draft_reply` with exact refs. If multiple surfaced items plausibly match, it should ask a concise clarifying question.
 
+User-facing Gmail interruptions are orchestrator-owned. After Gateway stores surfaced refs, it creates a private orchestrator decision turn containing the Gmail Agent evidence, active working set, and memory context. The orchestrator returns a structured decision to either `deliver` a concise note/question to the user or `suppress` the interruption. Gateway may broadcast low-level sync events to clients, but conversational Gmail messages and push-worthy wording should come from this orchestrator decision path, not directly from the Gmail Agent.
+
 Attachment continuity follows the same rule. Gmail triage and thread reads include attachment metadata (`message_id`, `attachment_id`, filename, MIME type, size), but the agent does not push raw attachment bytes into prompts or auto-parse every attachment. When the user/task actually needs the file, the orchestrator delegates `gmail.fetch_attachment`; Gmail Agent downloads that single attachment into a private COSMIC artifact and returns it through the normal `TaskEnvelope` artifact path so docs, tabular, Alpha, or another specialist can consume it via `input_artifacts`.
 
 ## Semantic Event Automations

@@ -137,6 +137,7 @@ SYSTEM_CRON_DAILY_ROLLOVER = "system.daily_rollover"
 HEARTBEAT_SOURCE_ID = "default"
 HEARTBEAT_SUPPRESS_TOKEN = "heartbeat_ok"
 HEARTBEAT_NOTES_CHAR_LIMIT = 4000
+GMAIL_SURFACE_DECISION_SOURCE = "gmail_surface"
 # Heartbeats get two very different kinds of context:
 # - durable context: compaction, memory, task notebooks, active working set
 # - raw chat tail: a short-lived temporal grounding aid
@@ -3207,27 +3208,262 @@ class GatewayRuntime:
                     "gateway.gmail_notification.broadcast_failed platform=%s",
                     adapter.platform,
                 )
-        self._schedule_mobile_push(
-            session_id=None,
-            origin_channel="gmail",
-            event_type="gmail.notification",
-            title="Gmail needs attention",
-            body=f"{sender + ': ' if sender else ''}{subject}",
-            screen="chat",
-            priority="high",
-            data={
-                "type": "gmail.notification",
-                "surfaced_id": event.get("surfaced_id"),
-                "message_id": event.get("message_id"),
-                "thread_id": event.get("thread_id"),
-                "account_id": event.get("account_id"),
-                "channel_id": "cosmic-gmail",
-            },
-        )
         await self._evaluate_gmail_event_automations(
             result=result,
             raw_items=items,
             stored_items=stored_items,
+        )
+        self._schedule_background_task(
+            self._dispatch_gmail_surface_decision(
+                result=result,
+                raw_items=items,
+                stored_items=stored_items,
+            ),
+            name="gmail-surface-decision",
+        )
+
+    async def _dispatch_gmail_surface_decision(
+        self,
+        *,
+        result: dict[str, Any],
+        raw_items: list[dict[str, Any]],
+        stored_items: list[dict[str, Any]],
+    ) -> None:
+        if not raw_items:
+            return
+        try:
+            request_record = await self._build_gmail_surface_decision_request_record(
+                result=result,
+                raw_items=raw_items,
+                stored_items=stored_items,
+            )
+            await self.fulfill_processed_message(request_record)
+        except Exception:
+            logger.exception(
+                "gateway.gmail_surface_decision.dispatch_failed task_id=%s",
+                self._safe_text(result.get("task_id")),
+            )
+
+    async def _build_gmail_surface_decision_request_record(
+        self,
+        *,
+        result: dict[str, Any],
+        raw_items: list[dict[str, Any]],
+        stored_items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        session_id = self._current_session_id()
+        channel, delivery_state = await self._heartbeat_delivery_target(
+            {"delivery_channel": "auto"},
+            session_id=session_id,
+        )
+        session_metadata = self._ensure_session_state_seeded(session_id)
+        active_working_set = (
+            session_metadata.get("active_working_set")
+            if isinstance(session_metadata.get("active_working_set"), dict)
+            else None
+        )
+        events = [
+            self._gmail_automation_event(
+                result=result,
+                raw_item=item,
+                stored_item=stored_items[index]
+                if index < len(stored_items) and isinstance(stored_items[index], dict)
+                else {},
+            )
+            for index, item in enumerate(raw_items)
+            if isinstance(item, dict)
+        ]
+        surfaced_ids = self._normalize_string_list(
+            [event.get("surfaced_id") for event in events],
+            limit=12,
+        )
+        event_refs = self._normalize_string_list(
+            [event.get("event_ref") for event in events],
+            limit=12,
+        )
+        request_id = f"req_gmail_{uuid4().hex[:12]}"
+        source_task_id = self._safe_text(result.get("task_id"))
+        prompt = self._render_gmail_surface_decision_prompt(
+            account_email=self._safe_text(result.get("email"))
+            or self._safe_text(result.get("account_email")),
+            source_task_id=source_task_id,
+            events=events,
+        )
+        memory_query = " ".join(
+            self._normalize_string_list(
+                [
+                    "Gmail surfaced inbound email user goals relationships active projects",
+                    *[
+                        " ".join(
+                            self._normalize_string_list(
+                                [
+                                    event.get("sender"),
+                                    event.get("subject"),
+                                    event.get("category"),
+                                    event.get("reason"),
+                                    event.get("suggested_action"),
+                                ],
+                                limit=8,
+                            )
+                        )
+                        for event in events
+                    ],
+                ],
+                limit=24,
+            )
+        )
+        memory_prompt_context = await self._assemble_memory_prompt_context(
+            query=memory_query or "Gmail surfaced inbound email"
+        )
+        source_id = "gmail_surface:" + (
+            ":".join(surfaced_ids or event_refs)
+            or source_task_id
+            or uuid4().hex[:8]
+        )
+        request_record = {
+            "status": "accepted",
+            "request_id": request_id,
+            "session_id": session_id,
+            "source": GMAIL_SURFACE_DECISION_SOURCE,
+            "source_id": source_id,
+            "channel": channel,
+            "route": "opus",
+            "dispatch_target": "orchestrator",
+            "classification": {
+                "route": "opus",
+                "needs_latest": False,
+                "needs_citations": False,
+                "is_task": True,
+                "is_continuation": False,
+                "confidence": 1.0,
+                "signals": [
+                    "gmail.inbound",
+                    "gmail.surface_to_user",
+                    "orchestrator_notification_decision",
+                ],
+            },
+            "message": {
+                "content": prompt,
+                "channel": channel,
+                "request_id": request_id,
+                "metadata": {
+                    "platform": "gmail",
+                    "event_type": "gmail.inbound",
+                    "source_task_id": source_task_id,
+                    "surfaced_ids": surfaced_ids,
+                    "event_refs": event_refs,
+                    "delivery_state": delivery_state,
+                    "source": GMAIL_SURFACE_DECISION_SOURCE,
+                },
+            },
+            "assembled_conversation_context": [],
+            "memory_context": self._compose_prompt_context(
+                active_working_set=active_working_set,
+                memory_context=memory_prompt_context.rendered,
+            ),
+            "active_working_set": active_working_set,
+            "carry_forward_packet": (
+                session_metadata.get("carry_forward_packet")
+                if isinstance(session_metadata.get("carry_forward_packet"), dict)
+                else None
+            ),
+            "memory_context_payload": {
+                "core_fact_items": memory_prompt_context.core_fact_items,
+                "core_facts_rendered": memory_prompt_context.core_facts_rendered,
+                "items": memory_prompt_context.recall_items,
+                "total_token_count": memory_prompt_context.total_token_count,
+                "diagnostics": memory_prompt_context.diagnostics,
+            },
+            "routing_decision_source": "gmail_surface_decision",
+            "input_artifacts": [],
+            "accepted_at": utcnow_iso(),
+            "idempotency_key": f"gmail-surface-decision:{source_id}",
+            "cron_timezone": self.current_user_timezone(),
+            "gateway_preferences": self.get_desktop_preferences_snapshot(),
+            "visual_response_enhancement_enabled": False,
+            "gmail_surface_events": events,
+        }
+        self.request_records[request_id] = request_record
+        self.routing_audit_store.append(
+            request_id=request_id,
+            session_id=session_id,
+            channel=channel,
+            source=GMAIL_SURFACE_DECISION_SOURCE,
+            source_id=source_id,
+            query_text="[gmail surface decision]",
+            route_override=None,
+            sticky_hit=False,
+            decision_source="gmail_surface_decision",
+            classifier_route="opus",
+            final_route="opus",
+            dispatch_target="orchestrator",
+            confidence=1.0,
+            signals=[
+                "gmail.inbound",
+                "gmail.surface_to_user",
+                "orchestrator_notification_decision",
+            ],
+            conversation_context=[],
+            classifier_payload=None,
+            classifier_metrics=None,
+            classifier_model=None,
+            classifier_latency_ms=None,
+            decision_latency_ms=0.0,
+            error_text=None,
+        )
+        return request_record
+
+    def _render_gmail_surface_decision_prompt(
+        self,
+        *,
+        account_email: str | None,
+        source_task_id: str | None,
+        events: list[dict[str, Any]],
+    ) -> str:
+        compact_events: list[dict[str, Any]] = []
+        for event in events[:8]:
+            if not isinstance(event, dict):
+                continue
+            compact_events.append(
+                {
+                    "event_ref": self._safe_text(event.get("event_ref")),
+                    "surfaced_id": self._safe_text(event.get("surfaced_id")),
+                    "account_email": self._safe_text(event.get("account_email"))
+                    or account_email,
+                    "sender": self._safe_text(event.get("sender")),
+                    "sender_email": self._safe_text(event.get("sender_email")),
+                    "subject": self._safe_text(event.get("subject")),
+                    "snippet": self._bounded_excerpt(event.get("snippet"), limit=700),
+                    "category": self._safe_text(event.get("category")),
+                    "priority": event.get("priority"),
+                    "reason": self._safe_text(event.get("reason")),
+                    "suggested_action": self._safe_text(event.get("suggested_action")),
+                    "thread_id": self._safe_text(event.get("thread_id")),
+                    "message_id": self._safe_text(event.get("message_id")),
+                    "attachments": event.get("attachments")
+                    if isinstance(event.get("attachments"), list)
+                    else [],
+                }
+            )
+        return (
+            "You are COSMIC handling an automatic Gmail surfaced-item decision.\n"
+            "This turn was triggered by Gmail triage, not by a live user message. "
+            "The Gmail Agent has already made a first-pass semantic judgment and returned structured evidence; "
+            "you are the orchestrator, so you own whether COSMIC should speak to the user now.\n\n"
+            "Use your memory, active goals, relationship context, and available specialist tools if they materially improve the decision. "
+            "Do not notify merely because an email exists. Deliver only when the user would likely benefit from knowing now, "
+            "when a decision/reply/follow-up is useful, or when the email connects to active goals, deadlines, relationships, approvals, or projects. "
+            "Suppress routine notifications, duplicates, low-value FYIs, and anything better handled silently later.\n\n"
+            "If you deliver, write a short natural note for the user. Include what arrived, why it matters, and the next useful option/question. "
+            "Do not mention internal routing, this prompt, or that a specialist classified it. "
+            "If an attachment is needed, do not pretend to have parsed it; mention that you can inspect it if the user wants, or use Gmail Agent attachment refs through the normal tool path in a later task.\n\n"
+            "Return only JSON. No markdown, no prose outside JSON.\n"
+            "Schema: {\"decision\":\"suppress\"|\"deliver\",\"message\":\"\",\"reason\":\"\",\"confidence\":0.0,\"notes\":\"\"}\n"
+            "For suppress, message must be empty. For deliver, message must be the exact user-facing message.\n\n"
+            f"Account: {account_email or 'unknown'}\n"
+            f"Gmail task id: {source_task_id or 'unknown'}\n"
+            "Surfaced Gmail item(s):\n"
+            f"{json.dumps(compact_events, ensure_ascii=False, indent=2)}"
         )
 
     def _upsert_surfaced_gmail_item(
@@ -14553,6 +14789,43 @@ class GatewayRuntime:
                     completed=True,
                 )
                 return
+        if self._is_gmail_surface_decision_event(event):
+            if event_type in {
+                "task.created",
+                "task.progress",
+                "response.chunk",
+                "response.thinking.chunk",
+                "response.blocks.snapshot",
+                "tool.call",
+                "tool.result",
+            }:
+                return
+            if event_type in {"task.completed", "task.failed", "task.cancelled", "error"}:
+                if task_id:
+                    self.active_task_channels.pop(task_id, None)
+                    self.active_requests_by_task.pop(task_id, None)
+                status = (
+                    "failed"
+                    if event_type in {"task.failed", "error"}
+                    else "cancelled"
+                    if event_type == "task.cancelled"
+                    else "completed"
+                )
+                self._trace_request_event(
+                    request_id=request_id,
+                    session_id=session_id,
+                    channel=self._safe_text(event.get("channel")),
+                    route=self._safe_text(event.get("route")) or "opus",
+                    event_type=event_type,
+                    stage="terminal",
+                    status=status,
+                    title="Gmail surface decision terminal event",
+                    detail=self._safe_text(event.get("message"))
+                    or self._safe_text(event.get("content")),
+                    task_id=task_id,
+                    completed=True,
+                )
+                return
         if request_id and task_id:
             previous_bound_request_id = self.active_requests_by_task.get(task_id)
             self.active_requests_by_task[task_id] = request_id
@@ -14660,6 +14933,38 @@ class GatewayRuntime:
             if heartbeat_decision and heartbeat_decision["decision"] == "deliver":
                 event["content"] = self._safe_text(heartbeat_decision.get("message"))
                 event["heartbeat_decision"] = heartbeat_decision
+            gmail_surface_decision = (
+                self._parse_gmail_surface_decision(event)
+                if self._is_gmail_surface_decision_event(event)
+                else None
+            )
+            if (
+                gmail_surface_decision
+                and gmail_surface_decision["decision"] == "suppress"
+            ):
+                self._trace_request_event(
+                    request_id=request_id,
+                    session_id=session_id,
+                    channel=event_channel,
+                    route=self._safe_text(event.get("route")) or "opus",
+                    event_type="response.complete",
+                    stage="response",
+                    status="suppressed",
+                    title="Gmail surface decision suppressed",
+                    detail=self._safe_text(gmail_surface_decision.get("reason"))
+                    or "Orchestrator chose not to interrupt for this Gmail item.",
+                    task_id=task_id,
+                    completed=False,
+                )
+                return
+            if (
+                gmail_surface_decision
+                and gmail_surface_decision["decision"] == "deliver"
+            ):
+                event["content"] = self._safe_text(
+                    gmail_surface_decision.get("message")
+                )
+                event["gmail_surface_decision"] = gmail_surface_decision
             if is_heartbeat_response:
                 duplicate_summary = self._heartbeat_duplicate_response_summary(
                     event.get("content"),
@@ -15081,6 +15386,19 @@ class GatewayRuntime:
                 return True
         return False
 
+    def _is_gmail_surface_decision_event(self, event: dict[str, Any]) -> bool:
+        if self._safe_text(event.get("source")) == GMAIL_SURFACE_DECISION_SOURCE:
+            return True
+        request_id = self._safe_text(event.get("request_id"))
+        if not request_id:
+            return False
+        request_record = self.request_records.get(request_id)
+        return (
+            isinstance(request_record, dict)
+            and self._safe_text(request_record.get("source"))
+            == GMAIL_SURFACE_DECISION_SOURCE
+        )
+
     def _is_heartbeat_noop_response(self, event: dict[str, Any]) -> bool:
         if not self._is_heartbeat_event(event):
             return False
@@ -15131,7 +15449,7 @@ class GatewayRuntime:
                 "notes": "",
                 "raw_format": "invalid",
             }
-        decision = self._safe_text(payload.get("decision")).lower()
+        decision = (self._safe_text(payload.get("decision")) or "").lower()
         if decision not in {"suppress", "deliver"}:
             return {
                 "decision": "suppress",
@@ -15178,6 +15496,59 @@ class GatewayRuntime:
             "pending_checks": pending_checks,
             "notes": self._safe_text(payload.get("notes")),
             "raw_format": "json",
+        }
+
+    def _parse_gmail_surface_decision(self, event: dict[str, Any]) -> dict[str, Any]:
+        if not self._is_gmail_surface_decision_event(event):
+            return {
+                "decision": "suppress",
+                "reason": "not_gmail_surface_decision_event",
+                "message": "",
+                "confidence": 0.0,
+                "notes": "",
+            }
+        payload = self._parse_json_object_from_text(
+            self._safe_text(event.get("content")) or ""
+        )
+        if payload is None:
+            return {
+                "decision": "suppress",
+                "reason": "invalid_gmail_surface_decision_envelope",
+                "message": "",
+                "confidence": 0.0,
+                "notes": "",
+            }
+        decision = (self._safe_text(payload.get("decision")) or "").lower()
+        if decision not in {"suppress", "deliver"}:
+            return {
+                "decision": "suppress",
+                "reason": "invalid_gmail_surface_decision",
+                "message": "",
+                "confidence": 0.0,
+                "notes": self._safe_text(payload.get("notes")),
+            }
+        message = self._safe_text(payload.get("message"))
+        reason = self._safe_text(payload.get("reason"))
+        try:
+            confidence = max(0.0, min(1.0, float(payload.get("confidence"))))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if decision == "deliver" and not message:
+            return {
+                "decision": "suppress",
+                "reason": reason or "deliver_decision_missing_message",
+                "message": "",
+                "confidence": confidence,
+                "notes": self._safe_text(payload.get("notes")),
+            }
+        if decision == "suppress":
+            message = ""
+        return {
+            "decision": decision,
+            "message": message,
+            "reason": reason,
+            "confidence": confidence,
+            "notes": self._safe_text(payload.get("notes")),
         }
 
     def _parse_json_object_from_text(self, text: str) -> dict[str, Any] | None:

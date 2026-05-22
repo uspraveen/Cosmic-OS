@@ -7,6 +7,7 @@ BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(BACKEND_ROOT))
 
 from gateway.runtime import GatewayRuntime
+from gateway.runtime import GMAIL_SURFACE_DECISION_SOURCE
 
 
 def _runtime() -> GatewayRuntime:
@@ -93,3 +94,43 @@ def test_heartbeat_malformed_structured_output_is_suppressed() -> None:
 
     assert decision["decision"] == "suppress"
     assert decision["reason"] == "invalid_heartbeat_decision_envelope"
+
+
+def test_gmail_surface_decision_deliver_extracts_user_message() -> None:
+    runtime = object.__new__(GatewayRuntime)
+    runtime.request_records = {
+        "req_gmail_test": {
+            "source": GMAIL_SURFACE_DECISION_SOURCE,
+        }
+    }
+
+    decision = runtime._parse_gmail_surface_decision(
+        {
+            "type": "response.complete",
+            "request_id": "req_gmail_test",
+            "content": '{"decision":"deliver","message":"PearX sent a decision email about LearnChain. Want me to open it and help decide the next reply?","reason":"investor/application outcome","confidence":0.96,"notes":""}',
+        }
+    )
+
+    assert decision["decision"] == "deliver"
+    assert decision["message"].startswith("PearX sent a decision email")
+
+
+def test_gmail_surface_decision_invalid_output_is_suppressed() -> None:
+    runtime = object.__new__(GatewayRuntime)
+    runtime.request_records = {
+        "req_gmail_test": {
+            "source": GMAIL_SURFACE_DECISION_SOURCE,
+        }
+    }
+
+    decision = runtime._parse_gmail_surface_decision(
+        {
+            "type": "response.complete",
+            "request_id": "req_gmail_test",
+            "content": "I should probably tell the user.",
+        }
+    )
+
+    assert decision["decision"] == "suppress"
+    assert decision["reason"] == "invalid_gmail_surface_decision_envelope"
