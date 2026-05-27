@@ -10,10 +10,38 @@ from typing import Any
 CURSOR_CLI_CONFIG_RELATIVE_PATH = Path(".cursor") / "cli-config.json"
 DEFAULT_CURSOR_MODEL = "composer-2.5"
 NON_FAST_CURSOR_MODELS = ("composer-2.5", "composer-2")
+DEFAULT_CURSOR_MODEL_DISPLAY = "Composer 2.5"
+FAST_PARAMETER = {"id": "fast", "value": "false"}
 
 
 def cursor_cli_config_path(cursor_home: str | Path) -> Path:
     return Path(cursor_home).expanduser() / CURSOR_CLI_CONFIG_RELATIVE_PATH
+
+
+def _non_fast_parameters(value: Any) -> list[dict[str, Any]]:
+    parameters = [dict(parameter) for parameter in value if isinstance(parameter, dict)] if isinstance(value, list) else []
+    fast_parameter: dict[str, Any] | None = None
+    for parameter in parameters:
+        if parameter.get("id") == "fast":
+            fast_parameter = parameter
+            break
+    if fast_parameter is None:
+        parameters.append(dict(FAST_PARAMETER))
+    else:
+        fast_parameter["value"] = "false"
+    return parameters
+
+
+def _cursor_model_config(value: Any) -> dict[str, Any]:
+    model = dict(value) if isinstance(value, dict) else {}
+    model["modelId"] = DEFAULT_CURSOR_MODEL
+    model["displayModelId"] = DEFAULT_CURSOR_MODEL
+    model["displayName"] = DEFAULT_CURSOR_MODEL_DISPLAY
+    model["displayNameShort"] = DEFAULT_CURSOR_MODEL_DISPLAY
+    if not isinstance(model.get("aliases"), list):
+        model["aliases"] = []
+    model["maxMode"] = False
+    return model
 
 
 def ensure_cursor_cli_non_fast_config(cursor_home: str | Path) -> tuple[Path, bool, dict[str, Any]]:
@@ -49,26 +77,22 @@ def ensure_cursor_cli_non_fast_config(cursor_home: str | Path) -> tuple[Path, bo
         permissions["deny"] = []
     config["permissions"] = permissions
 
-    config["model"] = DEFAULT_CURSOR_MODEL
+    config["model"] = _cursor_model_config(config.get("model"))
+    config["selectedModel"] = {
+        "modelId": DEFAULT_CURSOR_MODEL,
+        "parameters": _non_fast_parameters(
+            config.get("selectedModel", {}).get("parameters")
+            if isinstance(config.get("selectedModel"), dict)
+            else None
+        ),
+    }
+    config["hasChangedDefaultModel"] = True
 
     model_parameters = config.get("modelParameters")
     if not isinstance(model_parameters, dict):
         model_parameters = {}
     for model_id in NON_FAST_CURSOR_MODELS:
-        parameters = model_parameters.get(model_id)
-        if not isinstance(parameters, list):
-            parameters = []
-
-        fast_parameter: dict[str, Any] | None = None
-        for parameter in parameters:
-            if isinstance(parameter, dict) and parameter.get("id") == "fast":
-                fast_parameter = parameter
-                break
-        if fast_parameter is None:
-            parameters.append({"id": "fast", "value": "false"})
-        else:
-            fast_parameter["value"] = "false"
-        model_parameters[model_id] = parameters
+        model_parameters[model_id] = _non_fast_parameters(model_parameters.get(model_id))
     config["modelParameters"] = model_parameters
 
     rendered = json.dumps(config, indent=2, sort_keys=False) + "\n"

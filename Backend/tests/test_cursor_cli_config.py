@@ -14,6 +14,15 @@ def test_cursor_cli_config_preserves_auth_and_disables_composer_fast(tmp_path) -
                 "version": 1,
                 "authInfo": {"accessToken": "keep-me"},
                 "permissions": {"allow": ["Shell(ls)"], "deny": []},
+                "model": {
+                    "modelId": "composer-2.5",
+                    "displayName": "Composer 2.5 Fast",
+                    "aliases": [],
+                },
+                "selectedModel": {
+                    "modelId": "composer-2.5",
+                    "parameters": [{"id": "fast", "value": "true"}],
+                },
                 "modelParameters": {
                     "composer-2": [{"id": "fast", "value": "true"}],
                     "composer-2.5": [{"id": "fast", "value": "true"}],
@@ -28,7 +37,13 @@ def test_cursor_cli_config_preserves_auth_and_disables_composer_fast(tmp_path) -
     assert path == config_path
     assert changed is True
     assert config["authInfo"] == {"accessToken": "keep-me"}
-    assert config["model"] == "composer-2.5"
+    assert config["model"]["modelId"] == "composer-2.5"
+    assert config["model"]["displayName"] == "Composer 2.5"
+    assert config["model"]["displayNameShort"] == "Composer 2.5"
+    assert config["selectedModel"] == {
+        "modelId": "composer-2.5",
+        "parameters": [{"id": "fast", "value": "false"}],
+    }
     assert config["permissions"]["allow"] == ["Shell(ls)"]
     assert config["modelParameters"]["composer-2"] == [{"id": "fast", "value": "false"}]
     assert config["modelParameters"]["composer-2.5"] == [{"id": "fast", "value": "false"}]
@@ -40,7 +55,12 @@ def test_cursor_cli_config_creates_minimal_non_fast_config(tmp_path) -> None:
     assert path.exists()
     assert changed is True
     assert config["version"] == 1
-    assert config["model"] == "composer-2.5"
+    assert config["model"]["modelId"] == "composer-2.5"
+    assert config["model"]["displayName"] == "Composer 2.5"
+    assert config["selectedModel"] == {
+        "modelId": "composer-2.5",
+        "parameters": [{"id": "fast", "value": "false"}],
+    }
     assert config["editor"] == {"vimMode": False}
     assert config["permissions"] == {"allow": [], "deny": []}
     assert config["modelParameters"]["composer-2.5"] == [{"id": "fast", "value": "false"}]
