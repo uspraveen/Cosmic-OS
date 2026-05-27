@@ -115,7 +115,7 @@ def test_project_registry_creates_and_resolves_project(tmp_path: Path) -> None:
         native_session_id="chat_resume_123456",
         workspace_path="/var/lib/cosmic/alpha/workspaces/prj_x",
         task_id="tsk_def",
-        model="composer-2",
+        model="composer-2.5",
         status="active",
     )
     assert harness_session.session_id.startswith("hses_")
@@ -123,7 +123,7 @@ def test_project_registry_creates_and_resolves_project(tmp_path: Path) -> None:
         created.project_id,
         harness="cursor",
         workspace_path="/var/lib/cosmic/alpha/workspaces/prj_x",
-        model="composer-2",
+        model="composer-2.5",
     ).native_session_id == "chat_resume_123456"
     assert registry.find_project("cursor:chat_resume_123456").project_id == created.project_id
 
@@ -352,40 +352,45 @@ def test_cursor_runner_maps_normal_composer_to_working_alias(tmp_path: Path) -> 
     command = runner.build_command(
         paths=paths,
         prompt="Build the app",
-        model="Composer 2",
+        model="Composer 2.5",
         stream_json=True,
     )
 
     assert "--model" in command
     model_index = command.index("--model") + 1
-    assert command[model_index] == "composer-2"
-    assert "composer-2-fast" not in command
+    assert command[model_index] == "composer-2.5"
+    assert "composer-2.5-fast" not in command
 
 
 def test_cursor_model_normalization_preserves_explicit_fast_variant() -> None:
-    assert normalize_cursor_model("composer") == "composer-2"
-    assert normalize_cursor_model("composer-2") == "composer-2"
-    assert normalize_cursor_model("Composer 2") == "composer-2"
-    assert normalize_cursor_model("composer-2-fast") == "composer-2-fast"
+    assert normalize_cursor_model("composer") == "composer-2.5"
+    assert normalize_cursor_model("composer-2") == "composer-2.5"
+    assert normalize_cursor_model("Composer 2") == "composer-2.5"
+    assert normalize_cursor_model("Composer 2.5") == "composer-2.5"
+    assert normalize_cursor_model("composer-2.5-fast") == "composer-2.5-fast"
     assert normalize_cursor_model("auto") is None
 
 
 def test_cursor_runner_detects_fast_model_mismatch(tmp_path: Path) -> None:
     runner = CursorWorkspaceRunner(_config(tmp_path))
-    stdout = '{"type":"system","subtype":"init","model":"Composer 2 Fast"}\n'
+    stdout = '{"type":"system","subtype":"init","model":"Composer 2.5 Fast"}\n'
 
-    assert runner._extract_observed_model(stdout) == "Composer 2 Fast"
+    assert runner._extract_observed_model(stdout) == "Composer 2.5 Fast"
     assert not runner._model_mismatch(
-        requested_model="composer-2",
-        observed_model="Composer 2",
+        requested_model="composer-2.5",
+        observed_model="Composer 2.5",
     )
     assert runner._model_mismatch(
-        requested_model="composer-2",
-        observed_model="Composer 2 Fast",
+        requested_model="composer-2.5",
+        observed_model="Composer 2.5 Fast",
     )
     assert not runner._model_mismatch(
-        requested_model="composer-2-fast",
-        observed_model="Composer 2 Fast",
+        requested_model="composer-2.5-fast",
+        observed_model="Composer 2.5 Fast",
+    )
+    assert runner._model_mismatch(
+        requested_model="composer-2.5",
+        observed_model="Composer 2",
     )
 
 
@@ -437,8 +442,8 @@ def test_alpha_execute_retries_dirty_cursor_before_any_cross_provider_fallback(t
                     last_message_path=paths.artifacts / "cursor-last-message.md",
                     last_message="Cursor wrote partial work before SIGTERM.",
                     duration_sec=1.0,
-                    requested_model="composer-2",
-                    observed_model="Composer 2",
+                    requested_model="composer-2.5",
+                    observed_model="Composer 2.5",
                     native_session_id=str(kwargs.get("resume_chat_id") or ""),
                     resume_session_id=str(kwargs.get("resume_chat_id") or ""),
                     resume_used=True,
@@ -455,8 +460,8 @@ def test_alpha_execute_retries_dirty_cursor_before_any_cross_provider_fallback(t
                 last_message_path=output,
                 last_message="Cursor retried, fixed cleanup, and verified the task.",
                 duration_sec=1.0,
-                requested_model="composer-2",
-                observed_model="Composer 2",
+                requested_model="composer-2.5",
+                observed_model="Composer 2.5",
                 native_session_id=str(kwargs.get("resume_chat_id") or ""),
                 resume_session_id=str(kwargs.get("resume_chat_id") or ""),
                 resume_used=True,
@@ -474,7 +479,7 @@ def test_alpha_execute_retries_dirty_cursor_before_any_cross_provider_fallback(t
     async def fetch_status(provider: str) -> dict[str, object]:
         return {
             "status": "authenticated",
-            "preferred_model": "composer-2" if provider == "cursor" else "gpt-5.1-codex",
+            "preferred_model": "composer-2.5" if provider == "cursor" else "gpt-5.1-codex",
             "cli": {"authenticated": True},
         }
 

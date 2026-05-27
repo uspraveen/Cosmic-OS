@@ -23,15 +23,21 @@ from .workspace_manager import WorkspacePaths
 
 SECRET_PATTERN = re.compile(r"(sk-[^\s\"']{4,}|cursor_[^\s\"']{8,})", re.IGNORECASE)
 CURSOR_MODEL_ALIASES = {
-    "composer": "composer-2",
-    "composer normal": "composer-2",
-    "normal composer": "composer-2",
-    "composer 2": "composer-2",
-    "composer2": "composer-2",
-    "composer-2": "composer-2",
-    "composer-2-normal": "composer-2",
-    "composer 2 normal": "composer-2",
-    "normal composer 2": "composer-2",
+    "composer": "composer-2.5",
+    "composer normal": "composer-2.5",
+    "normal composer": "composer-2.5",
+    "composer 2": "composer-2.5",
+    "composer2": "composer-2.5",
+    "composer-2": "composer-2.5",
+    "composer-2-normal": "composer-2.5",
+    "composer 2 normal": "composer-2.5",
+    "normal composer 2": "composer-2.5",
+    "composer 2.5": "composer-2.5",
+    "composer2.5": "composer-2.5",
+    "composer-2.5": "composer-2.5",
+    "composer-2.5-normal": "composer-2.5",
+    "composer 2.5 normal": "composer-2.5",
+    "normal composer 2.5": "composer-2.5",
 }
 
 
@@ -662,7 +668,12 @@ class CursorWorkspaceRunner:
             return False
         requested_is_fast = "fast" in requested
         observed_is_fast = observed.endswith("fast") or " fast" in observed
-        return observed_is_fast and not requested_is_fast
+        if observed_is_fast and not requested_is_fast:
+            return True
+        if requested.startswith("composer-2.5"):
+            observed_normalized = observed.replace("-", " ")
+            return "composer" in observed_normalized and "2.5" not in observed_normalized
+        return False
 
     def artifact_for_last_message(self, *, task_id: str, result: CursorRunResult) -> ArtifactManifest | None:
         path = result.last_message_path

@@ -409,7 +409,7 @@ def _cli_identity_line(cli: str) -> str:
     if cli == "cursor":
         return (
             "You are running as the **Cursor CLI** (`cursor-agent`). You have "
-            "the composer-2 model and Cursor's edit/diff tooling. Make use of "
+            "the composer-2.5 model and Cursor's edit/diff tooling. Make use of "
             "patch-style edits where they fit."
         )
     return ""

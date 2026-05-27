@@ -4,8 +4,8 @@ import { Bot, CheckCircle2, ExternalLink, LogIn, RefreshCw, ShieldCheck, Termina
 type CursorApprovalMode = 'suggest' | 'auto_edit' | 'full_auto'
 
 const MODEL_OPTIONS = [
-  { value: 'auto', label: 'Auto', note: 'Fast default' },
-  { value: 'composer-2', label: 'Composer 2', note: 'Normal, not Fast' },
+  { value: 'auto', label: 'Auto', note: 'Use CLI config' },
+  { value: 'composer-2.5', label: 'Composer 2.5', note: 'Standard, not Fast' },
   { value: 'gpt-5', label: 'GPT-5', note: 'Manual' },
   { value: 'claude-4-sonnet', label: 'Claude Sonnet', note: 'Manual' },
   { value: 'opus-4.6', label: 'Opus 4.6', note: 'Manual' },
@@ -51,7 +51,15 @@ function normalizeCursorModelOption(value: unknown) {
   const normalized = String(value ?? 'auto').trim()
   if (!normalized || normalized === 'auto') return 'auto'
   const lowered = normalized.toLowerCase()
-  if (['composer', 'composer-2', 'composer 2', 'composer2'].includes(lowered)) return 'composer-2'
+  if ([
+    'composer',
+    'composer-2',
+    'composer 2',
+    'composer2',
+    'composer-2.5',
+    'composer 2.5',
+    'composer2.5',
+  ].includes(lowered)) return 'composer-2.5'
   return normalized
 }
 

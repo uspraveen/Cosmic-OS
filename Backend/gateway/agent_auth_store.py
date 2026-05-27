@@ -20,15 +20,21 @@ _CODEX_MODEL_ALIASES = {
 }
 _CODEX_MODELS = {"auto", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2"}
 _CURSOR_MODEL_ALIASES = {
-    "composer": "composer-2",
-    "composer normal": "composer-2",
-    "normal composer": "composer-2",
-    "composer 2": "composer-2",
-    "composer2": "composer-2",
-    "composer-2": "composer-2",
-    "composer-2-normal": "composer-2",
-    "composer 2 normal": "composer-2",
-    "normal composer 2": "composer-2",
+    "composer": "composer-2.5",
+    "composer normal": "composer-2.5",
+    "normal composer": "composer-2.5",
+    "composer 2": "composer-2.5",
+    "composer2": "composer-2.5",
+    "composer-2": "composer-2.5",
+    "composer-2-normal": "composer-2.5",
+    "composer 2 normal": "composer-2.5",
+    "normal composer 2": "composer-2.5",
+    "composer 2.5": "composer-2.5",
+    "composer2.5": "composer-2.5",
+    "composer-2.5": "composer-2.5",
+    "composer-2.5-normal": "composer-2.5",
+    "composer 2.5 normal": "composer-2.5",
+    "normal composer 2.5": "composer-2.5",
 }
 
 
@@ -82,7 +88,7 @@ class AgentAuthStore:
             PROVIDER_CURSOR,
             include_secret=include_secret,
             default_auth_mode="oauth",
-            default_preferred_model="composer-2",
+            default_preferred_model="composer-2.5",
         )
 
     def save_codex(
@@ -387,6 +393,11 @@ class AgentAuthStore:
             "last_cli_status": last_cli_status,
             "updated_at": row["updated_at"],
         }
+        if provider == PROVIDER_CURSOR:
+            payload["preferred_model"] = _normalize_cursor_model(
+                str(payload.get("preferred_model") or ""),
+                fallback=default_preferred_model,
+            )
         if include_secret:
             api_key = ""
             if row["encrypted_api_key"]:
