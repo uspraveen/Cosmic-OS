@@ -343,6 +343,7 @@ async def resolve_credential(body: ResolveRequest, request: Request):
                         {
                             "account_id": a["account_id"],
                             "account_label": a.get("account_label", ""),
+                            "account_display_label": a.get("account_display_label", ""),
                             "display_name": a.get("display_name", ""),
                             "email": a.get("email", ""),
                             "is_primary": a.get("is_primary", False),

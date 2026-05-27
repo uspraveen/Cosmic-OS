@@ -28,6 +28,8 @@ intents:
     usage_hints:
       - Use this for meeting scheduling and explicit calendar creation requests.
       - Plain-language requests are acceptable; the specialist will normalize them internally before calling Google Calendar.
+      - If the user names a Google account email address, pass that exact email as `account_hint`; do not ask the user to choose between generic account labels.
+      - If multiple Google accounts are connected and the target account is not clear, ask using the account emails shown by the resolver, not generic labels like "Google account".
       - Expect conflict warnings when the requested slot overlaps existing events.
       - If the user asks for a Google Meet / Meet link, include `add_google_meet=true`.
 

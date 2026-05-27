@@ -8,7 +8,7 @@
     "is_all_day": { "type": "boolean", "default": false },
     "timezone": { "type": "string", "description": "IANA timezone" },
     "calendar_id": { "type": "string", "default": "primary" },
-    "account_hint": { "type": "string", "description": "Friendly account selector like work, personal, or an email address" },
+    "account_hint": { "type": "string", "description": "Friendly account selector like work, personal, or an exact Google account email address. If the user names an email, pass it exactly." },
     "description": { "type": "string" },
     "location": { "type": "string" },
     "attendees": { "type": "array", "items": { "type": "string" }, "description": "List of attendee emails" },

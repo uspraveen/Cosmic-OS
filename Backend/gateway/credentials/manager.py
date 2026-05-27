@@ -27,6 +27,25 @@ from .store import CredentialStore
 
 logger = logging.getLogger(__name__)
 
+_GENERIC_ACCOUNT_LABELS = {"", "google account", "google"}
+
+
+def _is_generic_account_label(value: str | None) -> bool:
+    return str(value or "").strip().lower() in _GENERIC_ACCOUNT_LABELS
+
+
+def _account_display_label(account: dict[str, Any]) -> str:
+    stored_label = str(account.get("account_label") or "").strip()
+    if stored_label and not _is_generic_account_label(stored_label):
+        return stored_label
+    return (
+        str(account.get("email") or "").strip()
+        or str(account.get("display_name") or "").strip()
+        or stored_label
+        or "Google account"
+    )
+
+
 # Google Calendar scopes for Phase 1
 GOOGLE_CALENDAR_SCOPES = [
     "https://www.googleapis.com/auth/calendar",
@@ -149,6 +168,8 @@ class CredentialManager:
         hosted_domain = str(profile.get("hd") or "")
         now_ts = time.time()
         requested_label = str(flow.metadata.get("account_label") or "").strip()
+        if _is_generic_account_label(requested_label):
+            requested_label = ""
         selected_tools = [
             str(item).strip()
             for item in (flow.metadata.get("selected_tools") or [])
@@ -174,12 +195,16 @@ class CredentialManager:
 
         if existing:
             account_id = existing["account_id"]
+            existing_label = str(existing.get("account_label") or "").strip()
             self._store.update_account(
                 account_id,
                 email=email,
                 display_name=display_name,
                 status="active",
-                account_label=requested_label or None,
+                account_label=(
+                    requested_label
+                    or ((email or display_name) if _is_generic_account_label(existing_label) else None)
+                ),
                 metadata_patch=metadata_patch,
             )
         else:
@@ -188,7 +213,7 @@ class CredentialManager:
                 provider_account_id=provider_account_id,
                 email=email,
                 display_name=display_name,
-                account_label=requested_label or display_name or email,
+                account_label=requested_label or email or display_name,
                 is_primary=len(self._store.list_accounts(flow.provider)) == 0,
                 metadata=metadata_patch,
             )
@@ -248,6 +273,7 @@ class CredentialManager:
                 if str(item).strip()
             ]
             entry["platform_key"] = str(metadata.get("platform_key") or "workspace").strip() or "workspace"
+            entry["account_display_label"] = _account_display_label(entry)
             entry.pop("_metadata", None)
             result.append(entry)
         return result
@@ -277,6 +303,7 @@ class CredentialManager:
             if str(item).strip()
         ]
         entry["platform_key"] = str(metadata.get("platform_key") or "workspace").strip() or "workspace"
+        entry["account_display_label"] = _account_display_label(entry)
         entry.pop("_metadata", None)
         return entry
 

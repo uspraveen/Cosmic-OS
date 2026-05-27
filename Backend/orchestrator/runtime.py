@@ -2825,13 +2825,13 @@ class OrchestratorRuntime:
                 for account in accounts:
                     if not isinstance(account, dict):
                         continue
-                    label = str(
-                        account.get("account_label")
-                        or account.get("display_name")
-                        or account.get("email")
-                        or account.get("account_id")
-                        or "account"
-                    ).strip()
+                    email = str(account.get("email") or "").strip()
+                    display_label = str(account.get("account_display_label") or "").strip()
+                    raw_label = str(account.get("account_label") or "").strip()
+                    display_name = str(account.get("display_name") or "").strip()
+                    label = email or display_label or raw_label or display_name or str(account.get("account_id") or "account").strip()
+                    if email and display_label and display_label != email:
+                        label = f"{display_label} <{email}>"
                     if bool(account.get("is_primary")):
                         label = f"{label} (primary)"
                     options.append(label)

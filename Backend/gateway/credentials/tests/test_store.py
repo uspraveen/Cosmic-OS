@@ -267,6 +267,69 @@ async def test_manager_resolve_credential_returns_account_metadata(store):
     assert resolved["account_is_primary"] is True
 
 
+@pytest.mark.asyncio
+async def test_manager_resolves_exact_email_when_generic_labels_collide(store):
+    from gateway.credentials.manager import CredentialManager
+
+    first = store.create_account(
+        provider="google",
+        email="uspraveenraj@gmail.com",
+        display_name="Praveen Raj U S",
+        account_label="Google account",
+        is_primary=True,
+    )
+    second = store.create_account(
+        provider="google",
+        email="usp.upenn@gmail.com",
+        display_name="Praveen Raj U S",
+        account_label="Google account",
+    )
+    for account in (first, second):
+        store.store_credential(
+            account_id=account["account_id"],
+            granted_scopes=["calendar"],
+            access_token=f"tok_{account['account_id']}",
+            refresh_token=f"ref_{account['account_id']}",
+            expires_at_ts=time.time() + 3600,
+        )
+    mgr = CredentialManager(store)
+
+    resolved = await mgr.resolve_credential(
+        provider="google",
+        required_scopes=["calendar"],
+        account_hint="uspraveenraj@gmail.com",
+        operation_mode="write",
+    )
+
+    assert resolved is not None
+    assert resolved["account_id"] == first["account_id"]
+    assert resolved["account_email"] == "uspraveenraj@gmail.com"
+
+
+def test_manager_exposes_email_display_label_for_generic_google_labels(store):
+    from gateway.credentials.manager import CredentialManager
+
+    account = store.create_account(
+        provider="google",
+        email="uspraveenraj@gmail.com",
+        display_name="Praveen Raj U S",
+        account_label="Google account",
+    )
+    store.store_credential(
+        account_id=account["account_id"],
+        granted_scopes=["calendar"],
+        access_token="tok_live",
+        refresh_token="ref_live",
+        expires_at_ts=time.time() + 3600,
+    )
+    mgr = CredentialManager(store)
+
+    listed = mgr.list_accounts("google")
+
+    assert listed[0]["account_label"] == "Google account"
+    assert listed[0]["account_display_label"] == "uspraveenraj@gmail.com"
+
+
 # ── Resource binding tests ────────────────────────────────────────────────────
 
 
