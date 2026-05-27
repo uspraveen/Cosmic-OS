@@ -246,6 +246,9 @@ contextBridge.exposeInMainWorld('cosmic', {
   clearGatewayAgentEmailConfig: () => ipcRenderer.invoke('gateway:clear-agent-email-config'),
   getGatewayAgentEmailDesktopConfig: () => ipcRenderer.invoke('gateway:get-agent-email-desktop-config'),
   saveGatewayAgentEmailTrustedSenders: (payload: any) => ipcRenderer.invoke('gateway:save-agent-email-trusted-senders', payload),
+  getGatewayGmailApprovals: () => ipcRenderer.invoke('gateway:get-gmail-approvals'),
+  approveGatewayGmailApproval: (payload: any) => ipcRenderer.invoke('gateway:approve-gmail-approval', payload),
+  rejectGatewayGmailApproval: (payload: any) => ipcRenderer.invoke('gateway:reject-gmail-approval', payload),
   cosmicMailRequest: (payload: any) => ipcRenderer.invoke('cosmic-mail:request', payload),
   recordCosmicMailGatewayNotification: (payload: any) => ipcRenderer.invoke('cosmic-mail:record-gateway-notification', payload),
   cosmicMailUploadDraftAttachment: (payload: any) => ipcRenderer.invoke('cosmic-mail:upload-draft-attachment', payload),
@@ -275,4 +278,5 @@ contextBridge.exposeInMainWorld('cosmic', {
     ipcRenderer.on('integration:event', listener)
     return () => ipcRenderer.removeListener('integration:event', listener)
   },
+  readClipboardImageAttachment: () => ipcRenderer.invoke('gateway:read-clipboard-image'),
 })

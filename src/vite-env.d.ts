@@ -97,6 +97,14 @@ interface Window {
     saveGatewayAgentEmailTrustedSenders: (payload: {
       trustedSenders: string[]
     }) => Promise<any>
+    getGatewayGmailApprovals: () => Promise<any>
+    approveGatewayGmailApproval: (payload: {
+      approvalId: string
+    }) => Promise<any>
+    rejectGatewayGmailApproval: (payload: {
+      approvalId: string
+      note?: string
+    }) => Promise<any>
     cosmicMailRequest: (payload: GatewayConnectionPayload & {
       path: string
       method?: string

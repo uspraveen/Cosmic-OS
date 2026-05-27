@@ -88,6 +88,7 @@ class GmailAgent(AgentRuntime):
     READ_THREAD = "gmail.read_thread"
     TRIAGE_INBOX = "gmail.triage_inbox"
     DRAFT_REPLY = "gmail.draft_reply"
+    SEND_DRAFT = "gmail.send_draft"
     FETCH_ATTACHMENT = "gmail.fetch_attachment"
     PROCESS_INBOUND = "gmail.process_inbound"
     HEARTBEAT_DIGEST = "gmail.heartbeat_digest"
@@ -304,6 +305,27 @@ class GmailAgent(AgentRuntime):
                 "delivery_status": "draft_created_pending_user_approval",
                 "draft": draft_plan,
                 "notes": draft_plan.get("notes") or "",
+            },
+            artifacts=[],
+        )
+
+    async def handle_gmail_send_draft(self, task: TaskEnvelope) -> AgentResult:
+        await self._maybe_create_plan(task, ["Resolve Gmail account", "Send approved Gmail draft"])
+        draft_id = str(task.input.get("draft_id") or "").strip()
+        if not draft_id:
+            raise ValueError("gmail.send_draft requires draft_id.")
+        result = await self._client().send_draft(draft_id)
+        await self._maybe_step(1, "completed", "Gmail account ready.")
+        await self._maybe_step(2, "completed", "Approved Gmail draft sent.")
+        return AgentResult(
+            status="completed",
+            output={
+                "status": "sent",
+                "account": self._account_info(),
+                "draft_id": draft_id,
+                "message": result,
+                "message_id": result.get("id"),
+                "thread_id": result.get("threadId") or result.get("thread_id"),
             },
             artifacts=[],
         )

@@ -1,5 +1,5 @@
 import { ArrowDownToLine, ChevronDown, ChevronRight, Square, Terminal } from 'lucide-react'
-import { Fragment, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, type ClipboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -4941,6 +4941,43 @@ export default function App() {
     }
   }
 
+  const showAttachmentError = (error: unknown, fallback: string) => {
+    setMessages((prev) => [
+      ...prev,
+      {
+        ...createAssistantMessage(),
+        content: error instanceof Error ? error.message : fallback,
+      },
+    ])
+  }
+
+  const mergePendingAttachmentSelection = (picked: any[]) => {
+    if (!Array.isArray(picked) || picked.length === 0) {
+      return false
+    }
+    const byPath = new Map(pendingAttachments.map((item) => [item.filePath, item]))
+    for (const item of picked) {
+      const filePath = String(item?.filePath || '').trim()
+      const filename = String(item?.filename || '').trim()
+      if (!filePath || !filename) {
+        continue
+      }
+      byPath.set(filePath, {
+        filePath,
+        filename,
+        mimeType: String(item?.mimeType || '').trim(),
+        sizeBytes: Number(item?.sizeBytes || 0),
+      })
+    }
+    const next = Array.from(byPath.values())
+    const imageCount = countImageAttachments(next)
+    if (imageCount > MAX_IMAGE_ATTACHMENTS_PER_MESSAGE) {
+      throw new Error(buildImageAttachmentLimitError(imageCount))
+    }
+    setPendingAttachments(next)
+    return next.length !== pendingAttachments.length
+  }
+
   const handlePickDocuments = async () => {
     if (!window.cosmic?.pickGatewayDocuments || isStreaming || authState !== 'authenticated') {
       return
@@ -4951,35 +4988,42 @@ export default function App() {
       if (picked.length === 0) {
         return
       }
-      const byPath = new Map(pendingAttachments.map((item) => [item.filePath, item]))
-      for (const item of picked) {
-        const filePath = String(item?.filePath || '').trim()
-        const filename = String(item?.filename || '').trim()
-        if (!filePath || !filename) {
-          continue
-        }
-        byPath.set(filePath, {
-          filePath,
-          filename,
-          mimeType: String(item?.mimeType || '').trim(),
-          sizeBytes: Number(item?.sizeBytes || 0),
-        })
-      }
-      const next = Array.from(byPath.values())
-      const imageCount = countImageAttachments(next)
-      if (imageCount > MAX_IMAGE_ATTACHMENTS_PER_MESSAGE) {
-        throw new Error(buildImageAttachmentLimitError(imageCount))
-      }
-      setPendingAttachments(next)
+      mergePendingAttachmentSelection(picked)
     } catch (error) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          ...createAssistantMessage(),
-          content: error instanceof Error ? error.message : 'Document selection failed.',
-        },
-      ])
+      showAttachmentError(error, 'Document selection failed.')
     }
+  }
+
+  const handleComposerPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const clipboardData = event.clipboardData
+    const items = Array.from(clipboardData?.items ?? [])
+    const files = Array.from(clipboardData?.files ?? [])
+    const hasImagePayload =
+      items.some((item) => item.kind === 'file' && isImageAttachment({ mimeType: item.type })) ||
+      files.some((file) => isImageAttachment({ mimeType: file.type }))
+    if (!hasImagePayload) {
+      return
+    }
+    if (isStreaming || authState !== 'authenticated') {
+      return
+    }
+    const readClipboardImageAttachment = (window.cosmic as any)?.readClipboardImageAttachment
+    if (typeof readClipboardImageAttachment !== 'function') {
+      return
+    }
+    event.preventDefault()
+    void (async () => {
+      try {
+        const payload = await readClipboardImageAttachment()
+        const picked = Array.isArray(payload?.documents) ? payload.documents : []
+        if (picked.length > 0) {
+          mergePendingAttachmentSelection(picked)
+          inputRef.current?.focus()
+        }
+      } catch (error) {
+        showAttachmentError(error, 'Image paste failed.')
+      }
+    })()
   }
 
   const handleRemoveAttachment = (filePath: string) => {
@@ -6853,6 +6897,7 @@ export default function App() {
                           handleSubmit()
                         }
                       }}
+                      onPaste={handleComposerPaste}
                       onFocus={() => setIsInputFocused(true)}
                       onBlur={() => setIsInputFocused(false)}
                       placeholder={composerPlaceholder}

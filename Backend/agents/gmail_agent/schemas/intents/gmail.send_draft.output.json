@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["status", "account", "draft_id"],
+  "properties": {
+    "status": { "type": "string" },
+    "account": { "type": "object" },
+    "draft_id": { "type": "string" },
+    "message": { "type": "object" },
+    "message_id": { "type": ["string", "null"] },
+    "thread_id": { "type": ["string", "null"] }
+  }
+}

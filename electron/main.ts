@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, nativeImage, screen, shell } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, nativeImage, screen, shell } from 'electron'
 import { existsSync, promises as fs, readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -363,6 +363,33 @@ async function pickGatewayDocuments() {
     throw new Error(buildImageAttachmentLimitError(pickedImageCount))
   }
   return picked
+}
+
+async function readClipboardImageAsGatewayDocument() {
+  const image = clipboard.readImage()
+  if (image.isEmpty()) {
+    return null
+  }
+  const pngBytes = image.toPNG()
+  if (!pngBytes.length) {
+    return null
+  }
+  if (pngBytes.length > GATEWAY_DOCUMENT_UPLOAD_MAX_FILE_BYTES) {
+    throw new Error(buildDocumentSizeLimitError([{ filename: 'pasted image', sizeBytes: pngBytes.length }]))
+  }
+
+  const dir = path.join(app.getPath('temp'), 'cosmic-os', 'clipboard-images')
+  await fs.mkdir(dir, { recursive: true })
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const filename = `pasted-image-${stamp}.png`
+  const filePath = path.join(dir, filename)
+  await fs.writeFile(filePath, pngBytes)
+  return {
+    filePath,
+    filename,
+    mimeType: 'image/png',
+    sizeBytes: pngBytes.length,
+  } satisfies PickedGatewayDocument
 }
 
 async function uploadDesktopDocumentsToGateway(
@@ -1960,6 +1987,11 @@ app.whenReady().then(() => {
     return { documents: await pickGatewayDocuments() }
   })
 
+  ipcMain.handle('gateway:read-clipboard-image', async () => {
+    const document = await readClipboardImageAsGatewayDocument()
+    return { documents: document ? [document] : [] }
+  })
+
   ipcMain.handle('gateway:send-query', async (_, payload: {
     content: string
     conversationContext?: any[]
@@ -2572,6 +2604,48 @@ app.whenReady().then(() => {
         trusted_senders: trustedSenders,
       },
       timeoutMs: 20000,
+    })
+  })
+
+  ipcMain.handle('gateway:get-gmail-approvals', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/channels/gmail/approvals', {
+      method: 'GET',
+      timeoutMs: 20000,
+    })
+  })
+
+  ipcMain.handle('gateway:approve-gmail-approval', async (_, payload: { approvalId?: string }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const approvalId = String(payload?.approvalId || '').trim()
+    if (!approvalId) {
+      throw new Error('Gmail approval id is required.')
+    }
+    return callGatewayJson(config, `/channels/gmail/approvals/${encodeURIComponent(approvalId)}/approve`, {
+      method: 'POST',
+      timeoutMs: 45000,
+    })
+  })
+
+  ipcMain.handle('gateway:reject-gmail-approval', async (_, payload: { approvalId?: string; note?: string }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const approvalId = String(payload?.approvalId || '').trim()
+    if (!approvalId) {
+      throw new Error('Gmail approval id is required.')
+    }
+    return callGatewayJson(config, `/channels/gmail/approvals/${encodeURIComponent(approvalId)}/reject`, {
+      method: 'POST',
+      body: { note: String(payload?.note || '').trim() || null },
+      timeoutMs: 30000,
     })
   })
 

@@ -42,6 +42,7 @@ from .credentials import CredentialManager
 from .credentials.store import CredentialStore
 from .delivery.queue_store import DeliveryQueueStore, utcnow_iso
 from .event_automation_store import EventAutomationStore
+from .gmail_approval_store import GmailApprovalStore
 from .gmail_context_store import GmailContextStore
 from .memory import MemoryWriteAuditStore
 from .memory.client import (
@@ -342,6 +343,7 @@ class GatewayRuntime:
         self.artifact_store = ArtifactStore(config.artifacts_db_path)
         self.delivery_queue_store = DeliveryQueueStore(config.delivery_queue_db_path)
         self.gmail_context_store = GmailContextStore(config.gmail_context_db_path)
+        self.gmail_approval_store = GmailApprovalStore(config.gmail_approvals_db_path)
         self.event_automation_store = EventAutomationStore(config.event_automation_db_path)
         self.scheduler_store = SchedulerStore(config.scheduler_db_path)
         self.agent_email_integration_store = AgentEmailIntegrationStore(
@@ -464,6 +466,7 @@ class GatewayRuntime:
         self.artifact_store.initialize()
         self.delivery_queue_store.initialize()
         self.gmail_context_store.initialize()
+        self.gmail_approval_store.initialize()
         self.event_automation_store.initialize()
         self.scheduler_store.initialize(
             default_timezone=self.config.user_timezone_fallback,
@@ -3224,6 +3227,173 @@ class GatewayRuntime:
                 stored_items=stored_items,
             ),
             name="gmail-surface-decision",
+        )
+
+    def list_gmail_approvals(self, *, include_terminal: bool = True) -> dict[str, Any]:
+        approvals = self.gmail_approval_store.list(include_terminal=include_terminal)
+        return {
+            "status": "ok",
+            "approvals": approvals,
+            "pending_count": sum(
+                1 for item in approvals if self._safe_text(item.get("status")) == "pending"
+            ),
+        }
+
+    async def approve_gmail_approval(self, approval_id: str) -> dict[str, Any]:
+        approval = self.gmail_approval_store.get(approval_id)
+        if not approval:
+            raise ValueError("Gmail approval not found.")
+        status = self._safe_text(approval.get("status"))
+        if status not in {"pending", "failed"}:
+            return {"status": "ignored", "approval": approval, "reason": f"approval_is_{status or 'unknown'}"}
+
+        self.gmail_approval_store.mark_sending(approval_id)
+        result = await self._dispatch_gmail_send_draft(approval)
+        if self._safe_text(result.get("status")) == "completed":
+            output = result.get("output") if isinstance(result.get("output"), dict) else result
+            sent = self.gmail_approval_store.mark_sent(approval_id, output) or approval
+            return {"status": "sent", "approval": sent, "send_result": output}
+
+        error_message = (
+            self._safe_text(result.get("error_message"))
+            or self._safe_text(result.get("message"))
+            or "Gmail draft send failed."
+        )
+        reset = self.gmail_approval_store.mark_send_failed(approval_id, error_message) or approval
+        raise RuntimeError(error_message or f"Gmail approval {approval_id} was not sent.")
+
+    def reject_gmail_approval(self, approval_id: str, *, note: str | None = None) -> dict[str, Any]:
+        approval = self.gmail_approval_store.get(approval_id)
+        if not approval:
+            raise ValueError("Gmail approval not found.")
+        status = self._safe_text(approval.get("status"))
+        if status not in {"pending", "sending", "failed"}:
+            return {"status": "ignored", "approval": approval, "reason": f"approval_is_{status or 'unknown'}"}
+        rejected = self.gmail_approval_store.mark_rejected(approval_id, note) or approval
+        return {"status": "rejected", "approval": rejected}
+
+    async def _dispatch_gmail_send_draft(self, approval: dict[str, Any]) -> dict[str, Any]:
+        if self._redis is None:
+            return {"status": "failed", "error_message": "Redis is not available for Gmail send."}
+        account_id = self._safe_text(approval.get("account_id"))
+        draft_id = self._safe_text(approval.get("draft_id"))
+        if not account_id or not draft_id:
+            return {"status": "failed", "error_message": "Approval is missing account_id or draft_id."}
+        auth = await self.credential_manager.resolve_credential(
+            provider="google",
+            required_scopes=["https://www.googleapis.com/auth/gmail.modify"],
+            account_id=account_id,
+            operation_mode="write",
+            allow_primary_fallback=False,
+        )
+        if not auth:
+            return {"status": "failed", "error_message": "Unable to resolve Gmail credential. Reconnect the Google account."}
+
+        session_id = self._safe_text(approval.get("session_id")) or self._current_session_id()
+        task = TaskEnvelope(
+            task_id=generate_task_id(),
+            task_list_id=session_id,
+            session_id=session_id,
+            sender="cosmic/gateway:1.0.0",
+            recipient=self.config.gmail_agent_id,
+            intent="gmail.send_draft",
+            input={
+                "approval_id": self._safe_text(approval.get("approval_id")),
+                "draft_id": draft_id,
+                "account": {
+                    "account_id": account_id,
+                    "account_email": self._safe_text(approval.get("account_email")),
+                    "account_label": self._safe_text(approval.get("account_label")),
+                },
+                "auth": auth,
+            },
+            input_artifacts=[],
+            idempotency_key=f"gmail-send-draft:{account_id}:{draft_id}",
+            priority="high",
+            signature="",
+            created_at=utcnow(),
+            source="approval",
+            source_id=f"gmail:{self._safe_text(approval.get('approval_id'))}",
+            channel="gmail",
+        )
+        task = task.model_copy(
+            update={"signature": sign_task_envelope(task, self.config.signing_secret)}
+        )
+        await dispatch_task(task, self._redis)
+        return await self._wait_for_agent_terminal_result(
+            task.task_id,
+            timeout_sec=90.0,
+            poll_interval_sec=self.config.gmail_process_inbound_poll_interval_sec,
+        )
+
+    async def _persist_gmail_approval_receipts(self, event: dict[str, Any]) -> list[dict[str, Any]]:
+        receipts = self._normalize_specialist_receipts(event.get("specialist_receipts"))
+        created: list[dict[str, Any]] = []
+        for receipt in receipts:
+            approval = receipt.get("gmail_approval")
+            if not isinstance(approval, dict):
+                continue
+            payload = {
+                **approval,
+                "request_id": self._safe_text(event.get("request_id")),
+                "session_id": self._safe_text(event.get("session_id")),
+                "task_id": self._safe_text(event.get("task_id")),
+                "payload": {
+                    "receipt": receipt,
+                    "route": self._safe_text(event.get("route")),
+                    "content_excerpt": self._bounded_excerpt(event.get("content"), limit=320),
+                },
+            }
+            try:
+                row, was_created = self.gmail_approval_store.upsert_pending(payload)
+            except ValueError:
+                logger.exception("gateway.gmail_approval.upsert_invalid")
+                continue
+            if was_created:
+                created.append(row)
+                await self._publish_gmail_approval_notification(row)
+        return created
+
+    async def _publish_gmail_approval_notification(self, approval: dict[str, Any]) -> None:
+        subject = self._safe_text(approval.get("subject")) or "Gmail draft approval needed"
+        approval_id = self._safe_text(approval.get("approval_id"))
+        event = {
+            "type": "gmail.notification",
+            "kind": "approval",
+            "event_type": "gmail.approval",
+            "notification_id": f"gmail:approval:{approval_id}",
+            "approval_id": approval_id,
+            "account_id": self._safe_text(approval.get("account_id")),
+            "account_email": self._safe_text(approval.get("account_email")),
+            "subject": subject,
+            "draft_id": self._safe_text(approval.get("draft_id")),
+            "thread_id": self._safe_text(approval.get("thread_id")),
+            "tab": "approvals",
+            "timestamp": utcnow_iso(),
+        }
+        for adapter in self.registry.adapters.values():
+            if not isinstance(adapter, (DesktopAdapter, MobileAdapter)):
+                continue
+            try:
+                await adapter.broadcast_all(event)
+            except Exception:
+                logger.exception(
+                    "gateway.gmail_approval.broadcast_failed platform=%s",
+                    adapter.platform,
+                )
+        self._schedule_mobile_push(
+            session_id=self._safe_text(approval.get("session_id")) or None,
+            origin_channel="gmail",
+            event_type="gmail.approval",
+            title="Gmail approval needed",
+            body=subject,
+            screen="gmail",
+            priority="high",
+            data={
+                "type": "gmail.approval",
+                "approval_id": approval_id,
+                "screen": "gmail",
+            },
         )
 
     async def _dispatch_gmail_surface_decision(
@@ -15155,6 +15325,8 @@ class GatewayRuntime:
                 event["activity_log"] = activity_log
             if alpha_terminal_log:
                 event["alpha_terminal_log"] = alpha_terminal_log
+            if event.get("specialist_receipts"):
+                await self._persist_gmail_approval_receipts(event)
             event_channel_platform = self._channel_platform(event_channel)
             email_delivery = (
                 self._effective_email_delivery(event)
@@ -17176,6 +17348,34 @@ class GatewayRuntime:
             )
             if source_sample:
                 receipt["source_sample"] = source_sample
+            gmail_approval = item.get("gmail_approval")
+            if isinstance(gmail_approval, dict):
+                normalized_gmail_approval: dict[str, Any] = {}
+                for key in (
+                    "approval_id",
+                    "account_id",
+                    "account_email",
+                    "account_label",
+                    "draft_id",
+                    "message_id",
+                    "thread_id",
+                    "subject",
+                    "body_text",
+                    "body_preview",
+                    "notes",
+                    "source_task_id",
+                ):
+                    text = self._safe_text(gmail_approval.get(key))
+                    if text:
+                        normalized_gmail_approval[key] = text
+                for key in ("to", "cc", "bcc"):
+                    values = self._normalize_string_list(
+                        gmail_approval.get(key), limit=25
+                    )
+                    if values:
+                        normalized_gmail_approval[key] = values
+                if normalized_gmail_approval.get("account_id") and normalized_gmail_approval.get("draft_id"):
+                    receipt["gmail_approval"] = normalized_gmail_approval
             if receipt:
                 normalized.append(receipt)
                 seen.add(dedupe)

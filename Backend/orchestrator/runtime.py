@@ -4826,6 +4826,49 @@ class OrchestratorRuntime:
                 receipt["parse_status"] = parse_status
             if isinstance(sheet_count, int):
                 receipt["sheet_count"] = sheet_count
+        if intent_name == "gmail.draft_reply":
+            draft = data.get("draft") if isinstance(data.get("draft"), dict) else {}
+            account = data.get("account") if isinstance(data.get("account"), dict) else {}
+            message = data.get("message") if isinstance(data.get("message"), dict) else {}
+
+            def _string_list(value: Any) -> list[str]:
+                if isinstance(value, str):
+                    values = [value]
+                elif isinstance(value, list):
+                    values = value
+                else:
+                    values = []
+                out: list[str] = []
+                for raw in values:
+                    text = self._activity_excerpt(raw, limit=320)
+                    if text:
+                        out.append(text)
+                return out[:25]
+
+            gmail_approval = {
+                key: value
+                for key, value in {
+                    "account_id": self._activity_excerpt(account.get("account_id"), limit=160),
+                    "account_email": self._activity_excerpt(account.get("account_email"), limit=320),
+                    "account_label": self._activity_excerpt(account.get("account_label"), limit=320),
+                    "draft_id": self._activity_excerpt(data.get("draft_id"), limit=160),
+                    "message_id": self._activity_excerpt(message.get("id"), limit=160),
+                    "thread_id": self._activity_excerpt(
+                        message.get("threadId") or message.get("thread_id"), limit=160
+                    ),
+                    "subject": self._activity_excerpt(draft.get("subject"), limit=500),
+                    "body_text": self._activity_excerpt(draft.get("body"), limit=6000),
+                    "body_preview": self._activity_excerpt(draft.get("body"), limit=700),
+                    "notes": self._activity_excerpt(data.get("notes"), limit=700),
+                }.items()
+                if value
+            }
+            for key in ("to", "cc", "bcc"):
+                values = _string_list(draft.get(key))
+                if values:
+                    gmail_approval[key] = values
+            if gmail_approval.get("account_id") and gmail_approval.get("draft_id"):
+                receipt["gmail_approval"] = gmail_approval
         if artifact_count > 0:
             receipt["artifact_count"] = artifact_count
         if local_sources:

@@ -154,6 +154,21 @@ class GoogleGmailClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def send_draft(self, draft_id: str) -> dict[str, Any]:
+        normalized_id = str(draft_id or "").strip()
+        if not normalized_id:
+            raise ValueError("Gmail draft_id is required to send a draft.")
+        async with httpx.AsyncClient(timeout=max(30.0, self._timeout)) as client:
+            resp = await client.post(
+                f"{_GMAIL_BASE}/users/me/drafts/{normalized_id}/send",
+                headers={**self._headers, "Content-Type": "application/json"},
+                json={},
+            )
+            if resp.status_code == 401:
+                raise PermissionError("Google access token expired.")
+            resp.raise_for_status()
+            return resp.json()
+
     async def modify_message(
         self,
         message_id: str,

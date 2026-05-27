@@ -71,6 +71,10 @@ class AgentEmailTrustedSendersRequest(BaseModel):
     trusted_senders: list[str] = Field(default_factory=list)
 
 
+class GmailApprovalRejectRequest(BaseModel):
+    note: str | None = Field(default=None, max_length=1000)
+
+
 class CodexAgentConfigRequest(BaseModel):
     auth_mode: str | None = Field(default=None, max_length=32)
     api_key: str | None = Field(default=None, max_length=4096)
@@ -1969,6 +1973,45 @@ async def save_agent_email_trusted_senders(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+@router.get("/channels/gmail/approvals")
+async def list_gmail_approvals(
+    include_terminal: bool = Query(default=True),
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return runtime.list_gmail_approvals(include_terminal=include_terminal)
+
+
+@router.post("/channels/gmail/approvals/{approval_id}/approve")
+async def approve_gmail_approval(
+    approval_id: str,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return await runtime.approve_gmail_approval(approval_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+@router.post("/channels/gmail/approvals/{approval_id}/reject")
+async def reject_gmail_approval(
+    approval_id: str,
+    body: GmailApprovalRejectRequest | None = None,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return runtime.reject_gmail_approval(
+            approval_id,
+            note=body.note if body is not None else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @router.get("/channels/{platform}/status")

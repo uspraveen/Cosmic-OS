@@ -109,6 +109,7 @@ The Gmail API treats Gmail scopes as separate strings, so an account granted `gm
 | `gmail.fetch_attachment` | Download one Gmail attachment into a private COSMIC artifact for downstream specialist handoff. |
 | `gmail.triage_inbox` | Run LLM-based inbox triage across bounded recent messages. |
 | `gmail.draft_reply` | Create a Gmail draft for a new message or thread reply. Sending remains approval-gated. |
+| `gmail.send_draft` | Send a Gmail draft only after Gateway confirms explicit user approval from the Gmail approval surface. |
 | `gmail.process_inbound` | Process a push/poll inbound notification with account, history, or message refs. |
 | `gmail.heartbeat_digest` | Reconcile cached Gmail triage state for heartbeats without re-triaging the inbox by default. |
 | `gmail.morning_briefing_digest` | Run a deliberate broader Gmail scan for morning briefings. |
@@ -116,6 +117,21 @@ The Gmail API treats Gmail scopes as separate strings, so an account granted `gm
 | `gmail.sync_watch` | Register/renew `users.watch` for a connected Gmail account when Pub/Sub is configured. |
 | `gmail.stop_watch` | Stop Gmail push notifications and clear local history cursor state. |
 | `gmail.recall_session` | Recall prior Gmail-agent work from the agent ledger. |
+
+## Outbound Approval Surface
+
+Gmail outbound sends are approval-gated like Agent Email, but they use a Gmail-specific queue because the draft lives in the user's own Gmail account, not in Cosmic Mail.
+
+Flow:
+
+1. The orchestrator delegates `gmail.draft_reply` when the user or an automation asks COSMIC to compose/reply through Gmail.
+2. Gmail Agent creates a Gmail draft and returns `approval_required=true`, the connected account identity, `draft_id`, recipients, subject, and a compact draft preview.
+3. The orchestrator's specialist receipt preserves this Gmail draft metadata.
+4. Gateway persists the receipt into `gateway/gmail_approvals.db` and broadcasts a Gmail approval notification to Desktop/Mobile. The chat response can continue normally; approval state is not hidden inside chat text.
+5. Desktop Spaces -> Gmail and Mobile Spaces -> Gmail list pending/reviewed approvals. The user can approve or reject each draft.
+6. On approve, Gateway resolves the exact Google account credential and dispatches `gmail.send_draft` to Gmail Agent. On reject, Gateway marks the local approval rejected; the Gmail draft remains available in Gmail unless a future explicit delete path is added.
+
+This keeps autonomy and safety separate: the Gmail Agent can draft intelligently, Gateway owns the durable approval queue, and only an explicit user action unlocks sending.
 
 ## LLM Spam and Triage
 

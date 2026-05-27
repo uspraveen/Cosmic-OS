@@ -19,7 +19,7 @@ import {
   normalizeCalendarAgendaSnapshot,
 } from './calendar'
 
-type SpacesPageId = 'command' | 'calendar' | 'prophet' | 'autopilot' | 'pulse' | 'manage' | 'agents' | 'sessions' | 'agent-email'
+type SpacesPageId = 'command' | 'calendar' | 'prophet' | 'autopilot' | 'pulse' | 'manage' | 'agents' | 'sessions' | 'agent-email' | 'gmail'
 type AgentEmailViewId = 'overview' | 'agents' | 'inboxes' | 'approvals' | 'settings'
 type AccentTone = 'azure' | 'gold' | 'mint' | 'rose' | 'slate'
 type MetricTone = 'good' | 'warm' | 'cool' | 'muted'
@@ -397,6 +397,25 @@ interface AgentEmailApproval {
   time: string
   summary: string
   excerpt: string
+  accent: AccentTone
+}
+
+interface GmailApproval {
+  id: string
+  subject: string
+  account: string
+  recipients: string
+  cc: string
+  bcc: string
+  state: string
+  status: string
+  time: string
+  reviewedAt: string
+  summary: string
+  excerpt: string
+  notes: string
+  draftId: string
+  threadId: string
   accent: AccentTone
 }
 
@@ -1069,6 +1088,52 @@ function normalizeGatewayAgentEmailStatus(raw: unknown): GatewayAgentEmailStatus
   }
 }
 
+function normalizeGmailApprovals(raw: unknown): GmailApproval[] {
+  const source = toRecord(raw)
+  const list = Array.isArray(source?.approvals) ? source.approvals : Array.isArray(raw) ? raw : []
+  return list
+    .map((item): GmailApproval | null => {
+      const row = toRecord(item)
+      if (!row) return null
+      const status = typeof row.status === 'string' ? row.status.trim() : ''
+      const to = Array.isArray(row.to) ? row.to.map((v) => String(v || '').trim()).filter(Boolean) : []
+      const cc = Array.isArray(row.cc) ? row.cc.map((v) => String(v || '').trim()).filter(Boolean) : []
+      const bcc = Array.isArray(row.bcc) ? row.bcc.map((v) => String(v || '').trim()).filter(Boolean) : []
+      const body = typeof row.body_text === 'string' && row.body_text.trim()
+        ? row.body_text.trim()
+        : typeof row.body_preview === 'string'
+          ? row.body_preview.trim()
+          : ''
+      const account =
+        (typeof row.account_label === 'string' && row.account_label.trim()) ||
+        (typeof row.account_email === 'string' && row.account_email.trim()) ||
+        (typeof row.account_id === 'string' && row.account_id.trim()) ||
+        'Gmail account'
+      return {
+        id: typeof row.approval_id === 'string' ? row.approval_id.trim() : '',
+        subject: typeof row.subject === 'string' && row.subject.trim() ? row.subject.trim() : '(No subject)',
+        account,
+        recipients: to.join(', ') || '—',
+        cc: cc.join(', '),
+        bcc: bcc.join(', '),
+        state: humanizeAgentEmailValue(status || 'pending'),
+        status: status || 'pending',
+        time: formatAgentEmailRelative(typeof row.created_at === 'string' ? row.created_at : ''),
+        reviewedAt: formatAgentEmailAbsolute(typeof row.reviewed_at === 'string' ? row.reviewed_at : ''),
+        summary: body || 'No draft body available.',
+        excerpt: body || 'No draft body available.',
+        notes:
+          (typeof row.reviewer_note === 'string' && row.reviewer_note.trim()) ||
+          (typeof row.notes === 'string' && row.notes.trim()) ||
+          'Waiting for review',
+        draftId: typeof row.draft_id === 'string' ? row.draft_id.trim() : '',
+        threadId: typeof row.thread_id === 'string' ? row.thread_id.trim() : '',
+        accent: mapAgentEmailAccent(status || 'pending', 'approval'),
+      }
+    })
+    .filter((item): item is GmailApproval => Boolean(item?.id))
+}
+
 function formatSessionDayDate(date: Date | null): string {
   if (!date || !Number.isFinite(date.getTime())) return 'Unknown date'
   const today = new Date()
@@ -1682,6 +1747,7 @@ const SPACE_PAGES: SpacePageDef[] = [
   { id: 'agents', label: 'Agents', kicker: 'Registered specialists', countLabel: 'Registry', accent: 'azure' },
   { id: 'sessions', label: 'Sessions', kicker: 'Daily memory lanes', countLabel: 'Archive', accent: 'mint' },
   { id: 'agent-email', label: 'Agent Email', kicker: 'Mail control for agents', countLabel: 'Mail ops', accent: 'gold' },
+  { id: 'gmail', label: 'Gmail', kicker: 'User inbox approvals', countLabel: 'Review', accent: 'mint' },
 ]
 
 const CALENDAR_WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
@@ -1929,6 +1995,15 @@ function SpacesNavIcon({ page }: { page: SpacesPageId }) {
         <rect x="4" y="6" width="16" height="12" rx="2.5" />
         <path d="m5.5 8.25 6.5 5 6.5-5" />
         <path d="M8 10.5h8" opacity="0.42" />
+      </svg>
+    )
+  }
+  if (page === 'gmail') {
+    return (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M4.5 7.5h15v9a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2v-9Z" />
+        <path d="m5.25 8.25 6.75 5 6.75-5" />
+        <path d="M8.75 16.25h6.5" />
       </svg>
     )
   }
@@ -3034,6 +3109,12 @@ export default function SpacesControlCenter({
   const [agentEmailComposerExpanded, setAgentEmailComposerExpanded] = useState(false)
   const [agentEmailReplyAttachmentFiles, setAgentEmailReplyAttachmentFiles] = useState<File[]>([])
   const [agentEmailAttachmentActionId, setAgentEmailAttachmentActionId] = useState<string | null>(null)
+  const [gmailApprovals, setGmailApprovals] = useState<GmailApproval[]>([])
+  const [gmailLoading, setGmailLoading] = useState(false)
+  const [gmailError, setGmailError] = useState<string | null>(null)
+  const [gmailActionId, setGmailActionId] = useState<string | null>(null)
+  const [gmailSelectedApprovalId, setGmailSelectedApprovalId] = useState<string | null>(null)
+  const [gmailBanner, setGmailBanner] = useState<{ tone: AgentEmailBannerTone; message: string } | null>(null)
   const agentEmailReplyAttachInputRef = useRef<HTMLInputElement>(null)
   const agentEmailMessagesEndRef = useRef<HTMLDivElement>(null)
   const agentEmailBaseUrlRef = useRef('')
@@ -3672,6 +3753,7 @@ export default function SpacesControlCenter({
   const agentEmailSelectedThread = agentEmailThreads.find((thread) => thread.id === agentEmailSelectedThreadId) || agentEmailThreads[0] || null
   const agentEmailSelectedDomain = agentEmailDomains.find((domain) => domain.id === agentEmailSelectedDomainId) || agentEmailDomains[0] || null
   const agentEmailSelectedApproval = agentEmailApprovals.find((approval) => approval.id === agentEmailSelectedApprovalId) || agentEmailApprovals[0] || null
+  const gmailSelectedApproval = gmailApprovals.find((approval) => approval.id === gmailSelectedApprovalId) || gmailApprovals[0] || null
 
   useEffect(() => {
     if (!agentEmailSelectedThread) return
@@ -3683,6 +3765,7 @@ export default function SpacesControlCenter({
 
   const unreadAgentEmailThreads = agentEmailThreads.filter((thread) => thread.unread).length
   const pendingAgentEmailApprovals = agentEmailApprovals.filter((approval) => approval.state === 'Pending').length
+  const pendingGmailApprovals = gmailApprovals.filter((approval) => approval.status === 'pending').length
   const agentEmailSidebarAttentionCount =
     agentEmailConfigReady ? pendingAgentEmailApprovals + unreadAgentEmailThreads : 0
   const activeAgentEmailDomains = agentEmailDomains.filter((domain) => domain.status === 'Active').length
@@ -4154,6 +4237,71 @@ export default function SpacesControlCenter({
       setAgentEmailActionId(null)
     }
   }, [callAgentEmailApi, requestAgentEmailSnapshot])
+
+  const requestGmailApprovals = useCallback(async (showSpinner = false) => {
+    if (!window.cosmic?.getGatewayGmailApprovals) {
+      setGmailError('Gateway Gmail approval bridge is unavailable.')
+      return
+    }
+    if (showSpinner) setGmailLoading(true)
+    try {
+      const raw = await window.cosmic.getGatewayGmailApprovals()
+      const mapped = normalizeGmailApprovals(raw)
+      setGmailApprovals(mapped)
+      setGmailError(null)
+      setGmailSelectedApprovalId((current) => {
+        if (current && mapped.some((approval) => approval.id === current)) return current
+        return mapped[0]?.id ?? null
+      })
+    } catch (error: unknown) {
+      setGmailError(toErrorMessage(error))
+    } finally {
+      if (showSpinner) setGmailLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!active || page !== 'gmail' || !gatewayConnected) return
+    void requestGmailApprovals(true)
+    const timer = window.setInterval(() => {
+      void requestGmailApprovals(false)
+    }, 30000)
+    return () => window.clearInterval(timer)
+  }, [active, gatewayConnected, page, requestGmailApprovals])
+
+  const handleGmailApprove = useCallback(async (approvalId: string) => {
+    if (!window.cosmic?.approveGatewayGmailApproval) {
+      setGmailBanner({ tone: 'error', message: 'Gateway Gmail approval bridge is unavailable.' })
+      return
+    }
+    try {
+      setGmailActionId(approvalId)
+      await window.cosmic.approveGatewayGmailApproval({ approvalId })
+      await requestGmailApprovals(false)
+      setGmailBanner({ tone: 'success', message: 'Gmail draft approved and sent.' })
+    } catch (error: unknown) {
+      setGmailBanner({ tone: 'error', message: toErrorMessage(error) })
+    } finally {
+      setGmailActionId(null)
+    }
+  }, [requestGmailApprovals])
+
+  const handleGmailReject = useCallback(async (approvalId: string) => {
+    if (!window.cosmic?.rejectGatewayGmailApproval) {
+      setGmailBanner({ tone: 'error', message: 'Gateway Gmail approval bridge is unavailable.' })
+      return
+    }
+    try {
+      setGmailActionId(approvalId)
+      await window.cosmic.rejectGatewayGmailApproval({ approvalId, note: 'Rejected from Spaces Gmail.' })
+      await requestGmailApprovals(false)
+      setGmailBanner({ tone: 'success', message: 'Gmail draft rejected.' })
+    } catch (error: unknown) {
+      setGmailBanner({ tone: 'error', message: toErrorMessage(error) })
+    } finally {
+      setGmailActionId(null)
+    }
+  }, [requestGmailApprovals])
 
   const agentEmailViews: Array<{ id: AgentEmailViewId; label: string; kicker: string; signal: string; detail: string }> = [
     { id: 'overview', label: 'Overview', kicker: 'Command view', signal: 'Setup + health', detail: 'Start with readiness, the default Cosmic mail setup, and the current operating posture.' },
@@ -6679,6 +6827,139 @@ export default function SpacesControlCenter({
     )
   }
 
+  const renderGmailPage = () => {
+    const terminalCount = gmailApprovals.filter((approval) => approval.status !== 'pending').length
+    const renderGmailEmptyState = (title: string, description: string) => (
+      <div className="agent-email-empty-state">
+        <strong>{title}</strong>
+        <span>{description}</span>
+      </div>
+    )
+    return (
+      <div className="spaces-page agent-email-page">
+        <section className="agent-email-minimal-tabs" aria-label="Gmail approval summary">
+          <button type="button" className="agent-email-minimal-tab active">
+            <span className="agent-email-tab-label">Approvals</span>
+            <span className="agent-email-tab-signal">{pendingGmailApprovals} waiting</span>
+          </button>
+          <button type="button" className="agent-email-minimal-tab" onClick={() => void requestGmailApprovals(true)}>
+            <span className="agent-email-tab-label">Refresh</span>
+            <span className="agent-email-tab-signal">{gmailLoading ? 'Syncing' : `${terminalCount} reviewed`}</span>
+          </button>
+        </section>
+
+        <section className="agent-email-minimal-shell">
+          <div className="agent-email-minimal-shell-head">
+            <div className="agent-email-minimal-shell-head-text">
+              <span className="agent-email-shell-eyebrow">User Gmail</span>
+              <h3>Outbound approval queue</h3>
+              <p className="agent-email-shell-subtitle">
+                Drafts created in connected Gmail accounts stay here until you approve or reject them.
+              </p>
+            </div>
+            <div className="agent-email-shell-context" aria-label="Gmail approvals context">
+              <span className="agent-email-context-chip agent-email-context-chip-warm">{pendingGmailApprovals} pending</span>
+              <span className="agent-email-context-chip">{gmailApprovals.length} total</span>
+            </div>
+          </div>
+
+          {gmailBanner ? <div className={`agent-email-banner ${gmailBanner.tone}`}>{gmailBanner.message}</div> : null}
+          {gmailError ? <div className="agent-email-banner warning">{gmailError}</div> : null}
+
+          {!gatewayConnected ? (
+            renderGmailEmptyState('VM offline', 'Reconnect to the gateway to review Gmail drafts.')
+          ) : gmailLoading && !gmailApprovals.length ? (
+            <div className="agent-email-empty-state">
+              <strong>Loading Gmail approvals</strong>
+              <span>Checking the gateway approval queue.</span>
+            </div>
+          ) : !gmailApprovals.length ? (
+            renderGmailEmptyState('No Gmail approvals waiting', 'When Cosmic creates a Gmail draft, it will appear here before sending.')
+          ) : (
+            <div className="agent-email-console-approvals">
+              <div className="agent-email-console-approvals-list">
+                <div className="agent-email-console-filterbar">
+                  <span className="agent-email-console-copy">{pendingGmailApprovals} pending review</span>
+                </div>
+                <div className="agent-email-minimal-list compact">
+                  {gmailApprovals.map((approval) => (
+                    <button
+                      key={approval.id}
+                      type="button"
+                      className={`agent-email-minimal-row ${gmailSelectedApproval?.id === approval.id ? 'active' : ''}`}
+                      onClick={() => setGmailSelectedApprovalId(approval.id)}
+                    >
+                      <div className="agent-email-minimal-row-top">
+                        <strong>{approval.subject}</strong>
+                        <span className={`agent-email-minimal-pill ${approval.accent}`}>{approval.state}</span>
+                      </div>
+                      <div className="agent-email-minimal-row-meta">
+                        <span>{approval.account}</span>
+                        <span>{approval.time}</span>
+                      </div>
+                      <p>{approval.notes}</p>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="agent-email-console-approvals-detail">
+                {gmailSelectedApproval ? (
+                  <div className="agent-email-console-card">
+                    <div className="agent-email-console-card-head">
+                      <h4>{gmailSelectedApproval.subject}</h4>
+                      <span className={`agent-email-minimal-pill ${gmailSelectedApproval.accent}`}>{gmailSelectedApproval.state}</span>
+                    </div>
+                    <div className="agent-email-console-detail-rows">
+                      <div className="agent-email-console-detail-row"><span>Account</span><strong>{gmailSelectedApproval.account}</strong></div>
+                      <div className="agent-email-console-detail-row"><span>To</span><strong>{gmailSelectedApproval.recipients}</strong></div>
+                      {gmailSelectedApproval.cc ? (
+                        <div className="agent-email-console-detail-row"><span>Cc</span><strong>{gmailSelectedApproval.cc}</strong></div>
+                      ) : null}
+                      {gmailSelectedApproval.bcc ? (
+                        <div className="agent-email-console-detail-row"><span>Bcc</span><strong>{gmailSelectedApproval.bcc}</strong></div>
+                      ) : null}
+                      <div className="agent-email-console-detail-row"><span>Draft</span><strong className="agent-email-console-mono">{gmailSelectedApproval.draftId || '—'}</strong></div>
+                      <div className="agent-email-console-detail-row"><span>Created</span><strong>{gmailSelectedApproval.time}</strong></div>
+                    </div>
+                    <div className="agent-email-console-text-block">
+                      <span>Reason</span>
+                      <p>{gmailSelectedApproval.notes}</p>
+                    </div>
+                    <div className="agent-email-console-text-block">
+                      <span>Draft preview</span>
+                      <p>{gmailSelectedApproval.excerpt}</p>
+                    </div>
+                    <div className="agent-email-detail-actions">
+                      <button
+                        type="button"
+                        className="agent-email-console-primary"
+                        onClick={() => void handleGmailApprove(gmailSelectedApproval.id)}
+                        disabled={gmailActionId === gmailSelectedApproval.id || gmailSelectedApproval.status !== 'pending'}
+                      >
+                        {gmailActionId === gmailSelectedApproval.id ? 'Processing...' : 'Approve and send'}
+                      </button>
+                      <button
+                        type="button"
+                        className="agent-email-console-secondary"
+                        onClick={() => void handleGmailReject(gmailSelectedApproval.id)}
+                        disabled={gmailActionId === gmailSelectedApproval.id || gmailSelectedApproval.status !== 'pending'}
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  renderGmailEmptyState('Select an approval', 'Choose a Gmail draft to inspect it and release or reject it.')
+                )}
+              </div>
+            </div>
+          )}
+        </section>
+      </div>
+    )
+  }
+
   const renderSessionsPage = () => {
     const lastUpdatedLabel = sessionsFetchedAt
       ? new Date(sessionsFetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -7076,6 +7357,9 @@ export default function SpacesControlCenter({
     if (page === 'agent-email') {
       return renderAgentEmailPage()
     }
+    if (page === 'gmail') {
+      return renderGmailPage()
+    }
     return renderCommandPage()
   }
 
@@ -7159,6 +7443,11 @@ export default function SpacesControlCenter({
                         {item.id === 'agent-email' && agentEmailSidebarAttentionCount > 0 ? (
                           <span className="spaces-rail-badge" aria-label={`${agentEmailSidebarAttentionCount} unread or pending`}>
                             {agentEmailSidebarAttentionCount > 99 ? '99+' : agentEmailSidebarAttentionCount}
+                          </span>
+                        ) : null}
+                        {item.id === 'gmail' && pendingGmailApprovals > 0 ? (
+                          <span className="spaces-rail-badge" aria-label={`${pendingGmailApprovals} Gmail approvals pending`}>
+                            {pendingGmailApprovals > 99 ? '99+' : pendingGmailApprovals}
                           </span>
                         ) : null}
                       </span>

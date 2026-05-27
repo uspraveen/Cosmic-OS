@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["draft_id"],
+  "properties": {
+    "draft_id": { "type": "string", "minLength": 1 },
+    "approval_id": { "type": "string" },
+    "account": { "type": "object" },
+    "auth": { "type": "object" }
+  },
+  "additionalProperties": true
+}
