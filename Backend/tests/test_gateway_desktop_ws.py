@@ -4688,6 +4688,33 @@ async def test_runtime_heartbeat_preference_toggle_controls_due_execution(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_queues_desktop_when_only_mobile_push_target_exists(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    await runtime.start()
+    try:
+        runtime.authorize_mobile_device("mob_push", metadata={"platform": "ios"})
+        runtime.update_mobile_push_token("mob_push", push_token=None, fcm_token="f" * 32)
+        runtime.record_mobile_device_session(
+            "mob_push",
+            session_id="sess_heartbeat_push",
+            channel="mobile:mob_push",
+        )
+
+        channel, state = await runtime._heartbeat_delivery_target(  # noqa: SLF001 - verifies heartbeat channel routing
+            {"delivery_channel": "auto"},
+            session_id="sess_heartbeat_push",
+        )
+
+        assert channel == "desktop"
+        assert state["selected_channel"] == "desktop"
+        assert state["selected_platform"] == "desktop"
+        assert state["selection_reason"] == "desktop_queue_with_mobile_push_target"
+        assert state["mobile_push_target_count"] == 1
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
 async def test_runtime_due_cron_reuses_stored_context_and_resolves_explicit_whatsapp_target(tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="opus")
     runtime.registry.register(FakeWhatsAppChannelAdapter())

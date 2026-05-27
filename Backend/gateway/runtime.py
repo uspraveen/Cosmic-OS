@@ -2210,18 +2210,18 @@ class GatewayRuntime:
         if not push_targets:
             push_targets = self.mobile_device_store.list_push_targets(session_id=None)
         delivery_state["mobile_push_target_count"] = len(push_targets)
-        for target in push_targets:
-            device_id = self._safe_text(target.get("device_id"))
-            if device_id:
-                channel = f"mobile:{device_id}"
-                delivery_state.update(
-                    {
-                        "selected_channel": channel,
-                        "selected_platform": "mobile",
-                        "selection_reason": "mobile_push_target",
-                    }
-                )
-                return channel, delivery_state
+        if push_targets:
+            # Push-only mobile targets are not realtime delivery channels. Keep
+            # the durable response queued for the desktop surface while the
+            # response.complete handler sends mobile push notifications.
+            delivery_state.update(
+                {
+                    "selected_channel": "desktop",
+                    "selected_platform": "desktop",
+                    "selection_reason": "desktop_queue_with_mobile_push_target",
+                }
+            )
+            return "desktop", delivery_state
 
         return "desktop", delivery_state
 

@@ -1261,6 +1261,27 @@ const findUnreadBoundaryMessage = (messages: Message[], cursor: ChatReadCursor |
   return null
 }
 
+const unreadReadableMessagesAfterCursor = (messages: Message[], cursor: ChatReadCursor | null): Message[] => {
+  if (!cursor?.messageId) {
+    return []
+  }
+  const cursorIndex = messages.findIndex((message) => message.id === cursor.messageId)
+  if (cursorIndex >= 0) {
+    return messages.slice(cursorIndex + 1).filter(isReadableChatMessage)
+  }
+  const cursorTime = Date.parse(cursor.createdAt || '')
+  if (!Number.isFinite(cursorTime)) {
+    return []
+  }
+  return messages.filter((message) => {
+    if (!isReadableChatMessage(message)) {
+      return false
+    }
+    const messageTime = Date.parse(message.createdAt || '')
+    return Number.isFinite(messageTime) && messageTime > cursorTime
+  })
+}
+
 const buildConversationContext = (messages: Message[]) => {
   return messages.slice(-10).map((message) => ({
     role: message.role,
@@ -2923,6 +2944,35 @@ export default function App() {
     })
   }
 
+  const enqueueUnreadHeartbeatNotificationsFromMessages = (
+    items: Message[],
+    sessionId: string | null | undefined,
+  ) => {
+    const normalizedSessionId = String(sessionId || '').trim()
+    if (!normalizedSessionId || items.length === 0) {
+      return
+    }
+    const cursor = getChatReadCursor(normalizedSessionId)
+    if (!cursor) {
+      return
+    }
+    const unreadHeartbeats = unreadReadableMessagesAfterCursor(items, cursor)
+      .filter(isHeartbeatMessage)
+      .filter((message) => String(message.content || '').trim())
+    for (const message of unreadHeartbeats) {
+      enqueueCronResultNotification({
+        id: `heartbeat_history_${message.id}`,
+        kind: 'heartbeat',
+        requestId: message.requestId || null,
+        sourceId: message.sourceId || null,
+        sessionId: normalizedSessionId,
+        content: String(message.content || '').trim(),
+        channel: message.channel || null,
+        createdAt: message.createdAt || new Date().toISOString(),
+      })
+    }
+  }
+
   const enqueueArtifactReadyNotification = (notification: ProducedArtifactNotification) => {
     const dedupeKey = buildArtifactReadyNotificationKey({
       messageId: notification.messageId,
@@ -3410,6 +3460,9 @@ export default function App() {
 
     setMessages(nextMessages)
     messagesRef.current = nextMessages
+    if (usingHistoryTail) {
+      enqueueUnreadHeartbeatNotificationsFromMessages(nextMessages, activeSessionIdRef.current)
+    }
 
     const activeStream = [...streams].reverse().find((stream) => !stream.completed && !stream.failed) || null
     if (activeStream) {
@@ -3605,7 +3658,10 @@ export default function App() {
     try {
       const payload = await window.cosmic.getGatewaySessionHistory(targetSessionId)
       resetInFlightAssistantMaps()
-      setMessages((prev) => mergeHydratedMessages(prev, historyToMessages(payload?.messages)))
+      const hydratedMessages = historyToMessages(payload?.messages)
+      setMessages((prev) => mergeHydratedMessages(prev, hydratedMessages))
+      enqueueUnreadHeartbeatNotificationsFromMessages(hydratedMessages, targetSessionId)
+      activeSessionIdRef.current = targetSessionId
       setActiveSessionId(targetSessionId)
     } catch {
       return
@@ -3933,6 +3989,7 @@ export default function App() {
             setGatewayStatus(state.status)
           }
           if (typeof state.sessionId === 'string') {
+            activeSessionIdRef.current = state.sessionId
             setActiveSessionId(state.sessionId)
           }
           restoreForegroundStreamsFromState((state as any).foregroundStreams ?? (state as any).foreground_streams, {
@@ -4058,6 +4115,9 @@ export default function App() {
         const newSessionId = typeof event.session_id === 'string' ? event.session_id : null
         const oldSessionId = activeSessionIdRef.current
         const sessionRolledOver = oldSessionId && newSessionId && oldSessionId !== newSessionId
+        if (newSessionId) {
+          activeSessionIdRef.current = newSessionId
+        }
         setActiveSessionId(newSessionId)
         // If session rolled over (e.g. 4 AM boundary), prepend a rollover divider
         if (sessionRolledOver) {
