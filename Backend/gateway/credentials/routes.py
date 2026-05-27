@@ -458,13 +458,18 @@ _CALENDAR_API = "https://www.googleapis.com/calendar/v3"
 _USERINFO_API = "https://www.googleapis.com/oauth2/v2/userinfo"
 
 
+def _to_google_rfc3339_z(value: datetime) -> str:
+    """Google Calendar accepts UTC RFC3339 timestamps with a single trailing Z."""
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def _calendar_window_bounds() -> tuple[str, str]:
     """Current month start → 2 months ahead (matches desktop behavior)."""
     now = datetime.now(tz=timezone.utc)
     window_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     next_month = (window_start.replace(day=28) + timedelta(days=4)).replace(day=1)
     month_after_next = (next_month.replace(day=28) + timedelta(days=4)).replace(day=1)
-    return window_start.isoformat() + "Z", month_after_next.isoformat() + "Z"
+    return _to_google_rfc3339_z(window_start), _to_google_rfc3339_z(month_after_next)
 
 
 async def _google_get_json(
@@ -652,6 +657,7 @@ async def get_calendar_agenda(request: Request):
 
         if is_active:
             try:
+                account_errors: list[str] = []
                 resolved = await mgr.resolve_credential(
                     provider="google",
                     required_scopes=[
@@ -690,14 +696,29 @@ async def get_calendar_agenda(request: Request):
                                 evt["calendar_color"] = cal["color"]
                                 evt["calendar_primary"] = cal["primary"]
                             events.extend(cal_events)
-                        except Exception:
-                            continue
+                        except Exception as exc:
+                            err = str(exc).strip() or "Calendar event sync failed."
+                            label = cal.get("name") or cal.get("id") or "Calendar"
+                            logger.warning(
+                                "Calendar event fetch failed for account=%s calendar=%s: %s",
+                                account_id,
+                                cal.get("id"),
+                                err,
+                            )
+                            account_errors.append(f"{label}: {err}")
                     events.sort(
                         key=lambda e: (e.get("start") or "", e.get("summary") or "")
                     )
                     events = events[:96]
                     account_entry["calendar_count"] = len(calendars)
                     account_entry["upcoming_count"] = len(events)
+                    if account_errors:
+                        error_messages.extend(
+                            f"{account_entry['account_label']} / {err}"
+                            for err in account_errors
+                        )
+                    if not events and account_errors and not account_entry["last_error"]:
+                        account_entry["last_error"] = account_errors[0]
                     all_events.extend(events)
             except Exception as exc:
                 err = str(exc).strip() or "Calendar sync failed."
