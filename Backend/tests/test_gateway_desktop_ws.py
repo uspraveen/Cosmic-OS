@@ -4521,6 +4521,65 @@ def test_scheduler_store_annotates_heartbeat_calendar_event_dedupe(tmp_path) -> 
     assert third["events"][0]["heartbeat_last_changed_at"] == "2026-05-21T15:00:00Z"
 
 
+def test_scheduler_store_records_heartbeat_consumption_once(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    runtime.scheduler_store.initialize(default_timezone="America/Chicago")
+
+    first = runtime.record_heartbeat_consumption(
+        session_id="sess_heartbeat_read",
+        message_id="msg_heartbeat_1",
+        request_id="req_heartbeat_1",
+        source_id="heartbeat:2026-05-27T23:00:00Z",
+        channel="mobile:phone_1",
+        platform="mobile",
+        device_id="phone_1",
+        consumed_via="mobile_push_open",
+    )
+    second = runtime.record_heartbeat_consumption(
+        session_id="sess_heartbeat_read",
+        message_id="msg_heartbeat_1",
+        request_id="req_heartbeat_1",
+        source_id="heartbeat:2026-05-27T23:00:00Z",
+        channel="desktop:desk_1",
+        platform="desktop",
+        device_id="desk_1",
+        consumed_via="desktop_chat_read",
+    )
+
+    assert first["consumption_id"] == second["consumption_id"]
+    assert second["platform"] == "desktop"
+    consumptions = runtime.get_heartbeat_consumptions(
+        session_id="sess_heartbeat_read"
+    )
+    assert len(consumptions) == 1
+    assert consumptions[0]["message_id"] == "msg_heartbeat_1"
+
+
+@pytest.mark.asyncio
+async def test_resume_payload_includes_heartbeat_consumptions(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    await runtime.start()
+    try:
+        session_id = runtime._current_session_id()  # noqa: SLF001 - verifies resume payload contract
+        runtime.record_heartbeat_consumption(
+            session_id=session_id,
+            message_id="msg_heartbeat_resume",
+            request_id="req_heartbeat_resume",
+            source_id="heartbeat:resume",
+            channel="mobile:phone_1",
+            platform="mobile",
+            device_id="phone_1",
+            consumed_via="mobile_push_open",
+        )
+
+        payload = await runtime.build_resume_payload(channel="desktop:desk_1")
+
+        assert payload["session_id"] == session_id
+        assert payload["heartbeat_consumptions"][0]["message_id"] == "msg_heartbeat_resume"
+    finally:
+        await runtime.stop()
+
+
 @pytest.mark.asyncio
 async def test_runtime_heartbeat_calendar_digest_queries_multiple_accounts(tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="opus")

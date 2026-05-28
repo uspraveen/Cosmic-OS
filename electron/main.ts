@@ -2220,6 +2220,52 @@ app.whenReady().then(() => {
     })
   })
 
+  ipcMain.handle('gateway:record-heartbeat-consumption', async (_, payload: {
+    sessionId?: string
+    messageId?: string
+    requestId?: string
+    sourceId?: string
+    channel?: string
+    platform?: string
+    deviceId?: string
+    consumedVia?: string
+    metadata?: Record<string, unknown>
+  }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/channels/heartbeat/consume', {
+      method: 'POST',
+      body: {
+        session_id: String(payload?.sessionId || '').trim() || null,
+        message_id: String(payload?.messageId || '').trim() || null,
+        request_id: String(payload?.requestId || '').trim() || null,
+        source_id: String(payload?.sourceId || '').trim() || null,
+        channel: String(payload?.channel || '').trim() || null,
+        platform: String(payload?.platform || '').trim() || 'desktop',
+        device_id: String(payload?.deviceId || config.deviceId || '').trim() || null,
+        consumed_via: String(payload?.consumedVia || '').trim() || 'desktop',
+        metadata: payload?.metadata && typeof payload.metadata === 'object' ? payload.metadata : {},
+      },
+      timeoutMs: 10000,
+    })
+  })
+
+  ipcMain.handle('gateway:list-heartbeat-consumptions', async (_, sessionId?: string) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const normalizedSessionId = String(sessionId || '').trim()
+    const suffix = normalizedSessionId
+      ? `?session_id=${encodeURIComponent(normalizedSessionId)}&limit=500`
+      : '?limit=500'
+    return callGatewayJson(config, `/channels/heartbeat/consumptions${suffix}`, {
+      timeoutMs: 10000,
+    })
+  })
+
   ipcMain.handle('gateway:get-codex-status', async () => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {

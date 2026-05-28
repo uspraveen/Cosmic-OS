@@ -112,6 +112,32 @@ class SchedulerStore:
 
                 CREATE INDEX IF NOT EXISTS idx_heartbeat_calendar_seen
                     ON heartbeat_calendar_events(last_seen_at DESC);
+
+                CREATE TABLE IF NOT EXISTS heartbeat_consumptions (
+                    consumption_id TEXT PRIMARY KEY,
+                    session_id TEXT,
+                    message_id TEXT,
+                    request_id TEXT,
+                    source_id TEXT,
+                    channel TEXT,
+                    platform TEXT,
+                    device_id TEXT,
+                    consumed_via TEXT,
+                    consumed_at TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_heartbeat_consumptions_session
+                    ON heartbeat_consumptions(session_id, consumed_at DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_heartbeat_consumptions_message
+                    ON heartbeat_consumptions(message_id)
+                    WHERE message_id IS NOT NULL AND message_id != '';
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_heartbeat_consumptions_request
+                    ON heartbeat_consumptions(request_id)
+                    WHERE request_id IS NOT NULL AND request_id != '';
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_heartbeat_consumptions_source
+                    ON heartbeat_consumptions(source_id)
+                    WHERE source_id IS NOT NULL AND source_id != '';
                 """
             )
             self._ensure_heartbeat_columns(connection)
@@ -793,10 +819,207 @@ class SchedulerStore:
             "included_at": now,
         }
 
+    def record_heartbeat_consumption(
+        self,
+        *,
+        session_id: str | None,
+        message_id: str | None,
+        request_id: str | None,
+        source_id: str | None,
+        channel: str | None,
+        platform: str | None,
+        device_id: str | None,
+        consumed_via: str | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized = {
+            "session_id": self._clean_optional_text(session_id),
+            "message_id": self._clean_optional_text(message_id),
+            "request_id": self._clean_optional_text(request_id),
+            "source_id": self._clean_optional_text(source_id),
+            "channel": self._clean_optional_text(channel),
+            "platform": self._clean_optional_text(platform),
+            "device_id": self._clean_optional_text(device_id),
+            "consumed_via": self._clean_optional_text(consumed_via),
+        }
+        if not (
+            normalized["message_id"]
+            or normalized["request_id"]
+            or normalized["source_id"]
+        ):
+            raise ValueError(
+                "heartbeat consumption requires a message_id, request_id, or source_id"
+            )
+        now = utcnow_iso()
+        metadata_json = json.dumps(
+            metadata if isinstance(metadata, dict) else {},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with self._lock, self._connect() as connection:
+            existing = self._find_heartbeat_consumption_row(
+                connection,
+                message_id=normalized["message_id"],
+                request_id=normalized["request_id"],
+                source_id=normalized["source_id"],
+            )
+            if existing is not None:
+                connection.execute(
+                    """
+                    UPDATE heartbeat_consumptions
+                    SET session_id = COALESCE(?, session_id),
+                        message_id = COALESCE(?, message_id),
+                        request_id = COALESCE(?, request_id),
+                        source_id = COALESCE(?, source_id),
+                        channel = COALESCE(?, channel),
+                        platform = COALESCE(?, platform),
+                        device_id = COALESCE(?, device_id),
+                        consumed_via = COALESCE(?, consumed_via),
+                        consumed_at = ?,
+                        metadata_json = ?
+                    WHERE consumption_id = ?
+                    """,
+                    (
+                        normalized["session_id"],
+                        normalized["message_id"],
+                        normalized["request_id"],
+                        normalized["source_id"],
+                        normalized["channel"],
+                        normalized["platform"],
+                        normalized["device_id"],
+                        normalized["consumed_via"],
+                        now,
+                        metadata_json,
+                        existing["consumption_id"],
+                    ),
+                )
+                consumption_id = str(existing["consumption_id"])
+            else:
+                consumption_id = f"hbcon_{uuid4().hex[:16]}"
+                connection.execute(
+                    """
+                    INSERT INTO heartbeat_consumptions (
+                        consumption_id,
+                        session_id,
+                        message_id,
+                        request_id,
+                        source_id,
+                        channel,
+                        platform,
+                        device_id,
+                        consumed_via,
+                        consumed_at,
+                        metadata_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        consumption_id,
+                        normalized["session_id"],
+                        normalized["message_id"],
+                        normalized["request_id"],
+                        normalized["source_id"],
+                        normalized["channel"],
+                        normalized["platform"],
+                        normalized["device_id"],
+                        normalized["consumed_via"],
+                        now,
+                        metadata_json,
+                    ),
+                )
+            connection.commit()
+            row = connection.execute(
+                """
+                SELECT *
+                FROM heartbeat_consumptions
+                WHERE consumption_id = ?
+                """,
+                (consumption_id,),
+            ).fetchone()
+        return self._heartbeat_consumption_record(row)
+
+    def list_heartbeat_consumptions(
+        self,
+        *,
+        session_id: str | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        normalized_session_id = self._clean_optional_text(session_id)
+        bounded_limit = max(1, min(int(limit or 500), 1000))
+        with self._lock, self._connect() as connection:
+            if normalized_session_id:
+                rows = connection.execute(
+                    """
+                    SELECT *
+                    FROM heartbeat_consumptions
+                    WHERE session_id = ?
+                    ORDER BY consumed_at DESC
+                    LIMIT ?
+                    """,
+                    (normalized_session_id, bounded_limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT *
+                    FROM heartbeat_consumptions
+                    ORDER BY consumed_at DESC
+                    LIMIT ?
+                    """,
+                    (bounded_limit,),
+                ).fetchall()
+        return [self._heartbeat_consumption_record(row) for row in rows if row is not None]
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(str(self.db_path), check_same_thread=False)
         connection.row_factory = sqlite3.Row
         return connection
+
+    @staticmethod
+    def _clean_optional_text(value: Any) -> str | None:
+        normalized = str(value or "").strip()
+        return normalized or None
+
+    def _find_heartbeat_consumption_row(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        message_id: str | None,
+        request_id: str | None,
+        source_id: str | None,
+    ) -> sqlite3.Row | None:
+        for column, value in (
+            ("message_id", message_id),
+            ("request_id", request_id),
+            ("source_id", source_id),
+        ):
+            if not value:
+                continue
+            row = connection.execute(
+                f"""
+                SELECT *
+                FROM heartbeat_consumptions
+                WHERE {column} = ?
+                LIMIT 1
+                """,
+                (value,),
+            ).fetchone()
+            if row is not None:
+                return row
+        return None
+
+    @staticmethod
+    def _heartbeat_consumption_record(row: sqlite3.Row | None) -> dict[str, Any]:
+        if row is None:
+            return {}
+        record = dict(row)
+        try:
+            metadata = json.loads(record.get("metadata_json") or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        record["metadata"] = metadata if isinstance(metadata, dict) else {}
+        record.pop("metadata_json", None)
+        return record
 
     @staticmethod
     def _heartbeat_calendar_event_key(event: dict[str, Any]) -> str:

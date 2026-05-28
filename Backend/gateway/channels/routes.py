@@ -132,6 +132,18 @@ class PauseRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=200)
 
 
+class HeartbeatConsumeRequest(BaseModel):
+    session_id: str | None = Field(default=None, max_length=160)
+    message_id: str | None = Field(default=None, max_length=160)
+    request_id: str | None = Field(default=None, max_length=160)
+    source_id: str | None = Field(default=None, max_length=200)
+    channel: str | None = Field(default=None, max_length=160)
+    platform: str | None = Field(default=None, max_length=64)
+    device_id: str | None = Field(default=None, max_length=160)
+    consumed_via: str | None = Field(default=None, max_length=80)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class SchedulerCreateRequest(BaseModel):
     cron_id: str | None = Field(default=None, max_length=80)
     label: str = Field(..., min_length=1, max_length=200)
@@ -1156,7 +1168,14 @@ async def get_session_history(
     _: None = Depends(require_local_api_token),
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
-    return {"session_id": session_id, "messages": runtime.get_session_history(session_id)}
+    return {
+        "session_id": session_id,
+        "messages": runtime.get_session_history(session_id),
+        "heartbeat_consumptions": runtime.get_heartbeat_consumptions(
+            session_id=session_id,
+            limit=500,
+        ),
+    }
 
 
 @router.get("/sessions/{session_id}/request-traces")
@@ -1599,6 +1618,45 @@ async def resume_scheduler_heartbeat(
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
     return runtime.resume_scheduler_heartbeat()
+
+
+@router.get("/channels/heartbeat/consumptions")
+async def list_heartbeat_consumptions(
+    session_id: str | None = Query(default=None, max_length=160),
+    limit: int = Query(default=500, ge=1, le=1000),
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return {
+        "session_id": session_id,
+        "consumptions": runtime.get_heartbeat_consumptions(
+            session_id=session_id,
+            limit=limit,
+        ),
+    }
+
+
+@router.post("/channels/heartbeat/consume")
+async def consume_heartbeat_notification(
+    body: HeartbeatConsumeRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        consumption = runtime.record_heartbeat_consumption(
+            session_id=body.session_id,
+            message_id=body.message_id,
+            request_id=body.request_id,
+            source_id=body.source_id,
+            channel=body.channel,
+            platform=body.platform,
+            device_id=body.device_id,
+            consumed_via=body.consumed_via,
+            metadata=body.metadata,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return {"ok": True, "consumption": consumption}
 
 
 @router.get("/channels")

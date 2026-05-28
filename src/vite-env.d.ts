@@ -14,6 +14,7 @@ interface GatewaySocketState {
   }
   sessionId?: string | null
   historyTail?: any[]
+  heartbeatConsumptions?: any[]
   knownTaskIds?: string[]
   foregroundStreams?: any[]
 }
@@ -139,6 +140,18 @@ interface Window {
       cosmicOrchestratorModel?: string
       cosmicHeartbeatEnabled?: boolean
     }) => Promise<any>
+    recordGatewayHeartbeatConsumption: (payload: {
+      sessionId?: string | null
+      messageId?: string | null
+      requestId?: string | null
+      sourceId?: string | null
+      channel?: string | null
+      platform?: string | null
+      deviceId?: string | null
+      consumedVia?: string | null
+      metadata?: Record<string, unknown>
+    }) => Promise<any>
+    listGatewayHeartbeatConsumptions: (sessionId?: string | null) => Promise<any>
     getGatewayCodexStatus: () => Promise<any>
     saveGatewayCodexConfig: (payload: {
       authMode?: string
@@ -175,7 +188,7 @@ interface Window {
     backgroundGatewayRequest: (payload: { requestId: string }) => Promise<{ ok: boolean; requestId: string }>
     foregroundGatewayRequest: (payload: { requestId: string }) => Promise<{ ok: boolean; requestId: string }>
     listGatewaySessions: () => Promise<{ sessions: any[] }>
-    getGatewaySessionHistory: (sessionId: string) => Promise<{ session_id: string; messages: any[] }>
+    getGatewaySessionHistory: (sessionId: string) => Promise<{ session_id: string; messages: any[]; heartbeat_consumptions?: any[] }>
     getGatewayRequestTraces: (sessionId: string) => Promise<{ session_id: string; request_traces: any[] }>
     listMobileDevices: () => Promise<{ devices: any[] }>
     authorizeMobileDevice: (deviceId: string) => Promise<{ device: any }>

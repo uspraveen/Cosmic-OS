@@ -97,6 +97,8 @@ contextBridge.exposeInMainWorld('cosmic', {
   requestGatewayResume: () => ipcRenderer.invoke('gateway:request-resume'),
   getGatewayPreferences: () => ipcRenderer.invoke('gateway:get-preferences'),
   saveGatewayPreferences: (payload: any) => ipcRenderer.invoke('gateway:save-preferences', payload),
+  recordGatewayHeartbeatConsumption: (payload: any) => ipcRenderer.invoke('gateway:record-heartbeat-consumption', payload),
+  listGatewayHeartbeatConsumptions: (sessionId?: string) => ipcRenderer.invoke('gateway:list-heartbeat-consumptions', sessionId),
   getGatewayCodexStatus: () => ipcRenderer.invoke('gateway:get-codex-status'),
   saveGatewayCodexConfig: (payload: any) => ipcRenderer.invoke('gateway:save-codex-config', payload),
   startGatewayCodexLogin: () => ipcRenderer.invoke('gateway:start-codex-login'),

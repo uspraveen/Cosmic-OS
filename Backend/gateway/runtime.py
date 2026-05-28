@@ -6624,6 +6624,42 @@ class GatewayRuntime:
         history = self.session_store.get_history(session_id)
         return [self._hydrate_history_message_for_client(item) for item in history]
 
+    def get_heartbeat_consumptions(
+        self,
+        *,
+        session_id: str | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        return self.scheduler_store.list_heartbeat_consumptions(
+            session_id=session_id,
+            limit=limit,
+        )
+
+    def record_heartbeat_consumption(
+        self,
+        *,
+        session_id: str | None,
+        message_id: str | None,
+        request_id: str | None,
+        source_id: str | None,
+        channel: str | None,
+        platform: str | None,
+        device_id: str | None,
+        consumed_via: str | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self.scheduler_store.record_heartbeat_consumption(
+            session_id=session_id,
+            message_id=message_id,
+            request_id=request_id,
+            source_id=source_id,
+            channel=channel,
+            platform=platform,
+            device_id=device_id,
+            consumed_via=consumed_via,
+            metadata=metadata,
+        )
+
     def list_session_request_traces(
         self, session_id: str, *, limit: int = 40
     ) -> list[dict[str, Any]]:
@@ -10318,6 +10354,10 @@ class GatewayRuntime:
             "channel": channel,
             "user_timezone": self.current_user_timezone(),
             "history_tail": history,
+            "heartbeat_consumptions": self.scheduler_store.list_heartbeat_consumptions(
+                session_id=session_id,
+                limit=500,
+            ),
             "active_tasks": active_tasks,
             "pending_inputs": pending_inputs,
             "background_tasks": background_tasks,

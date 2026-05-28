@@ -80,6 +80,7 @@ interface BackgroundTask {
 interface CronResultNotification {
   id: string
   kind?: 'cron' | 'heartbeat'
+  messageId?: string | null
   requestId?: string | null
   sourceId?: string | null
   sessionId?: string | null
@@ -970,6 +971,39 @@ const isHeartbeatMessage = (message: Pick<Message, 'role' | 'source' | 'sourceId
     String(message.sourceId || '').trim().startsWith('heartbeat:')
   )
 )
+
+const heartbeatConsumptionKeys = (value: {
+  messageId?: string | null
+  requestId?: string | null
+  sourceId?: string | null
+}) => {
+  const keys: string[] = []
+  const messageId = String(value.messageId || '').trim()
+  const requestId = String(value.requestId || '').trim()
+  const sourceId = String(value.sourceId || '').trim()
+  if (messageId) keys.push(`message:${messageId}`)
+  if (requestId) keys.push(`request:${requestId}`)
+  if (sourceId) keys.push(`source:${sourceId}`)
+  return keys
+}
+
+const heartbeatConsumptionKeysFromRecord = (record: any) => heartbeatConsumptionKeys({
+  messageId: typeof record?.message_id === 'string'
+    ? record.message_id
+    : typeof record?.messageId === 'string'
+      ? record.messageId
+      : null,
+  requestId: typeof record?.request_id === 'string'
+    ? record.request_id
+    : typeof record?.requestId === 'string'
+      ? record.requestId
+      : null,
+  sourceId: typeof record?.source_id === 'string'
+    ? record.source_id
+    : typeof record?.sourceId === 'string'
+      ? record.sourceId
+      : null,
+})
 
 const normalizeForegroundStreamSnapshot = (value: unknown): GatewayForegroundStreamSnapshot | null => {
   if (!value || typeof value !== 'object') {
@@ -2561,6 +2595,7 @@ export default function App() {
   const shouldAutoScrollRef = useRef(true)
   const selectedModelRef = useRef<GatewayModelSelection>('cosmic')
   const seenCronResultKeysRef = useRef<Set<string>>(new Set())
+  const consumedHeartbeatKeysRef = useRef<Set<string>>(new Set())
   const seenArtifactReadyKeysRef = useRef<Set<string>>(new Set())
   const unreadBoundaryMessageIdRef = useRef<string | null>(null)
 
@@ -2746,6 +2781,7 @@ export default function App() {
       return
     }
     saveChatReadCursor(sessionId, latest)
+    recordHeartbeatMessagesConsumed(items, 'desktop_chat_read', sessionId)
   }
 
   const scrollToUnreadBoundaryOrBottom = (behavior: ScrollBehavior = 'smooth') => {
@@ -2849,6 +2885,7 @@ export default function App() {
   }
 
   const buildCronResultNotificationKey = (value: {
+    messageId?: string | null
     requestId?: string | null
     sourceId?: string | null
     createdAt?: string | null
@@ -2859,7 +2896,7 @@ export default function App() {
     if (requestId) {
       return `request:${requestId}`
     }
-    const messageId = String(value.id || '').trim()
+    const messageId = String(value.messageId || value.id || '').trim()
     if (messageId) {
       return `message:${messageId}`
     }
@@ -2916,7 +2953,18 @@ export default function App() {
   }
 
   const enqueueCronResultNotification = (notification: CronResultNotification) => {
+    if (
+      notification.kind === 'heartbeat' &&
+      heartbeatConsumptionKeys({
+        messageId: notification.messageId,
+        requestId: notification.requestId,
+        sourceId: notification.sourceId,
+      }).some((key) => consumedHeartbeatKeysRef.current.has(key))
+    ) {
+      return
+    }
     const dedupeKey = buildCronResultNotificationKey({
+      messageId: notification.messageId,
       requestId: notification.requestId,
       sourceId: notification.sourceId,
       createdAt: notification.createdAt,
@@ -2930,6 +2978,7 @@ export default function App() {
     setCronResultNotifications((prev) => {
       const exists = prev.some((item) => (
         buildCronResultNotificationKey({
+          messageId: item.messageId,
           requestId: item.requestId,
           sourceId: item.sourceId,
           createdAt: item.createdAt,
@@ -2942,6 +2991,91 @@ export default function App() {
       }
       return [...prev, notification]
     })
+  }
+
+  const rememberHeartbeatConsumptions = (records: any[] | undefined | null) => {
+    if (!Array.isArray(records) || records.length === 0) {
+      return
+    }
+    let added = false
+    for (const record of records) {
+      for (const key of heartbeatConsumptionKeysFromRecord(record)) {
+        if (!consumedHeartbeatKeysRef.current.has(key)) {
+          consumedHeartbeatKeysRef.current.add(key)
+          added = true
+        }
+      }
+    }
+    if (!added) {
+      return
+    }
+    setCronResultNotifications((prev) => prev.filter((notification) => (
+      notification.kind !== 'heartbeat' ||
+      !heartbeatConsumptionKeys({
+        messageId: notification.messageId,
+        requestId: notification.requestId,
+        sourceId: notification.sourceId,
+      }).some((key) => consumedHeartbeatKeysRef.current.has(key))
+    )))
+  }
+
+  const recordHeartbeatConsumed = (value: {
+    sessionId?: string | null
+    messageId?: string | null
+    requestId?: string | null
+    sourceId?: string | null
+    channel?: string | null
+    consumedVia: string
+  }) => {
+    const keys = heartbeatConsumptionKeys(value)
+    if (keys.length === 0) {
+      return
+    }
+    const alreadyKnown = keys.some((key) => consumedHeartbeatKeysRef.current.has(key))
+    keys.forEach((key) => consumedHeartbeatKeysRef.current.add(key))
+    setCronResultNotifications((prev) => prev.filter((notification) => (
+      notification.kind !== 'heartbeat' ||
+      !heartbeatConsumptionKeys({
+        messageId: notification.messageId,
+        requestId: notification.requestId,
+        sourceId: notification.sourceId,
+      }).some((key) => keys.includes(key))
+    )))
+    if (alreadyKnown || !window.cosmic?.recordGatewayHeartbeatConsumption) {
+      return
+    }
+    window.cosmic.recordGatewayHeartbeatConsumption({
+      sessionId: value.sessionId || activeSessionIdRef.current || null,
+      messageId: value.messageId || null,
+      requestId: value.requestId || null,
+      sourceId: value.sourceId || null,
+      channel: value.channel || null,
+      platform: 'desktop',
+      consumedVia: value.consumedVia,
+    }).catch(() => {
+      // Best-effort cross-device read state. Local suppression still prevents repeats here.
+    })
+  }
+
+  const recordHeartbeatMessagesConsumed = (
+    items: Message[],
+    consumedVia: string,
+    sessionId: string | null | undefined = activeSessionIdRef.current,
+  ) => {
+    const normalizedSessionId = String(sessionId || '').trim() || activeSessionIdRef.current
+    for (const message of items) {
+      if (!isHeartbeatMessage(message)) {
+        continue
+      }
+      recordHeartbeatConsumed({
+        sessionId: normalizedSessionId,
+        messageId: message.id,
+        requestId: message.requestId || null,
+        sourceId: message.sourceId || null,
+        channel: message.channel || null,
+        consumedVia,
+      })
+    }
   }
 
   const enqueueUnreadHeartbeatNotificationsFromMessages = (
@@ -2963,6 +3097,7 @@ export default function App() {
       enqueueCronResultNotification({
         id: `heartbeat_history_${message.id}`,
         kind: 'heartbeat',
+        messageId: message.id,
         requestId: message.requestId || null,
         sourceId: message.sourceId || null,
         sessionId: normalizedSessionId,
@@ -3075,6 +3210,19 @@ export default function App() {
   }
 
   const openChatFromCronNotification = () => {
+    for (const notification of cronResultNotifications) {
+      if (notification.kind !== 'heartbeat') {
+        continue
+      }
+      recordHeartbeatConsumed({
+        sessionId: notification.sessionId || activeSessionIdRef.current,
+        messageId: notification.messageId || null,
+        requestId: notification.requestId || null,
+        sourceId: notification.sourceId || null,
+        channel: notification.channel || null,
+        consumedVia: 'desktop_notification_open',
+      })
+    }
     clearCronResultNotifications()
     modeRef.current = 'chat'
     setMode('chat')
@@ -3658,6 +3806,7 @@ export default function App() {
     try {
       const payload = await window.cosmic.getGatewaySessionHistory(targetSessionId)
       resetInFlightAssistantMaps()
+      rememberHeartbeatConsumptions(payload?.heartbeat_consumptions)
       const hydratedMessages = historyToMessages(payload?.messages)
       setMessages((prev) => mergeHydratedMessages(prev, hydratedMessages))
       enqueueUnreadHeartbeatNotificationsFromMessages(hydratedMessages, targetSessionId)
@@ -3992,6 +4141,7 @@ export default function App() {
             activeSessionIdRef.current = state.sessionId
             setActiveSessionId(state.sessionId)
           }
+          rememberHeartbeatConsumptions((state as any).heartbeatConsumptions ?? (state as any).heartbeat_consumptions)
           restoreForegroundStreamsFromState((state as any).foregroundStreams ?? (state as any).foreground_streams, {
             historyTail: Array.isArray(state.historyTail) ? state.historyTail : [],
             clearIfNone: true,
@@ -4112,6 +4262,7 @@ export default function App() {
       if (!eventType) return
 
       if (eventType === 'resume.ok') {
+        rememberHeartbeatConsumptions((event as any).heartbeat_consumptions)
         const newSessionId = typeof event.session_id === 'string' ? event.session_id : null
         const oldSessionId = activeSessionIdRef.current
         const sessionRolledOver = oldSessionId && newSessionId && oldSessionId !== newSessionId
@@ -4715,6 +4866,7 @@ export default function App() {
           enqueueCronResultNotification({
             id: `${eventSource}_result_${String(event.request_id || event.source_id || crypto.randomUUID())}`,
             kind: eventSource === 'heartbeat' ? 'heartbeat' : 'cron',
+            messageId: typeof (event as any).message_id === 'string' ? (event as any).message_id : null,
             requestId: typeof event.request_id === 'string' ? event.request_id : null,
             sourceId: typeof event.source_id === 'string' ? event.source_id : null,
             sessionId: typeof event.session_id === 'string' ? event.session_id : null,

@@ -415,6 +415,7 @@ export class GatewayConnectionManager {
   private lastSocketActivityAt = 0
   private currentSessionId: string | null = null
   private historyTail: any[] = []
+  private heartbeatConsumptions: any[] = []
   private knownTaskIds = new Set<string>()
   private foregroundStreams = new Map<string, ForegroundStreamSnapshot>()
   private foregroundStreamRequestIndex = new Map<string, string>()
@@ -556,6 +557,7 @@ export class GatewayConnectionManager {
     this.lastSocketActivityAt = 0
     this.currentSessionId = null
     this.historyTail = []
+    this.heartbeatConsumptions = []
     this.knownTaskIds.clear()
     this.foregroundStreams.clear()
     this.foregroundStreamRequestIndex.clear()
@@ -669,6 +671,7 @@ export class GatewayConnectionManager {
       status: this.status,
       sessionId: this.currentSessionId,
       historyTail: this.historyTail,
+      heartbeatConsumptions: this.heartbeatConsumptions,
       knownTaskIds: Array.from(this.knownTaskIds),
       foregroundStreams: this.getForegroundStreams(),
       config: this.config ? { ...this.config, apiToken: undefined } : null,
@@ -799,6 +802,9 @@ export class GatewayConnectionManager {
 
     if (eventType === 'resume.ok') {
       this.historyTail = Array.isArray(payload.history_tail) ? payload.history_tail : []
+      this.heartbeatConsumptions = Array.isArray(payload.heartbeat_consumptions)
+        ? payload.heartbeat_consumptions
+        : []
       return
     }
 
