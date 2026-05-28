@@ -14,7 +14,38 @@ import pytest
 BACKEND_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(BACKEND_ROOT))
 
-from shared import TaskEnvelope, utcnow
+from shared.contracts import TaskEnvelope, utcnow
+
+
+class _StepPlanProbe:
+    def __init__(self) -> None:
+        self.steps: list[dict] = []
+        self.events: list[dict] = []
+
+    async def create(self, steps: list[str]) -> dict:
+        self.steps = [
+            {"step": index, "text": text, "status": "pending", "note": None}
+            for index, text in enumerate(steps, start=1)
+        ]
+        self.events.append({"type": "agent_plan_created", "steps": list(self.steps)})
+        return {"plan_active": True, "total_steps": len(self.steps), "steps": list(self.steps)}
+
+    async def update(self, step: int, status: str, note: str | None = None) -> dict:
+        entry = self.steps[step - 1]
+        entry["status"] = status
+        entry["note"] = note
+        self.events.append({"type": "agent_step_update", "step": step, "status": status, "note": note})
+        completed = sum(1 for item in self.steps if item["status"] in {"completed", "failed", "skipped"})
+        return {"step": step, "status": status, "completed": completed, "total": len(self.steps)}
+
+    def has_pending_steps(self) -> bool:
+        return any(item["status"] in {"pending", "in_progress"} for item in self.steps)
+
+
+def _attach_step_plan(agent) -> _StepPlanProbe:
+    probe = _StepPlanProbe()
+    agent.step_plan = probe
+    return probe
 
 
 def test_sender_prefilter_matches_sender_and_domain() -> None:
@@ -133,6 +164,82 @@ def test_agent_card_references_all_gmail_schemas() -> None:
     assert "cosmic/gateway:1.0.0" in authz["gmail.sync_watch"]
     assert "cosmic/gateway:1.0.0" in authz["gmail.stop_watch"]
     assert card["model_requirements"]["internal_llm"]["default_model_key"] == "openai:gpt-5-mini"
+
+
+@pytest.mark.asyncio
+async def test_gmail_search_completes_step_plan() -> None:
+    from agents.gmail_agent.agent import GmailAgent
+
+    class FakeGmailClient:
+        async def search_messages(self, *, query: str, max_results: int) -> list[dict]:
+            assert query == "from:n.mcgill.gardner@gmail.com"
+            assert max_results == 5
+            return [
+                {
+                    "message_id": "msg_eduardo",
+                    "thread_id": "thr_eduardo",
+                    "from": "Nicholas McGill-Gardner <n.mcgill.gardner@gmail.com>",
+                    "to": "user@example.com",
+                    "subject": "Intro: Praveen x Eduardo",
+                    "date": "Wed, 27 May 2026 21:50:39 -0400",
+                    "snippet": "I'd like to introduce you to Eduardo.",
+                    "body_text": "Hi Ed - I'd like to introduce you to a former student.",
+                    "label_ids": ["INBOX"],
+                    "attachments": [],
+                }
+            ]
+
+    temp_dir = Path(__file__).resolve().parent / f".tmp_{uuid.uuid4().hex}"
+    agent = None
+    try:
+        temp_dir.mkdir(parents=True, exist_ok=False)
+        agent = GmailAgent(redis_client=MagicMock(), store_root=temp_dir / "store")
+        agent.auth = {
+            "access_token": "token",
+            "account_id": "acct_gmail_1",
+            "account_email": "user@example.com",
+        }
+        await agent.on_startup()
+        agent._client = MagicMock(return_value=FakeGmailClient())
+        task = TaskEnvelope(
+            task_id="tsk_gmail_search",
+            task_list_id="sess_search",
+            parent_task_id=None,
+            session_id="sess_search",
+            sender="cosmic/orchestrator:1.0.0",
+            recipient="cosmic/gmail-agent:1.0.0",
+            intent="gmail.search",
+            input={"query": "from:n.mcgill.gardner@gmail.com", "max_results": 5},
+            input_artifacts=[],
+            idempotency_key="idem_gmail_search",
+            priority="normal",
+            signature="sig",
+            created_at=utcnow(),
+            source="user",
+            source_id=None,
+            channel="desktop",
+        )
+        step_plan = _attach_step_plan(agent)
+
+        result = await agent.handle_gmail_search(task)
+
+        assert result.status == "completed"
+        assert result.output["count"] == 1
+        assert result.output["messages"][0]["thread_id"] == "thr_eduardo"
+        assert agent.step_plan is not None
+        assert agent.step_plan.has_pending_steps() is False
+        completed_steps = [
+            event["step"]
+            for event in step_plan.events
+            if event.get("type") == "agent_step_update"
+            and event.get("status") == "completed"
+        ]
+        assert completed_steps == [1, 2, 3]
+    finally:
+        if agent is not None:
+            await agent.stop()
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 @pytest.mark.asyncio
@@ -267,11 +374,14 @@ async def test_fetch_attachment_writes_private_artifact() -> None:
             source_id=None,
             channel="desktop",
         )
+        _attach_step_plan(agent)
 
         result = await agent.handle_gmail_fetch_attachment(task)
 
         assert result.status == "completed"
         assert result.artifacts
+        assert agent.step_plan is not None
+        assert agent.step_plan.has_pending_steps() is False
         artifact = result.artifacts[0]
         assert artifact.mime == "application/pdf"
         assert artifact.created_by_agent == "cosmic/gmail-agent:1.0.0"

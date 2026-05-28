@@ -200,7 +200,9 @@ class GmailAgent(AgentRuntime):
         client = self._client()
         query = self._build_query(task.input)
         max_results = self._bounded_int(task.input.get("max_results"), self.config.max_search_results, 1, 50)
+        await self._maybe_step(1, "completed", "Gmail account and search query ready.")
         messages = await client.search_messages(query=query, max_results=max_results)
+        await self._maybe_step(2, "completed", f"Fetched {len(messages)} Gmail messages.")
         compact = [self._attach_account(compact_message_for_llm(msg, max_body_chars=600), task) for msg in messages]
         await self._maybe_step(3, "completed", f"Found {len(compact)} Gmail messages.")
         return AgentResult(
@@ -338,9 +340,12 @@ class GmailAgent(AgentRuntime):
             raise ValueError("gmail.fetch_attachment requires message_id and attachment_id.")
         filename = str(task.input.get("filename") or attachment_id).strip() or attachment_id
         mime_type = str(task.input.get("mime_type") or "").strip()
-        content = await self._client().get_attachment(message_id, attachment_id)
+        client = self._client()
+        await self._maybe_step(1, "completed", "Gmail account ready.")
+        content = await client.get_attachment(message_id, attachment_id)
         if not content:
             raise ValueError("Gmail attachment was empty or could not be decoded.")
+        await self._maybe_step(2, "completed", f"Downloaded attachment {filename}.")
         artifact = self._write_binary_artifact(
             task=task,
             filename=filename,
@@ -663,6 +668,10 @@ class GmailAgent(AgentRuntime):
         if not start_history_id:
             self._save_history_cursor(history_id=history_id)
             await self._maybe_step(1, "completed", "Seeded Gmail history cursor.")
+            await self._maybe_step(2, "skipped", "No previous cursor existed, so no history replay was possible.")
+            await self._maybe_step(3, "skipped", "No changed messages to fetch on initial cursor seed.")
+            await self._maybe_step(4, "skipped", "No changed messages to triage on initial cursor seed.")
+            await self._maybe_step(5, "completed", f"Stored Gmail history cursor {history_id}.")
             return AgentResult(
                 status="completed",
                 output={
@@ -727,7 +736,9 @@ class GmailAgent(AgentRuntime):
                 exc.response.status_code,
             )
             query = str(task.input.get("fallback_query") or "newer_than:1d in:inbox -in:trash").strip()
+            await self._maybe_step(2, "completed", "History cursor could not be replayed; using bounded recent inbox fallback.")
             messages = await client.search_messages(query=query, max_results=max_results)
+            await self._maybe_step(3, "completed", f"Fetched {len(messages)} recent fallback Gmail messages.")
             triage_payload = await self._triage_message_batch(
                 task,
                 messages,
@@ -736,6 +747,8 @@ class GmailAgent(AgentRuntime):
             )
             items = [self._attach_account(item, task) for item in triage_payload["items"]]
             self._save_history_cursor(history_id=history_id)
+            await self._maybe_step(4, "completed", f"Classified {len(items)} fallback messages.")
+            await self._maybe_step(5, "completed", f"Advanced Gmail history cursor to {history_id}.")
             return AgentResult(
                 status="completed",
                 output={
