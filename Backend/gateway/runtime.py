@@ -9,6 +9,7 @@ import httpx
 import json
 import logging
 import math
+import mimetypes
 import os
 from pathlib import Path
 import platform
@@ -4150,10 +4151,17 @@ class GatewayRuntime:
             if isinstance(session_metadata.get("active_working_set"), dict)
             else None
         )
+        input_artifacts = await self._fetch_gmail_attachment_input_artifacts(
+            request_id=request_id,
+            session_id=session_id,
+            channel="desktop",
+            event=event,
+        )
         query = self._render_event_automation_orchestrator_prompt(
             automation=automation,
             event=event,
             match=match,
+            input_artifacts=input_artifacts,
         )
         memory_prompt_context = await self._assemble_memory_prompt_context(query=query)
         request_record = {
@@ -4184,6 +4192,12 @@ class GatewayRuntime:
                     "match_id": match_id,
                     "event_ref": event_ref,
                     "event_type": "gmail.inbound",
+                    "input_artifact_ids": [
+                        self._safe_text(item.get("artifact_id"))
+                        for item in input_artifacts
+                        if isinstance(item, dict)
+                        and self._safe_text(item.get("artifact_id"))
+                    ],
                 },
             },
             "assembled_conversation_context": [],
@@ -4205,7 +4219,7 @@ class GatewayRuntime:
                 "diagnostics": memory_prompt_context.diagnostics,
             },
             "routing_decision_source": "event_automation",
-            "input_artifacts": [],
+            "input_artifacts": input_artifacts,
             "accepted_at": utcnow_iso(),
             "idempotency_key": f"event-automation:{automation_id}:{event_ref}",
         }
@@ -4241,6 +4255,7 @@ class GatewayRuntime:
         automation: dict[str, Any],
         event: dict[str, Any],
         match: dict[str, Any],
+        input_artifacts: list[dict[str, Any]] | None = None,
     ) -> str:
         action = automation.get("action") if isinstance(automation.get("action"), dict) else {}
         approval_policy = (
@@ -4306,6 +4321,23 @@ class GatewayRuntime:
                 lines.append(
                     f"  - {filename} ({mime_type}, id={attachment_id}, size={size})"
                 )
+        staged_artifacts = [
+            artifact
+            for artifact in (input_artifacts or [])
+            if isinstance(artifact, dict)
+            and self._safe_text(artifact.get("path"))
+            and self._safe_text(artifact.get("ingest_state")) == "staged"
+        ]
+        if staged_artifacts:
+            lines.append("- Fetched attachment artifacts available in TaskEnvelope.input_artifacts:")
+            for artifact in staged_artifacts[:8]:
+                filename = self._safe_text(artifact.get("filename")) or "attachment"
+                artifact_id = self._safe_text(artifact.get("artifact_id")) or "unknown"
+                kind = self._safe_text(artifact.get("kind")) or "file"
+                mime_type = self._safe_text(artifact.get("mime")) or self._safe_text(
+                    artifact.get("mime_type")
+                ) or "unknown"
+                lines.append(f"  - {filename} ({kind}, {mime_type}, artifact_id={artifact_id})")
         if evidence:
             lines.extend(["", "## Matching Evidence", json.dumps(evidence, ensure_ascii=False, indent=2)[:3000]])
         lines.extend(
@@ -4313,13 +4345,325 @@ class GatewayRuntime:
                 "",
                 "## Execution Guidance",
                 "- Use Gmail Agent with account_id plus thread_id/message_id to read exact thread context before drafting or producing work.",
-                "- If the task depends on an email attachment, use Gmail Agent `gmail.fetch_attachment` with message_id and attachment_id, then pass the produced artifact to the right specialist through TaskEnvelope.input_artifacts.",
+                "- Gmail attachment files that could be fetched are already attached through TaskEnvelope.input_artifacts; use the parsed document/spreadsheet context when available instead of asking the user to reattach them.",
+                "- If a needed attachment is listed only by metadata and is not present in TaskEnvelope.input_artifacts, use Gmail Agent `gmail.fetch_attachment` with message_id and attachment_id before depending on its contents.",
                 "- Use shared memory and active context to resolve people, projects, and prior commitments.",
                 "- Drafts, local analysis, document creation, and summaries are allowed when consistent with the user instruction.",
                 "- Sending email, sharing externally, deleting/modifying important data, making purchases, or committing the user requires approval unless the approval policy clearly says otherwise.",
             ]
         )
         return "\n".join(lines)
+
+    def _gmail_attachment_refs(
+        self,
+        event: dict[str, Any],
+        *,
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        attachments = event.get("attachments") if isinstance(event, dict) else []
+        if not isinstance(attachments, list) or not attachments:
+            return []
+        default_message_id = self._safe_text(event.get("message_id"))
+        refs: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for attachment in attachments:
+            if not isinstance(attachment, dict):
+                continue
+            attachment_id = self._safe_text(attachment.get("attachment_id"))
+            message_id = (
+                self._safe_text(attachment.get("message_id")) or default_message_id
+            )
+            if not message_id or not attachment_id:
+                continue
+            key = (message_id, attachment_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            refs.append(
+                {
+                    "message_id": message_id,
+                    "attachment_id": attachment_id,
+                    "filename": self._safe_text(attachment.get("filename"))
+                    or attachment_id,
+                    "mime_type": self._safe_text(attachment.get("mime_type"))
+                    or self._safe_text(attachment.get("mime")),
+                    "size": attachment.get("size")
+                    if attachment.get("size") is not None
+                    else attachment.get("size_bytes"),
+                }
+            )
+            if len(refs) >= limit:
+                break
+        return refs
+
+    def _gmail_account_for_event(self, event: dict[str, Any]) -> dict[str, Any] | None:
+        if not hasattr(self, "credential_manager"):
+            return None
+        account_id = self._safe_text(event.get("account_id"))
+        if account_id:
+            try:
+                account = self.credential_manager.get_account(account_id)
+            except Exception:
+                logger.exception("gateway.gmail_attachment.account_lookup_failed account_id=%s", account_id)
+                account = None
+            if isinstance(account, dict):
+                return account
+        account_email = self._safe_text(event.get("account_email")).lower()
+        if not account_email:
+            return None
+        try:
+            for account in self.credential_manager.list_accounts("google"):
+                if (
+                    isinstance(account, dict)
+                    and self._safe_text(account.get("email")).lower() == account_email
+                ):
+                    return account
+        except Exception:
+            logger.exception(
+                "gateway.gmail_attachment.account_email_lookup_failed account_email=%s",
+                account_email,
+            )
+        return None
+
+    async def _fetch_gmail_attachment_input_artifacts(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        channel: str,
+        event: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        refs = self._gmail_attachment_refs(event)
+        if not refs or getattr(self, "_redis", None) is None:
+            return []
+        gmail_scope = "https://www.googleapis.com/auth/gmail.modify"
+        account = self._gmail_account_for_event(event)
+        if not isinstance(account, dict):
+            return []
+        account_id = self._safe_text(account.get("account_id"))
+        if (
+            not account_id
+            or self._safe_text(account.get("status")) != "active"
+            or not bool(account.get("has_refresh_token"))
+            or not self._google_account_has_tool(account, "gmail")
+            or gmail_scope not in set(account.get("granted_scopes") or [])
+        ):
+            return []
+        try:
+            auth = await self.credential_manager.resolve_credential(
+                provider="google",
+                required_scopes=[gmail_scope],
+                account_id=account_id,
+                operation_mode="read",
+                allow_primary_fallback=False,
+            )
+        except Exception:
+            logger.exception(
+                "gateway.gmail_attachment.credential_resolution_failed account_id=%s request_id=%s",
+                account_id,
+                request_id,
+            )
+            return []
+        if not auth:
+            return []
+
+        fetched: list[dict[str, Any]] = []
+        for index, ref in enumerate(refs, start=1):
+            try:
+                result = await self._dispatch_gmail_fetch_attachment(
+                    account=account,
+                    auth=auth,
+                    ref=ref,
+                    session_id=session_id,
+                    channel=channel,
+                    parent_request_id=request_id,
+                )
+            except Exception:
+                logger.exception(
+                    "gateway.gmail_attachment.fetch_failed request_id=%s message_id=%s attachment_id=%s",
+                    request_id,
+                    self._safe_text(ref.get("message_id")),
+                    self._safe_text(ref.get("attachment_id")),
+                )
+                continue
+            if self._safe_text(result.get("status")) != "completed":
+                logger.warning(
+                    "gateway.gmail_attachment.fetch_not_completed request_id=%s status=%s error=%s",
+                    request_id,
+                    self._safe_text(result.get("status")),
+                    self._safe_text(result.get("error_message")),
+                )
+                continue
+            manifest = self._gmail_fetched_attachment_manifest(
+                request_id=request_id,
+                index=index,
+                event=event,
+                ref=ref,
+                result=result,
+            )
+            if manifest:
+                fetched.append(manifest)
+
+        if not fetched:
+            return []
+        try:
+            persisted = self.artifact_store.persist_inbound_attachments(
+                request_id=request_id,
+                session_id=session_id,
+                source_channel=channel,
+                source_platform="gmail",
+                source_message_id=self._safe_text(event.get("message_id")),
+                attachments=fetched,
+            )
+            return await self._stage_supported_input_artifacts(
+                request_id=request_id,
+                session_id=session_id,
+                channel=channel,
+                manifests=persisted,
+            )
+        except Exception:
+            logger.exception(
+                "gateway.gmail_attachment.stage_failed request_id=%s attachment_count=%s",
+                request_id,
+                len(fetched),
+            )
+            return fetched
+
+    async def _dispatch_gmail_fetch_attachment(
+        self,
+        *,
+        account: dict[str, Any],
+        auth: dict[str, Any],
+        ref: dict[str, Any],
+        session_id: str,
+        channel: str,
+        parent_request_id: str,
+    ) -> dict[str, Any]:
+        message_id = self._safe_text(ref.get("message_id"))
+        attachment_id = self._safe_text(ref.get("attachment_id"))
+        if not message_id or not attachment_id:
+            return {
+                "status": "failed",
+                "error_message": "Missing Gmail message_id or attachment_id.",
+            }
+        task = TaskEnvelope(
+            task_id=generate_task_id(),
+            task_list_id=session_id,
+            session_id=session_id,
+            sender="cosmic/gateway:1.0.0",
+            recipient=self.config.gmail_agent_id,
+            intent="gmail.fetch_attachment",
+            input={
+                "message_id": message_id,
+                "attachment_id": attachment_id,
+                "filename": self._safe_text(ref.get("filename")),
+                "mime_type": self._safe_text(ref.get("mime_type")),
+                "account_id": self._safe_text(account.get("account_id")),
+                "account_hint": self._safe_text(account.get("email")),
+                "account": self._heartbeat_gmail_account_summary(account),
+                "auth": auth,
+            },
+            input_artifacts=[],
+            idempotency_key=(
+                "gmail-fetch-attachment:"
+                f"{self._safe_text(account.get('account_id'))}:{message_id}:{attachment_id}:{parent_request_id}"
+            ),
+            priority="normal",
+            signature="",
+            created_at=utcnow(),
+            source="webhook",
+            source_id=f"gmail-attachment:{parent_request_id}",
+            channel=channel,
+        )
+        task = task.model_copy(
+            update={"signature": sign_task_envelope(task, self.config.signing_secret)}
+        )
+        await dispatch_task(task, self._redis)
+        return await self._wait_for_agent_terminal_result(
+            task.task_id,
+            timeout_sec=self.config.gmail_process_inbound_timeout_sec,
+            poll_interval_sec=self.config.gmail_process_inbound_poll_interval_sec,
+        )
+
+    def _gmail_fetched_attachment_manifest(
+        self,
+        *,
+        request_id: str,
+        index: int,
+        event: dict[str, Any],
+        ref: dict[str, Any],
+        result: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        output = result.get("output") if isinstance(result.get("output"), dict) else {}
+        artifact = output.get("artifact") if isinstance(output.get("artifact"), dict) else None
+        if artifact is None:
+            artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), list) else []
+            artifact = artifacts[0] if artifacts and isinstance(artifacts[0], dict) else None
+        if not isinstance(artifact, dict):
+            return None
+
+        source_artifact_id = self._safe_text(artifact.get("artifact_id"))
+        source_path = self._safe_text(artifact.get("path"))
+        if not source_artifact_id or not source_path:
+            return None
+        filename = (
+            self._safe_text(output.get("filename"))
+            or self._safe_text(ref.get("filename"))
+            or Path(source_path).name
+            or "attachment"
+        )
+        mime_type = (
+            self._safe_text(output.get("mime_type"))
+            or self._safe_text(artifact.get("mime"))
+            or self._safe_text(ref.get("mime_type"))
+            or mimetypes.guess_type(filename)[0]
+            or "application/octet-stream"
+        )
+        kind_probe = {"filename": filename, "mime": mime_type, "mime_type": mime_type}
+        kind = self._supported_artifact_kind(kind_probe) or "file"
+        stable = hashlib.sha256(
+            "|".join(
+                [
+                    request_id,
+                    self._safe_text(ref.get("message_id")),
+                    self._safe_text(ref.get("attachment_id")),
+                    source_artifact_id,
+                ]
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        size_bytes = self._coerce_int(artifact.get("size_bytes"))
+        resolved_path = self._resolve_logical_artifact_path(source_path)
+        if (
+            size_bytes is None
+            and resolved_path is not None
+            and resolved_path.exists()
+            and resolved_path.is_file()
+        ):
+            try:
+                size_bytes = int(resolved_path.stat().st_size)
+            except OSError:
+                size_bytes = None
+        return {
+            "artifact_id": f"art_gmail_input_{stable}",
+            "kind": kind,
+            "mime_type": mime_type,
+            "mime": mime_type,
+            "filename": filename,
+            "size_bytes": size_bytes,
+            "sha256": self._safe_text(artifact.get("sha256")),
+            "path": source_path,
+            "ingest_state": "staged",
+            "task_id": self._safe_text(result.get("task_id"))
+            or self._safe_text(artifact.get("task_id")),
+            "index": index,
+            "gmail_message_id": self._safe_text(ref.get("message_id")),
+            "gmail_thread_id": self._safe_text(event.get("thread_id")),
+            "gmail_attachment_id": self._safe_text(ref.get("attachment_id")),
+            "gmail_account_id": self._safe_text(event.get("account_id")),
+            "gmail_account_email": self._safe_text(event.get("account_email")),
+            "source_artifact_id": source_artifact_id,
+            "source_task_id": self._safe_text(result.get("task_id")),
+        }
 
     def _condition_values(self, value: Any) -> list[str]:
         if value is None:
