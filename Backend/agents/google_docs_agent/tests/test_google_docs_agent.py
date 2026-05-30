@@ -133,6 +133,86 @@ def test_agent_card_references_all_google_docs_schemas() -> None:
         assert (schemas_dir / intent["output_schema"].split("/")[-1]).exists()
     assert "https://www.googleapis.com/auth/documents" in card["auth_requirements"]["docs.edit"]["scopes"]
     assert "https://www.googleapis.com/auth/drive" in card["auth_requirements"]["docs.edit"]["scopes"]
+    assert card["model_requirements"]["internal_llm"]["default_model_key"] == "openai:gpt-5-mini"
+
+
+@pytest.mark.asyncio
+async def test_google_docs_internal_llm_omits_temperature_for_gpt5_and_logs_usage() -> None:
+    from agents.google_docs_agent.config import GoogleDocsAgentConfig
+    from agents.google_docs_agent.internal_llm import invoke_google_docs_planner_llm
+
+    class FakeResponse:
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+            self.status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return self._payload
+
+    class FakeHttp:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def post(self, url: str, **kwargs):
+            self.calls.append({"url": url, **kwargs})
+            if url.endswith("/chat/completions"):
+                return FakeResponse(
+                    {
+                        "id": "chatcmpl_docs",
+                        "model": "gpt-5-mini",
+                        "usage": {
+                            "prompt_tokens": 20,
+                            "completion_tokens": 10,
+                            "total_tokens": 30,
+                        },
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": json.dumps(
+                                        {
+                                            "intent": "docs.edit",
+                                            "operation": "replace_text",
+                                            "params": {"old_text": "old", "new_text": "new"},
+                                            "confidence": 0.91,
+                                            "needs_clarification": False,
+                                        }
+                                    )
+                                }
+                            }
+                        ],
+                    }
+                )
+            return FakeResponse({"ok": True})
+
+    cfg = GoogleDocsAgentConfig(
+        gateway_url="http://gateway.local",
+        gateway_internal_token="token",
+        internal_llm_api_key="key",
+        internal_llm_base_url="https://api.openai.com/v1",
+        internal_llm_model="gpt-5-mini",
+    )
+    http = FakeHttp()
+
+    result = await invoke_google_docs_planner_llm(
+        cfg=cfg,
+        http_client=http,  # type: ignore[arg-type]
+        user_payload={"task": {"intent": "docs.edit", "input": {"query": "replace old with new"}}},
+        task_context={"task_id": "tsk_docs", "session_id": "sess_docs", "channel": "desktop"},
+    )
+
+    assert result["operation"] == "replace_text"
+    chat_call = http.calls[0]
+    assert "temperature" not in chat_call["json"]
+    usage_call = http.calls[1]
+    assert usage_call["url"] == "http://gateway.local/internal/usage/log"
+    assert usage_call["json"]["source_id"] == "cosmic/google-docs-agent:1.0.0"
+    assert usage_call["json"]["provider"] == "openai"
+    assert usage_call["json"]["model"] == "gpt-5-mini"
+    assert usage_call["json"]["prompt_tokens"] == 20
+    assert usage_call["json"]["completion_tokens"] == 10
 
 
 @pytest.mark.asyncio
@@ -170,6 +250,64 @@ async def test_resolve_resource_uses_selected_google_account() -> None:
         assert result.output["count"] == 1
         assert result.output["matches"][0]["document_id"] == "doc_1"
         assert result.output["matches"][0]["account_email"] == "user@example.com"
+    finally:
+        if agent is not None:
+            await agent.stop()
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_execute_logs_google_docs_specialist_usage() -> None:
+    from agents.google_docs_agent.agent import GoogleDocsAgent
+    from agents.google_docs_agent.config import GoogleDocsAgentConfig
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeHttp:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def post(self, url: str, **kwargs):
+            self.calls.append({"url": url, **kwargs})
+            return FakeResponse()
+
+    class FakeClient:
+        async def list_documents(self, *, query: str, max_results: int) -> list[dict]:
+            return [{"document_id": "doc_1", "title": f"{query}:{max_results}"}]
+
+    temp_dir = Path(__file__).resolve().parent / f".tmp_{uuid.uuid4().hex}"
+    agent = None
+    try:
+        temp_dir.mkdir(parents=True, exist_ok=False)
+        http = FakeHttp()
+        agent = GoogleDocsAgent(
+            redis_client=MagicMock(),
+            config=GoogleDocsAgentConfig(
+                gateway_url="http://gateway.local",
+                gateway_internal_token="token",
+                enable_internal_llm=False,
+            ),
+            http_client=http,  # type: ignore[arg-type]
+            store_root=temp_dir / "store",
+            artifacts_root=temp_dir / "artifacts",
+        )
+        agent.auth = {"access_token": "token", "account_id": "acct_docs_1"}
+        await agent.on_startup()
+        agent._client = MagicMock(return_value=FakeClient())
+
+        result = await agent.execute(_task("docs.resolve_resource", {"query": "launch", "max_results": 2}))
+
+        assert result.status == "completed"
+        usage_call = http.calls[-1]
+        assert usage_call["url"] == "http://gateway.local/internal/usage/log"
+        assert usage_call["json"]["source_id"] == "cosmic/google-docs-agent:1.0.0"
+        assert usage_call["json"]["provider"] == "google"
+        assert usage_call["json"]["model"] == "google-docs-api"
+        assert usage_call["json"]["usage_kind"] == "specialist"
     finally:
         if agent is not None:
             await agent.stop()
@@ -234,3 +372,78 @@ async def test_update_block_uses_revision_guard() -> None:
             await agent.stop()
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+
+@pytest.mark.asyncio
+async def test_high_level_edit_uses_internal_planner(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agents.google_docs_agent import agent as docs_agent_module
+    from agents.google_docs_agent.agent import GoogleDocsAgent
+    from agents.google_docs_agent.config import GoogleDocsAgentConfig
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.required_revision_id = ""
+
+        async def get_document(self, document_id: str, **_: object) -> dict:
+            assert document_id == "doc_123"
+            return _sample_doc("Old sentence\n")
+
+        async def batch_update(self, document_id: str, requests: list[dict], *, required_revision_id: str = "") -> dict:
+            assert document_id == "doc_123"
+            self.required_revision_id = required_revision_id
+            assert requests[0]["replaceAllText"]["containsText"]["text"] == "Old sentence"
+            return {"replies": [{"replaceAllText": {"occurrencesChanged": 1}}]}
+
+        async def get_revision_id(self, document_id: str) -> str:
+            assert document_id == "doc_123"
+            return "rev_2"
+
+    async def fake_planner(**_: object) -> dict:
+        return {
+            "intent": "docs.edit",
+            "operation": "replace_text",
+            "params": {
+                "old_text": "Old sentence",
+                "new_text": "New sentence",
+            },
+            "confidence": 0.94,
+            "needs_clarification": False,
+        }
+
+    monkeypatch.setattr(docs_agent_module, "invoke_google_docs_planner_llm", fake_planner)
+
+    temp_dir = Path(__file__).resolve().parent / f".tmp_{uuid.uuid4().hex}"
+    agent = None
+    try:
+        temp_dir.mkdir(parents=True, exist_ok=False)
+        fake = FakeClient()
+        agent = GoogleDocsAgent(
+            redis_client=MagicMock(),
+            config=GoogleDocsAgentConfig(
+                internal_llm_api_key="key",
+                internal_llm_base_url="https://api.openai.com/v1",
+            ),
+            store_root=temp_dir / "store",
+            artifacts_root=temp_dir / "artifacts",
+        )
+        agent.auth = {"access_token": "token", "account_id": "acct_docs_1"}
+        await agent.on_startup()
+        agent._client = MagicMock(return_value=fake)
+
+        result = await agent.handle_docs_edit(
+            _task(
+                "docs.edit",
+                {
+                    "operation": "auto",
+                    "document_id": "doc_123",
+                    "query": "Replace the old sentence with a new one.",
+                },
+            )
+        )
+
+        assert result.status == "completed"
+        assert result.output["operation"] == "replace_text"
+        assert fake.required_revision_id == "rev_1"
+    finally:
+        if agent is not None:
+            await agent.stop()
+        shutil.rmtree(temp_dir, ignore_errors=True)

@@ -15,10 +15,12 @@ from shared import utcnow
 from shared.agent_runtime import AgentRuntime
 from shared.contracts import AgentError, AgentResult, ArtifactManifest, TaskEnvelope
 from shared.sqlite_client import connect_sync
+from shared.usage import begin_metered_call, build_usage_event, post_usage_event, serialize_usage_metadata
 
 from .config import AGENT_ROOT, BACKEND_ROOT, GoogleDocsAgentConfig
 from .doc_structure import MarkdownParser, build_block_map, document_summary, markdown_probe_text
 from .google_docs_client import GoogleDocsClient, document_url, is_revision_conflict
+from .internal_llm import invoke_google_docs_planner_llm
 
 logger = logging.getLogger(__name__)
 
@@ -115,52 +117,74 @@ class GoogleDocsAgent(AgentRuntime):
 
     async def execute(self, task: TaskEnvelope) -> AgentResult:
         started = time.perf_counter()
+        metered = begin_metered_call(prefix="google_docs_api")
         handler = getattr(self, f"handle_{task.intent.replace('.', '_')}", None)
         if not handler:
-            return self._err("INVALID_INPUT", f"Unknown intent: {task.intent}", False, "escalate")
+            result = self._err("INVALID_INPUT", f"Unknown intent: {task.intent}", False, "escalate")
+            await self._post_specialist_usage(task, metered, result, started)
+            return result
         try:
             result = await handler(task)
-            self._save_session(task, result.output)
+            if result.status == "completed":
+                self._save_session(task, result.output)
+            await self._post_specialist_usage(task, metered, result, started)
             return result
         except PermissionError:
-            return await self._handle_auth_error(task)
+            result = await self._handle_auth_error(task)
+            await self._post_specialist_usage(task, metered, result, started)
+            return result
         except ValueError as exc:
-            return self._err("INVALID_INPUT", str(exc), False, "escalate")
+            result = self._err("INVALID_INPUT", str(exc), False, "escalate")
+            await self._post_specialist_usage(task, metered, result, started)
+            return result
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 401:
-                return await self._handle_auth_error(task)
+                result = await self._handle_auth_error(task)
+                await self._post_specialist_usage(task, metered, result, started)
+                return result
             if is_revision_conflict(exc):
-                return self._err(
+                result = self._err(
                     "REVISION_CONFLICT",
                     "The Google Doc changed during the operation. Refresh and retry.",
                     True,
                     "retry",
                 )
-            return self._err(
+                await self._post_specialist_usage(task, metered, result, started)
+                return result
+            result = self._err(
                 "NETWORK_ERROR",
                 f"Google Docs/Drive API error: {exc.response.status_code}",
                 True,
                 "retry",
             )
+            await self._post_specialist_usage(task, metered, result, started)
+            return result
         except httpx.TimeoutException:
-            return self._err("TIMEOUT", "Google Docs/Drive API timed out.", True, "retry")
+            result = self._err("TIMEOUT", "Google Docs/Drive API timed out.", True, "retry")
+            await self._post_specialist_usage(task, metered, result, started)
+            return result
         except Exception as exc:
             if is_revision_conflict(exc):
-                return self._err(
+                result = self._err(
                     "REVISION_CONFLICT",
                     "The Google Doc changed during the operation. Refresh and retry.",
                     True,
                     "retry",
                 )
+                await self._post_specialist_usage(task, metered, result, started)
+                return result
             logger.exception(
                 "google_docs_agent.error task_id=%s intent=%s elapsed_ms=%.1f",
                 task.task_id,
                 task.intent,
                 (time.perf_counter() - started) * 1000,
             )
-            return self._err("INTERNAL_ERROR", str(exc), False, "escalate")
+            result = self._err("INTERNAL_ERROR", str(exc), False, "escalate")
+            await self._post_specialist_usage(task, metered, result, started)
+            return result
 
     async def handle_docs_resolve_resource(self, task: TaskEnvelope) -> AgentResult:
+        task = await self._apply_internal_plan_if_needed(task, purpose="resolve")
         await self._maybe_create_plan(task, ["Resolve Google account", "Search Drive", "Return candidates"])
         client = self._client()
         query = str(task.input.get("query") or task.input.get("resource_hint") or "").strip()
@@ -184,6 +208,7 @@ class GoogleDocsAgent(AgentRuntime):
         return AgentResult(status="completed", output=output, artifacts=[])
 
     async def handle_docs_create(self, task: TaskEnvelope) -> AgentResult:
+        task = await self._apply_internal_plan_if_needed(task, purpose="create")
         await self._maybe_create_plan(task, ["Resolve Google account", "Create document", "Apply initial content", "Verify document"])
         client = self._client()
         title = str(task.input.get("title") or "Untitled document").strip() or "Untitled document"
@@ -227,9 +252,10 @@ class GoogleDocsAgent(AgentRuntime):
         return AgentResult(status="completed", output=output, artifacts=[artifact])
 
     async def handle_docs_read(self, task: TaskEnvelope) -> AgentResult:
+        task = await self._apply_internal_plan_if_needed(task, purpose="read")
         await self._maybe_create_plan(task, ["Resolve Google account", "Fetch document", "Fetch comments", "Return structure"])
         client = self._client()
-        document_id = self._document_id_from_input(task.input)
+        document_id = await self._resolve_document_id_for_task(task, client)
         if not document_id:
             raise ValueError("document_id is required for docs.read.")
         include_comments = self._bool(task.input.get("include_comments"), False)
@@ -271,9 +297,12 @@ class GoogleDocsAgent(AgentRuntime):
         return AgentResult(status="completed", output=output, artifacts=[artifact])
 
     async def handle_docs_edit(self, task: TaskEnvelope) -> AgentResult:
+        task = await self._apply_internal_plan_if_needed(task, purpose="edit")
         operation = str(task.input.get("operation") or "").strip().lower()
         if not operation:
             raise ValueError("operation is required for docs.edit.")
+        if operation == "read":
+            return await self.handle_docs_read(task.model_copy(update={"intent": self.READ}))
         client = self._client()
         if operation == "overwrite_doc":
             return await self._handle_overwrite(task, client)
@@ -869,6 +898,271 @@ class GoogleDocsAgent(AgentRuntime):
             "artifact_id": output.get("artifact_id"),
         }
 
+    async def _apply_internal_plan_if_needed(self, task: TaskEnvelope, *, purpose: str) -> TaskEnvelope:
+        if not self._should_use_internal_planner(task, purpose=purpose):
+            return task
+        try:
+            document_context = await self._planner_document_context(task, purpose=purpose)
+            payload = self._planner_payload(task, purpose=purpose, document_context=document_context)
+            plan = await invoke_google_docs_planner_llm(
+                cfg=self.config,
+                http_client=self._http_client,
+                user_payload=payload,
+                task_context=self._task_context(task),
+            )
+        except Exception as exc:
+            logger.warning("google_docs_agent.internal_planner_failed task_id=%s error=%s", task.task_id, exc)
+            return task
+
+        if self._bool(plan.get("needs_clarification"), False):
+            question = str(plan.get("clarifying_question") or "").strip()
+            if question:
+                raise ValueError(f"Clarification needed: {question}")
+            raise ValueError("Clarification needed before editing the Google Doc.")
+
+        params = plan.get("params") if isinstance(plan.get("params"), dict) else {}
+        merged = dict(task.input)
+        for key, value in params.items():
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            if isinstance(value, list) and not value:
+                continue
+            if isinstance(value, dict) and not value:
+                continue
+            if key not in merged or merged.get(key) in (None, "", [], {}):
+                merged[key] = value
+
+        operation = str(plan.get("operation") or "").strip()
+        intent = str(plan.get("intent") or "").strip()
+        if purpose == "create" and operation == "create":
+            merged.setdefault("title", params.get("title") or "Untitled document")
+            if params.get("body_markdown") and not merged.get("body_markdown"):
+                merged["body_markdown"] = params["body_markdown"]
+        elif purpose == "edit" and operation and operation not in {"create", "resolve_resource"}:
+            if not str(merged.get("operation") or "").strip() or str(merged.get("operation")).strip().lower() in {"auto", "plan"}:
+                merged["operation"] = operation
+        elif purpose == "read" and intent == self.READ:
+            merged.setdefault("include_comments", bool(params.get("include_comments", False)))
+        elif purpose == "resolve" and operation == "resolve_resource":
+            merged.setdefault("query", params.get("query") or params.get("resource_hint") or "")
+
+        merged["internal_llm_plan"] = {
+            "intent": intent,
+            "operation": operation,
+            "confidence": plan.get("confidence"),
+            "needs_approval": plan.get("needs_approval"),
+            "approval_reason": plan.get("approval_reason"),
+            "reasoning": plan.get("reasoning"),
+        }
+        return task.model_copy(update={"input": merged})
+
+    def _should_use_internal_planner(self, task: TaskEnvelope, *, purpose: str) -> bool:
+        if not self.config.enable_internal_llm:
+            return False
+        if not self.config.internal_llm_api_key or not self.config.internal_llm_base_url:
+            return False
+        input_data = task.input if isinstance(task.input, dict) else {}
+        natural_keys = (
+            "query",
+            "user_request",
+            "natural_language_request",
+            "instructions",
+            "goal",
+            "request",
+        )
+        has_natural_request = any(str(input_data.get(key) or "").strip() for key in natural_keys)
+        if purpose == "edit":
+            operation = str(input_data.get("operation") or "").strip().lower()
+            return has_natural_request and (not operation or operation in {"auto", "plan"})
+        if purpose == "create":
+            return has_natural_request and (
+                not str(input_data.get("title") or "").strip()
+                or not str(input_data.get("body_markdown") or input_data.get("content") or "").strip()
+            )
+        if purpose == "read":
+            return has_natural_request and not self._document_id_from_input(input_data)
+        if purpose == "resolve":
+            return has_natural_request and not str(input_data.get("query") or input_data.get("resource_hint") or "").strip()
+        return False
+
+    def _planner_payload(
+        self,
+        task: TaskEnvelope,
+        *,
+        purpose: str,
+        document_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        input_data = dict(task.input or {})
+        input_data.pop("auth", None)
+        return {
+            "purpose": purpose,
+            "task": {
+                "intent": task.intent,
+                "input": input_data,
+                "task_id": task.task_id,
+                "session_id": task.session_id,
+                "channel": task.channel,
+                "source": task.source,
+                "created_at": task.created_at.isoformat() if task.created_at else "",
+            },
+            "account": self._account_info(),
+            "current_document_context": document_context or {},
+            "recent_google_docs_work": self._recent_session_context(task, limit=5),
+            "executor_capabilities": {
+                "read": ["resolve_resource", "read", "list_comments", "list_permissions", "get_link"],
+                "write": [
+                    "create",
+                    "overwrite_doc",
+                    "replace_text",
+                    "update_block",
+                    "insert_table",
+                    "insert_image",
+                    "add_comment",
+                    "reply_to_comment",
+                    "resolve_comment",
+                    "reopen_comment",
+                    "share_file",
+                ],
+                "unsupported_from_old_agent": [
+                    "delete_image",
+                    "replace_image",
+                    "read_tables",
+                    "update_table_cell",
+                    "add_table_rows",
+                    "delete_table_rows",
+                    "list_suggestions",
+                    "accept_suggestion",
+                    "reject_suggestion",
+                    "rollback_last_edit",
+                ],
+            },
+        }
+
+    async def _planner_document_context(self, task: TaskEnvelope, *, purpose: str) -> dict[str, Any]:
+        if purpose not in {"edit", "read"}:
+            return {}
+        document_id = self._document_id_from_input(task.input)
+        if not document_id:
+            return {}
+        try:
+            document = await self._client().get_document(document_id)
+            summary = document_summary(
+                document,
+                max_read_chars=min(self.config.max_read_chars, 12000),
+                max_blocks=min(self.config.max_blocks, 80),
+            )
+            return {
+                "document_id": document_id,
+                "title": summary.get("title"),
+                "revision_id": summary.get("revision_id"),
+                "outline": summary.get("outline", [])[:40],
+                "blocks": summary.get("blocks", [])[:80],
+                "tables": summary.get("tables", [])[:20],
+                "images": summary.get("images", [])[:20],
+                "full_text_preview": str(summary.get("full_text") or "")[:12000],
+            }
+        except Exception:
+            logger.debug("google_docs_agent.planner_doc_context_failed task_id=%s", task.task_id, exc_info=True)
+            return {}
+
+    def _recent_session_context(self, task: TaskEnvelope, *, limit: int) -> list[dict[str, Any]]:
+        session_id = str(task.session_id or "").strip()
+        if not session_id or not self.session_db_path.exists():
+            return []
+        try:
+            with connect_sync(self.session_db_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT task_id, intent, account_email, document_id, title, operation,
+                           result_summary_json, created_at
+                    FROM google_docs_session_runs
+                    WHERE session_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    [session_id, limit],
+                ).fetchall()
+            out = []
+            for row in rows:
+                item = dict(row)
+                item["result_summary"] = self._json_loads(item.pop("result_summary_json", "{}"))
+                out.append(item)
+            return out
+        except Exception:
+            logger.debug("google_docs_agent.recent_session_context_failed task_id=%s", task.task_id, exc_info=True)
+            return []
+
+    async def _resolve_document_id_for_task(self, task: TaskEnvelope, client: GoogleDocsClient) -> str:
+        document_id = self._document_id_from_input(task.input)
+        if document_id:
+            return document_id
+        query = str(
+            task.input.get("query")
+            or task.input.get("resource_hint")
+            or task.input.get("document_hint")
+            or task.input.get("title")
+            or ""
+        ).strip()
+        if not query:
+            return ""
+        matches = await client.list_documents(query=query, max_results=2)
+        if len(matches) == 1:
+            return str(matches[0].get("document_id") or matches[0].get("file_id") or "").strip()
+        raise ValueError("Multiple or no matching Google Docs were found. Run docs.resolve_resource first.")
+
+    async def _post_specialist_usage(self, task: TaskEnvelope, metered_call, result: AgentResult, started: float) -> None:
+        if not self.config.gateway_internal_token:
+            return
+        operation = str(task.input.get("operation") or task.intent).strip().replace("docs.", "")
+        error_code = result.error.code if result.error else None
+        try:
+            event = build_usage_event(
+                metered_call=metered_call,
+                source_component="agent",
+                source_id=self.agent_id,
+                task_id=task.task_id,
+                parent_task_id=task.parent_task_id,
+                session_id=task.session_id,
+                route="google_docs",
+                operation=f"agent.google_docs.{operation}",
+                provider="google",
+                model="google-docs-api",
+                usage_kind="specialist",
+                raw_usage=None,
+                success=result.status == "completed",
+                error_code=error_code,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                metadata_json=serialize_usage_metadata(
+                    {
+                        "intent": task.intent,
+                        "channel": task.channel,
+                        "source": task.source,
+                        "source_id": task.source_id,
+                        "account": self._account_info(),
+                    }
+                ),
+            )
+            await post_usage_event(
+                client=self._http_client,
+                gateway_url=self.config.gateway_url,
+                internal_token=self.config.gateway_internal_token,
+                event=event,
+            )
+        except Exception:
+            logger.debug("google_docs_agent.specialist_usage_post_failed task_id=%s", task.task_id, exc_info=True)
+
+    def _task_context(self, task: TaskEnvelope) -> dict[str, Any]:
+        return {
+            "task_id": task.task_id,
+            "parent_task_id": task.parent_task_id,
+            "session_id": task.session_id,
+            "source": task.source,
+            "source_id": task.source_id,
+            "channel": task.channel,
+        }
+
     def _client(self) -> GoogleDocsClient:
         return GoogleDocsClient(self._require_auth(), timeout_sec=self.config.request_timeout_sec)
 
@@ -1037,4 +1331,3 @@ class GoogleDocsAgent(AgentRuntime):
                 next_action=next_action,
             ),
         )
-

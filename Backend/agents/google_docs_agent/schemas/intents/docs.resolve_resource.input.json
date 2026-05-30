@@ -4,6 +4,10 @@
   "properties": {
     "query": { "type": "string" },
     "resource_hint": { "type": "string" },
+    "user_request": { "type": "string" },
+    "natural_language_request": { "type": "string" },
+    "instructions": { "type": "string" },
+    "goal": { "type": "string" },
     "document_id": { "type": "string" },
     "file_id": { "type": "string" },
     "max_results": { "type": "integer", "minimum": 1, "maximum": 50 },
@@ -11,4 +15,3 @@
     "auth": { "type": "object" }
   }
 }
-

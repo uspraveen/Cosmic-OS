@@ -17,9 +17,17 @@
         "reopen_comment",
         "share_file",
         "list_permissions",
-        "get_link"
+        "get_link",
+        "auto",
+        "plan"
       ]
     },
+    "query": { "type": "string" },
+    "user_request": { "type": "string" },
+    "natural_language_request": { "type": "string" },
+    "instructions": { "type": "string" },
+    "goal": { "type": "string" },
+    "document_hint": { "type": "string" },
     "document_id": { "type": "string" },
     "doc_id": { "type": "string" },
     "file_id": { "type": "string" },
@@ -51,7 +59,5 @@
     "approval_confirmed": { "type": "boolean" },
     "account_hint": { "type": "string" },
     "auth": { "type": "object" }
-  },
-  "required": ["operation"]
+  }
 }
-

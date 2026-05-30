@@ -2222,6 +2222,14 @@ def build_google_docs_agent_env_rendered(
     source_data = parse_env_text(source_raw)
     existing_env = (existing_env_by_name or {}).get(GOOGLE_DOCS_AGENT_ENV_NAME, {})
     external_env = (external_env_by_name or {}).get(GOOGLE_DOCS_AGENT_ENV_NAME, {})
+    gmail_existing_env = (existing_env_by_name or {}).get(GMAIL_AGENT_ENV_NAME, {})
+    gmail_external_env = (external_env_by_name or {}).get(GMAIL_AGENT_ENV_NAME, {})
+    gateway_existing_env = (existing_env_by_name or {}).get("gateway.env", {})
+    gateway_external_env = (external_env_by_name or {}).get("gateway.env", {})
+    orchestrator_existing_env = (existing_env_by_name or {}).get("orchestrator.env", {})
+    orchestrator_external_env = (external_env_by_name or {}).get("orchestrator.env", {})
+    slide_existing_env = (existing_env_by_name or {}).get(SLIDE_AGENT_ENV_NAME, {})
+    slide_external_env = (external_env_by_name or {}).get(SLIDE_AGENT_ENV_NAME, {})
 
     def pick(key: str, default: Optional[str] = None) -> Optional[str]:
         return first_meaningful_value(
@@ -2230,6 +2238,50 @@ def build_google_docs_agent_env_rendered(
             source_data.get(key),
             default,
         )
+
+    internal_llm_api_key = first_meaningful_value(
+        external_env.get("GOOGLE_DOCS_AGENT_INTERNAL_LLM_API_KEY"),
+        external_env.get("OPENAI_COMPAT_API_KEY"),
+        external_env.get("OPENAI_API_KEY"),
+        gmail_external_env.get("GMAIL_AGENT_INTERNAL_LLM_API_KEY"),
+        gmail_external_env.get("OPENAI_COMPAT_API_KEY"),
+        gateway_external_env.get("OPENAI_API_KEY"),
+        gateway_external_env.get("OPENAI_COMPAT_API_KEY"),
+        orchestrator_external_env.get("OPENAI_API_KEY"),
+        orchestrator_external_env.get("OPENAI_COMPAT_API_KEY"),
+        slide_external_env.get("OPENAI_COMPAT_API_KEY"),
+        existing_env.get("GOOGLE_DOCS_AGENT_INTERNAL_LLM_API_KEY"),
+        existing_env.get("OPENAI_COMPAT_API_KEY"),
+        existing_env.get("OPENAI_API_KEY"),
+        gmail_existing_env.get("GMAIL_AGENT_INTERNAL_LLM_API_KEY"),
+        gmail_existing_env.get("OPENAI_COMPAT_API_KEY"),
+        gateway_existing_env.get("OPENAI_API_KEY"),
+        gateway_existing_env.get("OPENAI_COMPAT_API_KEY"),
+        orchestrator_existing_env.get("OPENAI_API_KEY"),
+        orchestrator_existing_env.get("OPENAI_COMPAT_API_KEY"),
+        slide_existing_env.get("OPENAI_COMPAT_API_KEY"),
+        source_data.get("GOOGLE_DOCS_AGENT_INTERNAL_LLM_API_KEY"),
+        source_data.get("OPENAI_COMPAT_API_KEY"),
+        source_data.get("OPENAI_API_KEY"),
+    )
+    internal_llm_base_url = first_meaningful_value(
+        external_env.get("GOOGLE_DOCS_AGENT_INTERNAL_LLM_BASE_URL"),
+        external_env.get("OPENAI_COMPAT_BASE_URL"),
+        gmail_external_env.get("GMAIL_AGENT_INTERNAL_LLM_BASE_URL"),
+        gmail_external_env.get("OPENAI_COMPAT_BASE_URL"),
+        gateway_external_env.get("OPENAI_COMPAT_BASE_URL"),
+        orchestrator_external_env.get("OPENAI_COMPAT_BASE_URL"),
+        slide_external_env.get("OPENAI_COMPAT_BASE_URL"),
+        existing_env.get("GOOGLE_DOCS_AGENT_INTERNAL_LLM_BASE_URL"),
+        existing_env.get("OPENAI_COMPAT_BASE_URL"),
+        gmail_existing_env.get("GMAIL_AGENT_INTERNAL_LLM_BASE_URL"),
+        gmail_existing_env.get("OPENAI_COMPAT_BASE_URL"),
+        gateway_existing_env.get("OPENAI_COMPAT_BASE_URL"),
+        orchestrator_existing_env.get("OPENAI_COMPAT_BASE_URL"),
+        slide_existing_env.get("OPENAI_COMPAT_BASE_URL"),
+        source_data.get("GOOGLE_DOCS_AGENT_INTERNAL_LLM_BASE_URL"),
+        source_data.get("OPENAI_COMPAT_BASE_URL"),
+    )
 
     overrides = {
         "REDIS_URL": pick("REDIS_URL", "redis://127.0.0.1:6379/0")
@@ -2241,6 +2293,18 @@ def build_google_docs_agent_env_rendered(
         "INSTANCE_ID": pick("INSTANCE_ID", GOOGLE_DOCS_AGENT_DEFAULT_INSTANCE_ID)
         or GOOGLE_DOCS_AGENT_DEFAULT_INSTANCE_ID,
         "GOOGLE_DOCS_AGENT_ENABLED": pick("GOOGLE_DOCS_AGENT_ENABLED", "true")
+        or "true",
+        "GOOGLE_DOCS_AGENT_INTERNAL_LLM_MODEL": pick(
+            "GOOGLE_DOCS_AGENT_INTERNAL_LLM_MODEL", "gpt-5-mini"
+        )
+        or "gpt-5-mini",
+        "GOOGLE_DOCS_AGENT_INTERNAL_LLM_TIMEOUT_SEC": pick(
+            "GOOGLE_DOCS_AGENT_INTERNAL_LLM_TIMEOUT_SEC", "120.0"
+        )
+        or "120.0",
+        "GOOGLE_DOCS_AGENT_ENABLE_INTERNAL_LLM": pick(
+            "GOOGLE_DOCS_AGENT_ENABLE_INTERNAL_LLM", "true"
+        )
         or "true",
         "GOOGLE_DOCS_AGENT_REQUEST_TIMEOUT_SEC": pick(
             "GOOGLE_DOCS_AGENT_REQUEST_TIMEOUT_SEC", "30"
@@ -2261,6 +2325,10 @@ def build_google_docs_agent_env_rendered(
         )
         or "100",
     }
+    if internal_llm_api_key is not None:
+        overrides["GOOGLE_DOCS_AGENT_INTERNAL_LLM_API_KEY"] = internal_llm_api_key
+    if internal_llm_base_url is not None:
+        overrides["GOOGLE_DOCS_AGENT_INTERNAL_LLM_BASE_URL"] = internal_llm_base_url
     rendered = render_env_with_overrides(source_raw, overrides)
     rendered_data = parse_env_text(rendered)
     return google_docs_agent_system_env_path(system_env_dir), rendered, rendered_data
@@ -7551,9 +7619,14 @@ def provision_vm(
     google_docs_env = read_google_docs_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
     enable_google_docs_agent = google_docs_agent_is_configured(google_docs_env)
     if enable_google_docs_agent:
-        log(
-            "Google Docs agent env is enabled; bootstrap will enable and start the Google Docs agent service."
-        )
+        if meaningful_env_value(google_docs_env.get("GOOGLE_DOCS_AGENT_INTERNAL_LLM_API_KEY")) is not None:
+            log(
+                "Google Docs agent env is configured with internal LLM credentials; bootstrap will enable and start the Google Docs agent service."
+            )
+        else:
+            log(
+                "Google Docs agent env is enabled without an internal LLM key; bootstrap will still start deterministic Docs actions, but natural-language planning will be unavailable."
+            )
     else:
         log(
             "Google Docs agent is installed but disabled; set GOOGLE_DOCS_AGENT_ENABLED=true to enable it."

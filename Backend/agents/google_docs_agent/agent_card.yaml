@@ -15,6 +15,7 @@ intents:
     timeout_sec: 45
     usage_hints:
       - Use this before live Google Docs reads/edits when the user names a document but did not provide a Google Doc id.
+      - May accept a high-level natural-language document reference; the agent's internal LLM normalizes it into a Drive search query when needed.
       - Pass account hints naturally when the user mentions a specific Google account email, work account, or personal account.
       - Return candidate documents with account identity; the orchestrator should ask the user only when multiple plausible matches remain.
 
@@ -25,6 +26,7 @@ intents:
     timeout_sec: 90
     usage_hints:
       - Use this when the user asks COSMIC to create a Google Doc.
+      - This is an intelligent specialist: it can use its internal LLM to turn a high-level brief into a document title and Markdown-like body before the API executor creates native Google Docs content.
       - The initial content can be Markdown-like text; the specialist renders headings, bullets, links, basic inline styles, and code blocks as native Docs formatting.
       - Preserve the selected Google account in the result because users may connect multiple accounts.
 
@@ -35,6 +37,7 @@ intents:
     timeout_sec: 60
     usage_hints:
       - Use this when the user asks what is in a Google Doc or before a surgical edit that needs current block IDs.
+      - If the user gives a named document instead of an id, this agent can do a bounded same-account resolution; use docs.resolve_resource first when several matches are possible.
       - The output includes stable block IDs generated from content and style. Use those block IDs for targeted edits.
       - Use include_comments=true when the task is about comments, annotations, feedback, or review state.
 
@@ -45,6 +48,7 @@ intents:
     timeout_sec: 120
     usage_hints:
       - Use this for live Google Docs mutations: overwrite_doc, replace_text, update_block, insert_table, insert_image, add_comment, reply_to_comment, resolve_comment, reopen_comment, share_file, list_permissions, list_comments, get_link.
+      - For high-level natural-language edits, pass query/user_request/instructions with operation=auto or omit operation; the agent's internal LLM will choose the safest supported operation and parameters.
       - Prefer update_block with a fresh block_id from docs.read for precise edits; include expected_snippet when safety matters.
       - For large document generation, use docs.create or overwrite_doc with Markdown-like content rather than asking the orchestrator to hand-edit Google Docs API requests.
       - Sharing with writer/commenter access, domain visibility, or anyone visibility requires approval_confirmed=true after explicit user approval.
@@ -80,6 +84,18 @@ auth_requirements:
     scopes:
       - https://www.googleapis.com/auth/documents
       - https://www.googleapis.com/auth/drive
+
+model_requirements:
+  internal_llm:
+    required: true
+    provider: openai_compatible
+    default_model_key: openai:gpt-5-mini
+    purposes:
+      - google_docs.internal_llm.plan
+    usage_reporting: Gateway /internal/usage/log
+    notes:
+      - The internal LLM is the planning layer. Google Docs and Drive API calls remain deterministic, revision-guarded executor operations.
+      - The planner can normalize high-level requests into create/read/edit/share/comment operations and decide when clarification or approval is required.
 
 artifact_types:
   - google_docs_snapshot

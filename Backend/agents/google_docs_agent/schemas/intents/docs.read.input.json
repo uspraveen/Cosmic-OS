@@ -6,10 +6,15 @@
     "doc_id": { "type": "string" },
     "file_id": { "type": "string" },
     "resource": { "type": "object" },
+    "query": { "type": "string" },
+    "resource_hint": { "type": "string" },
+    "document_hint": { "type": "string" },
+    "user_request": { "type": "string" },
+    "natural_language_request": { "type": "string" },
+    "instructions": { "type": "string" },
     "include_comments": { "type": "boolean" },
     "max_chars": { "type": "integer", "minimum": 1000, "maximum": 100000 },
     "account_hint": { "type": "string" },
     "auth": { "type": "object" }
   }
 }
-
