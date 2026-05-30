@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "title": { "type": "string" },
+    "body_markdown": { "type": "string" },
+    "content": { "type": "string" },
+    "account_hint": { "type": "string" },
+    "auth": { "type": "object" }
+  },
+  "required": ["title"]
+}
+

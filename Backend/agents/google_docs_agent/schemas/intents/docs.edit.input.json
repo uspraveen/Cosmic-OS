@@ -1,0 +1,57 @@
+{
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "operation": {
+      "type": "string",
+      "enum": [
+        "overwrite_doc",
+        "replace_text",
+        "update_block",
+        "insert_table",
+        "insert_image",
+        "list_comments",
+        "add_comment",
+        "reply_to_comment",
+        "resolve_comment",
+        "reopen_comment",
+        "share_file",
+        "list_permissions",
+        "get_link"
+      ]
+    },
+    "document_id": { "type": "string" },
+    "doc_id": { "type": "string" },
+    "file_id": { "type": "string" },
+    "resource": { "type": "object" },
+    "full_markdown_text": { "type": "string" },
+    "body_markdown": { "type": "string" },
+    "old_text": { "type": "string" },
+    "new_text": { "type": "string" },
+    "block_id": { "type": "string" },
+    "expected_snippet": { "type": "string" },
+    "data": { "type": "array", "items": { "type": "array", "items": { "type": "string" } } },
+    "after_text": { "type": "string" },
+    "has_header": { "type": "boolean" },
+    "image_url": { "type": "string" },
+    "width_pt": { "type": "number" },
+    "height_pt": { "type": "number" },
+    "comment_id": { "type": "string" },
+    "content": { "type": "string" },
+    "comment": { "type": "string" },
+    "reply": { "type": "string" },
+    "quoted_text": { "type": "string" },
+    "anchor_text": { "type": "string" },
+    "role": { "type": "string" },
+    "type": { "type": "string" },
+    "permission_type": { "type": "string" },
+    "email_address": { "type": "string" },
+    "domain": { "type": "string" },
+    "send_notification_email": { "type": "boolean" },
+    "approval_confirmed": { "type": "boolean" },
+    "account_hint": { "type": "string" },
+    "auth": { "type": "object" }
+  },
+  "required": ["operation"]
+}
+

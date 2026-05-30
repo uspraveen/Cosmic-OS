@@ -113,6 +113,10 @@ GMAIL_AGENT_ENV_NAME = "gmail-agent.env"
 GMAIL_AGENT_SERVICE_NAME = "cosmic-gmail-agent.service"
 GMAIL_AGENT_ID = "cosmic/gmail-agent:1.0.0"
 GMAIL_AGENT_DEFAULT_INSTANCE_ID = "gmail-agent-1"
+GOOGLE_DOCS_AGENT_ENV_NAME = "google-docs-agent.env"
+GOOGLE_DOCS_AGENT_SERVICE_NAME = "cosmic-google-docs-agent.service"
+GOOGLE_DOCS_AGENT_ID = "cosmic/google-docs-agent:1.0.0"
+GOOGLE_DOCS_AGENT_DEFAULT_INSTANCE_ID = "google-docs-agent-1"
 DIAGRAM_AGENT_ENV_NAME = "diagram-agent.env"
 DIAGRAM_AGENT_SERVICE_NAME = "cosmic-diagram-agent.service"
 DIAGRAM_AGENT_ID = "cosmic/diagram-agent:1.0.0"
@@ -145,6 +149,7 @@ CORE_BACKEND_SERVICE_UNITS = (
     "cosmic-tabular-agent.service",
     "cosmic-calendar-agent.service",
     "cosmic-gmail-agent.service",
+    "cosmic-google-docs-agent.service",
     "cosmic-diagram-agent.service",
     "cosmic-map-agent.service",
     "cosmic-slide-agent.service",
@@ -2180,6 +2185,101 @@ def gmail_agent_is_configured(env_values: Dict[str, str]) -> bool:
     return meaningful_env_value(env_values.get("GMAIL_AGENT_INTERNAL_LLM_API_KEY")) is not None
 
 
+def google_docs_agent_repo_dir() -> Path:
+    return BACKEND_ROOT / "agents" / "google_docs_agent"
+
+
+def google_docs_agent_repo_env_path() -> Path:
+    return google_docs_agent_repo_dir() / "agent.env"
+
+
+def google_docs_agent_repo_env_example_path() -> Path:
+    return google_docs_agent_repo_dir() / "agent.env.example"
+
+
+def google_docs_agent_system_env_path(system_env_dir: Optional[Path] = None) -> Path:
+    system_env_dir = system_env_dir or DEFAULT_SYSTEM_ENV_DIR
+    return system_env_dir / "agents" / GOOGLE_DOCS_AGENT_ENV_NAME
+
+
+def resolve_google_docs_agent_env_source() -> Path:
+    repo_env = google_docs_agent_repo_env_path()
+    if repo_env.exists():
+        return repo_env
+    return google_docs_agent_repo_env_example_path()
+
+
+def build_google_docs_agent_env_rendered(
+    *,
+    signing_secret: str,
+    shared_internal_token: str,
+    system_env_dir: Optional[Path] = None,
+    existing_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+    external_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Tuple[Path, str, Dict[str, str]]:
+    source_path = resolve_google_docs_agent_env_source()
+    source_raw = source_path.read_text(encoding="utf-8")
+    source_data = parse_env_text(source_raw)
+    existing_env = (existing_env_by_name or {}).get(GOOGLE_DOCS_AGENT_ENV_NAME, {})
+    external_env = (external_env_by_name or {}).get(GOOGLE_DOCS_AGENT_ENV_NAME, {})
+
+    def pick(key: str, default: Optional[str] = None) -> Optional[str]:
+        return first_meaningful_value(
+            external_env.get(key),
+            existing_env.get(key),
+            source_data.get(key),
+            default,
+        )
+
+    overrides = {
+        "REDIS_URL": pick("REDIS_URL", "redis://127.0.0.1:6379/0")
+        or "redis://127.0.0.1:6379/0",
+        "GATEWAY_URL": pick("GATEWAY_URL", "http://127.0.0.1:8080")
+        or "http://127.0.0.1:8080",
+        "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
+        "AGENT_SECRET": signing_secret,
+        "INSTANCE_ID": pick("INSTANCE_ID", GOOGLE_DOCS_AGENT_DEFAULT_INSTANCE_ID)
+        or GOOGLE_DOCS_AGENT_DEFAULT_INSTANCE_ID,
+        "GOOGLE_DOCS_AGENT_ENABLED": pick("GOOGLE_DOCS_AGENT_ENABLED", "true")
+        or "true",
+        "GOOGLE_DOCS_AGENT_REQUEST_TIMEOUT_SEC": pick(
+            "GOOGLE_DOCS_AGENT_REQUEST_TIMEOUT_SEC", "30"
+        )
+        or "30",
+        "GOOGLE_DOCS_AGENT_MAX_SEARCH_RESULTS": pick(
+            "GOOGLE_DOCS_AGENT_MAX_SEARCH_RESULTS", "10"
+        )
+        or "10",
+        "GOOGLE_DOCS_AGENT_MAX_READ_CHARS": pick(
+            "GOOGLE_DOCS_AGENT_MAX_READ_CHARS", "30000"
+        )
+        or "30000",
+        "GOOGLE_DOCS_AGENT_MAX_BLOCKS": pick("GOOGLE_DOCS_AGENT_MAX_BLOCKS", "200")
+        or "200",
+        "GOOGLE_DOCS_AGENT_MAX_COMMENTS": pick(
+            "GOOGLE_DOCS_AGENT_MAX_COMMENTS", "100"
+        )
+        or "100",
+    }
+    rendered = render_env_with_overrides(source_raw, overrides)
+    rendered_data = parse_env_text(rendered)
+    return google_docs_agent_system_env_path(system_env_dir), rendered, rendered_data
+
+
+def read_google_docs_agent_system_env(
+    system_env_dir: Optional[Path] = None,
+) -> Dict[str, str]:
+    env_path = google_docs_agent_system_env_path(system_env_dir)
+    if not env_path.exists():
+        return {}
+    return parse_env_text(read_text_file(env_path, use_sudo=True))
+
+
+def google_docs_agent_is_configured(env_values: Dict[str, str]) -> bool:
+    enabled = str(env_values.get("GOOGLE_DOCS_AGENT_ENABLED") or "true").strip().lower()
+    return enabled not in {"0", "false", "no", "off"}
+
+
 def diagram_agent_repo_dir() -> Path:
     return BACKEND_ROOT / "agents" / "diagram_agent"
 
@@ -3305,6 +3405,9 @@ def normalize_bootstrap_env_payload(
     gmail_agent_env = {}
     if isinstance(payload.get("gmail_agent_env"), dict):
         gmail_agent_env = dict(payload.get("gmail_agent_env") or {})
+    google_docs_agent_env = {}
+    if isinstance(payload.get("google_docs_agent_env"), dict):
+        google_docs_agent_env = dict(payload.get("google_docs_agent_env") or {})
     image_generator_agent_env = {}
     if isinstance(payload.get("image_generator_agent_env"), dict):
         image_generator_agent_env = dict(payload.get("image_generator_agent_env") or {})
@@ -3377,6 +3480,8 @@ def normalize_bootstrap_env_payload(
         normalized[EMAIL_AGENT_ENV_NAME] = email_agent_env
     if gmail_agent_env:
         normalized[GMAIL_AGENT_ENV_NAME] = gmail_agent_env
+    if google_docs_agent_env:
+        normalized[GOOGLE_DOCS_AGENT_ENV_NAME] = google_docs_agent_env
     if image_generator_agent_env:
         normalized[IMAGE_GENERATOR_AGENT_ENV_NAME] = image_generator_agent_env
     required_fields = {
@@ -4954,6 +5059,27 @@ def materialize_bootstrap_env_files(
         )
     )
 
+    google_docs_repo_path = google_docs_agent_repo_env_path()
+    _google_docs_dest_path, google_docs_rendered, _google_docs_env = (
+        build_google_docs_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+            shared_internal_token=overrides_by_dest["gateway.env"][
+                "GATEWAY_INTERNAL_TOKEN"
+            ],
+            system_env_dir=system_env_dir,
+            existing_env_by_name=existing_env_by_name,
+            external_env_by_name=external_env_by_name,
+        )
+    )
+    google_docs_repo_path.parent.mkdir(parents=True, exist_ok=True)
+    google_docs_repo_path.write_text(google_docs_rendered, encoding="utf-8")
+    written.append(google_docs_repo_path)
+    log(
+        "Materialized repo env file from bootstrap inputs: {0}".format(
+            google_docs_repo_path
+        )
+    )
+
     diagram_repo_path = diagram_agent_repo_env_path()
     _diagram_dest_path, diagram_rendered, _diagram_env = (
         build_diagram_agent_env_rendered(
@@ -5036,6 +5162,7 @@ def install_service_env_files(
             "System env provisioning currently targets Linux VMs only."
         )
 
+    external_env_by_name: Dict[str, Dict[str, str]] = {}
     effective_sources = resolve_effective_service_env_sources(
         system_env_dir,
         include_memory=include_memory,
@@ -5247,6 +5374,28 @@ def install_service_env_files(
         install_text_file(gmail_dest_path, gmail_rendered, mode="600", use_sudo=True)
         installed.append(gmail_dest_path)
         log("Installed system env file: {0}".format(gmail_dest_path))
+
+    google_docs_dest_path, google_docs_rendered, _google_docs_env = (
+        build_google_docs_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+            shared_internal_token=overrides_by_dest["gateway.env"][
+                "GATEWAY_INTERNAL_TOKEN"
+            ],
+            system_env_dir=system_env_dir,
+        )
+    )
+    run(
+        ["install", "-d", "-m", "755", str(google_docs_dest_path.parent)],
+        use_sudo=True,
+    )
+    if google_docs_dest_path.exists():
+        log("System env file already exists: {0}".format(google_docs_dest_path))
+    else:
+        install_text_file(
+            google_docs_dest_path, google_docs_rendered, mode="600", use_sudo=True
+        )
+        installed.append(google_docs_dest_path)
+        log("Installed system env file: {0}".format(google_docs_dest_path))
 
     diagram_dest_path, diagram_rendered, _diagram_env = (
         build_diagram_agent_env_rendered(
@@ -6280,6 +6429,34 @@ def sync_service_env_files(
         )
         if changed_keys:
             synced.append(gmail_dest_path)
+    google_docs_dest_path = google_docs_agent_system_env_path(system_env_dir)
+    if google_docs_dest_path.exists():
+        google_docs_existing_by_name: Dict[str, Dict[str, str]] = {
+            GOOGLE_DOCS_AGENT_ENV_NAME: parse_env_text(
+                read_text_file(google_docs_dest_path, use_sudo=True)
+            ),
+        }
+        _google_docs_dest_path, google_docs_rendered, _google_docs_env = (
+            build_google_docs_agent_env_rendered(
+                signing_secret=overrides_by_dest["gateway.env"][
+                    "GATEWAY_SIGNING_SECRET"
+                ],
+                shared_internal_token=overrides_by_dest["gateway.env"][
+                    "GATEWAY_INTERNAL_TOKEN"
+                ],
+                system_env_dir=system_env_dir,
+                existing_env_by_name=google_docs_existing_by_name,
+            )
+        )
+        changed_keys = sync_env_file(
+            google_docs_dest_path,
+            source_raw=google_docs_rendered,
+            create_missing=False,
+            use_sudo=True,
+            mode="600",
+        )
+        if changed_keys:
+            synced.append(google_docs_dest_path)
     diagram_dest_path = diagram_agent_system_env_path(system_env_dir)
     if diagram_dest_path.exists():
         diagram_existing_by_name: Dict[str, Dict[str, str]] = {
@@ -6939,6 +7116,7 @@ def run_post_provision_health_checks(
     include_tabular_agent: bool = True,
     include_email_agent: bool = False,
     include_gmail_agent: bool = False,
+    include_google_docs_agent: bool = False,
     include_image_generator_agent: bool = False,
     include_diagram_agent: bool = False,
     include_map_agent: bool = False,
@@ -7039,6 +7217,18 @@ def run_post_provision_health_checks(
         )
         wait_for_orchestrator_agent_ready(
             GMAIL_AGENT_ID,
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+
+    if include_google_docs_agent:
+        wait_for_systemd_unit_active(
+            GOOGLE_DOCS_AGENT_SERVICE_NAME,
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+        wait_for_orchestrator_agent_ready(
+            GOOGLE_DOCS_AGENT_ID,
             timeout_sec=timeout_sec,
             poll_interval_sec=poll_interval_sec,
         )
@@ -7358,6 +7548,16 @@ def provision_vm(
         log(
             "Gmail agent is installed but disabled; set GMAIL_AGENT_ENABLED=true to enable the Gmail agent service."
         )
+    google_docs_env = read_google_docs_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+    enable_google_docs_agent = google_docs_agent_is_configured(google_docs_env)
+    if enable_google_docs_agent:
+        log(
+            "Google Docs agent env is enabled; bootstrap will enable and start the Google Docs agent service."
+        )
+    else:
+        log(
+            "Google Docs agent is installed but disabled; set GOOGLE_DOCS_AGENT_ENABLED=true to enable it."
+        )
     image_env = read_image_generator_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
     enable_image_generator_agent = image_generator_agent_is_configured(image_env)
     if enable_image_generator_agent:
@@ -7443,6 +7643,11 @@ def provision_vm(
                 else []
             )
             + (
+                [GOOGLE_DOCS_AGENT_SERVICE_NAME]
+                if enable_units and enable_google_docs_agent
+                else []
+            )
+            + (
                 [IMAGE_GENERATOR_AGENT_SERVICE_NAME]
                 if enable_units and enable_image_generator_agent
                 else []
@@ -7478,6 +7683,7 @@ def provision_vm(
             include_tabular_agent=enable_tabular_agent,
             include_email_agent=enable_email_agent,
             include_gmail_agent=enable_gmail_agent,
+            include_google_docs_agent=enable_google_docs_agent,
             include_image_generator_agent=enable_image_generator_agent,
             include_diagram_agent=enable_diagram_agent,
             include_map_agent=enable_map_agent,
@@ -7771,6 +7977,10 @@ def main() -> int:
             enable_email_agent = email_agent_enabled_via_env_or_integration(email_env)
             gmail_env = read_gmail_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
             enable_gmail_agent = gmail_agent_is_configured(gmail_env)
+            google_docs_env = read_google_docs_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+            enable_google_docs_agent = google_docs_agent_is_configured(
+                google_docs_env
+            )
             image_env = read_image_generator_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
             enable_image_generator_agent = image_generator_agent_is_configured(
                 image_env
@@ -7825,6 +8035,12 @@ def main() -> int:
                         else []
                     )
                     + (
+                        [GOOGLE_DOCS_AGENT_SERVICE_NAME]
+                        if enable_google_docs_agent
+                        and bool(getattr(args, "enable", False))
+                        else []
+                    )
+                    + (
                         [IMAGE_GENERATOR_AGENT_SERVICE_NAME]
                         if enable_image_generator_agent
                         and bool(getattr(args, "enable", False))
@@ -7863,6 +8079,7 @@ def main() -> int:
                     include_tabular_agent=enable_tabular_agent,
                     include_email_agent=enable_email_agent,
                     include_gmail_agent=enable_gmail_agent,
+                    include_google_docs_agent=enable_google_docs_agent,
                     include_image_generator_agent=enable_image_generator_agent,
                     include_diagram_agent=enable_diagram_agent,
                     include_map_agent=enable_map_agent,

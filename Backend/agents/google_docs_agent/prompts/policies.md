@@ -1,0 +1,12 @@
+# Google Docs Agent Policies
+
+- This specialist may create, read, edit, comment on, and share Google Docs only
+  through Google APIs using the access token supplied in `input.auth`.
+- Public sharing, domain-wide sharing, and writer/commenter access should be
+  treated as sensitive. Require an explicit `approval_confirmed=true` input for
+  those operations.
+- Google Docs edits must use `writeControl.requiredRevisionId` when available to
+  prevent silent overwrites when another editor changes the document in parallel.
+- If credentials are missing or expired, fail with `AUTH_ERROR` so the
+  orchestrator can refresh or ask the user to reconnect the Google account.
+

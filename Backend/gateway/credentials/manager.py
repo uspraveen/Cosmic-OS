@@ -52,6 +52,15 @@ GOOGLE_CALENDAR_SCOPES = [
     "https://www.googleapis.com/auth/calendar.events",
 ]
 
+GOOGLE_GMAIL_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.modify",
+]
+
+GOOGLE_DOCS_SCOPES = [
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/drive",
+]
+
 # Base profile scopes
 GOOGLE_BASE_SCOPES = [
     "openid",
@@ -59,8 +68,15 @@ GOOGLE_BASE_SCOPES = [
     "https://www.googleapis.com/auth/userinfo.email",
 ]
 
-# Full default scope set for calendar + profile
-GOOGLE_DEFAULT_SCOPES = GOOGLE_BASE_SCOPES + GOOGLE_CALENDAR_SCOPES
+# Full default scope set for workspace + profile. Desktop normally sends the
+# selected tool scopes explicitly, but this keeps non-desktop callers from
+# silently creating a Calendar-only account.
+GOOGLE_DEFAULT_SCOPES = (
+    GOOGLE_BASE_SCOPES
+    + GOOGLE_CALENDAR_SCOPES
+    + GOOGLE_GMAIL_SCOPES
+    + GOOGLE_DOCS_SCOPES
+)
 
 
 class OAuthFlowState:

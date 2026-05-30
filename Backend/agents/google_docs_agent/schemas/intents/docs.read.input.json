@@ -1,0 +1,15 @@
+{
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "document_id": { "type": "string" },
+    "doc_id": { "type": "string" },
+    "file_id": { "type": "string" },
+    "resource": { "type": "object" },
+    "include_comments": { "type": "boolean" },
+    "max_chars": { "type": "integer", "minimum": 1000, "maximum": 100000 },
+    "account_hint": { "type": "string" },
+    "auth": { "type": "object" }
+  }
+}
+

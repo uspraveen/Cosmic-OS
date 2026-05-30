@@ -1,0 +1,14 @@
+{
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "status": { "type": "string" },
+    "account": { "type": "object" },
+    "document": { "type": "object" },
+    "initial_edit": { "type": ["object", "null"] },
+    "outline": { "type": "array", "items": { "type": "object" } },
+    "artifact_id": { "type": "string" }
+  },
+  "required": ["status", "account", "document"]
+}
+

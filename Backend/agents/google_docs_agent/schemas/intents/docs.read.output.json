@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "status": { "type": "string" },
+    "account": { "type": "object" },
+    "document": { "type": "object" },
+    "outline": { "type": "array", "items": { "type": "object" } },
+    "full_text": { "type": "string" },
+    "blocks": { "type": "array", "items": { "type": "object" } },
+    "tables": { "type": "array", "items": { "type": "object" } },
+    "images": { "type": "array", "items": { "type": "object" } },
+    "comments": { "type": "array", "items": { "type": "object" } },
+    "artifact_id": { "type": "string" }
+  },
+  "required": ["status", "account", "document"]
+}
+

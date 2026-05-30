@@ -1,0 +1,135 @@
+agent_id: cosmic/google-docs-agent:1.0.0
+display_name: Google Docs Agent
+description: >
+  Specialist agent for live Google Docs and Google Drive documents. It resolves
+  user-owned documents, reads structured document state, creates new Google Docs,
+  performs revision-guarded edits, manages comments and permissions, and keeps a
+  private edit/session ledger. It is separate from the uploaded-file parser and
+  always operates through the selected connected Google account.
+
+intents:
+  - name: docs.resolve_resource
+    description: Resolve a Google Doc by title/query or explicit document/file id.
+    input_schema: schemas/intents/docs.resolve_resource.input.json
+    output_schema: schemas/intents/docs.resolve_resource.output.json
+    timeout_sec: 45
+    usage_hints:
+      - Use this before live Google Docs reads/edits when the user names a document but did not provide a Google Doc id.
+      - Pass account hints naturally when the user mentions a specific Google account email, work account, or personal account.
+      - Return candidate documents with account identity; the orchestrator should ask the user only when multiple plausible matches remain.
+
+  - name: docs.create
+    description: Create a new Google Doc, optionally with Markdown-like initial content.
+    input_schema: schemas/intents/docs.create.input.json
+    output_schema: schemas/intents/docs.create.output.json
+    timeout_sec: 90
+    usage_hints:
+      - Use this when the user asks COSMIC to create a Google Doc.
+      - The initial content can be Markdown-like text; the specialist renders headings, bullets, links, basic inline styles, and code blocks as native Docs formatting.
+      - Preserve the selected Google account in the result because users may connect multiple accounts.
+
+  - name: docs.read
+    description: Read a live Google Doc into outline, block IDs, full text, tables, images, and optional comments.
+    input_schema: schemas/intents/docs.read.input.json
+    output_schema: schemas/intents/docs.read.output.json
+    timeout_sec: 60
+    usage_hints:
+      - Use this when the user asks what is in a Google Doc or before a surgical edit that needs current block IDs.
+      - The output includes stable block IDs generated from content and style. Use those block IDs for targeted edits.
+      - Use include_comments=true when the task is about comments, annotations, feedback, or review state.
+
+  - name: docs.edit
+    description: Perform a live Google Doc or Drive operation with revision guarded writes.
+    input_schema: schemas/intents/docs.edit.input.json
+    output_schema: schemas/intents/docs.edit.output.json
+    timeout_sec: 120
+    usage_hints:
+      - Use this for live Google Docs mutations: overwrite_doc, replace_text, update_block, insert_table, insert_image, add_comment, reply_to_comment, resolve_comment, reopen_comment, share_file, list_permissions, list_comments, get_link.
+      - Prefer update_block with a fresh block_id from docs.read for precise edits; include expected_snippet when safety matters.
+      - For large document generation, use docs.create or overwrite_doc with Markdown-like content rather than asking the orchestrator to hand-edit Google Docs API requests.
+      - Sharing with writer/commenter access, domain visibility, or anyone visibility requires approval_confirmed=true after explicit user approval.
+      - If a revision conflict occurs, re-read the document and retry with the updated structure instead of forcing the edit.
+
+  - name: docs.recall_session
+    description: Recall prior Google Docs operations from the private agent ledger.
+    input_schema: schemas/intents/docs.recall_session.input.json
+    output_schema: schemas/intents/docs.recall_session.output.json
+    timeout_sec: 30
+    usage_hints:
+      - Recall prior Google Docs work when the user says "that doc", "the doc you made", or needs audit details from a previous Docs action.
+      - Prefer recall plus docs.read for continuing edits on an existing document from the same project/session.
+
+auth_requirements:
+  docs.resolve_resource:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/documents
+      - https://www.googleapis.com/auth/drive
+  docs.create:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/documents
+      - https://www.googleapis.com/auth/drive
+  docs.read:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/documents
+      - https://www.googleapis.com/auth/drive
+  docs.edit:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/documents
+      - https://www.googleapis.com/auth/drive
+
+artifact_types:
+  - google_docs_snapshot
+  - google_docs_edit_report
+  - google_docs_resource_candidates
+
+policies:
+  network_access: true
+  writable_paths:
+    - runs/artifacts
+    - agents/google_docs_agent/store
+    - agents/google_docs_agent/runtime
+  tool_access: []
+  allowed_senders:
+    - cosmic/orchestrator:1.0.0
+  intent_authorization:
+    docs.resolve_resource: [cosmic/orchestrator:1.0.0]
+    docs.create: [cosmic/orchestrator:1.0.0]
+    docs.read: [cosmic/orchestrator:1.0.0]
+    docs.edit: [cosmic/orchestrator:1.0.0]
+    docs.recall_session: [cosmic/orchestrator:1.0.0]
+
+sla:
+  max_concurrency: 2
+  heartbeat_interval_sec: 10
+  heartbeat_ttl_sec: 30
+  max_task_duration_sec: 180
+  health_endpoint: /health
+  retry_policy:
+    max_attempts: 3
+    backoff: exponential
+    backoff_base_sec: 2
+    backoff_max_sec: 60
+    retryable_codes:
+      - TIMEOUT
+      - NETWORK_ERROR
+      - RATE_LIMITED
+      - REVISION_CONFLICT
+    non_retryable_codes:
+      - INVALID_INPUT
+      - AUTH_ERROR
+      - APPROVAL_REQUIRED
+      - SCHEMA_VIOLATION
+      - INTERNAL_ERROR
+
+stream_key: streams:cosmic/google-docs-agent:1.0.0
+
+version_info:
+  semver: 1.0.0
+  released_at: "2026-05-30"
+  deprecated_at: null
+  remove_after: null
+  changelog: CHANGELOG.md

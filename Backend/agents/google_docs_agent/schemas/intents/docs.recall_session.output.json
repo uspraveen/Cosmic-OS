@@ -1,0 +1,14 @@
+{
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "status": { "type": "string" },
+    "session_id": { "type": "string" },
+    "document_id": { "type": "string" },
+    "runs": { "type": "array", "items": { "type": "object" } },
+    "edits": { "type": "array", "items": { "type": "object" } },
+    "count": { "type": "integer" }
+  },
+  "required": ["status", "runs", "edits"]
+}
+

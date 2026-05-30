@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "status": { "type": "string" },
+    "operation": { "type": "string" },
+    "account": { "type": "object" },
+    "document": { "type": "object" },
+    "document_id": { "type": "string" },
+    "url": { "type": "string" },
+    "revision_before": { "type": "string" },
+    "revision_after": { "type": "string" },
+    "verification": { "type": "object" },
+    "outline": { "type": "array", "items": { "type": "object" } },
+    "comments": { "type": "array", "items": { "type": "object" } },
+    "permissions": { "type": "array", "items": { "type": "object" } },
+    "artifact_id": { "type": "string" }
+  },
+  "required": ["status", "operation", "account"]
+}
+

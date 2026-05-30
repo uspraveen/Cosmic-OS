@@ -109,8 +109,8 @@ export const GOOGLE_TOOL_DEFINITIONS: IntegrationToolDefinition[] = [
     id: 'drive',
     label: 'Drive',
     platformLabel: 'Files',
-    description: 'Files opened or created by Cosmic inside Google Drive.',
-    scopes: ['https://www.googleapis.com/auth/drive.file'],
+    description: 'Google Docs discovery, comments, permissions, and Drive-backed document actions.',
+    scopes: ['https://www.googleapis.com/auth/drive'],
   },
 ]
 
