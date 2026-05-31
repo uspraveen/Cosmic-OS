@@ -315,10 +315,27 @@ class UsageStore:
                 SELECT
                     source_component,
                     operation,
+                    is_heartbeat,
                     COUNT(*) AS call_count
-                FROM usage_events
-                WHERE llm_call_placed_at >= ? AND llm_call_placed_at <= ?
-                GROUP BY source_component, operation
+                FROM (
+                    SELECT
+                        source_component,
+                        operation,
+                        CASE
+                            WHEN lower(COALESCE(source_component, '')) LIKE '%heartbeat%'
+                                OR lower(COALESCE(source_id, '')) LIKE '%heartbeat%'
+                                OR lower(COALESCE(route, '')) LIKE '%heartbeat%'
+                                OR lower(COALESCE(operation, '')) LIKE '%heartbeat%'
+                                OR COALESCE(metadata_json, '') LIKE '%"source":"heartbeat"%'
+                                OR COALESCE(metadata_json, '') LIKE '%"source": "heartbeat"%'
+                                OR COALESCE(metadata_json, '') LIKE '%scheduler_heartbeat%'
+                            THEN 1
+                            ELSE 0
+                        END AS is_heartbeat
+                    FROM usage_events
+                    WHERE llm_call_placed_at >= ? AND llm_call_placed_at <= ?
+                )
+                GROUP BY source_component, operation, is_heartbeat
                 ORDER BY call_count DESC, source_component ASC, operation ASC
                 """,
                 (start_iso, end_iso),
@@ -403,11 +420,12 @@ class UsageStore:
             label = _feature_label(
                 source_component=str(row["source_component"] or "").strip(),
                 operation=str(row["operation"] or "").strip(),
+                is_heartbeat=bool(row["is_heartbeat"]),
             )
             feature_buckets[label] += int(row["call_count"] or 0)
 
         usage_by_feature: list[dict[str, Any]] = []
-        for label, count in sorted(feature_buckets.items(), key=lambda item: (-item[1], item[0]))[: max(1, min(int(feature_limit), 12))]:
+        for label, count in _select_feature_buckets(feature_buckets, feature_limit):
             usage_by_feature.append(
                 {
                     "label": label,
@@ -496,7 +514,25 @@ def _display_provider_name(value: str) -> str:
     }.get(normalized, normalized.replace("_", " ").title())
 
 
-def _feature_label(*, source_component: str, operation: str) -> str:
+def _select_feature_buckets(
+    feature_buckets: dict[str, int],
+    feature_limit: int,
+) -> list[tuple[str, int]]:
+    limit = max(1, min(int(feature_limit), 12))
+    ranked = sorted(feature_buckets.items(), key=lambda item: (-item[1], item[0]))
+    selected = ranked[:limit]
+    pinned_label = "Heartbeats"
+    if pinned_label in feature_buckets and all(label != pinned_label for label, _ in selected):
+        if len(selected) >= limit:
+            selected = [*selected[:-1], (pinned_label, feature_buckets[pinned_label])]
+        else:
+            selected.append((pinned_label, feature_buckets[pinned_label]))
+    return selected
+
+
+def _feature_label(*, source_component: str, operation: str, is_heartbeat: bool = False) -> str:
+    if is_heartbeat:
+        return "Heartbeats"
     op = operation.lower()
     src = source_component.lower()
     if "docs." in op or "docs_" in op or "docs-parser" in op:

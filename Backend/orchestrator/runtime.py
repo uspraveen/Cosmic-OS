@@ -505,6 +505,11 @@ class OrchestratorRuntime:
             produced_artifacts: list[dict[str, Any]] = []
             supporting_artifacts: list[dict[str, Any]] = []
             surface_tool_artifacts = task.source != "heartbeat"
+            usage_operation = (
+                "orchestrator.heartbeat"
+                if task.source == "heartbeat"
+                else "orchestrator.process"
+            )
             research_paths: set[str] = set()
             specialist_receipts: list[dict[str, Any]] = []
             container_id: str | None = None
@@ -572,7 +577,7 @@ class OrchestratorRuntime:
                             "request_id": request_id,
                             "session_id": session_id,
                             "route": "opus",
-                            "operation": "orchestrator.process",
+                            "operation": usage_operation,
                             "metadata_json": {
                                 "iteration": iteration,
                                 "source": task.source,
@@ -1157,6 +1162,11 @@ class OrchestratorRuntime:
         produced_artifacts: list[dict[str, Any]] = []
         supporting_artifacts: list[dict[str, Any]] = []
         surface_tool_artifacts = task.source != "heartbeat"
+        usage_operation = (
+            "orchestrator.heartbeat"
+            if task.source == "heartbeat"
+            else "orchestrator.process"
+        )
         research_paths: set[str] = set()
         specialist_receipts: list[dict[str, Any]] = []
         model_name = self._select_fireworks_kimi_model(task)
@@ -1306,7 +1316,7 @@ class OrchestratorRuntime:
                         "request_id": request_id,
                         "session_id": session_id,
                         "route": "opus",
-                        "operation": "orchestrator.process",
+                        "operation": usage_operation,
                         "metadata_json": {
                             "provider": "fireworks_kimi",
                             "iteration": iteration,

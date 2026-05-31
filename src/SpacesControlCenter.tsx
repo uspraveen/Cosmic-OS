@@ -813,7 +813,8 @@ const MANAGE_USAGE_FALLBACK: ManageUsageDatum[] = [
   { label: 'Tasks', calls: '386', pct: 22, accent: 'mint' },
   { label: 'Cron jobs', calls: '214', pct: 16, accent: 'gold' },
   { label: 'Voice', calls: '78', pct: 9, accent: 'rose' },
-  { label: 'Search', calls: '52', pct: 5, accent: 'slate' },
+  { label: 'Heartbeats', calls: '52', pct: 4, accent: 'rose' },
+  { label: 'Search', calls: '38', pct: 1, accent: 'slate' },
 ]
 
 const MANAGE_SERVICES_FALLBACK: ManageServiceDatum[] = [
@@ -1501,7 +1502,7 @@ function parseLiveUsage(source: unknown): ManageUsageDatum[] {
   const rowsField = top?.usage_by_feature
   if (Array.isArray(rowsField)) {
     if (rowsField.length === 0) return []
-    return rowsField.slice(0, 6).map((record, index) => {
+    return rowsField.slice(0, 8).map((record, index) => {
     const sourceRecord = toRecord(record)
     const calls = pickNumber(sourceRecord, ['count', 'calls', 'requests']) || 0
     const pct = pickNumber(sourceRecord, ['percent', 'share', 'ratio']) || 0
@@ -1510,11 +1511,22 @@ function parseLiveUsage(source: unknown): ManageUsageDatum[] {
       label,
       calls: formatNumberShort(calls, 'calls'),
       pct: normalizePercent(pct),
-      accent: MANAGE_PROVIDER_ACCENTS[index % MANAGE_PROVIDER_ACCENTS.length],
+      accent: manageUsageAccentForLabel(label, index),
     }
     })
   }
   return MANAGE_USAGE_FALLBACK
+}
+
+function manageUsageAccentForLabel(label: string, index: number): AccentTone {
+  const normalized = label.trim().toLowerCase()
+  if (normalized.includes('heartbeat')) return 'rose'
+  if (normalized.includes('research') || normalized.includes('search')) return 'gold'
+  if (normalized.includes('memory')) return 'mint'
+  if (normalized.includes('routing')) return 'slate'
+  if (normalized.includes('gateway')) return 'slate'
+  if (normalized.includes('scheduling') || normalized.includes('cron') || normalized.includes('reminder')) return 'mint'
+  return MANAGE_PROVIDER_ACCENTS[index % MANAGE_PROVIDER_ACCENTS.length]
 }
 
 function parseLiveServices(source: unknown): ManageServiceDatum[] {
