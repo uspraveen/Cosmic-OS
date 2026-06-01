@@ -741,6 +741,8 @@ async def test_email_agent_reason_reply_thread_sends_mailbox_and_cc_overrides(
 
     monkeypatch.setattr(agent, "_fetch_thread_context", fake_fetch_thread_context)
     monkeypatch.setattr(agent, "_compose_reply", fake_compose_reply)
+    monkeypatch.setattr(agent, "_ensure_mail_client_ready", AsyncMock(return_value=None))
+    monkeypatch.setattr(agent, "_refresh_mail_client_from_store", AsyncMock(return_value=None))
 
     class FakeMailClient:
         base_url = "http://cosmic-mail.local"
@@ -749,6 +751,10 @@ async def test_email_agent_reason_reply_thread_sends_mailbox_and_cc_overrides(
 
         async def aclose(self):
             return None
+
+        async def resolve_mailbox(self, *, mailbox_id=None, mailbox_address=None):
+            assert mailbox_id == "mbx_primary"
+            return {"id": "mbx_primary", "address": "assistant@example.com"}
 
         async def reply_to_thread(self, thread_id, payload):
             assert thread_id == "thr_123"
@@ -782,6 +788,121 @@ async def test_email_agent_reason_reply_thread_sends_mailbox_and_cc_overrides(
     assert result.output["message_id"] == "msg_reply_123"
     assert result.output["cc_recipients"] == [{"email": "finance@example.com", "name": None}]
     assert result.output["bcc_recipients"] == []
+
+
+@pytest.mark.asyncio
+async def test_email_agent_reason_reply_thread_uploads_artifacts_via_reply_draft(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+            enable_internal_llm=True,
+        ),
+    )
+
+    async def fake_fetch_thread_context(*, thread_id, message_id=None):
+        assert thread_id == "thr_123"
+        return {
+            "thread": {"id": "thr_123", "subject": "Create a Google sheet", "mailbox_id": "mbx_primary"},
+            "subject": "Create a Google sheet",
+            "latest_body": "Please create the sheet and send it here.",
+            "latest_message": {
+                "id": "msg_latest",
+                "internet_message_id": "<latest@example.com>",
+                "from_address": "requester@example.com",
+                "from_name": "Requester",
+            },
+        }
+
+    async def fake_compose_reply(**kwargs):
+        return {
+            "body": "Attached is the requested sheet.",
+            "summary": "Prepared a reply draft for the existing email thread.",
+        }
+
+    monkeypatch.setattr(agent, "_fetch_thread_context", fake_fetch_thread_context)
+    monkeypatch.setattr(agent, "_compose_reply", fake_compose_reply)
+    monkeypatch.setattr(agent, "_ensure_mail_client_ready", AsyncMock(return_value=None))
+    monkeypatch.setattr(agent, "_refresh_mail_client_from_store", AsyncMock(return_value=None))
+
+    uploaded: list[tuple[str, str, bytes, str | None]] = []
+
+    class FakeMailClient:
+        base_url = "http://cosmic-mail.local"
+        api_token = "mail-token"
+        timeout_sec = 20.0
+
+        async def aclose(self):
+            return None
+
+        async def resolve_mailbox(self, *, mailbox_id=None, mailbox_address=None):
+            assert mailbox_id == "mbx_primary"
+            return {"id": "mbx_primary", "address": "assistant@example.com"}
+
+        async def create_draft(self, payload):
+            assert payload == {
+                "mailbox_id": "mbx_primary",
+                "thread_id": "thr_123",
+                "subject": "Re: Create a Google sheet",
+                "to_recipients": [{"email": "requester@example.com", "name": "Requester"}],
+                "cc_recipients": [],
+                "text_body": "Attached is the requested sheet.",
+                "reply_to_message_id": "<latest@example.com>",
+            }
+            return {"id": "draft_reply_123"}
+
+        async def upload_draft_attachment(self, draft_id, *, filename, content, mime_type=None):
+            uploaded.append((draft_id, filename, content, mime_type))
+            return {"id": "upl_1"}
+
+        async def send_draft(self, draft_id):
+            assert draft_id == "draft_reply_123"
+            return {
+                "draft": {"id": draft_id, "thread_id": "thr_123"},
+                "thread": {"id": "thr_123"},
+                "message": {"id": "msg_sent_123", "thread_id": "thr_123"},
+            }
+
+    agent.mail_client = FakeMailClient()  # type: ignore[assignment]
+
+    attachment_path = tmp_path / "generated-sheet.csv"
+    attachment_path.write_bytes(b"name,value\ncosmic,42\n")
+    task = _make_task(
+        intent="email.reason",
+        task_id="tsk_reason_reply_attachment",
+        input_payload={
+            "goal": "Reply to the thread with the generated sheet attached.",
+            "thread_id": "thr_123",
+            "send": True,
+        },
+        input_artifacts=[
+            {
+                "artifact_id": "art_sheet",
+                "task_id": "tsk_tabular",
+                "mime": "text/csv",
+                "sha256": "dummy",
+                "path": str(attachment_path),
+                "created_by_agent": "cosmic/tabular-agent:1.0.0",
+            }
+        ],
+    )
+
+    result = await agent.execute(task)
+
+    assert result.status == "completed", result.error
+    assert result.output["action"] == "reply_thread"
+    assert result.output["sent"] is True
+    assert result.output["draft_id"] == "draft_reply_123"
+    assert result.output["message_id"] == "msg_sent_123"
+    assert result.output["attached_input_artifact_count"] == 1
+    assert result.output["failed_input_artifact_count"] == 0
+    assert "Attached 1 file to the draft." in result.output["response"]
+    assert uploaded == [("draft_reply_123", "generated-sheet.csv", b"name,value\ncosmic,42\n", "text/csv")]
 
 
 @pytest.mark.asyncio

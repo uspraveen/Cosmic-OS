@@ -494,7 +494,8 @@ class EmailAgent(AgentRuntime):
         artifacts: list[ArtifactManifest] = []
         default_docs_tools: list[str] = []
 
-        if (thread_id or message_id) and self._looks_like_attachment_goal(goal, attachment_name=attachment_name):
+        outbound_artifact_reply = bool(task.input_artifacts) and (send or mode_hint == "compose" or self._looks_like_reply(goal))
+        if (thread_id or message_id) and not outbound_artifact_reply and self._looks_like_attachment_goal(goal, attachment_name=attachment_name):
             resolution = await self._resolve_attachment_for_reason(
                 task=task,
                 goal=goal,
@@ -614,24 +615,65 @@ class EmailAgent(AgentRuntime):
                 )
                 sent_payload = None
                 delivery = None
+                upload_summary: dict[str, Any] = {"attempted": 0, "uploaded": [], "failed": []}
+                reply_draft_id: str | None = None
                 if send:
                     mailbox = await self._resolve_mailbox(
                         mailbox_address=mailbox_address,
                         mailbox_id=mailbox_id or self._safe_text(context.get("thread", {}).get("mailbox_id")),
                     )
-                    reply_payload: dict[str, Any] = {
-                        "mailbox_id": mailbox["id"],
-                        "text_body": drafted["body"],
-                    }
-                    if recipients:
-                        reply_payload["to_recipients"] = recipients
-                    if cc_recipients:
-                        reply_payload["cc_recipients"] = cc_recipients
-                    sent_payload = await self.mail_client.reply_to_thread(
-                        thread_id,
-                        reply_payload,
-                    )
-                    delivery = self._normalize_mail_delivery_result(sent_payload, thread_id=thread_id)
+                    if task.input_artifacts:
+                        reply_recipients = recipients or self._default_reply_recipients(context, mailbox)
+                        if not reply_recipients:
+                            raise EmailAgentError(
+                                code="INVALID_INPUT",
+                                message="Could not determine reply recipients for the thread attachment reply.",
+                                retryable=False,
+                                next_action="escalate",
+                            )
+                        draft_payload: dict[str, Any] = {
+                            "mailbox_id": mailbox["id"],
+                            "thread_id": thread_id,
+                            "subject": self._reply_subject(context),
+                            "to_recipients": reply_recipients,
+                            "cc_recipients": cc_recipients,
+                            "text_body": drafted["body"],
+                        }
+                        reply_to_message_id = self._reply_to_message_id(context)
+                        if reply_to_message_id:
+                            draft_payload["reply_to_message_id"] = reply_to_message_id
+                        draft_response = await self.mail_client.create_draft(draft_payload)
+                        reply_draft_id = self._safe_text(draft_response.get("id")) or None
+                        if not reply_draft_id:
+                            raise EmailAgentError(
+                                code="EMAIL_DRAFT_FAILED",
+                                message="Cosmic Mail did not return a draft id for the attachment reply.",
+                                retryable=True,
+                                next_action="retry",
+                            )
+                        raw_upload_summary = await self._upload_input_artifacts_to_draft(task, draft_id=reply_draft_id)
+                        if isinstance(raw_upload_summary, dict):
+                            upload_summary = {
+                                "attempted": int(raw_upload_summary.get("attempted") or 0),
+                                "uploaded": raw_upload_summary.get("uploaded") if isinstance(raw_upload_summary.get("uploaded"), list) else [],
+                                "failed": raw_upload_summary.get("failed") if isinstance(raw_upload_summary.get("failed"), list) else [],
+                            }
+                        sent_payload = await self.mail_client.send_draft(reply_draft_id)
+                        delivery = self._normalize_mail_delivery_result(sent_payload, draft_id=reply_draft_id, thread_id=thread_id)
+                    else:
+                        reply_payload: dict[str, Any] = {
+                            "mailbox_id": mailbox["id"],
+                            "text_body": drafted["body"],
+                        }
+                        if recipients:
+                            reply_payload["to_recipients"] = recipients
+                        if cc_recipients:
+                            reply_payload["cc_recipients"] = cc_recipients
+                        sent_payload = await self.mail_client.reply_to_thread(
+                            thread_id,
+                            reply_payload,
+                        )
+                        delivery = self._normalize_mail_delivery_result(sent_payload, thread_id=thread_id)
                     artifacts.append(
                         self._write_json_artifact(
                             task_id=task.task_id,
@@ -643,6 +685,9 @@ class EmailAgent(AgentRuntime):
                         )
                     )
                 response = drafted["summary"]
+                attachment_note = self._build_outbound_attachment_note(upload_summary)
+                if send and attachment_note:
+                    response = f"{response} {attachment_note}".strip()
                 delivery_note = self._mail_delivery_note(delivery)
                 if send and delivery_note:
                     response = f"{response} {delivery_note}".strip()
@@ -652,7 +697,7 @@ class EmailAgent(AgentRuntime):
                     "sent": bool(delivery and delivery.get("sent")),
                     "thread_id": self._safe_text(delivery.get("thread_id")) if isinstance(delivery, dict) else thread_id,
                     "message_id": self._safe_text(delivery.get("message_id")) if isinstance(delivery, dict) else None,
-                    "draft_id": None,
+                    "draft_id": reply_draft_id,
                     "summary": response,
                     "to_recipients": recipients,
                     "cc_recipients": cc_recipients,
@@ -662,6 +707,10 @@ class EmailAgent(AgentRuntime):
                     "docs_tools": default_docs_tools,
                     "resolved_attachment": None,
                     "attachment_resolution_status": None,
+                    "attached_input_artifact_count": len(upload_summary["uploaded"]) if upload_summary.get("attempted") else None,
+                    "attached_input_artifacts": upload_summary["uploaded"] if upload_summary.get("attempted") else None,
+                    "failed_input_artifact_count": len(upload_summary["failed"]) if upload_summary.get("attempted") else None,
+                    "failed_input_artifacts": upload_summary["failed"] if upload_summary.get("attempted") else None,
                     "delivery_status": self._safe_text(delivery.get("delivery_status")) if isinstance(delivery, dict) else None,
                     "queued_for_approval": bool(delivery.get("queued_for_approval")) if isinstance(delivery, dict) else False,
                     "approval_id": self._safe_text(delivery.get("approval_id")) if isinstance(delivery, dict) else None,
@@ -3230,6 +3279,7 @@ class EmailAgent(AgentRuntime):
             self._safe_text(message_payload.get("id"))
             or self._safe_text(body.get("message_id"))
             or self._safe_text(body.get("sent_message_id"))
+            or self._safe_text(body.get("id"))
             or None
         )
         resolved_thread_id = (
@@ -3826,11 +3876,42 @@ class EmailAgent(AgentRuntime):
             ),
             "direction": self._safe_text(message.get("direction")),
             "sent_at": self._safe_text(message.get("sent_at") or message.get("created_at")),
+            "internet_message_id": self._safe_text(message.get("internet_message_id")),
+            "from_name": self._safe_text(message.get("from_name")) or None,
+            "to_recipients": self._normalize_recipient_list(message.get("to_recipients")),
+            "reply_to_recipients": self._normalize_recipient_list(message.get("reply_to_recipients")),
         }
 
     def _thread_sender(self, context: dict[str, Any]) -> str | None:
         latest = context.get("latest_message") if isinstance(context.get("latest_message"), dict) else {}
         return self._safe_text(latest.get("from_address")) or None
+
+    def _reply_subject(self, context: dict[str, Any]) -> str:
+        subject = self._safe_text(context.get("subject")) or "email thread"
+        if subject.casefold().startswith("re:"):
+            return subject
+        return f"Re: {subject}"
+
+    def _reply_to_message_id(self, context: dict[str, Any]) -> str | None:
+        latest = context.get("latest_message") if isinstance(context.get("latest_message"), dict) else {}
+        return self._safe_text(latest.get("internet_message_id")) or None
+
+    def _default_reply_recipients(self, context: dict[str, Any], mailbox: dict[str, Any]) -> list[dict[str, Any]]:
+        latest = context.get("latest_message") if isinstance(context.get("latest_message"), dict) else {}
+        from_address = self._safe_text(latest.get("from_address"))
+        from_name = self._safe_text(latest.get("from_name")) or None
+        mailbox_address = self._safe_text(mailbox.get("address"))
+        if from_address and (not mailbox_address or from_address.casefold() != mailbox_address.casefold()):
+            return [{"email": from_address, "name": from_name}]
+        reply_to_recipients = latest.get("reply_to_recipients") if isinstance(latest.get("reply_to_recipients"), list) else []
+        if reply_to_recipients:
+            return self._normalize_recipient_list(reply_to_recipients)
+        to_recipients = latest.get("to_recipients") if isinstance(latest.get("to_recipients"), list) else []
+        if to_recipients:
+            return self._normalize_recipient_list(to_recipients)
+        if from_address:
+            return [{"email": from_address, "name": from_name}]
+        return []
 
     def _build_system_prompt(self) -> str:
         parts = []
