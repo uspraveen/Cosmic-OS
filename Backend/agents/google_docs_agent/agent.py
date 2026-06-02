@@ -157,11 +157,12 @@ class GoogleDocsAgent(AgentRuntime):
                 )
                 await self._post_specialist_usage(task, metered, result, started)
                 return result
+            detail = self._http_status_error_detail(exc)
             result = self._err(
-                "NETWORK_ERROR",
-                f"Google Docs/Drive API error: {exc.response.status_code}",
-                True,
-                "retry",
+                "GOOGLE_API_ERROR",
+                detail,
+                exc.response.status_code in {408, 409, 429, 500, 502, 503, 504},
+                "retry" if exc.response.status_code in {408, 409, 429, 500, 502, 503, 504} else "escalate",
             )
             await self._post_specialist_usage(task, metered, result, started)
             return result
@@ -618,11 +619,19 @@ class GoogleDocsAgent(AgentRuntime):
             )
             style_requests = self._table_header_style_requests(table_element)
             if style_requests:
-                await client.batch_update(
-                    document_id,
-                    style_requests,
-                    required_revision_id=str(styled_doc.get("revisionId") or ""),
-                )
+                try:
+                    await client.batch_update(
+                        document_id,
+                        style_requests,
+                        required_revision_id=str(styled_doc.get("revisionId") or ""),
+                    )
+                except httpx.HTTPStatusError as exc:
+                    logger.warning(
+                        "Skipping optional Google Docs table header styling for %s: %s",
+                        document_id,
+                        self._http_status_error_detail(exc),
+                    )
+                    style_requests = []
 
         revision_after = await client.get_revision_id(document_id)
         return {
@@ -1365,7 +1374,7 @@ class GoogleDocsAgent(AgentRuntime):
                 first = cell_content[0]
                 start = first.get("startIndex")
                 if isinstance(start, int):
-                    positions[(r_idx, c_idx)] = start + 1
+                    positions[(r_idx, c_idx)] = start
         return positions
 
     def _find_table_element(
@@ -1475,6 +1484,38 @@ class GoogleDocsAgent(AgentRuntime):
                     }
                 )
         return requests
+
+    @staticmethod
+    def _http_status_error_detail(exc: httpx.HTTPStatusError) -> str:
+        status_code = exc.response.status_code
+        detail = ""
+        try:
+            payload = exc.response.json()
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                message = str(error.get("message") or "").strip()
+                status = str(error.get("status") or "").strip()
+                reason = ""
+                details = error.get("details")
+                if isinstance(details, list) and details:
+                    first = details[0]
+                    if isinstance(first, dict):
+                        reason = str(first.get("reason") or first.get("message") or "").strip()
+                detail_parts = [part for part in (status, message, reason) if part]
+                detail = ": ".join(detail_parts)
+            else:
+                detail = str(payload.get("message") or payload.get("error_description") or "").strip()
+        if not detail:
+            detail = (exc.response.text or "").strip()
+        if detail:
+            detail = " ".join(detail.split())
+            if len(detail) > 700:
+                detail = detail[:697].rstrip() + "..."
+            return f"Google Docs/Drive API error: {status_code}: {detail}"
+        return f"Google Docs/Drive API error: {status_code}"
 
     def _write_json_artifact(self, task: TaskEnvelope, filename: str, payload: dict[str, Any]) -> ArtifactManifest:
         safe_filename = filename.replace("/", "_").replace("\\", "_")

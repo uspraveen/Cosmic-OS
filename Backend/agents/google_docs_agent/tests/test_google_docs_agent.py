@@ -64,6 +64,64 @@ def _sample_doc(text: str = "Project Plan\n") -> dict:
     }
 
 
+def _sample_table_doc() -> dict:
+    return {
+        "documentId": "doc_123",
+        "title": "Tracker",
+        "revisionId": "rev_table",
+        "body": {
+            "content": [
+                {
+                    "startIndex": 5,
+                    "endIndex": 40,
+                    "table": {
+                        "tableRows": [
+                            {
+                                "tableCells": [
+                                    {
+                                        "content": [
+                                            {
+                                                "startIndex": 10,
+                                                "endIndex": 11,
+                                                "paragraph": {
+                                                    "elements": [
+                                                        {
+                                                            "startIndex": 10,
+                                                            "endIndex": 11,
+                                                            "textRun": {"content": "\n"},
+                                                        }
+                                                    ]
+                                                },
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "content": [
+                                            {
+                                                "startIndex": 20,
+                                                "endIndex": 21,
+                                                "paragraph": {
+                                                    "elements": [
+                                                        {
+                                                            "startIndex": 20,
+                                                            "endIndex": 21,
+                                                            "textRun": {"content": "\n"},
+                                                        }
+                                                    ]
+                                                },
+                                            }
+                                        ]
+                                    },
+                                ]
+                            }
+                        ]
+                    },
+                }
+            ]
+        },
+    }
+
+
 def test_markdown_parser_preserves_useful_standalone_agent_features() -> None:
     from agents.google_docs_agent.doc_structure import MarkdownParser
 
@@ -122,6 +180,36 @@ def test_block_map_extracts_stable_block_ids() -> None:
     assert block["style"] == "HEADING_1"
     assert block_map.get_block(block["id"]) == block
     assert block_map.get_block_by_content("Project") == block
+
+
+def test_table_cell_positions_use_cell_content_start_index() -> None:
+    from agents.google_docs_agent.agent import GoogleDocsAgent
+
+    agent = object.__new__(GoogleDocsAgent)
+
+    assert agent._table_cell_positions(_sample_table_doc(), 1, 2, min_start_index=1) == {
+        (0, 0): 10,
+        (0, 1): 20,
+    }
+
+
+def test_http_status_error_detail_preserves_google_message() -> None:
+    import httpx
+
+    from agents.google_docs_agent.agent import GoogleDocsAgent
+
+    request = httpx.Request("POST", "https://docs.googleapis.com/v1/documents/doc_123:batchUpdate")
+    response = httpx.Response(
+        400,
+        json={"error": {"status": "INVALID_ARGUMENT", "message": "Invalid requests[1].insertText."}},
+        request=request,
+    )
+    exc = httpx.HTTPStatusError("bad request", request=request, response=response)
+
+    assert (
+        GoogleDocsAgent._http_status_error_detail(exc)
+        == "Google Docs/Drive API error: 400: INVALID_ARGUMENT: Invalid requests[1].insertText."
+    )
 
 
 def test_all_google_docs_schemas_are_valid_json() -> None:
@@ -467,6 +555,56 @@ async def test_overwrite_doc_routes_pipe_tables_to_native_table_insertion() -> N
     assert any("deleteContentRange" in req for req in fake.requests)
     assert any("insertText" in req for req in fake.requests)
     assert any("insertTable" in req for req in result["requests"])
+
+
+@pytest.mark.asyncio
+async def test_insert_native_table_uses_valid_cell_indexes_and_tolerates_style_failure() -> None:
+    import httpx
+
+    from agents.google_docs_agent.agent import GoogleDocsAgent
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls: list[list[dict]] = []
+
+        async def batch_update(self, document_id: str, requests: list[dict], *, required_revision_id: str = "") -> dict:
+            assert document_id == "doc_123"
+            assert required_revision_id.startswith("rev_")
+            self.calls.append(requests)
+            if any("updateTableCellStyle" in req for req in requests):
+                request = httpx.Request("POST", "https://docs.googleapis.com/v1/documents/doc_123:batchUpdate")
+                response = httpx.Response(
+                    400,
+                    json={"error": {"status": "INVALID_ARGUMENT", "message": "Invalid table style range."}},
+                    request=request,
+                )
+                raise httpx.HTTPStatusError("bad request", request=request, response=response)
+            return {"replies": []}
+
+        async def get_document(self, document_id: str, **_: object) -> dict:
+            assert document_id == "doc_123"
+            return _sample_table_doc()
+
+        async def get_revision_id(self, document_id: str) -> str:
+            assert document_id == "doc_123"
+            return "rev_after"
+
+    agent = object.__new__(GoogleDocsAgent)
+    fake = FakeClient()
+
+    result = await agent._insert_native_table_at_index(
+        client=fake,  # type: ignore[arg-type]
+        document_id="doc_123",
+        rows=[["Status", "Meaning"]],
+        insertion_index=5,
+        required_revision_id="rev_1",
+        has_header=True,
+    )
+
+    fill_requests = [req["insertText"] for batch in fake.calls for req in batch if "insertText" in req]
+    assert {req["location"]["index"] for req in fill_requests} == {10, 20}
+    assert not any("updateTableCellStyle" in req for req in result["requests"])
+    assert result["revision_after"] == "rev_after"
 
 
 @pytest.mark.asyncio
