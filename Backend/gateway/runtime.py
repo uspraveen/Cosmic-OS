@@ -232,6 +232,8 @@ class ActiveRequest:
     session_id: str
     channel: str
     route: str
+    source: str = "user"
+    source_id: str | None = None
     worker: asyncio.Task[None] | None = None
     task_id: str | None = None
     cancel_requested: bool = False
@@ -3412,7 +3414,7 @@ class GatewayRuntime:
                 raw_items=raw_items,
                 stored_items=stored_items,
             )
-            await self.fulfill_processed_message(request_record)
+            await self._fulfill_autonomous_request(request_record)
         except Exception:
             logger.exception(
                 "gateway.gmail_surface_decision.dispatch_failed task_id=%s",
@@ -4125,7 +4127,7 @@ class GatewayRuntime:
                 match_id=self._safe_text(match.get("match_id")) or "",
                 orchestrator_request_id=request_id,
             )
-            await self.fulfill_processed_message(request_record)
+            await self._fulfill_autonomous_request(request_record)
         except Exception:
             logger.exception(
                 "gateway.event_automation.dispatch_failed automation_id=%s match_id=%s",
@@ -5352,7 +5354,7 @@ class GatewayRuntime:
         request_record = await self._build_heartbeat_request_record(heartbeat)
         request_id = self._safe_text(request_record.get("request_id")) or ""
         self._heartbeat_outcomes_by_request_id.pop(request_id, None)
-        await self.fulfill_processed_message(request_record)
+        await self._fulfill_autonomous_request(request_record)
         outcome = self._heartbeat_outcomes_by_request_id.pop(request_id, None) or {}
         self._heartbeat_activity_by_request_id.pop(request_id, None)
         status = self._safe_text(outcome.get("status")) or "completed"
@@ -5678,7 +5680,7 @@ class GatewayRuntime:
             raise RuntimeError(f"Cron {cron_id} is missing its cron expression.")
 
         request_record = await self._build_scheduler_request_record(cron)
-        await self.fulfill_processed_message(request_record)
+        await self._fulfill_autonomous_request(request_record)
 
         scheduled_for = self._safe_text(cron.get("next_fire_at"))
         next_fire_at = None
@@ -6584,10 +6586,14 @@ class GatewayRuntime:
                 "Request record is missing channel, request_id, or session_id"
             )
 
-        # Reject if there is already a foreground stream on this channel
+        # Reject if there is already a foreground stream on this channel.
+        # Autonomous streams are not allowed to block a user request; move them
+        # into the background first so a timer/webhook can't hijack the chat.
         enforce_channel_guard = self._channel_platform(
             channel
         ) != "agent-email" and not self._is_email_thread_session(session_id)
+        if enforce_channel_guard:
+            self._background_autonomous_foreground_requests_for_channel(channel)
         has_foreground = enforce_channel_guard and any(
             s.foreground and not s.completed and s.channel == channel
             for s in self.active_requests.values()
@@ -6608,6 +6614,8 @@ class GatewayRuntime:
             session_id=session_id,
             channel=channel,
             route=route,
+            source=self._safe_text(request_record.get("source")) or "user",
+            source_id=self._safe_text(request_record.get("source_id")),
             user_query_excerpt=query_text[:120].strip(),
         )
         self.active_requests[request_id] = state
@@ -6634,6 +6642,187 @@ class GatewayRuntime:
         state.worker = asyncio.create_task(
             self._run_request_fulfillment(state, request_record)
         )
+
+    def _is_autonomous_source(self, source: Any, source_id: Any = None) -> bool:
+        source = self._safe_text(source) or ""
+        source_id = self._safe_text(source_id) or ""
+        return (
+            source in {"heartbeat", "cron", GMAIL_SURFACE_DECISION_SOURCE}
+            or source_id.startswith("event_automation:")
+            or source_id.startswith("gmail_surface:")
+        )
+
+    def _is_autonomous_request_record(self, request_record: dict[str, Any]) -> bool:
+        return self._is_autonomous_source(
+            request_record.get("source"),
+            request_record.get("source_id"),
+        )
+
+    def _is_autonomous_active_request(self, state: ActiveRequest) -> bool:
+        return self._is_autonomous_source(state.source, state.source_id)
+
+    def _background_autonomous_foreground_requests_for_channel(
+        self, channel: str
+    ) -> None:
+        normalized_channel = self._safe_text(channel)
+        if not normalized_channel:
+            return
+        for state in list(self.active_requests.values()):
+            if (
+                state.channel != normalized_channel
+                or not state.foreground
+                or state.completed
+                or not self._is_autonomous_active_request(state)
+            ):
+                continue
+            state.foreground = False
+            state.backgrounded_at = state.backgrounded_at or utcnow_iso()
+            if not state.activity:
+                state.activity = "Running in background until the current response finishes."
+            self._track_background_task(
+                self._deliver_or_queue_channel_event(
+                    {
+                        "type": "task.backgrounded",
+                        "request_id": state.request_id,
+                        "session_id": state.session_id,
+                        "task_id": state.task_id,
+                        "channel": state.channel,
+                        "route": state.route,
+                        "user_query_excerpt": state.user_query_excerpt,
+                        "partial_content": state.partial_content[:500]
+                        if state.partial_content
+                        else "",
+                        "partial_thinking": state.partial_thinking,
+                        "activity": state.activity,
+                        "activity_log": state.activity_log,
+                        "alpha_terminal_log": state.alpha_terminal_log,
+                        "response_blocks": state.response_blocks_snapshot,
+                        "snapshot_seq": state.snapshot_seq or None,
+                    },
+                    channel=state.channel,
+                )
+            )
+
+    def _active_foreground_collision_for_request(
+        self, request_record: dict[str, Any]
+    ) -> ActiveRequest | None:
+        request_id = self._safe_text(request_record.get("request_id"))
+        channel = self._safe_text(request_record.get("channel"))
+        if not request_id or not channel:
+            return None
+        for state in self.active_requests.values():
+            if (
+                state.request_id != request_id
+                and state.foreground
+                and not state.completed
+                and state.channel == channel
+            ):
+                return state
+        return None
+
+    def _should_background_autonomous_request(
+        self, request_record: dict[str, Any]
+    ) -> bool:
+        return self._is_autonomous_request_record(
+            request_record
+        ) and self._active_foreground_collision_for_request(request_record) is not None
+
+    async def _fulfill_autonomous_request(
+        self, request_record: dict[str, Any]
+    ) -> None:
+        request_id = self._safe_text(request_record.get("request_id"))
+        session_id = self._safe_text(request_record.get("session_id"))
+        channel = self._safe_text(request_record.get("channel"))
+        route = self._safe_text(request_record.get("route")) or "opus"
+        if not request_id or not session_id or not channel:
+            raise ValueError(
+                "Autonomous request record is missing channel, request_id, or session_id"
+            )
+
+        query_text = (
+            self._safe_text(request_record.get("query"))
+            or self._safe_text(request_record.get("content"))
+            or self._safe_text(
+                (request_record.get("message") or {}).get("content")
+                if isinstance(request_record.get("message"), dict)
+                else None
+            )
+            or ""
+        )
+        foreground_collision = (
+            self._active_foreground_collision_for_request(request_record)
+            if self._is_autonomous_request_record(request_record)
+            else None
+        )
+        backgrounded = foreground_collision is not None
+        state = ActiveRequest(
+            request_id=request_id,
+            session_id=session_id,
+            channel=channel,
+            route=route,
+            source=self._safe_text(request_record.get("source")) or "user",
+            source_id=self._safe_text(request_record.get("source_id")),
+            foreground=not backgrounded,
+            backgrounded_at=utcnow_iso() if backgrounded else None,
+            user_query_excerpt=query_text[:120].strip(),
+            activity=(
+                "Running in background until the current response finishes."
+                if backgrounded
+                else ""
+            ),
+        )
+        self.active_requests[request_id] = state
+        self._trace_request_event(
+            request_id=request_id,
+            session_id=session_id,
+            channel=channel,
+            route=route,
+            event_type="request.accepted",
+            stage="accepted",
+            status="backgrounded" if backgrounded else "active",
+            title=(
+                "Autonomous request accepted in background"
+                if backgrounded
+                else "Autonomous request accepted"
+            ),
+            detail=query_text[:240].strip() or None,
+            source=state.source or None,
+            source_id=state.source_id or None,
+            user_query_excerpt=query_text[:240].strip() or None,
+            metadata={
+                "autonomous": True,
+                "auto_backgrounded": backgrounded,
+                "foreground_collision_request_id": (
+                    foreground_collision.request_id
+                    if foreground_collision is not None
+                    else None
+                ),
+            },
+        )
+        if backgrounded:
+            await self._deliver_or_queue_channel_event(
+                {
+                    "type": "task.backgrounded",
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "task_id": state.task_id,
+                    "channel": channel,
+                    "route": route,
+                    "user_query_excerpt": state.user_query_excerpt,
+                    "partial_content": "",
+                    "partial_thinking": "",
+                    "activity": state.activity,
+                    "activity_log": state.activity_log,
+                    "alpha_terminal_log": state.alpha_terminal_log,
+                    "response_blocks": state.response_blocks_snapshot,
+                    "snapshot_seq": None,
+                },
+                channel=channel,
+            )
+        state.worker = asyncio.create_task(
+            self._run_request_fulfillment(state, request_record)
+        )
+        await state.worker
 
     async def cancel_active_fulfillment(
         self,

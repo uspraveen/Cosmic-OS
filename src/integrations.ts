@@ -110,7 +110,7 @@ export const GOOGLE_TOOL_DEFINITIONS: IntegrationToolDefinition[] = [
     label: 'Drive',
     platformLabel: 'Files',
     description: 'Google Docs discovery, comments, permissions, and Drive-backed document actions.',
-    scopes: ['https://www.googleapis.com/auth/drive'],
+    scopes: ['https://www.googleapis.com/auth/drive.file'],
   },
 ]
 

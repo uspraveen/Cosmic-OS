@@ -306,6 +306,89 @@ async def test_manager_resolves_exact_email_when_generic_labels_collide(store):
     assert resolved["account_email"] == "uspraveenraj@gmail.com"
 
 
+@pytest.mark.asyncio
+async def test_manager_resolves_email_inside_natural_account_hint(store):
+    from gateway.credentials.manager import CredentialManager
+
+    first = store.create_account(
+        provider="google",
+        email="uspraveenraj@gmail.com",
+        display_name="Praveen Raj U S",
+        account_label="Google account",
+        is_primary=True,
+    )
+    second = store.create_account(
+        provider="google",
+        email="usp.upenn@gmail.com",
+        display_name="Praveen Raj U S",
+        account_label="Google account",
+    )
+    for account in (first, second):
+        store.store_credential(
+            account_id=account["account_id"],
+            granted_scopes=[
+                "https://www.googleapis.com/auth/documents",
+                "https://www.googleapis.com/auth/drive",
+            ],
+            access_token=f"tok_{account['account_id']}",
+            refresh_token=f"ref_{account['account_id']}",
+            expires_at_ts=time.time() + 3600,
+        )
+    mgr = CredentialManager(store)
+
+    resolved = await mgr.resolve_credential(
+        provider="google",
+        required_scopes=[
+            "https://www.googleapis.com/auth/documents",
+            "https://www.googleapis.com/auth/drive",
+        ],
+        account_hint="use uspraveenraj@gmail.com for this Google Doc",
+        operation_mode="write",
+    )
+
+    assert resolved is not None
+    assert resolved["account_id"] == first["account_id"]
+    assert resolved["account_email"] == "uspraveenraj@gmail.com"
+
+
+@pytest.mark.asyncio
+async def test_manager_resolves_explicit_primary_hint_for_write(store):
+    from gateway.credentials.manager import CredentialManager
+
+    first = store.create_account(
+        provider="google",
+        email="uspraveenraj@gmail.com",
+        display_name="Praveen Raj U S",
+        account_label="Google account",
+        is_primary=True,
+    )
+    second = store.create_account(
+        provider="google",
+        email="usp.upenn@gmail.com",
+        display_name="Praveen Raj U S",
+        account_label="Google account",
+    )
+    for account in (first, second):
+        store.store_credential(
+            account_id=account["account_id"],
+            granted_scopes=["calendar"],
+            access_token=f"tok_{account['account_id']}",
+            refresh_token=f"ref_{account['account_id']}",
+            expires_at_ts=time.time() + 3600,
+        )
+    mgr = CredentialManager(store)
+
+    resolved = await mgr.resolve_credential(
+        provider="google",
+        required_scopes=["calendar"],
+        account_hint="primary",
+        operation_mode="write",
+    )
+
+    assert resolved is not None
+    assert resolved["account_id"] == first["account_id"]
+
+
 def test_manager_exposes_email_display_label_for_generic_google_labels(store):
     from gateway.credentials.manager import CredentialManager
 

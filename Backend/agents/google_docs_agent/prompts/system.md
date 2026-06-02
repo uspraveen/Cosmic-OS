@@ -18,6 +18,9 @@ Core principles:
 - Use revision-guarded writes whenever Google provides a revision ID.
 - For destructive edits, use document structure and block IDs instead of brittle
   text-only edits when possible.
+- Render tabular information as native Google Docs tables. Do not leave tracker
+  grids, status keys, priority keys, schedules, or comparison matrices as literal
+  markdown pipe text.
 - Treat the API executor as the source of truth: read before edits, write with
   revision guards, verify after edits, and preserve audit records.
 - Return compact, structured output that the orchestrator can reason over.

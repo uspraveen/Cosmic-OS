@@ -27,7 +27,9 @@ intents:
     usage_hints:
       - Use this when the user asks COSMIC to create a Google Doc.
       - This is an intelligent specialist: it can use its internal LLM to turn a high-level brief into a document title and Markdown-like body before the API executor creates native Google Docs content.
-      - The initial content can be Markdown-like text; the specialist renders headings, bullets, links, basic inline styles, and code blocks as native Docs formatting.
+      - The initial content can be Markdown-like text; the specialist renders headings, bullets, links, basic inline styles, code blocks, and pipe-table blocks as native Docs formatting.
+      - Use this for tracker docs, outreach/contact tables, status/priority keys, schedules, and comparison matrices. The specialist should create real Google Docs tables, not literal markdown pipe text.
+      - If the user already named or previously selected a Google account, pass it as account_hint exactly enough for routing, preferably the email address.
       - Preserve the selected Google account in the result because users may connect multiple accounts.
 
   - name: docs.read
@@ -68,22 +70,22 @@ auth_requirements:
     provider: google
     scopes:
       - https://www.googleapis.com/auth/documents
-      - https://www.googleapis.com/auth/drive
+      - https://www.googleapis.com/auth/drive.file
   docs.create:
     provider: google
     scopes:
       - https://www.googleapis.com/auth/documents
-      - https://www.googleapis.com/auth/drive
+      - https://www.googleapis.com/auth/drive.file
   docs.read:
     provider: google
     scopes:
       - https://www.googleapis.com/auth/documents
-      - https://www.googleapis.com/auth/drive
+      - https://www.googleapis.com/auth/drive.file
   docs.edit:
     provider: google
     scopes:
       - https://www.googleapis.com/auth/documents
-      - https://www.googleapis.com/auth/drive
+      - https://www.googleapis.com/auth/drive.file
 
 model_requirements:
   internal_llm:

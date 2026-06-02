@@ -2651,7 +2651,13 @@ auth_requirements:
     provider: google
     scopes:
       - https://www.googleapis.com/auth/documents
+      - https://www.googleapis.com/auth/drive.file
   docs.create:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/documents
+      - https://www.googleapis.com/auth/drive.file
+  docs.read:
     provider: google
     scopes:
       - https://www.googleapis.com/auth/documents
@@ -2659,7 +2665,8 @@ auth_requirements:
   docs.resolve_resource:
     provider: google
     scopes:
-      - https://www.googleapis.com/auth/drive.metadata.readonly
+      - https://www.googleapis.com/auth/documents
+      - https://www.googleapis.com/auth/drive.file
   # docs.recall_session has no auth_requirements — it only reads
   # from the agent's own store/data/, no provider API calls needed.
 ```

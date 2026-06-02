@@ -91,6 +91,26 @@ def test_markdown_parser_preserves_useful_standalone_agent_features() -> None:
     assert "backgroundColor" in ",".join(style_fields)
 
 
+def test_markdown_pipe_tables_are_split_for_native_docs_tables() -> None:
+    from agents.google_docs_agent.doc_structure import split_markdown_native_blocks
+
+    blocks = split_markdown_native_blocks(
+        "# Status Key\n\n"
+        "| Status | Meaning |\n"
+        "|---|---|\n"
+        "| To Contact | Not yet reached out |\n"
+        "| Meeting Scheduled | Call booked |\n\n"
+        "After the table."
+    )
+
+    assert [block["type"] for block in blocks] == ["markdown", "table", "markdown"]
+    assert blocks[1]["rows"] == [
+        ["Status", "Meaning"],
+        ["To Contact", "Not yet reached out"],
+        ["Meeting Scheduled", "Call booked"],
+    ]
+
+
 def test_block_map_extracts_stable_block_ids() -> None:
     from agents.google_docs_agent.doc_structure import build_block_map
 
@@ -132,7 +152,7 @@ def test_agent_card_references_all_google_docs_schemas() -> None:
         assert (schemas_dir / intent["input_schema"].split("/")[-1]).exists()
         assert (schemas_dir / intent["output_schema"].split("/")[-1]).exists()
     assert "https://www.googleapis.com/auth/documents" in card["auth_requirements"]["docs.edit"]["scopes"]
-    assert "https://www.googleapis.com/auth/drive" in card["auth_requirements"]["docs.edit"]["scopes"]
+    assert "https://www.googleapis.com/auth/drive.file" in card["auth_requirements"]["docs.edit"]["scopes"]
     assert card["model_requirements"]["internal_llm"]["default_model_key"] == "openai:gpt-5-mini"
 
 
@@ -371,6 +391,82 @@ async def test_update_block_uses_revision_guard() -> None:
         if agent is not None:
             await agent.stop()
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_overwrite_doc_routes_pipe_tables_to_native_table_insertion() -> None:
+    from agents.google_docs_agent.agent import GoogleDocsAgent
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.requests: list[dict] = []
+            self.revision = 1
+
+        async def get_document(self, document_id: str, **_: object) -> dict:
+            assert document_id == "doc_123"
+            return {
+                "documentId": "doc_123",
+                "title": "Tracker",
+                "revisionId": f"rev_{self.revision}",
+                "body": {"content": [{"startIndex": 1, "endIndex": 8}]},
+            }
+
+        async def batch_update(self, document_id: str, requests: list[dict], *, required_revision_id: str = "") -> dict:
+            assert document_id == "doc_123"
+            assert required_revision_id.startswith("rev_")
+            self.requests.extend(requests)
+            self.revision += 1
+            return {"replies": []}
+
+        async def get_revision_id(self, document_id: str) -> str:
+            assert document_id == "doc_123"
+            return f"rev_{self.revision}"
+
+    agent = object.__new__(GoogleDocsAgent)
+    inserted_tables: list[list[list[str]]] = []
+
+    async def fake_insert_native_table_at_index(**kwargs: object) -> dict:
+        inserted_tables.append(kwargs["rows"])  # type: ignore[arg-type]
+        return {
+            "revision_after": "rev_table",
+            "requests": [
+                {
+                    "insertTable": {
+                        "rows": len(kwargs["rows"]),  # type: ignore[arg-type]
+                        "columns": len(kwargs["rows"][0]),  # type: ignore[index]
+                    }
+                }
+            ],
+        }
+
+    agent._insert_native_table_at_index = fake_insert_native_table_at_index  # type: ignore[method-assign]
+    fake = FakeClient()
+
+    result = await agent._overwrite_document(
+        client=fake,  # type: ignore[arg-type]
+        task=_task("docs.edit", {}),
+        document_id="doc_123",
+        full_markdown_text=(
+            "# Status Key\n\n"
+            "| Status | Meaning |\n"
+            "|---|---|\n"
+            "| To Contact | Not yet reached out |\n"
+            "| Meeting Scheduled | Call booked |\n\n"
+            "After the table."
+        ),
+    )
+
+    assert result["verification"]["native_table_count"] == 1
+    assert inserted_tables == [
+        [
+            ["Status", "Meaning"],
+            ["To Contact", "Not yet reached out"],
+            ["Meeting Scheduled", "Call booked"],
+        ]
+    ]
+    assert any("deleteContentRange" in req for req in fake.requests)
+    assert any("insertText" in req for req in fake.requests)
+    assert any("insertTable" in req for req in result["requests"])
 
 
 @pytest.mark.asyncio

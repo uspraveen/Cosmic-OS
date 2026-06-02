@@ -1,4 +1,4 @@
-import { ArrowDownToLine, ChevronDown, ChevronRight, Square, Terminal } from 'lucide-react'
+import { ArrowDownToLine, ChevronDown, ChevronRight, Mic, Square, Terminal } from 'lucide-react'
 import { Fragment, type ClipboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown from 'react-markdown'
@@ -2632,6 +2632,7 @@ export default function App() {
   // --- CHAT STATE ---
   const [messages, setMessages] = useState<Message[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
+  const [composerVoiceActive, setComposerVoiceActive] = useState(false)
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [downloadingArtifactId, setDownloadingArtifactId] = useState<string | null>(null)
   const [showScrollButton, setShowScrollButton] = useState(false)
@@ -5130,6 +5131,21 @@ export default function App() {
     }
   }, [authState])
 
+  useEffect(() => {
+    if (!window.cosmic?.onVoiceStatus) {
+      return
+    }
+    const unsubscribe = window.cosmic.onVoiceStatus((data) => {
+      const status = String(data?.status || '').toLowerCase()
+      if (status === 'connected' || status === 'listening') {
+        setComposerVoiceActive(true)
+      } else if (status === 'ready' || status === 'stopped' || status === 'disconnected' || status === 'error') {
+        setComposerVoiceActive(false)
+      }
+    })
+    return () => unsubscribe?.()
+  }, [])
+
   // --- ACTIONS ---
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const target = e.target
@@ -5161,6 +5177,22 @@ export default function App() {
         content: error instanceof Error ? error.message : fallback,
       },
     ])
+  }
+
+  const handleComposerVoiceTyping = () => {
+    if (isStreaming || authState !== 'authenticated') {
+      return
+    }
+    const input = inputRef.current
+    if (!input) {
+      return
+    }
+    input.focus({ preventScroll: true })
+    window.setTimeout(() => {
+      window.cosmic?.toggleVoiceTyping?.().catch((error) => {
+        showAttachmentError(error, 'Voice typing failed.')
+      })
+    }, 50)
   }
 
   const mergePendingAttachmentSelection = (picked: any[]) => {
@@ -7095,6 +7127,22 @@ export default function App() {
                           strokeLinejoin="round"
                         />
                       </svg>
+                    </button>
+
+                    <button
+                      className={`voice-typing-btn ${composerVoiceActive ? 'active' : ''}`}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={handleComposerVoiceTyping}
+                      onMouseEnter={(event) => showHoverTooltipForElement(composerVoiceActive ? 'Stop voice typing' : 'Voice typing', event.currentTarget, 'control')}
+                      onMouseLeave={hideHoverTooltip}
+                      onFocus={(event) => showHoverTooltipForElement(composerVoiceActive ? 'Stop voice typing' : 'Voice typing', event.currentTarget, 'control')}
+                      onBlur={hideHoverTooltip}
+                      aria-label={composerVoiceActive ? 'Stop voice typing' : 'Start voice typing'}
+                      aria-pressed={composerVoiceActive}
+                      disabled={isStreaming || authState !== 'authenticated'}
+                      type="button"
+                    >
+                      <Mic size={17} strokeWidth={2.15} aria-hidden="true" />
                     </button>
 
                     <textarea

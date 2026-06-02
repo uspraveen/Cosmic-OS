@@ -1531,8 +1531,23 @@ function startVoiceBridge(window: BrowserWindow) {
 
 function sendToVoiceBridge(command: string) {
   if (voiceProcess && voiceProcess.stdin) {
-    voiceProcess.stdin.write(command + '\n')
+    try {
+      voiceProcess.stdin.write(command + '\n')
+      return true
+    } catch (error) {
+      console.error('[VOICE] Failed to send command:', error)
+    }
   }
+  return false
+}
+
+function toggleVoiceTyping() {
+  const nextActive = !voiceActive
+  const sent = sendToVoiceBridge(nextActive ? 'START' : 'STOP')
+  if (sent) {
+    voiceActive = nextActive
+  }
+  return { ok: sent, active: voiceActive }
 }
 
 function getPreferredDisplayId() {
@@ -1922,6 +1937,7 @@ app.whenReady().then(() => {
   ipcMain.on('voice:set-key', (_, key: string) => {
     sendToVoiceBridge(`SET_KEY:${key}`)
   })
+  ipcMain.handle('voice:toggle-typing', () => toggleVoiceTyping())
 
   ipcMain.on('meeting:start', (_, payload) => {
     if (meetingProcess?.stdin) {
@@ -3426,13 +3442,6 @@ app.whenReady().then(() => {
 
   // Voice activation shortcut - CommandOrControl+Shift+V to toggle voice
   globalShortcut.register('CommandOrControl+Shift+V', () => {
-    // Toggle voice on/off
-    if (voiceActive) {
-      sendToVoiceBridge('STOP')
-      voiceActive = false
-    } else {
-      sendToVoiceBridge('START')
-      voiceActive = true
-    }
+    toggleVoiceTyping()
   })
 })

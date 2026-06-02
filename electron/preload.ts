@@ -74,6 +74,7 @@ contextBridge.exposeInMainWorld('cosmic', {
   // --- VOICE BRIDGE ---
   startVoice: () => ipcRenderer.send('voice:start'),
   stopVoice: () => ipcRenderer.send('voice:stop'),
+  toggleVoiceTyping: () => ipcRenderer.invoke('voice:toggle-typing'),
   setVoiceKey: (key: string) => ipcRenderer.send('voice:set-key', key),
   onVoiceTranscript: (cb: (data: { text: string; is_final: boolean; timestamp: number }) => void) => {
     const listener = (_: any, data: { text: string; is_final: boolean; timestamp: number }) => cb(data)

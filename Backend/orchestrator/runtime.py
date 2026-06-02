@@ -2893,9 +2893,20 @@ class OrchestratorRuntime:
             "account_name",
             "account_label",
             "account_email",
+            "selected_account",
+            "target_account",
+            "target_account_email",
             "calendar_account",
             "calendar_account_hint",
+            "docs_account",
+            "docs_account_hint",
+            "drive_account",
+            "drive_account_hint",
+            "gmail_account",
+            "gmail_account_hint",
             "google_account",
+            "google_account_hint",
+            "google_account_email",
         )
         for key in candidate_keys:
             value = child_input.get(key)

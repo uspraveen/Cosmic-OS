@@ -46,6 +46,24 @@ def _account_display_label(account: dict[str, Any]) -> str:
     )
 
 
+def _normalized_hint_value(value: str | None) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _hint_matches_value(normalized_hint: str, normalized_value: str) -> bool:
+    if not normalized_hint or not normalized_value:
+        return False
+    if normalized_hint == normalized_value:
+        return True
+    if "@" in normalized_value or "@" in normalized_hint:
+        return normalized_value in normalized_hint or normalized_hint in normalized_value
+    if len(normalized_hint) >= 4 and normalized_hint in normalized_value:
+        return True
+    if len(normalized_value) >= 4 and normalized_value in normalized_hint:
+        return True
+    return False
+
+
 # Google Calendar scopes for Phase 1
 GOOGLE_CALENDAR_SCOPES = [
     "https://www.googleapis.com/auth/calendar",
@@ -667,45 +685,15 @@ class CredentialManager:
         account_hint: str,
         allow_primary_fallback: bool,
     ) -> str | None:
-        normalized_hint = str(account_hint or "").strip().lower()
+        normalized_hint = _normalized_hint_value(account_hint)
         if not normalized_hint:
             return None
 
-        active_accounts = [
-            a
-            for a in self._store.list_accounts(provider)
-            if a["status"] == "active"
-            and self._store.get_active_credential(a["account_id"])
-        ]
-        if not active_accounts:
-            return None
-
-        def fields(account: dict[str, Any]) -> list[str]:
-            metadata = account.get("_metadata") if isinstance(account.get("_metadata"), dict) else {}
-            platform_key = str(metadata.get("platform_key") or "").strip()
-            values = [
-                str(account.get("account_label") or "").strip(),
-                str(account.get("display_name") or "").strip(),
-                str(account.get("email") or "").strip(),
-                str(account.get("provider_account_id") or "").strip(),
-                platform_key,
-            ]
-            return [value.lower() for value in values if value]
-
-        exact_matches = [
-            account
-            for account in active_accounts
-            if normalized_hint in fields(account)
-        ]
-        if len(exact_matches) == 1:
-            return exact_matches[0]["account_id"]
-
-        fuzzy_matches = [
-            account
-            for account in active_accounts
-            if any(normalized_hint in value for value in fields(account))
-        ]
-        matches = exact_matches or fuzzy_matches
+        matches = self.account_hint_candidates(
+            provider=provider,
+            account_hint=account_hint,
+            active_only=True,
+        )
         if len(matches) == 1:
             return matches[0]["account_id"]
         if len(matches) > 1 and allow_primary_fallback:
@@ -715,3 +703,62 @@ class CredentialManager:
             if len(primary_matches) == 1:
                 return primary_matches[0]["account_id"]
         return None
+
+    def account_hint_candidates(
+        self,
+        *,
+        provider: str,
+        account_hint: str,
+        active_only: bool = True,
+    ) -> list[dict[str, Any]]:
+        normalized_hint = _normalized_hint_value(account_hint)
+        if not normalized_hint:
+            return []
+
+        accounts = self._store.list_accounts(provider)
+        if active_only:
+            accounts = [
+                account
+                for account in accounts
+                if account["status"] == "active"
+                and self._store.get_active_credential(account["account_id"])
+            ]
+        if not accounts:
+            return []
+
+        def fields(account: dict[str, Any]) -> list[str]:
+            metadata = account.get("_metadata") if isinstance(account.get("_metadata"), dict) else {}
+            platform_key = str(metadata.get("platform_key") or "").strip()
+            values = [
+                _account_display_label(account),
+                str(account.get("display_name") or "").strip(),
+                str(account.get("email") or "").strip(),
+                str(account.get("provider_account_id") or "").strip(),
+                platform_key,
+            ]
+            stored_label = str(account.get("account_label") or "").strip()
+            if stored_label and not _is_generic_account_label(stored_label):
+                values.append(stored_label)
+            if bool(account.get("is_primary")):
+                values.extend(["primary", "main"])
+            normalized_values: list[str] = []
+            for value in values:
+                normalized = _normalized_hint_value(value)
+                if normalized and normalized not in normalized_values:
+                    normalized_values.append(normalized)
+            return normalized_values
+
+        exact_matches = [
+            account
+            for account in accounts
+            if normalized_hint in fields(account)
+        ]
+        if len(exact_matches) == 1:
+            return exact_matches
+
+        matches = [
+            account
+            for account in accounts
+            if any(_hint_matches_value(normalized_hint, value) for value in fields(account))
+        ]
+        return exact_matches or matches

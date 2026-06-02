@@ -18,7 +18,13 @@ from shared.sqlite_client import connect_sync
 from shared.usage import begin_metered_call, build_usage_event, post_usage_event, serialize_usage_metadata
 
 from .config import AGENT_ROOT, BACKEND_ROOT, GoogleDocsAgentConfig
-from .doc_structure import MarkdownParser, build_block_map, document_summary, markdown_probe_text
+from .doc_structure import (
+    MarkdownParser,
+    build_block_map,
+    document_summary,
+    markdown_probe_text,
+    split_markdown_native_blocks,
+)
 from .google_docs_client import GoogleDocsClient, document_url, is_revision_conflict
 from .internal_llm import invoke_google_docs_planner_llm
 
@@ -524,14 +530,65 @@ class GoogleDocsAgent(AgentRuntime):
         insertion_index = self._find_insert_index(document, str(task.input.get("after_text") or "").strip())
         revision_before = str(document.get("revisionId") or "")
         await self._maybe_step(1, "completed", f"Insertion index: {insertion_index}.")
-        await client.batch_update(
-            document_id,
-            [{"insertTable": {"rows": len(rows), "columns": column_count, "location": {"index": insertion_index}}}],
+        edit_details = await self._insert_native_table_at_index(
+            client=client,
+            document_id=document_id,
+            rows=rows,
+            insertion_index=insertion_index,
             required_revision_id=revision_before,
+            has_header=self._bool(task.input.get("has_header"), True),
         )
         await self._maybe_step(2, "completed", f"Inserted {len(rows)}x{column_count} table.")
+        await self._maybe_step(3, "completed", "Filled table cells.")
+        summary = await self._verify_document(client, document_id)
+        await self._maybe_step(4, "completed", "Verified updated document.")
+        edit = {
+            "operation": "insert_table",
+            "revision_before": revision_before,
+            "revision_after": edit_details.get("revision_after"),
+            "requests": edit_details.get("requests", []),
+            "verification": {"rows": len(rows), "columns": column_count, "table_count": summary.get("table_count")},
+        }
+        self._record_edit(task, document_id, summary.get("title", ""), edit)
+        return self._edit_result(task, "insert_table", document_id, edit, summary)
+
+    async def _insert_native_table_at_index(
+        self,
+        *,
+        client: GoogleDocsClient,
+        document_id: str,
+        rows: list[list[str]],
+        insertion_index: int,
+        required_revision_id: str = "",
+        has_header: bool = True,
+    ) -> dict[str, Any]:
+        if not rows or not rows[0]:
+            raise ValueError("rows must be a non-empty 2D array.")
+        column_count = len(rows[0])
+        for idx, row in enumerate(rows):
+            if len(row) != column_count:
+                raise ValueError(f"Row {idx} has {len(row)} column(s); expected {column_count}.")
+
+        insert_request = {
+            "insertTable": {
+                "rows": len(rows),
+                "columns": column_count,
+                "location": {"index": insertion_index},
+            }
+        }
+        await client.batch_update(
+            document_id,
+            [insert_request],
+            required_revision_id=required_revision_id,
+        )
+
         after_table = await client.get_document(document_id)
-        cell_positions = self._table_cell_positions(after_table, len(rows), column_count)
+        cell_positions = self._table_cell_positions(
+            after_table,
+            len(rows),
+            column_count,
+            min_start_index=max(1, insertion_index - 5),
+        )
         fill_requests: list[dict[str, Any]] = []
         for r_idx, row in enumerate(rows):
             for c_idx, cell in enumerate(row):
@@ -539,38 +596,40 @@ class GoogleDocsAgent(AgentRuntime):
                 if pos is None or not cell:
                     continue
                 fill_requests.append({"insertText": {"location": {"index": pos}, "text": cell}})
-                if r_idx == 0 and self._bool(task.input.get("has_header"), True):
-                    fill_requests.append(
-                        {
-                            "updateTextStyle": {
-                                "range": {"startIndex": pos, "endIndex": pos + len(cell)},
-                                "textStyle": {"bold": True},
-                                "fields": "bold",
-                            }
-                        }
-                    )
         fill_requests.sort(
-            key=lambda item: item.get("insertText", {}).get("location", {}).get("index")
-            or item.get("updateTextStyle", {}).get("range", {}).get("startIndex")
-            or 0,
+            key=lambda item: item.get("insertText", {}).get("location", {}).get("index") or 0,
             reverse=True,
         )
-        revision_mid = str(after_table.get("revisionId") or "")
         if fill_requests:
-            await client.batch_update(document_id, fill_requests, required_revision_id=revision_mid)
+            await client.batch_update(
+                document_id,
+                fill_requests,
+                required_revision_id=str(after_table.get("revisionId") or ""),
+            )
+
+        style_requests: list[dict[str, Any]] = []
+        if has_header:
+            styled_doc = await client.get_document(document_id)
+            table_element = self._find_table_element(
+                styled_doc,
+                len(rows),
+                column_count,
+                min_start_index=max(1, insertion_index - 5),
+            )
+            style_requests = self._table_header_style_requests(table_element)
+            if style_requests:
+                await client.batch_update(
+                    document_id,
+                    style_requests,
+                    required_revision_id=str(styled_doc.get("revisionId") or ""),
+                )
+
         revision_after = await client.get_revision_id(document_id)
-        await self._maybe_step(3, "completed", "Filled table cells.")
-        summary = await self._verify_document(client, document_id)
-        await self._maybe_step(4, "completed", "Verified updated document.")
-        edit = {
-            "operation": "insert_table",
-            "revision_before": revision_before,
+        return {
             "revision_after": revision_after,
-            "requests": [{"insertTable": {"rows": len(rows), "columns": column_count}}, *fill_requests],
-            "verification": {"rows": len(rows), "columns": column_count, "table_count": summary.get("table_count")},
+            "requests": [insert_request, *fill_requests, *style_requests],
+            "table": {"rows": len(rows), "columns": column_count},
         }
-        self._record_edit(task, document_id, summary.get("title", ""), edit)
-        return self._edit_result(task, "insert_table", document_id, edit, summary)
 
     async def _handle_insert_image(self, task: TaskEnvelope, client: GoogleDocsClient) -> AgentResult:
         await self._maybe_create_plan(task, ["Find insertion point", "Insert image", "Verify result"])
@@ -761,20 +820,79 @@ class GoogleDocsAgent(AgentRuntime):
         document = await client.get_document(document_id)
         content = ((document.get("body") or {}).get("content") or [])
         revision_before = str(document.get("revisionId") or "")
+        native_blocks = split_markdown_native_blocks(full_markdown_text)
+        contains_native_tables = any(block.get("type") == "table" for block in native_blocks)
         requests: list[dict[str, Any]] = []
         if content:
             end_index = int(content[-1].get("endIndex") or 1) - 1
             if end_index > 1:
                 requests.append({"deleteContentRange": {"range": {"startIndex": 1, "endIndex": end_index}}})
-        requests.extend(MarkdownParser.parse(full_markdown_text, start_index=1))
-        await client.batch_update(document_id, requests, required_revision_id=revision_before)
+
+        if not contains_native_tables:
+            requests.extend(MarkdownParser.parse(full_markdown_text, start_index=1))
+            await client.batch_update(document_id, requests, required_revision_id=revision_before)
+            revision_after = await client.get_revision_id(document_id)
+            return {
+                "operation": "overwrite_doc",
+                "revision_before": revision_before,
+                "revision_after": revision_after,
+                "requests": requests,
+                "verification": {"probe": markdown_probe_text(full_markdown_text)},
+            }
+
+        applied_requests: list[dict[str, Any]] = []
+        if requests:
+            await client.batch_update(document_id, requests, required_revision_id=revision_before)
+            applied_requests.extend(requests)
+
+        native_table_count = 0
+        for block in native_blocks:
+            block_type = str(block.get("type") or "")
+            if block_type == "markdown":
+                markdown_text = str(block.get("text") or "").strip("\n")
+                if not markdown_text.strip():
+                    continue
+                current_doc = await client.get_document(document_id)
+                insertion_index = self._find_insert_index(current_doc)
+                markdown_requests = MarkdownParser.parse(markdown_text, start_index=insertion_index)
+                if markdown_requests:
+                    await client.batch_update(
+                        document_id,
+                        markdown_requests,
+                        required_revision_id=str(current_doc.get("revisionId") or ""),
+                    )
+                    applied_requests.extend(markdown_requests)
+                continue
+            if block_type == "table":
+                rows = block.get("rows")
+                if not isinstance(rows, list) or not rows:
+                    continue
+                table_rows = [[str(cell) for cell in row] for row in rows if isinstance(row, list)]
+                if not table_rows or not table_rows[0]:
+                    continue
+                current_doc = await client.get_document(document_id)
+                insertion_index = self._find_insert_index(current_doc)
+                table_edit = await self._insert_native_table_at_index(
+                    client=client,
+                    document_id=document_id,
+                    rows=table_rows,
+                    insertion_index=insertion_index,
+                    required_revision_id=str(current_doc.get("revisionId") or ""),
+                    has_header=self._bool(block.get("has_header"), True),
+                )
+                applied_requests.extend(table_edit.get("requests", []))
+                native_table_count += 1
+
         revision_after = await client.get_revision_id(document_id)
         return {
             "operation": "overwrite_doc",
             "revision_before": revision_before,
             "revision_after": revision_after,
-            "requests": requests,
-            "verification": {"probe": markdown_probe_text(full_markdown_text)},
+            "requests": applied_requests,
+            "verification": {
+                "probe": markdown_probe_text(full_markdown_text),
+                "native_table_count": native_table_count,
+            },
         }
 
     async def _verify_document(self, client: GoogleDocsClient, document_id: str) -> dict[str, Any]:
@@ -1222,17 +1340,20 @@ class GoogleDocsAgent(AgentRuntime):
         document: dict[str, Any],
         rows: int,
         columns: int,
+        *,
+        min_start_index: int | None = None,
     ) -> dict[tuple[int, int], int]:
-        del self
-        content = ((document.get("body") or {}).get("content") or [])
-        candidate = None
-        for element in content:
-            table = element.get("table") if isinstance(element, dict) else None
-            if not isinstance(table, dict):
-                continue
-            table_rows = table.get("tableRows") or []
-            if len(table_rows) == rows and all(len(row.get("tableCells") or []) == columns for row in table_rows):
-                candidate = table_rows
+        table_element = self._find_table_element(
+            document,
+            rows,
+            columns,
+            min_start_index=min_start_index,
+        )
+        candidate = (
+            (table_element.get("table") or {}).get("tableRows") or []
+            if isinstance(table_element, dict)
+            else None
+        )
         positions: dict[tuple[int, int], int] = {}
         if candidate is None:
             return positions
@@ -1246,6 +1367,114 @@ class GoogleDocsAgent(AgentRuntime):
                 if isinstance(start, int):
                     positions[(r_idx, c_idx)] = start + 1
         return positions
+
+    def _find_table_element(
+        self,
+        document: dict[str, Any],
+        rows: int,
+        columns: int,
+        *,
+        min_start_index: int | None = None,
+    ) -> dict[str, Any] | None:
+        del self
+        content = ((document.get("body") or {}).get("content") or [])
+        candidates: list[dict[str, Any]] = []
+        for element in content:
+            table = element.get("table") if isinstance(element, dict) else None
+            if not isinstance(table, dict):
+                continue
+            table_rows = table.get("tableRows") or []
+            if len(table_rows) == rows and all(len(row.get("tableCells") or []) == columns for row in table_rows):
+                candidates.append(element)
+        if not candidates:
+            return None
+        if min_start_index is None:
+            return candidates[-1]
+        viable = [
+            element
+            for element in candidates
+            if int(element.get("startIndex") or 0) >= int(min_start_index)
+        ]
+        if viable:
+            return min(viable, key=lambda item: int(item.get("startIndex") or 0))
+        return min(
+            candidates,
+            key=lambda item: abs(int(item.get("startIndex") or 0) - int(min_start_index)),
+        )
+
+    def _table_header_style_requests(
+        self,
+        table_element: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        del self
+        if not isinstance(table_element, dict):
+            return []
+        table = table_element.get("table") if isinstance(table_element.get("table"), dict) else {}
+        rows = table.get("tableRows") or []
+        if not rows:
+            return []
+        first_row = rows[0]
+        cells = first_row.get("tableCells") or []
+        requests: list[dict[str, Any]] = []
+        table_start = table_element.get("startIndex")
+        if isinstance(table_start, int) and cells:
+            requests.append(
+                {
+                    "updateTableCellStyle": {
+                        "tableRange": {
+                            "tableCellLocation": {
+                                "tableStartLocation": {"index": table_start},
+                                "rowIndex": 0,
+                                "columnIndex": 0,
+                            },
+                            "rowSpan": 1,
+                            "columnSpan": len(cells),
+                        },
+                        "tableCellStyle": {
+                            "backgroundColor": {
+                                "color": {
+                                    "rgbColor": {
+                                        "red": 0.93,
+                                        "green": 0.95,
+                                        "blue": 0.98,
+                                    }
+                                }
+                            }
+                        },
+                        "fields": "backgroundColor",
+                    }
+                }
+            )
+
+        for cell in cells:
+            ranges = []
+            for cell_element in cell.get("content") or []:
+                paragraph = cell_element.get("paragraph") if isinstance(cell_element, dict) else None
+                if not isinstance(paragraph, dict):
+                    continue
+                for item in paragraph.get("elements") or []:
+                    text_run = item.get("textRun") if isinstance(item, dict) else None
+                    content = str((text_run or {}).get("content") or "")
+                    if not content.strip():
+                        continue
+                    start = item.get("startIndex")
+                    end = item.get("endIndex")
+                    if isinstance(start, int) and isinstance(end, int) and end > start:
+                        ranges.append((start, end - 1))
+            if ranges:
+                requests.append(
+                    {
+                        "updateTextStyle": {
+                            "range": {
+                                "startIndex": min(start for start, _ in ranges),
+                                "endIndex": max(end for _, end in ranges),
+                            },
+                            "textStyle": {"bold": True},
+                            "fields": "bold",
+                        }
+                    }
+                )
+        return requests
 
     def _write_json_artifact(self, task: TaskEnvelope, filename: str, payload: dict[str, Any]) -> ArtifactManifest:
         safe_filename = filename.replace("/", "_").replace("\\", "_")

@@ -242,6 +242,7 @@ interface Window {
     // Voice APIs
     startVoice: () => void
     stopVoice: () => void
+    toggleVoiceTyping: () => Promise<{ ok: boolean; active: boolean }>
     setVoiceKey: (key: string) => void
     onVoiceTranscript: (cb: (data: { text: string; is_final: boolean; timestamp: number }) => void) => () => void
     onVoiceStatus: (cb: (data: { status: string; error?: string; timestamp: number }) => void) => () => void

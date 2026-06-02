@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -7,6 +8,7 @@ BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(BACKEND_ROOT))
 
 from gateway.runtime import GatewayRuntime
+from gateway.runtime import ActiveRequest
 from gateway.runtime import GMAIL_SURFACE_DECISION_SOURCE
 
 
@@ -145,3 +147,158 @@ def test_gmail_surface_decision_uses_valid_task_envelope_source() -> None:
     )
     assert runtime._task_envelope_source({"source": "heartbeat"}) == "heartbeat"
     assert runtime._task_envelope_source({"source": "unknown_private_source"}) == "user"
+
+
+def test_autonomous_gmail_surface_backgrounds_when_foreground_user_response_active() -> None:
+    runtime = object.__new__(GatewayRuntime)
+    runtime.active_requests = {
+        "req_user": ActiveRequest(
+            request_id="req_user",
+            session_id="sess_1",
+            channel="desktop",
+            route="opus",
+            source="user",
+            foreground=True,
+        )
+    }
+
+    assert runtime._should_background_autonomous_request(
+        {
+            "request_id": "req_gmail",
+            "session_id": "sess_1",
+            "channel": "desktop",
+            "source": GMAIL_SURFACE_DECISION_SOURCE,
+            "source_id": "gmail_surface:abc",
+        }
+    )
+
+
+def test_autonomous_event_automation_backgrounds_when_foreground_user_response_active() -> None:
+    runtime = object.__new__(GatewayRuntime)
+    runtime.active_requests = {
+        "req_user": ActiveRequest(
+            request_id="req_user",
+            session_id="sess_1",
+            channel="desktop",
+            route="opus",
+            source="user",
+            foreground=True,
+        )
+    }
+
+    assert runtime._should_background_autonomous_request(
+        {
+            "request_id": "req_event",
+            "session_id": "sess_1",
+            "channel": "desktop",
+            "source": "webhook",
+            "source_id": "event_automation:auto_123",
+        }
+    )
+
+
+def test_autonomous_request_backgrounds_across_sessions_on_same_visible_channel() -> None:
+    runtime = object.__new__(GatewayRuntime)
+    runtime.active_requests = {
+        "req_user": ActiveRequest(
+            request_id="req_user",
+            session_id="sess_1",
+            channel="desktop",
+            route="opus",
+            source="user",
+            foreground=True,
+        )
+    }
+
+    assert runtime._should_background_autonomous_request(
+        {
+            "request_id": "req_heartbeat",
+            "session_id": "sess_2",
+            "channel": "desktop",
+            "source": "heartbeat",
+            "source_id": "default",
+        }
+    )
+    assert not runtime._should_background_autonomous_request(
+        {
+            "request_id": "req_heartbeat",
+            "session_id": "sess_1",
+            "channel": "mobile:device_1",
+            "source": "heartbeat",
+            "source_id": "default",
+        }
+    )
+
+
+def test_user_and_plain_webhook_records_do_not_auto_background() -> None:
+    runtime = object.__new__(GatewayRuntime)
+    runtime.active_requests = {
+        "req_user": ActiveRequest(
+            request_id="req_user",
+            session_id="sess_1",
+            channel="desktop",
+            route="opus",
+            source="user",
+            foreground=True,
+        )
+    }
+
+    assert not runtime._should_background_autonomous_request(
+        {
+            "request_id": "req_next_user",
+            "session_id": "sess_1",
+            "channel": "desktop",
+            "source": "user",
+        }
+    )
+    assert not runtime._should_background_autonomous_request(
+        {
+            "request_id": "req_webhook",
+            "session_id": "sess_1",
+            "channel": "desktop",
+            "source": "webhook",
+            "source_id": "generic-webhook",
+        }
+    )
+
+
+def test_user_request_can_background_autonomous_foreground_on_same_channel() -> None:
+    runtime = object.__new__(GatewayRuntime)
+    events: list[dict] = []
+
+    async def fake_deliver(event: dict, *, channel: str | None = None) -> str:
+        events.append({**event, "delivered_channel": channel})
+        return "sent"
+
+    def fake_track(coroutine) -> None:
+        asyncio.run(coroutine)
+
+    runtime._deliver_or_queue_channel_event = fake_deliver
+    runtime._track_background_task = fake_track
+    runtime.active_requests = {
+        "req_heartbeat": ActiveRequest(
+            request_id="req_heartbeat",
+            session_id="sess_1",
+            channel="desktop",
+            route="opus",
+            source="heartbeat",
+            foreground=True,
+            partial_content="Checking YC chatter...",
+        ),
+        "req_user": ActiveRequest(
+            request_id="req_user",
+            session_id="sess_1",
+            channel="desktop",
+            route="opus",
+            source="user",
+            foreground=True,
+        ),
+    }
+
+    runtime._background_autonomous_foreground_requests_for_channel("desktop")
+
+    assert not runtime.active_requests["req_heartbeat"].foreground
+    assert runtime.active_requests["req_heartbeat"].backgrounded_at
+    assert runtime.active_requests["req_user"].foreground
+    assert events[0]["type"] == "task.backgrounded"
+    assert events[0]["request_id"] == "req_heartbeat"

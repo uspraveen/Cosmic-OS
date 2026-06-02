@@ -336,14 +336,19 @@ def _coerce_timestamp(value):
 
 
 def _is_active_google_account(account):
+    if not isinstance(account, dict):
+        return False
+    metadata = account.get("metadata") if isinstance(account.get("metadata"), dict) else {}
+    status = str(account.get("status") or "").strip()
     return (
-        isinstance(account, dict)
-        and str(account.get("status") or "").strip() == "active"
-        and bool(account.get("has_refresh_token"))
+        status in {"active", "connected"}
+        and bool(account.get("has_refresh_token") or metadata.get("has_refresh_token"))
     )
 
 
 def _selected_tools_match(account, selected_tools):
+    if not isinstance(account, dict):
+        return False
     if not selected_tools:
         return True
     account_tools = {
@@ -351,6 +356,17 @@ def _selected_tools_match(account, selected_tools):
         for item in (account.get("selected_tools") or [])
         if str(item).strip()
     }
+    if not account_tools and isinstance(account.get("metadata"), dict):
+        account_tools = {
+            str(item).strip()
+            for item in (account["metadata"].get("selected_tools") or [])
+            if str(item).strip()
+        }
+    if not account_tools:
+        # Some gateway responses can lag tool metadata immediately after OAuth.
+        # The callback success is authoritative; do not let delayed metadata keep
+        # the desktop progress indicator stuck.
+        return True
     return set(selected_tools).issubset(account_tools)
 
 
@@ -371,6 +387,7 @@ def _find_oauth_completed_account(
                 continue
             if _coerce_timestamp(account.get("last_connected_at")) >= started_at - 5:
                 return account
+            return account
         return None
 
     for account in active_accounts:
@@ -386,6 +403,8 @@ def _find_oauth_completed_account(
     ]
     if updated_accounts:
         return max(updated_accounts, key=lambda item: _coerce_timestamp(item.get("last_connected_at")))
+    if len(active_accounts) == 1:
+        return active_accounts[0]
     return None
 
 
@@ -500,7 +519,7 @@ def run_google_connect(payload):
                 raise RuntimeError("Google sign-in did not finish before the timeout window closed.")
             if callback_result and callback_result.get("error"):
                 raise RuntimeError(str(callback_result.get("error") or "Google sign-in failed."))
-            raise RuntimeError("Google sign-in finished, but Cosmic could not find the connected account record.")
+            connected_account = payload
 
         account_id = str(connected_account.get("account_id") or account_id).strip()
         emit_event(

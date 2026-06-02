@@ -235,6 +235,35 @@ def _calendar_agent_card() -> dict[str, object]:
     }
 
 
+def _google_docs_agent_card() -> dict[str, object]:
+    return {
+        "agent_id": "cosmic/google-docs-agent:1.0.0",
+        "display_name": "Google Docs Agent",
+        "description": "Specialist agent for Google Docs and Drive.",
+        "sla": {
+            "max_concurrency": 2,
+            "heartbeat_ttl_sec": 30,
+            "max_task_duration_sec": 180,
+        },
+        "intents": [
+            {
+                "name": "docs.create",
+                "description": "Create a Google Doc.",
+                "timeout_sec": 90,
+            },
+        ],
+        "auth_requirements": {
+            "docs.create": {
+                "provider": "google",
+                "scopes": [
+                    "https://www.googleapis.com/auth/documents",
+                    "https://www.googleapis.com/auth/drive.file",
+                ],
+            }
+        },
+    }
+
+
 async def _register_agent(card: dict[str, object], redis_client: FakeRedis, registry_db_path) -> None:
     store = RegistryStore(registry_db_path)
     store.initialize()
@@ -320,7 +349,7 @@ async def test_orchestrator_dispatches_signed_child_task_and_waits_for_completed
 
         assert isinstance(result, AgentResult)
         assert result.status == "completed"
-        assert result.output == {"sources": 2}
+        assert result.output == {"sources": 2, "delegated_task_id": child_task.task_id}
 
         with sqlite3.connect(config.task_ledger_db_path) as connection:
             row = connection.execute(
@@ -565,6 +594,11 @@ async def test_dispatch_agent_task_records_usage_and_refreshes_featured_speciali
         )
         result = await dispatch_task
         featured = runtime.registry_store.list_featured_specialists(limit=3)
+        assert isinstance(result, AgentResult)
+        assert result.status == "completed"
+        assert len(featured) == 1
+        assert featured[0]["agent_id"] == "cosmic/research-agent:1.0.0"
+        assert featured[0]["usage_count"] == 1
     finally:
         await runtime.stop()
 
@@ -684,11 +718,6 @@ async def test_orchestrator_reverse_delegate_registers_and_resumes_waiting_speci
         assert reverse_record["status"] == "completed"
     finally:
         await runtime.stop()
-    assert isinstance(result, AgentResult)
-    assert result.status == "completed"
-    assert len(featured) == 1
-    assert featured[0]["agent_id"] == "cosmic/research-agent:1.0.0"
-    assert featured[0]["usage_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -784,7 +813,7 @@ async def test_orchestrator_dispatch_tracks_suspended_and_resumed_until_complete
         result = await asyncio.wait_for(dispatch, timeout=2.0)
         assert isinstance(result, AgentResult)
         assert result.status == "completed"
-        assert result.output == {"answer": "source A"}
+        assert result.output == {"answer": "source A", "delegated_task_id": child_task.task_id}
     finally:
         await runtime.stop()
 
@@ -920,6 +949,89 @@ async def test_dispatch_injects_resolved_auth_into_child_task(tmp_path) -> None:
                 "operation_mode": "read",
                 "allow_primary_fallback": True,
                 "account_hint": "work",
+            }
+        ]
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_forwards_docs_account_hint_alias(tmp_path) -> None:
+    fake_redis = FakeRedis()
+    captured_requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/credentials/resolve":
+            captured_requests.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(
+                200,
+                json={
+                    "credential_ref": "cred_google_docs_123",
+                    "access_token": "token-google-docs-123",
+                    "provider": "google",
+                    "scopes": [
+                        "https://www.googleapis.com/auth/documents",
+                        "https://www.googleapis.com/auth/drive.file",
+                    ],
+                    "expires_at": "2026-03-30T18:00:00+00:00",
+                    "account_id": "acc_personal",
+                },
+            )
+        return httpx.Response(200)
+
+    config = OrchestratorConfig(
+        signing_secret="gateway-secret",
+        internal_token="internal-token",
+        gateway_url="http://gateway.test",
+        anthropic_api_key="anthropic-key",
+        agent_signing_secrets={"cosmic/google-docs-agent:1.0.0": "docs-secret"},
+        task_ledger_db_path=tmp_path / "task_ledger_docs_auth.db",
+        agent_registry_db_path=tmp_path / "registry_docs_auth.db",
+    )
+    await _register_agent(
+        _google_docs_agent_card(),
+        fake_redis,
+        config.agent_registry_db_path,
+    )
+    runtime = OrchestratorRuntime(
+        config,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        redis_client=fake_redis,
+    )
+    await runtime.start()
+    try:
+        result = await runtime.dispatch_agent_task(
+            parent_task=_parent_task("gateway-secret"),
+            intent="docs.create",
+            input_payload={
+                "title": "Copper Outreach Tracker",
+                "body_markdown": "# Copper Outreach Tracker",
+                "docs_account_hint": "use uspraveenraj@gmail.com",
+            },
+            wait_timeout_sec=0.0,
+        )
+        assert isinstance(result, TaskInProgress)
+
+        fields = await _wait_for_stream(
+            fake_redis,
+            "streams:cosmic/google-docs-agent:1.0.0:high",
+        )
+        child_task = parse_task_envelope(fields)
+        assert child_task.input["auth"]["access_token"] == "token-google-docs-123"
+        assert child_task.input["auth"]["credential_ref"] == "cred_google_docs_123"
+        assert child_task.input["docs_account_hint"] == "use uspraveenraj@gmail.com"
+
+        assert captured_requests == [
+            {
+                "provider": "google",
+                "required_scopes": [
+                    "https://www.googleapis.com/auth/documents",
+                    "https://www.googleapis.com/auth/drive.file",
+                ],
+                "session_id": "sess_20260315",
+                "operation_mode": "write",
+                "allow_primary_fallback": False,
+                "account_hint": "use uspraveenraj@gmail.com",
             }
         ]
     finally:

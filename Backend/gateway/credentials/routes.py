@@ -331,6 +331,51 @@ async def resolve_credential(body: ResolveRequest, request: Request):
         operation_mode=body.operation_mode,
     )
     if result is None:
+        hinted = bool(body.account_id or body.account_hint or body.resource_hint)
+        if hinted:
+            if body.account_hint:
+                candidates = mgr.account_hint_candidates(
+                    provider=body.provider,
+                    account_hint=body.account_hint,
+                    active_only=True,
+                )
+                if len(candidates) > 1:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "error": "ambiguous_account",
+                            "message": (
+                                "The account hint matched multiple Google accounts. "
+                                "Specify the exact account email."
+                            ),
+                            "accounts": [
+                                {
+                                    "account_id": a["account_id"],
+                                    "account_label": a.get("account_label", ""),
+                                    "account_display_label": (
+                                        a.get("account_display_label")
+                                        or a.get("email")
+                                        or a.get("display_name")
+                                        or a.get("account_label", "")
+                                    ),
+                                    "display_name": a.get("display_name", ""),
+                                    "email": a.get("email", ""),
+                                    "is_primary": a.get("is_primary", False),
+                                }
+                                for a in candidates
+                            ],
+                        },
+                    )
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": "credential_unavailable",
+                    "message": (
+                        "No usable Google credential matched the requested account. "
+                        "The account may need reconnecting with the required scopes."
+                    ),
+                },
+            )
         # Check if this is a multi-account ambiguity vs truly no account
         accounts = mgr.list_accounts(body.provider)
         if len(accounts) > 1:

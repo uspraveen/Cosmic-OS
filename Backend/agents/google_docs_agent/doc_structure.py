@@ -392,6 +392,119 @@ class MarkdownParser:
         return requests
 
 
+def split_markdown_native_blocks(full_text: str) -> list[dict[str, Any]]:
+    """Split markdown-like text into native-renderable blocks.
+
+    Google Docs cannot turn pipe-table markdown into a table via text styling.
+    The standalone Docs agent handled this by calling `insert_table(...)`; the
+    COSMIC specialist does the same defensively at the executor boundary.
+    """
+    lines = str(full_text or "").splitlines()
+    blocks: list[dict[str, Any]] = []
+    text_buffer: list[str] = []
+    i = 0
+
+    def flush_text() -> None:
+        if not text_buffer:
+            return
+        text = "\n".join(text_buffer).strip("\n")
+        text_buffer.clear()
+        if text.strip():
+            blocks.append({"type": "markdown", "text": text})
+
+    while i < len(lines):
+        parsed = _parse_pipe_table_at(lines, i)
+        if parsed is None:
+            text_buffer.append(lines[i])
+            i += 1
+            continue
+        rows, consumed = parsed
+        flush_text()
+        blocks.append({"type": "table", "rows": rows, "has_header": True})
+        i += consumed
+
+    flush_text()
+    if not blocks and str(full_text or "").strip():
+        blocks.append({"type": "markdown", "text": str(full_text)})
+    return blocks
+
+
+def _parse_pipe_table_at(
+    lines: list[str],
+    start: int,
+) -> tuple[list[list[str]], int] | None:
+    if start + 1 >= len(lines):
+        return None
+    header = _parse_pipe_table_line(lines[start])
+    separator = _parse_pipe_table_line(lines[start + 1])
+    if (
+        header is None
+        or separator is None
+        or len(header) < 2
+        or len(separator) != len(header)
+        or not all(_is_pipe_table_separator_cell(cell) for cell in separator)
+    ):
+        return None
+
+    rows: list[list[str]] = [header]
+    consumed = 2
+    expected_columns = len(header)
+    for line in lines[start + consumed :]:
+        parsed = _parse_pipe_table_line(line)
+        if parsed is None:
+            break
+        if not any(cell.strip() for cell in parsed):
+            break
+        rows.append(_normalize_table_row(parsed, expected_columns))
+        consumed += 1
+
+    if len(rows) < 2:
+        return None
+    return rows, consumed
+
+
+def _parse_pipe_table_line(line: str) -> list[str] | None:
+    text = str(line or "").strip()
+    if "|" not in text:
+        return None
+    if text.startswith("|"):
+        text = text[1:]
+    if text.endswith("|"):
+        text = text[:-1]
+
+    cells: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for char in text:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == "|":
+            cells.append("".join(current).strip())
+            current = []
+            continue
+        current.append(char)
+    cells.append("".join(current).strip())
+    if len(cells) < 2:
+        return None
+    return cells
+
+
+def _is_pipe_table_separator_cell(cell: str) -> bool:
+    return re.fullmatch(r":?-{3,}:?", str(cell or "").strip()) is not None
+
+
+def _normalize_table_row(row: list[str], expected_columns: int) -> list[str]:
+    normalized = list(row[:expected_columns])
+    while len(normalized) < expected_columns:
+        normalized.append("")
+    return normalized
+
+
 @dataclass(slots=True)
 class BlockMap:
     blocks: list[dict[str, Any]]
@@ -577,4 +690,3 @@ def markdown_probe_text(markdown_text: str, *, max_len: int = 80) -> str:
         if sum(len(item) for item in lines) >= max_len:
             break
     return " ".join(lines)[:max_len].strip()
-
