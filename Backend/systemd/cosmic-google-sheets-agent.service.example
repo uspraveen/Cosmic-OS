@@ -8,14 +8,13 @@ Type=simple
 User=<SERVICE_USER>
 Group=<SERVICE_GROUP>
 WorkingDirectory=<BACKEND_ROOT>
-EnvironmentFile=/etc/cosmic/agents/google-sheets-agent.env
 EnvironmentFile=-/etc/cosmic/agents/google-docs-agent.env
 EnvironmentFile=-/etc/cosmic/agents/gmail-agent.env
 EnvironmentFile=-/etc/cosmic/agents/calendar-agent.env
+EnvironmentFile=/etc/cosmic/agents/google-sheets-agent.env
 ExecStart=<BACKEND_ROOT>/.venv/bin/python -m agents.google_sheets_agent
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-
