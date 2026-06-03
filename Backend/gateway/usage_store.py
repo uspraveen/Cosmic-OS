@@ -535,6 +535,8 @@ def _feature_label(*, source_component: str, operation: str, is_heartbeat: bool 
         return "Heartbeats"
     op = operation.lower()
     src = source_component.lower()
+    if "sheets." in op or "sheets_" in op or "google_sheets" in op or "google-sheets" in op:
+        return "Spreadsheets"
     if "docs." in op or "docs_" in op or "docs-parser" in op:
         return "Documents"
     if "memory" in op:

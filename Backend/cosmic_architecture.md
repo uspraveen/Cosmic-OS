@@ -9917,6 +9917,7 @@ def build_tool_definitions(self) -> list[dict]:
 | `cosmic/orchestrator:1.0.0` | Orchestrator | **Core** | `orchestrator.process`, `orchestrator.clarify`, `orchestrator.delegate`, `orchestrator.schedule` |
 | `cosmic/research-agent:1.0.0` | Research Agent | **Core** | `research.topic`, `research.find_image`, `research.recall_session` |
 | `cosmic/google-docs-agent:1.0.0` | Google Docs Agent | **Core** | `docs.edit`, `docs.create`, `docs.read`, `docs.resolve_resource`, `docs.recall_session` |
+| `cosmic/google-sheets-agent:1.0.0` | Google Sheets Agent | **Core** | `sheets.edit`, `sheets.create`, `sheets.read`, `sheets.resolve_resource`, `sheets.recall_session` |
 | `cosmic/docs-parser-agent:1.0.0` | Docs Parser Agent | **Core** | `docs.parse_bundle`, `docs.read_bundle` |
 | `cosmic/browser-agent:1.0.0` | Browser Agent | **Core** | `browser.navigate`, `browser.interact`, `browser.extract`, `browser.screenshot` |
 | `cosmic/system-agent:1.0.0` | System Agent | **Core** | `system.file_operation`, `system.process_manage`, `system.shell_execute`, `system.clipboard` |

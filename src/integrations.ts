@@ -106,10 +106,20 @@ export const GOOGLE_TOOL_DEFINITIONS: IntegrationToolDefinition[] = [
     scopes: ['https://www.googleapis.com/auth/documents'],
   },
   {
+    id: 'sheets',
+    label: 'Sheets',
+    platformLabel: 'Spreadsheets',
+    description: 'Live spreadsheet creation, editing, formatting, and data tracking.',
+    scopes: [
+      'https://www.googleapis.com/auth/spreadsheets',
+      'https://www.googleapis.com/auth/drive.file',
+    ],
+  },
+  {
     id: 'drive',
     label: 'Drive',
     platformLabel: 'Files',
-    description: 'Google Docs discovery, comments, permissions, and Drive-backed document actions.',
+    description: 'Google Docs and Sheets discovery, comments, permissions, and Drive-backed actions.',
     scopes: ['https://www.googleapis.com/auth/drive.file'],
   },
 ]

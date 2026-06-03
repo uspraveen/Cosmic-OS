@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["status", "operation", "spreadsheet_id"],
+  "properties": {
+    "status": { "type": "string" },
+    "operation": { "type": "string" },
+    "spreadsheet_id": { "type": "string" },
+    "title": { "type": "string" },
+    "url": { "type": "string" },
+    "account": { "type": "object" },
+    "result": { "type": "object" },
+    "permissions": { "type": "array" },
+    "permission": { "type": "object" }
+  }
+}
+

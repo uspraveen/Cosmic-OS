@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "title": { "type": "string" },
+    "sheet_name": { "type": "string" },
+    "sheets": { "type": "array", "items": { "type": "object" } },
+    "values": { "type": "array" },
+    "rows": { "type": "array" },
+    "data": { "type": "array" },
+    "range": { "type": "string" },
+    "has_header": { "type": "boolean" },
+    "body_markdown": { "type": "string" },
+    "content": { "type": "string" },
+    "query": { "type": "string" },
+    "user_request": { "type": "string" },
+    "natural_language_request": { "type": "string" },
+    "instructions": { "type": "string" },
+    "goal": { "type": "string" },
+    "account_hint": { "type": "string" },
+    "auth": { "type": "object" }
+  }
+}
+

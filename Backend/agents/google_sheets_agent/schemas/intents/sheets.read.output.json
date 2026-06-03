@@ -1,0 +1,16 @@
+{
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["status", "operation", "spreadsheet_id", "structure"],
+  "properties": {
+    "status": { "type": "string" },
+    "operation": { "type": "string" },
+    "spreadsheet_id": { "type": "string" },
+    "title": { "type": "string" },
+    "url": { "type": "string" },
+    "account": { "type": "object" },
+    "structure": { "type": "object" },
+    "range": { "type": "object" }
+  }
+}
+

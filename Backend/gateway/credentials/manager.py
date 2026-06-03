@@ -79,6 +79,11 @@ GOOGLE_DOCS_SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+GOOGLE_SHEETS_SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
 # Base profile scopes
 GOOGLE_BASE_SCOPES = [
     "openid",
@@ -94,6 +99,7 @@ GOOGLE_DEFAULT_SCOPES = (
     + GOOGLE_CALENDAR_SCOPES
     + GOOGLE_GMAIL_SCOPES
     + GOOGLE_DOCS_SCOPES
+    + GOOGLE_SHEETS_SCOPES
 )
 
 

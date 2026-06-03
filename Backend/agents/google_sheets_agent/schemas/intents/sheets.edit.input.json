@@ -1,0 +1,50 @@
+{
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "operation": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "update_cells",
+        "append_rows",
+        "add_sheet",
+        "format_header_row",
+        "clear_range",
+        "share_file",
+        "list_permissions",
+        "get_link"
+      ]
+    },
+    "spreadsheet_id": { "type": "string" },
+    "sheet_id": { "type": "string" },
+    "file_id": { "type": "string" },
+    "resource": { "type": "object" },
+    "range": { "type": "string" },
+    "sheet_name": { "type": "string" },
+    "title": { "type": "string" },
+    "values": { "type": "array" },
+    "rows": { "type": "array" },
+    "data": { "type": "array" },
+    "body_markdown": { "type": "string" },
+    "content": { "type": "string" },
+    "background_color": { "type": "string" },
+    "row_count": { "type": "integer" },
+    "column_count": { "type": "integer" },
+    "role": { "type": "string" },
+    "type": { "type": "string" },
+    "permission_type": { "type": "string" },
+    "email_address": { "type": "string" },
+    "domain": { "type": "string" },
+    "send_notification_email": { "type": "boolean" },
+    "approval_confirmed": { "type": "boolean" },
+    "query": { "type": "string" },
+    "user_request": { "type": "string" },
+    "natural_language_request": { "type": "string" },
+    "instructions": { "type": "string" },
+    "goal": { "type": "string" },
+    "account_hint": { "type": "string" },
+    "auth": { "type": "object" }
+  }
+}
+

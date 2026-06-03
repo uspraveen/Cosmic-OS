@@ -1,0 +1,16 @@
+{
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["status", "operation", "spreadsheet_id", "title", "url"],
+  "properties": {
+    "status": { "type": "string" },
+    "operation": { "type": "string" },
+    "spreadsheet": { "type": "object" },
+    "spreadsheet_id": { "type": "string" },
+    "title": { "type": "string" },
+    "url": { "type": "string" },
+    "account": { "type": "object" },
+    "verified_ranges": { "type": "array" }
+  }
+}
+

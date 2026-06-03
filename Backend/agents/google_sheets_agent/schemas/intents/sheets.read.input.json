@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "spreadsheet_id": { "type": "string" },
+    "sheet_id": { "type": "string" },
+    "file_id": { "type": "string" },
+    "resource": { "type": "object" },
+    "operation": { "type": "string", "enum": ["read_structure", "read_range", "structure", "range", "auto"] },
+    "range": { "type": "string" },
+    "sheet_name": { "type": "string" },
+    "query": { "type": "string" },
+    "user_request": { "type": "string" },
+    "account_hint": { "type": "string" },
+    "auth": { "type": "object" }
+  }
+}
+

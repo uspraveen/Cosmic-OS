@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["status", "matches", "count"],
+  "properties": {
+    "status": { "type": "string" },
+    "matches": { "type": "array", "items": { "type": "object" } },
+    "count": { "type": "integer" }
+  }
+}
+

@@ -1,0 +1,154 @@
+agent_id: cosmic/google-sheets-agent:1.0.0
+display_name: Google Sheets Agent
+description: >
+  Specialist agent for live Google Sheets and Google Drive spreadsheets. It
+  resolves user-owned spreadsheets, reads workbook structure and ranges, creates
+  native Google Sheets, performs verified cell/tab/formatting edits, manages
+  sharing permissions, and keeps a private edit/session ledger. It always
+  operates through the selected connected Google account and is separate from
+  uploaded CSV/XLSX parsing.
+
+intents:
+  - name: sheets.resolve_resource
+    description: Resolve a Google Sheet by title/query or explicit spreadsheet/file id.
+    input_schema: schemas/intents/sheets.resolve_resource.input.json
+    output_schema: schemas/intents/sheets.resolve_resource.output.json
+    timeout_sec: 45
+    usage_hints:
+      - Use this before live Google Sheets reads/edits when the user names a spreadsheet but did not provide an id.
+      - May accept a high-level natural-language spreadsheet reference; the agent's internal LLM can normalize it into a Drive search query.
+      - Pass account hints naturally when the user mentions a specific Google account email, work account, or personal account.
+      - Return candidate spreadsheets with account identity; the orchestrator should ask the user only when multiple plausible matches remain.
+
+  - name: sheets.create
+    description: Create a new Google Sheet, optionally with initial tabs, values, and header formatting.
+    input_schema: schemas/intents/sheets.create.input.json
+    output_schema: schemas/intents/sheets.create.output.json
+    timeout_sec: 120
+    usage_hints:
+      - Use this when the user asks COSMIC to create a Google Sheet, spreadsheet, tracker, table, budget, CRM, list, schedule, planning grid, or matrix.
+      - This is an intelligent specialist: it can use its internal LLM to convert a high-level brief into native spreadsheet tabs, rows, and header formatting.
+      - Prefer passing structured sheets=[{title, values, has_header}] when the orchestrator already has the data. The specialist also parses simple Markdown pipe tables defensively.
+      - Use this instead of asking the orchestrator to create a downloadable CSV when the user specifically wants a live Google Sheet.
+      - If the user already named or previously selected a Google account, pass account_hint, preferably the email address.
+      - Preserve the selected Google account in the result because users may connect multiple accounts.
+
+  - name: sheets.read
+    description: Read a live Google Sheet workbook structure or a bounded A1 range.
+    input_schema: schemas/intents/sheets.read.input.json
+    output_schema: schemas/intents/sheets.read.output.json
+    timeout_sec: 60
+    usage_hints:
+      - Use this when the user asks what is in a Google Sheet or before a surgical edit that needs current tabs/ranges.
+      - Read workbook structure first when the tab name/range is unclear.
+      - Use a bounded A1 range whenever the user asks for cell values. Avoid reading entire large spreadsheets.
+      - If the user gives a named spreadsheet instead of an id, use sheets.resolve_resource first when several matches are possible.
+
+  - name: sheets.edit
+    description: Perform live Google Sheets or Drive operations with read-before-write verification.
+    input_schema: schemas/intents/sheets.edit.input.json
+    output_schema: schemas/intents/sheets.edit.output.json
+    timeout_sec: 150
+    usage_hints:
+      - Use this for live Google Sheets mutations: update_cells, append_rows, add_sheet, format_header_row, clear_range, share_file, list_permissions, get_link.
+      - For high-level natural-language edits, pass query/user_request/instructions with operation=auto or omit operation; the internal LLM planner will choose a safe supported operation.
+      - Prefer append_rows for adding records under existing headers, update_cells for exact ranges, and add_sheet before writing to a new tab.
+      - Cell mutations perform read-before-write and read-after-write verification and are recorded in the private edit ledger.
+      - Sharing with writer/commenter access, domain visibility, or anyone visibility requires approval_confirmed=true after explicit user approval.
+      - Use sheets.read or sheets.resolve_resource again if the workbook changed or a range is ambiguous.
+
+  - name: sheets.recall_session
+    description: Recall prior Google Sheets operations from the private agent ledger.
+    input_schema: schemas/intents/sheets.recall_session.input.json
+    output_schema: schemas/intents/sheets.recall_session.output.json
+    timeout_sec: 30
+    usage_hints:
+      - Recall prior Google Sheets work when the user says "that sheet", "the tracker you made", or needs audit details from a previous Sheets action.
+      - Prefer recall plus sheets.read for continuing edits on an existing spreadsheet from the same project/session.
+
+auth_requirements:
+  sheets.resolve_resource:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/spreadsheets
+      - https://www.googleapis.com/auth/drive.file
+  sheets.create:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/spreadsheets
+      - https://www.googleapis.com/auth/drive.file
+  sheets.read:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/spreadsheets
+      - https://www.googleapis.com/auth/drive.file
+  sheets.edit:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/spreadsheets
+      - https://www.googleapis.com/auth/drive.file
+
+model_requirements:
+  internal_llm:
+    required: true
+    provider: openai_compatible
+    default_model_key: openai:gpt-5-mini
+    purposes:
+      - google_sheets.internal_llm.plan
+    usage_reporting: Gateway /internal/usage/log
+    notes:
+      - The internal LLM is the planning layer. Google Sheets and Drive API calls remain deterministic, verified executor operations.
+      - The planner can normalize high-level requests into create/read/edit/share operations and decide when clarification or approval is required.
+
+artifact_types:
+  - google_sheets_snapshot
+  - google_sheets_edit_report
+  - google_sheets_resource_candidates
+
+policies:
+  network_access: true
+  writable_paths:
+    - runs/artifacts
+    - agents/google_sheets_agent/store
+    - agents/google_sheets_agent/runtime
+  tool_access: []
+  allowed_senders:
+    - cosmic/orchestrator:1.0.0
+  intent_authorization:
+    sheets.resolve_resource: [cosmic/orchestrator:1.0.0]
+    sheets.create: [cosmic/orchestrator:1.0.0]
+    sheets.read: [cosmic/orchestrator:1.0.0]
+    sheets.edit: [cosmic/orchestrator:1.0.0]
+    sheets.recall_session: [cosmic/orchestrator:1.0.0]
+
+sla:
+  max_concurrency: 2
+  heartbeat_interval_sec: 10
+  heartbeat_ttl_sec: 30
+  max_task_duration_sec: 240
+  health_endpoint: /health
+  retry_policy:
+    max_attempts: 3
+    backoff: exponential
+    backoff_base_sec: 2
+    backoff_max_sec: 60
+    retryable_codes:
+      - TIMEOUT
+      - NETWORK_ERROR
+      - RATE_LIMITED
+    non_retryable_codes:
+      - INVALID_INPUT
+      - AUTH_ERROR
+      - APPROVAL_REQUIRED
+      - SCHEMA_VIOLATION
+      - INTERNAL_ERROR
+
+stream_key: streams:cosmic/google-sheets-agent:1.0.0
+
+version_info:
+  semver: 1.0.0
+  released_at: "2026-06-02"
+  deprecated_at: null
+  remove_after: null
+  changelog: CHANGELOG.md
+
