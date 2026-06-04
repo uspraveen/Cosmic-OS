@@ -73,6 +73,35 @@ class SheetNavigator:
             raise ValueError(f"Sheet tab not found: {sheet_name}")
         return f"{quote_sheet_name(sheet_name)}!{raw}"
 
+    def grid_range(self, range_name: str, *, default_sheet: str | None = None) -> dict[str, int]:
+        """Return a Google Sheets GridRange for a bounded A1 cell range."""
+
+        normalized = self.ensure_range(range_name, default_sheet=default_sheet)
+        match = _A1_WITH_SHEET_RE.match(normalized)
+        if not match:
+            raise ValueError(f"Unsupported A1 range: {range_name!r}")
+        sheet_name = match.group("sheet").strip("' ")
+        sheet = self.sheet_for(sheet_name)
+        if sheet is None or sheet.sheet_id is None:
+            raise ValueError(f"Sheet tab not found: {sheet_name}")
+        cells = match.group("cells").replace(" ", "")
+        start_ref, end_ref = (cells.split(":", 1) + [cells])[:2] if ":" in cells else (cells, cells)
+        start_row, start_col = _parse_a1_cell(start_ref)
+        end_row, end_col = _parse_a1_cell(end_ref)
+        top = min(start_row, end_row) - 1
+        bottom = max(start_row, end_row)
+        left = min(start_col, end_col)
+        right = max(start_col, end_col) + 1
+        if top < 0 or left < 0 or bottom <= top or right <= left:
+            raise ValueError(f"Unsupported A1 range: {range_name!r}")
+        return {
+            "sheetId": int(sheet.sheet_id),
+            "startRowIndex": top,
+            "endRowIndex": bottom,
+            "startColumnIndex": left,
+            "endColumnIndex": right,
+        }
+
     def summary(self) -> dict[str, Any]:
         return {
             "spreadsheet_id": self.spreadsheet_id,
@@ -95,6 +124,16 @@ class SheetNavigator:
 def quote_sheet_name(sheet_name: str) -> str:
     cleaned = str(sheet_name or "Sheet1").replace("'", "''").strip() or "Sheet1"
     return f"'{cleaned}'"
+
+
+def _parse_a1_cell(cell_ref: str) -> tuple[int, int]:
+    match = re.fullmatch(r"([A-Za-z]+)([0-9]+)", str(cell_ref or "").strip())
+    if not match:
+        raise ValueError(f"Unsupported A1 cell reference: {cell_ref!r}")
+    col = 0
+    for char in match.group(1).upper():
+        col = col * 26 + (ord(char) - ord("A") + 1)
+    return int(match.group(2)), col - 1
 
 
 def parse_markdown_tables(markdown_text: str) -> list[dict[str, Any]]:
@@ -187,4 +226,3 @@ def _looks_like_separator(line: str) -> bool:
 
 def _split_pipe_row(line: str) -> list[str]:
     return [cell.strip() for cell in line.strip().strip("|").split("|")]
-

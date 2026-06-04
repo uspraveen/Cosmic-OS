@@ -2593,6 +2593,8 @@ export default function App() {
   const showLauncherTrayRef = useRef(false)
   const lastGatewayResumeRequestAtRef = useRef(0)
   const shouldAutoScrollRef = useRef(true)
+  const pendingResponseStartScrollRef = useRef(false)
+  const suppressBottomAnchorUntilRef = useRef(0)
   const selectedModelRef = useRef<GatewayModelSelection>('cosmic')
   const seenCronResultKeysRef = useRef<Set<string>>(new Set())
   const consumedHeartbeatKeysRef = useRef<Set<string>>(new Set())
@@ -3618,6 +3620,8 @@ export default function App() {
       activeStreamingRequestIdRef.current = String(activeStream.requestId || '').trim() || null
       activeStreamingTaskIdRef.current = String(activeStream.taskId || '').trim() || null
       setStreamingProgress(String(activeStream.activity || activeStream.progress?.label || '').trim())
+      pendingResponseStartScrollRef.current = true
+      shouldAutoScrollRef.current = false
       setIsStreaming(true)
       return
     }
@@ -4464,13 +4468,14 @@ export default function App() {
             activeStreamingTaskIdRef.current = foregroundTask.taskId
           }
           setStreamingProgress('')
+          pendingResponseStartScrollRef.current = true
           setIsStreaming(true)
         } else if (activeStreamingRequestIdRef.current === requestId) {
           clearActiveStreamingRefs()
           setStreamingProgress('')
           setIsStreaming(false)
         }
-        shouldAutoScrollRef.current = !foregroundCompleted
+        shouldAutoScrollRef.current = false
         if (modeRef.current !== 'chat') {
           showChatComposer()
         }
@@ -5287,7 +5292,8 @@ export default function App() {
     const requestId = `req_${crypto.randomUUID()}`
     const userMessage = createUserMessage(displayText, messageAttachments, { requestId })
     clearComposerInput()
-    shouldAutoScrollRef.current = true
+    pendingResponseStartScrollRef.current = true
+    shouldAutoScrollRef.current = false
     saveChatReadCursor(activeSessionIdRef.current, userMessage)
     setUnreadBoundaryMessageId(null)
 
@@ -5515,7 +5521,8 @@ export default function App() {
     })
     try {
       await window.cosmic.foregroundGatewayRequest({ requestId })
-      shouldAutoScrollRef.current = true
+      pendingResponseStartScrollRef.current = true
+      shouldAutoScrollRef.current = false
       showChatComposer()
       setSelectedBackgroundRequestId(null)
     } catch (error: any) {
@@ -5719,24 +5726,44 @@ export default function App() {
   }
 
   const scrollToBottom = () => {
+    shouldAutoScrollRef.current = true
+    setShowScrollButton(false)
     responseEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    if (searchStateRef.current === 'visible' && modeRef.current === 'chat') {
+      clearUnreadBoundaryAndMarkRead()
+    }
   }
 
   const handleScroll = () => {
     if (!responseContainerRef.current) return
     const { scrollTop, scrollHeight, clientHeight } = responseContainerRef.current
     const distanceFromBottom = scrollHeight - scrollTop - clientHeight
+    const isAtBottom = distanceFromBottom <= 24
     const isNearBottom = distanceFromBottom < 50
-    shouldAutoScrollRef.current = isNearBottom
+    if (Date.now() < suppressBottomAnchorUntilRef.current) {
+      shouldAutoScrollRef.current = false
+      setShowScrollButton(!isNearBottom && messages.length > 1)
+      return
+    }
+    shouldAutoScrollRef.current = isAtBottom
     setShowScrollButton(!isNearBottom && messages.length > 1)
-    if (isNearBottom && searchStateRef.current === 'visible' && modeRef.current === 'chat') {
+    if (isAtBottom && searchStateRef.current === 'visible' && modeRef.current === 'chat') {
       clearUnreadBoundaryAndMarkRead()
     }
   }
 
   useEffect(() => {
+    if (pendingResponseStartScrollRef.current) {
+      pendingResponseStartScrollRef.current = false
+      suppressBottomAnchorUntilRef.current = Date.now() + 500
+      window.requestAnimationFrame(() => {
+        responseEndRef.current?.scrollIntoView({ behavior: 'auto' })
+        shouldAutoScrollRef.current = false
+      })
+      return
+    }
     if (shouldAutoScrollRef.current) {
-      responseEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+      responseEndRef.current?.scrollIntoView({ behavior: isStreaming ? 'auto' : 'smooth' })
       if (searchStateRef.current === 'visible' && modeRef.current === 'chat') {
         markChatReadThroughLatest(messages)
         if (unreadBoundaryMessageIdRef.current) {

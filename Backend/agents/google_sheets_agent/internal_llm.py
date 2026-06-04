@@ -41,6 +41,10 @@ Core behavior:
 - Use append_rows for adding new records under existing headers.
 - Use add_sheet before writing to a new tab.
 - Use format_header_row when the first row should be frozen/bold/colored.
+- Use format_range, set_borders, add_banding, resize_columns/rows,
+  auto_resize_columns/rows, freeze_panes, merge_cells, and clear_formatting
+  when the user asks for visual polish, colored cells, alignment, wrapping,
+  borders, merged titles, frozen panes, readable widths, or table banding.
 - Never make a file public, domain-visible, or grant writer/commenter access
   unless approval_confirmed=true after explicit user approval.
 - If the request is underspecified, return needs_clarification=true instead of
@@ -49,7 +53,7 @@ Core behavior:
 Return strict JSON only with this shape:
 {
   "intent": "sheets.resolve_resource|sheets.create|sheets.read|sheets.edit",
-  "operation": "resolve_resource|create|read_structure|read_range|update_cells|append_rows|add_sheet|format_header_row|clear_range|share_file|list_permissions|get_link",
+  "operation": "resolve_resource|create|read_structure|read_range|update_cells|append_rows|add_sheet|format_header_row|format_range|clear_formatting|set_borders|auto_resize|auto_resize_columns|auto_resize_rows|resize_dimension|resize_columns|resize_rows|freeze_panes|merge_cells|unmerge_cells|add_banding|clear_range|share_file|list_permissions|get_link",
   "params": {},
   "confidence": 0.0,
   "needs_clarification": false,
@@ -68,6 +72,17 @@ Supported params include:
 - append_rows: spreadsheet_id, range, values
 - add_sheet: spreadsheet_id, title, row_count, column_count
 - format_header_row: spreadsheet_id, sheet_name, range, background_color
+- format_range: spreadsheet_id, range, background_color, text_color, bold,
+  italic, underline, strikethrough, font_size, horizontal_alignment,
+  vertical_alignment, wrap_strategy, number_format_type, number_format_pattern
+- set_borders: spreadsheet_id, range, border_color, border_style,
+  border_width, sides
+- auto_resize/resize_dimension: spreadsheet_id, range, dimension, pixel_size
+- freeze_panes: spreadsheet_id, sheet_name, frozen_row_count, frozen_column_count
+- merge_cells/unmerge_cells: spreadsheet_id, range, merge_type
+- add_banding: spreadsheet_id, range, header_color, first_band_color,
+  second_band_color
+- clear_formatting: spreadsheet_id, range
 - clear_range: spreadsheet_id, range
 - sharing: spreadsheet_id, role, type, email_address, domain, send_notification_email, approval_confirmed
 """
@@ -232,4 +247,3 @@ def _is_gpt5_chat_model(model: str) -> bool:
 def _optional_text(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
-

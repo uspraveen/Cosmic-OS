@@ -511,6 +511,7 @@ def _display_provider_name(value: str) -> str:
         "groq": "Groq",
         "perplexity": "Perplexity",
         "fireworks": "Fireworks",
+        "deepgram": "Deepgram",
     }.get(normalized, normalized.replace("_", " ").title())
 
 
@@ -521,12 +522,14 @@ def _select_feature_buckets(
     limit = max(1, min(int(feature_limit), 12))
     ranked = sorted(feature_buckets.items(), key=lambda item: (-item[1], item[0]))
     selected = ranked[:limit]
-    pinned_label = "Heartbeats"
-    if pinned_label in feature_buckets and all(label != pinned_label for label, _ in selected):
-        if len(selected) >= limit:
-            selected = [*selected[:-1], (pinned_label, feature_buckets[pinned_label])]
-        else:
+    pinned_labels = [label for label in ("Heartbeats", "Meeting mode") if label in feature_buckets]
+    for pinned_label in pinned_labels:
+        if pinned_label in feature_buckets and all(label != pinned_label for label, _ in selected):
             selected.append((pinned_label, feature_buckets[pinned_label]))
+    if len(selected) > limit:
+        pinned = [item for item in selected if item[0] in pinned_labels]
+        regular = [item for item in selected if item[0] not in pinned_labels]
+        selected = regular[: max(0, limit - len(pinned))] + pinned[:limit]
     return selected
 
 
@@ -535,6 +538,8 @@ def _feature_label(*, source_component: str, operation: str, is_heartbeat: bool 
         return "Heartbeats"
     op = operation.lower()
     src = source_component.lower()
+    if "meeting." in op or "meeting_" in op or "meeting" in src:
+        return "Meeting mode"
     if "sheets." in op or "sheets_" in op or "google_sheets" in op or "google-sheets" in op:
         return "Spreadsheets"
     if "docs." in op or "docs_" in op or "docs-parser" in op:

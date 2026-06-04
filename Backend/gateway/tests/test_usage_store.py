@@ -92,3 +92,49 @@ def test_dashboard_summary_pins_heartbeat_usage_when_lower_volume(tmp_path):
 
     labels = [row["label"] for row in summary["usage_by_feature"]]
     assert "Heartbeats" in labels
+
+
+def test_dashboard_summary_groups_and_pins_meeting_mode_usage(tmp_path):
+    store = UsageStore(tmp_path / "usage.db")
+    store.initialize()
+    high_volume_features = [
+        ("agent", "docs.parse"),
+        ("orchestrator", "memory_write"),
+        ("gateway", "gateway.capability_wishlist"),
+        ("orchestrator", "orchestrator.perplexity_research"),
+        ("scheduler", "scheduler.cron"),
+        ("model_router", "model_router.classify"),
+        ("gateway", "gateway.direct_chat"),
+    ]
+    for index, (source_component, operation) in enumerate(high_volume_features):
+        for repeat in range(2):
+            store.append(
+                _usage_event(
+                    f"call_meeting_high_{index}_{repeat}",
+                    operation=operation,
+                    source_component=source_component,
+                )
+            )
+    store.append(
+        _usage_event(
+            "call_meeting_anthropic",
+            operation="meeting.anthropic.summary_update",
+            source_component="desktop_meeting_mode",
+        )
+    )
+    store.append(
+        _usage_event(
+            "call_meeting_deepgram",
+            operation="meeting.deepgram.stream",
+            source_component="desktop_meeting_mode",
+        )
+    )
+
+    summary = store.dashboard_summary(
+        range_start_iso="2026-05-20T00:00:00Z",
+        range_end_iso="2026-05-21T00:00:00Z",
+        feature_limit=6,
+    )
+
+    by_label = {row["label"]: row for row in summary["usage_by_feature"]}
+    assert by_label["Meeting mode"]["count"] == 2

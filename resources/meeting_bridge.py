@@ -26,8 +26,9 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
+from uuid import uuid4
 
 import requests
 import websockets
@@ -59,6 +60,16 @@ CHANNELS = 1
 
 DG_WS = "wss://api.deepgram.com/v1/listen"
 DG_MODEL = os.getenv("DG_MODEL", "nova-3")
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+DG_NOVA3_STREAMING_USD_PER_HOUR = _env_float("DG_NOVA3_STREAMING_USD_PER_HOUR", 0.29)
 
 # Claude Haiku 4.5 — minimal thinking for speed (https://docs.anthropic.com/en/api/messages)
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MEETING_MODEL", "claude-haiku-4-5")
@@ -95,6 +106,9 @@ NUDGE_REPEAT_COOLDOWN_SEC = 18.0
 _ANTHROPIC_HTTP_LOCAL = threading.local()
 _ANTHROPIC_HTTP_CLIENTS: List[Any] = []
 _ANTHROPIC_HTTP_CLIENTS_LOCK = threading.Lock()
+
+MEETING_USAGE_SOURCE_COMPONENT = "desktop_meeting_mode"
+MEETING_USAGE_SOURCE_ID = "cosmic/desktop-meeting-mode:1.0.0"
 
 
 def dlog(*args: Any) -> None:
@@ -152,6 +166,136 @@ atexit.register(_close_anthropic_http2_clients)
 
 def emit(tag: str, payload: Dict[str, Any]) -> None:
     print(f"<<{tag}>>{json.dumps(payload, ensure_ascii=False)}<<END>>", flush=True)
+
+
+def utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def begin_usage_call(prefix: str) -> Dict[str, Any]:
+    normalized = re.sub(r"[^a-z0-9_]+", "_", str(prefix or "meeting").strip().lower()).strip("_") or "meeting"
+    return {
+        "llm_call_id": f"{normalized}_{uuid4().hex}",
+        "llm_call_placed_at": utcnow_iso(),
+        "started_perf_counter": time.perf_counter(),
+    }
+
+
+def _read_path(value: Any, path_name: str) -> Any:
+    current = value
+    for part in str(path_name or "").split("."):
+        if isinstance(current, dict):
+            current = current.get(part)
+        else:
+            return None
+    return current
+
+
+def _read_first_int(value: Any, paths: List[str]) -> int:
+    for path_name in paths:
+        raw = _read_path(value, path_name)
+        try:
+            if raw is None or raw == "":
+                continue
+            return max(0, int(float(raw)))
+        except Exception:
+            continue
+    return 0
+
+
+def normalize_usage(raw_usage: Any) -> Dict[str, int]:
+    prompt_tokens = _read_first_int(raw_usage, ["input_tokens", "prompt_tokens"])
+    completion_tokens = _read_first_int(raw_usage, ["output_tokens", "completion_tokens"])
+    total_tokens = _read_first_int(raw_usage, ["total_tokens"])
+    cached_tokens = _read_first_int(raw_usage, ["cache_read_input_tokens", "cached_tokens"])
+    reasoning_tokens = _read_first_int(raw_usage, ["reasoning_tokens"])
+    if total_tokens == 0 and (prompt_tokens or completion_tokens):
+        total_tokens = prompt_tokens + completion_tokens
+    if cached_tokens > prompt_tokens:
+        cached_tokens = prompt_tokens
+    if reasoning_tokens > completion_tokens:
+        reasoning_tokens = completion_tokens
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "cached_tokens": cached_tokens,
+        "reasoning_tokens": reasoning_tokens,
+    }
+
+
+def merge_usage_delta(target: Dict[str, Any], raw_usage: Any) -> None:
+    if not isinstance(raw_usage, dict):
+        return
+    for key in (
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cache_read_input_tokens",
+        "cached_tokens",
+        "reasoning_tokens",
+    ):
+        value = _read_path(raw_usage, key)
+        try:
+            if value is None or value == "":
+                continue
+            parsed = max(0, int(float(value)))
+        except Exception:
+            continue
+        target[key] = max(int(target.get(key) or 0), parsed)
+
+
+def emit_usage_event(
+    *,
+    metered_call: Dict[str, Any],
+    meeting_id: str,
+    operation: str,
+    usage_kind: str,
+    provider: str,
+    model: str,
+    raw_usage: Any = None,
+    provider_request_id: Optional[str] = None,
+    success: bool = True,
+    error_code: Optional[str] = None,
+    estimated_cost_usd: Optional[float] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    usage = normalize_usage(raw_usage)
+    latency_ms = max(
+        0,
+        int((time.perf_counter() - float(metered_call.get("started_perf_counter") or time.perf_counter())) * 1000),
+    )
+    meta: Dict[str, Any] = {
+        "source": "meeting_mode",
+        "raw_usage": raw_usage if raw_usage is not None else {},
+    }
+    if metadata:
+        meta.update(metadata)
+    payload = {
+        "llm_call_id": str(metered_call.get("llm_call_id") or f"meeting_{uuid4().hex}"),
+        "source_component": MEETING_USAGE_SOURCE_COMPONENT,
+        "source_id": MEETING_USAGE_SOURCE_ID,
+        "task_id": meeting_id,
+        "session_id": meeting_id,
+        "route": "meeting",
+        "operation": operation,
+        "usage_kind": usage_kind,
+        "provider": provider,
+        "model": model,
+        "provider_request_id": provider_request_id,
+        "prompt_tokens": usage["prompt_tokens"],
+        "completion_tokens": usage["completion_tokens"],
+        "total_tokens": usage["total_tokens"],
+        "cached_tokens": usage["cached_tokens"],
+        "reasoning_tokens": usage["reasoning_tokens"],
+        "estimated_cost_usd": estimated_cost_usd,
+        "latency_ms": latency_ms,
+        "success": bool(success),
+        "error_code": error_code if not success else None,
+        "metadata_json": meta,
+        "llm_call_placed_at": str(metered_call.get("llm_call_placed_at") or utcnow_iso()),
+    }
+    emit("MEETING_USAGE", payload)
 
 
 def emit_status(status: str, **extra: Any) -> None:
@@ -556,6 +700,10 @@ class MeetingRuntime:
         self.noise_floor_rms = 120.0
         self.calibration_frames = 0
         self.speech_hold_frames = 0
+        self.deepgram_usage_call: Optional[Dict[str, Any]] = None
+        self.deepgram_audio_bytes_sent = 0
+        self.deepgram_audio_seconds_sent = 0.0
+        self.deepgram_request_id: Optional[str] = None
 
     def current_meeting_time(self) -> float:
         elapsed = time.time() - self.start_ts
@@ -996,6 +1144,7 @@ class MeetingRuntime:
         cls,
         lines: Any,
         on_chunk: Optional[Callable[[str], None]] = None,
+        usage_out: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         accumulated: List[str] = []
         pending_pre_search: List[str] = []
@@ -1040,6 +1189,15 @@ class MeetingRuntime:
                 continue
 
             event_type = str(data.get("type") or current_event or "").strip()
+            if usage_out is not None:
+                if isinstance(data.get("usage"), dict):
+                    merge_usage_delta(usage_out, data.get("usage"))
+                message = data.get("message")
+                if isinstance(message, dict) and isinstance(message.get("usage"), dict):
+                    merge_usage_delta(usage_out, message.get("usage"))
+                delta = data.get("delta")
+                if isinstance(delta, dict) and isinstance(delta.get("usage"), dict):
+                    merge_usage_delta(usage_out, delta.get("usage"))
             if event_type == "content_block_start":
                 block = data.get("content_block") or {}
                 block_type = block.get("type")
@@ -1287,6 +1445,54 @@ class MeetingRuntime:
 
         emit_status("running", meeting_id=self.meeting_id, title=self.title)
 
+    def _begin_deepgram_usage(self) -> None:
+        self.deepgram_usage_call = begin_usage_call("meeting_deepgram")
+        self.deepgram_audio_bytes_sent = 0
+        self.deepgram_audio_seconds_sent = 0.0
+        self.deepgram_request_id = None
+
+    def _record_deepgram_audio_bytes(self, size_bytes: int) -> None:
+        byte_count = max(0, int(size_bytes or 0))
+        if byte_count <= 0:
+            return
+        self.deepgram_audio_bytes_sent += byte_count
+        bytes_per_second = TARGET_SR * CHANNELS * 2
+        if bytes_per_second > 0:
+            self.deepgram_audio_seconds_sent += byte_count / float(bytes_per_second)
+
+    def _finish_deepgram_usage(self, *, success: bool = True, error_code: Optional[str] = None) -> None:
+        metered_call = self.deepgram_usage_call
+        if not metered_call:
+            return
+        audio_seconds = max(0.0, float(self.deepgram_audio_seconds_sent or 0.0))
+        estimated_cost = round((audio_seconds / 3600.0) * DG_NOVA3_STREAMING_USD_PER_HOUR, 10)
+        emit_usage_event(
+            metered_call=metered_call,
+            meeting_id=self.meeting_id,
+            operation="meeting.deepgram.stream",
+            usage_kind="audio_transcription",
+            provider="deepgram",
+            model=DG_MODEL,
+            raw_usage={
+                "audio_seconds": round(audio_seconds, 3),
+                "audio_bytes": self.deepgram_audio_bytes_sent,
+            },
+            provider_request_id=self.deepgram_request_id,
+            success=success,
+            error_code=error_code,
+            estimated_cost_usd=estimated_cost,
+            metadata={
+                "sample_rate": TARGET_SR,
+                "channels": CHANNELS,
+                "frame_ms": FRAME_MS,
+                "streaming_rate_usd_per_hour": DG_NOVA3_STREAMING_USD_PER_HOUR,
+            },
+        )
+        self.deepgram_usage_call = None
+        self.deepgram_audio_bytes_sent = 0
+        self.deepgram_audio_seconds_sent = 0.0
+        self.deepgram_request_id = None
+
     def stop(self) -> Dict[str, Any]:
         self.is_running = False
         self.stop_event.set()
@@ -1517,6 +1723,7 @@ class MeetingRuntime:
             temperature=0.2,
             max_tokens=768,
             allow_web=self.web_search_enabled,
+            operation="meeting.anthropic.summary_update",
         )
         if not raw:
             return None
@@ -1562,6 +1769,7 @@ class MeetingRuntime:
             temperature=0.2,
             max_tokens=220,
             allow_web=self.web_search_enabled,
+            operation="meeting.anthropic.nudge_repair",
         )
         return self._normalize_transcript_text(raw or "")
 
@@ -1605,6 +1813,7 @@ class MeetingRuntime:
             temperature=0.45,
             max_tokens=1024,
             allow_web=bool(allow_web_search),
+            operation="meeting.anthropic.answer",
         )
         if answer is None:
             return self._fallback_answer(question, transcript_text, summary_text)
@@ -1656,6 +1865,7 @@ class MeetingRuntime:
             temperature=0.45,
             max_tokens=1024,
             allow_web=bool(allow_web_search),
+            operation="meeting.anthropic.answer_stream",
             on_chunk=on_chunk,
         )
         if answer is None:
@@ -1693,11 +1903,14 @@ class MeetingRuntime:
         temperature: float,
         max_tokens: int,
         allow_web: bool,
+        operation: str,
         on_chunk: Optional[Callable[[str], None]] = None,
     ) -> Optional[str]:
         client = _get_anthropic_http2_client()
         if client is None:
             return None
+        metered_call = begin_usage_call("meeting_anthropic")
+        usage: Dict[str, Any] = {}
 
         payload = self._build_anthropic_payload(
             system_prompt=system_prompt,
@@ -1724,6 +1937,23 @@ class MeetingRuntime:
                     except Exception:
                         pass
                     dlog("Anthropic HTTP/2 stream error:", resp.status_code, text)
+                    emit_usage_event(
+                        metered_call=metered_call,
+                        meeting_id=self.meeting_id,
+                        operation=operation,
+                        usage_kind="messages",
+                        provider="anthropic",
+                        model=ANTHROPIC_MODEL,
+                        raw_usage=usage,
+                        success=False,
+                        error_code=f"HTTP_{resp.status_code}",
+                        metadata={
+                            "transport": "httpx_stream",
+                            "allow_web": bool(allow_web),
+                            "status_code": resp.status_code,
+                            "error_preview": text,
+                        },
+                    )
                     if allow_web and resp.status_code in (400, 401, 403):
                         return self._call_anthropic_http2_stream(
                             system_prompt=system_prompt,
@@ -1731,12 +1961,45 @@ class MeetingRuntime:
                             temperature=temperature,
                             max_tokens=max_tokens,
                             allow_web=False,
+                            operation=operation,
                             on_chunk=on_chunk,
                         )
                     return None
-                return self._consume_anthropic_sse(resp.iter_lines(), on_chunk=on_chunk)
+                text = self._consume_anthropic_sse(resp.iter_lines(), on_chunk=on_chunk, usage_out=usage)
+                emit_usage_event(
+                    metered_call=metered_call,
+                    meeting_id=self.meeting_id,
+                    operation=operation,
+                    usage_kind="messages",
+                    provider="anthropic",
+                    model=ANTHROPIC_MODEL,
+                    raw_usage=usage,
+                    success=text is not None,
+                    error_code=None if text is not None else "NO_TEXT",
+                    metadata={
+                        "transport": "httpx_stream",
+                        "allow_web": bool(allow_web),
+                    },
+                )
+                return text
         except Exception as exc:
             dlog("Anthropic HTTP/2 stream failed:", exc)
+            emit_usage_event(
+                metered_call=metered_call,
+                meeting_id=self.meeting_id,
+                operation=operation,
+                usage_kind="messages",
+                provider="anthropic",
+                model=ANTHROPIC_MODEL,
+                raw_usage=usage,
+                success=False,
+                error_code=type(exc).__name__,
+                metadata={
+                    "transport": "httpx_stream",
+                    "allow_web": bool(allow_web),
+                    "error": str(exc)[:300],
+                },
+            )
             return None
 
     def _call_anthropic_requests(
@@ -1746,7 +2009,9 @@ class MeetingRuntime:
         temperature: float,
         max_tokens: int,
         allow_web: bool,
+        operation: str,
     ) -> Optional[str]:
+        metered_call = begin_usage_call("meeting_anthropic")
         payload = self._build_anthropic_payload(
             system_prompt=system_prompt,
             user_content=user_content,
@@ -1764,6 +2029,23 @@ class MeetingRuntime:
             )
             if resp.status_code != 200:
                 dlog("Anthropic requests fallback error:", resp.status_code, resp.text[:300])
+                emit_usage_event(
+                    metered_call=metered_call,
+                    meeting_id=self.meeting_id,
+                    operation=operation,
+                    usage_kind="messages",
+                    provider="anthropic",
+                    model=ANTHROPIC_MODEL,
+                    raw_usage={},
+                    success=False,
+                    error_code=f"HTTP_{resp.status_code}",
+                    metadata={
+                        "transport": "requests",
+                        "allow_web": bool(allow_web),
+                        "status_code": resp.status_code,
+                        "error_preview": resp.text[:300],
+                    },
+                )
                 if allow_web and resp.status_code in (400, 401, 403):
                     return self._call_anthropic_requests(
                         system_prompt=system_prompt,
@@ -1771,12 +2053,44 @@ class MeetingRuntime:
                         temperature=temperature,
                         max_tokens=max_tokens,
                         allow_web=False,
+                        operation=operation,
                     )
                 return None
             body = resp.json()
+            emit_usage_event(
+                metered_call=metered_call,
+                meeting_id=self.meeting_id,
+                operation=operation,
+                usage_kind="messages",
+                provider="anthropic",
+                model=ANTHROPIC_MODEL,
+                raw_usage=body.get("usage") or {},
+                provider_request_id=str(body.get("id") or "").strip() or None,
+                success=True,
+                metadata={
+                    "transport": "requests",
+                    "allow_web": bool(allow_web),
+                },
+            )
             return self._extract_anthropic_text_from_blocks(body.get("content") or [])
         except Exception as exc:
             dlog("Anthropic requests fallback failed:", exc)
+            emit_usage_event(
+                metered_call=metered_call,
+                meeting_id=self.meeting_id,
+                operation=operation,
+                usage_kind="messages",
+                provider="anthropic",
+                model=ANTHROPIC_MODEL,
+                raw_usage={},
+                success=False,
+                error_code=type(exc).__name__,
+                metadata={
+                    "transport": "requests",
+                    "allow_web": bool(allow_web),
+                    "error": str(exc)[:300],
+                },
+            )
             return None
 
     def _call_anthropic_stream_requests(
@@ -1786,8 +2100,11 @@ class MeetingRuntime:
         temperature: float,
         max_tokens: int,
         allow_web: bool,
+        operation: str,
         on_chunk: Optional[Callable[[str], None]] = None,
     ) -> Optional[str]:
+        metered_call = begin_usage_call("meeting_anthropic")
+        usage: Dict[str, Any] = {}
         payload = self._build_anthropic_payload(
             system_prompt=system_prompt,
             user_content=user_content,
@@ -1811,6 +2128,23 @@ class MeetingRuntime:
                 except Exception:
                     pass
                 dlog("Anthropic requests stream fallback error:", resp.status_code, preview)
+                emit_usage_event(
+                    metered_call=metered_call,
+                    meeting_id=self.meeting_id,
+                    operation=operation,
+                    usage_kind="messages",
+                    provider="anthropic",
+                    model=ANTHROPIC_MODEL,
+                    raw_usage=usage,
+                    success=False,
+                    error_code=f"HTTP_{resp.status_code}",
+                    metadata={
+                        "transport": "requests_stream",
+                        "allow_web": bool(allow_web),
+                        "status_code": resp.status_code,
+                        "error_preview": preview,
+                    },
+                )
                 if allow_web and resp.status_code in (400, 401, 403):
                     return self._call_anthropic_stream_requests(
                         system_prompt=system_prompt,
@@ -1818,12 +2152,45 @@ class MeetingRuntime:
                         temperature=temperature,
                         max_tokens=max_tokens,
                         allow_web=False,
+                        operation=operation,
                         on_chunk=on_chunk,
                     )
                 return None
-            return self._consume_anthropic_sse(resp.iter_lines(decode_unicode=True), on_chunk=on_chunk)
+            text = self._consume_anthropic_sse(resp.iter_lines(decode_unicode=True), on_chunk=on_chunk, usage_out=usage)
+            emit_usage_event(
+                metered_call=metered_call,
+                meeting_id=self.meeting_id,
+                operation=operation,
+                usage_kind="messages",
+                provider="anthropic",
+                model=ANTHROPIC_MODEL,
+                raw_usage=usage,
+                success=text is not None,
+                error_code=None if text is not None else "NO_TEXT",
+                metadata={
+                    "transport": "requests_stream",
+                    "allow_web": bool(allow_web),
+                },
+            )
+            return text
         except Exception as exc:
             dlog("Anthropic requests stream fallback failed:", exc)
+            emit_usage_event(
+                metered_call=metered_call,
+                meeting_id=self.meeting_id,
+                operation=operation,
+                usage_kind="messages",
+                provider="anthropic",
+                model=ANTHROPIC_MODEL,
+                raw_usage=usage,
+                success=False,
+                error_code=type(exc).__name__,
+                metadata={
+                    "transport": "requests_stream",
+                    "allow_web": bool(allow_web),
+                    "error": str(exc)[:300],
+                },
+            )
             return None
 
     def _call_anthropic(
@@ -1833,6 +2200,7 @@ class MeetingRuntime:
         temperature: float = 0.4,
         max_tokens: int = 1024,
         allow_web: bool = False,
+        operation: str = "meeting.anthropic.call",
     ) -> Optional[str]:
         if not self.anthropic_key:
             return None
@@ -1844,6 +2212,7 @@ class MeetingRuntime:
             temperature=temperature,
             max_tokens=max_tokens,
             allow_web=allow_web,
+            operation=operation,
             on_chunk=None,
         )
         if response is not None:
@@ -1855,6 +2224,7 @@ class MeetingRuntime:
             temperature=temperature,
             max_tokens=max_tokens,
             allow_web=allow_web,
+            operation=operation,
         )
 
     def _call_anthropic_stream(
@@ -1864,6 +2234,7 @@ class MeetingRuntime:
         temperature: float = 0.4,
         max_tokens: int = 1024,
         allow_web: bool = False,
+        operation: str = "meeting.anthropic.call_stream",
         on_chunk: Optional[Callable[[str], None]] = None,
     ) -> Optional[str]:
         """Stream Anthropic response; call on_chunk(text) for each text delta. Returns final merged text or None."""
@@ -1885,6 +2256,7 @@ class MeetingRuntime:
             temperature=temperature,
             max_tokens=max_tokens,
             allow_web=allow_web,
+            operation=operation,
             on_chunk=tracked_on_chunk,
         )
         if response is not None:
@@ -1898,6 +2270,7 @@ class MeetingRuntime:
             temperature=temperature,
             max_tokens=max_tokens,
             allow_web=allow_web,
+            operation=operation,
             on_chunk=tracked_on_chunk,
         )
         if fallback_response is not None:
@@ -2143,6 +2516,9 @@ class MeetingRuntime:
                             timeout=DG_CONNECT_TIMEOUT,
                         )
                         self.websocket_conn = ws
+                        self._begin_deepgram_usage()
+                        deepgram_success = True
+                        deepgram_error_code: Optional[str] = None
                         emit_status("listening", meeting_id=self.meeting_id)
                         dlog(f"Deepgram Nova-3 connected (attempt {attempt + 1})")
 
@@ -2151,6 +2527,7 @@ class MeetingRuntime:
                                 try:
                                     data = await asyncio.wait_for(audio_queue.get(), timeout=0.5)
                                     await ws.send(data)
+                                    self._record_deepgram_audio_bytes(len(data))
                                 except asyncio.TimeoutError:
                                     continue
                                 except Exception as exc:
@@ -2158,6 +2535,7 @@ class MeetingRuntime:
                                     break
 
                         async def receiver() -> None:
+                            nonlocal deepgram_success, deepgram_error_code
                             while self.is_running and not self.stop_event.is_set():
                                 try:
                                     message = await asyncio.wait_for(ws.recv(), timeout=30.0)
@@ -2166,6 +2544,7 @@ class MeetingRuntime:
 
                                     if msg_type == "Metadata":
                                         dlog("Deepgram metadata:", data.get("request_id", ""))
+                                        self.deepgram_request_id = str(data.get("request_id") or "").strip() or self.deepgram_request_id
                                         continue
                                     if msg_type == "SpeechStarted":
                                         continue
@@ -2182,6 +2561,8 @@ class MeetingRuntime:
                                     if msg_type == "Error":
                                         err = data.get("message", data.get("description", "Unknown error"))
                                         dlog("Deepgram error:", err)
+                                        deepgram_success = False
+                                        deepgram_error_code = str(data.get("variant") or data.get("error") or "DEEPGRAM_ERROR").strip() or "DEEPGRAM_ERROR"
                                         emit_status("error", meeting_id=self.meeting_id, error=f"Deepgram: {err}")
                                         break
 
@@ -2228,6 +2609,7 @@ class MeetingRuntime:
                             await asyncio.gather(sender(), receiver(), keepalive())
                         finally:
                             self.websocket_conn = None
+                            self._finish_deepgram_usage(success=deepgram_success, error_code=deepgram_error_code)
                             try:
                                 await ws.send(json.dumps({"type": "CloseStream"}))
                             except Exception:

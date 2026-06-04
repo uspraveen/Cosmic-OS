@@ -50,7 +50,9 @@ intents:
     output_schema: schemas/intents/sheets.edit.output.json
     timeout_sec: 150
     usage_hints:
-      - Use this for live Google Sheets mutations: update_cells, append_rows, add_sheet, format_header_row, clear_range, share_file, list_permissions, get_link.
+      - Use this for live Google Sheets mutations: update_cells, append_rows, add_sheet, clear_range, share_file, list_permissions, get_link.
+      - Use styling operations when the user asks for polish or visual layout: format_header_row, format_range, clear_formatting, set_borders, add_banding, auto_resize_columns, auto_resize_rows, resize_columns, resize_rows, freeze_panes, merge_cells, unmerge_cells.
+      - format_range supports cell background colors, text colors, bold/italic/underline/strikethrough, font size, horizontal/vertical alignment, wrapping, and number/date/currency formats on bounded A1 ranges.
       - For high-level natural-language edits, pass query/user_request/instructions with operation=auto or omit operation; the internal LLM planner will choose a safe supported operation.
       - Prefer append_rows for adding records under existing headers, update_cells for exact ranges, and add_sheet before writing to a new tab.
       - Cell mutations perform read-before-write and read-after-write verification and are recorded in the private edit ledger.
@@ -151,4 +153,3 @@ version_info:
   deprecated_at: null
   remove_after: null
   changelog: CHANGELOG.md
-

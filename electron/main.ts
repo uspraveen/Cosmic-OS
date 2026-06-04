@@ -224,6 +224,7 @@ function configureGatewayConnection() {
     return
   }
   gatewayConnectionManager.configure(getStoredGatewayTransportConfig())
+  scheduleMeetingUsageFlush(1000)
 }
 
 function inferDesktopAttachmentMimeType(filename: string) {
@@ -758,6 +759,69 @@ async function callGatewayJson(
   }
 }
 
+const MEETING_USAGE_QUEUE_STORE_KEY = 'meetingUsageQueueV1'
+const MEETING_USAGE_QUEUE_LIMIT = 1000
+let meetingUsageFlushTimer: ReturnType<typeof setTimeout> | null = null
+let meetingUsageFlushBusy = false
+
+function readMeetingUsageQueue(): any[] {
+  const raw = store.get(MEETING_USAGE_QUEUE_STORE_KEY)
+  return Array.isArray(raw) ? raw.filter((item) => item && typeof item === 'object') : []
+}
+
+function writeMeetingUsageQueue(items: any[]) {
+  store.set(MEETING_USAGE_QUEUE_STORE_KEY, items.slice(-MEETING_USAGE_QUEUE_LIMIT))
+}
+
+function scheduleMeetingUsageFlush(delayMs = 750) {
+  if (meetingUsageFlushTimer) return
+  meetingUsageFlushTimer = setTimeout(() => {
+    meetingUsageFlushTimer = null
+    flushMeetingUsageQueue().catch((error) => {
+      console.error('[meeting usage] flush failed', error)
+    })
+  }, Math.max(0, delayMs))
+}
+
+function enqueueMeetingUsageEvent(payload: any) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return
+  }
+  const queue = readMeetingUsageQueue()
+  queue.push(payload)
+  writeMeetingUsageQueue(queue)
+  scheduleMeetingUsageFlush()
+}
+
+async function flushMeetingUsageQueue() {
+  if (meetingUsageFlushBusy) return
+  const config = getStoredGatewayTransportConfig()
+  if (!config) return
+
+  meetingUsageFlushBusy = true
+  try {
+    let queue = readMeetingUsageQueue()
+    while (queue.length > 0) {
+      const event = queue[0]
+      try {
+        await callGatewayJson(config, '/desktop/usage/log', {
+          method: 'POST',
+          body: event,
+          timeoutMs: 8000,
+        })
+        queue = queue.slice(1)
+        writeMeetingUsageQueue(queue)
+        gatewaySystemMetricsCache = null
+      } catch (error) {
+        console.error('[meeting usage] queued event could not be posted', error)
+        break
+      }
+    }
+  } finally {
+    meetingUsageFlushBusy = false
+  }
+}
+
 async function callCosmicMailJson(
   config: GatewayConnectionConfig,
   pathName: string,
@@ -925,6 +989,7 @@ function startMeetingBridge(window: BrowserWindow) {
         else if (tag === 'MEETING_ANSWER_CHUNK') window.webContents.send('meeting:answer-chunk', json)
         else if (tag === 'MEETING_FINAL') window.webContents.send('meeting:final', json)
         else if (tag === 'MEETING_SETTINGS') window.webContents.send('meeting:settings', json)
+        else if (tag === 'MEETING_USAGE') enqueueMeetingUsageEvent(json)
         else if (tag === 'KEY_STATUS') window.webContents.send('key-status', json)
       } catch (e) {
         console.error('Meeting Parse Error:', e)
@@ -1730,6 +1795,17 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
     },
+  })
+
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || input.key !== 'Escape') {
+      return
+    }
+    if (!searchVisible) {
+      return
+    }
+    event.preventDefault()
+    toggleSearch()
   })
 
   win.setIgnoreMouseEvents(true, { forward: true })

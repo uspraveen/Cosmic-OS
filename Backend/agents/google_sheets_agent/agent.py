@@ -359,6 +359,93 @@ class GoogleSheetsAgent(AgentRuntime):
             )
             after_structure = await client.get_spreadsheet(spreadsheet_id)
             result_payload = {"range": f"{sheet_name}!1:1", "response": response, "before": structure, "after": after_structure}
+        elif operation == "format_range":
+            range_name = navigator.ensure_range(str(task.input.get("range") or "").strip())
+            response = await self._format_range(
+                client,
+                spreadsheet_id,
+                navigator,
+                range_name=range_name,
+                input_data=task.input,
+            )
+            after_structure = await client.get_spreadsheet(spreadsheet_id)
+            result_payload = {"range": range_name, "response": response, "before": structure, "after": after_structure}
+        elif operation == "clear_formatting":
+            range_name = navigator.ensure_range(str(task.input.get("range") or "").strip())
+            response = await self._clear_formatting(client, spreadsheet_id, navigator, range_name=range_name)
+            after_structure = await client.get_spreadsheet(spreadsheet_id)
+            result_payload = {"range": range_name, "response": response, "before": structure, "after": after_structure}
+        elif operation == "set_borders":
+            range_name = navigator.ensure_range(str(task.input.get("range") or "").strip())
+            response = await self._set_borders(
+                client,
+                spreadsheet_id,
+                navigator,
+                range_name=range_name,
+                input_data=task.input,
+            )
+            after_structure = await client.get_spreadsheet(spreadsheet_id)
+            result_payload = {"range": range_name, "response": response, "before": structure, "after": after_structure}
+        elif operation in {"auto_resize", "auto_resize_columns", "auto_resize_rows"}:
+            range_name = navigator.ensure_range(str(task.input.get("range") or "").strip())
+            dimension = self._dimension_from_input(task.input, default="ROWS" if operation == "auto_resize_rows" else "COLUMNS")
+            response = await self._auto_resize_dimension(
+                client,
+                spreadsheet_id,
+                navigator,
+                range_name=range_name,
+                dimension=dimension,
+            )
+            after_structure = await client.get_spreadsheet(spreadsheet_id)
+            result_payload = {"range": range_name, "response": response, "before": structure, "after": after_structure}
+        elif operation in {"resize_dimension", "resize_columns", "resize_rows"}:
+            range_name = navigator.ensure_range(str(task.input.get("range") or "").strip())
+            dimension = self._dimension_from_input(task.input, default="ROWS" if operation == "resize_rows" else "COLUMNS")
+            response = await self._resize_dimension(
+                client,
+                spreadsheet_id,
+                navigator,
+                range_name=range_name,
+                dimension=dimension,
+                pixel_size=self._bounded_int(task.input.get("pixel_size") or task.input.get("width") or task.input.get("height"), 120, 20, 1000),
+            )
+            after_structure = await client.get_spreadsheet(spreadsheet_id)
+            result_payload = {"range": range_name, "response": response, "before": structure, "after": after_structure}
+        elif operation == "freeze_panes":
+            sheet_name = str(task.input.get("sheet_name") or navigator.active_sheet).strip()
+            response = await self._freeze_panes(
+                client,
+                spreadsheet_id,
+                navigator,
+                sheet_name=sheet_name,
+                frozen_row_count=self._bounded_int(task.input.get("frozen_row_count") or task.input.get("rows"), 1, 0, 1000),
+                frozen_column_count=self._bounded_int(task.input.get("frozen_column_count") or task.input.get("columns"), 0, 0, 1000),
+            )
+            after_structure = await client.get_spreadsheet(spreadsheet_id)
+            result_payload = {"range": sheet_name, "response": response, "before": structure, "after": after_structure}
+        elif operation in {"merge_cells", "unmerge_cells"}:
+            range_name = navigator.ensure_range(str(task.input.get("range") or "").strip())
+            response = await self._merge_cells(
+                client,
+                spreadsheet_id,
+                navigator,
+                range_name=range_name,
+                unmerge=operation == "unmerge_cells",
+                merge_type=str(task.input.get("merge_type") or "MERGE_ALL").strip(),
+            )
+            after_structure = await client.get_spreadsheet(spreadsheet_id)
+            result_payload = {"range": range_name, "response": response, "before": structure, "after": after_structure}
+        elif operation == "add_banding":
+            range_name = navigator.ensure_range(str(task.input.get("range") or "").strip())
+            response = await self._add_banding(
+                client,
+                spreadsheet_id,
+                navigator,
+                range_name=range_name,
+                input_data=task.input,
+            )
+            after_structure = await client.get_spreadsheet(spreadsheet_id)
+            result_payload = {"range": range_name, "response": response, "before": structure, "after": after_structure}
         else:
             raise ValueError(f"Unsupported Sheets edit operation: {operation}")
 
@@ -514,6 +601,183 @@ class GoogleSheetsAgent(AgentRuntime):
                     "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)",
                 }
             },
+        ]
+        return await client.batch_update(spreadsheet_id, requests)
+
+    async def _format_range(
+        self,
+        client: GoogleSheetsClient,
+        spreadsheet_id: str,
+        navigator: SheetNavigator,
+        *,
+        range_name: str,
+        input_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        cell_format, field_names = self._cell_format_from_input(input_data)
+        if not field_names:
+            raise ValueError("At least one formatting field is required for format_range.")
+        requests = [
+            {
+                "repeatCell": {
+                    "range": navigator.grid_range(range_name),
+                    "cell": {"userEnteredFormat": cell_format},
+                    "fields": ",".join(f"userEnteredFormat.{field_name}" for field_name in field_names),
+                }
+            }
+        ]
+        return await client.batch_update(spreadsheet_id, requests)
+
+    async def _clear_formatting(
+        self,
+        client: GoogleSheetsClient,
+        spreadsheet_id: str,
+        navigator: SheetNavigator,
+        *,
+        range_name: str,
+    ) -> dict[str, Any]:
+        requests = [
+            {
+                "repeatCell": {
+                    "range": navigator.grid_range(range_name),
+                    "cell": {"userEnteredFormat": {}},
+                    "fields": "userEnteredFormat",
+                }
+            }
+        ]
+        return await client.batch_update(spreadsheet_id, requests)
+
+    async def _set_borders(
+        self,
+        client: GoogleSheetsClient,
+        spreadsheet_id: str,
+        navigator: SheetNavigator,
+        *,
+        range_name: str,
+        input_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        raw_border_style = input_data.get("border_style")
+        if raw_border_style is None and not isinstance(input_data.get("style"), dict):
+            raw_border_style = input_data.get("style")
+        border_style = self._border_style(str(raw_border_style or "SOLID"))
+        width = self._bounded_int(input_data.get("border_width") or input_data.get("width"), 1, 1, 10)
+        border: dict[str, Any] = {"style": border_style}
+        if border_style != "NONE":
+            border["width"] = width
+            border["color"] = self._hex_color(str(input_data.get("border_color") or input_data.get("color") or "#D0D7DE"))
+        sides = self._border_sides(input_data.get("sides") or input_data.get("border_sides") or "all")
+        requests = [{"updateBorders": {"range": navigator.grid_range(range_name), **{side: border for side in sides}}}]
+        return await client.batch_update(spreadsheet_id, requests)
+
+    async def _auto_resize_dimension(
+        self,
+        client: GoogleSheetsClient,
+        spreadsheet_id: str,
+        navigator: SheetNavigator,
+        *,
+        range_name: str,
+        dimension: str,
+    ) -> dict[str, Any]:
+        requests = [
+            {
+                "autoResizeDimensions": {
+                    "dimensions": self._dimension_range(navigator.grid_range(range_name), dimension)
+                }
+            }
+        ]
+        return await client.batch_update(spreadsheet_id, requests)
+
+    async def _resize_dimension(
+        self,
+        client: GoogleSheetsClient,
+        spreadsheet_id: str,
+        navigator: SheetNavigator,
+        *,
+        range_name: str,
+        dimension: str,
+        pixel_size: int,
+    ) -> dict[str, Any]:
+        requests = [
+            {
+                "updateDimensionProperties": {
+                    "range": self._dimension_range(navigator.grid_range(range_name), dimension),
+                    "properties": {"pixelSize": pixel_size},
+                    "fields": "pixelSize",
+                }
+            }
+        ]
+        return await client.batch_update(spreadsheet_id, requests)
+
+    async def _freeze_panes(
+        self,
+        client: GoogleSheetsClient,
+        spreadsheet_id: str,
+        navigator: SheetNavigator,
+        *,
+        sheet_name: str,
+        frozen_row_count: int,
+        frozen_column_count: int,
+    ) -> dict[str, Any]:
+        sheet_id = navigator.sheet_id_for(sheet_name)
+        if sheet_id is None:
+            raise ValueError(f"Sheet tab not found: {sheet_name}")
+        requests = [
+            {
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": sheet_id,
+                        "gridProperties": {
+                            "frozenRowCount": frozen_row_count,
+                            "frozenColumnCount": frozen_column_count,
+                        },
+                    },
+                    "fields": "gridProperties(frozenRowCount,frozenColumnCount)",
+                }
+            }
+        ]
+        return await client.batch_update(spreadsheet_id, requests)
+
+    async def _merge_cells(
+        self,
+        client: GoogleSheetsClient,
+        spreadsheet_id: str,
+        navigator: SheetNavigator,
+        *,
+        range_name: str,
+        unmerge: bool,
+        merge_type: str,
+    ) -> dict[str, Any]:
+        grid_range = navigator.grid_range(range_name)
+        if grid_range["endRowIndex"] - grid_range["startRowIndex"] == 1 and grid_range["endColumnIndex"] - grid_range["startColumnIndex"] == 1:
+            raise ValueError("merge_cells/unmerge_cells requires a range larger than one cell.")
+        if unmerge:
+            requests = [{"unmergeCells": {"range": grid_range}}]
+        else:
+            normalized_type = self._merge_type(merge_type)
+            requests = [{"mergeCells": {"range": grid_range, "mergeType": normalized_type}}]
+        return await client.batch_update(spreadsheet_id, requests)
+
+    async def _add_banding(
+        self,
+        client: GoogleSheetsClient,
+        spreadsheet_id: str,
+        navigator: SheetNavigator,
+        *,
+        range_name: str,
+        input_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        requests = [
+            {
+                "addBanding": {
+                    "bandedRange": {
+                        "range": navigator.grid_range(range_name),
+                        "rowProperties": {
+                            "headerColor": self._hex_color(str(input_data.get("header_color") or "#E8F0FE")),
+                            "firstBandColor": self._hex_color(str(input_data.get("first_band_color") or "#FFFFFF")),
+                            "secondBandColor": self._hex_color(str(input_data.get("second_band_color") or "#F6F8FA")),
+                        },
+                    }
+                }
+            }
         ]
         return await client.batch_update(spreadsheet_id, requests)
 
@@ -888,6 +1152,193 @@ class GoogleSheetsAgent(AgentRuntime):
             r, g, b = 232 / 255.0, 240 / 255.0, 254 / 255.0
         return {"red": r, "green": g, "blue": b}
 
+    @classmethod
+    def _cell_format_from_input(cls, input_data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        nested_style = input_data.get("style") if isinstance(input_data.get("style"), dict) else {}
+        source = {**nested_style, **input_data}
+        cell_format: dict[str, Any] = {}
+        fields: list[str] = []
+
+        if cls._present(source, "background_color", "background"):
+            cell_format["backgroundColor"] = cls._hex_color(str(source.get("background_color") or source.get("background")))
+            fields.append("backgroundColor")
+
+        text_format: dict[str, Any] = {}
+        if cls._present(source, "text_color", "foreground_color", "font_color"):
+            text_format["foregroundColor"] = cls._hex_color(
+                str(source.get("text_color") or source.get("foreground_color") or source.get("font_color"))
+            )
+            fields.append("textFormat.foregroundColor")
+        if cls._present(source, "font_size"):
+            text_format["fontSize"] = cls._positive_int(source.get("font_size"), "font_size", minimum=6, maximum=72)
+            fields.append("textFormat.fontSize")
+        for source_key, sheets_key in (
+            ("bold", "bold"),
+            ("italic", "italic"),
+            ("underline", "underline"),
+            ("strikethrough", "strikethrough"),
+        ):
+            if cls._present(source, source_key):
+                text_format[sheets_key] = cls._bool(source.get(source_key), False)
+                fields.append(f"textFormat.{sheets_key}")
+        if text_format:
+            cell_format["textFormat"] = text_format
+
+        if cls._present(source, "horizontal_alignment", "align", "alignment"):
+            cell_format["horizontalAlignment"] = cls._alignment(
+                str(source.get("horizontal_alignment") or source.get("align") or source.get("alignment")),
+                allowed={"LEFT", "CENTER", "RIGHT"},
+                aliases={"START": "LEFT", "END": "RIGHT", "MIDDLE": "CENTER"},
+                field_name="horizontal_alignment",
+            )
+            fields.append("horizontalAlignment")
+        if cls._present(source, "vertical_alignment", "valign"):
+            cell_format["verticalAlignment"] = cls._alignment(
+                str(source.get("vertical_alignment") or source.get("valign")),
+                allowed={"TOP", "MIDDLE", "BOTTOM"},
+                aliases={"CENTER": "MIDDLE"},
+                field_name="vertical_alignment",
+            )
+            fields.append("verticalAlignment")
+        if cls._present(source, "wrap_strategy", "wrap"):
+            cell_format["wrapStrategy"] = cls._alignment(
+                str(source.get("wrap_strategy") or source.get("wrap")),
+                allowed={"OVERFLOW_CELL", "LEGACY_WRAP", "CLIP", "WRAP"},
+                aliases={"TRUE": "WRAP", "YES": "WRAP", "ON": "WRAP", "FALSE": "OVERFLOW_CELL", "NO": "OVERFLOW_CELL"},
+                field_name="wrap_strategy",
+            )
+            fields.append("wrapStrategy")
+        if cls._present(source, "number_format_type", "number_format_pattern", "number_format"):
+            number_format = cls._number_format(source)
+            cell_format["numberFormat"] = number_format
+            fields.append("numberFormat")
+
+        return cell_format, fields
+
+    @classmethod
+    def _number_format(cls, source: dict[str, Any]) -> dict[str, str]:
+        raw_type = str(source.get("number_format_type") or source.get("number_format") or "NUMBER").strip().upper()
+        aliases = {
+            "MONEY": "CURRENCY",
+            "DOLLAR": "CURRENCY",
+            "DOLLARS": "CURRENCY",
+            "PERCENTAGE": "PERCENT",
+            "DATETIME": "DATE_TIME",
+            "PLAIN_TEXT": "TEXT",
+        }
+        number_type = aliases.get(raw_type, raw_type)
+        allowed = {"TEXT", "NUMBER", "PERCENT", "CURRENCY", "DATE", "TIME", "DATE_TIME", "SCIENTIFIC"}
+        if number_type not in allowed:
+            raise ValueError(f"Unsupported number_format_type: {raw_type}")
+        result = {"type": number_type}
+        pattern = str(source.get("number_format_pattern") or "").strip()
+        if pattern:
+            result["pattern"] = pattern
+        return result
+
+    @classmethod
+    def _border_style(cls, value: str) -> str:
+        normalized = str(value or "SOLID").strip().upper().replace("-", "_").replace(" ", "_")
+        aliases = {"MEDIUM": "SOLID_MEDIUM", "THICK": "SOLID_THICK", "DASH": "DASHED", "DOT": "DOTTED", "CLEAR": "NONE"}
+        normalized = aliases.get(normalized, normalized)
+        allowed = {"DOTTED", "DASHED", "SOLID", "SOLID_MEDIUM", "SOLID_THICK", "DOUBLE", "NONE"}
+        if normalized not in allowed:
+            raise ValueError(f"Unsupported border_style: {value}")
+        return normalized
+
+    @classmethod
+    def _border_sides(cls, value: Any) -> list[str]:
+        raw_items = value if isinstance(value, list) else str(value or "all").replace(",", " ").split()
+        normalized: set[str] = set()
+        aliases = {
+            "all": ["top", "bottom", "left", "right", "innerHorizontal", "innerVertical"],
+            "outer": ["top", "bottom", "left", "right"],
+            "inner": ["innerHorizontal", "innerVertical"],
+            "inside": ["innerHorizontal", "innerVertical"],
+            "horizontal": ["top", "bottom", "innerHorizontal"],
+            "vertical": ["left", "right", "innerVertical"],
+            "top": ["top"],
+            "bottom": ["bottom"],
+            "left": ["left"],
+            "right": ["right"],
+            "innerhorizontal": ["innerHorizontal"],
+            "inner_horizontal": ["innerHorizontal"],
+            "innervertical": ["innerVertical"],
+            "inner_vertical": ["innerVertical"],
+        }
+        for item in raw_items:
+            key = str(item or "").strip().lower().replace("-", "_")
+            for side in aliases.get(key, []):
+                normalized.add(side)
+        if not normalized:
+            raise ValueError("Unsupported border sides. Use all, outer, inner, top, bottom, left, right, innerHorizontal, or innerVertical.")
+        order = ["top", "bottom", "left", "right", "innerHorizontal", "innerVertical"]
+        return [side for side in order if side in normalized]
+
+    @classmethod
+    def _dimension_from_input(cls, input_data: dict[str, Any], *, default: str) -> str:
+        raw = str(input_data.get("dimension") or input_data.get("axis") or default).strip().upper()
+        aliases = {"COLUMN": "COLUMNS", "COL": "COLUMNS", "COLS": "COLUMNS", "ROW": "ROWS"}
+        dimension = aliases.get(raw, raw)
+        if dimension not in {"ROWS", "COLUMNS"}:
+            raise ValueError("dimension must be ROWS or COLUMNS.")
+        return dimension
+
+    @staticmethod
+    def _dimension_range(grid_range: dict[str, int], dimension: str) -> dict[str, int | str]:
+        if dimension == "ROWS":
+            return {
+                "sheetId": grid_range["sheetId"],
+                "dimension": "ROWS",
+                "startIndex": grid_range["startRowIndex"],
+                "endIndex": grid_range["endRowIndex"],
+            }
+        return {
+            "sheetId": grid_range["sheetId"],
+            "dimension": "COLUMNS",
+            "startIndex": grid_range["startColumnIndex"],
+            "endIndex": grid_range["endColumnIndex"],
+        }
+
+    @classmethod
+    def _merge_type(cls, value: str) -> str:
+        normalized = str(value or "MERGE_ALL").strip().upper().replace("-", "_").replace(" ", "_")
+        aliases = {"ALL": "MERGE_ALL", "ROWS": "MERGE_ROWS", "COLUMNS": "MERGE_COLUMNS", "COLS": "MERGE_COLUMNS"}
+        normalized = aliases.get(normalized, normalized)
+        allowed = {"MERGE_ALL", "MERGE_ROWS", "MERGE_COLUMNS"}
+        if normalized not in allowed:
+            raise ValueError(f"Unsupported merge_type: {value}")
+        return normalized
+
+    @classmethod
+    def _alignment(
+        cls,
+        value: str,
+        *,
+        allowed: set[str],
+        aliases: dict[str, str],
+        field_name: str,
+    ) -> str:
+        normalized = str(value or "").strip().upper().replace("-", "_").replace(" ", "_")
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in allowed:
+            raise ValueError(f"Unsupported {field_name}: {value}")
+        return normalized
+
+    @staticmethod
+    def _positive_int(value: Any, field_name: str, *, minimum: int, maximum: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} must be an integer.") from exc
+        if parsed < minimum or parsed > maximum:
+            raise ValueError(f"{field_name} must be between {minimum} and {maximum}.")
+        return parsed
+
+    @staticmethod
+    def _present(source: dict[str, Any], *keys: str) -> bool:
+        return any(key in source and source.get(key) is not None and str(source.get(key)).strip() != "" for key in keys)
+
     @staticmethod
     def _http_status_error_detail(exc: httpx.HTTPStatusError) -> str:
         try:
@@ -915,4 +1366,3 @@ class GoogleSheetsAgent(AgentRuntime):
             artifacts=[],
             error=AgentError(code=code, message=message, retryable=retryable, next_action=next_action),
         )
-
