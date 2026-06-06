@@ -318,6 +318,35 @@ class AgentEmailAdapter(ChannelAdapter):
         raw_body = self._build_text_body(message)
         text_body = self._render_plain_text_body(raw_body)
         html_body = self._build_html_body(raw_body)
+
+        def record_delivery(
+            delivery: dict[str, Any],
+            *,
+            subject: str,
+            recipients: list[dict[str, Any]],
+            cc_recipients: list[dict[str, Any]] | None = None,
+            mailbox_address: str | None = None,
+        ) -> None:
+            message["email_delivery"] = delivery
+            message["email_delivery_status"] = delivery["status"]
+            message["email_queued_for_approval"] = bool(delivery.get("queued_for_approval"))
+            if delivery.get("approval_id"):
+                message["email_approval_id"] = delivery["approval_id"]
+            if delivery.get("message_id"):
+                message["email_sent_message_id"] = delivery["message_id"]
+            if delivery.get("approval_id"):
+                message["email_approval"] = {
+                    "approval_id": delivery["approval_id"],
+                    "status": "pending",
+                    "draft_id": delivery.get("draft_id"),
+                    "thread_id": delivery.get("thread_id"),
+                    "subject": subject,
+                    "recipients": recipients,
+                    "cc_recipients": cc_recipients or [],
+                    "body_preview": re.sub(r"\s+", " ", text_body).strip()[:700],
+                    "mailbox_address": _safe_text(mailbox_address) or None,
+                }
+
         reply_context = self._thread_reply_context(message)
         if reply_context is not None:
             if not reply_context["eligible"]:
@@ -345,13 +374,14 @@ class AgentEmailAdapter(ChannelAdapter):
                 reply_payload["cc_recipients"] = cc_recipients
             reply_result = await self.client.reply_to_thread(reply_context["thread_id"], reply_payload)
             delivery = _normalize_email_delivery(payload=reply_result, fallback_thread_id=reply_context["thread_id"])
-            message["email_delivery"] = delivery
-            message["email_delivery_status"] = delivery["status"]
-            message["email_queued_for_approval"] = bool(delivery.get("queued_for_approval"))
-            if delivery.get("approval_id"):
-                message["email_approval_id"] = delivery["approval_id"]
-            if delivery.get("message_id"):
-                message["email_sent_message_id"] = delivery["message_id"]
+            record_delivery(
+                delivery,
+                subject=self._build_subject(message),
+                recipients=to_recipients,
+                cc_recipients=cc_recipients,
+                mailbox_address=_safe_text(mailbox.get("address"))
+                or reply_context["mailbox_address"],
+            )
             return
 
         try:
@@ -378,13 +408,12 @@ class AgentEmailAdapter(ChannelAdapter):
             raise PermanentDeliveryError("Cosmic Mail draft creation did not return an id.")
         send_result = await self.client.send_draft(draft_id)
         delivery = _normalize_email_delivery(payload=send_result, fallback_draft_id=draft_id)
-        message["email_delivery"] = delivery
-        message["email_delivery_status"] = delivery["status"]
-        message["email_queued_for_approval"] = bool(delivery.get("queued_for_approval"))
-        if delivery.get("approval_id"):
-            message["email_approval_id"] = delivery["approval_id"]
-        if delivery.get("message_id"):
-            message["email_sent_message_id"] = delivery["message_id"]
+        record_delivery(
+            delivery,
+            subject=subject,
+            recipients=recipients,
+            mailbox_address=_safe_text(mailbox.get("address")) or mailbox_address,
+        )
 
     async def get_status(self) -> dict[str, Any]:
         auth_context = await self.client.get_auth_context()

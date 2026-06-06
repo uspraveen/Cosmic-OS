@@ -225,6 +225,17 @@ async def test_agent_email_adapter_send_marks_approval_queue_status() -> None:
     assert message["email_delivery_status"] == "queued_for_approval"
     assert message["email_queued_for_approval"] is True
     assert message["email_approval_id"] == "apr_123"
+    assert message["email_approval"] == {
+        "approval_id": "apr_123",
+        "status": "pending",
+        "draft_id": "draft_queued",
+        "thread_id": None,
+        "subject": "Pending approval",
+        "recipients": [{"email": "owner@example.com", "name": "Owner"}],
+        "cc_recipients": [],
+        "body_preview": "Needs review.",
+        "mailbox_address": "assistant@example.com",
+    }
 
 
 @pytest.mark.asyncio

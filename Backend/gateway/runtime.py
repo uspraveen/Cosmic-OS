@@ -3265,6 +3265,16 @@ class GatewayRuntime:
         if self._safe_text(result.get("status")) == "completed":
             output = result.get("output") if isinstance(result.get("output"), dict) else result
             sent = self.gmail_approval_store.mark_sent(approval_id, output) or approval
+            self._persist_response_action_status(
+                approval_id=approval_id,
+                block_type="gmail_draft_approval",
+                status="sent",
+            )
+            await self._publish_response_action_update(
+                approval_id=approval_id,
+                block_type="gmail_draft_approval",
+                status="sent",
+            )
             return {"status": "sent", "approval": sent, "send_result": output}
 
         error_message = (
@@ -3283,7 +3293,183 @@ class GatewayRuntime:
         if status not in {"pending", "sending", "failed"}:
             return {"status": "ignored", "approval": approval, "reason": f"approval_is_{status or 'unknown'}"}
         rejected = self.gmail_approval_store.mark_rejected(approval_id, note) or approval
+        self._persist_response_action_status(
+            approval_id=approval_id,
+            block_type="gmail_draft_approval",
+            status="rejected",
+        )
+        self._schedule_background_task(
+            self._publish_response_action_update(
+                approval_id=approval_id,
+                block_type="gmail_draft_approval",
+                status="rejected",
+            ),
+            name=f"gmail-approval-update-{approval_id}",
+        )
         return {"status": "rejected", "approval": rejected}
+
+    async def approve_agent_email_approval(self, approval_id: str) -> dict[str, Any]:
+        settings = self._effective_agent_email_settings()
+        if not settings.get("base_url") or not settings.get("api_token"):
+            raise RuntimeError("Agent Email is not configured.")
+        client = CosmicMailClient(
+            base_url=settings["base_url"],
+            api_token=settings["api_token"],
+            timeout_sec=self.config.cosmic_mail_timeout_sec,
+        )
+        try:
+            result = await client.approve_approval(approval_id)
+        finally:
+            await client.aclose()
+        self._persist_response_action_status(
+            approval_id=approval_id,
+            block_type="agent_email_draft_approval",
+            status="sent",
+        )
+        await self._publish_response_action_update(
+            approval_id=approval_id,
+            block_type="agent_email_draft_approval",
+            status="sent",
+        )
+        return {"status": "approved", "approval_id": approval_id, "result": result}
+
+    async def reject_agent_email_approval(
+        self,
+        approval_id: str,
+        *,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        settings = self._effective_agent_email_settings()
+        if not settings.get("base_url") or not settings.get("api_token"):
+            raise RuntimeError("Agent Email is not configured.")
+        client = CosmicMailClient(
+            base_url=settings["base_url"],
+            api_token=settings["api_token"],
+            timeout_sec=self.config.cosmic_mail_timeout_sec,
+        )
+        try:
+            result = await client.reject_approval(approval_id, note=note)
+        finally:
+            await client.aclose()
+        self._persist_response_action_status(
+            approval_id=approval_id,
+            block_type="agent_email_draft_approval",
+            status="rejected",
+        )
+        await self._publish_response_action_update(
+            approval_id=approval_id,
+            block_type="agent_email_draft_approval",
+            status="rejected",
+        )
+        return {"status": "rejected", "approval_id": approval_id, "result": result}
+
+    def _gmail_approval_response_block(self, approval: dict[str, Any]) -> dict[str, Any]:
+        approval_id = self._safe_text(approval.get("approval_id"))
+        return {
+            key: value
+            for key, value in {
+                "id": f"gmail_approval:{approval_id}",
+                "type": "gmail_draft_approval",
+                "approval_id": approval_id,
+                "status": self._safe_text(approval.get("status")) or "pending",
+                "account_id": self._safe_text(approval.get("account_id")),
+                "account_email": self._safe_text(approval.get("account_email")),
+                "account_label": self._safe_text(approval.get("account_label")),
+                "draft_id": self._safe_text(approval.get("draft_id")),
+                "thread_id": self._safe_text(approval.get("thread_id")),
+                "subject": self._safe_text(approval.get("subject")) or "Gmail draft",
+                "to": approval.get("to") if isinstance(approval.get("to"), list) else [],
+                "cc": approval.get("cc") if isinstance(approval.get("cc"), list) else [],
+                "bcc": approval.get("bcc") if isinstance(approval.get("bcc"), list) else [],
+                "body_preview": self._safe_text(approval.get("body_preview"))
+                or self._bounded_excerpt(approval.get("body_text"), limit=700),
+                "created_at": self._safe_text(approval.get("created_at")),
+            }.items()
+            if value not in (None, "", [], {})
+        }
+
+    def _calendar_response_blocks(self, event: dict[str, Any]) -> list[dict[str, Any]]:
+        blocks: list[dict[str, Any]] = []
+        for receipt in self._normalize_specialist_receipts(event.get("specialist_receipts")):
+            calendar_event = receipt.get("calendar_event")
+            if not isinstance(calendar_event, dict):
+                continue
+            event_id = self._safe_text(calendar_event.get("event_id"))
+            summary = self._safe_text(calendar_event.get("summary"))
+            if not event_id and not summary:
+                continue
+            block = {
+                key: value
+                for key, value in {
+                    **calendar_event,
+                    "id": f"calendar_event:{event_id or hashlib.sha256(summary.encode('utf-8')).hexdigest()[:16]}",
+                    "type": "calendar_event",
+                    "operation": self._safe_text(calendar_event.get("operation")) or "created",
+                }.items()
+                if value not in (None, "", [], {})
+            }
+            blocks.append(block)
+        return blocks
+
+    def _append_trusted_response_blocks(
+        self,
+        blocks: list[dict[str, Any]],
+        trusted_blocks: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        result = [dict(item) for item in blocks if isinstance(item, dict)]
+        indexes = {
+            self._safe_text(item.get("id")): index
+            for index, item in enumerate(result)
+            if self._safe_text(item.get("id"))
+        }
+        for block in trusted_blocks:
+            block_id = self._safe_text(block.get("id"))
+            if not block_id:
+                continue
+            if block_id in indexes:
+                result[indexes[block_id]] = block
+            else:
+                indexes[block_id] = len(result)
+                result.append(block)
+        return result
+
+    def _persist_response_action_status(
+        self,
+        *,
+        approval_id: str,
+        block_type: str,
+        status: str,
+    ) -> None:
+        self.session_store.update_response_action_status(
+            approval_id=approval_id,
+            block_type=block_type,
+            status=status,
+        )
+
+    async def _publish_response_action_update(
+        self,
+        *,
+        approval_id: str,
+        block_type: str,
+        status: str,
+    ) -> None:
+        event = {
+            "type": "response.action.updated",
+            "approval_id": approval_id,
+            "block_type": block_type,
+            "status": status,
+            "timestamp": utcnow_iso(),
+        }
+        for adapter in self.registry.adapters.values():
+            if not isinstance(adapter, (DesktopAdapter, MobileAdapter)):
+                continue
+            try:
+                await adapter.broadcast_all(event)
+            except Exception:
+                logger.exception(
+                    "gateway.response_action_update.broadcast_failed platform=%s",
+                    adapter.platform,
+                )
 
     async def _dispatch_gmail_send_draft(self, approval: dict[str, Any]) -> dict[str, Any]:
         if self._redis is None:
@@ -3341,7 +3527,7 @@ class GatewayRuntime:
 
     async def _persist_gmail_approval_receipts(self, event: dict[str, Any]) -> list[dict[str, Any]]:
         receipts = self._normalize_specialist_receipts(event.get("specialist_receipts"))
-        created: list[dict[str, Any]] = []
+        persisted: list[dict[str, Any]] = []
         for receipt in receipts:
             approval = receipt.get("gmail_approval")
             if not isinstance(approval, dict):
@@ -3362,10 +3548,10 @@ class GatewayRuntime:
             except ValueError:
                 logger.exception("gateway.gmail_approval.upsert_invalid")
                 continue
+            persisted.append(row)
             if was_created:
-                created.append(row)
                 await self._publish_gmail_approval_notification(row)
-        return created
+        return persisted
 
     async def _publish_gmail_approval_notification(self, approval: dict[str, Any]) -> None:
         subject = self._safe_text(approval.get("subject")) or "Gmail draft approval needed"
@@ -6243,7 +6429,32 @@ class GatewayRuntime:
                 channel=channel,
             )
             if self._safe_text(delivery_event.get("type")) == "response.complete":
-                self._persist_email_delivery_metadata(delivery_event)
+                updated_message = self._persist_email_delivery_metadata(delivery_event)
+                updated_metadata = (
+                    updated_message.get("metadata")
+                    if isinstance(updated_message, dict)
+                    and isinstance(updated_message.get("metadata"), dict)
+                    else {}
+                )
+                updated_blocks = (
+                    updated_metadata.get("response_blocks")
+                    if isinstance(updated_metadata.get("response_blocks"), list)
+                    else []
+                )
+                if updated_blocks and isinstance(updated_message, dict):
+                    self._track_background_task(
+                        self._broadcast_cross_channel_to_realtime_clients(
+                            self._safe_text(updated_message.get("session_id")) or session_id,
+                            message_id=self._safe_text(updated_message.get("message_id")),
+                            role="assistant",
+                            content=self._safe_text(updated_message.get("content")),
+                            channel=channel,
+                            route=self._safe_text(updated_message.get("route")) or route,
+                            response_blocks=updated_blocks,
+                            source=self._safe_text(delivery_event.get("source")),
+                            source_id=self._safe_text(delivery_event.get("source_id")),
+                        )
+                    )
             trace_status = delivery_status
             if self._channel_platform(channel) == "agent-email":
                 email_delivery = self._effective_email_delivery(delivery_event)
@@ -12402,28 +12613,54 @@ class GatewayRuntime:
                 stage,
             )
 
-    def _persist_email_delivery_metadata(self, event: dict[str, Any]) -> None:
+    def _persist_email_delivery_metadata(self, event: dict[str, Any]) -> dict[str, Any] | None:
         if (
             self._channel_platform(self._safe_text(event.get("channel")))
             != "agent-email"
         ):
-            return
+            return None
         message_id = self._safe_text(event.get("message_id"))
         if not message_id:
-            return
+            return None
         delivery = self._effective_email_delivery(event)
         status = self._safe_text(delivery.get("status"))
         if not status:
-            return
-        self.session_store.merge_message_metadata(
+            return None
+        patch: dict[str, Any] = {
+            "email_delivery": delivery,
+            "email_delivery_status": status,
+            "email_queued_for_approval": bool(delivery.get("queued_for_approval")),
+            "email_approval_id": self._safe_text(delivery.get("approval_id"))
+            or None,
+        }
+        approval = event.get("email_approval")
+        if isinstance(approval, dict) and self._safe_text(approval.get("approval_id")):
+            patch["email_approval"] = approval
+            current = self.session_store.get_message(message_id) or {}
+            metadata = current.get("metadata") if isinstance(current.get("metadata"), dict) else {}
+            current_blocks = (
+                metadata.get("response_blocks")
+                if isinstance(metadata.get("response_blocks"), list)
+                else []
+            )
+            approval_id = self._safe_text(approval.get("approval_id"))
+            approval_block = {
+                key: value
+                for key, value in {
+                    **approval,
+                    "id": f"agent_email_approval:{approval_id}",
+                    "type": "agent_email_draft_approval",
+                    "status": self._safe_text(approval.get("status")) or "pending",
+                }.items()
+                if value not in (None, "", [], {})
+            }
+            patch["response_blocks"] = self._append_trusted_response_blocks(
+                current_blocks,
+                [approval_block],
+            )
+        return self.session_store.merge_message_metadata(
             message_id,
-            {
-                "email_delivery": delivery,
-                "email_delivery_status": status,
-                "email_queued_for_approval": bool(delivery.get("queued_for_approval")),
-                "email_approval_id": self._safe_text(delivery.get("approval_id"))
-                or None,
-            },
+            patch,
         )
 
     def _delivery_available_at(self, attempts: int) -> str:
@@ -15801,6 +16038,11 @@ class GatewayRuntime:
                     source_message_id=None,
                     artifacts=supporting_artifacts,
                 )
+            gmail_approvals = (
+                await self._persist_gmail_approval_receipts(event)
+                if event.get("specialist_receipts")
+                else []
+            )
             response_blocks = (
                 [dict(item) for item in event.get("response_blocks") if isinstance(item, dict)]
                 if isinstance(event.get("response_blocks"), list)
@@ -15808,6 +16050,16 @@ class GatewayRuntime:
                     content=self._safe_text(event.get("content")),
                     produced_artifacts=produced_artifacts,
                 )
+            )
+            response_blocks = self._append_trusted_response_blocks(
+                response_blocks,
+                [
+                    *[
+                        self._gmail_approval_response_block(approval)
+                        for approval in gmail_approvals
+                    ],
+                    *self._calendar_response_blocks(event),
+                ],
             )
             client_produced_artifacts = self._hydrate_artifact_list_for_client(
                 produced_artifacts
@@ -15924,8 +16176,6 @@ class GatewayRuntime:
                 event["activity_log"] = activity_log
             if alpha_terminal_log:
                 event["alpha_terminal_log"] = alpha_terminal_log
-            if event.get("specialist_receipts"):
-                await self._persist_gmail_approval_receipts(event)
             event_channel_platform = self._channel_platform(event_channel)
             email_delivery = (
                 self._effective_email_delivery(event)
@@ -17975,6 +18225,56 @@ class GatewayRuntime:
                         normalized_gmail_approval[key] = values
                 if normalized_gmail_approval.get("account_id") and normalized_gmail_approval.get("draft_id"):
                     receipt["gmail_approval"] = normalized_gmail_approval
+            calendar_event = item.get("calendar_event")
+            if isinstance(calendar_event, dict):
+                normalized_calendar_event: dict[str, Any] = {}
+                for key in (
+                    "operation",
+                    "event_id",
+                    "calendar_id",
+                    "summary",
+                    "description",
+                    "location",
+                    "start",
+                    "end",
+                    "status",
+                    "html_link",
+                    "meeting_link",
+                    "organizer",
+                ):
+                    text = self._safe_text(calendar_event.get(key))
+                    if text:
+                        normalized_calendar_event[key] = text
+                normalized_calendar_event["is_all_day"] = bool(
+                    calendar_event.get("is_all_day")
+                )
+                attendees: list[dict[str, Any]] = []
+                if isinstance(calendar_event.get("attendees"), list):
+                    for attendee in calendar_event.get("attendees", [])[:50]:
+                        if not isinstance(attendee, dict):
+                            continue
+                        email = self._safe_text(attendee.get("email"))
+                        display_name = self._safe_text(attendee.get("display_name"))
+                        if not email and not display_name:
+                            continue
+                        attendees.append(
+                            {
+                                key: value
+                                for key, value in {
+                                    "email": email,
+                                    "display_name": display_name,
+                                    "response_status": self._safe_text(
+                                        attendee.get("response_status")
+                                    ),
+                                    "self": bool(attendee.get("self")),
+                                }.items()
+                                if value not in (None, "")
+                            }
+                        )
+                if attendees:
+                    normalized_calendar_event["attendees"] = attendees
+                if normalized_calendar_event.get("event_id") or normalized_calendar_event.get("summary"):
+                    receipt["calendar_event"] = normalized_calendar_event
             if receipt:
                 normalized.append(receipt)
                 seen.add(dedupe)

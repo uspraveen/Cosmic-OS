@@ -2787,6 +2787,37 @@ app.whenReady().then(() => {
     })
   })
 
+  ipcMain.handle('gateway:approve-agent-email-approval', async (_, payload: { approvalId?: string }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const approvalId = String(payload?.approvalId || '').trim()
+    if (!approvalId) {
+      throw new Error('Agent Email approval id is required.')
+    }
+    return callGatewayJson(config, `/channels/agent-email/approvals/${encodeURIComponent(approvalId)}/approve`, {
+      method: 'POST',
+      timeoutMs: 45000,
+    })
+  })
+
+  ipcMain.handle('gateway:reject-agent-email-approval', async (_, payload: { approvalId?: string; note?: string }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const approvalId = String(payload?.approvalId || '').trim()
+    if (!approvalId) {
+      throw new Error('Agent Email approval id is required.')
+    }
+    return callGatewayJson(config, `/channels/agent-email/approvals/${encodeURIComponent(approvalId)}/reject`, {
+      method: 'POST',
+      body: { note: String(payload?.note || '').trim() || null },
+      timeoutMs: 30000,
+    })
+  })
+
   ipcMain.handle('cosmic-mail:request', async (_, payload: GatewayConnectionConfig & {
     path: string
     method?: string

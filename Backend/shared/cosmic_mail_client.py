@@ -176,6 +176,27 @@ class CosmicMailClient:
             raise ValueError("draft_id is required")
         return await self._request_json("POST", f"/v1/drafts/{normalized}/send")
 
+    async def approve_approval(self, approval_id: str) -> dict[str, Any]:
+        normalized = str(approval_id or "").strip()
+        if not normalized:
+            raise ValueError("approval_id is required")
+        return await self._request_json("POST", f"/approvals/{normalized}/approve")
+
+    async def reject_approval(
+        self,
+        approval_id: str,
+        *,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        normalized = str(approval_id or "").strip()
+        if not normalized:
+            raise ValueError("approval_id is required")
+        return await self._request_json(
+            "POST",
+            f"/approvals/{normalized}/reject",
+            json_body={"note": str(note or "").strip() or None},
+        )
+
     async def upload_draft_attachment(
         self,
         draft_id: str,

@@ -855,6 +855,38 @@ export class GatewayConnectionManager {
       return
     }
 
+    if (eventType === 'response.action.updated') {
+      const approvalId = String(payload.approval_id || '').trim()
+      const blockType = String(payload.block_type || '').trim()
+      const status = String(payload.status || '').trim()
+      if (!approvalId || !blockType || !status) {
+        return
+      }
+      this.historyTail = this.historyTail.map((item) => {
+        const metadata = item.metadata && typeof item.metadata === 'object'
+          ? { ...item.metadata }
+          : {}
+        const blocks = Array.isArray(metadata.response_blocks)
+          ? metadata.response_blocks
+          : []
+        let changed = false
+        const responseBlocks = blocks.map((block: unknown) => {
+          if (
+            block &&
+            typeof block === 'object' &&
+            String((block as Record<string, unknown>).type || '').trim() === blockType &&
+            String((block as Record<string, unknown>).approval_id || '').trim() === approvalId
+          ) {
+            changed = true
+            return { ...block, status }
+          }
+          return block
+        })
+        return changed ? { ...item, metadata: { ...metadata, response_blocks: responseBlocks } } : item
+      })
+      return
+    }
+
     if (eventType === 'crosschannel.message') {
       const role = String(payload.role || '').trim()
       const content = String(payload.content || '')
@@ -899,19 +931,16 @@ export class GatewayConnectionManager {
       if (Array.isArray(payload.alpha_terminal_log) && payload.alpha_terminal_log.length > 0) {
         metadata.alpha_terminal_log = payload.alpha_terminal_log
       }
-      this.historyTail = [
-        ...this.historyTail,
-        {
-          message_id: typeof payload.message_id === 'string' && payload.message_id.trim()
-            ? payload.message_id.trim()
-            : `crosschannel_${crypto.randomUUID()}`,
-          role,
-          content,
-          channel: typeof payload.channel === 'string' ? payload.channel : null,
-          created_at: new Date().toISOString(),
-          metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
-        },
-      ]
+      this.upsertHistoryMessage({
+        message_id: typeof payload.message_id === 'string' && payload.message_id.trim()
+          ? payload.message_id.trim()
+          : `crosschannel_${crypto.randomUUID()}`,
+        role,
+        content,
+        channel: typeof payload.channel === 'string' ? payload.channel : null,
+        created_at: new Date().toISOString(),
+        metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+      })
     }
   }
 

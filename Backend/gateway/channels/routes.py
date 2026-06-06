@@ -2074,6 +2074,38 @@ async def reject_gmail_approval(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
+@router.post("/channels/agent-email/approvals/{approval_id}/approve")
+async def approve_agent_email_approval(
+    approval_id: str,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return await runtime.approve_agent_email_approval(approval_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+@router.post("/channels/agent-email/approvals/{approval_id}/reject")
+async def reject_agent_email_approval(
+    approval_id: str,
+    body: GmailApprovalRejectRequest | None = None,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return await runtime.reject_agent_email_approval(
+            approval_id,
+            note=body.note if body is not None else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
 @router.get("/channels/{platform}/status")
 async def get_channel_status(
     platform: str,

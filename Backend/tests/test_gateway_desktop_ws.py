@@ -1104,6 +1104,105 @@ def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
     return runtime
 
 
+def test_gateway_builds_trusted_gmail_and_calendar_response_blocks(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+
+    gmail = runtime._gmail_approval_response_block(  # noqa: SLF001
+        {
+            "approval_id": "gma_123",
+            "status": "pending",
+            "account_email": "owner@example.com",
+            "draft_id": "draft_123",
+            "subject": "Review this",
+            "to": ["recipient@example.com"],
+            "body_preview": "Draft body",
+        }
+    )
+    calendar = runtime._calendar_response_blocks(  # noqa: SLF001
+        {
+            "specialist_receipts": [
+                {
+                    "intent": "calendar.create_event",
+                    "calendar_event": {
+                        "operation": "created",
+                        "event_id": "evt_123",
+                        "summary": "Design review",
+                        "start": "2026-06-06T10:00:00-05:00",
+                        "end": "2026-06-06T10:30:00-05:00",
+                        "html_link": "https://calendar.google.com/event?eid=evt_123",
+                    },
+                }
+            ]
+        }
+    )
+
+    assert gmail["id"] == "gmail_approval:gma_123"
+    assert gmail["type"] == "gmail_draft_approval"
+    assert gmail["to"] == ["recipient@example.com"]
+    assert calendar == [
+        {
+            "operation": "created",
+            "event_id": "evt_123",
+            "summary": "Design review",
+            "start": "2026-06-06T10:00:00-05:00",
+            "end": "2026-06-06T10:30:00-05:00",
+            "html_link": "https://calendar.google.com/event?eid=evt_123",
+            "is_all_day": False,
+            "id": "calendar_event:evt_123",
+            "type": "calendar_event",
+        }
+    ]
+
+
+def test_gateway_persists_agent_email_approval_response_block(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+    runtime.session_store.initialize()
+    message_id = runtime.session_store.append_message(
+        "sess_agent_email_block",
+        role="assistant",
+        content="I drafted the response.",
+        route="opus",
+        channel="agent-email:assistant@example.com",
+        metadata={"response_blocks": [{"id": "copy", "type": "markdown", "text": "I drafted the response."}]},
+    )
+
+    updated = runtime._persist_email_delivery_metadata(  # noqa: SLF001
+        {
+            "message_id": message_id,
+            "channel": "agent-email:assistant@example.com",
+            "email_delivery": {
+                "status": "queued_for_approval",
+                "queued_for_approval": True,
+                "approval_id": "apr_123",
+                "draft_id": "draft_123",
+            },
+            "email_approval": {
+                "approval_id": "apr_123",
+                "status": "pending",
+                "draft_id": "draft_123",
+                "subject": "Review needed",
+                "recipients": [{"email": "owner@example.com"}],
+                "body_preview": "Draft body",
+                "mailbox_address": "assistant@example.com",
+            },
+        }
+    )
+
+    assert updated is not None
+    blocks = updated["metadata"]["response_blocks"]
+    assert blocks[-1]["id"] == "agent_email_approval:apr_123"
+    assert blocks[-1]["type"] == "agent_email_draft_approval"
+    assert blocks[-1]["subject"] == "Review needed"
+    assert runtime.session_store.update_response_action_status(
+        approval_id="apr_123",
+        block_type="agent_email_draft_approval",
+        status="sent",
+    ) == 1
+    refreshed = runtime.session_store.get_message(message_id)
+    assert refreshed is not None
+    assert refreshed["metadata"]["response_blocks"][-1]["status"] == "sent"
+
+
 def test_alpha_harness_completion_progress_keeps_activity_stage(tmp_path) -> None:
     runtime = build_runtime(tmp_path)
 

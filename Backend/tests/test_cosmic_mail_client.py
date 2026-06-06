@@ -137,3 +137,27 @@ async def test_cosmic_mail_client_creates_organization_api_key() -> None:
             '{"name":"COSMIC Gateway Agent Email"}',
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_cosmic_mail_client_proxies_approval_actions() -> None:
+    seen: list[tuple[str, str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode("utf-8") if request.content else None
+        seen.append((request.method, request.url.path, body))
+        return httpx.Response(200, json={"status": "ok"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        cosmic = CosmicMailClient(
+            base_url="https://console.thelearnchain.com",
+            api_token="token",
+            client=client,
+        )
+        await cosmic.approve_approval("apr_123")
+        await cosmic.reject_approval("apr_456", note="Not this one.")
+
+    assert seen == [
+        ("POST", "/approvals/apr_123/approve", None),
+        ("POST", "/approvals/apr_456/reject", '{"note":"Not this one."}'),
+    ]

@@ -106,6 +106,13 @@ interface Window {
       approvalId: string
       note?: string
     }) => Promise<any>
+    approveGatewayAgentEmailApproval: (payload: {
+      approvalId: string
+    }) => Promise<any>
+    rejectGatewayAgentEmailApproval: (payload: {
+      approvalId: string
+      note?: string
+    }) => Promise<any>
     cosmicMailRequest: (payload: GatewayConnectionPayload & {
       path: string
       method?: string

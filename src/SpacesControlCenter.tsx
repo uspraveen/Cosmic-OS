@@ -363,6 +363,7 @@ interface AgentEmailThread {
   threadSnapshot: CosmicMailThreadRead
   messagesSource: CosmicMailMessageRead[]
   messages: AgentEmailThreadMessage[]
+  messagesLoaded: boolean
 }
 
 interface AgentEmailDomainRecord {
@@ -3098,6 +3099,7 @@ export default function SpacesControlCenter({
   const [agentEmailActionId, setAgentEmailActionId] = useState<string | null>(null)
   const [agentEmailError, setAgentEmailError] = useState<string | null>(null)
   const [agentEmailBanner, setAgentEmailBanner] = useState<{ tone: AgentEmailBannerTone; message: string } | null>(null)
+  const [agentEmailThreadMessagesLoadingId, setAgentEmailThreadMessagesLoadingId] = useState<string | null>(null)
   const [agentEmailOrg, setAgentEmailOrg] = useState<CosmicMailOrganizationRead | null>(null)
   const [agentEmailChecklist, setAgentEmailChecklist] = useState<AgentEmailChecklistItem[]>([])
   const [agentEmailAgents, setAgentEmailAgents] = useState<AgentEmailAgent[]>([])
@@ -3135,7 +3137,24 @@ export default function SpacesControlCenter({
   const agentEmailBackendBootstrapDoneRef = useRef(false)
   const agentEmailLocalConfigReady = agentEmailBaseUrl.trim().length > 0 && agentEmailApiToken.trim().length > 0
   const agentEmailBackendConfigured = Boolean(agentEmailBackendStatus?.configured)
-  const agentEmailConfigReady = agentEmailLocalConfigReady && agentEmailBackendConfigured
+  const agentEmailEffectiveBaseUrl = agentEmailBaseUrl.trim() || agentEmailBackendStatus?.base_url?.trim() || ''
+  const agentEmailEffectiveApiToken = agentEmailApiToken.trim() || agentEmailBackendStatus?.api_token?.trim() || ''
+  const agentEmailBackendHasUsableConfig = Boolean(
+    !agentEmailBackendStatus?.explicitly_disconnected
+    && agentEmailBackendStatus?.base_url
+    && agentEmailBackendStatus?.api_token
+    && (
+      agentEmailBackendStatus.configured
+      || agentEmailBackendStatus.connected
+      || agentEmailBackendStatus.healthy
+      || agentEmailBackendStatus.adapter_registered
+    ),
+  )
+  const agentEmailConfigReady = Boolean(
+    agentEmailEffectiveBaseUrl
+    && agentEmailEffectiveApiToken
+    && (agentEmailBackendHasUsableConfig || (agentEmailLocalConfigReady && agentEmailBackendConfigured)),
+  )
 
   useEffect(() => {
     agentEmailBaseUrlRef.current = agentEmailBaseUrl
@@ -3168,14 +3187,14 @@ export default function SpacesControlCenter({
       return `/v1${cleanPath}`
     })()
     return window.cosmic.cosmicMailRequest({
-      baseUrl: agentEmailBaseUrl.trim(),
-      apiToken: agentEmailApiToken.trim(),
+      baseUrl: agentEmailEffectiveBaseUrl,
+      apiToken: agentEmailEffectiveApiToken,
       path: normalizedPath,
       method: init.method,
       body: init.body,
       timeoutMs: init.timeoutMs,
     })
-  }, [agentEmailApiToken, agentEmailBaseUrl])
+  }, [agentEmailEffectiveApiToken, agentEmailEffectiveBaseUrl])
 
   const requestAgentEmailBackendStatus = useCallback(async (
     applyFields = true,
@@ -3317,6 +3336,7 @@ export default function SpacesControlCenter({
     approvals: AgentEmailApproval[],
     mailboxAddress?: string,
     searchQuery?: string,
+    hydrateThreadId?: string,
   ): Promise<AgentEmailThread[]> => {
     const q = (searchQuery || '').trim()
     const threadsRawAll = await callAgentEmailApi(
@@ -3334,15 +3354,29 @@ export default function SpacesControlCenter({
     const threads = [...threadsRaw].sort(
       (a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime(),
     )
+    const selectedHydrateThreadId = hydrateThreadId && threads.some((thread) => thread.id === hydrateThreadId)
+      ? hydrateThreadId
+      : threads[0]?.id || ''
     const threadEntries = await Promise.all(threads.map(async (thread) => {
-      const messages = await callAgentEmailApi(`/threads/${thread.id}/messages`) as CosmicMailMessageRead[]
+      let messages: CosmicMailMessageRead[] = []
+      let messagesLoaded = false
+      if (thread.id === selectedHydrateThreadId) {
+        try {
+          messages = await callAgentEmailApi(`/threads/${thread.id}/messages`, { timeoutMs: 12000 }) as CosmicMailMessageRead[]
+          messagesLoaded = true
+        } catch {
+          messages = []
+        }
+      }
       const sortedMessages = [...messages].sort((a, b) => {
         const aTime = new Date(a.received_at || a.sent_at || a.created_at).getTime()
         const bTime = new Date(b.received_at || b.sent_at || b.created_at).getTime()
         return aTime - bTime
       })
       const lastMessage = sortedMessages[sortedMessages.length - 1] || null
-      const unread = sortedMessages.some((message) => message.direction === 'inbound' && !message.is_read)
+      const unread = messagesLoaded
+        ? sortedMessages.some((message) => message.direction === 'inbound' && !message.is_read)
+        : false
       const matchingApproval = approvals.find((approval) => {
         if (approval.subject !== thread.subject) {
           return false
@@ -3363,7 +3397,7 @@ export default function SpacesControlCenter({
       return {
         id: thread.id,
         subject: thread.subject,
-        fromName: lastMessage?.from_name || lastMessage?.from_address || 'Unknown sender',
+        fromName: lastMessage?.from_name || lastMessage?.from_address || 'Thread',
         fromAddress: lastMessage?.from_address || '—',
         time: formatAgentEmailRelative(lastMessage?.received_at || lastMessage?.sent_at || thread.last_message_at),
         unread,
@@ -3382,6 +3416,7 @@ export default function SpacesControlCenter({
           isRead: message.is_read,
           attachments: message.attachments ?? [],
         })),
+        messagesLoaded,
       } satisfies AgentEmailThread
     }))
     return [...threadEntries].sort((a, b) => {
@@ -3410,48 +3445,65 @@ export default function SpacesControlCenter({
     }
 
     try {
-      const authContext = await callAgentEmailApi('/system/auth-context') as CosmicMailAuthContextRead
-      const organizations = await callAgentEmailApi('/organizations') as CosmicMailOrganizationRead[]
-      const preferredOrganization =
-        organizations.find((organization) => organization.id === authContext.organization_id) ||
-        organizations.find((organization) => organization.slug.toLowerCase() === 'cosmic' || organization.name.toLowerCase() === 'cosmic') ||
-        organizations[0] ||
-        null
-
-      if (!preferredOrganization) {
-        setAgentEmailOrg(null)
-        setAgentEmailChecklist([
-          {
-            label: 'No organization found',
-            state: 'Needs setup',
-            note: 'Cosmic Mail is reachable, but this API key does not currently expose an organization.',
-            complete: false,
-          },
-        ])
-        setAgentEmailAgents([])
-        setAgentEmailInboxes([])
-        setAgentEmailThreads([])
-        setAgentEmailDomains([])
-        setAgentEmailApprovals([])
-        setAgentEmailError('No Cosmic Mail organization is available for this API key.')
-        return
+      const partialErrors: string[] = []
+      const loadOptionalValue = async <T,>(pathName: string, label: string, timeoutMs = 20000): Promise<T | null> => {
+        try {
+          return await callAgentEmailApi(pathName, { timeoutMs }) as T
+        } catch (error: unknown) {
+          partialErrors.push(`${label}: ${toErrorMessage(error)}`)
+          return null
+        }
+      }
+      const loadOptionalList = async <T,>(pathName: string, label: string, timeoutMs = 20000): Promise<T[]> => {
+        try {
+          const value = await callAgentEmailApi(pathName, { timeoutMs })
+          return Array.isArray(value) ? value as T[] : []
+        } catch (error: unknown) {
+          partialErrors.push(`${label}: ${toErrorMessage(error)}`)
+          return []
+        }
       }
 
-      const [agentsRaw, mailboxesRaw, domainsRaw, approvalsRaw] = await Promise.all([
-        callAgentEmailApi('/agents') as Promise<CosmicMailAgentRead[]>,
-        callAgentEmailApi('/mailboxes') as Promise<CosmicMailMailboxRead[]>,
-        callAgentEmailApi('/domains') as Promise<CosmicMailDomainRead[]>,
-        callAgentEmailApi('/approvals') as Promise<CosmicMailApprovalRead[]>,
+      const [authContext, organizations, agentsRaw, mailboxesRaw, domainsRaw, approvalsRaw] = await Promise.all([
+        loadOptionalValue<CosmicMailAuthContextRead>('/system/auth-context', 'Auth context', 8000),
+        loadOptionalList<CosmicMailOrganizationRead>('/organizations', 'Organizations', 8000),
+        loadOptionalList<CosmicMailAgentRead>('/agents', 'Agents'),
+        loadOptionalList<CosmicMailMailboxRead>('/mailboxes', 'Inboxes'),
+        loadOptionalList<CosmicMailDomainRead>('/domains', 'Domains', 8000),
+        loadOptionalList<CosmicMailApprovalRead>('/approvals', 'Approvals'),
       ])
 
-      const organizationAgents = agentsRaw.filter((agent) => agent.organization_id === preferredOrganization.id)
-      const organizationMailboxes = mailboxesRaw.filter((mailbox) => mailbox.organization_id === preferredOrganization.id)
-      const organizationDomains = domainsRaw.filter((domain) => domain.organization_id === preferredOrganization.id)
-      const organizationApprovals = approvalsRaw.filter((approval) => approval.organization_id === preferredOrganization.id)
+      const fallbackOrganizationId =
+        authContext?.organization_id ||
+        organizations[0]?.id ||
+        agentsRaw[0]?.organization_id ||
+        mailboxesRaw[0]?.organization_id ||
+        domainsRaw[0]?.organization_id ||
+        approvalsRaw[0]?.organization_id ||
+        'cosmic-mail'
+      const preferredOrganization =
+        organizations.find((organization) => organization.id === authContext?.organization_id) ||
+        organizations.find((organization) => organization.slug.toLowerCase() === 'cosmic' || organization.name.toLowerCase() === 'cosmic') ||
+        organizations[0] ||
+        {
+          id: fallbackOrganizationId,
+          name: 'Cosmic Mail',
+          slug: 'cosmic',
+          created_at: '',
+        }
+      const shouldFilterByOrganization = Boolean(authContext?.organization_id || organizations.length)
+      const belongsToPreferredOrganization = (organizationId: string | null | undefined) => (
+        !shouldFilterByOrganization || !organizationId || organizationId === preferredOrganization.id
+      )
+
+      const organizationAgents = agentsRaw.filter((agent) => belongsToPreferredOrganization(agent.organization_id))
+      const organizationMailboxes = mailboxesRaw.filter((mailbox) => belongsToPreferredOrganization(mailbox.organization_id))
+      const organizationDomains = domainsRaw.filter((domain) => belongsToPreferredOrganization(domain.organization_id))
+      const organizationApprovals = approvalsRaw.filter((approval) => belongsToPreferredOrganization(approval.organization_id))
 
       const domainDeliverability = await Promise.all(organizationDomains.map(async (domain) => {
         try {
-          const detail = await callAgentEmailApi(`/domains/${domain.id}/deliverability`) as CosmicMailDomainDeliverabilityRead
+          const detail = await callAgentEmailApi(`/domains/${domain.id}/deliverability`, { timeoutMs: 8000 }) as CosmicMailDomainDeliverabilityRead
           return [domain.id, detail] as const
         } catch {
           return [domain.id, null] as const
@@ -3542,9 +3594,15 @@ export default function SpacesControlCenter({
 
       const nextSelectedInboxId = mappedInboxes.find((inbox) => inbox.id === agentEmailSelectedInboxId)?.id || mappedInboxes[0]?.id || ''
       const nextSelectedInbox = mappedInboxes.find((inbox) => inbox.id === nextSelectedInboxId)
-      const mappedThreads = nextSelectedInboxId
-        ? await loadAgentEmailThreads(nextSelectedInboxId, mappedApprovals, nextSelectedInbox?.address)
-        : []
+      let mappedThreads: AgentEmailThread[] = []
+      if (nextSelectedInboxId) {
+        try {
+          mappedThreads = await loadAgentEmailThreads(nextSelectedInboxId, mappedApprovals, nextSelectedInbox?.address, undefined, agentEmailSelectedThreadId)
+        } catch (error: unknown) {
+          partialErrors.push(`Inbox: ${toErrorMessage(error)}`)
+          mappedThreads = []
+        }
+      }
 
       setAgentEmailOrg(preferredOrganization)
       setAgentEmailChecklist([
@@ -3583,7 +3641,7 @@ export default function SpacesControlCenter({
       setAgentEmailSelectedThreadId((current) => mappedThreads.find((thread) => thread.id === current)?.id || mappedThreads[0]?.id || '')
       setAgentEmailSelectedDomainId((current) => mappedDomains.find((domain) => domain.id === current)?.id || mappedDomains[0]?.id || '')
       setAgentEmailSelectedApprovalId((current) => mappedApprovals.find((approval) => approval.id === current)?.id || mappedApprovals[0]?.id || '')
-      setAgentEmailError(null)
+      setAgentEmailError(partialErrors.length ? `Some Agent Email sections did not finish loading. ${partialErrors[0]}` : null)
     } catch (error: unknown) {
       setAgentEmailError(toErrorMessage(error))
     } finally {
@@ -3591,9 +3649,8 @@ export default function SpacesControlCenter({
     }
   }, [
     agentEmailConfigReady,
-    agentEmailSelectedApprovalId,
-    agentEmailSelectedDomainId,
     agentEmailSelectedInboxId,
+    agentEmailSelectedThreadId,
     callAgentEmailApi,
     loadAgentEmailThreads,
   ])
@@ -3656,6 +3713,7 @@ export default function SpacesControlCenter({
           agentEmailApprovals,
           selectedInbox?.address,
           agentEmailInboxSearchApplied,
+          agentEmailSelectedThreadId,
         )
         setAgentEmailThreads(threads)
         setAgentEmailSelectedThreadId((current) => threads.find((thread) => thread.id === current)?.id || threads[0]?.id || '')
@@ -3670,6 +3728,7 @@ export default function SpacesControlCenter({
     agentEmailInboxSearchApplied,
     agentEmailInboxes,
     agentEmailSelectedInboxId,
+    agentEmailSelectedThreadId,
     loadAgentEmailThreads,
     page,
   ])
@@ -3768,12 +3827,101 @@ export default function SpacesControlCenter({
   const gmailSelectedApproval = gmailApprovals.find((approval) => approval.id === gmailSelectedApprovalId) || gmailApprovals[0] || null
 
   useEffect(() => {
+    if (!active || page !== 'agent-email' || !agentEmailConfigReady || !agentEmailSelectedThread || agentEmailSelectedThread.messagesLoaded) {
+      return
+    }
+
+    let cancelled = false
+    const threadId = agentEmailSelectedThread.id
+    setAgentEmailThreadMessagesLoadingId(threadId)
+
+    void (async () => {
+      try {
+        const messages = await callAgentEmailApi(`/threads/${threadId}/messages`, { timeoutMs: 15000 }) as CosmicMailMessageRead[]
+        if (cancelled) {
+          return
+        }
+        const sortedMessages = [...messages].sort((a, b) => {
+          const aTime = new Date(a.received_at || a.sent_at || a.created_at).getTime()
+          const bTime = new Date(b.received_at || b.sent_at || b.created_at).getTime()
+          return aTime - bTime
+        })
+        const lastMessage = sortedMessages[sortedMessages.length - 1] || null
+        setAgentEmailThreads((current) => current.map((thread) => {
+          if (thread.id !== threadId) {
+            return thread
+          }
+          const unread = sortedMessages.some((message) => message.direction === 'inbound' && !message.is_read)
+          const matchingApproval = agentEmailApprovals.find((approval) => {
+            if (approval.subject !== thread.subject) {
+              return false
+            }
+            if (!agentEmailSelectedInbox?.address) {
+              return true
+            }
+            return approval.mailbox === agentEmailSelectedInbox.address
+          })
+          const state = matchingApproval && matchingApproval.subject === thread.subject
+            ? 'Awaiting approval'
+            : unread
+              ? 'Needs reply'
+              : lastMessage?.direction === 'outbound'
+                ? 'Waiting'
+                : 'Read'
+          return {
+            ...thread,
+            fromName: lastMessage?.from_name || lastMessage?.from_address || thread.fromName,
+            fromAddress: lastMessage?.from_address || thread.fromAddress,
+            time: formatAgentEmailRelative(lastMessage?.received_at || lastMessage?.sent_at || thread.lastMessageAt),
+            unread,
+            state,
+            snippet: buildAgentEmailSnippet(lastMessage, thread.threadSnapshot.snippet),
+            messagesSource: sortedMessages,
+            messages: sortedMessages.map((message) => ({
+              id: message.id,
+              direction: message.direction,
+              author: message.from_name || message.from_address || 'Unknown sender',
+              address: message.from_address,
+              time: formatAgentEmailAbsolute(message.received_at || message.sent_at || message.created_at),
+              body: buildAgentEmailMessageBody(message),
+              isRead: message.is_read,
+              attachments: message.attachments ?? [],
+            })),
+            messagesLoaded: true,
+          }
+        }))
+        setAgentEmailError((current) => current?.startsWith('Thread messages') ? null : current)
+      } catch (error: unknown) {
+        if (!cancelled) {
+          setAgentEmailError(`Thread messages did not finish loading. ${toErrorMessage(error)}`)
+        }
+      } finally {
+        if (!cancelled) {
+          setAgentEmailThreadMessagesLoadingId((current) => current === threadId ? null : current)
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    active,
+    agentEmailApprovals,
+    agentEmailConfigReady,
+    agentEmailSelectedInbox?.address,
+    agentEmailSelectedThread,
+    callAgentEmailApi,
+    page,
+  ])
+
+  useEffect(() => {
     if (!agentEmailSelectedThread) return
     const frame = window.requestAnimationFrame(() => {
       agentEmailMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
     })
     return () => window.cancelAnimationFrame(frame)
-  }, [agentEmailSelectedThread?.id, agentEmailSelectedThread?.messages.length])
+  }, [agentEmailSelectedThread])
 
   const unreadAgentEmailThreads = agentEmailThreads.filter((thread) => thread.unread).length
   const pendingAgentEmailApprovals = agentEmailApprovals.filter((approval) => approval.state === 'Pending').length
@@ -3792,10 +3940,10 @@ export default function SpacesControlCenter({
     ? { tone: 'rose' as const, label: 'VM offline' }
     : agentEmailConfigSaving || agentEmailBackendLoading
       ? { tone: 'azure' as const, label: 'Syncing' }
-      : !agentEmailBackendConfigured
+      : !agentEmailConfigReady
         ? { tone: 'rose' as const, label: 'Not connected' }
-        : agentEmailError && !agentEmailHasData
-          ? { tone: 'gold' as const, label: 'Needs attention' }
+      : agentEmailError && !agentEmailHasData
+        ? { tone: 'gold' as const, label: 'Needs attention' }
           : agentEmailOrg && agentEmailBackendStatus?.connected
             ? { tone: 'mint' as const, label: `${agentEmailOrg.name} live` }
             : agentEmailBackendStatus?.healthy
@@ -3936,8 +4084,8 @@ export default function SpacesControlCenter({
     try {
       setAgentEmailAttachmentActionId(attachment.id)
       const result = await window.cosmic.cosmicMailDownloadAttachment({
-        baseUrl: agentEmailBaseUrl.trim(),
-        apiToken: agentEmailApiToken.trim(),
+        baseUrl: agentEmailEffectiveBaseUrl,
+        apiToken: agentEmailEffectiveApiToken,
         attachmentId: attachment.id,
         suggestedFilename: attachment.filename,
       })
@@ -3949,13 +4097,17 @@ export default function SpacesControlCenter({
     } finally {
       setAgentEmailAttachmentActionId(null)
     }
-  }, [agentEmailApiToken, agentEmailBaseUrl])
+  }, [agentEmailEffectiveApiToken, agentEmailEffectiveBaseUrl])
 
   const handleAgentEmailReply = useCallback(async () => {
     if (!agentEmailSelectedThread || !agentEmailSelectedInbox) return
     const bodyText = agentEmailReplyDraft.trim()
     const hasFiles = agentEmailReplyAttachmentFiles.length > 0
     if (!bodyText && !hasFiles) return
+    if (!agentEmailSelectedThread.messagesLoaded) {
+      setAgentEmailBanner({ tone: 'info', message: 'Wait for the selected conversation to finish loading before replying.' })
+      return
+    }
 
     if (hasFiles) {
       const missingPath = agentEmailReplyAttachmentFiles.some((file) => !getElectronLocalFilePath(file))
@@ -4016,8 +4168,8 @@ export default function SpacesControlCenter({
 
       for (const item of paths) {
         await window.cosmic.cosmicMailUploadDraftAttachment({
-          baseUrl: agentEmailBaseUrl.trim(),
-          apiToken: agentEmailApiToken.trim(),
+          baseUrl: agentEmailEffectiveBaseUrl,
+          apiToken: agentEmailEffectiveApiToken,
           draftId: created.id,
           filePath: item.path,
           filename: item.name,
@@ -4046,8 +4198,8 @@ export default function SpacesControlCenter({
       setAgentEmailReplySending(false)
     }
   }, [
-    agentEmailApiToken,
-    agentEmailBaseUrl,
+    agentEmailEffectiveApiToken,
+    agentEmailEffectiveBaseUrl,
     agentEmailReplyAttachmentFiles,
     agentEmailReplyDraft,
     agentEmailSelectedInbox,
@@ -6079,7 +6231,7 @@ export default function SpacesControlCenter({
                           <span className="agent-email-console-mono agent-email-inbox-read-meta-item" title={agentEmailSelectedInbox.address}>{agentEmailSelectedInbox.address}</span>
                           <span className="agent-email-inbox-read-meta-sep" aria-hidden />
                           <span className="agent-email-inbox-read-meta-item">
-                            {agentEmailSelectedThread.messages.length} {agentEmailSelectedThread.messages.length === 1 ? 'message' : 'messages'}
+                            {(agentEmailSelectedThread.messagesLoaded ? agentEmailSelectedThread.messages.length : agentEmailSelectedThread.threadSnapshot.message_count)} {(agentEmailSelectedThread.messagesLoaded ? agentEmailSelectedThread.messages.length : agentEmailSelectedThread.threadSnapshot.message_count) === 1 ? 'message' : 'messages'}
                           </span>
                         </p>
                       </div>
@@ -6088,6 +6240,9 @@ export default function SpacesControlCenter({
 
                   <div className="agent-email-inbox-messages-scroll">
                     <div className="agent-email-inbox-thread-body">
+                      {!agentEmailSelectedThread.messagesLoaded && agentEmailThreadMessagesLoadingId === agentEmailSelectedThread.id ? (
+                        <div className="agent-email-banner warning">Loading the selected conversation...</div>
+                      ) : null}
                       {agentEmailSelectedThread.messages.map((message) => (
                         <article key={message.id} className={`agent-email-inbox-msg agent-email-inbox-msg--${message.direction}`}>
                           <div className="agent-email-inbox-msg-inner">
@@ -6398,9 +6553,9 @@ export default function SpacesControlCenter({
               {agentEmailView === 'approvals' && pendingAgentEmailApprovals > 0 ? (
                 <span className="agent-email-context-chip agent-email-context-chip-warm">{pendingAgentEmailApprovals} pending</span>
               ) : null}
-              {agentEmailView === 'settings' && agentEmailBaseUrl.trim() ? (
-                <span className="agent-email-context-chip agent-email-console-mono" title={agentEmailBaseUrl.trim()}>
-                  {shortenAgentEmailUrl(agentEmailBaseUrl)}
+              {agentEmailView === 'settings' && agentEmailEffectiveBaseUrl ? (
+                <span className="agent-email-context-chip agent-email-console-mono" title={agentEmailEffectiveBaseUrl}>
+                  {shortenAgentEmailUrl(agentEmailEffectiveBaseUrl)}
                 </span>
               ) : null}
             </div>

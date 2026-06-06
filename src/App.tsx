@@ -218,12 +218,34 @@ interface ResponseSlotBlock {
   timeoutMs?: number | null
 }
 
+interface ResponseActionBlock {
+  id: string
+  type: 'gmail_draft_approval' | 'agent_email_draft_approval' | 'calendar_event'
+  status?: string | null
+  approvalId?: string | null
+  subject?: string | null
+  summary?: string | null
+  bodyPreview?: string | null
+  to?: string[]
+  cc?: string[]
+  recipients?: Array<string | { email?: string | null; name?: string | null }>
+  accountEmail?: string | null
+  mailboxAddress?: string | null
+  operation?: string | null
+  start?: string | null
+  end?: string | null
+  location?: string | null
+  htmlLink?: string | null
+  meetingLink?: string | null
+}
+
 type ResponseBlock =
   | ResponseMarkdownBlock
   | ResponseCodeBlock
   | ResponseArtifactBlock
   | MapArtifactBlock
   | ResponseSlotBlock
+  | ResponseActionBlock
 
 interface ActivityLogEntry {
   id: string
@@ -509,6 +531,43 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
             ? (item as any).loadingLabel.trim()
             : null,
         timeoutMs: Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : null,
+      })
+      continue
+    }
+    if (type === 'gmail_draft_approval' || type === 'agent_email_draft_approval' || type === 'calendar_event') {
+      const stringList = (raw: unknown) => Array.isArray(raw)
+        ? raw.map((value) => String(value || '').trim()).filter(Boolean)
+        : []
+      const recipients = Array.isArray((item as any).recipients)
+        ? (item as any).recipients
+            .map((value: any) => {
+              if (typeof value === 'string' && value.trim()) return value.trim()
+              if (!value || typeof value !== 'object') return null
+              const email = String(value.email || value.address || '').trim()
+              const name = String(value.name || '').trim()
+              return email || name ? { email: email || null, name: name || null } : null
+            })
+            .filter(Boolean)
+        : []
+      normalized.push({
+        id,
+        type,
+        status: typeof (item as any).status === 'string' ? (item as any).status.trim() : null,
+        approvalId: typeof (item as any).approval_id === 'string' ? (item as any).approval_id.trim() : null,
+        subject: typeof (item as any).subject === 'string' ? (item as any).subject.trim() : null,
+        summary: typeof (item as any).summary === 'string' ? (item as any).summary.trim() : null,
+        bodyPreview: typeof (item as any).body_preview === 'string' ? (item as any).body_preview.trim() : null,
+        to: stringList((item as any).to),
+        cc: stringList((item as any).cc),
+        recipients,
+        accountEmail: typeof (item as any).account_email === 'string' ? (item as any).account_email.trim() : null,
+        mailboxAddress: typeof (item as any).mailbox_address === 'string' ? (item as any).mailbox_address.trim() : null,
+        operation: typeof (item as any).operation === 'string' ? (item as any).operation.trim() : null,
+        start: typeof (item as any).start === 'string' ? (item as any).start.trim() : null,
+        end: typeof (item as any).end === 'string' ? (item as any).end.trim() : null,
+        location: typeof (item as any).location === 'string' ? (item as any).location.trim() : null,
+        htmlLink: typeof (item as any).html_link === 'string' ? (item as any).html_link.trim() : null,
+        meetingLink: typeof (item as any).meeting_link === 'string' ? (item as any).meeting_link.trim() : null,
       })
       continue
     }
@@ -2321,6 +2380,144 @@ const formatInlineVisualSubtitle = (block: ResponseArtifactBlock, title: string)
   return ''
 }
 
+const formatInlineActionRecipients = (block: ResponseActionBlock) => {
+  const values = block.type === 'gmail_draft_approval'
+    ? block.to || []
+    : (block.recipients || []).map((item) => (
+        typeof item === 'string' ? item : item.email || item.name || ''
+      ))
+  return values.filter(Boolean).join(', ')
+}
+
+const formatInlineCalendarTime = (value?: string | null) => {
+  if (!value) return ''
+  const date = new Date(value)
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
+}
+
+const AssistantActionBlock = ({ block }: { block: ResponseActionBlock }) => {
+  const [status, setStatus] = useState(block.status || 'pending')
+  const [busy, setBusy] = useState<'approve' | 'reject' | null>(null)
+  const [error, setError] = useState('')
+  const isCalendar = block.type === 'calendar_event'
+  const isPending = ['pending', 'failed'].includes(status.toLowerCase())
+  const title = isCalendar
+    ? block.summary || 'Calendar event'
+    : block.subject || (block.type === 'gmail_draft_approval' ? 'Gmail draft' : 'Agent Email draft')
+  const recipients = formatInlineActionRecipients(block)
+
+  useEffect(() => {
+    setStatus(block.status || 'pending')
+  }, [block.status])
+
+  const act = async (kind: 'approve' | 'reject') => {
+    if (!block.approvalId || busy) return
+    setBusy(kind)
+    setError('')
+    try {
+      if (block.type === 'gmail_draft_approval') {
+        if (kind === 'approve') {
+          if (!window.cosmic?.approveGatewayGmailApproval) throw new Error('Gmail approval action is unavailable.')
+          await window.cosmic.approveGatewayGmailApproval({ approvalId: block.approvalId })
+        } else {
+          if (!window.cosmic?.rejectGatewayGmailApproval) throw new Error('Gmail rejection action is unavailable.')
+          await window.cosmic.rejectGatewayGmailApproval({
+            approvalId: block.approvalId,
+            note: 'Rejected from inline response.',
+          })
+        }
+      } else {
+        if (kind === 'approve') {
+          if (!window.cosmic?.approveGatewayAgentEmailApproval) throw new Error('Agent Email approval action is unavailable.')
+          await window.cosmic.approveGatewayAgentEmailApproval({ approvalId: block.approvalId })
+        } else {
+          if (!window.cosmic?.rejectGatewayAgentEmailApproval) throw new Error('Agent Email rejection action is unavailable.')
+          await window.cosmic.rejectGatewayAgentEmailApproval({
+            approvalId: block.approvalId,
+            note: 'Rejected from inline response.',
+          })
+        }
+      }
+      setStatus(kind === 'approve' ? 'sent' : 'rejected')
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : 'Action failed.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <section className="assistant-action-card" data-kind={block.type}>
+      <div className="assistant-action-card-head">
+        <div>
+          <div className="assistant-action-card-kicker">
+            {isCalendar
+              ? `${block.operation || 'calendar'} event`
+              : block.type === 'gmail_draft_approval'
+                ? 'Gmail draft'
+                : 'Agent Email draft'}
+          </div>
+          <div className="assistant-action-card-title">{title}</div>
+        </div>
+        <div className={`assistant-action-card-status is-${status.toLowerCase()}`}>{status}</div>
+      </div>
+      {isCalendar ? (
+        <div className="assistant-action-card-details">
+          {(block.start || block.end) && (
+            <div><span>When</span>{formatInlineCalendarTime(block.start)}{block.end ? ` – ${formatInlineCalendarTime(block.end)}` : ''}</div>
+          )}
+          {block.location && <div><span>Where</span>{block.location}</div>}
+        </div>
+      ) : (
+        <>
+          <div className="assistant-action-card-details">
+            {recipients && <div><span>To</span>{recipients}</div>}
+            {(block.accountEmail || block.mailboxAddress) && (
+              <div><span>From</span>{block.accountEmail || block.mailboxAddress}</div>
+            )}
+          </div>
+          {block.bodyPreview && <div className="assistant-action-card-preview">{block.bodyPreview}</div>}
+        </>
+      )}
+      {error && <div className="assistant-action-card-error">{error}</div>}
+      <div className="assistant-action-card-actions">
+        {isCalendar ? (
+          (block.htmlLink || block.meetingLink) && (
+            <button
+              type="button"
+              className="assistant-action-button is-primary"
+              onClick={() => window.cosmic?.openExternal?.(block.htmlLink || block.meetingLink || '')}
+            >
+              Open event
+            </button>
+          )
+        ) : isPending ? (
+          <>
+            <button
+              type="button"
+              className="assistant-action-button"
+              disabled={Boolean(busy)}
+              onClick={() => act('reject')}
+            >
+              {busy === 'reject' ? 'Rejecting…' : 'Reject'}
+            </button>
+            <button
+              type="button"
+              className="assistant-action-button is-primary"
+              disabled={Boolean(busy)}
+              onClick={() => act('approve')}
+            >
+              {busy === 'approve' ? 'Sending…' : 'Approve & send'}
+            </button>
+          </>
+        ) : null}
+      </div>
+    </section>
+  )
+}
+
 const AssistantResponseBlocks = ({
   blocks,
 }: {
@@ -2338,6 +2535,9 @@ const AssistantResponseBlocks = ({
               <AssistantMarkdownBlock content={block.text} />
             </div>
           )
+        }
+        if (block.type === 'gmail_draft_approval' || block.type === 'agent_email_draft_approval' || block.type === 'calendar_event') {
+          return <AssistantActionBlock key={block.id} block={block} />
         }
         if (block.type === 'code') {
           return (
@@ -4911,6 +5111,22 @@ export default function App() {
         return
       }
 
+      if (eventType === 'response.action.updated') {
+        const approvalId = String(event.approval_id || '').trim()
+        const blockType = String(event.block_type || '').trim()
+        const nextStatus = String(event.status || '').trim()
+        if (!approvalId || !blockType || !nextStatus) return
+        setMessages((prev) => prev.map((message) => ({
+          ...message,
+          responseBlocks: message.responseBlocks?.map((block) => (
+            'approvalId' in block && block.approvalId === approvalId && block.type === blockType
+              ? { ...block, status: nextStatus }
+              : block
+          )),
+        })))
+        return
+      }
+
       // Cross-channel sync: messages from WhatsApp/Telegram arriving while desktop is open
       if (eventType === 'crosschannel.message') {
         const role = String(event.role || '').trim()
@@ -4963,6 +5179,14 @@ export default function App() {
             createdAt: new Date().toISOString(),
             sources: role === 'assistant' && Array.isArray(event.sources) ? event.sources : undefined,
             thinking: role === 'assistant' && typeof event.thinking_text === 'string' ? event.thinking_text : undefined,
+          }
+          if (eventMessageId) {
+            const existingIndex = prev.findIndex((message) => message.id === eventMessageId)
+            if (existingIndex >= 0) {
+              const next = [...prev]
+              next[existingIndex] = { ...next[existingIndex], ...newMsg }
+              return next
+            }
           }
           return [...prev, newMsg]
         })

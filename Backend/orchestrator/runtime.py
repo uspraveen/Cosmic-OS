@@ -4890,6 +4890,42 @@ class OrchestratorRuntime:
                     gmail_approval[key] = values
             if gmail_approval.get("account_id") and gmail_approval.get("draft_id"):
                 receipt["gmail_approval"] = gmail_approval
+        if intent_name in {
+            "calendar.create_event",
+            "calendar.update_event",
+            "calendar.cancel_event",
+        }:
+            event = data.get("event") if isinstance(data.get("event"), dict) else {}
+            if event:
+                operation = {
+                    "calendar.create_event": "created",
+                    "calendar.update_event": "updated",
+                    "calendar.cancel_event": "cancelled",
+                }[intent_name]
+                calendar_event = {
+                    key: value
+                    for key, value in {
+                        "operation": operation,
+                        "event_id": self._activity_excerpt(event.get("event_id"), limit=180),
+                        "calendar_id": self._activity_excerpt(event.get("calendar_id"), limit=320),
+                        "summary": self._activity_excerpt(event.get("summary"), limit=500),
+                        "description": self._activity_excerpt(event.get("description"), limit=1200),
+                        "location": self._activity_excerpt(event.get("location"), limit=500),
+                        "start": self._activity_excerpt(event.get("start"), limit=160),
+                        "end": self._activity_excerpt(event.get("end"), limit=160),
+                        "status": self._activity_excerpt(event.get("status"), limit=80),
+                        "html_link": self._activity_excerpt(event.get("html_link"), limit=1200),
+                        "meeting_link": self._activity_excerpt(event.get("meeting_link"), limit=1200),
+                        "organizer": self._activity_excerpt(event.get("organizer"), limit=320),
+                        "is_all_day": bool(event.get("is_all_day")),
+                        "attendees": event.get("attendees")
+                        if isinstance(event.get("attendees"), list)
+                        else [],
+                    }.items()
+                    if value not in (None, "", [], {})
+                }
+                if calendar_event.get("event_id") or calendar_event.get("summary"):
+                    receipt["calendar_event"] = calendar_event
         if artifact_count > 0:
             receipt["artifact_count"] = artifact_count
         if local_sources:

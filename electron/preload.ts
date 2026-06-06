@@ -252,6 +252,8 @@ contextBridge.exposeInMainWorld('cosmic', {
   getGatewayGmailApprovals: () => ipcRenderer.invoke('gateway:get-gmail-approvals'),
   approveGatewayGmailApproval: (payload: any) => ipcRenderer.invoke('gateway:approve-gmail-approval', payload),
   rejectGatewayGmailApproval: (payload: any) => ipcRenderer.invoke('gateway:reject-gmail-approval', payload),
+  approveGatewayAgentEmailApproval: (payload: any) => ipcRenderer.invoke('gateway:approve-agent-email-approval', payload),
+  rejectGatewayAgentEmailApproval: (payload: any) => ipcRenderer.invoke('gateway:reject-agent-email-approval', payload),
   cosmicMailRequest: (payload: any) => ipcRenderer.invoke('cosmic-mail:request', payload),
   recordCosmicMailGatewayNotification: (payload: any) => ipcRenderer.invoke('cosmic-mail:record-gateway-notification', payload),
   cosmicMailUploadDraftAttachment: (payload: any) => ipcRenderer.invoke('cosmic-mail:upload-draft-attachment', payload),

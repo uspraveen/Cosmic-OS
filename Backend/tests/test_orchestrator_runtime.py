@@ -2944,3 +2944,114 @@ async def test_orchestrator_runtime_can_retry_with_fallback_model_after_overload
     assert retry_event["message"] == "Opus hit temporary capacity. Retrying with a standby model..."
     complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
     assert complete_event["content"] == "Fallback model completed the turn."
+
+
+@pytest.mark.asyncio
+async def test_collect_specialist_receipt_captures_calendar_event(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    runtime = OrchestratorRuntime(
+        OrchestratorConfig(
+            internal_token="internal-token",
+            signing_secret="signing-secret",
+            anthropic_api_key="anthropic-key",
+            anthropic_model="claude-opus-4-6",
+            task_ledger_db_path=tmp_path / "task_ledger_calendar_receipt.db",
+        ),
+        client=client,
+    )
+    try:
+        receipts: list[dict[str, object]] = []
+        runtime._collect_specialist_receipt(  # noqa: SLF001
+            "delegate_to_agent",
+            {"intent": "calendar.create_event", "agent_id": "cosmic/calendar-agent:1.0.0"},
+            json.dumps(
+                {
+                    "delegation": {
+                        "intent": "calendar.create_event",
+                        "agent_id": "cosmic/calendar-agent:1.0.0",
+                    },
+                    "event": {
+                        "event_id": "evt_123",
+                        "calendar_id": "owner@example.com",
+                        "summary": "Design review",
+                        "start": "2026-06-06T10:00:00-05:00",
+                        "end": "2026-06-06T10:30:00-05:00",
+                        "html_link": "https://calendar.google.com/event?eid=evt_123",
+                    },
+                }
+            ),
+            specialist_receipts=receipts,
+        )
+    finally:
+        await runtime.stop()
+
+    assert receipts[0]["calendar_event"] == {
+        "operation": "created",
+        "event_id": "evt_123",
+        "calendar_id": "owner@example.com",
+        "summary": "Design review",
+        "start": "2026-06-06T10:00:00-05:00",
+        "end": "2026-06-06T10:30:00-05:00",
+        "html_link": "https://calendar.google.com/event?eid=evt_123",
+        "is_all_day": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_collect_specialist_receipt_captures_real_gmail_draft_reply_shape(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    runtime = OrchestratorRuntime(
+        OrchestratorConfig(
+            internal_token="internal-token",
+            signing_secret="signing-secret",
+            anthropic_api_key="anthropic-key",
+            anthropic_model="claude-opus-4-6",
+            task_ledger_db_path=tmp_path / "task_ledger_gmail_receipt.db",
+        ),
+        client=client,
+    )
+    try:
+        receipts: list[dict[str, object]] = []
+        runtime._collect_specialist_receipt(  # noqa: SLF001
+            "delegate_to_agent",
+            {"intent": "gmail.draft_reply", "agent_id": "cosmic/gmail-agent:1.0.0"},
+            json.dumps(
+                {
+                    "status": "draft_created",
+                    "account": {
+                        "account_id": "acct_123",
+                        "account_email": "owner@example.com",
+                        "account_label": "Primary",
+                    },
+                    "draft_id": "draft_123",
+                    "message": {"id": "msg_123", "threadId": "thread_123"},
+                    "approval_required": True,
+                    "delivery_status": "draft_created_pending_user_approval",
+                    "draft": {
+                        "to": ["recipient@example.com"],
+                        "subject": "Quick follow-up",
+                        "body": "Hi, following up.",
+                    },
+                    "delegation": {
+                        "intent": "gmail.draft_reply",
+                        "agent_id": "cosmic/gmail-agent:1.0.0",
+                    },
+                }
+            ),
+            specialist_receipts=receipts,
+        )
+    finally:
+        await runtime.stop()
+
+    assert receipts[0]["gmail_approval"] == {
+        "account_id": "acct_123",
+        "account_email": "owner@example.com",
+        "account_label": "Primary",
+        "draft_id": "draft_123",
+        "message_id": "msg_123",
+        "thread_id": "thread_123",
+        "subject": "Quick follow-up",
+        "body_text": "Hi, following up.",
+        "body_preview": "Hi, following up.",
+        "to": ["recipient@example.com"],
+    }
