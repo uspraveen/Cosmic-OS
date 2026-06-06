@@ -3411,6 +3411,21 @@ class GatewayRuntime:
             blocks.append(block)
         return blocks
 
+    def _historical_gmail_approval_blocks(self, specialist_receipts: Any) -> list[dict[str, Any]]:
+        blocks: list[dict[str, Any]] = []
+        for receipt in self._normalize_specialist_receipts(specialist_receipts):
+            approval = receipt.get("gmail_approval")
+            if not isinstance(approval, dict):
+                continue
+            account_id = self._safe_text(approval.get("account_id"))
+            draft_id = self._safe_text(approval.get("draft_id"))
+            if not account_id or not draft_id:
+                continue
+            persisted = self.gmail_approval_store.get_by_account_draft(account_id, draft_id)
+            if persisted is not None:
+                blocks.append(self._gmail_approval_response_block(persisted))
+        return blocks
+
     def _append_trusted_response_blocks(
         self,
         blocks: list[dict[str, Any]],
@@ -17971,6 +17986,15 @@ class GatewayRuntime:
         )
         if supporting_artifacts:
             hydrated["supporting_artifacts"] = supporting_artifacts
+        stored_blocks = (
+            [dict(item) for item in metadata.get("response_blocks") if isinstance(item, dict)]
+            if isinstance(metadata.get("response_blocks"), list)
+            else []
+        )
+        stored_blocks = self._append_trusted_response_blocks(
+            stored_blocks,
+            self._historical_gmail_approval_blocks(metadata.get("specialist_receipts")),
+        )
         response_blocks = self._build_client_response_blocks(
             content=None,
             produced_artifacts=self._normalize_produced_artifact_list(
@@ -17979,9 +18003,7 @@ class GatewayRuntime:
             supporting_artifacts=self._normalize_produced_artifact_list(
                 metadata.get("supporting_artifacts")
             ),
-            stored_blocks=metadata.get("response_blocks")
-            if isinstance(metadata.get("response_blocks"), list)
-            else None,
+            stored_blocks=stored_blocks or None,
         )
         if response_blocks:
             hydrated["response_blocks"] = response_blocks

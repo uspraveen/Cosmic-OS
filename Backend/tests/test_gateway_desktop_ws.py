@@ -1154,6 +1154,44 @@ def test_gateway_builds_trusted_gmail_and_calendar_response_blocks(tmp_path) -> 
     ]
 
 
+def test_gateway_hydrates_historical_gmail_approval_block_from_receipt(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+    runtime.gmail_approval_store.initialize()
+    approval, _ = runtime.gmail_approval_store.upsert_pending(
+        {
+            "account_id": "acc_a83a2c5b1199",
+            "account_email": "uspraveenraj@gmail.com",
+            "account_label": "uspraveenraj@gmail.com",
+            "draft_id": "r-5268802296645509690",
+            "message_id": "19e9c0130046e0c5",
+            "thread_id": "19e93cfac7519fb6",
+            "subject": "Quick follow-up on Copper",
+            "to": ["maratr@science.xyz"],
+            "body_preview": "Hi Marat, just following up.",
+        }
+    )
+
+    hydrated = runtime._hydrate_message_metadata_for_client(  # noqa: SLF001
+        {
+            "specialist_receipts": [
+                {
+                    "tool_name": "delegate_to_agent",
+                    "intent": "gmail.draft_reply",
+                    "gmail_approval": {
+                        "account_id": "acc_a83a2c5b1199",
+                        "draft_id": "r-5268802296645509690",
+                    },
+                }
+            ],
+            "response_blocks": [
+                {"id": "markdown_1", "type": "markdown", "text": "Draft saved."}
+            ],
+        }
+    )
+
+    assert hydrated["response_blocks"][-1] == runtime._gmail_approval_response_block(approval)  # noqa: SLF001
+
+
 def test_gateway_persists_agent_email_approval_response_block(tmp_path) -> None:
     runtime = build_runtime(tmp_path)
     runtime.session_store.initialize()

@@ -41,6 +41,11 @@ def test_gmail_approval_store_upsert_and_state_transitions():
         assert created_again is False
         assert duplicate["approval_id"] == row["approval_id"]
         assert duplicate["subject"] == "Hello again"
+        by_draft = store.get_by_account_draft("acc_123", "draft_123")
+        assert by_draft is not None
+        assert by_draft["approval_id"] == row["approval_id"]
+        assert store.get_by_account_draft("", "draft_123") is None
+        assert store.get_by_account_draft("acc_123", "") is None
 
         sent = store.mark_sent(row["approval_id"], {"message_id": "msg_123"})
         assert sent is not None

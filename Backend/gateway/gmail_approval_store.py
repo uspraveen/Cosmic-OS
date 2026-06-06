@@ -138,6 +138,23 @@ class GmailApprovalStore:
             ).fetchone()
         return self._row_to_dict(row) if row is not None else None
 
+    def get_by_account_draft(self, account_id: str, draft_id: str) -> dict[str, Any] | None:
+        normalized_account_id = self._text(account_id)
+        normalized_draft_id = self._text(draft_id)
+        if not normalized_account_id or not normalized_draft_id:
+            return None
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM gmail_approvals
+                WHERE account_id = ? AND draft_id = ?
+                LIMIT 1
+                """,
+                (normalized_account_id, normalized_draft_id),
+            ).fetchone()
+        return self._row_to_dict(row) if row is not None else None
+
     def mark_sending(self, approval_id: str) -> dict[str, Any] | None:
         return self._update_status(approval_id, "sending")
 
