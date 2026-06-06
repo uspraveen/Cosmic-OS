@@ -553,6 +553,8 @@ async def _handle_realtime_websocket_message(
 ) -> None:
     message_type = str(payload.get("type") or "").strip()
     request_id = str(payload.get("request_id") or "").strip() or None
+    if platform == "desktop" and isinstance(adapter, DesktopAdapter):
+        await adapter.touch_connection(channel)
 
     if message_type == "ping":
         await runtime.update_user_timezone(payload.get("timezone"), source=platform)

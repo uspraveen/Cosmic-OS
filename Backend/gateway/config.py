@@ -112,6 +112,7 @@ class GatewayConfig:
     fcm_service_account_json: str = ""
     fcm_timeout_sec: float = 8.0
     mobile_presence_stale_sec: int = 120
+    desktop_connection_stale_sec: int = 180
     usage_db_path: Path = BACKEND_ROOT / "gateway" / "usage.db"
     request_trace_db_path: Path = BACKEND_ROOT / "gateway" / "request_traces.db"
     routing_audit_db_path: Path = BACKEND_ROOT / "gateway" / "routing_audit.db"
@@ -355,6 +356,10 @@ class GatewayConfig:
             mobile_presence_stale_sec=max(
                 15,
                 _env_int("MOBILE_PRESENCE_STALE_SEC", 120),
+            ),
+            desktop_connection_stale_sec=max(
+                30,
+                _env_int("DESKTOP_CONNECTION_STALE_SEC", 180),
             ),
             usage_db_path=Path(
                 os.getenv(

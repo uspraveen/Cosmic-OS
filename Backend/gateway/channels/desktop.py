@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import WebSocket
@@ -15,6 +16,12 @@ class DesktopConnection:
     device_id: str
     websocket: WebSocket
     session_id: str | None = None
+    connected_at: str = ""
+    last_seen_at: str = ""
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class DesktopAdapter(ChannelAdapter):
@@ -57,12 +64,15 @@ class DesktopAdapter(ChannelAdapter):
             raise ValueError(f"Invalid desktop channel: {channel!r}")
 
         replaced: DesktopConnection | None = None
+        now = _utcnow_iso()
         async with self._lock:
             replaced = self._connections.get(channel)
             self._connections[channel] = DesktopConnection(
                 channel=channel,
                 device_id=device_id,
                 websocket=websocket,
+                connected_at=now,
+                last_seen_at=now,
             )
             self._primary_channel = channel
 
@@ -109,6 +119,16 @@ class DesktopAdapter(ChannelAdapter):
                 "connection_count": len(channels),
                 "channels": channels,
                 "primary_channel": self._primary_channel,
+                "connections": [
+                    {
+                        "channel": conn.channel,
+                        "device_id": conn.device_id,
+                        "session_id": conn.session_id,
+                        "connected_at": conn.connected_at,
+                        "last_seen_at": conn.last_seen_at,
+                    }
+                    for conn in self._connections.values()
+                ],
             }
 
     async def handle_incoming_message(
@@ -183,6 +203,14 @@ class DesktopAdapter(ChannelAdapter):
             conn = self._connections.get(channel)
             if conn is not None:
                 conn.session_id = session_id
+                conn.last_seen_at = _utcnow_iso()
+
+    async def touch_connection(self, channel: str) -> None:
+        """Record activity from a desktop connection without changing its session binding."""
+        async with self._lock:
+            conn = self._connections.get(channel)
+            if conn is not None:
+                conn.last_seen_at = _utcnow_iso()
 
     async def get_connection_session_id(self, channel: str) -> str | None:
         async with self._lock:
@@ -198,6 +226,8 @@ class DesktopAdapter(ChannelAdapter):
                     "channel": conn.channel,
                     "device_id": conn.device_id,
                     "session_id": conn.session_id,
+                    "connected_at": conn.connected_at,
+                    "last_seen_at": conn.last_seen_at,
                 }
                 for conn in self._connections.values()
             ]

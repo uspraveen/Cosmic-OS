@@ -7,7 +7,7 @@ from pathlib import Path
 import shutil
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -277,7 +277,14 @@ class FakeHeartbeatNoteOrchestratorClient(FakeOrchestratorClient):
             "request_id": task.input.get("request_id"),
             "session_id": task.session_id,
             "channel": task.channel,
-            "content": self.note,
+            "content": json.dumps(
+                {
+                    "decision": "deliver",
+                    "message": self.note,
+                    "reason": "test_note",
+                    "confidence": 1.0,
+                }
+            ),
             "route": "opus",
             "awaiting_reply": False,
             "metrics": {"rtt_ms": 24},
@@ -4691,10 +4698,15 @@ async def test_runtime_due_heartbeat_suppresses_repeated_delivered_note(tmp_path
     runtime.orchestrator = FakeHeartbeatNoteOrchestratorClient(note)
     await runtime.start()
     try:
-        runtime.scheduler_store.schedule_heartbeat(
-            next_fire_at="2000-01-01T00:00:00Z"
+        heartbeat = runtime.scheduler_store.get_heartbeat()
+        status, summary, next_fire_at = await runtime._execute_scheduler_heartbeat(  # noqa: SLF001 - targeted heartbeat seam
+            heartbeat
         )
-        await runtime._run_due_crons()  # noqa: SLF001 - targeted scheduler seam
+        runtime.scheduler_store.record_heartbeat_result(
+            status=status,
+            summary=summary,
+            next_fire_at=next_fire_at,
+        )
 
         first_task = runtime.orchestrator.last_task
         assert first_task is not None
@@ -4706,10 +4718,15 @@ async def test_runtime_due_heartbeat_suppresses_repeated_delivered_note(tmp_path
         assert heartbeat["last_result_status"] == "delivered"
         assert heartbeat["last_delivered_summary"] == note
 
-        runtime.scheduler_store.schedule_heartbeat(
-            next_fire_at="2000-01-01T00:30:00Z"
+        heartbeat = runtime.scheduler_store.get_heartbeat()
+        status, summary, next_fire_at = await runtime._execute_scheduler_heartbeat(  # noqa: SLF001 - targeted heartbeat seam
+            heartbeat
         )
-        await runtime._run_due_crons()  # noqa: SLF001 - targeted scheduler seam
+        runtime.scheduler_store.record_heartbeat_result(
+            status=status,
+            summary=summary,
+            next_fire_at=next_fire_at,
+        )
 
         second_task = runtime.orchestrator.last_task
         assert second_task is not None
@@ -4747,7 +4764,7 @@ async def test_runtime_heartbeat_preference_toggle_controls_due_execution(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_queues_desktop_when_only_mobile_push_target_exists(tmp_path) -> None:
+async def test_heartbeat_targets_mobile_when_only_mobile_push_target_exists(tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="opus")
     await runtime.start()
     try:
@@ -4764,11 +4781,85 @@ async def test_heartbeat_queues_desktop_when_only_mobile_push_target_exists(tmp_
             session_id="sess_heartbeat_push",
         )
 
-        assert channel == "desktop"
-        assert state["selected_channel"] == "desktop"
-        assert state["selected_platform"] == "desktop"
-        assert state["selection_reason"] == "desktop_queue_with_mobile_push_target"
+        assert channel == "mobile:mob_push"
+        assert state["selected_channel"] == "mobile:mob_push"
+        assert state["selected_platform"] == "mobile"
+        assert state["selection_reason"] == "mobile_push_target"
         assert state["mobile_push_target_count"] == 1
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_uses_fresh_desktop_before_mobile_push_target(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    await runtime.start()
+    try:
+        desktop_adapter = runtime.registry.adapters.get("desktop")
+        assert isinstance(desktop_adapter, DesktopAdapter)
+        await desktop_adapter.register_connection(
+            object(),  # type: ignore[arg-type]
+            device_id="desk_fresh",
+            channel="desktop:desk_fresh",
+        )
+        runtime.authorize_mobile_device("mob_push", metadata={"platform": "ios"})
+        runtime.update_mobile_push_token("mob_push", push_token=None, fcm_token="f" * 32)
+        runtime.record_mobile_device_session(
+            "mob_push",
+            session_id="sess_heartbeat_push",
+            channel="mobile:mob_push",
+        )
+
+        channel, state = await runtime._heartbeat_delivery_target(  # noqa: SLF001 - verifies heartbeat channel routing
+            {"delivery_channel": "auto"},
+            session_id="sess_heartbeat_push",
+        )
+
+        assert channel == "desktop:desk_fresh"
+        assert state["selected_platform"] == "desktop"
+        assert state["selection_reason"] == "desktop_connected_fresh"
+        assert state["desktop_fresh_connection_count"] == 1
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_ignores_stale_desktop_before_mobile_push_target(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    await runtime.start()
+    try:
+        desktop_adapter = runtime.registry.adapters.get("desktop")
+        assert isinstance(desktop_adapter, DesktopAdapter)
+        await desktop_adapter.register_connection(
+            object(),  # type: ignore[arg-type]
+            device_id="desk_stale",
+            channel="desktop:desk_stale",
+        )
+        stale_at = (
+            datetime.now(timezone.utc)
+            - timedelta(seconds=runtime.config.desktop_connection_stale_sec + 30)
+        ).isoformat().replace("+00:00", "Z")
+        desktop_adapter._connections["desktop:desk_stale"].last_seen_at = stale_at  # noqa: SLF001
+
+        runtime.authorize_mobile_device("mob_push", metadata={"platform": "ios"})
+        runtime.update_mobile_push_token("mob_push", push_token=None, fcm_token="f" * 32)
+        runtime.record_mobile_device_session(
+            "mob_push",
+            session_id="sess_heartbeat_push",
+            channel="mobile:mob_push",
+        )
+
+        channel, state = await runtime._heartbeat_delivery_target(  # noqa: SLF001 - verifies heartbeat channel routing
+            {"delivery_channel": "auto"},
+            session_id="sess_heartbeat_push",
+        )
+
+        assert channel == "mobile:mob_push"
+        assert state["selected_platform"] == "mobile"
+        assert state["selection_reason"] == "mobile_push_target"
+        assert state["desktop_connection_count"] == 1
+        assert state["desktop_fresh_connection_count"] == 0
+        assert state["desktop_stale_connection_count"] == 1
     finally:
         await runtime.stop()
 

@@ -2121,6 +2121,8 @@ class GatewayRuntime:
             "selected_platform": "desktop",
             "selection_reason": "desktop_default",
             "desktop_connection_count": 0,
+            "desktop_fresh_connection_count": 0,
+            "desktop_stale_connection_count": 0,
             "mobile_connection_count": 0,
             "mobile_push_target_count": 0,
         }
@@ -2158,13 +2160,22 @@ class GatewayRuntime:
             except Exception:
                 logger.exception("gateway.heartbeat_desktop_presence_failed")
         delivery_state["desktop_connection_count"] = len(desktop_connections)
-        if desktop_connections:
-            channel = self._safe_text(desktop_connections[0].get("channel")) or "desktop"
+        fresh_desktop_connections = [
+            connection
+            for connection in desktop_connections
+            if self._desktop_connection_is_fresh(connection)
+        ]
+        delivery_state["desktop_fresh_connection_count"] = len(fresh_desktop_connections)
+        delivery_state["desktop_stale_connection_count"] = (
+            len(desktop_connections) - len(fresh_desktop_connections)
+        )
+        if fresh_desktop_connections:
+            channel = self._safe_text(fresh_desktop_connections[0].get("channel")) or "desktop"
             delivery_state.update(
                 {
                     "selected_channel": channel,
                     "selected_platform": "desktop",
-                    "selection_reason": "desktop_connected",
+                    "selection_reason": "desktop_connected_fresh",
                 }
             )
             return channel, delivery_state
@@ -2214,17 +2225,16 @@ class GatewayRuntime:
             push_targets = self.mobile_device_store.list_push_targets(session_id=None)
         delivery_state["mobile_push_target_count"] = len(push_targets)
         if push_targets:
-            # Push-only mobile targets are not realtime delivery channels. Keep
-            # the durable response queued for the desktop surface while the
-            # response.complete handler sends mobile push notifications.
+            device_id = self._safe_text(push_targets[0].get("device_id"))
+            channel = f"mobile:{device_id}" if device_id else "mobile"
             delivery_state.update(
                 {
-                    "selected_channel": "desktop",
-                    "selected_platform": "desktop",
-                    "selection_reason": "desktop_queue_with_mobile_push_target",
+                    "selected_channel": channel,
+                    "selected_platform": "mobile",
+                    "selection_reason": "mobile_push_target",
                 }
             )
-            return "desktop", delivery_state
+            return channel, delivery_state
 
         return "desktop", delivery_state
 
@@ -11185,6 +11195,22 @@ class GatewayRuntime:
             parsed = parsed.replace(tzinfo=timezone.utc)
         age = datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)
         return age.total_seconds() <= self.config.mobile_presence_stale_sec
+
+    def _desktop_connection_is_fresh(self, connection: dict[str, Any]) -> bool:
+        raw = self._safe_text(connection.get("last_seen_at") or connection.get("connected_at"))
+        if not raw:
+            # Older adapters/tests may not expose activity timestamps. Treat
+            # those as live so this freshness gate remains backwards compatible
+            # with non-DesktopAdapter test doubles.
+            return True
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        age = datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)
+        return age.total_seconds() <= self.config.desktop_connection_stale_sec
 
     def _push_recently_scheduled(self, dedupe_key: str) -> bool:
         now = time.monotonic()
