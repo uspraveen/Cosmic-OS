@@ -126,8 +126,8 @@ Flow:
 
 1. The orchestrator delegates `gmail.draft_reply` when the user or an automation asks COSMIC to compose/reply through Gmail.
 2. Gmail Agent creates a Gmail draft and returns `approval_required=true`, the connected account identity, `draft_id`, recipients, subject, and a compact draft preview.
-3. The orchestrator's specialist receipt preserves this Gmail draft metadata.
-4. Gateway persists the receipt into `gateway/gmail_approvals.db` and broadcasts a Gmail approval notification to Desktop/Mobile. The chat response can continue normally; approval state is not hidden inside chat text.
+3. The orchestrator's specialist receipt preserves this Gmail draft metadata. For Desktop/Mobile turns, the specialist tool result also carries a trusted `_cosmic_ui` presentation contract telling the orchestrator that the complete draft and approval actions will render as an inline block. The orchestrator should acknowledge the ready draft briefly without repeating recipients, subject, body, or approval instructions in Markdown.
+4. Gateway persists the receipt into `gateway/gmail_approvals.db`, appends the trusted inline approval block to the response, and broadcasts a Gmail approval notification to Desktop/Mobile. The chat response can continue normally; approval state is not hidden inside chat text.
 5. Desktop Spaces -> Gmail and Mobile Spaces -> Gmail list pending/reviewed approvals. The user can approve or reject each draft.
 6. On approve, Gateway resolves the exact Google account credential and dispatches `gmail.send_draft` to Gmail Agent. On reject, Gateway marks the local approval rejected; the Gmail draft remains available in Gmail unless a future explicit delete path is added.
 

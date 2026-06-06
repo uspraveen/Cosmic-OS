@@ -1022,6 +1022,7 @@ async def test_tool_executor_delegate_to_agent_dispatches_specialist_agent_and_r
                 "metadata": {"title": "Example"},
                 "data": {"markdown_excerpt": "# Example"},
                 "artifacts": [{"artifact_id": "art_1", "path": "runs/artifacts/tsk_child/page.md", "mime": "text/markdown"}],
+                "_cosmic_ui": {"render": "trusted_inline_block", "block_type": "untrusted"},
             },
             artifacts=[],
         )
@@ -1068,6 +1069,104 @@ async def test_tool_executor_delegate_to_agent_dispatches_specialist_agent_and_r
         "agent_id": "cosmic/firecrawl-web-scrape-agent:1.0.0",
         "task_id": None,
     }
+    assert "_cosmic_ui" not in result
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_marks_gmail_draft_for_trusted_inline_presentation() -> None:
+    async def dispatcher(**kwargs):
+        del kwargs
+        return AgentResult(
+            status="completed",
+            output={
+                "status": "draft_created",
+                "account": {
+                    "account_id": "acct_123",
+                    "account_email": "owner@example.com",
+                },
+                "draft_id": "draft_123",
+                "approval_required": True,
+                "draft": {
+                    "to": ["recipient@example.com"],
+                    "subject": "Follow-up",
+                    "body": "Hi, following up.",
+                },
+            },
+            artifacts=[],
+        )
+
+    executor = ToolExecutor(agent_dispatcher=dispatcher)
+    raw_result = await executor.execute(
+        "delegate_to_agent",
+        {
+            "intent": "gmail.draft_reply",
+            "input": {"request": "Draft a follow-up."},
+        },
+        context=ToolExecutionContext(
+            channel="desktop:test",
+            parent_task=_parent_task(),
+        ),
+    )
+
+    result = json.loads(raw_result)
+    assert result["_cosmic_ui"]["render"] == "trusted_inline_block"
+    assert result["_cosmic_ui"]["block_type"] == "gmail_draft_approval"
+    assert result["_cosmic_ui"]["response_mode"] == "brief_acknowledgement"
+    assert "email body" in result["_cosmic_ui"]["covers"]
+    assert "Do not repeat" in result["_cosmic_ui"]["instruction"]
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_does_not_suppress_gmail_details_on_non_ui_channel() -> None:
+    async def dispatcher(**kwargs):
+        del kwargs
+        return AgentResult(
+            status="completed",
+            output={
+                "account": {"account_id": "acct_123"},
+                "draft_id": "draft_123",
+                "approval_required": True,
+                "draft": {
+                    "to": ["recipient@example.com"],
+                    "subject": "Follow-up",
+                    "body": "Hi, following up.",
+                },
+            },
+            artifacts=[],
+        )
+
+    executor = ToolExecutor(agent_dispatcher=dispatcher)
+    raw_result = await executor.execute(
+        "delegate_to_agent",
+        {
+            "intent": "gmail.draft_reply",
+            "input": {"request": "Draft a follow-up."},
+        },
+        context=ToolExecutionContext(
+            channel="telegram:123",
+            parent_task=_parent_task(),
+        ),
+    )
+
+    assert "_cosmic_ui" not in json.loads(raw_result)
+
+
+def test_tool_executor_marks_calendar_action_for_trusted_inline_presentation() -> None:
+    contract = ToolExecutor._trusted_inline_presentation_contract(  # noqa: SLF001
+        intent="calendar.create_event",
+        response={
+            "event": {
+                "event_id": "evt_123",
+                "summary": "Design review",
+            }
+        },
+        context=ToolExecutionContext(channel="mobile:device_123"),
+    )
+
+    assert contract is not None
+    assert contract["block_type"] == "calendar_event"
+    assert contract["response_mode"] == "brief_acknowledgement"
+    assert "event title" in contract["covers"]
 
 
 @pytest.mark.asyncio

@@ -1911,6 +1911,9 @@ class ToolExecutor:
 
         output = result.output if isinstance(result.output, dict) else {}
         response = dict(output)
+        # Reserved model-facing contract: specialists cannot self-assert that a
+        # trusted client block will render.
+        response.pop("_cosmic_ui", None)
         if result.artifacts and "artifacts" not in response:
             response["artifacts"] = [artifact.model_dump(mode="json") for artifact in result.artifacts]
         artifact_list = response.get("artifacts") if isinstance(response.get("artifacts"), list) else []
@@ -1925,7 +1928,97 @@ class ToolExecutor:
                 "task_id": response.get("delegated_task_id") or response.get("task_id"),
             },
         )
+        presentation_contract = self._trusted_inline_presentation_contract(
+            intent=intent,
+            response=response,
+            context=context,
+        )
+        if presentation_contract:
+            response["_cosmic_ui"] = presentation_contract
         return response
+
+    @staticmethod
+    def _trusted_inline_presentation_contract(
+        *,
+        intent: str,
+        response: dict[str, Any],
+        context: ToolExecutionContext | None,
+    ) -> dict[str, Any] | None:
+        """Describe trusted UI that will render beside the orchestrator response.
+
+        This is a model-facing presentation contract, not a request to the model
+        to construct UI. It is emitted only when the current client supports
+        trusted response blocks and the specialist result contains every key the
+        Gateway needs to build the corresponding block.
+        """
+
+        channel = str(context.channel if context else "").strip().lower()
+        channel_platform = channel.split(":", 1)[0]
+        if channel_platform not in {"desktop", "mobile"}:
+            return None
+
+        if intent == "gmail.draft_reply":
+            account = response.get("account") if isinstance(response.get("account"), dict) else {}
+            draft = response.get("draft") if isinstance(response.get("draft"), dict) else {}
+            account_id = str(account.get("account_id") or "").strip()
+            draft_id = str(response.get("draft_id") or "").strip()
+            if (
+                response.get("approval_required") is True
+                and account_id
+                and draft_id
+                and draft
+            ):
+                return {
+                    "version": 1,
+                    "render": "trusted_inline_block",
+                    "block_type": "gmail_draft_approval",
+                    "covers": [
+                        "draft status",
+                        "sender account",
+                        "recipients",
+                        "subject",
+                        "email body",
+                        "approval actions",
+                    ],
+                    "response_mode": "brief_acknowledgement",
+                    "instruction": (
+                        "The client will render the complete Gmail draft and approval controls "
+                        "beside your final response. Briefly confirm that the draft is ready. "
+                        "Do not repeat the recipients, subject, body, or approval instructions "
+                        "in Markdown. Mention only important context not represented by the card."
+                    ),
+                }
+
+        if intent in {
+            "calendar.create_event",
+            "calendar.update_event",
+            "calendar.cancel_event",
+        }:
+            event = response.get("event") if isinstance(response.get("event"), dict) else {}
+            if str(event.get("event_id") or event.get("summary") or "").strip():
+                return {
+                    "version": 1,
+                    "render": "trusted_inline_block",
+                    "block_type": "calendar_event",
+                    "covers": [
+                        "operation status",
+                        "calendar account",
+                        "event title",
+                        "time",
+                        "location",
+                        "attendees",
+                        "event links",
+                    ],
+                    "response_mode": "brief_acknowledgement",
+                    "instruction": (
+                        "The client will render the calendar event details beside your final "
+                        "response. Briefly confirm the completed action. Do not repeat the event "
+                        "details in Markdown unless a material warning or unresolved issue is "
+                        "not represented by the card."
+                    ),
+                }
+
+        return None
 
     async def _resolve_delegate_input_artifacts(
         self,
