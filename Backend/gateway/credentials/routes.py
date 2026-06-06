@@ -671,6 +671,11 @@ async def get_calendar_agenda(request: Request):
     Replaces the desktop-local google_integration.get_google_calendar_agenda_snapshot().
     """
     _check_local_token(request)
+    return await build_calendar_agenda_snapshot(request)
+
+
+async def build_calendar_agenda_snapshot(request: Request) -> dict[str, Any]:
+    """Build the shared bounded agenda snapshot for authenticated UI surfaces."""
     mgr = _get_manager(request)
     accounts = mgr.list_accounts("google")
 
