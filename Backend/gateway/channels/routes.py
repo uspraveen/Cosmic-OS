@@ -1220,16 +1220,6 @@ async def list_mobile_devices(
     return {"devices": _dedupe_mobile_devices(await runtime.list_mobile_devices())}
 
 
-@router.get("/channels/mobile/calendar/agenda")
-async def get_mobile_calendar_agenda(
-    request: Request,
-    _: None = Depends(require_local_api_token),
-) -> dict[str, Any]:
-    from ..credentials.routes import build_calendar_agenda_snapshot
-
-    return await build_calendar_agenda_snapshot(request)
-
-
 @router.post("/channels/mobile/devices/authorize")
 async def authorize_mobile_device(
     payload: MobileDeviceAuthorizeRequest,
