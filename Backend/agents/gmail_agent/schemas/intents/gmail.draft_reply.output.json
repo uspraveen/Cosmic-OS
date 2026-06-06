@@ -4,6 +4,7 @@
   "required": ["status", "account", "draft_id", "approval_required"],
   "properties": {
     "status": { "type": "string" },
+    "operation": { "type": "string", "enum": ["created", "updated"] },
     "account": { "type": "object" },
     "draft_id": { "type": ["string", "null"] },
     "message": { "type": "object" },

@@ -243,6 +243,182 @@ async def test_gmail_search_completes_step_plan() -> None:
 
 
 @pytest.mark.asyncio
+async def test_gmail_redraft_updates_single_existing_thread_draft() -> None:
+    from agents.gmail_agent.agent import GmailAgent
+
+    class FakeGmailClient:
+        def __init__(self) -> None:
+            self.updated: dict | None = None
+
+        async def get_thread(self, thread_id: str) -> dict:
+            assert thread_id == "thr_marat"
+            message = {
+                "message_id": "msg_original",
+                "thread_id": thread_id,
+                "from": "Marat <marat@example.com>",
+                "to": "user@example.com",
+                "subject": "Copper",
+                "body_text": "Original thread context.",
+                "message_id_header": "<original@example.com>",
+                "references": "<original@example.com>",
+            }
+            return {
+                "thread_id": thread_id,
+                "messages": [message],
+                "message_count": 1,
+                "latest_message": message,
+            }
+
+        async def find_drafts_for_thread(self, thread_id: str) -> list[dict]:
+            assert thread_id == "thr_marat"
+            return [{"id": "draft_marat", "message": {"threadId": thread_id}}]
+
+        async def get_draft(self, draft_id: str) -> dict:
+            assert draft_id == "draft_marat"
+            return {
+                "id": draft_id,
+                "message": {
+                    "message_id": "msg_draft",
+                    "thread_id": "thr_marat",
+                    "from": "user@example.com",
+                    "to": "marat@example.com",
+                    "subject": "Re: Copper",
+                    "body_text": "Earlier weak draft.",
+                    "label_ids": ["DRAFT"],
+                },
+            }
+
+        async def update_draft(self, draft_id: str, **kwargs) -> dict:
+            assert draft_id == "draft_marat"
+            self.updated = kwargs
+            return {
+                "id": draft_id,
+                "message": {"id": "msg_draft", "threadId": "thr_marat"},
+            }
+
+        async def create_draft(self, **kwargs):
+            raise AssertionError(f"redraft should update, not create: {kwargs}")
+
+    temp_dir = Path(__file__).resolve().parent / f".tmp_{uuid.uuid4().hex}"
+    agent = None
+    try:
+        temp_dir.mkdir(parents=True, exist_ok=False)
+        agent = GmailAgent(redis_client=MagicMock(), store_root=temp_dir / "store")
+        agent.auth = {
+            "access_token": "token",
+            "account_id": "acct_gmail_1",
+            "account_email": "user@example.com",
+        }
+        await agent.on_startup()
+        client = FakeGmailClient()
+        agent._client = MagicMock(return_value=client)
+        task = TaskEnvelope(
+            task_id="tsk_gmail_redraft",
+            task_list_id="sess_redraft",
+            parent_task_id=None,
+            session_id="sess_redraft",
+            sender="cosmic/orchestrator:1.0.0",
+            recipient="cosmic/gmail-agent:1.0.0",
+            intent="gmail.draft_reply",
+            input={
+                "request": "Redraft this into a better, concise email.",
+                "thread_id": "thr_marat",
+                "update_existing_draft": True,
+                "to": ["marat@example.com"],
+                "subject": "Re: Copper",
+                "body": "A stronger draft.",
+            },
+            input_artifacts=[],
+            idempotency_key="idem_gmail_redraft",
+            priority="normal",
+            signature="sig",
+            created_at=utcnow(),
+            source="user",
+            source_id=None,
+            channel="desktop",
+        )
+        step_plan = _attach_step_plan(agent)
+
+        result = await agent.handle_gmail_draft_reply(task)
+
+        assert result.status == "completed"
+        assert result.output["status"] == "draft_updated"
+        assert result.output["operation"] == "updated"
+        assert result.output["draft_id"] == "draft_marat"
+        assert result.output["approval_required"] is True
+        assert client.updated is not None
+        assert client.updated["body"] == "A stronger draft."
+        assert client.updated["thread_id"] == "thr_marat"
+        assert client.updated["in_reply_to"] == "<original@example.com>"
+        assert agent.step_plan is not None
+        assert agent.step_plan.has_pending_steps() is False
+        assert step_plan.steps[2]["note"] == "Updated Gmail draft."
+    finally:
+        if agent is not None:
+            await agent.stop()
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_gmail_redraft_refuses_to_guess_between_multiple_thread_drafts() -> None:
+    from agents.gmail_agent.agent import GmailAgent
+
+    class FakeGmailClient:
+        async def get_thread(self, thread_id: str) -> dict:
+            return {"thread_id": thread_id, "messages": [], "message_count": 0}
+
+        async def find_drafts_for_thread(self, thread_id: str) -> list[dict]:
+            return [
+                {"id": "draft_1", "message": {"threadId": thread_id}},
+                {"id": "draft_2", "message": {"threadId": thread_id}},
+            ]
+
+    temp_dir = Path(__file__).resolve().parent / f".tmp_{uuid.uuid4().hex}"
+    agent = None
+    try:
+        temp_dir.mkdir(parents=True, exist_ok=False)
+        agent = GmailAgent(redis_client=MagicMock(), store_root=temp_dir / "store")
+        agent.auth = {
+            "access_token": "token",
+            "account_id": "acct_gmail_1",
+            "account_email": "user@example.com",
+        }
+        await agent.on_startup()
+        agent._client = MagicMock(return_value=FakeGmailClient())
+        task = TaskEnvelope(
+            task_id="tsk_gmail_redraft_ambiguous",
+            task_list_id="sess_redraft",
+            parent_task_id=None,
+            session_id="sess_redraft",
+            sender="cosmic/orchestrator:1.0.0",
+            recipient="cosmic/gmail-agent:1.0.0",
+            intent="gmail.draft_reply",
+            input={
+                "request": "Redraft this email.",
+                "thread_id": "thr_marat",
+                "update_existing_draft": True,
+            },
+            input_artifacts=[],
+            idempotency_key="idem_gmail_redraft_ambiguous",
+            priority="normal",
+            signature="sig",
+            created_at=utcnow(),
+            source="user",
+            source_id=None,
+            channel="desktop",
+        )
+
+        with pytest.raises(ValueError, match="Multiple Gmail drafts exist"):
+            await agent.handle_gmail_draft_reply(task)
+    finally:
+        if agent is not None:
+            await agent.stop()
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@pytest.mark.asyncio
 async def test_gmail_internal_llm_omits_temperature_for_gpt5_and_logs_usage() -> None:
     from agents.gmail_agent.config import GmailAgentConfig
     from agents.gmail_agent.internal_llm import invoke_gmail_triage_llm

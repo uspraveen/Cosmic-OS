@@ -2430,6 +2430,9 @@ def test_build_agentic_system_prompt_explains_trusted_inline_presentation_contra
     assert "trusted `_cosmic_ui` presentation contract" in prompt
     assert "do not duplicate fields listed in `covers` as Markdown" in prompt
     assert "Never claim an inline block will render unless the tool result includes this contract." in prompt
+    assert "compose, draft, reply, redraft, revise, or rewrite" in prompt
+    assert "do not stop at a Markdown preview" in prompt
+    assert "`update_existing_draft=true`" in prompt
 
 
 def test_build_agentic_system_prompt_gates_visual_response_policy() -> None:

@@ -86,6 +86,10 @@ class GmailApprovalStore:
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(unique_key) DO UPDATE SET
+                    status = CASE
+                        WHEN gmail_approvals.status IN ('sent', 'sending') THEN gmail_approvals.status
+                        ELSE 'pending'
+                    END,
                     account_email = excluded.account_email,
                     account_label = excluded.account_label,
                     message_id = excluded.message_id,
@@ -101,7 +105,15 @@ class GmailApprovalStore:
                     session_id = excluded.session_id,
                     task_id = excluded.task_id,
                     source_task_id = excluded.source_task_id,
+                    reviewer_note = CASE
+                        WHEN gmail_approvals.status IN ('sent', 'sending') THEN gmail_approvals.reviewer_note
+                        ELSE NULL
+                    END,
                     updated_at = excluded.updated_at,
+                    reviewed_at = CASE
+                        WHEN gmail_approvals.status IN ('sent', 'sending') THEN gmail_approvals.reviewed_at
+                        ELSE NULL
+                    END,
                     payload_json = excluded.payload_json
                 """,
                 self._insert_values(normalized),

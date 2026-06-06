@@ -2195,6 +2195,46 @@ async def test_refresh_active_working_set_uses_latest_session_artifact_state(tmp
 
 
 @pytest.mark.asyncio
+async def test_refresh_active_working_set_surfaces_pending_gmail_draft_refs(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    await runtime.start()
+    try:
+        runtime.gmail_approval_store.upsert_pending(
+            {
+                "account_id": "acc_personal",
+                "account_email": "user@example.com",
+                "draft_id": "draft_marat",
+                "message_id": "msg_marat",
+                "thread_id": "thr_marat",
+                "subject": "Re: Copper",
+                "to": ["marat@example.com"],
+                "body_text": "Current pending draft.",
+            }
+        )
+
+        working_set = runtime._refresh_active_working_set("sess_gmail_draft_context")  # noqa: SLF001
+
+        draft = next(
+            item
+            for item in working_set["pending_gmail_drafts"]
+            if item.get("draft_id") == "draft_marat"
+        )
+        assert draft["account_id"] == "acc_personal"
+        assert draft["account_email"] == "user@example.com"
+        assert draft["message_id"] == "msg_marat"
+        assert draft["thread_id"] == "thr_marat"
+        assert draft["subject"] == "Re: Copper"
+        assert draft["to"] == ["marat@example.com"]
+        rendered = runtime._render_active_working_set_context(working_set)  # noqa: SLF001
+        assert "Pending Gmail drafts awaiting approval" in (rendered or "")
+        assert "draft_id=draft_marat" in (rendered or "")
+        assert "thread_id=thr_marat" in (rendered or "")
+        assert "to=marat@example.com" in (rendered or "")
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
 async def test_refresh_active_working_set_surfaces_recent_memory_tool_receipts(tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="opus")
     runtime.memory_client = FakeMemoryClient(enabled=True)

@@ -53,9 +53,12 @@ intents:
     output_schema: schemas/intents/gmail.draft_reply.output.json
     timeout_sec: 90
     usage_hints:
-      - Use this for Gmail compose/reply requests.
+      - Use this for Gmail compose, draft, reply, redraft, revise, and rewrite requests.
+      - A user request to compose, draft, reply, redraft, revise, or rewrite is an instruction to create or update the reversible Gmail draft now, unless the user explicitly asks only for preview text or essential account/thread ambiguity remains.
       - Creating a draft is allowed; actual sending requires explicit user approval through the Gmail approval surface.
       - Include thread_id or message_id when replying to an existing Gmail thread.
+      - Preserve the resolved account_id for every compose/reply/redraft because users may connect multiple Gmail accounts.
+      - For redraft/revise/rewrite requests, pass the known draft_id when available. Otherwise pass thread_id with update_existing_draft=true so the agent updates the sole existing draft in that thread and refuses to guess if multiple drafts exist.
       - When Gateway prompt context includes a Recent Surfaced Gmail Item, use its account_id plus thread_id/message_id for "reply to this" style follow-ups.
 
   - name: gmail.send_draft

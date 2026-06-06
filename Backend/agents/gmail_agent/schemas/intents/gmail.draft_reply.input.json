@@ -6,6 +6,8 @@
     "query": { "type": "string" },
     "thread_id": { "type": "string" },
     "message_id": { "type": "string" },
+    "draft_id": { "type": "string", "description": "Exact existing Gmail draft to update instead of creating another draft." },
+    "update_existing_draft": { "type": "boolean", "description": "When true and thread_id is present, safely update the sole existing draft in that thread; fail rather than guess when multiple drafts exist." },
     "to": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }] },
     "cc": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }] },
     "bcc": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }] },

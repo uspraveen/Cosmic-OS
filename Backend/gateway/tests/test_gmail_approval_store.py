@@ -56,3 +56,38 @@ def test_gmail_approval_store_upsert_and_state_transitions():
         assert rejected is not None
         assert rejected["status"] == "rejected"
         assert rejected["reviewer_note"] == "late rejection"
+
+
+def test_gmail_approval_store_redraft_reopens_rejected_pending_draft():
+    from gateway.gmail_approval_store import GmailApprovalStore
+
+    with TemporaryDirectory() as td:
+        store = GmailApprovalStore(Path(td) / "gmail_approvals.db")
+        store.initialize()
+        row, _ = store.upsert_pending(
+            {
+                "account_id": "acc_123",
+                "draft_id": "draft_123",
+                "subject": "First version",
+                "body_text": "Weak draft",
+            }
+        )
+        rejected = store.mark_rejected(row["approval_id"], "Please improve it")
+        assert rejected is not None
+        assert rejected["status"] == "rejected"
+
+        redrafted, created = store.upsert_pending(
+            {
+                "account_id": "acc_123",
+                "draft_id": "draft_123",
+                "subject": "Improved version",
+                "body_text": "Stronger draft",
+            }
+        )
+
+        assert created is False
+        assert redrafted["approval_id"] == row["approval_id"]
+        assert redrafted["status"] == "pending"
+        assert redrafted["reviewer_note"] is None
+        assert redrafted["reviewed_at"] is None
+        assert redrafted["subject"] == "Improved version"

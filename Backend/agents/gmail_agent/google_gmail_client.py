@@ -127,22 +127,16 @@ class GoogleGmailClient:
     ) -> dict[str, Any]:
         if not to and not cc and not bcc:
             raise ValueError("At least one recipient is required to create a Gmail draft.")
-        msg = EmailMessage()
-        msg["To"] = ", ".join(to)
-        if cc:
-            msg["Cc"] = ", ".join(cc)
-        if bcc:
-            msg["Bcc"] = ", ".join(bcc)
-        msg["Subject"] = subject
-        if in_reply_to:
-            msg["In-Reply-To"] = in_reply_to
-        if references:
-            msg["References"] = references
-        msg.set_content(body)
-        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii").rstrip("=")
-        payload: dict[str, Any] = {"message": {"raw": raw}}
-        if thread_id:
-            payload["message"]["threadId"] = thread_id
+        payload = _draft_payload(
+            to=to,
+            subject=subject,
+            body=body,
+            cc=cc,
+            bcc=bcc,
+            thread_id=thread_id,
+            in_reply_to=in_reply_to,
+            references=references,
+        )
         async with httpx.AsyncClient(timeout=max(30.0, self._timeout)) as client:
             resp = await client.post(
                 f"{_GMAIL_BASE}/users/me/drafts",
@@ -151,6 +145,114 @@ class GoogleGmailClient:
             )
             if resp.status_code == 401:
                 raise PermissionError("Google access token expired.")
+            resp.raise_for_status()
+            return resp.json()
+
+    async def list_drafts(
+        self,
+        *,
+        query: str = "",
+        max_results: int = 100,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"maxResults": max(1, min(int(max_results), 500))}
+        if query:
+            params["q"] = query
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.get(
+                f"{_GMAIL_BASE}/users/me/drafts",
+                headers=self._headers,
+                params=params,
+            )
+            if resp.status_code == 401:
+                raise PermissionError("Google access token expired.")
+            resp.raise_for_status()
+            payload = resp.json()
+        return [
+            item
+            for item in (payload.get("drafts") or [])
+            if isinstance(item, dict)
+        ]
+
+    async def find_drafts_for_thread(
+        self,
+        thread_id: str,
+        *,
+        max_results: int = 500,
+    ) -> list[dict[str, Any]]:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            raise ValueError("Gmail thread_id is required to find related drafts.")
+        drafts = await self.list_drafts(query="in:drafts", max_results=max_results)
+        return [
+            item
+            for item in drafts
+            if str(
+                (item.get("message") or {}).get("threadId")
+                or (item.get("message") or {}).get("thread_id")
+                or ""
+            ).strip()
+            == normalized_thread_id
+        ]
+
+    async def get_draft(self, draft_id: str) -> dict[str, Any]:
+        normalized_id = str(draft_id or "").strip()
+        if not normalized_id:
+            raise ValueError("Gmail draft_id is required.")
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.get(
+                f"{_GMAIL_BASE}/users/me/drafts/{normalized_id}",
+                headers=self._headers,
+                params={"format": "full"},
+            )
+            if resp.status_code == 401:
+                raise PermissionError("Google access token expired.")
+            if resp.status_code == 404:
+                raise ValueError(f"Gmail draft not found: {normalized_id}")
+            resp.raise_for_status()
+            payload = resp.json()
+        message = payload.get("message")
+        if isinstance(message, dict):
+            payload["message"] = normalize_message(message)
+        return payload
+
+    async def update_draft(
+        self,
+        draft_id: str,
+        *,
+        to: list[str],
+        subject: str,
+        body: str,
+        cc: list[str] | None = None,
+        bcc: list[str] | None = None,
+        thread_id: str | None = None,
+        in_reply_to: str | None = None,
+        references: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_id = str(draft_id or "").strip()
+        if not normalized_id:
+            raise ValueError("Gmail draft_id is required to update a draft.")
+        if not to and not cc and not bcc:
+            raise ValueError("At least one recipient is required to update a Gmail draft.")
+        payload = _draft_payload(
+            to=to,
+            subject=subject,
+            body=body,
+            cc=cc,
+            bcc=bcc,
+            thread_id=thread_id,
+            in_reply_to=in_reply_to,
+            references=references,
+        )
+        async with httpx.AsyncClient(timeout=max(30.0, self._timeout)) as client:
+            resp = await client.put(
+                f"{_GMAIL_BASE}/users/me/drafts/{normalized_id}",
+                headers={**self._headers, "Content-Type": "application/json"},
+                json=payload,
+            )
+            if resp.status_code == 401:
+                raise PermissionError("Google access token expired.")
+            if resp.status_code == 404:
+                raise ValueError(f"Gmail draft not found: {normalized_id}")
             resp.raise_for_status()
             return resp.json()
 
@@ -257,6 +359,36 @@ class GoogleGmailClient:
                 raise PermissionError("Google access token expired.")
             resp.raise_for_status()
             return resp.json()
+
+
+def _draft_payload(
+    *,
+    to: list[str],
+    subject: str,
+    body: str,
+    cc: list[str] | None = None,
+    bcc: list[str] | None = None,
+    thread_id: str | None = None,
+    in_reply_to: str | None = None,
+    references: str | None = None,
+) -> dict[str, Any]:
+    msg = EmailMessage()
+    msg["To"] = ", ".join(to)
+    if cc:
+        msg["Cc"] = ", ".join(cc)
+    if bcc:
+        msg["Bcc"] = ", ".join(bcc)
+    msg["Subject"] = subject
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+    if references:
+        msg["References"] = references
+    msg.set_content(body)
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii").rstrip("=")
+    payload: dict[str, Any] = {"message": {"raw": raw}}
+    if thread_id:
+        payload["message"]["threadId"] = thread_id
+    return payload
 
 
 def normalize_message(raw: dict[str, Any]) -> dict[str, Any]:

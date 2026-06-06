@@ -159,6 +159,7 @@ TASK_ACTIVITY_LOG_LIMIT = 64
 RECENT_MEMORY_TOOL_RECEIPT_LIMIT = 4
 RECENT_RESEARCH_RECEIPT_LIMIT = 3
 RECENT_SPECIALIST_RECEIPT_LIMIT = 4
+PENDING_GMAIL_DRAFT_REF_LIMIT = 8
 EVENT_AUTOMATION_AUTO_CONFIDENCE = 0.78
 EVENT_AUTOMATION_CONFIRM_CONFIDENCE = 0.52
 EVENT_AUTOMATION_MATCH_SYSTEM_PROMPT = """You are COSMIC's semantic event automation matcher.
@@ -8444,6 +8445,7 @@ class GatewayRuntime:
             "recent_spreadsheet_artifacts": [],
             "recent_research_receipts": [],
             "recent_specialist_receipts": [],
+            "pending_gmail_drafts": [],
             "user_preferences_in_play": self._normalize_string_list(
                 carry_forward.get("stable_user_preferences")
             ),
@@ -8650,6 +8652,37 @@ class GatewayRuntime:
                     parts.append(f"domains={', '.join(domains)}")
                 if artifact_count:
                     parts.append(f"artifacts={artifact_count}")
+                if parts:
+                    lines.append("  - " + "; ".join(parts))
+        pending_gmail_drafts = (
+            working_set.get("pending_gmail_drafts")
+            if isinstance(working_set.get("pending_gmail_drafts"), list)
+            else []
+        )
+        if pending_gmail_drafts:
+            lines.extend(["", "- Pending Gmail drafts awaiting approval:"])
+            for draft in pending_gmail_drafts[:PENDING_GMAIL_DRAFT_REF_LIMIT]:
+                if not isinstance(draft, dict):
+                    continue
+                parts: list[str] = []
+                subject = self._safe_text(draft.get("subject"))
+                account_email = self._safe_text(draft.get("account_email"))
+                recipients = self._normalize_string_list(draft.get("to"), limit=4)
+                draft_id = self._safe_text(draft.get("draft_id"))
+                thread_id = self._safe_text(draft.get("thread_id"))
+                approval_id = self._safe_text(draft.get("approval_id"))
+                if subject:
+                    parts.append(f'subject="{self._bounded_excerpt(subject, limit=120)}"')
+                if recipients:
+                    parts.append(f"to={', '.join(recipients)}")
+                if account_email:
+                    parts.append(f"account={account_email}")
+                if draft_id:
+                    parts.append(f"draft_id={draft_id}")
+                if thread_id:
+                    parts.append(f"thread_id={thread_id}")
+                if approval_id:
+                    parts.append(f"approval_id={approval_id}")
                 if parts:
                     lines.append("  - " + "; ".join(parts))
         contested_claims = (
@@ -9875,6 +9908,9 @@ class GatewayRuntime:
         turn_window_end_at = ""
         recent_research_receipts: list[dict[str, Any]] = []
         recent_specialist_receipts: list[dict[str, Any]] = []
+        pending_gmail_drafts = self._pending_gmail_draft_refs(
+            limit=PENDING_GMAIL_DRAFT_REF_LIMIT
+        )
         backgrounded_task_ids = self._backgrounded_active_task_ids(session_id)
 
         for turn in recent_turns:
@@ -10131,6 +10167,7 @@ class GatewayRuntime:
             "recent_tool_receipts": recent_tool_receipts,
             "recent_research_receipts": recent_research_receipts,
             "recent_specialist_receipts": recent_specialist_receipts,
+            "pending_gmail_drafts": pending_gmail_drafts,
             "contested_memory_claims": contested_claims,
             "contested_memory_keys": sorted(contested_keys),
             "contested_memory_ids": sorted(contested_ids),
@@ -10147,6 +10184,41 @@ class GatewayRuntime:
             },
         )
         return working_set
+
+    def _pending_gmail_draft_refs(self, *, limit: int) -> list[dict[str, Any]]:
+        try:
+            rows = self.gmail_approval_store.list(
+                include_terminal=False,
+                limit=max(1, min(limit, PENDING_GMAIL_DRAFT_REF_LIMIT)),
+            )
+        except Exception:
+            logger.debug("gateway.pending_gmail_draft_refs_failed", exc_info=True)
+            return []
+        refs: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict) or self._safe_text(row.get("status")) != "pending":
+                continue
+            ref = {
+                "approval_id": self._safe_text(row.get("approval_id")),
+                "account_id": self._safe_text(row.get("account_id")),
+                "account_email": self._safe_text(row.get("account_email")),
+                "draft_id": self._safe_text(row.get("draft_id")),
+                "message_id": self._safe_text(row.get("message_id")),
+                "thread_id": self._safe_text(row.get("thread_id")),
+                "subject": self._safe_text(row.get("subject")),
+                "to": self._normalize_string_list(row.get("to"), limit=4),
+                "updated_at": self._safe_text(row.get("updated_at")),
+            }
+            refs.append(
+                {
+                    key: value
+                    for key, value in ref.items()
+                    if value not in (None, "", [], {})
+                }
+            )
+            if len(refs) >= limit:
+                break
+        return refs
 
     def _recent_memory_tool_receipts(
         self, session_id: str, *, limit: int

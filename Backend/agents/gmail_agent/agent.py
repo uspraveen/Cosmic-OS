@@ -269,42 +269,79 @@ class GmailAgent(AgentRuntime):
         )
 
     async def handle_gmail_draft_reply(self, task: TaskEnvelope) -> AgentResult:
-        await self._maybe_create_plan(task, ["Read thread context if needed", "Draft response", "Create Gmail draft"])
+        await self._maybe_create_plan(task, ["Resolve thread and existing draft", "Draft response", "Create or update Gmail draft"])
         client = self._client()
         thread = None
         thread_id = str(task.input.get("thread_id") or "").strip()
         message_id = str(task.input.get("message_id") or "").strip()
+        draft_id = str(task.input.get("draft_id") or "").strip()
+        update_existing_draft = self._bool(task.input.get("update_existing_draft"), False)
+        existing_draft = None
+        if draft_id:
+            existing_draft = await client.get_draft(draft_id)
+            if not thread_id:
+                draft_message = (
+                    existing_draft.get("message")
+                    if isinstance(existing_draft.get("message"), dict)
+                    else {}
+                )
+                thread_id = str(
+                    draft_message.get("thread_id")
+                    or draft_message.get("threadId")
+                    or ""
+                ).strip()
         if thread_id or message_id:
             if not thread_id:
                 msg = await client.get_message(message_id)
                 thread_id = str(msg.get("thread_id") or "").strip()
             thread = await client.get_thread(thread_id)
-        await self._maybe_step(1, "completed", "Thread context prepared.")
+        if update_existing_draft and not draft_id and thread_id:
+            matching_drafts = await client.find_drafts_for_thread(thread_id)
+            if len(matching_drafts) > 1:
+                raise ValueError(
+                    "Multiple Gmail drafts exist in this thread. Pass the exact draft_id to update one safely."
+                )
+            if matching_drafts:
+                draft_id = str(matching_drafts[0].get("id") or "").strip()
+                if draft_id:
+                    existing_draft = await client.get_draft(draft_id)
+        reply_in_reply_to = self._latest_header(thread, "message_id_header")
+        reply_references = self._latest_header(thread, "references") or reply_in_reply_to
+        draft_context = self._thread_with_draft_context(thread, existing_draft)
+        await self._maybe_step(1, "completed", "Thread and pending draft context prepared.")
         request = str(task.input.get("request") or task.input.get("query") or task.input.get("body") or "").strip()
         if not request:
             raise ValueError("gmail.draft_reply requires request, query, or body.")
-        draft_plan = await self._build_draft_plan(task, request=request, thread=thread)
+        draft_plan = await self._build_draft_plan(task, request=request, thread=draft_context)
         await self._maybe_step(2, "completed", "Draft body prepared.")
-        draft = await client.create_draft(
-            to=self._string_list(draft_plan.get("to") or task.input.get("to")),
-            cc=self._string_list(draft_plan.get("cc") or task.input.get("cc")),
-            bcc=self._string_list(draft_plan.get("bcc") or task.input.get("bcc")),
-            subject=str(draft_plan.get("subject") or task.input.get("subject") or ""),
-            body=str(draft_plan.get("body") or task.input.get("body") or ""),
-            thread_id=thread_id or None,
-            in_reply_to=self._latest_header(thread, "message_id_header"),
-            references=self._latest_header(thread, "references") or self._latest_header(thread, "message_id_header"),
-        )
-        await self._maybe_step(3, "completed", "Created Gmail draft.")
+        draft_args = {
+            "to": self._string_list(draft_plan.get("to") or task.input.get("to")),
+            "cc": self._string_list(draft_plan.get("cc") or task.input.get("cc")),
+            "bcc": self._string_list(draft_plan.get("bcc") or task.input.get("bcc")),
+            "subject": str(draft_plan.get("subject") or task.input.get("subject") or ""),
+            "body": str(draft_plan.get("body") or task.input.get("body") or ""),
+            "thread_id": thread_id or None,
+            "in_reply_to": reply_in_reply_to or None,
+            "references": reply_references or None,
+        }
+        if draft_id:
+            draft = await client.update_draft(draft_id, **draft_args)
+            operation = "updated"
+        else:
+            draft = await client.create_draft(**draft_args)
+            draft_id = str(draft.get("id") or "").strip()
+            operation = "created"
+        await self._maybe_step(3, "completed", f"{operation.title()} Gmail draft.")
         return AgentResult(
             status="completed",
             output={
-                "status": "draft_created",
+                "status": f"draft_{operation}",
+                "operation": operation,
                 "account": self._account_info(),
-                "draft_id": draft.get("id"),
+                "draft_id": draft.get("id") or draft_id,
                 "message": draft.get("message"),
                 "approval_required": True,
-                "delivery_status": "draft_created_pending_user_approval",
+                "delivery_status": f"draft_{operation}_pending_user_approval",
                 "draft": draft_plan,
                 "notes": draft_plan.get("notes") or "",
             },
@@ -875,7 +912,19 @@ class GmailAgent(AgentRuntime):
             task_context=self._task_context(task),
         )
         if not self._string_list(plan.get("to")) and thread:
-            latest = (thread.get("messages") or [])[-1] if thread.get("messages") else {}
+            messages = [
+                item
+                for item in (thread.get("messages") or [])
+                if isinstance(item, dict)
+            ]
+            latest = next(
+                (
+                    item
+                    for item in reversed(messages)
+                    if not bool(item.get("is_existing_draft"))
+                ),
+                messages[-1] if messages else {},
+            )
             sender = extract_email_address(str(latest.get("from") or ""))
             if sender:
                 plan["to"] = [sender]
@@ -1389,6 +1438,40 @@ class GmailAgent(AgentRuntime):
             ],
         }
 
+    def _thread_with_draft_context(
+        self,
+        thread: dict[str, Any] | None,
+        existing_draft: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        draft_message = (
+            existing_draft.get("message")
+            if isinstance(existing_draft, dict)
+            and isinstance(existing_draft.get("message"), dict)
+            else None
+        )
+        if not isinstance(draft_message, dict):
+            return thread
+        context = dict(thread or {})
+        messages = [
+            dict(item)
+            for item in (context.get("messages") or [])
+            if isinstance(item, dict)
+        ]
+        draft_message_id = str(
+            draft_message.get("message_id") or draft_message.get("id") or ""
+        ).strip()
+        if not any(
+            str(item.get("message_id") or item.get("id") or "").strip()
+            == draft_message_id
+            for item in messages
+        ):
+            messages.append({**draft_message, "is_existing_draft": True})
+        context["messages"] = messages
+        context["message_count"] = len(messages)
+        context["latest_message"] = messages[-1] if messages else None
+        context["existing_draft_id"] = existing_draft.get("id")
+        return context
+
     def _reply_subject(self, thread: dict[str, Any] | None) -> str:
         messages = thread.get("messages") if isinstance(thread, dict) else []
         latest = messages[-1] if messages else {}
@@ -1455,6 +1538,18 @@ class GmailAgent(AgentRuntime):
             return float(value)
         except (TypeError, ValueError):
             return default
+
+    def _bool(self, value: Any, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        normalized = str(value or "").strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        return default
 
     def _string_list(self, value: Any) -> list[str]:
         if value is None:
