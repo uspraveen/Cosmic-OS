@@ -75,6 +75,23 @@ class GmailApprovalRejectRequest(BaseModel):
     note: str | None = Field(default=None, max_length=1000)
 
 
+class EmailDraftUpdateRequest(BaseModel):
+    subject: str = Field(..., min_length=1, max_length=998)
+    body_text: str = Field(..., max_length=200000)
+
+
+class CalendarEventUpdateRequest(BaseModel):
+    account_id: str | None = Field(default=None, max_length=160)
+    calendar_id: str = Field(default="primary", min_length=1, max_length=320)
+    summary: str = Field(..., min_length=1, max_length=500)
+    start: str = Field(..., min_length=1, max_length=160)
+    end: str = Field(..., min_length=1, max_length=160)
+    location: str | None = Field(default=None, max_length=1000)
+    description: str | None = Field(default=None, max_length=10000)
+    is_all_day: bool = False
+    timezone: str | None = Field(default=None, max_length=100)
+
+
 class CodexAgentConfigRequest(BaseModel):
     auth_mode: str | None = Field(default=None, max_length=32)
     api_key: str | None = Field(default=None, max_length=4096)
@@ -953,6 +970,8 @@ async def agent_email_incoming(
                 "mailbox_address": mailbox_address,
                 "subject": subject,
                 "recipients": approval.get("recipients"),
+                "cc_recipients": approval.get("cc_recipients"),
+                "body_text": approval.get("body_text"),
                 "recipient_summary": approval.get("recipient_summary"),
                 "snippet": approval.get("snippet"),
                 "created_at": approval.get("created_at"),
@@ -2074,6 +2093,25 @@ async def reject_gmail_approval(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
+@router.patch("/channels/gmail/approvals/{approval_id}/draft")
+async def update_gmail_approval_draft(
+    approval_id: str,
+    body: EmailDraftUpdateRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return await runtime.update_gmail_approval_draft(
+            approval_id,
+            subject=body.subject,
+            body_text=body.body_text,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
 @router.post("/channels/agent-email/approvals/{approval_id}/approve")
 async def approve_agent_email_approval(
     approval_id: str,
@@ -2084,6 +2122,51 @@ async def approve_agent_email_approval(
         return await runtime.approve_agent_email_approval(approval_id)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+@router.patch("/channels/agent-email/approvals/{approval_id}/draft")
+async def update_agent_email_approval_draft(
+    approval_id: str,
+    body: EmailDraftUpdateRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return await runtime.update_agent_email_approval_draft(
+            approval_id,
+            subject=body.subject,
+            body_text=body.body_text,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+@router.patch("/channels/calendar/events/{event_id}")
+async def update_calendar_event(
+    event_id: str,
+    body: CalendarEventUpdateRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return await runtime.update_calendar_event(
+            event_id,
+            account_id=body.account_id,
+            calendar_id=body.calendar_id,
+            summary=body.summary,
+            start=body.start,
+            end=body.end,
+            location=body.location,
+            description=body.description,
+            is_all_day=body.is_all_day,
+            timezone_name=body.timezone,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 

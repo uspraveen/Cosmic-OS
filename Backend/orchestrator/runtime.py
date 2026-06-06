@@ -4896,6 +4896,7 @@ class OrchestratorRuntime:
             "calendar.cancel_event",
         }:
             event = data.get("event") if isinstance(data.get("event"), dict) else {}
+            account = data.get("account") if isinstance(data.get("account"), dict) else {}
             if event:
                 operation = {
                     "calendar.create_event": "created",
@@ -4921,6 +4922,15 @@ class OrchestratorRuntime:
                         "attendees": event.get("attendees")
                         if isinstance(event.get("attendees"), list)
                         else [],
+                        "account": {
+                            key: value
+                            for key, value in {
+                                "account_id": self._activity_excerpt(account.get("account_id"), limit=160),
+                                "email": self._activity_excerpt(account.get("email"), limit=320),
+                                "account_label": self._activity_excerpt(account.get("account_label"), limit=320),
+                            }.items()
+                            if value
+                        },
                     }.items()
                     if value not in (None, "", [], {})
                 }

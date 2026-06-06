@@ -154,10 +154,19 @@ async def test_cosmic_mail_client_proxies_approval_actions() -> None:
             api_token="token",
             client=client,
         )
+        await cosmic.update_approval_draft(
+            "apr_123",
+            {"subject": "Updated", "text_body": "Preserve\n  indentation"},
+        )
         await cosmic.approve_approval("apr_123")
         await cosmic.reject_approval("apr_456", note="Not this one.")
 
     assert seen == [
+        (
+            "PATCH",
+            "/approvals/apr_123",
+            '{"subject":"Updated","text_body":"Preserve\\n  indentation"}',
+        ),
         ("POST", "/approvals/apr_123/approve", None),
         ("POST", "/approvals/apr_456/reject", '{"note":"Not this one."}'),
     ]

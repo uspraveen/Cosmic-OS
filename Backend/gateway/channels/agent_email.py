@@ -288,6 +288,11 @@ class AgentEmailAdapter(ChannelAdapter):
             or re.sub(r"<[^>]+>", " ", _safe_text(draft_dict.get("html_body")))
         )
         snippet = re.sub(r"\s+", " ", snippet).strip()
+        body_text = (
+            str(draft_dict.get("text_body"))
+            if isinstance(draft_dict.get("text_body"), str)
+            else ""
+        )
 
         return {
             "kind": "approval",
@@ -302,6 +307,7 @@ class AgentEmailAdapter(ChannelAdapter):
             "subject": subject,
             "recipients": recipients,
             "cc_recipients": cc_recipients,
+            "body_text": body_text,
             "recipient_summary": ", ".join(
                 contact["email"] for contact in recipients if contact.get("email")
             ),
@@ -343,6 +349,7 @@ class AgentEmailAdapter(ChannelAdapter):
                     "subject": subject,
                     "recipients": recipients,
                     "cc_recipients": cc_recipients or [],
+                    "body_text": text_body,
                     "body_preview": re.sub(r"\s+", " ", text_body).strip()[:700],
                     "mailbox_address": _safe_text(mailbox_address) or None,
                 }

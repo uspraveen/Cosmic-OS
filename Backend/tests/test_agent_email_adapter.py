@@ -230,12 +230,13 @@ async def test_agent_email_adapter_send_marks_approval_queue_status() -> None:
         "status": "pending",
         "draft_id": "draft_queued",
         "thread_id": None,
-        "subject": "Pending approval",
-        "recipients": [{"email": "owner@example.com", "name": "Owner"}],
-        "cc_recipients": [],
-        "body_preview": "Needs review.",
-        "mailbox_address": "assistant@example.com",
-    }
+            "subject": "Pending approval",
+            "recipients": [{"email": "owner@example.com", "name": "Owner"}],
+            "cc_recipients": [],
+            "body_text": "Needs review.",
+            "body_preview": "Needs review.",
+            "mailbox_address": "assistant@example.com",
+        }
 
 
 @pytest.mark.asyncio

@@ -69,3 +69,41 @@ def test_list_sessions_orders_by_message_activity_and_skips_empty_rollover_rows(
     assert sessions[0]["message_count"] == 1
     assert sessions[0]["first_message_at"] == "2026-04-05T17:53:00Z"
     assert sessions[0]["last_message_at"] == "2026-04-05T17:53:00Z"
+
+
+def test_update_response_action_block_persists_exact_block_patch(tmp_path) -> None:
+    store = SessionStore(tmp_path / "sessions.db")
+    store.initialize()
+    message_id = store.append_message(
+        "sess_20260606",
+        role="assistant",
+        content="",
+        metadata={
+            "response_blocks": [
+                {
+                    "id": "calendar_event:evt_123",
+                    "type": "calendar_event",
+                    "event_id": "evt_123",
+                    "summary": "Initial title",
+                    "start": "2026-06-08T15:00:00Z",
+                    "end": "2026-06-08T15:30:00Z",
+                }
+            ]
+        },
+    )
+
+    changed = store.update_response_action_block(
+        block_id="calendar_event:evt_123",
+        block_type="calendar_event",
+        patch={
+            "summary": "Updated title",
+            "location": "Room 4",
+        },
+    )
+
+    assert changed == 1
+    message = store.get_message(message_id)
+    block = message["metadata"]["response_blocks"][0]
+    assert block["summary"] == "Updated title"
+    assert block["location"] == "Room 4"
+    assert block["start"] == "2026-06-08T15:00:00Z"

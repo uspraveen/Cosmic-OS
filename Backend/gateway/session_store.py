@@ -1023,6 +1023,59 @@ class SessionStore:
                 connection.commit()
         return changed
 
+    def update_response_action_block(
+        self,
+        *,
+        block_id: str,
+        block_type: str,
+        patch: dict[str, Any],
+    ) -> int:
+        normalized_block_id = str(block_id or "").strip()
+        normalized_block_type = str(block_type or "").strip()
+        normalized_patch = dict(patch or {})
+        if not normalized_block_id or not normalized_block_type or not normalized_patch:
+            return 0
+        changed = 0
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT message_id, metadata_json
+                FROM messages
+                WHERE metadata_json LIKE ?
+                """,
+                (f"%{normalized_block_id}%",),
+            ).fetchall()
+            for row in rows:
+                metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+                if not isinstance(metadata, dict):
+                    continue
+                blocks = metadata.get("response_blocks")
+                if not isinstance(blocks, list):
+                    continue
+                updated_blocks: list[Any] = []
+                row_changed = False
+                for block in blocks:
+                    if (
+                        isinstance(block, dict)
+                        and str(block.get("type") or "").strip() == normalized_block_type
+                        and str(block.get("id") or "").strip() == normalized_block_id
+                    ):
+                        updated_blocks.append({**block, **normalized_patch})
+                        row_changed = True
+                    else:
+                        updated_blocks.append(block)
+                if not row_changed:
+                    continue
+                metadata["response_blocks"] = updated_blocks
+                connection.execute(
+                    "UPDATE messages SET metadata_json = ? WHERE message_id = ?",
+                    (json.dumps(metadata, default=str), row["message_id"]),
+                )
+                changed += 1
+            if changed:
+                connection.commit()
+        return changed
+
     def list_turn_ledger(
         self,
         session_id: str,

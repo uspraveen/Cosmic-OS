@@ -170,6 +170,26 @@ class CosmicMailClient:
     async def create_draft(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._request_json("POST", "/v1/drafts", json_body=payload)
 
+    async def get_approval(self, approval_id: str) -> dict[str, Any]:
+        normalized = str(approval_id or "").strip()
+        if not normalized:
+            raise ValueError("approval_id is required")
+        return await self._request_json("GET", f"/approvals/{normalized}")
+
+    async def update_approval_draft(
+        self,
+        approval_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        normalized = str(approval_id or "").strip()
+        if not normalized:
+            raise ValueError("approval_id is required")
+        return await self._request_json(
+            "PATCH",
+            f"/approvals/{normalized}",
+            json_body=payload,
+        )
+
     async def send_draft(self, draft_id: str) -> dict[str, Any]:
         normalized = str(draft_id or "").strip()
         if not normalized:

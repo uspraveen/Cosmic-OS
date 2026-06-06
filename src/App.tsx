@@ -1,4 +1,4 @@
-import { ArrowDownToLine, ChevronDown, ChevronRight, Mic, Square, Terminal } from 'lucide-react'
+import { ArrowDownToLine, CalendarDays, Check, ChevronDown, ChevronRight, Copy, Mail, Mic, Pencil, Save, Square, Terminal, X } from 'lucide-react'
 import { Fragment, type ClipboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown from 'react-markdown'
@@ -223,8 +223,12 @@ interface ResponseActionBlock {
   type: 'gmail_draft_approval' | 'agent_email_draft_approval' | 'calendar_event'
   status?: string | null
   approvalId?: string | null
+  eventId?: string | null
+  calendarId?: string | null
+  accountId?: string | null
   subject?: string | null
   summary?: string | null
+  bodyText?: string | null
   bodyPreview?: string | null
   to?: string[]
   cc?: string[]
@@ -235,6 +239,8 @@ interface ResponseActionBlock {
   start?: string | null
   end?: string | null
   location?: string | null
+  description?: string | null
+  isAllDay?: boolean
   htmlLink?: string | null
   meetingLink?: string | null
 }
@@ -554,8 +560,12 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
         type,
         status: typeof (item as any).status === 'string' ? (item as any).status.trim() : null,
         approvalId: typeof (item as any).approval_id === 'string' ? (item as any).approval_id.trim() : null,
+        eventId: typeof (item as any).event_id === 'string' ? (item as any).event_id.trim() : null,
+        calendarId: typeof (item as any).calendar_id === 'string' ? (item as any).calendar_id.trim() : null,
+        accountId: typeof (item as any).account_id === 'string' ? (item as any).account_id.trim() : null,
         subject: typeof (item as any).subject === 'string' ? (item as any).subject.trim() : null,
         summary: typeof (item as any).summary === 'string' ? (item as any).summary.trim() : null,
+        bodyText: typeof (item as any).body_text === 'string' ? (item as any).body_text : null,
         bodyPreview: typeof (item as any).body_preview === 'string' ? (item as any).body_preview.trim() : null,
         to: stringList((item as any).to),
         cc: stringList((item as any).cc),
@@ -566,6 +576,8 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
         start: typeof (item as any).start === 'string' ? (item as any).start.trim() : null,
         end: typeof (item as any).end === 'string' ? (item as any).end.trim() : null,
         location: typeof (item as any).location === 'string' ? (item as any).location.trim() : null,
+        description: typeof (item as any).description === 'string' ? (item as any).description : null,
+        isAllDay: Boolean((item as any).is_all_day),
         htmlLink: typeof (item as any).html_link === 'string' ? (item as any).html_link.trim() : null,
         meetingLink: typeof (item as any).meeting_link === 'string' ? (item as any).meeting_link.trim() : null,
       })
@@ -2397,20 +2409,130 @@ const formatInlineCalendarTime = (value?: string | null) => {
     : date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
 }
 
+const toInlineCalendarInputValue = (value?: string | null, isAllDay = false) => {
+  if (!value) return ''
+  if (isAllDay) return value.slice(0, 10)
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value.slice(0, 16)
+  const pad = (part: number) => String(part).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+const fromInlineCalendarInputValue = (value: string, isAllDay = false) => {
+  if (isAllDay) return value
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toISOString()
+}
+
 const AssistantActionBlock = ({ block }: { block: ResponseActionBlock }) => {
   const [status, setStatus] = useState(block.status || 'pending')
-  const [busy, setBusy] = useState<'approve' | 'reject' | null>(null)
+  const [busy, setBusy] = useState<'approve' | 'reject' | 'save' | null>(null)
   const [error, setError] = useState('')
+  const [editing, setEditing] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const [subject, setSubject] = useState(block.subject || '')
+  const [bodyText, setBodyText] = useState(block.bodyText ?? block.bodyPreview ?? '')
+  const [summary, setSummary] = useState(block.summary || '')
+  const [start, setStart] = useState(toInlineCalendarInputValue(block.start, block.isAllDay))
+  const [end, setEnd] = useState(toInlineCalendarInputValue(block.end, block.isAllDay))
+  const [location, setLocation] = useState(block.location || '')
+  const [description, setDescription] = useState(block.description || '')
   const isCalendar = block.type === 'calendar_event'
   const isPending = ['pending', 'failed'].includes(status.toLowerCase())
   const title = isCalendar
     ? block.summary || 'Calendar event'
     : block.subject || (block.type === 'gmail_draft_approval' ? 'Gmail draft' : 'Agent Email draft')
   const recipients = formatInlineActionRecipients(block)
+  const visibleBody = block.bodyText ?? block.bodyPreview ?? ''
+  const canEdit = isCalendar
+    ? Boolean(block.eventId)
+    : Boolean(block.approvalId && isPending && block.bodyText !== null && block.bodyText !== undefined)
 
   useEffect(() => {
     setStatus(block.status || 'pending')
   }, [block.status])
+
+  useEffect(() => {
+    if (editing) return
+    setSubject(block.subject || '')
+    setBodyText(block.bodyText ?? block.bodyPreview ?? '')
+    setSummary(block.summary || '')
+    setStart(toInlineCalendarInputValue(block.start, block.isAllDay))
+    setEnd(toInlineCalendarInputValue(block.end, block.isAllDay))
+    setLocation(block.location || '')
+    setDescription(block.description || '')
+  }, [block, editing])
+
+  const copyBody = async () => {
+    if (!visibleBody) return
+    try {
+      await navigator.clipboard.writeText(visibleBody)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1600)
+    } catch {
+      setError('Unable to copy the email body.')
+    }
+  }
+
+  const cancelEdit = () => {
+    setEditing(false)
+    setError('')
+    setSubject(block.subject || '')
+    setBodyText(block.bodyText ?? block.bodyPreview ?? '')
+    setSummary(block.summary || '')
+    setStart(toInlineCalendarInputValue(block.start, block.isAllDay))
+    setEnd(toInlineCalendarInputValue(block.end, block.isAllDay))
+    setLocation(block.location || '')
+    setDescription(block.description || '')
+  }
+
+  const saveEdit = async () => {
+    if (!canEdit || busy) return
+    setBusy('save')
+    setError('')
+    try {
+      if (isCalendar) {
+        if (!window.cosmic?.updateGatewayCalendarEvent || !block.eventId) {
+          throw new Error('Calendar update action is unavailable.')
+        }
+        await window.cosmic.updateGatewayCalendarEvent({
+          eventId: block.eventId,
+          accountId: block.accountId,
+          calendarId: block.calendarId,
+          summary: summary.trim(),
+          start: fromInlineCalendarInputValue(start, block.isAllDay),
+          end: fromInlineCalendarInputValue(end, block.isAllDay),
+          location: location.trim() || null,
+          description,
+          isAllDay: Boolean(block.isAllDay),
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        })
+      } else if (block.type === 'gmail_draft_approval') {
+        if (!window.cosmic?.updateGatewayGmailApprovalDraft || !block.approvalId) {
+          throw new Error('Gmail draft update action is unavailable.')
+        }
+        await window.cosmic.updateGatewayGmailApprovalDraft({
+          approvalId: block.approvalId,
+          subject: subject.trim(),
+          bodyText,
+        })
+      } else {
+        if (!window.cosmic?.updateGatewayAgentEmailApprovalDraft || !block.approvalId) {
+          throw new Error('Agent Email draft update action is unavailable.')
+        }
+        await window.cosmic.updateGatewayAgentEmailApprovalDraft({
+          approvalId: block.approvalId,
+          subject: subject.trim(),
+          bodyText,
+        })
+      }
+      setEditing(false)
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : 'Update failed.')
+    } finally {
+      setBusy(null)
+    }
+  }
 
   const act = async (kind: 'approve' | 'reject') => {
     if (!block.approvalId || busy) return
@@ -2451,24 +2573,64 @@ const AssistantActionBlock = ({ block }: { block: ResponseActionBlock }) => {
   return (
     <section className="assistant-action-card" data-kind={block.type}>
       <div className="assistant-action-card-head">
-        <div>
-          <div className="assistant-action-card-kicker">
+        <div className="assistant-action-card-heading">
+          <span className="assistant-action-card-icon" aria-hidden="true">
+            {isCalendar ? <CalendarDays size={15} /> : <Mail size={15} />}
+          </span>
+          <div className="assistant-action-card-heading-copy">
+            <div className="assistant-action-card-kicker">
             {isCalendar
               ? `${block.operation || 'calendar'} event`
               : block.type === 'gmail_draft_approval'
                 ? 'Gmail draft'
                 : 'Agent Email draft'}
+            </div>
+            {editing ? (
+              <input
+                className="assistant-action-card-title-input"
+                value={isCalendar ? summary : subject}
+                onChange={(event) => (isCalendar ? setSummary(event.target.value) : setSubject(event.target.value))}
+                aria-label={isCalendar ? 'Event title' : 'Email subject'}
+              />
+            ) : (
+              <div className="assistant-action-card-title">{title}</div>
+            )}
           </div>
-          <div className="assistant-action-card-title">{title}</div>
         </div>
-        <div className={`assistant-action-card-status is-${status.toLowerCase()}`}>{status}</div>
+        <div className="assistant-action-card-head-actions">
+          {canEdit && !editing && (
+            <button
+              type="button"
+              className="assistant-action-icon-button"
+              onClick={() => setEditing(true)}
+              title="Edit"
+              aria-label="Edit"
+            >
+              <Pencil size={13} />
+            </button>
+          )}
+          <div className={`assistant-action-card-status is-${status.toLowerCase()}`}>{status}</div>
+        </div>
       </div>
       {isCalendar ? (
         <div className="assistant-action-card-details">
-          {(block.start || block.end) && (
-            <div><span>When</span>{formatInlineCalendarTime(block.start)}{block.end ? ` – ${formatInlineCalendarTime(block.end)}` : ''}</div>
+          {editing ? (
+            <>
+              <label><span>Starts</span><input type={block.isAllDay ? 'date' : 'datetime-local'} value={start} onChange={(event) => setStart(event.target.value)} /></label>
+              <label><span>Ends</span><input type={block.isAllDay ? 'date' : 'datetime-local'} value={end} onChange={(event) => setEnd(event.target.value)} /></label>
+              <label><span>Where</span><input value={location} onChange={(event) => setLocation(event.target.value)} placeholder="Optional location" /></label>
+              <label><span>Notes</span><textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={3} placeholder="Optional description" /></label>
+            </>
+          ) : (
+            <>
+              {(block.start || block.end) && (
+                <div><span>When</span>{formatInlineCalendarTime(block.start)}{block.end ? ` – ${formatInlineCalendarTime(block.end)}` : ''}</div>
+              )}
+              {block.location && <div><span>Where</span>{block.location}</div>}
+              {block.accountEmail && <div><span>Calendar</span>{block.accountEmail}</div>}
+              {block.description && <div><span>Notes</span>{block.description}</div>}
+            </>
           )}
-          {block.location && <div><span>Where</span>{block.location}</div>}
         </div>
       ) : (
         <>
@@ -2478,12 +2640,49 @@ const AssistantActionBlock = ({ block }: { block: ResponseActionBlock }) => {
               <div><span>From</span>{block.accountEmail || block.mailboxAddress}</div>
             )}
           </div>
-          {block.bodyPreview && <div className="assistant-action-card-preview">{block.bodyPreview}</div>}
+          {(visibleBody || editing) && (
+            <div className="assistant-action-card-body">
+              <div className="assistant-action-card-body-head">
+                <span>Message</span>
+                {visibleBody && !editing && (
+                  <button
+                    type="button"
+                    className="assistant-action-icon-button"
+                    onClick={() => void copyBody()}
+                    title="Copy email body"
+                    aria-label="Copy email body"
+                  >
+                    {copied ? <Check size={13} /> : <Copy size={13} />}
+                  </button>
+                )}
+              </div>
+              {editing ? (
+                <textarea
+                  className="assistant-action-card-body-editor"
+                  value={bodyText}
+                  onChange={(event) => setBodyText(event.target.value)}
+                  rows={10}
+                  aria-label="Email body"
+                />
+              ) : (
+                <div className="assistant-action-card-preview">{visibleBody}</div>
+              )}
+            </div>
+          )}
         </>
       )}
       {error && <div className="assistant-action-card-error">{error}</div>}
       <div className="assistant-action-card-actions">
-        {isCalendar ? (
+        {editing ? (
+          <>
+            <button type="button" className="assistant-action-button" disabled={Boolean(busy)} onClick={cancelEdit}>
+              <X size={13} /> Cancel
+            </button>
+            <button type="button" className="assistant-action-button is-primary" disabled={Boolean(busy)} onClick={() => void saveEdit()}>
+              <Save size={13} /> {busy === 'save' ? 'Saving…' : 'Save changes'}
+            </button>
+          </>
+        ) : isCalendar ? (
           (block.htmlLink || block.meetingLink) && (
             <button
               type="button"
@@ -5112,6 +5311,20 @@ export default function App() {
       }
 
       if (eventType === 'response.action.updated') {
+        const normalizedBlock = normalizeResponseBlocks([(event as any).response_block])?.[0]
+        if (normalizedBlock && (
+          normalizedBlock.type === 'gmail_draft_approval'
+          || normalizedBlock.type === 'agent_email_draft_approval'
+          || normalizedBlock.type === 'calendar_event'
+        )) {
+          setMessages((prev) => prev.map((message) => ({
+            ...message,
+            responseBlocks: message.responseBlocks?.map((block) => (
+              block.id === normalizedBlock.id ? normalizedBlock : block
+            )),
+          })))
+          return
+        }
         const approvalId = String(event.approval_id || '').trim()
         const blockType = String(event.block_type || '').trim()
         const nextStatus = String(event.status || '').trim()

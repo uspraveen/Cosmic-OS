@@ -2787,6 +2787,25 @@ app.whenReady().then(() => {
     })
   })
 
+  ipcMain.handle('gateway:update-gmail-approval-draft', async (_, payload: { approvalId?: string; subject?: string; bodyText?: string }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const approvalId = String(payload?.approvalId || '').trim()
+    if (!approvalId) {
+      throw new Error('Gmail approval id is required.')
+    }
+    return callGatewayJson(config, `/channels/gmail/approvals/${encodeURIComponent(approvalId)}/draft`, {
+      method: 'PATCH',
+      body: {
+        subject: String(payload?.subject || '').trim(),
+        body_text: String(payload?.bodyText || ''),
+      },
+      timeoutMs: 90000,
+    })
+  })
+
   ipcMain.handle('gateway:approve-agent-email-approval', async (_, payload: { approvalId?: string }) => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {
@@ -2799,6 +2818,62 @@ app.whenReady().then(() => {
     return callGatewayJson(config, `/channels/agent-email/approvals/${encodeURIComponent(approvalId)}/approve`, {
       method: 'POST',
       timeoutMs: 45000,
+    })
+  })
+
+  ipcMain.handle('gateway:update-agent-email-approval-draft', async (_, payload: { approvalId?: string; subject?: string; bodyText?: string }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const approvalId = String(payload?.approvalId || '').trim()
+    if (!approvalId) {
+      throw new Error('Agent Email approval id is required.')
+    }
+    return callGatewayJson(config, `/channels/agent-email/approvals/${encodeURIComponent(approvalId)}/draft`, {
+      method: 'PATCH',
+      body: {
+        subject: String(payload?.subject || '').trim(),
+        body_text: String(payload?.bodyText || ''),
+      },
+      timeoutMs: 45000,
+    })
+  })
+
+  ipcMain.handle('gateway:update-calendar-event', async (_, payload: {
+    eventId?: string
+    accountId?: string | null
+    calendarId?: string | null
+    summary?: string
+    start?: string
+    end?: string
+    location?: string | null
+    description?: string | null
+    isAllDay?: boolean
+    timezone?: string | null
+  }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const eventId = String(payload?.eventId || '').trim()
+    if (!eventId) {
+      throw new Error('Calendar event id is required.')
+    }
+    return callGatewayJson(config, `/channels/calendar/events/${encodeURIComponent(eventId)}`, {
+      method: 'PATCH',
+      body: {
+        account_id: String(payload?.accountId || '').trim() || null,
+        calendar_id: String(payload?.calendarId || '').trim() || 'primary',
+        summary: String(payload?.summary || '').trim(),
+        start: String(payload?.start || '').trim(),
+        end: String(payload?.end || '').trim(),
+        location: String(payload?.location || '').trim() || null,
+        description: String(payload?.description || ''),
+        is_all_day: Boolean(payload?.isAllDay),
+        timezone: String(payload?.timezone || '').trim() || null,
+      },
+      timeoutMs: 90000,
     })
   })
 

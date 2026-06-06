@@ -967,6 +967,9 @@ class CalendarAgent(AgentRuntime):
             "event": event,
             "created": True,
         }
+        account = self._resolved_account_output()
+        if account:
+            result["account"] = account
         if conflicts:
             result["conflict_warning"] = (
                 f"{len(conflicts)} overlapping event(s) found in this time slot."
@@ -1222,6 +1225,9 @@ class CalendarAgent(AgentRuntime):
         await self._maybe_update_step(3, "completed", f"Updated {event_id}.")
 
         result: dict[str, Any] = {"event": event, "updated": True}
+        account = self._resolved_account_output()
+        if account:
+            result["account"] = account
         if conflict_warning:
             result["conflict_warning"] = conflict_warning
 

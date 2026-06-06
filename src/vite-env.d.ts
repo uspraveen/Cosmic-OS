@@ -106,12 +106,34 @@ interface Window {
       approvalId: string
       note?: string
     }) => Promise<any>
+    updateGatewayGmailApprovalDraft: (payload: {
+      approvalId: string
+      subject: string
+      bodyText: string
+    }) => Promise<any>
     approveGatewayAgentEmailApproval: (payload: {
       approvalId: string
     }) => Promise<any>
     rejectGatewayAgentEmailApproval: (payload: {
       approvalId: string
       note?: string
+    }) => Promise<any>
+    updateGatewayAgentEmailApprovalDraft: (payload: {
+      approvalId: string
+      subject: string
+      bodyText: string
+    }) => Promise<any>
+    updateGatewayCalendarEvent: (payload: {
+      eventId: string
+      accountId?: string | null
+      calendarId?: string | null
+      summary: string
+      start: string
+      end: string
+      location?: string | null
+      description?: string | null
+      isAllDay?: boolean
+      timezone?: string | null
     }) => Promise<any>
     cosmicMailRequest: (payload: GatewayConnectionPayload & {
       path: string
