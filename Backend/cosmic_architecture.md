@@ -9812,6 +9812,11 @@ COSMIC may recognize that an ongoing goal would benefit from a persistent custom
 - `helpful_materials` are optional inputs that improve the result, such as a resume for a portfolio site. `required_inputs` are reserved for inputs without which the build truly cannot proceed.
 - Alpha delegation carries `constraints.tool_opportunity_id`. The orchestrator receipt and Gateway reconciliation path use that reference to link the opportunity to Alpha's project, task, repository, and deployment state.
 - Desktop and mobile Spaces expose the same **My Tools** registry and lifecycle state. Both support Build Now chat handoff, decline/archive actions, and opening live deployments; channel-specific authenticated routes remain thin aliases over the same Gateway-owned service.
+- The Gateway owns an idempotently seeded `system.weekly_my_tools_review` system cron. It runs through the full orchestrator every Sunday at 10:00 in the user's current timezone, with passive memory and current working-set context, rather than using a deterministic suggestion generator.
+- The weekly review begins by listing the canonical registry. It may capture strong new opportunities and intelligently refine, defer, deduplicate, or archive unaccepted ideas. It must not autonomously accept, build, or deploy anything.
+- Accepted, building, and live tools are user-owned product state. The weekly review cannot materially rewrite or archive them; it may update verified operational health, or create a separate improvement opportunity that references the existing tool. Declined and archived ideas remain inactive unless the user explicitly revisits them.
+- Weekly-review output uses a structured `suppress`/`deliver` decision envelope. Tool calls and maintenance narration remain private, and no chat-history entry is created when there is nothing genuinely useful to surface.
+- Every capture and mutation is appended to `tool_opportunity_events` with actor, source, reason, and before/after snapshots. Autonomous guardrail rejections are recorded as audit events as well.
 
 Default starter opportunities are seeded idempotently as examples and useful starting points. They do not replace intelligent model-generated suggestions.
 
@@ -9858,7 +9863,7 @@ Default starter opportunities are seeded idempotently as examples and useful sta
 | `gateway/credentials.db` | Gateway | Credential Manager | OAuth accounts, encrypted tokens, audit |
 | `gateway/usage.db` | Gateway | Usage Ledger | Append-only token/cost telemetry for direct LLM routes, model router, orchestrator, and agents |
 | `gateway/scheduler/scheduler.db` | Gateway | Scheduler | Cron definitions, heartbeat config, execution log |
-| `gateway/tool_opportunities.db` | Gateway | My Tools registry | Suggested, accepted, building, live, declined, deferred, and archived custom tool opportunities linked to Alpha projects |
+| `gateway/tool_opportunities.db` | Gateway | My Tools registry | Suggested, accepted, building, live, declined, deferred, and archived custom tool opportunities linked to Alpha projects, plus append-only opportunity mutation events |
 | `gateway/webhooks/webhooks.db` | Gateway | Webhook Handler | Webhook registrations, webhook log |
 | `agents/*/store/data/*.db` | Per-agent | Each agent | Agent-specific session data (§12.2) |
 | `agents/*/runtime/state.db` | Per-agent | Each agent | In-flight task state (ephemeral) |

@@ -63,3 +63,67 @@ def test_tool_opportunity_lifecycle_links_alpha_project(tmp_path: Path) -> None:
         assert updated["deployment_url"] == "https://example.test"
 
     asyncio.run(run())
+
+
+def test_weekly_review_refines_unaccepted_but_protects_user_owned_tools(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        store = ToolOpportunityStore(tmp_path / "tools.db")
+        service = ToolOpportunityService(
+            store=store,
+            export_path=tmp_path / "tools.json",
+        )
+        await service.initialize()
+        item = await service.capture(
+            {
+                "title": "General tracker",
+                "tool_type": "tracker",
+                "goal": "Track an active goal.",
+                "reasoning": "The workflow repeats.",
+            }
+        )
+        review_context = {
+            "actor": "cosmic/orchestrator:1.0.0",
+            "source": "cron",
+            "source_id": "system.weekly_my_tools_review",
+        }
+
+        refined = await service.update(
+            item["opportunity_id"],
+            {
+                "title": "Focused goal tracker",
+                "reasoning": "Current projects show a focused tracker would now be useful.",
+                "review_reason": "Refined against the user's active project context.",
+                "mutation_context": review_context,
+            },
+        )
+        assert refined is not None
+        assert refined["title"] == "Focused goal tracker"
+
+        accepted = await service.update(
+            item["opportunity_id"],
+            {"status": "accepted"},
+        )
+        assert accepted is not None
+        protected = await service.update(
+            item["opportunity_id"],
+            {
+                "title": "Silently rewritten title",
+                "status": "archived",
+                "health_status": "healthy",
+                "review_reason": "Checked the accepted tool during weekly review.",
+                "mutation_context": review_context,
+            },
+        )
+        assert protected is not None
+        assert protected["title"] == "Focused goal tracker"
+        assert protected["status"] == "accepted"
+        assert protected["health_status"] == "healthy"
+        assert protected["review_guardrail"]["blocked_fields"] == ["status", "title"]
+
+        events = store.list_events(opportunity_id=item["opportunity_id"])
+        assert any(event["event_type"] == "weekly_review_updated" for event in events)
+        assert any(event["event_type"] == "captured" for event in events)
+
+    asyncio.run(run())

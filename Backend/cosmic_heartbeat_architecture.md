@@ -18,6 +18,8 @@ The heartbeat should look wider than calendars and inboxes. It should consider a
 - Heartbeat is low priority and must not interfere with foreground user work.
 - Heartbeat may inspect state and use tools when justified. It may choose the best COSMIC-owned delivery path, including chat, mobile push, or email, when that channel is the clearest way to help the user.
 
+Deep recurring maintenance exercises belong in dedicated system crons rather than the 30-minute ambient heartbeat. For example, `system.weekly_my_tools_review` runs a full-context, model-driven review of persistent custom-tool opportunities once per week. It follows the same structured silence principle as heartbeat delivery, but has its own lifecycle guardrails and append-only audit trail.
+
 ## Context Surface
 
 Each heartbeat receives a compact context packet rather than a replayed chat prompt. The packet may include:

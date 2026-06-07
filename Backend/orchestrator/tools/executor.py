@@ -744,7 +744,6 @@ class ToolExecutor:
         *,
         context: ToolExecutionContext | None = None,
     ) -> dict[str, Any]:
-        del context
         opportunity_id = str(tool_input.get("opportunity_id") or "").strip()
         if not opportunity_id:
             return {"error": True, "message": "opportunity_id is required"}
@@ -753,8 +752,22 @@ class ToolExecutor:
             for key in (
                 "status", "alpha_project_id", "build_task_id", "deployment_url",
                 "repo_url", "user_feedback", "declined_reason", "health_status",
+                "title", "goal", "reasoning", "expected_value", "proposed_features",
+                "helpful_materials", "required_inputs", "data_sources", "defer_until",
+                "review_reason",
             )
         })
+        payload["mutation_context"] = self._clean_mapping(
+            {
+                "actor": "cosmic/orchestrator:1.0.0",
+                "source": context.source if context else None,
+                "source_id": context.source_id if context else None,
+                "request_id": context.request_id if context else None,
+                "session_id": context.session_id if context else None,
+                "task_id": context.task_id if context else None,
+                "channel": context.channel if context else None,
+            }
+        )
         result = await self._request_gateway_json(
             "PATCH",
             f"/internal/tool-opportunities/{quote(opportunity_id, safe='')}",

@@ -6,6 +6,7 @@ import threading
 from contextlib import closing
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 def _json_dumps(value: Any) -> str:
@@ -74,6 +75,22 @@ class ToolOpportunityStore:
                     ON tool_opportunities(status, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_tool_opportunities_alpha_project
                     ON tool_opportunities(alpha_project_id);
+
+                CREATE TABLE IF NOT EXISTS tool_opportunity_events (
+                    event_id TEXT PRIMARY KEY,
+                    opportunity_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    actor TEXT,
+                    source TEXT,
+                    source_id TEXT,
+                    reason TEXT,
+                    before_json TEXT NOT NULL DEFAULT '{}',
+                    after_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_tool_opportunity_events_opportunity
+                    ON tool_opportunity_events(opportunity_id, created_at DESC);
                 """
             )
             connection.commit()
@@ -163,13 +180,99 @@ class ToolOpportunityStore:
             connection.commit()
         return self.get_item(opportunity_id)
 
+    def record_event(
+        self,
+        *,
+        opportunity_id: str,
+        event_type: str,
+        actor: str | None,
+        source: str | None,
+        source_id: str | None,
+        reason: str | None,
+        before: dict[str, Any] | None,
+        after: dict[str, Any] | None,
+        created_at: str,
+    ) -> dict[str, Any]:
+        event = {
+            "event_id": f"toolevt_{uuid4().hex[:16]}",
+            "opportunity_id": str(opportunity_id or "").strip(),
+            "event_type": str(event_type or "").strip(),
+            "actor": str(actor or "").strip() or None,
+            "source": str(source or "").strip() or None,
+            "source_id": str(source_id or "").strip() or None,
+            "reason": str(reason or "").strip() or None,
+            "before": before or {},
+            "after": after or {},
+            "created_at": created_at,
+        }
+        with self._lock, closing(self._connect()) as connection:
+            connection.execute(
+                """
+                INSERT INTO tool_opportunity_events (
+                    event_id, opportunity_id, event_type, actor, source, source_id,
+                    reason, before_json, after_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event["event_id"],
+                    event["opportunity_id"],
+                    event["event_type"],
+                    event["actor"],
+                    event["source"],
+                    event["source_id"],
+                    event["reason"],
+                    _json_dumps(event["before"]),
+                    _json_dumps(event["after"]),
+                    event["created_at"],
+                ),
+            )
+            connection.commit()
+        return event
+
+    def list_events(
+        self, *, opportunity_id: str | None = None, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        where = ""
+        if str(opportunity_id or "").strip():
+            where = "WHERE opportunity_id = ?"
+            params.append(str(opportunity_id or "").strip())
+        params.append(max(1, min(int(limit), 1000)))
+        with self._lock, closing(self._connect()) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM tool_opportunity_events
+                {where}
+                ORDER BY created_at DESC, event_id DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            event = dict(row)
+            event["before"] = _json_load(event.pop("before_json", None), {})
+            event["after"] = _json_load(event.pop("after_json", None), {})
+            events.append(event)
+        return events
+
     def summary(self) -> dict[str, Any]:
         with self._lock, closing(self._connect()) as connection:
             rows = connection.execute(
                 "SELECT status, COUNT(*) AS count FROM tool_opportunities GROUP BY status"
             ).fetchall()
+            event_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) AS count FROM tool_opportunity_events"
+                ).fetchone()["count"]
+            )
         by_status = {str(row["status"]): int(row["count"]) for row in rows}
-        return {"db_path": str(self.db_path), "total": sum(by_status.values()), "by_status": by_status}
+        return {
+            "db_path": str(self.db_path),
+            "total": sum(by_status.values()),
+            "by_status": by_status,
+            "event_count": event_count,
+        }
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path, timeout=30)

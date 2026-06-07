@@ -48,6 +48,8 @@ class ToolOpportunityUpdateRequest(BaseModel):
     deployment_url: str | None = Field(default=None, max_length=2000)
     repo_url: str | None = Field(default=None, max_length=2000)
     health_status: str | None = Field(default=None, max_length=120)
+    review_reason: str | None = Field(default=None, max_length=2000)
+    mutation_context: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -68,7 +70,9 @@ async def update_desktop_tool_opportunity(
     _: None = Depends(require_local_api_token),
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
-    item = await runtime.update_tool_opportunity(opportunity_id, payload.model_dump(exclude_none=True))
+    item = await runtime.update_tool_opportunity(
+        opportunity_id, payload.model_dump(exclude_none=True, exclude_unset=True)
+    )
     if item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tool opportunity not found")
     return {"opportunity": item}
@@ -103,7 +107,9 @@ async def update_mobile_tool_opportunity(
     _: None = Depends(require_local_api_token),
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
-    item = await runtime.update_tool_opportunity(opportunity_id, payload.model_dump(exclude_none=True))
+    item = await runtime.update_tool_opportunity(
+        opportunity_id, payload.model_dump(exclude_none=True, exclude_unset=True)
+    )
     if item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tool opportunity not found")
     return {"opportunity": item}
@@ -137,7 +143,9 @@ async def update_internal_tool_opportunity(
     _: None = Depends(require_internal_token),
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
-    item = await runtime.update_tool_opportunity(opportunity_id, payload.model_dump(exclude_none=True))
+    item = await runtime.update_tool_opportunity(
+        opportunity_id, payload.model_dump(exclude_none=True, exclude_unset=True)
+    )
     if item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tool opportunity not found")
     return {"opportunity": item}

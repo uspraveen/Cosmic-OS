@@ -761,8 +761,11 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         api_definition={
             "name": "custom_tool_opportunity_update",
             "description": (
-                "Update an existing My Tools opportunity after the user accepts, declines, defers, or after Alpha begins/completes the build. "
-                "Use it to link the real Alpha project, repository, and deployment rather than creating a second project registry."
+                "Update an existing My Tools opportunity after the user accepts, declines, defers, after Alpha begins/completes the build, "
+                "or while intelligently reviewing unaccepted suggestions. Use it to refine useful ideas and link the real Alpha project, repository, "
+                "and deployment rather than creating a second project registry. During the automatic weekly My Tools review, unaccepted ideas may be "
+                "refined, deferred, or archived, but accepted/building/live tools must not be materially rewritten; create a separate improvement "
+                "opportunity instead."
             ),
             "input_schema": {
                 "type": "object",
@@ -779,6 +782,19 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                     "user_feedback": {"type": "string"},
                     "declined_reason": {"type": "string"},
                     "health_status": {"type": "string"},
+                    "title": {"type": "string"},
+                    "goal": {"type": "string"},
+                    "reasoning": {"type": "string"},
+                    "expected_value": {"type": "string"},
+                    "proposed_features": {"type": "array", "items": {"type": "string"}},
+                    "helpful_materials": {"type": "array", "items": {"type": "string"}},
+                    "required_inputs": {"type": "array", "items": {"type": "string"}},
+                    "data_sources": {"type": "array", "items": {"type": "string"}},
+                    "defer_until": {"type": "string"},
+                    "review_reason": {
+                        "type": "string",
+                        "description": "Concise rationale for an autonomous review edit or lifecycle decision.",
+                    },
                 },
                 "required": ["opportunity_id"],
             },

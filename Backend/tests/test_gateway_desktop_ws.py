@@ -24,7 +24,13 @@ from gateway.channels.routes import router as channel_router
 from gateway.config import GatewayConfig
 from gateway.memory_client import MemoryClientHTTPError, MemoryPromptContext
 from gateway.scheduler import CronExpressionError, compute_next_fire_at
-from gateway.runtime import ActiveRequest, SYSTEM_CRON_DAILY_ROLLOVER, GatewayRuntime
+from gateway.runtime import (
+    ActiveRequest,
+    SYSTEM_CRON_DAILY_ROLLOVER,
+    SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW,
+    WEEKLY_MY_TOOLS_REVIEW_CRON,
+    GatewayRuntime,
+)
 from gateway.session_store import utcnow_iso
 from shared import AgentEmailIntegrationStore
 
@@ -283,6 +289,59 @@ class FakeHeartbeatNoteOrchestratorClient(FakeOrchestratorClient):
                     "message": self.note,
                     "reason": "test_note",
                     "confidence": 1.0,
+                }
+            ),
+            "route": "opus",
+            "awaiting_reply": False,
+            "metrics": {"rtt_ms": 24},
+        }
+        yield {
+            "type": "task.completed",
+            "task_id": task.task_id,
+            "session_id": task.session_id,
+            "channel": task.channel,
+            "route": "opus",
+            "status": "completed",
+        }
+
+
+class FakeWeeklyMyToolsReviewOrchestratorClient(FakeOrchestratorClient):
+    def __init__(self, *, decision: str, message: str = "") -> None:
+        super().__init__()
+        self.decision = decision
+        self.message = message
+
+    async def stream_task(self, task) -> object:
+        self.last_task = task
+        yield {
+            "type": "task.created",
+            "task_id": task.task_id,
+            "session_id": task.session_id,
+            "channel": task.channel,
+            "route": "opus",
+            "status": "running",
+        }
+        yield {
+            "type": "task.progress",
+            "task_id": task.task_id,
+            "request_id": task.input.get("request_id"),
+            "session_id": task.session_id,
+            "channel": task.channel,
+            "message": "Reviewing My Tools opportunities.",
+        }
+        yield {
+            "type": "response.complete",
+            "task_id": task.task_id,
+            "request_id": task.input.get("request_id"),
+            "session_id": task.session_id,
+            "channel": task.channel,
+            "content": json.dumps(
+                {
+                    "decision": self.decision,
+                    "message": self.message,
+                    "reason": "weekly_review_test",
+                    "confidence": 0.9,
+                    "notes": "",
                 }
             ),
             "route": "opus",
@@ -4148,6 +4207,14 @@ async def test_runtime_uses_reported_desktop_timezone_for_session_rollover_and_c
         assert rollover_cron is not None
         assert rollover_cron["timezone"] == "Asia/Kolkata"
         assert rollover_cron["cron_expr"] == "0 4 * * *"
+        review_cron = runtime.scheduler_store.get_cron(
+            SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW
+        )
+        assert review_cron is not None
+        assert review_cron["timezone"] == "Asia/Kolkata"
+        assert review_cron["cron_expr"] == WEEKLY_MY_TOOLS_REVIEW_CRON
+        assert review_cron["metadata"]["purpose"] == "weekly_my_tools_review"
+        assert "automatic weekly My Tools review" in review_cron["metadata"]["prompt"]
     finally:
         await runtime.stop()
 
@@ -4294,6 +4361,10 @@ def test_scheduler_endpoints_list_and_pause_resume_system_cron(test_client: Test
     overview_payload = overview.json()
     assert overview_payload["profile"]["user_timezone"] == "America/Chicago"
     assert any(item["cron_id"] == SYSTEM_CRON_DAILY_ROLLOVER for item in overview_payload["crons"])
+    assert any(
+        item["cron_id"] == SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW
+        for item in overview_payload["crons"]
+    )
 
     cron_response = test_client.get(
         f"/scheduler/crons/{SYSTEM_CRON_DAILY_ROLLOVER}",
@@ -4609,6 +4680,90 @@ async def test_runtime_executes_due_custom_one_shot_cron_via_orchestrator(tmp_pa
         assert notebook["goal"] == "Check if any new YC companies were added and report the diff."
         assert runtime.session_store.get_turn_ledger_entry(task.input["request_id"]) is None
         assert runtime.list_scheduler_crons(include_system=False, active_only=True) == []
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_weekly_my_tools_review_is_private_when_structured_decision_suppresses(
+    tmp_path,
+) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    runtime.orchestrator = FakeWeeklyMyToolsReviewOrchestratorClient(
+        decision="suppress"
+    )
+    await runtime.start()
+    try:
+        review_cron = runtime.scheduler_store.get_cron(
+            SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW
+        )
+        assert review_cron is not None
+        runtime.scheduler_store.upsert_cron(
+            cron_id=SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW,
+            name=review_cron["name"],
+            kind=review_cron["kind"],
+            description=review_cron["description"],
+            cron_expr=review_cron["cron_expr"],
+            timezone_name=review_cron["timezone"],
+            next_fire_at="2000-01-01T00:00:00Z",
+            metadata=review_cron["metadata"],
+        )
+
+        await runtime._run_due_crons()  # noqa: SLF001 - targeted scheduler seam
+
+        task = runtime.orchestrator.last_task
+        assert task is not None
+        assert task.source == "cron"
+        assert task.source_id == SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW
+        assert "custom_tool_opportunities_list" in task.input["query"]
+        assert runtime.get_session_history(task.session_id) == []
+        stored = runtime.scheduler_store.get_cron(
+            SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW
+        )
+        assert stored is not None
+        assert stored["last_result_status"] == "completed"
+        assert stored["next_fire_at"] is not None
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_weekly_my_tools_review_delivers_only_validated_user_message(
+    tmp_path,
+) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    note = "I found a focused project dashboard idea worth considering in My Tools."
+    runtime.orchestrator = FakeWeeklyMyToolsReviewOrchestratorClient(
+        decision="deliver",
+        message=note,
+    )
+    await runtime.start()
+    try:
+        review_cron = runtime.scheduler_store.get_cron(
+            SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW
+        )
+        assert review_cron is not None
+        runtime.scheduler_store.upsert_cron(
+            cron_id=SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW,
+            name=review_cron["name"],
+            kind=review_cron["kind"],
+            description=review_cron["description"],
+            cron_expr=review_cron["cron_expr"],
+            timezone_name=review_cron["timezone"],
+            next_fire_at="2000-01-01T00:00:00Z",
+            metadata=review_cron["metadata"],
+        )
+
+        await runtime._run_due_crons()  # noqa: SLF001 - targeted scheduler seam
+
+        task = runtime.orchestrator.last_task
+        assert task is not None
+        history = runtime.get_session_history(task.session_id)
+        assert len(history) == 1
+        assert history[0]["content"] == note
+        assert history[0]["metadata"]["weekly_my_tools_review_decision"]["decision"] == (
+            "deliver"
+        )
     finally:
         await runtime.stop()
 

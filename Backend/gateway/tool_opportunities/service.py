@@ -69,6 +69,12 @@ DEFAULT_OPPORTUNITIES: tuple[dict[str, Any], ...] = (
     },
 )
 
+WEEKLY_REVIEW_SOURCE_ID = "system.weekly_my_tools_review"
+WEEKLY_REVIEW_EDITABLE_STATUSES = {"candidate", "suggested", "deferred", "failed"}
+WEEKLY_REVIEW_ALLOWED_STATUSES = {"candidate", "suggested", "deferred", "archived", "failed"}
+WEEKLY_REVIEW_PROTECTED_STATUSES = {"accepted", "building", "live", "declined", "archived"}
+WEEKLY_REVIEW_OPERATIONAL_FIELDS = {"health_status"}
+
 
 class ToolOpportunityService:
     def __init__(self, *, store: ToolOpportunityStore, export_path: Path) -> None:
@@ -82,7 +88,10 @@ class ToolOpportunityService:
         await self._sync_export()
 
     def summary(self) -> dict[str, Any]:
-        return {**self.store.summary(), "export_path": str(self.export_path)}
+        return {
+            **self.store.summary(),
+            "export_path": str(self.export_path),
+        }
 
     def list_items(self, *, statuses: list[str] | None = None, limit: int = 200) -> list[dict[str, Any]]:
         return self.store.list_items(statuses=statuses, limit=limit)
@@ -132,6 +141,14 @@ class ToolOpportunityService:
         }
         async with self._lock:
             created = self.store.create(item)
+            self._record_event(
+                opportunity_id=created["opportunity_id"],
+                event_type="captured",
+                before=None,
+                after=created,
+                payload=payload,
+                reason=reasoning,
+            )
             await self._sync_export()
         return created
 
@@ -139,6 +156,20 @@ class ToolOpportunityService:
         existing = self.store.get_item(opportunity_id)
         if existing is None:
             return None
+        payload = dict(payload)
+        mutation_context = (
+            payload.pop("mutation_context")
+            if isinstance(payload.get("mutation_context"), dict)
+            else {}
+        )
+        review_reason = self._text(payload.pop("review_reason", None))
+        weekly_review = self._is_weekly_review(mutation_context)
+        blocked_fields: list[str] = []
+        if weekly_review:
+            payload, blocked_fields = self._apply_weekly_review_guardrails(
+                existing=existing,
+                payload=payload,
+            )
         allowed_statuses = {"candidate", "suggested", "accepted", "building", "live", "declined", "deferred", "archived", "failed"}
         changes: dict[str, Any] = {"updated_at": self._utcnow()}
         status = self._text(payload.get("status"))
@@ -158,16 +189,59 @@ class ToolOpportunityService:
         metadata = payload.get("metadata")
         if isinstance(metadata, dict):
             changes["metadata_json"] = json.dumps({**existing.get("metadata", {}), **metadata}, ensure_ascii=False, separators=(",", ":"), default=str)
+        if "health_status" in changes:
+            changes["last_checked_at"] = self._utcnow()
         if status == "accepted":
             changes["last_presented_at"] = self._utcnow()
             changes["presentation_count"] = int(existing.get("presentation_count") or 0) + 1
+        if len(changes) == 1 and blocked_fields:
+            guarded = dict(existing)
+            guarded["review_guardrail"] = {
+                "blocked_fields": blocked_fields,
+                "reason": "Weekly review cannot silently rewrite user-owned or inactive lifecycle state.",
+            }
+            self._record_event(
+                opportunity_id=opportunity_id,
+                event_type="weekly_review_update_blocked",
+                before=existing,
+                after=existing,
+                payload={"mutation_context": mutation_context},
+                reason=review_reason,
+            )
+            return guarded
         async with self._lock:
             updated = self.store.update(opportunity_id, changes)
+            if updated is not None:
+                self._record_event(
+                    opportunity_id=opportunity_id,
+                    event_type="weekly_review_updated" if weekly_review else "updated",
+                    before=existing,
+                    after=updated,
+                    payload={"mutation_context": mutation_context},
+                    reason=review_reason,
+                )
             await self._sync_export()
+        if updated is not None and blocked_fields:
+            updated["review_guardrail"] = {
+                "blocked_fields": blocked_fields,
+                "reason": "Protected fields were ignored; verified operational health fields were retained.",
+            }
         return updated
 
     async def build_handoff(self, opportunity_id: str) -> dict[str, Any] | None:
-        item = await self.update(opportunity_id, {"status": "accepted", "metadata": {"accepted_via": "my_tools"}})
+        item = await self.update(
+            opportunity_id,
+            {
+                "status": "accepted",
+                "metadata": {"accepted_via": "my_tools"},
+                "mutation_context": {
+                    "actor": "user",
+                    "source": "user",
+                    "source_id": "my_tools_build_handoff",
+                },
+                "review_reason": "User chose Build Now from My Tools.",
+            },
+        )
         if item is None:
             return None
         helpful = item.get("helpful_materials") or []
@@ -233,11 +307,100 @@ class ToolOpportunityService:
                 "updated_at": now,
             }
             self.store.create(item)
+            self._record_event(
+                opportunity_id=item["opportunity_id"],
+                event_type="seeded",
+                before=None,
+                after=item,
+                payload={
+                    "mutation_context": {
+                        "actor": "cosmic/starter-library:1.0.0",
+                        "source": "system",
+                        "source_id": "starter_library",
+                    }
+                },
+                reason="Seeded from the default My Tools starter library.",
+            )
 
     async def _sync_export(self) -> None:
         self.export_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"version": 1, "updated_at": self._utcnow(), "items": self.store.list_items(limit=1000)}
+        payload = {
+            "version": 2,
+            "updated_at": self._utcnow(),
+            "items": self.store.list_items(limit=1000),
+            "recent_events": self.store.list_events(limit=250),
+        }
         self.export_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
+
+    def _apply_weekly_review_guardrails(
+        self, *, existing: dict[str, Any], payload: dict[str, Any]
+    ) -> tuple[dict[str, Any], list[str]]:
+        current_status = self._text(existing.get("status")) or "candidate"
+        clean = dict(payload)
+        blocked: list[str] = []
+        requested_status = self._text(clean.get("status"))
+
+        if current_status in WEEKLY_REVIEW_PROTECTED_STATUSES:
+            allowed = WEEKLY_REVIEW_OPERATIONAL_FIELDS if current_status in {"accepted", "building", "live"} else set()
+            for key in list(clean):
+                if key not in allowed:
+                    blocked.append(key)
+                    clean.pop(key, None)
+            return clean, sorted(set(blocked))
+
+        if current_status not in WEEKLY_REVIEW_EDITABLE_STATUSES:
+            for key in list(clean):
+                blocked.append(key)
+                clean.pop(key, None)
+            return clean, sorted(set(blocked))
+
+        if requested_status and requested_status not in WEEKLY_REVIEW_ALLOWED_STATUSES:
+            blocked.append("status")
+            clean.pop("status", None)
+        return clean, sorted(set(blocked))
+
+    @classmethod
+    def _is_weekly_review(cls, mutation_context: dict[str, Any]) -> bool:
+        return (
+            cls._text(mutation_context.get("source")) == "cron"
+            and cls._text(mutation_context.get("source_id")) == WEEKLY_REVIEW_SOURCE_ID
+        )
+
+    def _record_event(
+        self,
+        *,
+        opportunity_id: str,
+        event_type: str,
+        before: dict[str, Any] | None,
+        after: dict[str, Any] | None,
+        payload: dict[str, Any],
+        reason: str | None,
+    ) -> None:
+        mutation_context = (
+            payload.get("mutation_context")
+            if isinstance(payload.get("mutation_context"), dict)
+            else {}
+        )
+        metadata = (
+            payload.get("metadata")
+            if isinstance(payload.get("metadata"), dict)
+            else {}
+        )
+        self.store.record_event(
+            opportunity_id=opportunity_id,
+            event_type=event_type,
+            actor=self._text(mutation_context.get("actor"))
+            or self._text(payload.get("created_by"))
+            or "cosmic/gateway",
+            source=self._text(mutation_context.get("source"))
+            or self._text(payload.get("trigger_source")),
+            source_id=self._text(mutation_context.get("source_id"))
+            or self._text(metadata.get("source_id")),
+            reason=self._text(reason),
+            before=before,
+            after=after,
+            created_at=self._utcnow(),
+        )
 
     @staticmethod
     def _text(value: Any) -> str:

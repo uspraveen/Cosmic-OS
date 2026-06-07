@@ -137,6 +137,24 @@ DEFAULT_CONTEXT_WINDOW_TOKENS = 48_000
 MEMORY_WRITE_RATE_WINDOW_SEC = 3_600
 MEMORY_WRITE_PREVIEW_CHARS = 400
 SYSTEM_CRON_DAILY_ROLLOVER = "system.daily_rollover"
+SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW = "system.weekly_my_tools_review"
+WEEKLY_MY_TOOLS_REVIEW_CRON = "0 10 * * 0"
+WEEKLY_MY_TOOLS_REVIEW_PROMPT = """Run COSMIC's automatic weekly My Tools review.
+
+This is a scheduler-triggered maintenance exercise, not a user message. Use the full orchestrator intelligence available to you: current goals, projects, active work, durable memory, recent context, and specialist tools when a bounded check would materially improve the review.
+
+Start by calling custom_tool_opportunities_list. Then:
+- Identify persistent sites, dashboards, trackers, portals, workspaces, or utilities that would materially advance the user's real goals. Capture only strong opportunities, not generic filler.
+- Improve, clarify, deduplicate, defer, or archive unaccepted opportunities when the current context justifies it. Use custom_tool_opportunity_update with a concise review_reason.
+- Treat archived and declined entries as inactive history. Do not resurrect or rewrite them automatically.
+- Treat accepted, building, and live tools as user-owned product state. Never materially rewrite, archive, decline, or replace them automatically. You may update verified health_status. If a live tool deserves a meaningful improvement, capture that as a separate improvement opportunity referencing the existing tool.
+- Never build, deploy, send, purchase, or take another external action during this review.
+- Prefer a small number of high-conviction changes over activity for its own sake.
+
+Return exactly one JSON object and no surrounding prose:
+{"decision":"suppress"|"deliver","message":"","reason":"","confidence":0.0,"notes":""}
+
+Use decision=suppress with an empty message when there is no meaningful user-facing result. Use decision=deliver only when the review surfaced a genuinely valuable new opportunity, a consequential improvement recommendation, or a live-tool issue the user should know about. The message must be a short natural note for the user, not process narration or a maintenance report."""
 HEARTBEAT_SOURCE_ID = "default"
 HEARTBEAT_SUPPRESS_TOKEN = "heartbeat_ok"
 HEARTBEAT_NOTES_CHAR_LIMIT = 4000
@@ -459,6 +477,7 @@ class GatewayRuntime:
         self._system_metrics_snapshot_at = 0.0
         self._system_metrics_cpu_sample: tuple[int, int] | None = None
         self._system_metrics_network_sample: tuple[int, int, float] | None = None
+        self._scheduler_run_lock = asyncio.Lock()
         self._recent_push_dedupe: dict[str, float] = {}
         self._codex_login_session: dict[str, Any] | None = None
         self._cursor_login_session: dict[str, Any] | None = None
@@ -693,6 +712,47 @@ class GatewayRuntime:
             metadata={
                 "purpose": "daily_session_rollover",
                 "managed_by": "gateway",
+            },
+        )
+        review_existing = self.scheduler_store.get_cron(
+            SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW
+        )
+        review_next_fire_at = compute_next_fire_at(
+            WEEKLY_MY_TOOLS_REVIEW_CRON,
+            timezone_name,
+        )
+        if (
+            review_existing is not None
+            and self._safe_text(review_existing.get("timezone")) == timezone_name
+            and self._safe_text(review_existing.get("cron_expr"))
+            == WEEKLY_MY_TOOLS_REVIEW_CRON
+            and self._safe_text(review_existing.get("next_fire_at"))
+        ):
+            review_next_fire_at = (
+                self._safe_text(review_existing.get("next_fire_at"))
+                or review_next_fire_at
+            )
+        self.scheduler_store.upsert_cron(
+            cron_id=SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW,
+            name="Weekly My Tools review",
+            kind="system",
+            description="Intelligently review persistent custom-tool opportunities against the user's current goals and projects.",
+            cron_expr=WEEKLY_MY_TOOLS_REVIEW_CRON,
+            timezone_name=timezone_name,
+            next_fire_at=review_next_fire_at,
+            metadata={
+                "purpose": "weekly_my_tools_review",
+                "managed_by": "gateway",
+                "prompt": WEEKLY_MY_TOOLS_REVIEW_PROMPT,
+                "one_shot": False,
+                "delivery_target": "auto",
+                "delivery_channel": "desktop",
+                "created_by": "gateway",
+                "context_summary": (
+                    "Weekly intelligent maintenance of My Tools opportunities. "
+                    "Stay silent unless the review finds something worth surfacing."
+                ),
+                "context_packet": {},
             },
         )
 
@@ -6289,13 +6349,25 @@ class GatewayRuntime:
             cron.get("metadata") if isinstance(cron.get("metadata"), dict) else {}
         )
         prompt = self._safe_text(metadata.get("prompt"))
-        resolution = self.resolve_channel_target(
-            delivery_target=self._safe_text(metadata.get("delivery_target"))
-            or self._safe_text(metadata.get("delivery_channel")),
-            current_channel=self._safe_text(metadata.get("created_channel")),
-            fallback_channel=self._safe_text(metadata.get("delivery_channel")),
-        )
-        channel = self._safe_text(resolution.get("resolved_channel")) or "desktop"
+        session_id = self._current_session_id()
+        delivery_state: dict[str, Any] = {}
+        if self._safe_text(metadata.get("purpose")) == "weekly_my_tools_review":
+            channel, delivery_state = await self._heartbeat_delivery_target(
+                {"delivery_channel": "auto"},
+                session_id=session_id,
+            )
+            resolution = {
+                "delivery_target": "auto",
+                "resolved_channel": channel,
+            }
+        else:
+            resolution = self.resolve_channel_target(
+                delivery_target=self._safe_text(metadata.get("delivery_target"))
+                or self._safe_text(metadata.get("delivery_channel")),
+                current_channel=self._safe_text(metadata.get("created_channel")),
+                fallback_channel=self._safe_text(metadata.get("delivery_channel")),
+            )
+            channel = self._safe_text(resolution.get("resolved_channel")) or "desktop"
         timezone_name = (
             self._safe_text(cron.get("timezone")) or self.current_user_timezone()
         )
@@ -6306,7 +6378,6 @@ class GatewayRuntime:
         request_id, idempotency_key = self._cron_execution_identity(
             cron_id, scheduled_for
         )
-        session_id = self._current_session_id()
         session_metadata = self._ensure_session_state_seeded(session_id)
         active_working_set = (
             session_metadata.get("active_working_set")
@@ -6355,6 +6426,7 @@ class GatewayRuntime:
                     "delivery_target": self._safe_text(
                         resolution.get("delivery_target")
                     ),
+                    "delivery_state": delivery_state,
                 },
             },
             # Cron jobs should run as fresh tasks. Creation-time chat context stays available in
@@ -6387,6 +6459,7 @@ class GatewayRuntime:
             "cron_scheduled_for": scheduled_for,
             "cron_context": context_packet,
             "cron_delivery_target": self._safe_text(resolution.get("delivery_target")),
+            "cron_delivery_state": delivery_state,
         }
         self.request_records[request_id] = request_record
         self.routing_audit_store.append(
@@ -6473,6 +6546,10 @@ class GatewayRuntime:
             raise
 
     async def _run_due_crons(self) -> None:
+        async with self._scheduler_run_lock:
+            await self._run_due_crons_locked()
+
+    async def _run_due_crons_locked(self) -> None:
         self._sync_system_crons()
         due_crons = self.scheduler_store.fetch_due_crons(now_iso=utcnow_iso(), limit=8)
         for cron in due_crons:
@@ -16491,6 +16568,43 @@ class GatewayRuntime:
                     completed=True,
                 )
                 return
+        if self._is_weekly_my_tools_review_event(event):
+            if event_type in {
+                "task.created",
+                "task.progress",
+                "response.chunk",
+                "response.thinking.chunk",
+                "response.blocks.snapshot",
+                "tool.call",
+                "tool.result",
+            }:
+                return
+            if event_type in {"task.completed", "task.failed", "task.cancelled", "error"}:
+                if task_id:
+                    self.active_task_channels.pop(task_id, None)
+                    self.active_requests_by_task.pop(task_id, None)
+                status = (
+                    "failed"
+                    if event_type in {"task.failed", "error"}
+                    else "cancelled"
+                    if event_type == "task.cancelled"
+                    else "completed"
+                )
+                self._trace_request_event(
+                    request_id=request_id,
+                    session_id=session_id,
+                    channel=self._safe_text(event.get("channel")),
+                    route=self._safe_text(event.get("route")) or "opus",
+                    event_type=event_type,
+                    stage="terminal",
+                    status=status,
+                    title="Weekly My Tools review terminal event",
+                    detail=self._safe_text(event.get("message"))
+                    or self._safe_text(event.get("content")),
+                    task_id=task_id,
+                    completed=True,
+                )
+                return
         if self._is_gmail_surface_decision_event(event):
             if event_type in {
                 "task.created",
@@ -16602,6 +16716,40 @@ class GatewayRuntime:
                 event["blocks"] = client_response_blocks
         elif event_type == "response.complete":
             event_channel = self._safe_text(event.get("channel")) or ""
+            weekly_tools_review_decision = (
+                self._parse_weekly_my_tools_review_decision(event)
+                if self._is_weekly_my_tools_review_event(event)
+                else None
+            )
+            if (
+                weekly_tools_review_decision
+                and weekly_tools_review_decision["decision"] == "suppress"
+            ):
+                self._trace_request_event(
+                    request_id=request_id,
+                    session_id=session_id,
+                    channel=event_channel,
+                    route=self._safe_text(event.get("route")) or "opus",
+                    event_type="response.complete",
+                    stage="response",
+                    status="suppressed",
+                    title="Weekly My Tools review suppressed",
+                    detail=self._safe_text(weekly_tools_review_decision.get("reason"))
+                    or "No meaningful My Tools update to surface.",
+                    task_id=task_id,
+                    completed=False,
+                )
+                return
+            if (
+                weekly_tools_review_decision
+                and weekly_tools_review_decision["decision"] == "deliver"
+            ):
+                event["content"] = self._safe_text(
+                    weekly_tools_review_decision.get("message")
+                )
+                event["weekly_my_tools_review_decision"] = (
+                    weekly_tools_review_decision
+                )
             is_heartbeat_response = self._is_heartbeat_event(event)
             heartbeat_decision = (
                 self._parse_heartbeat_decision(event)
@@ -16803,6 +16951,7 @@ class GatewayRuntime:
                     "heartbeat_decision": heartbeat_decision
                     if is_heartbeat_response
                     else None,
+                    "weekly_my_tools_review_decision": weekly_tools_review_decision,
                     "research_provenance": research_provenance,
                     "sources": self._normalize_source_list(
                         event.get("sources")
@@ -17118,6 +17267,24 @@ class GatewayRuntime:
             == GMAIL_SURFACE_DECISION_SOURCE
         )
 
+    def _is_weekly_my_tools_review_event(self, event: dict[str, Any]) -> bool:
+        if (
+            self._safe_text(event.get("source")) == "cron"
+            and self._safe_text(event.get("source_id"))
+            == SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW
+        ):
+            return True
+        request_id = self._safe_text(event.get("request_id"))
+        if not request_id:
+            return False
+        request_record = self.request_records.get(request_id)
+        return (
+            isinstance(request_record, dict)
+            and self._safe_text(request_record.get("source")) == "cron"
+            and self._safe_text(request_record.get("source_id"))
+            == SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW
+        )
+
     def _is_heartbeat_noop_response(self, event: dict[str, Any]) -> bool:
         if not self._is_heartbeat_event(event):
             return False
@@ -17242,6 +17409,61 @@ class GatewayRuntime:
             return {
                 "decision": "suppress",
                 "reason": "invalid_gmail_surface_decision",
+                "message": "",
+                "confidence": 0.0,
+                "notes": self._safe_text(payload.get("notes")),
+            }
+        message = self._safe_text(payload.get("message"))
+        reason = self._safe_text(payload.get("reason"))
+        try:
+            confidence = max(0.0, min(1.0, float(payload.get("confidence"))))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if decision == "deliver" and not message:
+            return {
+                "decision": "suppress",
+                "reason": reason or "deliver_decision_missing_message",
+                "message": "",
+                "confidence": confidence,
+                "notes": self._safe_text(payload.get("notes")),
+            }
+        if decision == "suppress":
+            message = ""
+        return {
+            "decision": decision,
+            "message": message,
+            "reason": reason,
+            "confidence": confidence,
+            "notes": self._safe_text(payload.get("notes")),
+        }
+
+    def _parse_weekly_my_tools_review_decision(
+        self, event: dict[str, Any]
+    ) -> dict[str, Any]:
+        if not self._is_weekly_my_tools_review_event(event):
+            return {
+                "decision": "suppress",
+                "reason": "not_weekly_my_tools_review_event",
+                "message": "",
+                "confidence": 0.0,
+                "notes": "",
+            }
+        payload = self._parse_json_object_from_text(
+            self._safe_text(event.get("content")) or ""
+        )
+        if payload is None:
+            return {
+                "decision": "suppress",
+                "reason": "invalid_weekly_my_tools_review_decision_envelope",
+                "message": "",
+                "confidence": 0.0,
+                "notes": "",
+            }
+        decision = (self._safe_text(payload.get("decision")) or "").lower()
+        if decision not in {"suppress", "deliver"}:
+            return {
+                "decision": "suppress",
+                "reason": "invalid_weekly_my_tools_review_decision",
                 "message": "",
                 "confidence": 0.0,
                 "notes": self._safe_text(payload.get("notes")),
