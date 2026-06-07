@@ -138,7 +138,7 @@ MEMORY_WRITE_RATE_WINDOW_SEC = 3_600
 MEMORY_WRITE_PREVIEW_CHARS = 400
 SYSTEM_CRON_DAILY_ROLLOVER = "system.daily_rollover"
 SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW = "system.weekly_my_tools_review"
-WEEKLY_MY_TOOLS_REVIEW_CRON = "0 10 * * 0"
+WEEKLY_MY_TOOLS_REVIEW_CRON = "0 18 * * 5"
 WEEKLY_MY_TOOLS_REVIEW_PROMPT = """Run COSMIC's automatic weekly My Tools review.
 
 This is a scheduler-triggered maintenance exercise, not a user message. Use the full orchestrator intelligence available to you: current goals, projects, active work, durable memory, recent context, and specialist tools when a bounded check would materially improve the review.
