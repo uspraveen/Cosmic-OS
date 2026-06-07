@@ -4959,17 +4959,17 @@ export default function SpacesControlCenter({
     const suggestionCount = visible.filter((item) => ['candidate', 'suggested', 'deferred'].includes(item.status)).length
     return (
       <div className="spaces-page">
-        <section className="spaces-banner tools-banner">
-          <div className="tools-banner-copy">
-            <div className="spaces-banner-kicker">Persistent interfaces</div>
-            <h2 className="spaces-hero">Useful tools, shaped around your work.</h2>
-            <p className="spaces-hero-copy">
+        <section className="spaces-section-copy tools-page-head">
+          <div className="tools-page-copy">
+            <div className="spaces-card-kicker">Persistent interfaces</div>
+            <h2>Useful tools, shaped around your work.</h2>
+            <p>
               COSMIC can suggest and build focused sites, dashboards, trackers, and utilities. Optional materials improve a build, but do not block it.
             </p>
           </div>
           <div className="tools-banner-actions">
             <span className="tools-live-signal"><i />Continuously shaped by COSMIC</span>
-            <button type="button" className="tools-refresh-btn" onClick={() => void refreshToolOpportunities()} disabled={toolOpportunitiesRefreshing}>
+            <button type="button" className="spaces-surface-btn compact tools-refresh-btn" onClick={() => void refreshToolOpportunities()} disabled={toolOpportunitiesRefreshing}>
               <svg aria-hidden viewBox="0 0 24 24"><path d="M20 11a8.1 8.1 0 0 0-14.9-4L3 9m0 0V4m0 5h5m-4 4a8.1 8.1 0 0 0 14.9 4L21 15m0 0v5m0-5h-5" /></svg>
               {toolOpportunitiesRefreshing ? 'Refreshing' : 'Refresh'}
             </button>
@@ -5741,14 +5741,14 @@ export default function SpacesControlCenter({
 
       <section className="autopilot-status-grid">
         <article className="spaces-card autopilot-stat-card">
-          <div className="spaces-card-kicker">VM Scheduler</div>
+          <div className="spaces-card-kicker">Current routines</div>
           <strong>{gatewayConnected ? `${schedulerCounts.active}/${schedulerCounts.total} live` : 'Offline'}</strong>
-          <span>{schedulerCounts.paused} paused · {schedulerCounts.userCrons} user routines</span>
+          <span>{schedulerCounts.userCrons} user routines · VM synced</span>
         </article>
         <article className="spaces-card autopilot-stat-card">
-          <div className="spaces-card-kicker">Timezone</div>
-          <strong>{schedulerProfileTimezone}</strong>
-          <span>Gateway profile snapshot</span>
+          <div className="spaces-card-kicker">Paused</div>
+          <strong>{schedulerCounts.paused}</strong>
+          <span>Manual holds stay visible to COSMIC</span>
         </article>
         <article className="spaces-card autopilot-stat-card">
           <div className="spaces-card-kicker">Heartbeat</div>
@@ -5756,13 +5756,13 @@ export default function SpacesControlCenter({
           <span>{schedulerHeartbeat?.next_fire_at ? `Next ${formatAutopilotRelative(schedulerHeartbeat.next_fire_at)}` : 'No next beat scheduled'}</span>
         </article>
         <article className="spaces-card autopilot-stat-card">
-          <div className="spaces-card-kicker">Last Sync</div>
-          <strong>{schedulerOverview ? formatAutopilotRelative(new Date(schedulerOverview.fetchedAtMs).toISOString()) : 'Waiting'}</strong>
-          <span>{schedulerCounts.historical} history · {schedulerManualOverrides.length} manual overrides</span>
+          <div className="spaces-card-kicker">History</div>
+          <strong>{schedulerCounts.historical}</strong>
+          <span>{schedulerOverview ? `Synced ${formatAutopilotRelative(new Date(schedulerOverview.fetchedAtMs).toISOString())}` : 'Waiting for Gateway'}</span>
         </article>
       </section>
 
-      <section className="spaces-two-column">
+      <section className="autopilot-secondary-grid">
         <article className="spaces-card autopilot-heartbeat-card">
           <div className="spaces-card-head">
             <div>
@@ -5827,9 +5827,9 @@ export default function SpacesControlCenter({
           {selectedSchedulerCron ? (
             <>
               <div className="autopilot-detail-grid">
-                <div><span>ID</span><strong>{selectedSchedulerCron.cron_id}</strong></div>
-                <div><span>Kind</span><strong>{selectedSchedulerCron.kind}</strong></div>
-                <div><span>Cron</span><strong>{selectedSchedulerCron.cron_expression || '—'}</strong></div>
+                <div><span>Status</span><strong>{schedulerCronState(selectedSchedulerCron)}</strong></div>
+                <div><span>Delivery</span><strong>{selectedSchedulerCron.resolved_delivery_channel || selectedSchedulerCron.delivery_channel}</strong></div>
+                <div><span>Schedule</span><strong>{selectedSchedulerCron.cron_expression || (selectedSchedulerCron.one_shot ? 'One-shot' : 'Manual')}</strong></div>
                 <div>
                   <span>{selectedSchedulerCronIsHistory ? 'Completed' : 'Next fire'}</span>
                   <strong>
@@ -5839,7 +5839,7 @@ export default function SpacesControlCenter({
                   </strong>
                 </div>
                 <div><span>Last run</span><strong>{selectedSchedulerCron.last_fired_local || formatAutopilotRelative(selectedSchedulerCron.last_fired_at)}</strong></div>
-                <div><span>Created by</span><strong>{selectedSchedulerCron.created_by || 'Gateway'}</strong></div>
+                <div><span>Timezone</span><strong>{selectedSchedulerCron.timezone || schedulerProfileTimezone}</strong></div>
               </div>
               <div className="autopilot-prompt-block">
                 <span>Context / prompt</span>
@@ -5852,56 +5852,67 @@ export default function SpacesControlCenter({
         </article>
       </section>
 
-      <section className="autopilot-tab-strip" role="tablist" aria-label="Autopilot routine views">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={autopilotCronTab === 'current'}
-          className={`autopilot-tab ${autopilotCronTab === 'current' ? 'active' : ''}`}
-          onClick={() => setAutopilotCronTab('current')}
-        >
-          <span>Current</span>
-          <strong>{schedulerCurrentCrons.length}</strong>
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={autopilotCronTab === 'history'}
-          className={`autopilot-tab ${autopilotCronTab === 'history' ? 'active' : ''}`}
-          onClick={() => setAutopilotCronTab('history')}
-        >
-          <span>History</span>
-          <strong>{schedulerHistoryCrons.length}</strong>
-        </button>
-      </section>
+      <section className="autopilot-routines-shell">
+        <div className="spaces-card-head compact">
+          <div>
+            <div className="spaces-card-kicker">Routines</div>
+            <h3>{autopilotCronTab === 'history' ? 'Completed and old one-shot records.' : 'Current scheduler controls.'}</h3>
+          </div>
+          <span className="autopilot-panel-meta">
+            {autopilotCronTab === 'history' ? `${schedulerHistoryCrons.length} records` : `${schedulerCurrentCrons.length} routines`}
+          </span>
+        </div>
 
-      <section className="spaces-orbit-grid autopilot-cron-grid">
-        {visibleSchedulerCrons.length === 0 ? (
-          <article className="spaces-card spaces-cron-card autopilot-empty-card">
-            <div className="spaces-card-kicker">{autopilotCronTab === 'history' ? 'No history' : 'No routines'}</div>
-            <h3>
-              {gatewayConnected
-                ? autopilotCronTab === 'history'
-                  ? 'No completed historical routines yet.'
-                  : 'No current scheduled routines returned.'
-                : 'Gateway is offline.'}
-            </h3>
-            <p className="spaces-cron-note">
-              {autopilotCronTab === 'history'
-                ? 'Completed one-shot routines and stale finished jobs will appear here instead of crowding the active control surface.'
-                : 'Open COSMIC chat to create a reminder, or reconnect Gateway to sync the VM scheduler.'}
-            </p>
-          </article>
-        ) : visibleSchedulerCrons.map((cron) => {
-          const state = schedulerCronState(cron)
-          const actionPrefix = `${cron.paused ? 'resume' : 'pause'}:${cron.cron_id}`
-          const isHistory = autopilotCronTab === 'history'
-          return (
-            <article
-              key={cron.cron_id}
-              className={`spaces-card spaces-cron-card autopilot-cron-card ${schedulerSelectedCronId === cron.cron_id ? 'selected' : ''}`}
-              onClick={() => setSchedulerSelectedCronId(cron.cron_id)}
-            >
+        <section className="autopilot-tab-strip" role="tablist" aria-label="Autopilot routine views">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={autopilotCronTab === 'current'}
+            className={`autopilot-tab ${autopilotCronTab === 'current' ? 'active' : ''}`}
+            onClick={() => setAutopilotCronTab('current')}
+          >
+            <span>Current</span>
+            <strong>{schedulerCurrentCrons.length}</strong>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={autopilotCronTab === 'history'}
+            className={`autopilot-tab ${autopilotCronTab === 'history' ? 'active' : ''}`}
+            onClick={() => setAutopilotCronTab('history')}
+          >
+            <span>History</span>
+            <strong>{schedulerHistoryCrons.length}</strong>
+          </button>
+        </section>
+
+        <section className="spaces-orbit-grid autopilot-cron-grid">
+          {visibleSchedulerCrons.length === 0 ? (
+            <article className="spaces-card spaces-cron-card autopilot-empty-card">
+              <div className="spaces-card-kicker">{autopilotCronTab === 'history' ? 'No history' : 'No routines'}</div>
+              <h3>
+                {gatewayConnected
+                  ? autopilotCronTab === 'history'
+                    ? 'No completed historical routines yet.'
+                    : 'No current scheduled routines returned.'
+                  : 'Gateway is offline.'}
+              </h3>
+              <p className="spaces-cron-note">
+                {autopilotCronTab === 'history'
+                  ? 'Completed one-shot routines and stale finished jobs will appear here instead of crowding the active control surface.'
+                  : 'Open COSMIC chat to create a reminder, or reconnect Gateway to sync the VM scheduler.'}
+              </p>
+            </article>
+          ) : visibleSchedulerCrons.map((cron) => {
+            const state = schedulerCronState(cron)
+            const actionPrefix = `${cron.paused ? 'resume' : 'pause'}:${cron.cron_id}`
+            const isHistory = autopilotCronTab === 'history'
+            return (
+              <article
+                key={cron.cron_id}
+                className={`spaces-card spaces-cron-card autopilot-cron-card ${schedulerSelectedCronId === cron.cron_id ? 'selected' : ''}`}
+                onClick={() => setSchedulerSelectedCronId(cron.cron_id)}
+              >
               <div className="spaces-cron-top">
                 <div>
                   <div className="spaces-card-kicker">{cron.kind === 'system' ? 'System routine' : cron.one_shot ? 'One-shot reminder' : 'User routine'}</div>
@@ -5978,21 +5989,22 @@ export default function SpacesControlCenter({
               </div>
             </article>
           )
-        })}
+          })}
+        </section>
       </section>
 
       <section className="spaces-card autopilot-overrides-card">
         <div className="spaces-card-head">
           <div>
-            <div className="spaces-card-kicker">Manual override trail</div>
-            <h3>Recent user changes COSMIC can remember.</h3>
+            <div className="spaces-card-kicker">Recent changes</div>
+            <h3>Manual scheduler overrides COSMIC can remember.</h3>
           </div>
         </div>
         {schedulerManualOverrides.length === 0 ? (
           <p className="spaces-card-note">No manual scheduler overrides have been recorded yet.</p>
         ) : (
           <div className="spaces-operations-feed autopilot-overrides-feed">
-            {schedulerManualOverrides.slice(0, 8).map((override) => (
+            {schedulerManualOverrides.slice(0, 5).map((override) => (
               <div key={override.override_id} className="spaces-operation-item azure">
                 <div className="spaces-status-row">
                   <strong>{override.target_label}</strong>
