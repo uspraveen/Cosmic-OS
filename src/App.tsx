@@ -3021,6 +3021,68 @@ function pruneStaleforegroundedIds(stillBackgroundIds: Set<string>) {
   } catch { /* best-effort */ }
 }
 
+function ExpandableQueryPill({
+  text,
+  copied,
+  onCopy,
+}: {
+  text: string
+  copied?: boolean
+  onCopy?: () => void
+}) {
+  const textRef = useRef<HTMLSpanElement>(null)
+  const [expanded, setExpanded] = useState(false)
+  const [clipped, setClipped] = useState(false)
+
+  useLayoutEffect(() => {
+    const element = textRef.current
+    if (!element) return
+    const measure = () => {
+      if (expanded) return
+      setClipped(element.scrollWidth > element.clientWidth + 1 || element.scrollHeight > element.clientHeight + 1)
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [expanded, text])
+
+  return (
+    <div className={`query-pill-shell${expanded ? ' expanded' : ''}`}>
+      <div className={`query-pill${expanded ? ' expanded' : ''}`}>
+        <span ref={textRef}>{text}</span>
+        {onCopy ? (
+          <button className="copy-btn" onClick={onCopy} aria-label="Copy question" title="Copy question">
+            {copied ? (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z" />
+              </svg>
+            )}
+          </button>
+        ) : null}
+      </div>
+      {(clipped || expanded) ? (
+        <button
+          type="button"
+          className="query-expand-btn"
+          aria-expanded={expanded}
+          aria-label={expanded ? 'Collapse question' : 'Expand question'}
+          title={expanded ? 'Collapse question' : 'Expand question'}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          <svg aria-hidden width="13" height="13" viewBox="0 0 24 24" fill="none">
+            <path d={expanded ? 'm7 14 5-5 5 5' : 'm7 10 5 5 5-5'} />
+          </svg>
+        </button>
+      ) : null}
+    </div>
+  )
+}
+
 export default function App() {
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const modelDialRef = useRef<HTMLDivElement>(null)
@@ -7303,11 +7365,7 @@ export default function App() {
                           {isExpanded && (
                             <div style={{ padding: '12px 14px 4px', borderLeft: '2px solid rgba(255,255,255,0.06)', marginLeft: 16 }}>
                               <div className="message-row user" style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
-                                <div className="query-pill" style={{ maxWidth: '70%', alignSelf: 'flex-end', position: 'relative' }}>
-                                  <span style={{ display: 'inline-block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '100%' }}>
-                                    {cleanText(msg.content)}
-                                  </span>
-                                </div>
+                                <ExpandableQueryPill text={cleanText(msg.content)} />
                                 <UserMessageAttachments attachments={msg.attachments} />
                               </div>
                               {pairedResponse && (
@@ -7364,31 +7422,11 @@ export default function App() {
 
                     {msg.role === 'user' ? (
                         <>
-                          <div className="query-pill" style={{ maxWidth: '70%', alignSelf: 'flex-end', position: 'relative' }}>
-                            <span style={{
-                              display: 'inline-block',
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap',
-                              maxWidth: '100%'
-                            }}>
-                              {cleanText(msg.content)}
-                            </span>
-                            <button
-                              className="copy-btn"
-                              onClick={() => handleCopy(msg.content, `user-${idx}`)}
-                            >
-                              {copiedId === `user-${idx}` ? (
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                                  <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
-                                </svg>
-                              ) : (
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                                  <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z" />
-                                </svg>
-                              )}
-                            </button>
-                          </div>
+                          <ExpandableQueryPill
+                            text={cleanText(msg.content)}
+                            copied={copiedId === `user-${idx}`}
+                            onCopy={() => handleCopy(msg.content, `user-${idx}`)}
+                          />
                           {msg.backgroundState && (
                             <div className={`query-background-status ${msg.backgroundState}`}>
                               {msg.backgroundState === 'working'

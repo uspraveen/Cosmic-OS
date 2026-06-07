@@ -86,6 +86,41 @@ async def build_desktop_tool_opportunity(
     return handoff
 
 
+@router.get("/channels/mobile/tool-opportunities")
+async def list_mobile_tool_opportunities(
+    status_filter: str | None = Query(default=None, alias="status"),
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    statuses = [part.strip() for part in str(status_filter or "").split(",") if part.strip()]
+    return {"items": runtime.list_tool_opportunities(statuses=statuses or None), "summary": runtime.tool_opportunity_summary()}
+
+
+@router.patch("/channels/mobile/tool-opportunities/{opportunity_id}")
+async def update_mobile_tool_opportunity(
+    opportunity_id: str,
+    payload: ToolOpportunityUpdateRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    item = await runtime.update_tool_opportunity(opportunity_id, payload.model_dump(exclude_none=True))
+    if item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tool opportunity not found")
+    return {"opportunity": item}
+
+
+@router.post("/channels/mobile/tool-opportunities/{opportunity_id}/build")
+async def build_mobile_tool_opportunity(
+    opportunity_id: str,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    handoff = await runtime.build_tool_opportunity_handoff(opportunity_id)
+    if handoff is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tool opportunity not found")
+    return handoff
+
+
 @router.post("/internal/tool-opportunities/capture", status_code=status.HTTP_201_CREATED)
 async def capture_internal_tool_opportunity(
     payload: ToolOpportunityCaptureRequest,

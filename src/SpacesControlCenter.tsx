@@ -1769,7 +1769,7 @@ const PROPHET_ARTICLES: ProphetArticle[] = [
 
 const SPACE_PAGES: SpacePageDef[] = [
   { id: 'command', label: 'Command', kicker: 'Live operating picture', countLabel: '03 zones', accent: 'azure' },
-  { id: 'tools', label: 'My Tools', kicker: 'Sites, dashboards & utilities', countLabel: 'Build', accent: 'mint' },
+  { id: 'tools', label: 'My Tools', kicker: 'Sites, dashboards & utilities', countLabel: 'Build', accent: 'azure' },
   { id: 'calendar', label: 'My Calendar', kicker: 'Your schedule at a glance', countLabel: '07 days', accent: 'gold' },
   { id: 'prophet', label: 'My Prophet', kicker: 'Your curated daily edition', countLabel: 'Live', accent: 'rose' },
   { id: 'autopilot', label: 'Autopilot', kicker: 'Autonomous routines', countLabel: '04 routines', accent: 'mint' },
@@ -4604,22 +4604,26 @@ export default function SpacesControlCenter({
     return (
       <div className="spaces-page">
         <section className="spaces-banner tools-banner">
-          <div>
+          <div className="tools-banner-copy">
             <div className="spaces-banner-kicker">Persistent interfaces</div>
             <h2 className="spaces-hero">Useful tools, shaped around your work.</h2>
             <p className="spaces-hero-copy">
               COSMIC can suggest and build focused sites, dashboards, trackers, and utilities. Optional materials improve a build, but do not block it.
             </p>
           </div>
-          <button type="button" className="tools-refresh-btn" onClick={() => void refreshToolOpportunities()} disabled={toolOpportunitiesRefreshing}>
-            {toolOpportunitiesRefreshing ? 'Refreshing' : 'Refresh'}
-          </button>
+          <div className="tools-banner-actions">
+            <span className="tools-live-signal"><i />Continuously shaped by COSMIC</span>
+            <button type="button" className="tools-refresh-btn" onClick={() => void refreshToolOpportunities()} disabled={toolOpportunitiesRefreshing}>
+              <svg aria-hidden viewBox="0 0 24 24"><path d="M20 11a8.1 8.1 0 0 0-14.9-4L3 9m0 0V4m0 5h5m-4 4a8.1 8.1 0 0 0 14.9 4L21 15m0 0v5m0-5h-5" /></svg>
+              {toolOpportunitiesRefreshing ? 'Refreshing' : 'Refresh'}
+            </button>
+          </div>
         </section>
 
         <section className="tools-summary-strip">
-          <div><strong>{String(suggestionCount).padStart(2, '0')}</strong><span>Suggestions</span></div>
-          <div><strong>{String(buildingCount).padStart(2, '0')}</strong><span>Building</span></div>
-          <div><strong>{String(liveCount).padStart(2, '0')}</strong><span>Live</span></div>
+          <div><span>Suggestions</span><strong>{String(suggestionCount).padStart(2, '0')}</strong><i /></div>
+          <div><span>Building</span><strong>{String(buildingCount).padStart(2, '0')}</strong><i /></div>
+          <div><span>Live</span><strong>{String(liveCount).padStart(2, '0')}</strong><i /></div>
         </section>
 
         {toolOpportunitiesError ? <div className="tools-error">{toolOpportunitiesError}</div> : null}
@@ -4638,7 +4642,7 @@ export default function SpacesControlCenter({
             return (
               <article key={item.opportunity_id} className={`tools-card status-${item.status}`}>
                 <div className="tools-card-top">
-                  <span className="tools-kind">{item.tool_type}</span>
+                  <span className="tools-kind"><i />{item.tool_type}</span>
                   <span className="tools-status">{item.status}</span>
                 </div>
                 <h3>{item.title}</h3>
@@ -4651,7 +4655,7 @@ export default function SpacesControlCenter({
                 ) : null}
                 {item.helpful_materials?.length ? (
                   <div className="tools-materials">
-                    <strong>Helpful, not required</strong>
+                    <strong><span aria-hidden>+</span> Helpful, not required</strong>
                     <span>{item.helpful_materials.slice(0, 5).join(' · ')}</span>
                   </div>
                 ) : null}

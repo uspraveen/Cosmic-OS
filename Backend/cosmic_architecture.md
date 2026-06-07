@@ -9811,7 +9811,7 @@ COSMIC may recognize that an ongoing goal would benefit from a persistent custom
 - COSMIC may offer a strong opportunity in normal conversation or a heartbeat, but it must not autonomously build or deploy it. User acceptance starts a chat handoff, allowing COSMIC to ask for useful preferences or materials before delegating to Alpha.
 - `helpful_materials` are optional inputs that improve the result, such as a resume for a portfolio site. `required_inputs` are reserved for inputs without which the build truly cannot proceed.
 - Alpha delegation carries `constraints.tool_opportunity_id`. The orchestrator receipt and Gateway reconciliation path use that reference to link the opportunity to Alpha's project, task, repository, and deployment state.
-- The desktop Spaces **My Tools** page shows suggestions and lifecycle state, supports Build Now, decline/archive actions, and opens live deployments.
+- Desktop and mobile Spaces expose the same **My Tools** registry and lifecycle state. Both support Build Now chat handoff, decline/archive actions, and opening live deployments; channel-specific authenticated routes remain thin aliases over the same Gateway-owned service.
 
 Default starter opportunities are seeded idempotently as examples and useful starting points. They do not replace intelligent model-generated suggestions.
 
