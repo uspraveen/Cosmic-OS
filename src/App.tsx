@@ -3054,6 +3054,8 @@ export default function App() {
   const shouldAutoScrollRef = useRef(true)
   const pendingResponseStartScrollRef = useRef(false)
   const suppressBottomAnchorUntilRef = useRef(0)
+  const userResponseScrollIntentRef = useRef(false)
+  const userResponseScrollIntentTimerRef = useRef<number | null>(null)
   const selectedModelRef = useRef<GatewayModelSelection>('cosmic')
   const seenCronResultKeysRef = useRef<Set<string>>(new Set())
   const consumedHeartbeatKeysRef = useRef<Set<string>>(new Set())
@@ -4288,6 +4290,12 @@ export default function App() {
   useEffect(() => {
     searchStateRef.current = searchState
   }, [searchState])
+
+  useEffect(() => () => {
+    if (userResponseScrollIntentTimerRef.current !== null) {
+      window.clearTimeout(userResponseScrollIntentTimerRef.current)
+    }
+  }, [])
 
   useEffect(() => {
     if (searchState !== 'visible') {
@@ -6223,6 +6231,8 @@ export default function App() {
   }
 
   const scrollToBottom = () => {
+    suppressBottomAnchorUntilRef.current = 0
+    userResponseScrollIntentRef.current = false
     shouldAutoScrollRef.current = true
     setShowScrollButton(false)
     responseEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -6238,15 +6248,28 @@ export default function App() {
     const isAtBottom = distanceFromBottom <= 24
     const isNearBottom = distanceFromBottom < 50
     if (Date.now() < suppressBottomAnchorUntilRef.current) {
-      shouldAutoScrollRef.current = false
       setShowScrollButton(!isNearBottom && messages.length > 1)
       return
     }
-    shouldAutoScrollRef.current = isAtBottom
+    if (userResponseScrollIntentRef.current) {
+      shouldAutoScrollRef.current = isAtBottom
+    }
     setShowScrollButton(!isNearBottom && messages.length > 1)
     if (isAtBottom && searchStateRef.current === 'visible' && modeRef.current === 'chat') {
       clearUnreadBoundaryAndMarkRead()
     }
+  }
+
+  const markUserResponseScrollIntent = () => {
+    userResponseScrollIntentRef.current = true
+    suppressBottomAnchorUntilRef.current = 0
+    if (userResponseScrollIntentTimerRef.current !== null) {
+      window.clearTimeout(userResponseScrollIntentTimerRef.current)
+    }
+    userResponseScrollIntentTimerRef.current = window.setTimeout(() => {
+      userResponseScrollIntentRef.current = false
+      userResponseScrollIntentTimerRef.current = null
+    }, 220)
   }
 
   useEffect(() => {
@@ -6817,7 +6840,15 @@ export default function App() {
           >
             <LiquidGlass disableTilt={true} cornerRadius={32} style={{ width: '100%', height: '100%' }}>
               <div className="response-wrapper">
-                <div className="response-content" style={{ paddingTop: 24 }} ref={responseContainerRef} onScroll={handleScroll}>
+                <div
+                  className="response-content"
+                  style={{ paddingTop: 24 }}
+                  ref={responseContainerRef}
+                  onScroll={handleScroll}
+                  onWheel={markUserResponseScrollIntent}
+                  onTouchMove={markUserResponseScrollIntent}
+                  onPointerDown={markUserResponseScrollIntent}
+                >
                   {mode === 'task' && (
                     <div className="task-hub">
                       <div className="task-hub-header">
