@@ -3651,8 +3651,14 @@ class GatewayRuntime:
         normalized_response_status = self._safe_text(response_status)
         if not normalized_response_status and isinstance(self_attendee, dict):
             normalized_response_status = self._safe_text(self_attendee.get("response_status"))
-        can_respond = bool(self_attendee) and not bool(
-            self_attendee.get("organizer") if isinstance(self_attendee, dict) else False
+        can_respond = (
+            bool(self_attendee)
+            and normalized_response_status == "needsAction"
+            and not bool(
+                self_attendee.get("organizer")
+                if isinstance(self_attendee, dict)
+                else False
+            )
         )
         return {
             key: value
@@ -3926,7 +3932,7 @@ class GatewayRuntime:
             priority="high",
             signature="",
             created_at=utcnow(),
-            source="inline_action",
+            source="user",
             source_id=f"calendar:{event_id}",
             channel="calendar",
         )
@@ -3971,7 +3977,7 @@ class GatewayRuntime:
             priority="high",
             signature="",
             created_at=utcnow(),
-            source="inline_action",
+            source="user",
             source_id=f"calendar:{event_id}",
             channel="calendar",
         )

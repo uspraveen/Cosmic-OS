@@ -2443,6 +2443,7 @@ const AssistantActionBlock = ({ block }: { block: ResponseActionBlock }) => {
   const [description, setDescription] = useState(block.description || '')
   const [responseStatus, setResponseStatus] = useState(block.responseStatus || '')
   const isCalendar = block.type === 'calendar_event'
+  const invitationNeedsResponse = Boolean(block.canRespond) && (!responseStatus || responseStatus === 'needsAction')
   const isPending = ['pending', 'failed'].includes(status.toLowerCase())
   const title = isCalendar
     ? block.summary || 'Calendar event'
@@ -2714,7 +2715,7 @@ const AssistantActionBlock = ({ block }: { block: ResponseActionBlock }) => {
           </>
         ) : isCalendar ? (
           <>
-            {block.canRespond && (
+            {invitationNeedsResponse && (
               <div className="assistant-action-rsvp" role="group" aria-label="Respond to calendar invitation">
                 <button
                   type="button"
