@@ -2274,6 +2274,45 @@ app.whenReady().then(() => {
     return callGatewayJson(config, '/desktop/registry-agents', { timeoutMs: 25000 })
   })
 
+  ipcMain.handle('gateway:list-tool-opportunities', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/tool-opportunities', { timeoutMs: 20000 })
+  })
+
+  ipcMain.handle('gateway:update-tool-opportunity', async (_, payload: { opportunityId?: string; changes?: Record<string, unknown> }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const opportunityId = String(payload?.opportunityId || '').trim()
+    if (!opportunityId) {
+      throw new Error('Tool opportunity id is required.')
+    }
+    return callGatewayJson(config, `/desktop/tool-opportunities/${encodeURIComponent(opportunityId)}`, {
+      method: 'PATCH',
+      body: payload?.changes && typeof payload.changes === 'object' ? payload.changes : {},
+      timeoutMs: 20000,
+    })
+  })
+
+  ipcMain.handle('gateway:build-tool-opportunity', async (_, opportunityId: string) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const normalized = String(opportunityId || '').trim()
+    if (!normalized) {
+      throw new Error('Tool opportunity id is required.')
+    }
+    return callGatewayJson(config, `/desktop/tool-opportunities/${encodeURIComponent(normalized)}/build`, {
+      method: 'POST',
+      timeoutMs: 20000,
+    })
+  })
+
   ipcMain.handle('gateway:get-preferences', async () => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {

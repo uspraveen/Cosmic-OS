@@ -121,6 +121,21 @@ def _wishlist_capture_progress(tool_input: dict[str, Any]) -> str:
     return f"Recording capability gap: {title}" if title else "Recording a capability gap for COSMIC..."
 
 
+def _tool_opportunity_capture_progress(tool_input: dict[str, Any]) -> str:
+    title = str(tool_input.get("title") or "").strip()
+    return f"Saving custom tool opportunity: {title}" if title else "Saving a custom tool opportunity..."
+
+
+def _tool_opportunities_list_progress(tool_input: dict[str, Any]) -> str:
+    del tool_input
+    return "Reviewing existing custom tool opportunities..."
+
+
+def _tool_opportunity_update_progress(tool_input: dict[str, Any]) -> str:
+    opportunity_id = str(tool_input.get("opportunity_id") or "").strip()
+    return f"Updating custom tool opportunity {opportunity_id}" if opportunity_id else "Updating a custom tool opportunity..."
+
+
 def _docs_browse_progress(tool_input: dict[str, Any]) -> str:
     bundle_id = str(tool_input.get("bundle_id") or "").strip()
     index_kind = str(tool_input.get("index_kind") or "documents").strip() or "documents"
@@ -686,6 +701,92 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Capture a real missing capability directly when you notice COSMIC would materially help the user better if it already had that capability.",
         progress_builder=_wishlist_capture_progress,
         handler_method="_cosmics_capability_wishlist_capture",
+    ),
+    ToolSpec(
+        name="custom_tool_opportunities_list",
+        api_definition={
+            "name": "custom_tool_opportunities_list",
+            "description": (
+                "List existing My Tools opportunities and their lifecycle state. Use this before saving a suggestion when continuity or duplication matters, "
+                "and when deciding whether to continue an existing Alpha-linked tool instead of proposing a new one."
+            ),
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        group="planning",
+        prompt_summary="Review My Tools suggestions, accepted builds, and live Alpha-linked tools.",
+        progress_builder=_tool_opportunities_list_progress,
+        handler_method="_custom_tool_opportunities_list",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="custom_tool_opportunity_capture",
+        api_definition={
+            "name": "custom_tool_opportunity_capture",
+            "description": (
+                "Save a high-value opportunity for a persistent custom site, dashboard, tracker, portal, workspace, or utility. "
+                "Use this when a purpose-built interface would materially improve an ongoing user goal. This records the suggestion; it does not build or deploy it."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "tool_type": {"type": "string", "enum": ["site", "dashboard", "tracker", "portal", "workspace", "utility"]},
+                    "goal": {"type": "string"},
+                    "reasoning": {"type": "string"},
+                    "proposed_features": {"type": "array", "items": {"type": "string"}},
+                    "helpful_materials": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional inputs that could improve the result but must not be treated as blockers.",
+                    },
+                    "required_inputs": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Only inputs that are truly impossible to proceed without.",
+                    },
+                    "data_sources": {"type": "array", "items": {"type": "string"}},
+                    "expected_value": {"type": "string"},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                },
+                "required": ["title", "tool_type", "goal", "reasoning"],
+            },
+        },
+        group="planning",
+        prompt_summary="Record a valuable persistent custom-tool suggestion in My Tools without building it yet.",
+        progress_builder=_tool_opportunity_capture_progress,
+        handler_method="_custom_tool_opportunity_capture",
+    ),
+    ToolSpec(
+        name="custom_tool_opportunity_update",
+        api_definition={
+            "name": "custom_tool_opportunity_update",
+            "description": (
+                "Update an existing My Tools opportunity after the user accepts, declines, defers, or after Alpha begins/completes the build. "
+                "Use it to link the real Alpha project, repository, and deployment rather than creating a second project registry."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "opportunity_id": {"type": "string"},
+                    "status": {
+                        "type": "string",
+                        "enum": ["candidate", "suggested", "accepted", "building", "live", "declined", "deferred", "archived", "failed"],
+                    },
+                    "alpha_project_id": {"type": "string"},
+                    "build_task_id": {"type": "string"},
+                    "deployment_url": {"type": "string"},
+                    "repo_url": {"type": "string"},
+                    "user_feedback": {"type": "string"},
+                    "declined_reason": {"type": "string"},
+                    "health_status": {"type": "string"},
+                },
+                "required": ["opportunity_id"],
+            },
+        },
+        group="planning",
+        prompt_summary="Update a My Tools opportunity and link it to Alpha execution/deployment state.",
+        progress_builder=_tool_opportunity_update_progress,
+        handler_method="_custom_tool_opportunity_update",
     ),
     ToolSpec(
         name="docs_browse",

@@ -692,6 +692,76 @@ class ToolExecutor:
             return {"error": True, "message": "Capability wishlist capture did not return a payload."}
         return gateway_payload
 
+    async def _custom_tool_opportunity_capture(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "title": str(tool_input.get("title") or "").strip(),
+            "tool_type": str(tool_input.get("tool_type") or "site").strip(),
+            "goal": str(tool_input.get("goal") or "").strip(),
+            "reasoning": str(tool_input.get("reasoning") or "").strip(),
+            "proposed_features": self._normalize_string_list(tool_input.get("proposed_features")),
+            "helpful_materials": self._normalize_string_list(tool_input.get("helpful_materials")),
+            "required_inputs": self._normalize_string_list(tool_input.get("required_inputs")),
+            "data_sources": self._normalize_string_list(tool_input.get("data_sources")),
+            "expected_value": str(tool_input.get("expected_value") or "").strip() or None,
+            "confidence": tool_input.get("confidence"),
+            "source_context_refs": [
+                item for item in [
+                    context.session_id if context else None,
+                    context.task_id if context else None,
+                    context.request_id if context else None,
+                ] if item
+            ],
+            "trigger_source": context.source if context else "orchestrator",
+            "created_by": "cosmic/orchestrator:1.0.0",
+            "metadata": self._clean_mapping({
+                "channel": context.channel if context else None,
+                "source_id": context.source_id if context else None,
+            }),
+        }
+        if not payload["title"] or not payload["goal"] or not payload["reasoning"]:
+            return {"error": True, "message": "title, goal, and reasoning are required"}
+        result = await self._request_gateway_json("POST", "/internal/tool-opportunities/capture", json_body=payload)
+        return result or {"error": True, "message": "Tool opportunity capture did not return a payload."}
+
+    async def _custom_tool_opportunities_list(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        del tool_input, context
+        result = await self._request_gateway_json("GET", "/internal/tool-opportunities")
+        return result or {"error": True, "message": "Tool opportunities list did not return a payload."}
+
+    async def _custom_tool_opportunity_update(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        del context
+        opportunity_id = str(tool_input.get("opportunity_id") or "").strip()
+        if not opportunity_id:
+            return {"error": True, "message": "opportunity_id is required"}
+        payload = self._clean_mapping({
+            key: tool_input.get(key)
+            for key in (
+                "status", "alpha_project_id", "build_task_id", "deployment_url",
+                "repo_url", "user_feedback", "declined_reason", "health_status",
+            )
+        })
+        result = await self._request_gateway_json(
+            "PATCH",
+            f"/internal/tool-opportunities/{quote(opportunity_id, safe='')}",
+            json_body=payload,
+        )
+        return result or {"error": True, "message": "Tool opportunity update did not return a payload."}
+
     async def _docs_browse(
         self,
         tool_input: dict[str, Any],

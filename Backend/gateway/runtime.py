@@ -73,6 +73,7 @@ from .session.summary import (
 from .session_store import SessionStore
 from .usage_store import UsageStore
 from .wishlist import CapabilityWishlistService, CapabilityWishlistStore
+from .tool_opportunities import ToolOpportunityService, ToolOpportunityStore
 from orchestrator.store.ledger import TaskLedger
 
 try:
@@ -344,6 +345,7 @@ class GatewayRuntime:
         self.capability_wishlist_store = CapabilityWishlistStore(
             config.capability_wishlist_db_path
         )
+        self.tool_opportunity_store = ToolOpportunityStore(config.tool_opportunities_db_path)
         self.artifact_store = ArtifactStore(config.artifacts_db_path)
         self.delivery_queue_store = DeliveryQueueStore(config.delivery_queue_db_path)
         self.gmail_context_store = GmailContextStore(config.gmail_context_db_path)
@@ -377,6 +379,10 @@ class GatewayRuntime:
             adjudicator_model=config.capability_wishlist_adjudicator_model,
             usage_recorder=self._record_local_usage_event,
             owner_user_id=config.owner_user_id or None,
+        )
+        self.tool_opportunity_service = ToolOpportunityService(
+            store=self.tool_opportunity_store,
+            export_path=config.tool_opportunities_export_path,
         )
         self.haiku_adapter = HaikuAdapter(
             api_key=config.haiku_api_key,
@@ -480,6 +486,7 @@ class GatewayRuntime:
         self.agent_auth_store.initialize()
         self._orchestrator_task_ledger.initialize()
         await self.capability_wishlist_service.initialize()
+        await self.tool_opportunity_service.initialize()
         self._usage_event_queue = asyncio.Queue(
             maxsize=self.config.usage_queue_max_size
         )
@@ -5580,6 +5587,9 @@ class GatewayRuntime:
             packet["calendar_digest"] = calendar_digest
         if gmail_digest:
             packet["gmail_digest"] = gmail_digest
+        tool_opportunities = self.tool_opportunity_service.heartbeat_digest(limit=8)
+        if tool_opportunities.get("items"):
+            packet["tool_opportunities"] = tool_opportunities
         if last_delivered_summary:
             packet["last_delivered_heartbeat_note"] = {
                 "delivered_at": last_delivered_at,
@@ -5704,6 +5714,30 @@ class GatewayRuntime:
         if heartbeat_notes:
             lines.extend(["", "### Heartbeat Notes"])
             lines.append(heartbeat_notes)
+        tool_opportunities = (
+            context_packet.get("tool_opportunities")
+            if isinstance(context_packet.get("tool_opportunities"), dict)
+            else {}
+        )
+        if tool_opportunities:
+            lines.extend(["", "### Custom Tool Opportunities"])
+            instruction = self._safe_text(tool_opportunities.get("instruction"))
+            if instruction:
+                lines.append(f"- {instruction}")
+            items = (
+                tool_opportunities.get("items")
+                if isinstance(tool_opportunities.get("items"), list)
+                else []
+            )
+            for item in items[:8]:
+                if not isinstance(item, dict):
+                    continue
+                lines.append(
+                    "- "
+                    f"{self._safe_text(item.get('title')) or 'Custom tool'} "
+                    f"[{self._safe_text(item.get('status')) or 'suggested'}]: "
+                    f"{self._safe_text(item.get('goal'))}"
+                )
         calendar_digest = (
             context_packet.get("calendar_digest")
             if isinstance(context_packet.get("calendar_digest"), dict)
@@ -8315,6 +8349,57 @@ class GatewayRuntime:
             if isinstance(payload.get("metadata"), dict)
             else {},
         )
+
+    def tool_opportunity_summary(self) -> dict[str, Any]:
+        return self.tool_opportunity_service.summary()
+
+    def list_tool_opportunities(
+        self, *, statuses: list[str] | None = None, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        return self.tool_opportunity_service.list_items(statuses=statuses, limit=limit)
+
+    async def capture_tool_opportunity(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self.tool_opportunity_service.capture(payload)
+
+    async def update_tool_opportunity(
+        self, opportunity_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        return await self.tool_opportunity_service.update(opportunity_id, payload)
+
+    async def build_tool_opportunity_handoff(
+        self, opportunity_id: str
+    ) -> dict[str, Any] | None:
+        return await self.tool_opportunity_service.build_handoff(opportunity_id)
+
+    async def _reconcile_tool_opportunity_receipts(self, event: dict[str, Any]) -> None:
+        for receipt in self._normalize_specialist_receipts(event.get("specialist_receipts")):
+            alpha_project = receipt.get("alpha_project")
+            if not isinstance(alpha_project, dict):
+                continue
+            opportunity_id = self._safe_text(alpha_project.get("tool_opportunity_id"))
+            alpha_project_id = self._safe_text(alpha_project.get("alpha_project_id"))
+            if not opportunity_id or not alpha_project_id:
+                continue
+            deployment_url = self._safe_text(alpha_project.get("deployment_url"))
+            try:
+                await self.tool_opportunity_service.update(
+                    opportunity_id,
+                    {
+                        "status": "live" if deployment_url else "building",
+                        "alpha_project_id": alpha_project_id,
+                        "build_task_id": self._safe_text(alpha_project.get("last_task_id")) or None,
+                        "repo_url": self._safe_text(alpha_project.get("repo_url")) or None,
+                        "deployment_url": deployment_url or None,
+                        "health_status": "ready" if deployment_url else "building",
+                        "metadata": {"linked_via": "alpha_receipt"},
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "gateway.tool_opportunity_reconcile_failed opportunity_id=%s alpha_project_id=%s",
+                    opportunity_id,
+                    alpha_project_id,
+                )
 
     def _record_local_usage_event(self, event: UsageEvent | dict[str, Any]) -> None:
         try:
@@ -13575,6 +13660,7 @@ class GatewayRuntime:
         scheduler_summary = self.scheduler_store.summary()
         delivery_summary = self.delivery_queue_store.summary()
         wishlist_summary = self.capability_wishlist_service.summary()
+        tool_opportunity_summary = self.tool_opportunity_service.summary()
         channels = self.list_channels()
 
         orchestrator_result, router_result = await asyncio.gather(
@@ -13617,6 +13703,7 @@ class GatewayRuntime:
             "scheduler": scheduler_summary,
             "delivery_queue": delivery_summary,
             "capability_wishlist": wishlist_summary,
+            "tool_opportunities": tool_opportunity_summary,
         }
 
         return {
@@ -13996,6 +14083,7 @@ class GatewayRuntime:
             "current_session_id": self._current_session_id(),
             "usage": self._usage_summary(),
             "capability_wishlist": self.capability_wishlist_service.summary(),
+            "tool_opportunities": self.tool_opportunity_service.summary(),
             "delivery_queue": self.delivery_queue_store.summary(),
             "scheduler": self.scheduler_store.summary(),
         }
@@ -14017,6 +14105,7 @@ class GatewayRuntime:
             "memory": memory,
             "usage": self._usage_summary(),
             "capability_wishlist": self.capability_wishlist_service.summary(),
+            "tool_opportunities": self.tool_opportunity_service.summary(),
             "delivery_queue": self.delivery_queue_store.summary(),
             "scheduler": self.scheduler_store.summary(),
         }
@@ -16633,6 +16722,8 @@ class GatewayRuntime:
                     source_message_id=None,
                     artifacts=supporting_artifacts,
                 )
+            if event.get("specialist_receipts"):
+                await self._reconcile_tool_opportunity_receipts(event)
             gmail_approvals = (
                 await self._persist_gmail_approval_receipts(event)
                 if event.get("specialist_receipts")

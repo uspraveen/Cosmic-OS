@@ -245,6 +245,12 @@ interface Window {
           },
     ) => Promise<unknown>
     getGatewayRegistryAgents: () => Promise<unknown>
+    listGatewayToolOpportunities: () => Promise<{ items: any[]; summary?: any }>
+    updateGatewayToolOpportunity: (payload: {
+      opportunityId: string
+      changes: Record<string, unknown>
+    }) => Promise<{ opportunity: any }>
+    buildGatewayToolOpportunity: (opportunityId: string) => Promise<{ opportunity: any; prompt: string }>
     downloadGatewayOutputArtifact: (payload: {
       messageId: string
       artifactId: string

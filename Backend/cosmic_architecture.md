@@ -9801,6 +9801,20 @@ def build_tool_definitions(self) -> list[dict]:
 
 ---
 
+## 38. My Tools And Custom Tool Opportunities
+
+COSMIC may recognize that an ongoing goal would benefit from a persistent custom interface such as a site, dashboard, tracker, portal, workspace, or utility. These are managed as **tool opportunities** before and after the user chooses to build them.
+
+- The Gateway owns the canonical opportunity registry in `gateway/tool_opportunities.db` and exports an operator-readable JSON snapshot to `logs/tool_opportunities/tool_opportunities.json`.
+- Alpha continues to own project execution, workspaces, repositories, and deployments. A tool opportunity links to Alpha's real `project_id`; it never duplicates Alpha's project registry.
+- The orchestrator can list, capture, and update opportunities using `custom_tool_opportunities_list`, `custom_tool_opportunity_capture`, and `custom_tool_opportunity_update`.
+- COSMIC may offer a strong opportunity in normal conversation or a heartbeat, but it must not autonomously build or deploy it. User acceptance starts a chat handoff, allowing COSMIC to ask for useful preferences or materials before delegating to Alpha.
+- `helpful_materials` are optional inputs that improve the result, such as a resume for a portfolio site. `required_inputs` are reserved for inputs without which the build truly cannot proceed.
+- Alpha delegation carries `constraints.tool_opportunity_id`. The orchestrator receipt and Gateway reconciliation path use that reference to link the opportunity to Alpha's project, task, repository, and deployment state.
+- The desktop Spaces **My Tools** page shows suggestions and lifecycle state, supports Build Now, decline/archive actions, and opens live deployments.
+
+Default starter opportunities are seeded idempotently as examples and useful starting points. They do not replace intelligent model-generated suggestions.
+
 ## Appendix A: Quick Reference — All Redis Keys
 
 | Key Pattern | Type | Scope | TTL |
@@ -9844,6 +9858,7 @@ def build_tool_definitions(self) -> list[dict]:
 | `gateway/credentials.db` | Gateway | Credential Manager | OAuth accounts, encrypted tokens, audit |
 | `gateway/usage.db` | Gateway | Usage Ledger | Append-only token/cost telemetry for direct LLM routes, model router, orchestrator, and agents |
 | `gateway/scheduler/scheduler.db` | Gateway | Scheduler | Cron definitions, heartbeat config, execution log |
+| `gateway/tool_opportunities.db` | Gateway | My Tools registry | Suggested, accepted, building, live, declined, deferred, and archived custom tool opportunities linked to Alpha projects |
 | `gateway/webhooks/webhooks.db` | Gateway | Webhook Handler | Webhook registrations, webhook log |
 | `agents/*/store/data/*.db` | Per-agent | Each agent | Agent-specific session data (§12.2) |
 | `agents/*/runtime/state.db` | Per-agent | Each agent | In-flight task state (ephemeral) |

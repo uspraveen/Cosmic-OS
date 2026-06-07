@@ -122,6 +122,7 @@ class GatewayConfig:
     capability_wishlist_db_path: Path = (
         BACKEND_ROOT / "gateway" / "cosmics_capability_wishlist.db"
     )
+    tool_opportunities_db_path: Path = BACKEND_ROOT / "gateway" / "tool_opportunities.db"
     artifacts_db_path: Path = BACKEND_ROOT / "gateway" / "artifacts.db"
     artifacts_root: Path = BACKEND_ROOT / "runs" / "artifacts"
     delivery_queue_db_path: Path = BACKEND_ROOT / "gateway" / "delivery_queue.db"
@@ -129,6 +130,9 @@ class GatewayConfig:
     session_transcript_dir: Path = BACKEND_ROOT / "logs" / "sessions"
     capability_wishlist_export_dir: Path = (
         BACKEND_ROOT / "logs" / "cosmics_capability_wishlist"
+    )
+    tool_opportunities_export_path: Path = (
+        BACKEND_ROOT / "logs" / "tool_opportunities" / "tool_opportunities.json"
     )
     session_reset_hour: int = 4
     user_timezone_fallback: str = "America/Chicago"
@@ -391,6 +395,12 @@ class GatewayConfig:
                     str(BACKEND_ROOT / "gateway" / "cosmics_capability_wishlist.db"),
                 )
             ).expanduser(),
+            tool_opportunities_db_path=Path(
+                os.getenv(
+                    "GATEWAY_TOOL_OPPORTUNITIES_DB_PATH",
+                    str(BACKEND_ROOT / "gateway" / "tool_opportunities.db"),
+                )
+            ).expanduser(),
             artifacts_db_path=Path(
                 os.getenv(
                     "GATEWAY_ARTIFACTS_DB_PATH",
@@ -425,6 +435,12 @@ class GatewayConfig:
                 os.getenv(
                     "GATEWAY_CAPABILITY_WISHLIST_EXPORT_DIR",
                     str(BACKEND_ROOT / "logs" / "cosmics_capability_wishlist"),
+                )
+            ).expanduser(),
+            tool_opportunities_export_path=Path(
+                os.getenv(
+                    "GATEWAY_TOOL_OPPORTUNITIES_EXPORT_PATH",
+                    str(BACKEND_ROOT / "logs" / "tool_opportunities" / "tool_opportunities.json"),
                 )
             ).expanduser(),
             session_reset_hour=min(

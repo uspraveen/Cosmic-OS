@@ -4944,6 +4944,47 @@ class OrchestratorRuntime:
                 }
                 if calendar_event.get("event_id") or calendar_event.get("summary"):
                     receipt["calendar_event"] = calendar_event
+        if intent_name == "alpha.execute":
+            project = data.get("project") if isinstance(data.get("project"), dict) else {}
+
+            def _find_opportunity_id(value: Any) -> str:
+                if isinstance(value, dict):
+                    direct = self._activity_excerpt(
+                        value.get("tool_opportunity_id") or value.get("opportunity_id"),
+                        limit=160,
+                    )
+                    if direct:
+                        return direct
+                    for nested in value.values():
+                        found = _find_opportunity_id(nested)
+                        if found:
+                            return found
+                elif isinstance(value, list):
+                    for nested in value:
+                        found = _find_opportunity_id(nested)
+                        if found:
+                            return found
+                elif isinstance(value, str):
+                    match = re.search(r"\btool_[a-f0-9]{8,32}\b", value, re.IGNORECASE)
+                    if match:
+                        return match.group(0)
+                return ""
+
+            opportunity_id = _find_opportunity_id(tool_input)
+            alpha_project = {
+                key: value
+                for key, value in {
+                    "tool_opportunity_id": opportunity_id,
+                    "alpha_project_id": self._activity_excerpt(project.get("project_id"), limit=200),
+                    "status": self._activity_excerpt(project.get("status") or data.get("status"), limit=80),
+                    "repo_url": self._activity_excerpt(project.get("repo_url"), limit=1200),
+                    "deployment_url": self._activity_excerpt(project.get("deployment_url"), limit=1200),
+                    "last_task_id": self._activity_excerpt(project.get("last_task_id"), limit=200),
+                }.items()
+                if value
+            }
+            if alpha_project.get("tool_opportunity_id") and alpha_project.get("alpha_project_id"):
+                receipt["alpha_project"] = alpha_project
         if artifact_count > 0:
             receipt["artifact_count"] = artifact_count
         if local_sources:

@@ -19,7 +19,7 @@ import {
   normalizeCalendarAgendaSnapshot,
 } from './calendar'
 
-type SpacesPageId = 'command' | 'calendar' | 'prophet' | 'autopilot' | 'pulse' | 'manage' | 'agents' | 'sessions' | 'agent-email' | 'gmail'
+type SpacesPageId = 'command' | 'tools' | 'calendar' | 'prophet' | 'autopilot' | 'pulse' | 'manage' | 'agents' | 'sessions' | 'agent-email' | 'gmail'
 type AgentEmailViewId = 'overview' | 'agents' | 'inboxes' | 'approvals' | 'settings'
 type AccentTone = 'azure' | 'gold' | 'mint' | 'rose' | 'slate'
 type MetricTone = 'good' | 'warm' | 'cool' | 'muted'
@@ -33,6 +33,7 @@ interface SpacesControlCenterProps {
   pendingCronCount: number
   selectedModelLabel: string
   onBackToChat: () => void
+  onPromptChat: (prompt: string) => void
   onMinimize: () => void
   onClose: () => void
   onShowTooltip?: (label: string, element: HTMLElement) => void
@@ -61,6 +62,22 @@ interface SpaceMetric {
   value: string
   note: string
   tone: MetricTone
+}
+
+interface ToolOpportunity {
+  opportunity_id: string
+  title: string
+  tool_type: string
+  goal: string
+  reasoning: string
+  proposed_features: string[]
+  helpful_materials: string[]
+  required_inputs: string[]
+  status: string
+  expected_value?: string | null
+  alpha_project_id?: string | null
+  deployment_url?: string | null
+  repo_url?: string | null
 }
 
 interface OperationItem {
@@ -1752,6 +1769,7 @@ const PROPHET_ARTICLES: ProphetArticle[] = [
 
 const SPACE_PAGES: SpacePageDef[] = [
   { id: 'command', label: 'Command', kicker: 'Live operating picture', countLabel: '03 zones', accent: 'azure' },
+  { id: 'tools', label: 'My Tools', kicker: 'Sites, dashboards & utilities', countLabel: 'Build', accent: 'mint' },
   { id: 'calendar', label: 'My Calendar', kicker: 'Your schedule at a glance', countLabel: '07 days', accent: 'gold' },
   { id: 'prophet', label: 'My Prophet', kicker: 'Your curated daily edition', countLabel: 'Live', accent: 'rose' },
   { id: 'autopilot', label: 'Autopilot', kicker: 'Autonomous routines', countLabel: '04 routines', accent: 'mint' },
@@ -1922,6 +1940,18 @@ function SpacesNavIcon({ page }: { page: SpacesPageId }) {
       </svg>
     )
   }
+  if (page === 'tools') {
+    return (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M5 6.5h14" />
+        <path d="M7.5 4v5" />
+        <path d="M16.5 4v5" />
+        <rect x="4.5" y="6.5" width="15" height="13" rx="2.5" />
+        <path d="M8 12h3.5" />
+        <path d="M8 15.5h7.5" />
+      </svg>
+    )
+  }
   if (page === 'calendar') {
     return (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
@@ -2062,6 +2092,7 @@ export default function SpacesControlCenter({
   pendingCronCount,
   selectedModelLabel,
   onBackToChat,
+  onPromptChat,
   onMinimize,
   onClose,
   onShowTooltip,
@@ -2134,6 +2165,59 @@ export default function SpacesControlCenter({
   const sessionsDetailRequestRef = useRef(0)
   const sessionsTraceRequestRef = useRef(0)
   const sessionsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [toolOpportunities, setToolOpportunities] = useState<ToolOpportunity[]>([])
+  const [toolOpportunitiesRefreshing, setToolOpportunitiesRefreshing] = useState(false)
+  const [toolOpportunitiesError, setToolOpportunitiesError] = useState<string | null>(null)
+  const [toolOpportunityActionId, setToolOpportunityActionId] = useState<string | null>(null)
+
+  const refreshToolOpportunities = useCallback(async () => {
+    if (!window.cosmic?.listGatewayToolOpportunities) {
+      setToolOpportunitiesError('My Tools is unavailable in this desktop build.')
+      return
+    }
+    setToolOpportunitiesRefreshing(true)
+    try {
+      const result = await window.cosmic.listGatewayToolOpportunities()
+      setToolOpportunities(Array.isArray(result?.items) ? result.items as ToolOpportunity[] : [])
+      setToolOpportunitiesError(null)
+    } catch (error) {
+      setToolOpportunitiesError(toErrorMessage(error))
+    } finally {
+      setToolOpportunitiesRefreshing(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!active || page !== 'tools') return
+    void refreshToolOpportunities()
+  }, [active, page, refreshToolOpportunities])
+
+  const buildToolOpportunity = useCallback(async (opportunityId: string) => {
+    if (!window.cosmic?.buildGatewayToolOpportunity) return
+    setToolOpportunityActionId(opportunityId)
+    try {
+      const result = await window.cosmic.buildGatewayToolOpportunity(opportunityId)
+      await refreshToolOpportunities()
+      if (String(result?.prompt || '').trim()) onPromptChat(String(result.prompt))
+    } catch (error) {
+      setToolOpportunitiesError(toErrorMessage(error))
+    } finally {
+      setToolOpportunityActionId(null)
+    }
+  }, [onPromptChat, refreshToolOpportunities])
+
+  const updateToolOpportunityStatus = useCallback(async (opportunityId: string, status: string) => {
+    if (!window.cosmic?.updateGatewayToolOpportunity) return
+    setToolOpportunityActionId(opportunityId)
+    try {
+      await window.cosmic.updateGatewayToolOpportunity({ opportunityId, changes: { status } })
+      await refreshToolOpportunities()
+    } catch (error) {
+      setToolOpportunitiesError(toErrorMessage(error))
+    } finally {
+      setToolOpportunityActionId(null)
+    }
+  }, [refreshToolOpportunities])
 
   useEffect(() => {
     manageMetricsValueRef.current = manageMetrics
@@ -4511,6 +4595,93 @@ export default function SpacesControlCenter({
   const currentPage = SPACE_PAGES.find((item) => item.id === page) || SPACE_PAGES[0]
 
   /* ── PAGE RENDERERS ───────────────────────────────────── */
+
+  const renderToolsPage = () => {
+    const visible = toolOpportunities.filter((item) => !['archived', 'declined'].includes(item.status))
+    const liveCount = visible.filter((item) => item.status === 'live').length
+    const buildingCount = visible.filter((item) => ['accepted', 'building'].includes(item.status)).length
+    const suggestionCount = visible.filter((item) => ['candidate', 'suggested', 'deferred'].includes(item.status)).length
+    return (
+      <div className="spaces-page">
+        <section className="spaces-banner tools-banner">
+          <div>
+            <div className="spaces-banner-kicker">Persistent interfaces</div>
+            <h2 className="spaces-hero">Useful tools, shaped around your work.</h2>
+            <p className="spaces-hero-copy">
+              COSMIC can suggest and build focused sites, dashboards, trackers, and utilities. Optional materials improve a build, but do not block it.
+            </p>
+          </div>
+          <button type="button" className="tools-refresh-btn" onClick={() => void refreshToolOpportunities()} disabled={toolOpportunitiesRefreshing}>
+            {toolOpportunitiesRefreshing ? 'Refreshing' : 'Refresh'}
+          </button>
+        </section>
+
+        <section className="tools-summary-strip">
+          <div><strong>{String(suggestionCount).padStart(2, '0')}</strong><span>Suggestions</span></div>
+          <div><strong>{String(buildingCount).padStart(2, '0')}</strong><span>Building</span></div>
+          <div><strong>{String(liveCount).padStart(2, '0')}</strong><span>Live</span></div>
+        </section>
+
+        {toolOpportunitiesError ? <div className="tools-error">{toolOpportunitiesError}</div> : null}
+        {!toolOpportunitiesRefreshing && visible.length === 0 ? (
+          <section className="spaces-card tools-empty">
+            <strong>No tool opportunities yet</strong>
+            <p>COSMIC will add useful opportunities here as your projects and goals develop.</p>
+          </section>
+        ) : null}
+
+        <section className="tools-grid">
+          {visible.map((item) => {
+            const isBusy = toolOpportunityActionId === item.opportunity_id
+            const canBuild = ['candidate', 'suggested', 'deferred', 'accepted', 'failed'].includes(item.status)
+            const isLive = item.status === 'live' && item.deployment_url
+            return (
+              <article key={item.opportunity_id} className={`tools-card status-${item.status}`}>
+                <div className="tools-card-top">
+                  <span className="tools-kind">{item.tool_type}</span>
+                  <span className="tools-status">{item.status}</span>
+                </div>
+                <h3>{item.title}</h3>
+                <p className="tools-goal">{item.goal}</p>
+                <p className="tools-reasoning">{item.reasoning}</p>
+                {item.proposed_features?.length ? (
+                  <div className="tools-feature-row">
+                    {item.proposed_features.slice(0, 4).map((feature) => <span key={feature}>{feature}</span>)}
+                  </div>
+                ) : null}
+                {item.helpful_materials?.length ? (
+                  <div className="tools-materials">
+                    <strong>Helpful, not required</strong>
+                    <span>{item.helpful_materials.slice(0, 5).join(' · ')}</span>
+                  </div>
+                ) : null}
+                <div className="tools-card-actions">
+                  {isLive ? (
+                    <button type="button" className="tools-primary" onClick={() => window.open(String(item.deployment_url), '_blank')}>Open</button>
+                  ) : canBuild ? (
+                    <button type="button" className="tools-primary" disabled={isBusy} onClick={() => void buildToolOpportunity(item.opportunity_id)}>
+                      {isBusy ? 'Preparing' : item.status === 'accepted' ? 'Continue in chat' : 'Build now'}
+                    </button>
+                  ) : (
+                    <button type="button" className="tools-primary" onClick={() => onPromptChat(`Continue working on My Tools opportunity ${item.opportunity_id}: ${item.title}.`)}>Continue in chat</button>
+                  )}
+                  {!['live', 'building'].includes(item.status) ? (
+                    <button type="button" className="tools-secondary" disabled={isBusy} onClick={() => void updateToolOpportunityStatus(item.opportunity_id, 'declined')}>Not interested</button>
+                  ) : null}
+                  {item.status === 'live' ? (
+                    <button type="button" className="tools-secondary" disabled={isBusy} onClick={() => void updateToolOpportunityStatus(item.opportunity_id, 'archived')}>Archive</button>
+                  ) : null}
+                  {item.repo_url ? (
+                    <button type="button" className="tools-secondary" onClick={() => window.open(String(item.repo_url), '_blank')}>Repository</button>
+                  ) : null}
+                </div>
+              </article>
+            )
+          })}
+        </section>
+      </div>
+    )
+  }
 
   const renderCommandPage = () => (
     <div className="spaces-page">
@@ -7500,6 +7671,9 @@ export default function SpacesControlCenter({
   }
 
   const renderCurrentPage = () => {
+    if (page === 'tools') {
+      return renderToolsPage()
+    }
     if (page === 'calendar') {
       return renderCalendarPage()
     }

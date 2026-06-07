@@ -5680,6 +5680,23 @@ export default function App() {
     }
   }
 
+  const openChatWithPrompt = (prompt: string) => {
+    const normalized = String(prompt || '').trim()
+    if (!normalized) return
+    showChatComposer()
+    window.setTimeout(() => {
+      if (!inputRef.current) return
+      inputRef.current.value = normalized
+      inputRef.current.style.height = 'auto'
+      inputRef.current.style.height = `${Math.min(inputRef.current.scrollHeight, 120)}px`
+      inputHasTextRef.current = true
+      setHasText(true)
+      inputRef.current.focus()
+      inputRef.current.setSelectionRange(normalized.length, normalized.length)
+      window.setTimeout(() => handleSubmit(), 0)
+    }, 40)
+  }
+
   const showAttachmentError = (error: unknown, fallback: string) => {
     setMessages((prev) => [
       ...prev,
@@ -6719,6 +6736,7 @@ export default function App() {
           pendingCronCount={orderedCronResultNotifications.length}
           selectedModelLabel={MODEL_OPTIONS.find((item) => item.id === selectedModel)?.label || 'Cosmic'}
           onBackToChat={showChatComposer}
+          onPromptChat={openChatWithPrompt}
           onMinimize={handleShowLauncherTray}
           onClose={() => window.cosmic?.hide()}
           onShowTooltip={(label, el) => showHoverTooltipForElement(label, el, 'launcher')}
