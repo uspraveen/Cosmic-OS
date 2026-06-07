@@ -90,6 +90,7 @@ interface OperationItem {
 }
 
 type SchedulerCronState = 'live' | 'paused' | 'queued' | 'done' | 'draft'
+type AutopilotCronTab = 'current' | 'history'
 
 interface SchedulerCronRecord {
   cron_id: string
@@ -1073,6 +1074,19 @@ function schedulerCronState(cron: SchedulerCronRecord): SchedulerCronState {
   if (cron.one_shot && cron.last_result_status) return 'done'
   if (cron.cron_expression) return 'queued'
   return 'draft'
+}
+
+function isSchedulerHistoricalCron(cron: SchedulerCronRecord): boolean {
+  if (cron.kind === 'system' || cron.paused || cron.next_fire_at) {
+    return false
+  }
+  if (cron.one_shot) {
+    return Boolean(cron.last_fired_at || cron.last_result_status || cron.last_result_summary)
+  }
+  if (!cron.cron_expression) {
+    return Boolean(cron.last_fired_at || cron.last_result_status)
+  }
+  return false
 }
 
 function schedulerCronSortScore(cron: SchedulerCronRecord): number {
@@ -2384,6 +2398,7 @@ export default function SpacesControlCenter({
   const [schedulerError, setSchedulerError] = useState<string | null>(null)
   const [schedulerActionId, setSchedulerActionId] = useState<string | null>(null)
   const [schedulerSelectedCronId, setSchedulerSelectedCronId] = useState('')
+  const [autopilotCronTab, setAutopilotCronTab] = useState<AutopilotCronTab>('current')
   const schedulerRequestRef = useRef(0)
   const schedulerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -2682,8 +2697,10 @@ export default function SpacesControlCenter({
       setSchedulerOverview(normalized)
       setSchedulerError(null)
       setSchedulerSelectedCronId((current) => {
-        if (current && normalized.crons.some((cron) => cron.cron_id === current)) return current
-        return normalized.crons[0]?.cron_id || ''
+        const currentCrons = normalized.crons.filter((cron) => !isSchedulerHistoricalCron(cron))
+        const preferredCrons = currentCrons.length > 0 ? currentCrons : normalized.crons
+        if (current && preferredCrons.some((cron) => cron.cron_id === current)) return current
+        return preferredCrons[0]?.cron_id || ''
       })
     } catch (error: unknown) {
       if (requestId !== schedulerRequestRef.current) {
@@ -3292,21 +3309,42 @@ export default function SpacesControlCenter({
   const schedulerHeartbeat = schedulerOverview?.heartbeat ?? null
   const schedulerManualOverrides = schedulerOverview?.manual_overrides ?? []
   const schedulerProfileTimezone = pickString(schedulerOverview?.profile, ['user_timezone']) || 'Local timezone'
-  const selectedSchedulerCron = useMemo(
-    () => schedulerCrons.find((cron) => cron.cron_id === schedulerSelectedCronId) ?? schedulerCrons[0] ?? null,
-    [schedulerCrons, schedulerSelectedCronId],
+  const schedulerCurrentCrons = useMemo(
+    () => schedulerCrons.filter((cron) => !isSchedulerHistoricalCron(cron)),
+    [schedulerCrons],
   )
+  const schedulerHistoryCrons = useMemo(
+    () => schedulerCrons.filter((cron) => isSchedulerHistoricalCron(cron)),
+    [schedulerCrons],
+  )
+  const visibleSchedulerCrons = autopilotCronTab === 'history' ? schedulerHistoryCrons : schedulerCurrentCrons
+  const selectedSchedulerCron = useMemo(
+    () => visibleSchedulerCrons.find((cron) => cron.cron_id === schedulerSelectedCronId) ?? visibleSchedulerCrons[0] ?? null,
+    [visibleSchedulerCrons, schedulerSelectedCronId],
+  )
+  const selectedSchedulerCronIsHistory = Boolean(selectedSchedulerCron && isSchedulerHistoricalCron(selectedSchedulerCron))
   const schedulerCounts = useMemo(() => {
-    const active = schedulerCrons.filter((cron) => schedulerCronState(cron) === 'live').length
-    const paused = schedulerCrons.filter((cron) => cron.paused).length
-    const userCrons = schedulerCrons.filter((cron) => cron.kind !== 'system').length
+    const active = schedulerCurrentCrons.filter((cron) => schedulerCronState(cron) === 'live').length
+    const paused = schedulerCurrentCrons.filter((cron) => cron.paused).length
+    const userCrons = schedulerCurrentCrons.filter((cron) => cron.kind !== 'system').length
     return {
-      total: schedulerCrons.length,
+      total: schedulerCurrentCrons.length,
       active,
       paused,
       userCrons,
+      historical: schedulerHistoryCrons.length,
     }
-  }, [schedulerCrons])
+  }, [schedulerCurrentCrons, schedulerHistoryCrons])
+
+  useEffect(() => {
+    if (!active || page !== 'autopilot') {
+      return
+    }
+    if (schedulerSelectedCronId && visibleSchedulerCrons.some((cron) => cron.cron_id === schedulerSelectedCronId)) {
+      return
+    }
+    setSchedulerSelectedCronId(visibleSchedulerCrons[0]?.cron_id || '')
+  }, [active, page, schedulerSelectedCronId, visibleSchedulerCrons])
 
   /* ── PULSE data ───────────────────────────────────────── */
 
@@ -5720,7 +5758,7 @@ export default function SpacesControlCenter({
         <article className="spaces-card autopilot-stat-card">
           <div className="spaces-card-kicker">Last Sync</div>
           <strong>{schedulerOverview ? formatAutopilotRelative(new Date(schedulerOverview.fetchedAtMs).toISOString()) : 'Waiting'}</strong>
-          <span>{schedulerManualOverrides.length} recent manual overrides</span>
+          <span>{schedulerCounts.historical} history · {schedulerManualOverrides.length} manual overrides</span>
         </article>
       </section>
 
@@ -5792,7 +5830,14 @@ export default function SpacesControlCenter({
                 <div><span>ID</span><strong>{selectedSchedulerCron.cron_id}</strong></div>
                 <div><span>Kind</span><strong>{selectedSchedulerCron.kind}</strong></div>
                 <div><span>Cron</span><strong>{selectedSchedulerCron.cron_expression || '—'}</strong></div>
-                <div><span>Next fire</span><strong>{selectedSchedulerCron.next_fire_local || formatAutopilotStamp(selectedSchedulerCron.next_fire_at)}</strong></div>
+                <div>
+                  <span>{selectedSchedulerCronIsHistory ? 'Completed' : 'Next fire'}</span>
+                  <strong>
+                    {selectedSchedulerCronIsHistory
+                      ? selectedSchedulerCron.last_fired_local || formatAutopilotRelative(selectedSchedulerCron.last_fired_at) || selectedSchedulerCron.last_result_status || 'No future run'
+                      : selectedSchedulerCron.next_fire_local || formatAutopilotStamp(selectedSchedulerCron.next_fire_at)}
+                  </strong>
+                </div>
                 <div><span>Last run</span><strong>{selectedSchedulerCron.last_fired_local || formatAutopilotRelative(selectedSchedulerCron.last_fired_at)}</strong></div>
                 <div><span>Created by</span><strong>{selectedSchedulerCron.created_by || 'Gateway'}</strong></div>
               </div>
@@ -5802,21 +5847,55 @@ export default function SpacesControlCenter({
               </div>
             </>
           ) : (
-            <p className="spaces-card-note">No live cron records returned by Gateway yet.</p>
+            <p className="spaces-card-note">No cron records returned by Gateway for this view yet.</p>
           )}
         </article>
       </section>
 
+      <section className="autopilot-tab-strip" role="tablist" aria-label="Autopilot routine views">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={autopilotCronTab === 'current'}
+          className={`autopilot-tab ${autopilotCronTab === 'current' ? 'active' : ''}`}
+          onClick={() => setAutopilotCronTab('current')}
+        >
+          <span>Current</span>
+          <strong>{schedulerCurrentCrons.length}</strong>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={autopilotCronTab === 'history'}
+          className={`autopilot-tab ${autopilotCronTab === 'history' ? 'active' : ''}`}
+          onClick={() => setAutopilotCronTab('history')}
+        >
+          <span>History</span>
+          <strong>{schedulerHistoryCrons.length}</strong>
+        </button>
+      </section>
+
       <section className="spaces-orbit-grid autopilot-cron-grid">
-        {schedulerCrons.length === 0 ? (
+        {visibleSchedulerCrons.length === 0 ? (
           <article className="spaces-card spaces-cron-card autopilot-empty-card">
-            <div className="spaces-card-kicker">No routines</div>
-            <h3>{gatewayConnected ? 'No scheduled routines returned.' : 'Gateway is offline.'}</h3>
-            <p className="spaces-cron-note">Open COSMIC chat to create a reminder, or reconnect Gateway to sync the VM scheduler.</p>
+            <div className="spaces-card-kicker">{autopilotCronTab === 'history' ? 'No history' : 'No routines'}</div>
+            <h3>
+              {gatewayConnected
+                ? autopilotCronTab === 'history'
+                  ? 'No completed historical routines yet.'
+                  : 'No current scheduled routines returned.'
+                : 'Gateway is offline.'}
+            </h3>
+            <p className="spaces-cron-note">
+              {autopilotCronTab === 'history'
+                ? 'Completed one-shot routines and stale finished jobs will appear here instead of crowding the active control surface.'
+                : 'Open COSMIC chat to create a reminder, or reconnect Gateway to sync the VM scheduler.'}
+            </p>
           </article>
-        ) : schedulerCrons.map((cron) => {
+        ) : visibleSchedulerCrons.map((cron) => {
           const state = schedulerCronState(cron)
           const actionPrefix = `${cron.paused ? 'resume' : 'pause'}:${cron.cron_id}`
+          const isHistory = autopilotCronTab === 'history'
           return (
             <article
               key={cron.cron_id}
@@ -5832,8 +5911,12 @@ export default function SpacesControlCenter({
               </div>
               <div className="spaces-cron-meta">
                 <div>
-                  <span>Next</span>
-                  <strong>{cron.next_fire_local || formatAutopilotStamp(cron.next_fire_at)}</strong>
+                  <span>{isHistory ? 'Completed' : 'Next'}</span>
+                  <strong>
+                    {isHistory
+                      ? cron.last_fired_local || formatAutopilotRelative(cron.last_fired_at) || cron.last_result_status || 'No future run'
+                      : cron.next_fire_local || formatAutopilotStamp(cron.next_fire_at)}
+                  </strong>
                 </div>
                 <div>
                   <span>Cadence</span>
@@ -5853,31 +5936,33 @@ export default function SpacesControlCenter({
                 <p className="autopilot-pause-reason">Paused reason: {cron.pause_reason}</p>
               ) : null}
               <div className="autopilot-card-actions">
-                {cron.paused ? (
-                  <button
-                    type="button"
-                    className="agent-email-console-primary"
-                    disabled={schedulerActionId === actionPrefix}
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      runSchedulerCronAction(cron, 'resume')
-                    }}
-                  >
-                    Resume
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="agent-email-console-secondary"
-                    disabled={schedulerActionId === actionPrefix}
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      runSchedulerCronAction(cron, 'pause')
-                    }}
-                  >
-                    Pause
-                  </button>
-                )}
+                {!isHistory ? (
+                  cron.paused ? (
+                    <button
+                      type="button"
+                      className="agent-email-console-primary"
+                      disabled={schedulerActionId === actionPrefix}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        runSchedulerCronAction(cron, 'resume')
+                      }}
+                    >
+                      Resume
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="agent-email-console-secondary"
+                      disabled={schedulerActionId === actionPrefix}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        runSchedulerCronAction(cron, 'pause')
+                      }}
+                    >
+                      Pause
+                    </button>
+                  )
+                ) : null}
                 <button
                   type="button"
                   className="agent-email-console-secondary danger"
@@ -5888,7 +5973,7 @@ export default function SpacesControlCenter({
                     runSchedulerCronAction(cron, 'delete')
                   }}
                 >
-                  Delete
+                  {isHistory ? 'Delete record' : 'Delete'}
                 </button>
               </div>
             </article>
