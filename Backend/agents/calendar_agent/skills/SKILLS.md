@@ -7,6 +7,7 @@
 - `GET /calendar/v3/calendars/{calendarId}/events` — list events
 - `POST /calendar/v3/calendars/{calendarId}/events` — create event
 - `PATCH /calendar/v3/calendars/{calendarId}/events/{eventId}` — update event
+- `PATCH /calendar/v3/calendars/{calendarId}/events/{eventId}` with `attendeesOmitted=true` — update only the authenticated attendee's RSVP
 - `DELETE /calendar/v3/calendars/{calendarId}/events/{eventId}` — delete event
 - `POST /calendar/v3/freeBusy/query` — query free/busy
 
@@ -23,11 +24,17 @@
   "is_all_day": false,
   "status": "confirmed",
   "attendees": [
-    {"email": "alex@example.com", "display_name": "Alex", "response_status": "needsAction"}
+    {"email": "alex@example.com", "display_name": "Alex", "response_status": "needsAction", "self": true, "organizer": false}
   ],
   "recurring_event_id": null
 }
 ```
+
+### Invitation RSVP Safety
+- Valid Google response statuses are `accepted`, `declined`, `tentative`, and `needsAction`.
+- Resolve/read the event and locate exactly one attendee with `self=true`.
+- Refuse RSVP if that attendee is the organizer.
+- Send only the selected attendee in the patch body and set `attendeesOmitted=true`.
 
 ## Scheduling Patterns
 

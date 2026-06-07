@@ -3513,6 +3513,70 @@ class GatewayRuntime:
         await self._publish_response_action_update(response_block=block)
         return {"status": "updated", "event": event, "response_block": block}
 
+    async def respond_to_calendar_invite(
+        self,
+        event_id: str,
+        *,
+        account_id: str | None,
+        calendar_id: str,
+        response_status: str,
+    ) -> dict[str, Any]:
+        normalized_event_id = self._safe_text(event_id)
+        normalized_response = self._safe_text(response_status)
+        if not normalized_event_id:
+            raise ValueError("Calendar event id is required.")
+        if normalized_response not in {"accepted", "declined", "tentative", "needsAction"}:
+            raise ValueError("Calendar response must be accepted, declined, tentative, or needsAction.")
+        selected_account = self._resolve_calendar_action_account(
+            account_id=account_id,
+            calendar_id=calendar_id,
+        )
+        if not selected_account:
+            raise ValueError(
+                "Calendar account is ambiguous or unavailable. Reconnect the account or open a newer event block."
+            )
+        auth = await self.credential_manager.resolve_credential(
+            provider="google",
+            required_scopes=[
+                "https://www.googleapis.com/auth/calendar",
+                "https://www.googleapis.com/auth/calendar.events",
+            ],
+            account_id=self._safe_text(selected_account.get("account_id")),
+            operation_mode="write",
+            allow_primary_fallback=False,
+        )
+        if not auth:
+            raise RuntimeError("Unable to resolve Calendar credential. Reconnect the Google account.")
+        result = await self._dispatch_calendar_invite_response(
+            event_id=normalized_event_id,
+            calendar_id=self._safe_text(calendar_id) or "primary",
+            response_status=normalized_response,
+            account=selected_account,
+            auth=auth,
+        )
+        if self._safe_text(result.get("status")) != "completed":
+            raise RuntimeError(
+                self._safe_text(result.get("error_message"))
+                or self._safe_text(result.get("message"))
+                or "Calendar invitation response failed."
+            )
+        output = result.get("output") if isinstance(result.get("output"), dict) else {}
+        event = output.get("event") if isinstance(output.get("event"), dict) else {}
+        block = self._calendar_event_response_block(
+            event,
+            operation=normalized_response,
+            account=selected_account,
+            response_status=self._safe_text(output.get("response_status")) or normalized_response,
+        )
+        self._persist_response_action_block(block)
+        await self._publish_response_action_update(response_block=block)
+        return {
+            "status": normalized_response,
+            "event": event,
+            "response_status": normalized_response,
+            "response_block": block,
+        }
+
     def _gmail_approval_response_block(self, approval: dict[str, Any]) -> dict[str, Any]:
         approval_id = self._safe_text(approval.get("approval_id"))
         return {
@@ -3570,10 +3634,26 @@ class GatewayRuntime:
         *,
         operation: str,
         account: dict[str, Any] | None = None,
+        response_status: str | None = None,
     ) -> dict[str, Any]:
         event_id = self._safe_text(event.get("event_id"))
         summary = self._safe_text(event.get("summary")) or "Calendar event"
         account = account if isinstance(account, dict) else {}
+        attendees = event.get("attendees") if isinstance(event.get("attendees"), list) else []
+        self_attendee = next(
+            (
+                attendee
+                for attendee in attendees
+                if isinstance(attendee, dict) and bool(attendee.get("self"))
+            ),
+            None,
+        )
+        normalized_response_status = self._safe_text(response_status)
+        if not normalized_response_status and isinstance(self_attendee, dict):
+            normalized_response_status = self._safe_text(self_attendee.get("response_status"))
+        can_respond = bool(self_attendee) and not bool(
+            self_attendee.get("organizer") if isinstance(self_attendee, dict) else False
+        )
         return {
             key: value
             for key, value in {
@@ -3584,6 +3664,8 @@ class GatewayRuntime:
                 "account_id": self._safe_text(account.get("account_id")),
                 "account_email": self._safe_text(account.get("email")),
                 "account_label": self._safe_text(account.get("account_label")),
+                "response_status": normalized_response_status,
+                "can_respond": can_respond,
             }.items()
             if value not in (None, "", [], {})
         }
@@ -3841,6 +3923,51 @@ class GatewayRuntime:
             },
             input_artifacts=[],
             idempotency_key=f"calendar-update-event:{event_id}:{uuid4().hex[:12]}",
+            priority="high",
+            signature="",
+            created_at=utcnow(),
+            source="inline_action",
+            source_id=f"calendar:{event_id}",
+            channel="calendar",
+        )
+        task = task.model_copy(
+            update={"signature": sign_task_envelope(task, self.config.signing_secret)}
+        )
+        await dispatch_task(task, self._redis)
+        return await self._wait_for_agent_terminal_result(
+            task.task_id,
+            timeout_sec=90.0,
+            poll_interval_sec=self.config.gmail_process_inbound_poll_interval_sec,
+        )
+
+    async def _dispatch_calendar_invite_response(
+        self,
+        *,
+        event_id: str,
+        calendar_id: str,
+        response_status: str,
+        account: dict[str, Any],
+        auth: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self._redis is None:
+            return {"status": "failed", "error_message": "Redis is not available for Calendar RSVP."}
+        session_id = self._current_session_id()
+        task = TaskEnvelope(
+            task_id=generate_task_id(),
+            task_list_id=session_id,
+            session_id=session_id,
+            sender="cosmic/gateway:1.0.0",
+            recipient=self.config.calendar_agent_id,
+            intent="calendar.respond_to_invite",
+            input={
+                "event_id": event_id,
+                "calendar_id": calendar_id,
+                "response_status": response_status,
+                "account": self._heartbeat_calendar_account_summary(account),
+                "auth": auth,
+            },
+            input_artifacts=[],
+            idempotency_key=f"calendar-respond-invite:{event_id}:{response_status}:{uuid4().hex[:12]}",
             priority="high",
             signature="",
             created_at=utcnow(),
@@ -18707,6 +18834,7 @@ class GatewayRuntime:
                     "start",
                     "end",
                     "status",
+                    "response_status",
                     "html_link",
                     "meeting_link",
                     "organizer",
@@ -18736,12 +18864,26 @@ class GatewayRuntime:
                                         attendee.get("response_status")
                                     ),
                                     "self": bool(attendee.get("self")),
+                                    "organizer": bool(attendee.get("organizer")),
                                 }.items()
                                 if value not in (None, "")
                             }
                         )
                 if attendees:
                     normalized_calendar_event["attendees"] = attendees
+                account = calendar_event.get("account")
+                if isinstance(account, dict):
+                    normalized_account = {
+                        key: value
+                        for key, value in {
+                            "account_id": self._safe_text(account.get("account_id")),
+                            "email": self._safe_text(account.get("email")),
+                            "account_label": self._safe_text(account.get("account_label")),
+                        }.items()
+                        if value
+                    }
+                    if normalized_account:
+                        normalized_calendar_event["account"] = normalized_account
                 if normalized_calendar_event.get("event_id") or normalized_calendar_event.get("summary"):
                     receipt["calendar_event"] = normalized_calendar_event
             if receipt:

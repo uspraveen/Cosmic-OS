@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "event": { "type": "object", "description": "Updated invitation event details" },
+    "responded": { "type": "boolean" },
+    "response_status": {
+      "type": "string",
+      "enum": ["accepted", "declined", "tentative", "needsAction"]
+    },
+    "account": { "type": "object", "description": "Resolved Google account identity" }
+  },
+  "required": ["event", "responded", "response_status"]
+}

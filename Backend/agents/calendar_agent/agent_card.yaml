@@ -4,7 +4,7 @@ agent_id: cosmic/calendar-agent:1.0.0
 display_name: Calendar Agent
 description: >
   Specialist agent for Google Calendar management. Handles event listing, creation,
-  updates, cancellation, free-slot discovery, and scheduling coordination across
+  updates, invitation responses, cancellation, free-slot discovery, and scheduling coordination across
   connected Google accounts. Uses a bounded internal LangGraph workflow so it can
   resolve human-friendly hints, identify target events, check conflicts, and then
   act without turning Opus into the calendar domain expert.
@@ -52,6 +52,17 @@ intents:
       - The user does not need a raw event_id. A human event description plus a bounded time window is sufficient when available.
       - Pass only the fields the user wants changed; let the specialist preserve the rest.
       - Use this to add a Google Meet link to an existing event by setting `add_google_meet=true`.
+
+  - name: calendar.respond_to_invite
+    description: Accept, decline, tentatively accept, or reset the selected account's response to a Google Calendar invitation
+    input_schema: schemas/intents/calendar.respond_to_invite.input.json
+    output_schema: schemas/intents/calendar.respond_to_invite.output.json
+    timeout_sec: 45
+    usage_hints:
+      - Use this when the user asks to accept, decline, RSVP maybe/tentative, or reset their response to a calendar invitation.
+      - The user does not need a raw event_id. Pass a human event description and bounded time window when available.
+      - If the invitation belongs to a named Google account, pass that email or friendly account label as `account_hint`.
+      - This intent updates only the authenticated attendee's response and preserves every other attendee.
 
   - name: calendar.cancel_event
     description: Cancel a calendar event, optionally notifying attendees
@@ -101,6 +112,11 @@ auth_requirements:
     scopes:
       - https://www.googleapis.com/auth/calendar
       - https://www.googleapis.com/auth/calendar.events
+  calendar.respond_to_invite:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/calendar
+      - https://www.googleapis.com/auth/calendar.events
   calendar.cancel_event:
     provider: google
     scopes:
@@ -132,6 +148,7 @@ policies:
     calendar.create_event: [cosmic/orchestrator:1.0.0]
     calendar.find_free_slots: [cosmic/orchestrator:1.0.0]
     calendar.update_event: [cosmic/orchestrator:1.0.0]
+    calendar.respond_to_invite: [cosmic/orchestrator:1.0.0, cosmic/gateway:1.0.0]
     calendar.cancel_event: [cosmic/orchestrator:1.0.0]
     calendar.recall_session: [cosmic/orchestrator:1.0.0]
     calendar.heartbeat_digest: [cosmic/gateway:1.0.0, cosmic/orchestrator:1.0.0]

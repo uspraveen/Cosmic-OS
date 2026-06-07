@@ -349,6 +349,8 @@ class TestSchemas:
             "calendar.find_free_slots.output.json",
             "calendar.update_event.input.json",
             "calendar.update_event.output.json",
+            "calendar.respond_to_invite.input.json",
+            "calendar.respond_to_invite.output.json",
             "calendar.cancel_event.input.json",
             "calendar.cancel_event.output.json",
             "calendar.recall_session.input.json",
@@ -375,12 +377,13 @@ class TestAgentCard:
         card_path = Path(__file__).resolve().parent.parent / "agent_card.yaml"
         data = yaml.safe_load(card_path.read_text())
         assert data["agent_id"] == "cosmic/calendar-agent:1.0.0"
-        assert len(data["intents"]) == 7
+        assert len(data["intents"]) == 8
         intent_names = [i["name"] for i in data["intents"]]
         assert "calendar.list_events" in intent_names
         assert "calendar.create_event" in intent_names
         assert "calendar.find_free_slots" in intent_names
         assert "calendar.update_event" in intent_names
+        assert "calendar.respond_to_invite" in intent_names
         assert "calendar.cancel_event" in intent_names
         assert "calendar.recall_session" in intent_names
         assert "calendar.heartbeat_digest" in intent_names
@@ -394,6 +397,7 @@ class TestAgentCard:
         assert "calendar.list_events" in auth_req
         assert auth_req["calendar.list_events"]["provider"] == "google"
         assert "calendar.heartbeat_digest" in auth_req
+        assert "calendar.respond_to_invite" in auth_req
         assert "calendar.recall_session" not in auth_req
 
     def test_all_schemas_referenced(self):
@@ -1199,3 +1203,293 @@ async def test_langgraph_create_event_returns_conflict_warning():
     assert result.output["workflow"] == "langgraph"
     assert "conflict_warning" in result.output
     fake_client.create_event.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_respond_to_invite_verifies_self_attendee_and_updates_only_response():
+    from agents.calendar_agent.agent import CalendarAgent
+    from agents.calendar_agent.config import CalendarAgentConfig
+
+    agent = CalendarAgent(
+        redis_client=MagicMock(),
+        config=CalendarAgentConfig(enable_internal_llm=False, calendar_use_langgraph=True),
+    )
+    agent.db = MagicMock()
+    agent.auth = {
+        "access_token": "token",
+        "account_id": "acct_1",
+        "account_email": "user@example.com",
+        "account_label": "Personal",
+    }
+    task = TaskEnvelope(
+        task_id="tsk_rsvp_accept",
+        task_list_id="sess_rsvp",
+        parent_task_id=None,
+        session_id="sess_rsvp",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/calendar-agent:1.0.0",
+        intent="calendar.respond_to_invite",
+        input={
+            "event_id": "evt_invite",
+            "calendar_id": "primary",
+            "response_status": "accepted",
+        },
+        input_artifacts=[],
+        idempotency_key="idem_rsvp_accept",
+        priority="high",
+        signature="sig",
+        created_at=utcnow(),
+        source="user",
+        source_id="desktop",
+        channel="desktop:desk_001",
+    )
+    event = {
+        "event_id": "evt_invite",
+        "etag": '"invite-v1"',
+        "calendar_id": "primary",
+        "summary": "Andrew Goldman chat",
+        "organizer": "andrew@example.com",
+        "attendees": [
+            {
+                "email": "user@example.com",
+                "response_status": "needsAction",
+                "self": True,
+                "organizer": False,
+            },
+            {
+                "email": "andrew@example.com",
+                "response_status": "accepted",
+                "self": False,
+                "organizer": True,
+            },
+        ],
+    }
+    updated_event = {
+        **event,
+        "attendees": [
+            {**event["attendees"][0], "response_status": "accepted"},
+            event["attendees"][1],
+        ],
+    }
+    fake_client = AsyncMock()
+    fake_client.get_event.return_value = event
+    fake_client.respond_to_invite.return_value = updated_event
+
+    with patch.object(agent, "_get_calendar_client", return_value=fake_client):
+        result = await agent.execute(task)
+
+    assert result.status == "completed"
+    assert result.output["responded"] is True
+    assert result.output["response_status"] == "accepted"
+    assert result.output["account"]["email"] == "user@example.com"
+    fake_client.respond_to_invite.assert_awaited_once_with(
+        calendar_id="primary",
+        event_id="evt_invite",
+        attendee_email="user@example.com",
+        response_status="accepted",
+        etag='"invite-v1"',
+    )
+
+
+@pytest.mark.asyncio
+async def test_respond_to_invite_rejects_event_without_self_attendee():
+    from agents.calendar_agent.agent import CalendarAgent
+    from agents.calendar_agent.config import CalendarAgentConfig
+
+    agent = CalendarAgent(
+        redis_client=MagicMock(),
+        config=CalendarAgentConfig(enable_internal_llm=False, calendar_use_langgraph=True),
+    )
+    agent.db = MagicMock()
+    agent.auth = {
+        "access_token": "token",
+        "account_id": "acct_1",
+        "account_email": "user@example.com",
+    }
+    task = TaskEnvelope(
+        task_id="tsk_rsvp_wrong_account",
+        task_list_id="sess_rsvp",
+        parent_task_id=None,
+        session_id="sess_rsvp",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/calendar-agent:1.0.0",
+        intent="calendar.respond_to_invite",
+        input={
+            "event_id": "evt_other",
+            "calendar_id": "primary",
+            "response_status": "declined",
+        },
+        input_artifacts=[],
+        idempotency_key="idem_rsvp_wrong_account",
+        priority="high",
+        signature="sig",
+        created_at=utcnow(),
+        source="user",
+        source_id="desktop",
+        channel="desktop:desk_001",
+    )
+    fake_client = AsyncMock()
+    fake_client.get_event.return_value = {
+        "event_id": "evt_other",
+        "calendar_id": "primary",
+        "summary": "Other account invite",
+        "organizer": "host@example.com",
+        "attendees": [
+            {
+                "email": "other@example.com",
+                "response_status": "needsAction",
+                "self": False,
+                "organizer": False,
+            }
+        ],
+    }
+
+    with patch.object(agent, "_get_calendar_client", return_value=fake_client):
+        result = await agent.execute(task)
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert "verifiable invitation" in result.error.message
+    fake_client.respond_to_invite.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_respond_to_invite_uses_internal_llm_for_raw_natural_language_lookup():
+    from agents.calendar_agent.agent import CalendarAgent
+    from agents.calendar_agent.config import CalendarAgentConfig
+
+    agent = CalendarAgent(
+        redis_client=MagicMock(),
+        config=CalendarAgentConfig(enable_internal_llm=True, calendar_use_langgraph=True),
+    )
+    agent.db = MagicMock()
+    agent.auth = {
+        "access_token": "token",
+        "account_id": "acct_1",
+        "account_email": "user@example.com",
+    }
+    task = TaskEnvelope(
+        task_id="tsk_rsvp_natural",
+        task_list_id="sess_rsvp",
+        parent_task_id=None,
+        session_id="sess_rsvp",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/calendar-agent:1.0.0",
+        intent="calendar.respond_to_invite",
+        input={
+            "query": "Accept Andrew Goldman's Tuesday 2:30 PM invitation",
+            "response_status": "accepted",
+        },
+        input_artifacts=[],
+        idempotency_key="idem_rsvp_natural",
+        priority="high",
+        signature="sig",
+        created_at=utcnow(),
+        source="user",
+        source_id="desktop",
+        channel="desktop:desk_001",
+    )
+    event = {
+        "event_id": "evt_andrew",
+        "calendar_id": "primary",
+        "summary": "Andrew Goldman chat",
+        "organizer": "andrew@example.com",
+        "attendees": [
+            {
+                "email": "user@example.com",
+                "response_status": "needsAction",
+                "self": True,
+                "organizer": False,
+            }
+        ],
+    }
+    fake_client = AsyncMock()
+    fake_client.list_events.return_value = [event]
+    fake_client.respond_to_invite.return_value = event
+
+    with (
+        patch.object(agent, "_get_calendar_client", return_value=fake_client),
+        patch.object(
+            agent,
+            "_parse_natural_language",
+            AsyncMock(
+                return_value={
+                    "operation": "respond_to_invite",
+                    "params": {
+                        "event_query": "Andrew Goldman chat",
+                        "response_status": "accepted",
+                        "time_range": {
+                            "start": "2026-06-09T00:00:00Z",
+                            "end": "2026-06-10T00:00:00Z",
+                        },
+                    },
+                }
+            ),
+        ),
+    ):
+        result = await agent.execute(task)
+
+    assert result.status == "completed"
+    fake_client.list_events.assert_awaited_once_with(
+        calendar_id="primary",
+        time_min="2026-06-09T00:00:00Z",
+        time_max="2026-06-10T00:00:00Z",
+        max_results=25,
+        query="Andrew Goldman chat",
+    )
+
+
+@pytest.mark.asyncio
+async def test_google_calendar_client_rsvp_patch_preserves_other_attendees():
+    from agents.calendar_agent.google_calendar_client import GoogleCalendarClient
+
+    response = MagicMock()
+    response.status_code = 200
+    response.raise_for_status = MagicMock()
+    response.json.return_value = {
+        "id": "evt_1",
+        "etag": '"invite-v1"',
+        "summary": "Invite",
+        "start": {"dateTime": "2026-06-09T14:30:00Z"},
+        "end": {"dateTime": "2026-06-09T14:45:00Z"},
+        "organizer": {"email": "host@example.com"},
+        "attendees": [
+            {
+                "email": "user@example.com",
+                "self": True,
+                "responseStatus": "accepted",
+            }
+        ],
+    }
+    http_client = AsyncMock()
+    http_client.patch.return_value = response
+    async_context = AsyncMock()
+    async_context.__aenter__.return_value = http_client
+    async_context.__aexit__.return_value = None
+
+    with patch(
+        "agents.calendar_agent.google_calendar_client.httpx.AsyncClient",
+        return_value=async_context,
+    ):
+        event = await GoogleCalendarClient("token").respond_to_invite(
+            "primary",
+            "evt_1",
+            attendee_email="user@example.com",
+            response_status="accepted",
+            etag='"invite-v1"',
+        )
+
+    assert event["event_id"] == "evt_1"
+    http_client.patch.assert_awaited_once()
+    kwargs = http_client.patch.await_args.kwargs
+    assert kwargs["json"] == {
+        "attendees": [
+            {
+                "email": "user@example.com",
+                "responseStatus": "accepted",
+            }
+        ],
+        "attendeesOmitted": True,
+    }
+    assert kwargs["params"]["sendUpdates"] == "none"
+    assert kwargs["headers"]["If-Match"] == '"invite-v1"'

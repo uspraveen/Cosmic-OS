@@ -135,6 +135,12 @@ interface Window {
       isAllDay?: boolean
       timezone?: string | null
     }) => Promise<any>
+    respondGatewayCalendarInvite: (payload: {
+      eventId: string
+      accountId?: string | null
+      calendarId?: string | null
+      responseStatus: 'accepted' | 'declined' | 'tentative' | 'needsAction'
+    }) => Promise<any>
     cosmicMailRequest: (payload: GatewayConnectionPayload & {
       path: string
       method?: string

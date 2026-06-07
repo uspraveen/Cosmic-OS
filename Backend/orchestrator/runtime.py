@@ -4893,6 +4893,7 @@ class OrchestratorRuntime:
         if intent_name in {
             "calendar.create_event",
             "calendar.update_event",
+            "calendar.respond_to_invite",
             "calendar.cancel_event",
         }:
             event = data.get("event") if isinstance(data.get("event"), dict) else {}
@@ -4901,6 +4902,10 @@ class OrchestratorRuntime:
                 operation = {
                     "calendar.create_event": "created",
                     "calendar.update_event": "updated",
+                    "calendar.respond_to_invite": self._activity_excerpt(
+                        data.get("response_status"), limit=80
+                    )
+                    or "responded",
                     "calendar.cancel_event": "cancelled",
                 }[intent_name]
                 calendar_event = {
@@ -4915,6 +4920,9 @@ class OrchestratorRuntime:
                         "start": self._activity_excerpt(event.get("start"), limit=160),
                         "end": self._activity_excerpt(event.get("end"), limit=160),
                         "status": self._activity_excerpt(event.get("status"), limit=80),
+                        "response_status": self._activity_excerpt(
+                            data.get("response_status"), limit=80
+                        ),
                         "html_link": self._activity_excerpt(event.get("html_link"), limit=1200),
                         "meeting_link": self._activity_excerpt(event.get("meeting_link"), limit=1200),
                         "organizer": self._activity_excerpt(event.get("organizer"), limit=320),

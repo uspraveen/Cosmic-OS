@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "event_id": { "type": "string", "description": "Google event ID when already known" },
+    "calendar_id": { "type": "string", "default": "primary" },
+    "account_hint": { "type": "string", "description": "Friendly account selector such as an email address, work, or personal" },
+    "event_query": { "type": "string", "description": "Event title/query to resolve when event_id is not known" },
+    "query": { "type": "string", "description": "Natural-language description of the invitation to resolve" },
+    "time_min": { "type": "string", "description": "Optional bounded lookup start (ISO 8601)" },
+    "time_max": { "type": "string", "description": "Optional bounded lookup end (ISO 8601)" },
+    "response_status": {
+      "type": "string",
+      "enum": ["accepted", "declined", "tentative", "needsAction", "accept", "decline", "maybe", "reset"],
+      "description": "The selected account's invitation response"
+    }
+  },
+  "required": ["response_status"],
+  "anyOf": [
+    { "required": ["event_id"] },
+    { "required": ["event_query"] },
+    { "required": ["query"] }
+  ]
+}

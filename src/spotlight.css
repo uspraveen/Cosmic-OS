@@ -2441,6 +2441,14 @@ kbd {
 .assistant-action-card-actions {
   justify-content: flex-end;
   margin-top: 13px;
+  flex-wrap: wrap;
+}
+
+.assistant-action-rsvp {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: auto;
 }
 
 .assistant-action-button {
@@ -2462,6 +2470,12 @@ kbd {
 .assistant-action-button.is-primary {
   color: rgba(255, 255, 255, 0.94);
   background: rgba(255, 255, 255, 0.12);
+}
+
+.assistant-action-button.is-selected {
+  border-color: rgba(255, 255, 255, 0.28);
+  color: rgba(255, 255, 255, 0.96);
+  background: rgba(255, 255, 255, 0.15);
 }
 
 .assistant-action-button:disabled {

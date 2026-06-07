@@ -243,6 +243,8 @@ interface ResponseActionBlock {
   isAllDay?: boolean
   htmlLink?: string | null
   meetingLink?: string | null
+  responseStatus?: string | null
+  canRespond?: boolean
 }
 
 type ResponseBlock =
@@ -580,6 +582,8 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
         isAllDay: Boolean((item as any).is_all_day),
         htmlLink: typeof (item as any).html_link === 'string' ? (item as any).html_link.trim() : null,
         meetingLink: typeof (item as any).meeting_link === 'string' ? (item as any).meeting_link.trim() : null,
+        responseStatus: typeof (item as any).response_status === 'string' ? (item as any).response_status.trim() : null,
+        canRespond: Boolean((item as any).can_respond),
       })
       continue
     }
@@ -2426,7 +2430,7 @@ const fromInlineCalendarInputValue = (value: string, isAllDay = false) => {
 
 const AssistantActionBlock = ({ block }: { block: ResponseActionBlock }) => {
   const [status, setStatus] = useState(block.status || 'pending')
-  const [busy, setBusy] = useState<'approve' | 'reject' | 'save' | null>(null)
+  const [busy, setBusy] = useState<'approve' | 'reject' | 'save' | 'accepted' | 'declined' | 'tentative' | null>(null)
   const [error, setError] = useState('')
   const [editing, setEditing] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -2437,6 +2441,7 @@ const AssistantActionBlock = ({ block }: { block: ResponseActionBlock }) => {
   const [end, setEnd] = useState(toInlineCalendarInputValue(block.end, block.isAllDay))
   const [location, setLocation] = useState(block.location || '')
   const [description, setDescription] = useState(block.description || '')
+  const [responseStatus, setResponseStatus] = useState(block.responseStatus || '')
   const isCalendar = block.type === 'calendar_event'
   const isPending = ['pending', 'failed'].includes(status.toLowerCase())
   const title = isCalendar
@@ -2450,7 +2455,8 @@ const AssistantActionBlock = ({ block }: { block: ResponseActionBlock }) => {
 
   useEffect(() => {
     setStatus(block.status || 'pending')
-  }, [block.status])
+    setResponseStatus(block.responseStatus || '')
+  }, [block.responseStatus, block.status])
 
   useEffect(() => {
     if (editing) return
@@ -2570,6 +2576,28 @@ const AssistantActionBlock = ({ block }: { block: ResponseActionBlock }) => {
     }
   }
 
+  const respondToInvite = async (nextResponse: 'accepted' | 'declined' | 'tentative') => {
+    if (!block.eventId || !block.canRespond || busy) return
+    setBusy(nextResponse)
+    setError('')
+    try {
+      if (!window.cosmic?.respondGatewayCalendarInvite) {
+        throw new Error('Calendar invitation response is unavailable.')
+      }
+      await window.cosmic.respondGatewayCalendarInvite({
+        eventId: block.eventId,
+        accountId: block.accountId,
+        calendarId: block.calendarId,
+        responseStatus: nextResponse,
+      })
+      setResponseStatus(nextResponse)
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : 'Invitation response failed.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
   return (
     <section className="assistant-action-card" data-kind={block.type}>
       <div className="assistant-action-card-head">
@@ -2609,7 +2637,9 @@ const AssistantActionBlock = ({ block }: { block: ResponseActionBlock }) => {
               <Pencil size={13} />
             </button>
           )}
-          <div className={`assistant-action-card-status is-${status.toLowerCase()}`}>{status}</div>
+          <div className={`assistant-action-card-status is-${(responseStatus || status).toLowerCase()}`}>
+            {responseStatus || status}
+          </div>
         </div>
       </div>
       {isCalendar ? (
@@ -2683,15 +2713,45 @@ const AssistantActionBlock = ({ block }: { block: ResponseActionBlock }) => {
             </button>
           </>
         ) : isCalendar ? (
-          (block.htmlLink || block.meetingLink) && (
-            <button
-              type="button"
-              className="assistant-action-button is-primary"
-              onClick={() => window.cosmic?.openExternal?.(block.htmlLink || block.meetingLink || '')}
-            >
-              Open event
-            </button>
-          )
+          <>
+            {block.canRespond && (
+              <div className="assistant-action-rsvp" role="group" aria-label="Respond to calendar invitation">
+                <button
+                  type="button"
+                  className={`assistant-action-button ${responseStatus === 'declined' ? 'is-selected' : ''}`}
+                  disabled={Boolean(busy)}
+                  onClick={() => void respondToInvite('declined')}
+                >
+                  {busy === 'declined' ? 'Declining…' : 'Decline'}
+                </button>
+                <button
+                  type="button"
+                  className={`assistant-action-button ${responseStatus === 'tentative' ? 'is-selected' : ''}`}
+                  disabled={Boolean(busy)}
+                  onClick={() => void respondToInvite('tentative')}
+                >
+                  {busy === 'tentative' ? 'Updating…' : 'Maybe'}
+                </button>
+                <button
+                  type="button"
+                  className={`assistant-action-button is-primary ${responseStatus === 'accepted' ? 'is-selected' : ''}`}
+                  disabled={Boolean(busy)}
+                  onClick={() => void respondToInvite('accepted')}
+                >
+                  {busy === 'accepted' ? 'Accepting…' : 'Accept'}
+                </button>
+              </div>
+            )}
+            {(block.htmlLink || block.meetingLink) && (
+              <button
+                type="button"
+                className="assistant-action-button"
+                onClick={() => window.cosmic?.openExternal?.(block.htmlLink || block.meetingLink || '')}
+              >
+                Open event
+              </button>
+            )}
+          </>
         ) : isPending ? (
           <>
             <button

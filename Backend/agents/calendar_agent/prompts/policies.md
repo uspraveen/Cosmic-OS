@@ -42,6 +42,13 @@
 - If the user says "cancel without notifying", set `notify_attendees: false`.
 - If `event_id` is missing, resolve the target event by query/title/time window before cancelling.
 
+### Invitation Responses
+- Use `calendar.respond_to_invite` for accept, decline, tentative/maybe, and reset-response requests.
+- Read or boundedly resolve the exact event before responding.
+- Verify the selected Google account is the event's `self` attendee and is not the organizer.
+- Patch only the selected attendee response with `attendeesOmitted=true`; never replace the full attendee array.
+- If the invitation belongs to another connected account or the target remains ambiguous, stop and return a precise error instead of guessing.
+
 ### Free Slot Discovery
 - Respect working hours — do not suggest slots outside them.
 - Include buffer time between meetings (default 15 min).

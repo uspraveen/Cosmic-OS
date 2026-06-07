@@ -1,7 +1,8 @@
 """Calendar Agent — Google Calendar specialist for COSMIC.
 
 Handles calendar.list_events, calendar.create_event, calendar.find_free_slots,
-calendar.update_event, calendar.cancel_event, calendar.recall_session.
+calendar.update_event, calendar.respond_to_invite, calendar.cancel_event,
+calendar.recall_session.
 
 Uses self.auth.access_token from orchestrator-injected credentials.
 Internal LLM (gpt-5-mini) for natural language scheduling parsing.
@@ -29,6 +30,20 @@ from .google_calendar_client import GoogleCalendarClient
 from .internal_llm import invoke_calendar_internal_llm
 
 logger = logging.getLogger(__name__)
+
+_INVITE_RESPONSE_ALIASES = {
+    "accept": "accepted",
+    "accepted": "accepted",
+    "yes": "accepted",
+    "decline": "declined",
+    "declined": "declined",
+    "no": "declined",
+    "maybe": "tentative",
+    "tentative": "tentative",
+    "reset": "needsAction",
+    "needsaction": "needsAction",
+    "needs_action": "needsAction",
+}
 
 _CALENDAR_SESSIONS_SQL = """
 CREATE TABLE IF NOT EXISTS calendar_sessions (
@@ -95,7 +110,11 @@ class CalendarAgent(AgentRuntime):
         """Core execution. Dispatches to intent handlers."""
         self._load_task_context()
 
-        if task.intent not in {"calendar.recall_session", "calendar.heartbeat_digest"} and self._cfg.calendar_use_langgraph:
+        if task.intent not in {
+            "calendar.recall_session",
+            "calendar.heartbeat_digest",
+            "calendar.respond_to_invite",
+        } and self._cfg.calendar_use_langgraph:
             try:
                 from .calendar_graph import run_calendar_langgraph
             except ImportError as exc:
@@ -487,6 +506,12 @@ class CalendarAgent(AgentRuntime):
                 "Check the new slot for conflicts.",
                 "Apply the patch in Google Calendar.",
             ]
+        if intent == "calendar.respond_to_invite":
+            return [
+                "Normalize the invitation response.",
+                "Resolve and verify the invited event.",
+                "Apply the attendee response in Google Calendar.",
+            ]
         if intent == "calendar.cancel_event":
             return [
                 "Normalize the cancellation request.",
@@ -502,8 +527,6 @@ class CalendarAgent(AgentRuntime):
     ) -> str:
         direct_candidates = [
             task.input.get("event_query"),
-            task.input.get("query"),
-            task.input.get("summary"),
         ]
         if isinstance(params, dict):
             direct_candidates.extend(
@@ -513,6 +536,12 @@ class CalendarAgent(AgentRuntime):
                     params.get("search_query"),
                 ]
             )
+        direct_candidates.extend(
+            [
+                task.input.get("query"),
+                task.input.get("summary"),
+            ]
+        )
         for candidate in direct_candidates:
             normalized = str(candidate or "").strip()
             if normalized:
@@ -1237,6 +1266,108 @@ class CalendarAgent(AgentRuntime):
             artifacts=[],
             error=None,
         )
+
+    async def handle_calendar_respond_to_invite(self, task: TaskEnvelope) -> AgentResult:
+        """Accept, decline, tentatively accept, or reset one invitation response."""
+        client = self._get_calendar_client()
+        event_id = str(task.input.get("event_id") or "").strip()
+        calendar_id = str(task.input.get("calendar_id") or "primary").strip() or "primary"
+        llm_params: dict[str, Any] | None = None
+        if not event_id and task.input.get("query") and not task.input.get("event_query"):
+            llm_result = await self._parse_natural_language(task)
+            if llm_result and llm_result.get("operation") == "respond_to_invite":
+                llm_params = llm_result.get("params", {})
+                event_id = event_id or str(llm_params.get("event_id") or "").strip()
+                calendar_id = str(llm_params.get("calendar_id") or calendar_id).strip() or calendar_id
+        raw_response = str(
+            task.input.get("response_status")
+            or task.input.get("response")
+            or (llm_params or {}).get("response_status")
+            or ""
+        ).strip()
+        response_status = _INVITE_RESPONSE_ALIASES.get(raw_response.casefold())
+        if not response_status:
+            raise ValueError(
+                "Invitation response must be accepted, declined, tentative, or needsAction."
+            )
+
+        await self._maybe_create_plan(task, self._workflow_steps_for_intent(task.intent))
+        await self._maybe_update_step(1, "completed", f"Response normalized to {response_status}.")
+
+        event: dict[str, Any] | None = None
+        if event_id:
+            await self._maybe_update_step(2, "in_progress", "Reading the target invitation.")
+            event = await client.get_event(calendar_id=calendar_id, event_id=event_id)
+        else:
+            await self._maybe_update_step(2, "in_progress", "Searching for the target invitation.")
+            event, candidates, query = await self._resolve_target_event(
+                client=client,
+                task=task,
+                calendar_id=calendar_id,
+                params=llm_params,
+            )
+            if event is None:
+                await self._maybe_update_step(2, "skipped", "Invitation could not be resolved.")
+                return self._ambiguous_event_error(
+                    action="respond to",
+                    query=query,
+                    candidates=candidates,
+                )
+            event_id = str(event.get("event_id") or "").strip()
+            calendar_id = str(event.get("calendar_id") or calendar_id).strip() or calendar_id
+
+        attendees = event.get("attendees") if isinstance(event.get("attendees"), list) else []
+        self_attendees = [
+            attendee
+            for attendee in attendees
+            if isinstance(attendee, dict) and bool(attendee.get("self"))
+        ]
+        if len(self_attendees) != 1:
+            await self._maybe_update_step(2, "skipped", "Authenticated attendee could not be verified.")
+            raise ValueError(
+                "This event is not a verifiable invitation for the selected Google account."
+            )
+        self_attendee = self_attendees[0]
+        attendee_email = str(self_attendee.get("email") or "").strip()
+        account = self._resolved_account_output()
+        account_email = str((account or {}).get("email") or "").strip()
+        if account_email and attendee_email and account_email.casefold() != attendee_email.casefold():
+            await self._maybe_update_step(2, "skipped", "Invitation belongs to another account.")
+            raise ValueError(
+                "This invitation belongs to a different Google account than the selected account."
+            )
+        if bool(self_attendee.get("organizer")) or (
+            attendee_email
+            and str(event.get("organizer") or "").strip().casefold() == attendee_email.casefold()
+        ):
+            await self._maybe_update_step(2, "skipped", "Selected account organizes this event.")
+            raise ValueError("The selected account organizes this event; it cannot RSVP as an invitee.")
+        await self._maybe_update_step(2, "completed", f"Verified invitation {event_id}.")
+
+        await self._maybe_update_step(3, "in_progress", "Applying invitation response.")
+        updated_event = await client.respond_to_invite(
+            calendar_id=calendar_id,
+            event_id=event_id,
+            attendee_email=attendee_email or account_email,
+            response_status=response_status,
+            etag=str(event.get("etag") or "").strip() or None,
+        )
+        self._save_session(
+            task,
+            "respond_to_invite",
+            query=updated_event.get("summary", ""),
+            event_ids=[event_id],
+        )
+        await self._maybe_update_step(3, "completed", f"Invitation marked {response_status}.")
+
+        result: dict[str, Any] = {
+            "event": updated_event,
+            "responded": True,
+            "response_status": response_status,
+        }
+        if account:
+            result["account"] = account
+        return AgentResult(status="completed", output=result, artifacts=[], error=None)
 
     async def handle_calendar_cancel_event(self, task: TaskEnvelope) -> AgentResult:
         """Cancel a calendar event."""

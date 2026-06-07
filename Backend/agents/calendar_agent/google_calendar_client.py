@@ -123,6 +123,27 @@ class GoogleCalendarClient:
             if str(item.get("status") or "").lower() != "cancelled"
         ]
 
+    async def get_event(
+        self,
+        calendar_id: str,
+        event_id: str,
+    ) -> dict[str, Any]:
+        """Fetch one event by id."""
+        encoded_cal_id = urllib.parse.quote(calendar_id, safe="")
+        encoded_event_id = urllib.parse.quote(event_id, safe="")
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(
+                f"{_CALENDAR_BASE}/calendars/{encoded_cal_id}/events/{encoded_event_id}",
+                headers=self._headers,
+                params={"maxAttendees": 250},
+            )
+            if resp.status_code == 401:
+                raise PermissionError("Google access token expired.")
+            if resp.status_code == 404:
+                raise ValueError(f"Event not found: {event_id}")
+            resp.raise_for_status()
+            return _normalize_event(resp.json(), calendar_id)
+
     # ── Create Event ──────────────────────────────────────────────────
 
     async def create_event(
@@ -229,6 +250,50 @@ class GoogleCalendarClient:
             resp.raise_for_status()
             return _normalize_event(resp.json(), calendar_id)
 
+    async def respond_to_invite(
+        self,
+        calendar_id: str,
+        event_id: str,
+        *,
+        attendee_email: str,
+        response_status: str,
+        etag: str | None = None,
+    ) -> dict[str, Any]:
+        """Update only the authenticated attendee's RSVP response."""
+        if response_status not in {"accepted", "declined", "tentative", "needsAction"}:
+            raise ValueError(f"Unsupported calendar invitation response: {response_status}")
+        normalized_email = str(attendee_email or "").strip()
+        if not normalized_email:
+            raise ValueError("The responding calendar account email is required.")
+
+        encoded_cal_id = urllib.parse.quote(calendar_id, safe="")
+        encoded_event_id = urllib.parse.quote(event_id, safe="")
+        body = {
+            "attendees": [
+                {
+                    "email": normalized_email,
+                    "responseStatus": response_status,
+                }
+            ],
+            "attendeesOmitted": True,
+        }
+        headers = {**self._headers, "Content-Type": "application/json"}
+        if str(etag or "").strip():
+            headers["If-Match"] = str(etag).strip()
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.patch(
+                f"{_CALENDAR_BASE}/calendars/{encoded_cal_id}/events/{encoded_event_id}",
+                headers=headers,
+                json=body,
+                params={"sendUpdates": "none", "maxAttendees": 250},
+            )
+            if resp.status_code == 401:
+                raise PermissionError("Google access token expired.")
+            if resp.status_code == 404:
+                raise ValueError(f"Event not found: {event_id}")
+            resp.raise_for_status()
+            return _normalize_event(resp.json(), calendar_id)
+
     # ── Delete Event ──────────────────────────────────────────────────
 
     async def delete_event(
@@ -304,6 +369,7 @@ def _normalize_event(item: dict[str, Any], calendar_id: str) -> dict[str, Any]:
 
     return {
         "event_id": str(item.get("id") or "").strip(),
+        "etag": str(item.get("etag") or "").strip(),
         "calendar_id": calendar_id,
         "summary": str(item.get("summary") or "Untitled event").strip()
         or "Untitled event",
@@ -336,6 +402,7 @@ def _normalize_event(item: dict[str, Any], calendar_id: str) -> dict[str, Any]:
                 "response_status": str(a.get("responseStatus") or "needsAction").strip()
                 or "needsAction",
                 "self": bool(a.get("self")),
+                "organizer": bool(a.get("organizer")),
             }
             for a in (item.get("attendees") or [])
             if isinstance(a, dict)

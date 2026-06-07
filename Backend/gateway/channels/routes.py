@@ -92,6 +92,12 @@ class CalendarEventUpdateRequest(BaseModel):
     timezone: str | None = Field(default=None, max_length=100)
 
 
+class CalendarInviteResponseRequest(BaseModel):
+    account_id: str | None = Field(default=None, max_length=160)
+    calendar_id: str = Field(default="primary", min_length=1, max_length=320)
+    response_status: str = Field(..., pattern="^(accepted|declined|tentative|needsAction)$")
+
+
 class CodexAgentConfigRequest(BaseModel):
     auth_mode: str | None = Field(default=None, max_length=32)
     api_key: str | None = Field(default=None, max_length=4096)
@@ -2164,6 +2170,26 @@ async def update_calendar_event(
             description=body.description,
             is_all_day=body.is_all_day,
             timezone_name=body.timezone,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+@router.post("/channels/calendar/events/{event_id}/respond")
+async def respond_to_calendar_invite(
+    event_id: str,
+    body: CalendarInviteResponseRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return await runtime.respond_to_calendar_invite(
+            event_id,
+            account_id=body.account_id,
+            calendar_id=body.calendar_id,
+            response_status=body.response_status,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

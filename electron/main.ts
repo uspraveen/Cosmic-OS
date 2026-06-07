@@ -2877,6 +2877,35 @@ app.whenReady().then(() => {
     })
   })
 
+  ipcMain.handle('gateway:respond-calendar-invite', async (_, payload: {
+    eventId?: string
+    accountId?: string | null
+    calendarId?: string | null
+    responseStatus?: string
+  }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const eventId = String(payload?.eventId || '').trim()
+    const responseStatus = String(payload?.responseStatus || '').trim()
+    if (!eventId) {
+      throw new Error('Calendar event id is required.')
+    }
+    if (!['accepted', 'declined', 'tentative', 'needsAction'].includes(responseStatus)) {
+      throw new Error('A valid Calendar invitation response is required.')
+    }
+    return callGatewayJson(config, `/channels/calendar/events/${encodeURIComponent(eventId)}/respond`, {
+      method: 'POST',
+      body: {
+        account_id: String(payload?.accountId || '').trim() || null,
+        calendar_id: String(payload?.calendarId || '').trim() || 'primary',
+        response_status: responseStatus,
+      },
+      timeoutMs: 90000,
+    })
+  })
+
   ipcMain.handle('gateway:reject-agent-email-approval', async (_, payload: { approvalId?: string; note?: string }) => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {

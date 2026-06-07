@@ -1992,6 +1992,7 @@ class ToolExecutor:
         if intent in {
             "calendar.create_event",
             "calendar.update_event",
+            "calendar.respond_to_invite",
             "calendar.cancel_event",
         }:
             event = response.get("event") if isinstance(response.get("event"), dict) else {}
@@ -2012,7 +2013,8 @@ class ToolExecutor:
                     "response_mode": "brief_acknowledgement",
                     "instruction": (
                         "The client will render the calendar event details beside your final "
-                        "response. Briefly confirm the completed action. Do not repeat the event "
+                        "response, including its invitation response when relevant. Briefly confirm "
+                        "the completed action. Do not repeat the event "
                         "details in Markdown unless a material warning or unresolved issue is "
                         "not represented by the card."
                     ),
