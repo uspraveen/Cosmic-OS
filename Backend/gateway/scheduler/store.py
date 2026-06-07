@@ -75,6 +75,25 @@ class SchedulerStore:
                 CREATE INDEX IF NOT EXISTS idx_cron_history_cron_started
                     ON cron_history(cron_id, started_at DESC);
 
+                CREATE TABLE IF NOT EXISTS scheduler_manual_overrides (
+                    override_id TEXT PRIMARY KEY,
+                    target_type TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    target_label TEXT,
+                    action TEXT NOT NULL,
+                    reason TEXT,
+                    actor TEXT,
+                    source TEXT,
+                    previous_state_json TEXT NOT NULL DEFAULT '{}',
+                    resulting_state_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_scheduler_manual_overrides_created
+                    ON scheduler_manual_overrides(created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_scheduler_manual_overrides_target
+                    ON scheduler_manual_overrides(target_type, target_id, created_at DESC);
+
                 CREATE TABLE IF NOT EXISTS heartbeat_config (
                     config_id TEXT PRIMARY KEY,
                     timezone TEXT NOT NULL,
@@ -548,6 +567,122 @@ class SchedulerStore:
                 (cron_id, max(1, limit)),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def record_manual_override(
+        self,
+        *,
+        target_type: str,
+        target_id: str,
+        action: str,
+        reason: str | None = None,
+        actor: str | None = None,
+        source: str | None = None,
+        previous_state: dict[str, Any] | None = None,
+        resulting_state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        now = utcnow_iso()
+        previous = previous_state or {}
+        resulting = resulting_state or {}
+        target_label = (
+            str(resulting.get("label") or resulting.get("name") or "").strip()
+            or str(previous.get("label") or previous.get("name") or "").strip()
+            or None
+        )
+        row = {
+            "override_id": f"sched_override_{uuid4().hex}",
+            "target_type": str(target_type or "").strip() or "cron",
+            "target_id": str(target_id or "").strip(),
+            "target_label": target_label,
+            "action": str(action or "").strip(),
+            "reason": (reason or "").strip() or None,
+            "actor": (actor or "").strip() or None,
+            "source": (source or "").strip() or None,
+            "previous_state": previous,
+            "resulting_state": resulting,
+            "created_at": now,
+        }
+        if not row["target_id"] or not row["action"]:
+            raise ValueError("target_id and action are required")
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO scheduler_manual_overrides (
+                    override_id,
+                    target_type,
+                    target_id,
+                    target_label,
+                    action,
+                    reason,
+                    actor,
+                    source,
+                    previous_state_json,
+                    resulting_state_json,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["override_id"],
+                    row["target_type"],
+                    row["target_id"],
+                    row["target_label"],
+                    row["action"],
+                    row["reason"],
+                    row["actor"],
+                    row["source"],
+                    json.dumps(previous, sort_keys=True, default=str),
+                    json.dumps(resulting, sort_keys=True, default=str),
+                    now,
+                ),
+            )
+            connection.commit()
+        return row
+
+    def list_manual_overrides(
+        self,
+        *,
+        target_type: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        normalized_target_type = str(target_type or "").strip()
+        sql = """
+            SELECT
+                override_id,
+                target_type,
+                target_id,
+                target_label,
+                action,
+                reason,
+                actor,
+                source,
+                previous_state_json,
+                resulting_state_json,
+                created_at
+            FROM scheduler_manual_overrides
+        """
+        params: list[Any] = []
+        if normalized_target_type:
+            sql += " WHERE target_type = ?"
+            params.append(normalized_target_type)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(max(1, min(200, int(limit or 20))))
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        entries: list[dict[str, Any]] = []
+        for row in rows:
+            entry = dict(row)
+            previous_json = entry.pop("previous_state_json", None)
+            resulting_json = entry.pop("resulting_state_json", None)
+            try:
+                entry["previous_state"] = json.loads(previous_json) if previous_json else {}
+            except (TypeError, json.JSONDecodeError):
+                entry["previous_state"] = {}
+            try:
+                entry["resulting_state"] = json.loads(resulting_json) if resulting_json else {}
+            except (TypeError, json.JSONDecodeError):
+                entry["resulting_state"] = {}
+            entries.append(entry)
+        return entries
 
     def get_heartbeat(self) -> dict[str, Any]:
         with self._lock, self._connect() as connection:

@@ -175,6 +175,21 @@ interface Window {
       cosmicOrchestratorModel?: string
       cosmicHeartbeatEnabled?: boolean
     }) => Promise<any>
+    getGatewaySchedulerOverview: () => Promise<any>
+    pauseGatewaySchedulerCron: (payload: {
+      cronId: string
+      reason?: string
+    }) => Promise<any>
+    resumeGatewaySchedulerCron: (payload: {
+      cronId: string
+    }) => Promise<any>
+    deleteGatewaySchedulerCron: (payload: {
+      cronId: string
+    }) => Promise<any>
+    pauseGatewaySchedulerHeartbeat: (payload?: {
+      reason?: string
+    }) => Promise<any>
+    resumeGatewaySchedulerHeartbeat: () => Promise<any>
     recordGatewayHeartbeatConsumption: (payload: {
       sessionId?: string | null
       messageId?: string | null

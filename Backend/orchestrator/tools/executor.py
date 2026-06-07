@@ -1913,7 +1913,8 @@ class ToolExecutor:
             return {"error": True, "message": "Gateway scheduler is not configured."}
         payload = await self._request_gateway_json("GET", "/internal/scheduler/crons")
         crons = payload.get("crons") or []
-        return {"reminders": crons}
+        manual_overrides = payload.get("manual_overrides") or []
+        return {"reminders": crons, "manual_overrides": manual_overrides}
 
     # ── Delete Reminder ─────────────────────────────────────────
 

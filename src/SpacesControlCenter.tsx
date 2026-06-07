@@ -89,13 +89,75 @@ interface OperationItem {
   accent: AccentTone
 }
 
-interface CronCard {
+type SchedulerCronState = 'live' | 'paused' | 'queued' | 'done' | 'draft'
+
+interface SchedulerCronRecord {
+  cron_id: string
   label: string
-  schedule: string
-  channel: string
+  kind: string
+  description: string
+  cron_expression: string
   timezone: string
-  note: string
-  state: 'live' | 'queued' | 'draft'
+  next_fire_at: string | null
+  next_fire_local: string
+  last_fired_at: string | null
+  last_fired_local: string
+  last_result_status: string
+  last_result_summary: string
+  paused: boolean
+  paused_at: string | null
+  pause_reason: string
+  prompt: string
+  delivery_target: string | null
+  delivery_channel: string
+  resolved_delivery_channel: string
+  one_shot: boolean
+  created_by: string
+  created_request_id: string
+  created_session_id: string
+  created_channel: string
+  context_summary: string
+  created_at: string | null
+  updated_at: string | null
+}
+
+interface SchedulerHeartbeatRecord {
+  enabled: boolean
+  paused: boolean
+  paused_at: string | null
+  pause_reason: string
+  interval_sec: number
+  timezone: string
+  delivery_channel: string
+  last_fired_at: string | null
+  next_fire_at: string | null
+  last_suppressed_at: string | null
+  last_delivered_at: string | null
+  last_delivered_summary: string
+  last_result_status: string
+  last_result_summary: string
+  updated_at: string | null
+}
+
+interface SchedulerManualOverride {
+  override_id: string
+  target_type: string
+  target_id: string
+  target_label: string
+  action: string
+  reason: string
+  actor: string
+  source: string
+  created_at: string
+}
+
+interface SchedulerOverview {
+  profile: Record<string, unknown>
+  current_session_id: string
+  crons: SchedulerCronRecord[]
+  heartbeat: SchedulerHeartbeatRecord | null
+  manual_overrides: SchedulerManualOverride[]
+  fetchedAtMs: number
 }
 
 interface MeshEvent {
@@ -129,15 +191,6 @@ interface WeekEvent {
   startHour: number
   startMinute: number
   durationMinutes: number
-  accent: AccentTone
-}
-
-interface BackgroundProcess {
-  title: string
-  owner: string
-  status: string
-  channel: string
-  note: string
   accent: AccentTone
 }
 
@@ -881,6 +934,22 @@ function pickNumber(container: unknown, keys: string[]): number | null {
   return null
 }
 
+function pickBoolean(container: unknown, keys: string[], fallback = false): boolean {
+  const source = toRecord(container)
+  if (!source) return fallback
+  for (const key of keys) {
+    const value = source[key]
+    if (typeof value === 'boolean') return value
+    if (typeof value === 'number') return value !== 0
+    if (typeof value === 'string' && value.trim()) {
+      const normalized = value.trim().toLowerCase()
+      if (['true', '1', 'yes', 'on'].includes(normalized)) return true
+      if (['false', '0', 'no', 'off'].includes(normalized)) return false
+    }
+  }
+  return fallback
+}
+
 function normalizePercent(value: number | null): number {
   if (value === null || !Number.isFinite(value)) return 0
   const normalized = value <= 1 ? value * 100 : value
@@ -961,8 +1030,126 @@ function normalizeRegistryAgentsPayload(raw: unknown): { agents: RegistryAgentRo
   return { agents, fetchedAtMs }
 }
 
+function normalizeSchedulerCron(raw: unknown): SchedulerCronRecord | null {
+  const row = toRecord(raw)
+  if (!row) return null
+  const cronId = pickString(row, ['cron_id', 'id'])
+  if (!cronId) return null
+  const label = pickString(row, ['label', 'name']) || cronId
+  return {
+    cron_id: cronId,
+    label,
+    kind: pickString(row, ['kind', 'type']) || 'reminder',
+    description: pickString(row, ['description']) || '',
+    cron_expression: pickString(row, ['cron_expression', 'cron_expr']) || '',
+    timezone: pickString(row, ['timezone']) || 'Local timezone',
+    next_fire_at: pickString(row, ['next_fire_at']),
+    next_fire_local: pickString(row, ['next_fire_local']) || '',
+    last_fired_at: pickString(row, ['last_fired_at']),
+    last_fired_local: pickString(row, ['last_fired_local']) || '',
+    last_result_status: pickString(row, ['last_result_status']) || '',
+    last_result_summary: pickString(row, ['last_result_summary']) || '',
+    paused: pickBoolean(row, ['paused'], false),
+    paused_at: pickString(row, ['paused_at']),
+    pause_reason: pickString(row, ['pause_reason']) || '',
+    prompt: pickString(row, ['prompt']) || '',
+    delivery_target: pickString(row, ['delivery_target']),
+    delivery_channel: pickString(row, ['delivery_channel']) || 'desktop',
+    resolved_delivery_channel: pickString(row, ['resolved_delivery_channel']) || pickString(row, ['delivery_channel']) || 'desktop',
+    one_shot: pickBoolean(row, ['one_shot'], false),
+    created_by: pickString(row, ['created_by']) || '',
+    created_request_id: pickString(row, ['created_request_id']) || '',
+    created_session_id: pickString(row, ['created_session_id']) || '',
+    created_channel: pickString(row, ['created_channel']) || '',
+    context_summary: pickString(row, ['context_summary']) || '',
+    created_at: pickString(row, ['created_at']),
+    updated_at: pickString(row, ['updated_at']),
+  }
+}
+
+function schedulerCronState(cron: SchedulerCronRecord): SchedulerCronState {
+  if (cron.paused) return 'paused'
+  if (cron.next_fire_at) return 'live'
+  if (cron.one_shot && cron.last_result_status) return 'done'
+  if (cron.cron_expression) return 'queued'
+  return 'draft'
+}
+
+function schedulerCronSortScore(cron: SchedulerCronRecord): number {
+  const state = schedulerCronState(cron)
+  const kindScore = cron.kind === 'system' ? 100 : 0
+  const stateScore = state === 'live' ? 0 : state === 'paused' ? 20 : state === 'queued' ? 40 : 80
+  return kindScore + stateScore
+}
+
+function normalizeSchedulerHeartbeat(raw: unknown): SchedulerHeartbeatRecord | null {
+  const row = toRecord(raw)
+  if (!row) return null
+  return {
+    enabled: pickBoolean(row, ['enabled'], true),
+    paused: pickBoolean(row, ['paused'], false),
+    paused_at: pickString(row, ['paused_at']),
+    pause_reason: pickString(row, ['pause_reason']) || '',
+    interval_sec: pickNumber(row, ['interval_sec']) || 1800,
+    timezone: pickString(row, ['timezone']) || 'Local timezone',
+    delivery_channel: pickString(row, ['delivery_channel']) || 'desktop',
+    last_fired_at: pickString(row, ['last_fired_at']),
+    next_fire_at: pickString(row, ['next_fire_at']),
+    last_suppressed_at: pickString(row, ['last_suppressed_at']),
+    last_delivered_at: pickString(row, ['last_delivered_at']),
+    last_delivered_summary: pickString(row, ['last_delivered_summary']) || '',
+    last_result_status: pickString(row, ['last_result_status']) || '',
+    last_result_summary: pickString(row, ['last_result_summary']) || '',
+    updated_at: pickString(row, ['updated_at']),
+  }
+}
+
+function normalizeSchedulerOverride(raw: unknown): SchedulerManualOverride | null {
+  const row = toRecord(raw)
+  if (!row) return null
+  const overrideId = pickString(row, ['override_id'])
+  if (!overrideId) return null
+  return {
+    override_id: overrideId,
+    target_type: pickString(row, ['target_type']) || 'cron',
+    target_id: pickString(row, ['target_id']) || '',
+    target_label: pickString(row, ['target_label']) || pickString(row, ['target_id']) || 'Routine',
+    action: pickString(row, ['action']) || 'updated',
+    reason: pickString(row, ['reason']) || '',
+    actor: pickString(row, ['actor']) || '',
+    source: pickString(row, ['source']) || '',
+    created_at: pickString(row, ['created_at']) || '',
+  }
+}
+
+function normalizeSchedulerOverview(raw: unknown): SchedulerOverview {
+  const row = toRecord(raw) || {}
+  const crons = toArray(row.crons)
+    .map(normalizeSchedulerCron)
+    .filter((item): item is SchedulerCronRecord => Boolean(item))
+    .sort((a, b) => {
+      const scoreDelta = schedulerCronSortScore(a) - schedulerCronSortScore(b)
+      if (scoreDelta !== 0) return scoreDelta
+      const nextDelta = timestampMs(a.next_fire_at) - timestampMs(b.next_fire_at)
+      if (nextDelta !== 0) return nextDelta
+      return a.label.localeCompare(b.label)
+    })
+  const manualOverrides = toArray(row.manual_overrides)
+    .map(normalizeSchedulerOverride)
+    .filter((item): item is SchedulerManualOverride => Boolean(item))
+  return {
+    profile: toRecord(row.profile) || {},
+    current_session_id: pickString(row, ['current_session_id']) || '',
+    crons,
+    heartbeat: normalizeSchedulerHeartbeat(row.heartbeat),
+    manual_overrides: manualOverrides,
+    fetchedAtMs: Date.now(),
+  }
+}
+
 const SPACES_REGISTRY_REFRESH_MS = 90 * 1000
 const SPACES_SESSIONS_REFRESH_MS = 120 * 1000
+const SPACES_SCHEDULER_REFRESH_MS = 30 * 1000
 
 function normalizeGatewaySessionsPayload(raw: unknown): GatewaySessionRow[] {
   const source = toRecord(raw)
@@ -1190,6 +1377,62 @@ function formatSessionMetaStamp(value: string | null): string {
   const date = new Date(value)
   if (!Number.isFinite(date.getTime())) return '—'
   return date.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+}
+
+function formatAutopilotStamp(value: string | null | undefined): string {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return String(value)
+  return date.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+}
+
+function formatAutopilotRelative(value: string | null | undefined): string {
+  if (!value) return 'Never'
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return String(value)
+  const deltaMs = Date.now() - date.getTime()
+  const abs = Math.abs(deltaMs)
+  const suffix = deltaMs >= 0 ? 'ago' : 'from now'
+  if (abs < 60000) return deltaMs >= 0 ? 'just now' : 'in a moment'
+  const minutes = Math.round(abs / 60000)
+  if (minutes < 60) return `${minutes}m ${suffix}`
+  const hours = Math.round(minutes / 60)
+  if (hours < 48) return `${hours}h ${suffix}`
+  const days = Math.round(hours / 24)
+  if (days < 14) return `${days}d ${suffix}`
+  return formatAutopilotStamp(value)
+}
+
+function summarizeCronCadence(expr: string): string {
+  const text = String(expr || '').trim()
+  if (!text) return 'Manual / unscheduled'
+  const parts = text.split(/\s+/)
+  if (parts.length !== 5) return text
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = parts
+  if (minute === '0' && hour === '4' && dayOfMonth === '*' && month === '*' && dayOfWeek === '*') return 'Daily at 4:00 AM'
+  if (minute === '0' && hour === '18' && dayOfMonth === '*' && month === '*' && dayOfWeek === '5') return 'Fridays at 6:00 PM'
+  if (dayOfMonth === '*' && month === '*' && dayOfWeek === '*') {
+    if (/^\d+$/.test(hour) && /^\d+$/.test(minute)) {
+      const d = new Date()
+      d.setHours(Number(hour), Number(minute), 0, 0)
+      return `Daily at ${d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+    }
+  }
+  if (dayOfMonth === '*' && month === '*' && dayOfWeek !== '*') {
+    const names = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+    const days = dayOfWeek.split(',').map((part) => names[Number(part)] || part).join(', ')
+    if (/^\d+$/.test(hour) && /^\d+$/.test(minute)) {
+      const d = new Date()
+      d.setHours(Number(hour), Number(minute), 0, 0)
+      return `${days} at ${d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+    }
+  }
+  return text
 }
 
 const SESSION_MARKDOWN_REMARK = [remarkGfm, remarkMath]
@@ -2136,6 +2379,13 @@ export default function SpacesControlCenter({
   const [manageUsageCustomStart, setManageUsageCustomStart] = useState('')
   const [manageUsageCustomEnd, setManageUsageCustomEnd] = useState('')
   const manageUsageAppliedOptionsRef = useRef<ManageUsagePeriodPayload>({ usage_days: 30 })
+  const [schedulerOverview, setSchedulerOverview] = useState<SchedulerOverview | null>(null)
+  const [schedulerRefreshing, setSchedulerRefreshing] = useState(false)
+  const [schedulerError, setSchedulerError] = useState<string | null>(null)
+  const [schedulerActionId, setSchedulerActionId] = useState<string | null>(null)
+  const [schedulerSelectedCronId, setSchedulerSelectedCronId] = useState('')
+  const schedulerRequestRef = useRef(0)
+  const schedulerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const [registryAgents, setRegistryAgents] = useState<RegistryAgentRow[]>([])
   const [registryAgentsError, setRegistryAgentsError] = useState<string | null>(null)
@@ -2405,6 +2655,124 @@ export default function SpacesControlCenter({
       offShown?.()
     }
     }, [active, page, requestManageMetrics])
+
+  const requestSchedulerOverview = useCallback(async (showSpinner = false) => {
+    if (!gatewayConnected) {
+      setSchedulerOverview(null)
+      setSchedulerError(String(gatewayDetail || 'The desktop app is not connected to your VM yet.'))
+      if (window.cosmic?.requestGatewayResume) {
+        window.cosmic.requestGatewayResume().catch(() => { })
+      }
+      return
+    }
+    if (!window.cosmic?.getGatewaySchedulerOverview) {
+      setSchedulerError('Gateway scheduler bridge is unavailable in this desktop build.')
+      return
+    }
+    const requestId = ++schedulerRequestRef.current
+    if (showSpinner) {
+      setSchedulerRefreshing(true)
+    }
+    try {
+      const raw = await window.cosmic.getGatewaySchedulerOverview()
+      if (requestId !== schedulerRequestRef.current) {
+        return
+      }
+      const normalized = normalizeSchedulerOverview(raw)
+      setSchedulerOverview(normalized)
+      setSchedulerError(null)
+      setSchedulerSelectedCronId((current) => {
+        if (current && normalized.crons.some((cron) => cron.cron_id === current)) return current
+        return normalized.crons[0]?.cron_id || ''
+      })
+    } catch (error: unknown) {
+      if (requestId !== schedulerRequestRef.current) {
+        return
+      }
+      setSchedulerError(toErrorMessage(error, 'Unable to load scheduler routines.'))
+    } finally {
+      if (requestId === schedulerRequestRef.current) {
+        setSchedulerRefreshing(false)
+      }
+    }
+  }, [gatewayConnected, gatewayDetail])
+
+  useEffect(() => {
+    if (!active || page !== 'autopilot') {
+      return
+    }
+    if (!document.hidden) {
+      requestSchedulerOverview(true)
+    }
+    if (schedulerIntervalRef.current) {
+      clearInterval(schedulerIntervalRef.current)
+      schedulerIntervalRef.current = null
+    }
+    schedulerIntervalRef.current = setInterval(() => {
+      if (document.hidden) return
+      requestSchedulerOverview(false)
+    }, SPACES_SCHEDULER_REFRESH_MS)
+    const offShown = window.cosmic?.onShown?.(() => {
+      if (document.hidden) return
+      requestSchedulerOverview(false)
+    })
+    return () => {
+      if (schedulerIntervalRef.current) {
+        clearInterval(schedulerIntervalRef.current)
+        schedulerIntervalRef.current = null
+      }
+      offShown?.()
+    }
+  }, [active, page, requestSchedulerOverview])
+
+  const runSchedulerCronAction = useCallback(async (cron: SchedulerCronRecord, action: 'pause' | 'resume' | 'delete') => {
+    if (!window.cosmic) return
+    if (action === 'delete') {
+      if (cron.kind === 'system') {
+        setSchedulerError('System routines cannot be deleted. Pause them instead if you need a temporary override.')
+        return
+      }
+      const ok = window.confirm(`Delete "${cron.label}" from COSMIC Autopilot? This removes the live cron from the VM scheduler.`)
+      if (!ok) return
+    }
+    setSchedulerActionId(`${action}:${cron.cron_id}`)
+    try {
+      if (action === 'pause') {
+        await window.cosmic.pauseGatewaySchedulerCron?.({
+          cronId: cron.cron_id,
+          reason: 'Paused from Spaces Autopilot.',
+        })
+      } else if (action === 'resume') {
+        await window.cosmic.resumeGatewaySchedulerCron?.({ cronId: cron.cron_id })
+      } else {
+        await window.cosmic.deleteGatewaySchedulerCron?.({ cronId: cron.cron_id })
+      }
+      await requestSchedulerOverview(false)
+    } catch (error: unknown) {
+      setSchedulerError(toErrorMessage(error, `Unable to ${action} routine.`))
+    } finally {
+      setSchedulerActionId(null)
+    }
+  }, [requestSchedulerOverview])
+
+  const runSchedulerHeartbeatAction = useCallback(async (action: 'pause' | 'resume') => {
+    if (!window.cosmic) return
+    setSchedulerActionId(`heartbeat:${action}`)
+    try {
+      if (action === 'pause') {
+        await window.cosmic.pauseGatewaySchedulerHeartbeat?.({
+          reason: 'Paused from Spaces Autopilot.',
+        })
+      } else {
+        await window.cosmic.resumeGatewaySchedulerHeartbeat?.()
+      }
+      await requestSchedulerOverview(false)
+    } catch (error: unknown) {
+      setSchedulerError(toErrorMessage(error, `Unable to ${action} heartbeat.`))
+    } finally {
+      setSchedulerActionId(null)
+    }
+  }, [requestSchedulerOverview])
 
   const requestRegistryAgents = useCallback(async (showSpinner = false) => {
     if (!gatewayConnected) {
@@ -2920,75 +3288,25 @@ export default function SpacesControlCenter({
 
   /* ── AUTOPILOT data ───────────────────────────────────── */
 
-  const cronCards: CronCard[] = [
-    {
-      label: 'Morning YC radar',
-      schedule: '06:00 local time',
-      channel: 'Desktop \u2192 WhatsApp if requested',
-      timezone: 'User-local timezone snapshot',
-      note: 'Diff against the saved baseline, then deliver through the requested destination channel.',
-      state: 'live',
-    },
-    {
-      label: 'Session rollover',
-      schedule: '04:00 local time',
-      channel: 'Gateway internal',
-      timezone: 'Authoritative desktop timezone',
-      note: 'Creates the daily session summary and carry-forward packet for exact revisit continuity.',
-      state: 'live',
-    },
-    {
-      label: 'Ontology curator',
-      schedule: 'Every 6 hours',
-      channel: 'cosmic-memory internal',
-      timezone: 'UTC service loop',
-      note: 'Batches recurring weak-fit observations into learned aliases without mutating the hard ontology inline.',
-      state: 'queued',
-    },
-    {
-      label: 'Operator rebuild lane',
-      schedule: 'Manual / bounded maintenance',
-      channel: 'Ops only',
-      timezone: 'On demand',
-      note: 'Reserved for future graph sync and cache-warm repair runs.',
-      state: 'draft',
-    },
-  ]
-
-  const backgroundProcesses: BackgroundProcess[] = [
-    {
-      title: 'Ontology alias promotion',
-      owner: 'memory curator',
-      status: 'Nightly review',
-      channel: 'xAI loop',
-      note: 'Recurring weak-fit labels gather here until the curator safely resolves them.',
-      accent: 'mint',
-    },
-    {
-      title: 'Operator smoke pack',
-      owner: 'desktop',
-      status: 'Draft shell',
-      channel: 'Control Center',
-      note: 'Backend feeds for this screen will plug into this operator lane next.',
-      accent: 'slate',
-    },
-    {
-      title: 'Usage ledger foundation',
-      owner: 'Gateway',
-      status: 'Stable',
-      channel: 'SQLite',
-      note: 'Provider usage now lands in the gateway usage ledger with queue-backed writes.',
-      accent: 'azure',
-    },
-    {
-      title: 'Reminder context capture',
-      owner: 'Gateway',
-      status: 'Stable',
-      channel: 'Scheduler',
-      note: 'Long-delay cron runs carry their own context packet forward instead of leaning on rollover alone.',
-      accent: 'gold',
-    },
-  ]
+  const schedulerCrons = schedulerOverview?.crons ?? []
+  const schedulerHeartbeat = schedulerOverview?.heartbeat ?? null
+  const schedulerManualOverrides = schedulerOverview?.manual_overrides ?? []
+  const schedulerProfileTimezone = pickString(schedulerOverview?.profile, ['user_timezone']) || 'Local timezone'
+  const selectedSchedulerCron = useMemo(
+    () => schedulerCrons.find((cron) => cron.cron_id === schedulerSelectedCronId) ?? schedulerCrons[0] ?? null,
+    [schedulerCrons, schedulerSelectedCronId],
+  )
+  const schedulerCounts = useMemo(() => {
+    const active = schedulerCrons.filter((cron) => schedulerCronState(cron) === 'live').length
+    const paused = schedulerCrons.filter((cron) => cron.paused).length
+    const userCrons = schedulerCrons.filter((cron) => cron.kind !== 'system').length
+    return {
+      total: schedulerCrons.length,
+      active,
+      paused,
+      userCrons,
+    }
+  }, [schedulerCrons])
 
   /* ── PULSE data ───────────────────────────────────────── */
 
@@ -5360,97 +5678,251 @@ export default function SpacesControlCenter({
   const renderAutopilotPage = () => (
     <div className="spaces-page">
       <section className="spaces-section-copy">
-        <div className="spaces-card-kicker">Autopilot</div>
-        <h2>Routines should feel like controlled flight, not hidden timers.</h2>
-        <p>
-          Everything COSMIC runs on its own &mdash; scheduled deliveries, maintenance loops, background processes, and future multi-channel automations. Each routine carries its own context, delivery target, and timezone so it never depends on chat continuity alone.
-        </p>
+        <div className="spaces-card-head autopilot-hero-head">
+          <div>
+            <div className="spaces-card-kicker">Autopilot</div>
+            <h2>Routines should feel like controlled flight, not hidden timers.</h2>
+            <p>
+              Scheduled deliveries, reminders, system maintenance, and heartbeats are pulled from the live Gateway scheduler on your VM. Manual pauses and deletes are written back to Gateway and kept visible for COSMIC.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="spaces-surface-btn compact"
+            onClick={() => requestSchedulerOverview(true)}
+            disabled={schedulerRefreshing}
+          >
+            {schedulerRefreshing ? 'Syncing' : 'Refresh'}
+          </button>
+        </div>
       </section>
 
-      <section className="spaces-orbit-grid">
-        {cronCards.map((cron) => (
-          <article key={cron.label} className="spaces-card spaces-cron-card">
-            <div className="spaces-cron-top">
-              <div>
-                <div className="spaces-card-kicker">{cron.label}</div>
-                <h3>{cron.schedule}</h3>
-              </div>
-              <span className={`spaces-state-pill ${cron.state}`}>{cron.state}</span>
-            </div>
-            <div className="spaces-cron-meta">
-              <div>
-                <span>Channel</span>
-                <strong>{cron.channel}</strong>
-              </div>
-              <div>
-                <span>Timezone</span>
-                <strong>{cron.timezone}</strong>
-              </div>
-            </div>
-            <p className="spaces-cron-note">{cron.note}</p>
-          </article>
-        ))}
+      {schedulerError ? (
+        <div className="agent-email-banner warning">{schedulerError}</div>
+      ) : null}
+
+      <section className="autopilot-status-grid">
+        <article className="spaces-card autopilot-stat-card">
+          <div className="spaces-card-kicker">VM Scheduler</div>
+          <strong>{gatewayConnected ? `${schedulerCounts.active}/${schedulerCounts.total} live` : 'Offline'}</strong>
+          <span>{schedulerCounts.paused} paused · {schedulerCounts.userCrons} user routines</span>
+        </article>
+        <article className="spaces-card autopilot-stat-card">
+          <div className="spaces-card-kicker">Timezone</div>
+          <strong>{schedulerProfileTimezone}</strong>
+          <span>Gateway profile snapshot</span>
+        </article>
+        <article className="spaces-card autopilot-stat-card">
+          <div className="spaces-card-kicker">Heartbeat</div>
+          <strong>{schedulerHeartbeat?.paused ? 'Paused' : schedulerHeartbeat?.enabled ? 'Enabled' : 'Disabled'}</strong>
+          <span>{schedulerHeartbeat?.next_fire_at ? `Next ${formatAutopilotRelative(schedulerHeartbeat.next_fire_at)}` : 'No next beat scheduled'}</span>
+        </article>
+        <article className="spaces-card autopilot-stat-card">
+          <div className="spaces-card-kicker">Last Sync</div>
+          <strong>{schedulerOverview ? formatAutopilotRelative(new Date(schedulerOverview.fetchedAtMs).toISOString()) : 'Waiting'}</strong>
+          <span>{schedulerManualOverrides.length} recent manual overrides</span>
+        </article>
       </section>
 
       <section className="spaces-two-column">
-        <article className="spaces-card">
+        <article className="spaces-card autopilot-heartbeat-card">
           <div className="spaces-card-head">
             <div>
-              <div className="spaces-card-kicker">Routine contract</div>
-              <h3>Every automation should carry these fields</h3>
+              <div className="spaces-card-kicker">Heartbeat</div>
+              <h3>Ambient COSMIC cadence</h3>
+            </div>
+            <span className={`spaces-state-pill ${schedulerHeartbeat?.paused ? 'paused' : 'live'}`}>
+              {schedulerHeartbeat?.paused ? 'paused' : 'live'}
+            </span>
+          </div>
+          <div className="spaces-cron-meta autopilot-heartbeat-meta">
+            <div>
+              <span>Interval</span>
+              <strong>{schedulerHeartbeat ? `${Math.round(schedulerHeartbeat.interval_sec / 60)} minutes` : '—'}</strong>
+            </div>
+            <div>
+              <span>Delivery</span>
+              <strong>{schedulerHeartbeat?.delivery_channel || 'desktop'}</strong>
+            </div>
+            <div>
+              <span>Last result</span>
+              <strong>{schedulerHeartbeat?.last_result_status || '—'}</strong>
+            </div>
+            <div>
+              <span>Last delivered</span>
+              <strong>{formatAutopilotRelative(schedulerHeartbeat?.last_delivered_at)}</strong>
             </div>
           </div>
-          <ul className="spaces-checklist">
-            <li>Concrete delivery target resolved by Gateway, defaulting to the incoming channel unless you explicitly change it.</li>
-            <li>Authoritative timezone snapshot so &quot;tomorrow at 6&quot; means your local 6 AM, not the VM&apos;s clock.</li>
-            <li>Durable context summary so long-delay or recurring jobs do not depend on chat continuity alone.</li>
-            <li>Future controls for pause, resume, edit, and operator inspection without forcing you back through natural-language prompts.</li>
-          </ul>
+          <p className="spaces-cron-note">
+            {schedulerHeartbeat?.last_delivered_summary || schedulerHeartbeat?.last_result_summary || 'Heartbeat state is synced from Gateway.'}
+          </p>
+          <div className="autopilot-card-actions">
+            {schedulerHeartbeat?.paused ? (
+              <button
+                type="button"
+                className="agent-email-console-primary"
+                disabled={schedulerActionId === 'heartbeat:resume'}
+                onClick={() => runSchedulerHeartbeatAction('resume')}
+              >
+                Resume heartbeat
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="agent-email-console-secondary"
+                disabled={schedulerActionId === 'heartbeat:pause'}
+                onClick={() => runSchedulerHeartbeatAction('pause')}
+              >
+                Pause heartbeat
+              </button>
+            )}
+          </div>
         </article>
 
-        <article className="spaces-card">
+        <article className="spaces-card autopilot-selected-card">
           <div className="spaces-card-head">
             <div>
-              <div className="spaces-card-kicker">Background processes</div>
-              <h3>Quiet work running outside your hot path</h3>
+              <div className="spaces-card-kicker">Selected routine</div>
+              <h3>{selectedSchedulerCron?.label || 'No cron selected'}</h3>
             </div>
           </div>
-          <div className="spaces-operations-feed">
-            {backgroundProcesses.map((proc) => (
-              <div key={proc.title} className={`spaces-operation-item ${proc.accent}`}>
-                <div className="spaces-status-row">
-                  <strong>{proc.title}</strong>
-                  <span className="spaces-status-chip">{proc.status}</span>
-                </div>
-                <div className="spaces-inline-meta">
-                  <span>{proc.owner}</span>
-                  <span>{proc.channel}</span>
-                </div>
-                <p>{proc.note}</p>
+          {selectedSchedulerCron ? (
+            <>
+              <div className="autopilot-detail-grid">
+                <div><span>ID</span><strong>{selectedSchedulerCron.cron_id}</strong></div>
+                <div><span>Kind</span><strong>{selectedSchedulerCron.kind}</strong></div>
+                <div><span>Cron</span><strong>{selectedSchedulerCron.cron_expression || '—'}</strong></div>
+                <div><span>Next fire</span><strong>{selectedSchedulerCron.next_fire_local || formatAutopilotStamp(selectedSchedulerCron.next_fire_at)}</strong></div>
+                <div><span>Last run</span><strong>{selectedSchedulerCron.last_fired_local || formatAutopilotRelative(selectedSchedulerCron.last_fired_at)}</strong></div>
+                <div><span>Created by</span><strong>{selectedSchedulerCron.created_by || 'Gateway'}</strong></div>
               </div>
-            ))}
-          </div>
+              <div className="autopilot-prompt-block">
+                <span>Context / prompt</span>
+                <p>{selectedSchedulerCron.context_summary || selectedSchedulerCron.prompt || selectedSchedulerCron.description || 'No prompt context recorded.'}</p>
+              </div>
+            </>
+          ) : (
+            <p className="spaces-card-note">No live cron records returned by Gateway yet.</p>
+          )}
         </article>
       </section>
 
-      <section className="spaces-card">
+      <section className="spaces-orbit-grid autopilot-cron-grid">
+        {schedulerCrons.length === 0 ? (
+          <article className="spaces-card spaces-cron-card autopilot-empty-card">
+            <div className="spaces-card-kicker">No routines</div>
+            <h3>{gatewayConnected ? 'No scheduled routines returned.' : 'Gateway is offline.'}</h3>
+            <p className="spaces-cron-note">Open COSMIC chat to create a reminder, or reconnect Gateway to sync the VM scheduler.</p>
+          </article>
+        ) : schedulerCrons.map((cron) => {
+          const state = schedulerCronState(cron)
+          const actionPrefix = `${cron.paused ? 'resume' : 'pause'}:${cron.cron_id}`
+          return (
+            <article
+              key={cron.cron_id}
+              className={`spaces-card spaces-cron-card autopilot-cron-card ${schedulerSelectedCronId === cron.cron_id ? 'selected' : ''}`}
+              onClick={() => setSchedulerSelectedCronId(cron.cron_id)}
+            >
+              <div className="spaces-cron-top">
+                <div>
+                  <div className="spaces-card-kicker">{cron.kind === 'system' ? 'System routine' : cron.one_shot ? 'One-shot reminder' : 'User routine'}</div>
+                  <h3>{cron.label}</h3>
+                </div>
+                <span className={`spaces-state-pill ${state}`}>{state}</span>
+              </div>
+              <div className="spaces-cron-meta">
+                <div>
+                  <span>Next</span>
+                  <strong>{cron.next_fire_local || formatAutopilotStamp(cron.next_fire_at)}</strong>
+                </div>
+                <div>
+                  <span>Cadence</span>
+                  <strong>{summarizeCronCadence(cron.cron_expression)}</strong>
+                </div>
+                <div>
+                  <span>Channel</span>
+                  <strong>{cron.resolved_delivery_channel || cron.delivery_channel}</strong>
+                </div>
+                <div>
+                  <span>Timezone</span>
+                  <strong>{cron.timezone}</strong>
+                </div>
+              </div>
+              <p className="spaces-cron-note">{cron.context_summary || cron.description || cron.prompt || cron.last_result_summary || 'No routine note recorded.'}</p>
+              {cron.pause_reason ? (
+                <p className="autopilot-pause-reason">Paused reason: {cron.pause_reason}</p>
+              ) : null}
+              <div className="autopilot-card-actions">
+                {cron.paused ? (
+                  <button
+                    type="button"
+                    className="agent-email-console-primary"
+                    disabled={schedulerActionId === actionPrefix}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      runSchedulerCronAction(cron, 'resume')
+                    }}
+                  >
+                    Resume
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="agent-email-console-secondary"
+                    disabled={schedulerActionId === actionPrefix}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      runSchedulerCronAction(cron, 'pause')
+                    }}
+                  >
+                    Pause
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="agent-email-console-secondary danger"
+                  disabled={cron.kind === 'system' || schedulerActionId === `delete:${cron.cron_id}`}
+                  title={cron.kind === 'system' ? 'System routines cannot be deleted.' : 'Delete this cron from the VM scheduler.'}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    runSchedulerCronAction(cron, 'delete')
+                  }}
+                >
+                  Delete
+                </button>
+              </div>
+            </article>
+          )
+        })}
+      </section>
+
+      <section className="spaces-card autopilot-overrides-card">
         <div className="spaces-card-head">
           <div>
-            <div className="spaces-card-kicker">Timeline bridge</div>
-            <h3>See when these routines land on your week.</h3>
+            <div className="spaces-card-kicker">Manual override trail</div>
+            <h3>Recent user changes COSMIC can remember.</h3>
           </div>
         </div>
-        <p className="spaces-card-note">
-          Autopilot defines the rules. My Calendar shows where those rules touch your actual timeline &mdash; so you can see if an automation conflicts with a focus block or meeting.
-        </p>
-        <div className="spaces-chip-row">
-          <span className="spaces-chip">Cron truth</span>
-          <span className="spaces-chip">Timezone aware</span>
-          <span className="spaces-chip">Channel delivery</span>
-        </div>
-        <button type="button" className="spaces-surface-btn" onClick={() => setPage('calendar')}>
-          Open my calendar
-        </button>
+        {schedulerManualOverrides.length === 0 ? (
+          <p className="spaces-card-note">No manual scheduler overrides have been recorded yet.</p>
+        ) : (
+          <div className="spaces-operations-feed autopilot-overrides-feed">
+            {schedulerManualOverrides.slice(0, 8).map((override) => (
+              <div key={override.override_id} className="spaces-operation-item azure">
+                <div className="spaces-status-row">
+                  <strong>{override.target_label}</strong>
+                  <span className="spaces-status-chip">{override.action}</span>
+                </div>
+                <div className="spaces-inline-meta">
+                  <span>{override.source || 'scheduler'}</span>
+                  <span>{formatAutopilotRelative(override.created_at)}</span>
+                  <span>{override.target_type}</span>
+                </div>
+                <p>{override.reason || `${override.actor || 'user'} updated ${override.target_id}.`}</p>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
     </div>
   )

@@ -2177,14 +2177,14 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         name="list_reminders",
         api_definition={
             "name": "list_reminders",
-            "description": "List all active reminders and cron jobs.",
+            "description": "List all active reminders and cron jobs, including recent manual overrides from Spaces Autopilot.",
             "input_schema": {
                 "type": "object",
                 "properties": {},
             },
         },
         group="scheduling",
-        prompt_summary="Inspect the current reminder and schedule list.",
+        prompt_summary="Inspect the current reminder and schedule list, plus recent manual user overrides from Autopilot.",
         progress_builder=lambda _tool_input: "Checking your reminders...",
         handler_method="_list_reminders",
         read_only=True,

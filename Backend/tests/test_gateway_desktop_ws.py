@@ -4389,12 +4389,78 @@ def test_scheduler_endpoints_list_and_pause_resume_system_cron(test_client: Test
     assert resumed.status_code == 200
     assert resumed.json()["paused"] is False
 
+    override_payload = test_client.get(
+        "/scheduler/overview",
+        headers={"Authorization": "Bearer test-token"},
+    ).json()
+    overrides = override_payload["manual_overrides"]
+    assert overrides[0]["target_id"] == SYSTEM_CRON_DAILY_ROLLOVER
+    assert overrides[0]["action"] == "resume"
+    assert overrides[0]["source"] == "autopilot"
+    assert any(
+        item["target_id"] == SYSTEM_CRON_DAILY_ROLLOVER
+        and item["action"] == "pause"
+        and item["reason"] == "testing"
+        for item in overrides
+    )
+
     heartbeat = test_client.get(
         "/scheduler/heartbeat",
         headers={"Authorization": "Bearer test-token"},
     )
     assert heartbeat.status_code == 200
     assert heartbeat.json()["timezone"] == "America/Chicago"
+
+
+def test_scheduler_autopilot_delete_removes_user_cron_and_preserves_override(test_client: TestClient) -> None:
+    create_response = test_client.post(
+        "/internal/scheduler/crons",
+        headers={"X-Internal-Token": "internal-token"},
+        json={
+            "label": "Temporary reminder",
+            "cron_expression": "0 9 * * *",
+            "prompt": "Check temporary thing.",
+            "one_shot": False,
+            "source": "orchestrator",
+        },
+    )
+    assert create_response.status_code == 200
+    cron_id = create_response.json()["cron_id"]
+
+    deleted = test_client.delete(
+        f"/scheduler/crons/{cron_id}",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted": True, "cron_id": cron_id}
+
+    missing = test_client.get(
+        f"/scheduler/crons/{cron_id}",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert missing.status_code == 404
+
+    overview = test_client.get(
+        "/scheduler/overview",
+        headers={"Authorization": "Bearer test-token"},
+    ).json()
+    delete_override = next(
+        item
+        for item in overview["manual_overrides"]
+        if item["target_id"] == cron_id and item["action"] == "delete"
+    )
+    assert delete_override["source"] == "autopilot"
+    assert delete_override["target_label"] == "Temporary reminder"
+
+    internal_list = test_client.get(
+        "/internal/scheduler/crons",
+        headers={"X-Internal-Token": "internal-token"},
+    )
+    assert internal_list.status_code == 200
+    assert any(
+        item["target_id"] == cron_id and item["action"] == "delete"
+        for item in internal_list.json()["manual_overrides"]
+    )
 
 
 def test_scheduler_cron_helper_uses_user_local_timezone_and_validates_input() -> None:

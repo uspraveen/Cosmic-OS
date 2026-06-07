@@ -6327,7 +6327,14 @@ class GatewayRuntime:
         self._scheduler_wakeup.set()
         return self._scheduler_record(record, include_history=True)
 
-    def delete_scheduler_cron(self, cron_id: str) -> bool:
+    def delete_scheduler_cron(
+        self,
+        cron_id: str,
+        *,
+        reason: str | None = None,
+        actor: str | None = None,
+        source: str | None = None,
+    ) -> bool:
         normalized_cron_id = self._safe_text(cron_id)
         if not normalized_cron_id:
             return False
@@ -6336,6 +6343,17 @@ class GatewayRuntime:
             return False
         if self._safe_text(existing.get("kind")) == "system":
             raise ValueError("System crons cannot be deleted.")
+        existing_payload = self._scheduler_record(existing, include_history=False)
+        self.scheduler_store.record_manual_override(
+            target_type="cron",
+            target_id=normalized_cron_id,
+            action="delete",
+            reason=self._safe_text(reason) or "Deleted manually.",
+            actor=self._safe_text(actor) or "user",
+            source=self._safe_text(source) or "scheduler",
+            previous_state=existing_payload,
+            resulting_state={},
+        )
         deleted = self.scheduler_store.delete_cron(normalized_cron_id)
         if deleted:
             self._scheduler_wakeup.set()
@@ -6653,6 +6671,7 @@ class GatewayRuntime:
             "current_session_id": self._current_session_id(),
             "crons": self._list_scheduler_crons(include_system=True, active_only=False),
             "heartbeat": self.scheduler_store.get_heartbeat(),
+            "manual_overrides": self.scheduler_store.list_manual_overrides(limit=30),
         }
 
     def list_scheduler_crons(
@@ -6669,22 +6688,50 @@ class GatewayRuntime:
         return self._scheduler_record(record, include_history=True)
 
     def pause_scheduler_cron(
-        self, cron_id: str, *, reason: str | None = None
+        self,
+        cron_id: str,
+        *,
+        reason: str | None = None,
+        actor: str | None = None,
+        source: str | None = None,
     ) -> dict[str, Any] | None:
+        previous = self.scheduler_store.get_cron(cron_id)
         record = self.scheduler_store.pause_cron(cron_id, reason=reason)
         if record is None:
             return None
+        self.scheduler_store.record_manual_override(
+            target_type="cron",
+            target_id=cron_id,
+            action="pause",
+            reason=self._safe_text(reason) or "Paused manually.",
+            actor=self._safe_text(actor) or "user",
+            source=self._safe_text(source) or "scheduler",
+            previous_state=(
+                self._scheduler_record(previous, include_history=False)
+                if previous is not None
+                else {}
+            ),
+            resulting_state=self._scheduler_record(record, include_history=False),
+        )
         self._scheduler_wakeup.set()
         return self._scheduler_record(record, include_history=False)
 
-    def resume_scheduler_cron(self, cron_id: str) -> dict[str, Any] | None:
+    def resume_scheduler_cron(
+        self,
+        cron_id: str,
+        *,
+        actor: str | None = None,
+        source: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any] | None:
         next_fire_at = None
+        previous = self.scheduler_store.get_cron(cron_id)
         if cron_id == SYSTEM_CRON_DAILY_ROLLOVER:
             next_fire_at = self._next_rollover_fire_at(
                 timezone_name=self.current_user_timezone()
             )
         else:
-            existing = self.scheduler_store.get_cron(cron_id)
+            existing = previous
             if existing is not None:
                 cron_expr = self._safe_text(existing.get("cron_expr"))
                 timezone_name = (
@@ -6700,22 +6747,58 @@ class GatewayRuntime:
         self._scheduler_wakeup.set()
         if record is None:
             return None
+        self.scheduler_store.record_manual_override(
+            target_type="cron",
+            target_id=cron_id,
+            action="resume",
+            reason=self._safe_text(reason) or "Resumed manually.",
+            actor=self._safe_text(actor) or "user",
+            source=self._safe_text(source) or "scheduler",
+            previous_state=(
+                self._scheduler_record(previous, include_history=False)
+                if previous is not None
+                else {}
+            ),
+            resulting_state=self._scheduler_record(record, include_history=False),
+        )
         return self._scheduler_record(record, include_history=False)
 
     def get_scheduler_heartbeat(self) -> dict[str, Any]:
         return self.scheduler_store.get_heartbeat()
 
     def pause_scheduler_heartbeat(self, *, reason: str | None = None) -> dict[str, Any]:
+        previous = self.scheduler_store.get_heartbeat()
         record = self.scheduler_store.pause_heartbeat(reason=reason)
+        self.scheduler_store.record_manual_override(
+            target_type="heartbeat",
+            target_id="scheduler_heartbeat",
+            action="pause",
+            reason=self._safe_text(reason) or "Paused manually.",
+            actor="user",
+            source="autopilot",
+            previous_state=previous,
+            resulting_state=record,
+        )
         self._scheduler_wakeup.set()
         return record
 
     def resume_scheduler_heartbeat(self) -> dict[str, Any]:
+        previous = self.scheduler_store.get_heartbeat()
         record = self.scheduler_store.resume_heartbeat()
         if not self._safe_text(record.get("next_fire_at")):
             record = self.scheduler_store.schedule_heartbeat(
                 next_fire_at=self._heartbeat_next_fire_at(heartbeat=record)
             )
+        self.scheduler_store.record_manual_override(
+            target_type="heartbeat",
+            target_id="scheduler_heartbeat",
+            action="resume",
+            reason="Resumed manually.",
+            actor="user",
+            source="autopilot",
+            previous_state=previous,
+            resulting_state=record,
+        )
         self._scheduler_wakeup.set()
         return record
 

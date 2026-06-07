@@ -1514,7 +1514,10 @@ async def list_internal_scheduler_crons(
     _: None = Depends(require_internal_token),
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
-    return {"crons": runtime.list_scheduler_crons(include_system=include_system, active_only=True)}
+    return {
+        "crons": runtime.list_scheduler_crons(include_system=include_system, active_only=True),
+        "manual_overrides": runtime.scheduler_overview().get("manual_overrides", []),
+    }
 
 
 @router.get("/internal/scheduler/crons/{cron_id}")
@@ -1536,7 +1539,32 @@ async def delete_internal_scheduler_cron(
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
     try:
-        deleted = runtime.delete_scheduler_cron(cron_id)
+        deleted = runtime.delete_scheduler_cron(
+            cron_id,
+            reason="Deleted by orchestrator scheduler tool.",
+            actor="agent",
+            source="orchestrator",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown cron")
+    return {"deleted": True, "cron_id": cron_id}
+
+
+@router.delete("/scheduler/crons/{cron_id}")
+async def delete_scheduler_cron(
+    cron_id: str,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        deleted = runtime.delete_scheduler_cron(
+            cron_id,
+            reason="Deleted from Spaces Autopilot.",
+            actor="user",
+            source="autopilot",
+        )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     if not deleted:
@@ -1563,7 +1591,12 @@ async def pause_scheduler_cron(
     _: None = Depends(require_local_api_token),
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
-    payload = runtime.pause_scheduler_cron(cron_id, reason=body.reason)
+    payload = runtime.pause_scheduler_cron(
+        cron_id,
+        reason=body.reason,
+        actor="user",
+        source="autopilot",
+    )
     if payload is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown cron")
     return payload
@@ -1576,7 +1609,12 @@ async def pause_internal_scheduler_cron(
     _: None = Depends(require_internal_token),
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
-    payload = runtime.pause_scheduler_cron(cron_id, reason=body.reason)
+    payload = runtime.pause_scheduler_cron(
+        cron_id,
+        reason=body.reason,
+        actor="agent",
+        source="orchestrator",
+    )
     if payload is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown cron")
     return payload
@@ -1588,7 +1626,11 @@ async def resume_scheduler_cron(
     _: None = Depends(require_local_api_token),
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
-    payload = runtime.resume_scheduler_cron(cron_id)
+    payload = runtime.resume_scheduler_cron(
+        cron_id,
+        actor="user",
+        source="autopilot",
+    )
     if payload is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown cron")
     return payload
@@ -1600,7 +1642,11 @@ async def resume_internal_scheduler_cron(
     _: None = Depends(require_internal_token),
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
-    payload = runtime.resume_scheduler_cron(cron_id)
+    payload = runtime.resume_scheduler_cron(
+        cron_id,
+        actor="agent",
+        source="orchestrator",
+    )
     if payload is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown cron")
     return payload

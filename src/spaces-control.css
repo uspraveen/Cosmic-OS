@@ -1511,6 +1511,17 @@
   color: rgba(224, 231, 247, 0.9);
 }
 
+.spaces-state-pill.paused {
+  color: rgba(255, 219, 178, 0.98);
+  background: rgba(255, 154, 92, 0.1);
+  border-color: rgba(255, 154, 92, 0.2);
+}
+
+.spaces-state-pill.done {
+  color: rgba(215, 225, 244, 0.78);
+  background: rgba(255, 255, 255, 0.035);
+}
+
 .spaces-cron-meta {
   margin-top: 12px;
   display: grid;
@@ -1524,6 +1535,156 @@
   font-size: 12px;
   line-height: 1.45;
   color: rgba(255, 255, 255, 0.88);
+}
+
+.autopilot-hero-head {
+  margin-bottom: 0;
+}
+
+.autopilot-hero-head .spaces-surface-btn {
+  flex: 0 0 auto;
+}
+
+.autopilot-status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.autopilot-stat-card {
+  min-height: 108px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.autopilot-stat-card strong {
+  display: block;
+  margin-top: 10px;
+  font-size: 24px;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: rgba(255, 255, 255, 0.94);
+}
+
+.autopilot-stat-card span {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.autopilot-heartbeat-card,
+.autopilot-selected-card,
+.autopilot-overrides-card {
+  background:
+    radial-gradient(circle at 0% 0%, rgba(121, 201, 255, 0.1), transparent 42%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02)),
+    rgba(var(--spaces-glass), 0.58);
+}
+
+.autopilot-heartbeat-meta {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.autopilot-cron-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.autopilot-cron-card {
+  position: relative;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease;
+}
+
+.autopilot-cron-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(121, 201, 255, 0.2);
+}
+
+.autopilot-cron-card.selected {
+  border-color: rgba(121, 201, 255, 0.34);
+  box-shadow: inset 0 0 0 1px rgba(121, 201, 255, 0.08);
+}
+
+.autopilot-empty-card {
+  grid-column: 1 / -1;
+}
+
+.autopilot-card-actions {
+  margin-top: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.agent-email-console-secondary.danger {
+  color: rgba(255, 202, 211, 0.82);
+  border-color: rgba(255, 124, 150, 0.16);
+}
+
+.agent-email-console-secondary.danger:hover:not(:disabled) {
+  background: rgba(255, 124, 150, 0.08);
+  color: rgba(255, 222, 227, 0.95);
+}
+
+.autopilot-pause-reason {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(255, 207, 170, 0.72);
+}
+
+.autopilot-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.autopilot-detail-grid div,
+.autopilot-prompt-block {
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.065);
+  background: rgba(255, 255, 255, 0.035);
+  padding: 10px;
+  min-width: 0;
+}
+
+.autopilot-detail-grid span,
+.autopilot-prompt-block span {
+  display: block;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.34);
+}
+
+.autopilot-detail-grid strong {
+  display: block;
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.35;
+  color: rgba(255, 255, 255, 0.84);
+}
+
+.autopilot-prompt-block {
+  margin-top: 10px;
+}
+
+.autopilot-prompt-block p {
+  margin-top: 8px;
+  font-size: 13px;
+  line-height: 1.52;
+  color: rgba(255, 255, 255, 0.64);
+}
+
+.autopilot-overrides-feed {
+  max-height: 340px;
+  overflow: auto;
+  padding-right: 2px;
 }
 
 /* ── My Calendar ───────────────────────────────────── */
@@ -6890,6 +7051,23 @@
   .spaces-cal-toolbar {
     flex-wrap: wrap;
     padding: 8px 12px;
+  }
+
+  .autopilot-status-grid,
+  .autopilot-cron-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .autopilot-hero-head {
+    align-items: stretch;
+  }
+
+  .autopilot-hero-head .spaces-surface-btn {
+    align-self: flex-start;
+  }
+
+  .autopilot-detail-grid {
+    grid-template-columns: 1fr;
   }
 
   .spaces-cal-range {

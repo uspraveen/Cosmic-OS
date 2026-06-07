@@ -2351,6 +2351,91 @@ app.whenReady().then(() => {
     })
   })
 
+  ipcMain.handle('gateway:get-scheduler-overview', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const gatewayState = gatewayConnectionManager?.getState()?.status
+    if (gatewayState && !gatewayState.connected) {
+      throw new Error(String(gatewayState.detail || 'The desktop app is not connected to your VM yet.'))
+    }
+    return callGatewayJson(config, '/scheduler/overview', { timeoutMs: 15000 })
+  })
+
+  ipcMain.handle('gateway:pause-scheduler-cron', async (_, payload: { cronId?: string; reason?: string }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const cronId = String(payload?.cronId || '').trim()
+    if (!cronId) {
+      throw new Error('Cron id is required.')
+    }
+    return callGatewayJson(config, `/scheduler/crons/${encodeURIComponent(cronId)}/pause`, {
+      method: 'POST',
+      body: {
+        reason: String(payload?.reason || '').trim() || 'Paused from Spaces Autopilot.',
+      },
+      timeoutMs: 15000,
+    })
+  })
+
+  ipcMain.handle('gateway:resume-scheduler-cron', async (_, payload: { cronId?: string }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const cronId = String(payload?.cronId || '').trim()
+    if (!cronId) {
+      throw new Error('Cron id is required.')
+    }
+    return callGatewayJson(config, `/scheduler/crons/${encodeURIComponent(cronId)}/resume`, {
+      method: 'POST',
+      timeoutMs: 15000,
+    })
+  })
+
+  ipcMain.handle('gateway:delete-scheduler-cron', async (_, payload: { cronId?: string }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const cronId = String(payload?.cronId || '').trim()
+    if (!cronId) {
+      throw new Error('Cron id is required.')
+    }
+    return callGatewayJson(config, `/scheduler/crons/${encodeURIComponent(cronId)}`, {
+      method: 'DELETE',
+      timeoutMs: 15000,
+    })
+  })
+
+  ipcMain.handle('gateway:pause-scheduler-heartbeat', async (_, payload: { reason?: string }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/scheduler/heartbeat/pause', {
+      method: 'POST',
+      body: {
+        reason: String(payload?.reason || '').trim() || 'Paused from Spaces Autopilot.',
+      },
+      timeoutMs: 15000,
+    })
+  })
+
+  ipcMain.handle('gateway:resume-scheduler-heartbeat', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/scheduler/heartbeat/resume', {
+      method: 'POST',
+      timeoutMs: 15000,
+    })
+  })
+
   ipcMain.handle('gateway:record-heartbeat-consumption', async (_, payload: {
     sessionId?: string
     messageId?: string
