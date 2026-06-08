@@ -127,6 +127,22 @@ class ToolOpportunityStore:
             ).fetchone()
         return self._row_to_item(row) if row else None
 
+    def get_by_alpha_project_id(self, alpha_project_id: str) -> dict[str, Any] | None:
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM tool_opportunities WHERE alpha_project_id = ?",
+                (str(alpha_project_id or "").strip(),),
+            ).fetchone()
+        return self._row_to_item(row) if row else None
+
+    def get_by_deployment_url(self, deployment_url: str) -> dict[str, Any] | None:
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM tool_opportunities WHERE deployment_url = ?",
+                (str(deployment_url or "").strip(),),
+            ).fetchone()
+        return self._row_to_item(row) if row else None
+
     def create(self, item: dict[str, Any]) -> dict[str, Any]:
         with self._lock, closing(self._connect()) as connection:
             connection.execute(

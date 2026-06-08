@@ -1213,6 +1213,42 @@ def test_gateway_builds_trusted_gmail_and_calendar_response_blocks(tmp_path) -> 
     ]
 
 
+def test_gateway_normalizes_alpha_project_receipts() -> None:
+    runtime = GatewayRuntime.__new__(GatewayRuntime)
+
+    receipts = runtime._normalize_specialist_receipts(  # noqa: SLF001
+        [
+            {
+                "intent": "alpha.execute",
+                "agent_id": "cosmic/alpha-agent:1.0.0",
+                "activity": "Built CRM site",
+                "alpha_project": {
+                    "alpha_project_id": "alpha_proj_crm_123",
+                    "status": "live",
+                    "repo_url": "https://github.com/example/crm",
+                    "deployment_url": "https://crm.example.test",
+                    "last_task_id": "tsk_alpha_123",
+                },
+            }
+        ]
+    )
+
+    assert receipts == [
+        {
+            "intent": "alpha.execute",
+            "agent_id": "cosmic/alpha-agent:1.0.0",
+            "activity": "Built CRM site",
+            "alpha_project": {
+                "alpha_project_id": "alpha_proj_crm_123",
+                "status": "live",
+                "repo_url": "https://github.com/example/crm",
+                "deployment_url": "https://crm.example.test",
+                "last_task_id": "tsk_alpha_123",
+            },
+        }
+    ]
+
+
 def test_gateway_hydrates_historical_gmail_approval_block_from_receipt(tmp_path) -> None:
     runtime = build_runtime(tmp_path)
     runtime.gmail_approval_store.initialize()

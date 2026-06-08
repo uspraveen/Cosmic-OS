@@ -8538,20 +8538,36 @@ class GatewayRuntime:
                 continue
             opportunity_id = self._safe_text(alpha_project.get("tool_opportunity_id"))
             alpha_project_id = self._safe_text(alpha_project.get("alpha_project_id"))
-            if not opportunity_id or not alpha_project_id:
+            if not alpha_project_id:
                 continue
             deployment_url = self._safe_text(alpha_project.get("deployment_url"))
             try:
-                await self.tool_opportunity_service.update(
-                    opportunity_id,
+                if opportunity_id:
+                    await self.tool_opportunity_service.update(
+                        opportunity_id,
+                        {
+                            "status": "live" if deployment_url else "building",
+                            "alpha_project_id": alpha_project_id,
+                            "build_task_id": self._safe_text(alpha_project.get("last_task_id")) or None,
+                            "repo_url": self._safe_text(alpha_project.get("repo_url")) or None,
+                            "deployment_url": deployment_url or None,
+                            "health_status": "ready" if deployment_url else "building",
+                            "metadata": {"linked_via": "alpha_receipt"},
+                        },
+                    )
+                    continue
+                await self.tool_opportunity_service.upsert_alpha_project(
                     {
+                        **self._alpha_project_tool_payload(
+                            alpha_project=alpha_project,
+                            event=event,
+                        ),
                         "status": "live" if deployment_url else "building",
                         "alpha_project_id": alpha_project_id,
                         "build_task_id": self._safe_text(alpha_project.get("last_task_id")) or None,
                         "repo_url": self._safe_text(alpha_project.get("repo_url")) or None,
                         "deployment_url": deployment_url or None,
                         "health_status": "ready" if deployment_url else "building",
-                        "metadata": {"linked_via": "alpha_receipt"},
                     },
                 )
             except Exception:
@@ -8560,6 +8576,101 @@ class GatewayRuntime:
                     opportunity_id,
                     alpha_project_id,
                 )
+
+    def _alpha_project_tool_payload(
+        self, *, alpha_project: dict[str, Any], event: dict[str, Any]
+    ) -> dict[str, Any]:
+        request_id = self._safe_text(event.get("request_id"))
+        session_id = self._safe_text(event.get("session_id"))
+        alpha_project_id = self._safe_text(alpha_project.get("alpha_project_id"))
+        turn = self.session_store.get_turn_ledger_entry(request_id) if request_id else None
+        user_excerpt = (
+            self._safe_text(turn.get("user_message_excerpt"))
+            if isinstance(turn, dict)
+            else ""
+        )
+        response_excerpt = self._bounded_excerpt(event.get("content"), limit=280)
+        context_excerpt = user_excerpt or response_excerpt
+        title = self._alpha_project_tool_title(context_excerpt, alpha_project_id)
+        source_refs = [item for item in (request_id, session_id, alpha_project_id) if item]
+        goal = (
+            f"Keep the Alpha-built result from this request accessible: {user_excerpt}"
+            if user_excerpt
+            else f"Keep Alpha project {alpha_project_id} accessible from My Tools."
+        )
+        return {
+            "title": title,
+            "tool_type": "site",
+            "goal": goal,
+            "reasoning": (
+                "Alpha produced a persistent project/deployment without an existing My Tools opportunity, "
+                "so Cosmic should auto-import it as a user-owned tool instead of leaving it hidden in chat history."
+            ),
+            "proposed_features": ["Live deployment link", "Alpha project continuation context"],
+            "helpful_materials": [],
+            "required_inputs": [],
+            "data_sources": ["Alpha project receipt"],
+            "trigger_source": "alpha_receipt",
+            "source_context_refs": source_refs,
+            "confidence": 0.9,
+            "expected_value": "The user can reopen, manage, and continue the built site from Spaces -> My Tools.",
+            "created_by": "cosmic/gateway:1.0.0",
+            "metadata": {
+                "request_id": request_id,
+                "session_id": session_id,
+                "user_message_excerpt": user_excerpt,
+                "response_excerpt": response_excerpt,
+                "direct_alpha_import": True,
+            },
+        }
+
+    def _alpha_project_tool_title(self, context_excerpt: str, alpha_project_id: str) -> str:
+        text = self._safe_text(context_excerpt)
+        tokens = [token.strip(" \t\r\n\"'`.,:;!?()[]{}") for token in text.split()]
+        tokens = [token for token in tokens if token]
+        if any(token.casefold() == "crm" for token in tokens):
+            return "CRM Site"
+        leading_noise = {
+            "a",
+            "an",
+            "the",
+            "can",
+            "could",
+            "you",
+            "please",
+            "build",
+            "built",
+            "create",
+            "created",
+            "make",
+            "made",
+            "generate",
+            "generated",
+            "site",
+            "tool",
+            "dashboard",
+            "for",
+            "me",
+        }
+        while tokens and tokens[0].casefold() in leading_noise:
+            tokens.pop(0)
+        selected: list[str] = []
+        for token in tokens:
+            if token.casefold() in {"right", "now", "please"}:
+                continue
+            selected.append(self._alpha_project_title_token(token))
+            if len(selected) >= 7 or len(" ".join(selected)) >= 56:
+                break
+        if selected:
+            title = " ".join(selected).strip()
+            if title:
+                return title
+        return f"Alpha Project {alpha_project_id[-8:]}" if alpha_project_id else "Alpha-built Tool"
+
+    @staticmethod
+    def _alpha_project_title_token(token: str) -> str:
+        upper_tokens = {"ai", "api", "crm", "eda", "ui", "ux", "vm", "yc"}
+        return token.upper() if token.casefold() in upper_tokens else token[:1].upper() + token[1:].lower()
 
     def _record_local_usage_event(self, event: UsageEvent | dict[str, Any]) -> None:
         try:
@@ -19223,6 +19334,22 @@ class GatewayRuntime:
                         normalized_gmail_approval[key] = values
                 if normalized_gmail_approval.get("account_id") and normalized_gmail_approval.get("draft_id"):
                     receipt["gmail_approval"] = normalized_gmail_approval
+            alpha_project = item.get("alpha_project")
+            if isinstance(alpha_project, dict):
+                normalized_alpha_project: dict[str, Any] = {}
+                for key in (
+                    "tool_opportunity_id",
+                    "alpha_project_id",
+                    "status",
+                    "repo_url",
+                    "deployment_url",
+                    "last_task_id",
+                ):
+                    text = self._safe_text(alpha_project.get(key))
+                    if text:
+                        normalized_alpha_project[key] = text
+                if normalized_alpha_project.get("alpha_project_id"):
+                    receipt["alpha_project"] = normalized_alpha_project
             calendar_event = item.get("calendar_event")
             if isinstance(calendar_event, dict):
                 normalized_calendar_event: dict[str, Any] = {}

@@ -2427,6 +2427,7 @@ def test_build_agentic_system_prompt_includes_dynamic_specialist_shortlist() -> 
 def test_build_agentic_system_prompt_explains_trusted_inline_presentation_contract() -> None:
     prompt = build_agentic_system_prompt()
 
+    assert "Never claim a specialist, tool, agent, or external system performed work unless that tool/specialist result is present in this turn." in prompt
     assert "trusted `_cosmic_ui` presentation contract" in prompt
     assert "do not duplicate fields listed in `covers` as Markdown" in prompt
     assert "Never claim an inline block will render unless the tool result includes this contract." in prompt
@@ -3005,6 +3006,53 @@ async def test_collect_specialist_receipt_captures_calendar_event(tmp_path) -> N
         "end": "2026-06-06T10:30:00-05:00",
         "html_link": "https://calendar.google.com/event?eid=evt_123",
         "is_all_day": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_collect_specialist_receipt_captures_direct_alpha_project(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    runtime = OrchestratorRuntime(
+        OrchestratorConfig(
+            internal_token="internal-token",
+            signing_secret="signing-secret",
+            anthropic_api_key="anthropic-key",
+            anthropic_model="claude-opus-4-6",
+            task_ledger_db_path=tmp_path / "task_ledger_alpha_receipt.db",
+        ),
+        client=client,
+    )
+    try:
+        receipts: list[dict[str, object]] = []
+        runtime._collect_specialist_receipt(  # noqa: SLF001
+            "delegate_to_agent",
+            {"intent": "alpha.execute", "agent_id": "cosmic/alpha-agent:1.0.0"},
+            json.dumps(
+                {
+                    "delegation": {
+                        "intent": "alpha.execute",
+                        "agent_id": "cosmic/alpha-agent:1.0.0",
+                    },
+                    "project": {
+                        "project_id": "alpha_proj_crm_123",
+                        "status": "live",
+                        "repo_url": "https://github.com/example/crm",
+                        "deployment_url": "https://crm.example.test",
+                        "last_task_id": "tsk_alpha_123",
+                    },
+                }
+            ),
+            specialist_receipts=receipts,
+        )
+    finally:
+        await runtime.stop()
+
+    assert receipts[0]["alpha_project"] == {
+        "alpha_project_id": "alpha_proj_crm_123",
+        "status": "live",
+        "repo_url": "https://github.com/example/crm",
+        "deployment_url": "https://crm.example.test",
+        "last_task_id": "tsk_alpha_123",
     }
 
 

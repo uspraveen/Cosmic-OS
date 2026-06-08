@@ -65,6 +65,64 @@ def test_tool_opportunity_lifecycle_links_alpha_project(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_tool_opportunity_auto_imports_direct_alpha_project(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = ToolOpportunityService(
+            store=ToolOpportunityStore(tmp_path / "tools.db"),
+            export_path=tmp_path / "tools.json",
+        )
+        await service.initialize()
+
+        imported = await service.upsert_alpha_project(
+            {
+                "title": "CRM Site",
+                "tool_type": "site",
+                "goal": "Keep the CRM site accessible from My Tools.",
+                "reasoning": "Alpha returned a live deployment from a direct chat build.",
+                "alpha_project_id": "alpha_proj_crm_123",
+                "deployment_url": "https://crm.example.test",
+                "repo_url": "https://github.com/example/crm",
+                "build_task_id": "tsk_alpha_123",
+                "source_context_refs": ["req_123", "sess_123"],
+                "metadata": {"request_id": "req_123"},
+            }
+        )
+        assert imported is not None
+        assert imported["status"] == "live"
+        assert imported["title"] == "CRM Site"
+        assert imported["alpha_project_id"] == "alpha_proj_crm_123"
+        assert imported["deployment_url"] == "https://crm.example.test"
+        assert imported["health_status"] == "ready"
+        assert imported["metadata"]["auto_imported"] is True
+
+        updated = await service.upsert_alpha_project(
+            {
+                "title": "CRM Site",
+                "alpha_project_id": "alpha_proj_crm_123",
+                "build_task_id": "tsk_alpha_456",
+            }
+        )
+        assert updated is not None
+        assert updated["opportunity_id"] == imported["opportunity_id"]
+        assert updated["deployment_url"] == "https://crm.example.test"
+        assert updated["status"] == "live"
+        assert updated["build_task_id"] == "tsk_alpha_456"
+
+        duplicate_by_url = await service.upsert_alpha_project(
+            {
+                "title": "CRM Site Copy",
+                "alpha_project_id": "alpha_proj_crm_789",
+                "deployment_url": "https://crm.example.test",
+            }
+        )
+        assert duplicate_by_url is not None
+        assert duplicate_by_url["opportunity_id"] == imported["opportunity_id"]
+        assert duplicate_by_url["alpha_project_id"] == "alpha_proj_crm_789"
+        assert duplicate_by_url["title"] == "CRM Site"
+
+    asyncio.run(run())
+
+
 def test_weekly_review_refines_unaccepted_but_protects_user_owned_tools(
     tmp_path: Path,
 ) -> None:

@@ -228,6 +228,120 @@ class ToolOpportunityService:
             }
         return updated
 
+    async def upsert_alpha_project(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        alpha_project_id = self._text(payload.get("alpha_project_id"))
+        if not alpha_project_id:
+            return None
+        deployment_url = self._text(payload.get("deployment_url"))
+        repo_url = self._text(payload.get("repo_url"))
+        build_task_id = self._text(payload.get("build_task_id"))
+        now = self._utcnow()
+        status = "live" if deployment_url else "building"
+        health_status = "ready" if deployment_url else "building"
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+
+        async with self._lock:
+            existing = self.store.get_by_alpha_project_id(alpha_project_id)
+            if existing is None and deployment_url:
+                existing = self.store.get_by_deployment_url(deployment_url)
+            if existing is not None:
+                effective_deployment_url = deployment_url or self._text(existing.get("deployment_url"))
+                effective_repo_url = repo_url or self._text(existing.get("repo_url"))
+                effective_build_task_id = build_task_id or self._text(existing.get("build_task_id"))
+                changes: dict[str, Any] = {
+                    "status": "live" if effective_deployment_url else status,
+                    "alpha_project_id": alpha_project_id,
+                    "build_task_id": effective_build_task_id or None,
+                    "deployment_url": effective_deployment_url or None,
+                    "repo_url": effective_repo_url or None,
+                    "health_status": "ready" if effective_deployment_url else health_status,
+                    "last_checked_at": now,
+                    "updated_at": now,
+                    "metadata_json": json.dumps(
+                        {
+                            **(existing.get("metadata") or {}),
+                            **metadata,
+                            "linked_via": "alpha_project_receipt",
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        default=str,
+                    ),
+                }
+                for key in ("title", "goal", "reasoning", "expected_value"):
+                    text = self._text(payload.get(key))
+                    if text and not self._text(existing.get(key)):
+                        changes[key] = text
+                updated = self.store.update(existing["opportunity_id"], changes)
+                if updated is not None:
+                    self._record_event(
+                        opportunity_id=updated["opportunity_id"],
+                        event_type="alpha_project_linked",
+                        before=existing,
+                        after=updated,
+                        payload=payload,
+                        reason=self._text(payload.get("reasoning"))
+                        or "Linked Alpha project receipt to an existing My Tools item.",
+                    )
+                    await self._sync_export()
+                return updated
+
+            title = self._text(payload.get("title")) or "Alpha-built Tool"
+            goal = self._text(payload.get("goal")) or (
+                f"Keep Alpha project {alpha_project_id} accessible from My Tools."
+            )
+            reasoning = self._text(payload.get("reasoning")) or (
+                "Alpha produced a persistent project, so Cosmic should make it easy to reopen, monitor, and continue from Spaces -> My Tools."
+            )
+            item = {
+                "opportunity_id": f"tool_{uuid4().hex[:12]}",
+                "seed_key": None,
+                "title": title,
+                "tool_type": self._type(payload.get("tool_type")),
+                "goal": goal,
+                "reasoning": reasoning,
+                "proposed_features": self._strings(payload.get("proposed_features"), 12),
+                "helpful_materials": self._strings(payload.get("helpful_materials"), 12),
+                "required_inputs": self._strings(payload.get("required_inputs"), 8),
+                "data_sources": self._strings(payload.get("data_sources"), 12),
+                "trigger_source": self._text(payload.get("trigger_source")) or "alpha_receipt",
+                "source_context_refs": self._strings(payload.get("source_context_refs"), 12),
+                "status": status,
+                "confidence": self._number(payload.get("confidence")) or 0.9,
+                "expected_value": self._text(payload.get("expected_value")),
+                "suggested_at": now,
+                "last_presented_at": now,
+                "presentation_count": 1,
+                "user_feedback": None,
+                "declined_reason": None,
+                "defer_until": None,
+                "alpha_project_id": alpha_project_id,
+                "build_task_id": build_task_id or None,
+                "deployment_url": deployment_url or None,
+                "repo_url": repo_url or None,
+                "health_status": health_status,
+                "last_checked_at": now,
+                "created_by": self._text(payload.get("created_by")) or "cosmic/gateway:1.0.0",
+                "metadata": {
+                    **metadata,
+                    "auto_imported": True,
+                    "linked_via": "alpha_project_receipt",
+                },
+                "created_at": now,
+                "updated_at": now,
+            }
+            created = self.store.create(item)
+            self._record_event(
+                opportunity_id=created["opportunity_id"],
+                event_type="alpha_project_auto_imported",
+                before=None,
+                after=created,
+                payload=payload,
+                reason=reasoning,
+            )
+            await self._sync_export()
+            return created
+
     async def build_handoff(self, opportunity_id: str) -> dict[str, Any] | None:
         item = await self.update(
             opportunity_id,

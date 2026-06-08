@@ -4983,7 +4983,7 @@ class OrchestratorRuntime:
                 }.items()
                 if value
             }
-            if alpha_project.get("tool_opportunity_id") and alpha_project.get("alpha_project_id"):
+            if alpha_project.get("alpha_project_id"):
                 receipt["alpha_project"] = alpha_project
         if artifact_count > 0:
             receipt["artifact_count"] = artifact_count
