@@ -6239,6 +6239,126 @@
   color: #fff;
 }
 
+.cosmic-agents-login-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(145, 188, 255, 0.18);
+  background:
+    linear-gradient(145deg, rgba(35, 48, 72, 0.56), rgba(9, 12, 18, 0.72)),
+    rgba(255, 255, 255, 0.03);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.cosmic-agents-login-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cosmic-agents-login-card-head h5 {
+  margin: 3px 0 0;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.cosmic-agents-login-expiry {
+  flex-shrink: 0;
+  padding: 5px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.cosmic-agents-login-card-copy {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.cosmic-agents-login-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.cosmic-agents-login-open,
+.cosmic-agents-login-code {
+  min-height: 38px;
+  border: 0;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.cosmic-agents-login-open {
+  background: rgba(120, 170, 255, 0.18);
+  color: #c6ddff;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.cosmic-agents-login-open:hover {
+  background: rgba(120, 170, 255, 0.26);
+  color: #fff;
+}
+
+.cosmic-agents-login-code {
+  padding: 0 12px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.9);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.cosmic-agents-login-code:hover {
+  background: rgba(255, 255, 255, 0.13);
+}
+
+.cosmic-agents-login-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.cosmic-agents-login-warning svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.cosmic-agents-login-raw {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 11px;
+}
+
+.cosmic-agents-login-raw summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.cosmic-agents-login-raw .cosmic-agents-detail-login-output {
+  margin-top: 8px;
+  max-height: 110px;
+}
+
 .cosmic-agents-detail-section-copy {
   margin: 0;
   font-size: 12px;
@@ -6294,6 +6414,14 @@
 @media (max-width: 460px) {
   .cosmic-agents-detail-auth-grid {
     grid-template-columns: 1fr;
+  }
+
+  .cosmic-agents-login-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .cosmic-agents-login-code {
+    width: 100%;
   }
 
   .cosmic-agents-detail-hero-top {

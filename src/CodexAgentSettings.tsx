@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Bot, CheckCircle2, Code2, ExternalLink, KeyRound, LogIn, ShieldCheck, Terminal, Trash2 } from 'lucide-react'
+import { Bot, CheckCircle2, Code2, Copy, ExternalLink, KeyRound, LogIn, ShieldCheck, Terminal, Trash2 } from 'lucide-react'
 
 type CodexAuthMode = 'chatgpt' | 'api_key'
 type CodexApprovalMode = 'suggest' | 'auto_edit' | 'full_auto'
@@ -70,8 +70,27 @@ function normalizeReasoningEffort(value: unknown): CodexReasoningEffort {
   return 'auto'
 }
 
+function stripAnsi(value: string) {
+  return value
+    .replace(/\u001b\[[0-9;]*m/g, '')
+    .replace(/\[[0-9;]*m/g, '')
+}
+
 function extractFirstUrl(value: string) {
-  return value.match(/https?:\/\/\S+/)?.[0] || ''
+  const clean = stripAnsi(value)
+  const url = clean.match(/https?:\/\/auth\.openai\.com\/codex\/device|https?:\/\/[^\s\]]+/)?.[0] || ''
+  return url.replace(/[),.;]+$/, '')
+}
+
+function extractCodexDeviceLogin(lines: string[]) {
+  const cleanLines = lines.map(stripAnsi).map((line) => line.trim()).filter(Boolean)
+  const url = cleanLines.map(extractFirstUrl).find(Boolean) || ''
+  const code = cleanLines
+    .map((line) => line.match(/\b[A-Z0-9]{4,8}-[A-Z0-9]{4,8}\b/)?.[0] || '')
+    .find(Boolean) || ''
+  const expiry = cleanLines.find((line) => /expires/i.test(line))?.match(/expires[^)]*/i)?.[0] || ''
+  const warning = cleanLines.find((line) => /phishing/i.test(line)) || ''
+  return { cleanLines, code, expiry, url, warning }
 }
 
 export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) {
@@ -253,7 +272,14 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
   const loginOutput = [
     ...(gatewayStatus?.login_session?.stdout || []),
     ...(gatewayStatus?.login_session?.stderr || []),
-  ].slice(-6)
+  ].slice(-12)
+  const deviceLogin = extractCodexDeviceLogin(loginOutput)
+  const hasDeviceLogin = Boolean(deviceLogin.url || deviceLogin.code)
+  const copyDeviceCode = () => {
+    if (!deviceLogin.code) return
+    void navigator.clipboard?.writeText(deviceLogin.code)
+    setBanner('Device code copied.')
+  }
 
   return (
     <div className="cosmic-agents-detail-page">
@@ -363,13 +389,56 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
               {gatewayStatus?.status === 'login_pending' ? 'Restart' : 'Login'}
             </button>
           </div>
-          {loginOutput.length ? (
+          {hasDeviceLogin ? (
+            <div className="cosmic-agents-login-card">
+              <div className="cosmic-agents-login-card-head">
+                <div>
+                  <span className="cosmic-agents-detail-kicker">Device authorization</span>
+                  <h5>Sign in with ChatGPT</h5>
+                </div>
+                {deviceLogin.expiry ? <span className="cosmic-agents-login-expiry">{deviceLogin.expiry}</span> : null}
+              </div>
+              <p className="cosmic-agents-login-card-copy">
+                Open the Codex sign-in page, then enter the one-time code shown here.
+              </p>
+              <div className="cosmic-agents-login-actions">
+                {deviceLogin.url ? (
+                  <button type="button" className="cosmic-agents-login-open" onClick={() => window.cosmic?.openExternal(deviceLogin.url)}>
+                    <ExternalLink size={14} />
+                    Open sign-in
+                  </button>
+                ) : null}
+                {deviceLogin.code ? (
+                  <button type="button" className="cosmic-agents-login-code" onClick={copyDeviceCode} title="Copy device code">
+                    <KeyRound size={14} />
+                    <span>{deviceLogin.code}</span>
+                    <Copy size={13} />
+                  </button>
+                ) : null}
+              </div>
+              <div className="cosmic-agents-login-warning">
+                <ShieldCheck size={13} />
+                <span>{deviceLogin.warning || 'Only enter this code on the official OpenAI authorization page.'}</span>
+              </div>
+              {deviceLogin.cleanLines.length ? (
+                <details className="cosmic-agents-login-raw">
+                  <summary>Raw CLI output</summary>
+                  <div className="cosmic-agents-detail-login-output">
+                    {deviceLogin.cleanLines.map((line, index) => (
+                      <span key={`${line}-${index}`}>{line}</span>
+                    ))}
+                  </div>
+                </details>
+              ) : null}
+            </div>
+          ) : loginOutput.length ? (
             <div className="cosmic-agents-detail-login-output">
               {loginOutput.map((line, index) => {
                 const url = extractFirstUrl(line)
+                const cleanLine = stripAnsi(line)
                 return (
                   <span key={`${line}-${index}`}>
-                    {line}
+                    {cleanLine}
                     {url ? (
                       <button type="button" onClick={() => window.cosmic?.openExternal(url)}>
                         <ExternalLink size={12} />

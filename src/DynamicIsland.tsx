@@ -1771,7 +1771,7 @@ export default function DynamicIsland({
         ? `${formatCalendarTime(selectedCalendarEvent.start, false)} \u2013 ${formatCalendarTime(selectedCalendarEvent.end, false)}`
         : formatCalendarTime(selectedCalendarEvent.start, selectedCalendarEvent.isAllDay)
     const attendees = selectedCalendarEvent.attendees
-    const attendeePreview = attendees.slice(0, 4)
+    const attendeePreview = attendees.slice(0, 3)
     const attendeeOverflow = Math.max(0, attendees.length - attendeePreview.length)
     const durationLabel = getEventDurationLabel(selectedCalendarEvent)
 
@@ -1821,8 +1821,12 @@ export default function DynamicIsland({
                 <span className="cal-detail-meta-label">{attendees.length} attendee{attendees.length !== 1 ? 's' : ''}</span>
                 <div className="cal-detail-attendee-list">
                   {attendeePreview.map((attendee) => (
-                    <span key={`${attendee.email}-${attendee.response_status}`} className={`cal-attendee-pill status-${attendee.response_status}`}>
-                      {attendee.display_name}
+                    <span
+                      key={`${attendee.email}-${attendee.response_status}`}
+                      className={`cal-attendee-pill status-${attendee.response_status}`}
+                      title={attendee.email || attendee.display_name}
+                    >
+                      {attendee.display_name || attendee.email || 'Guest'}
                     </span>
                   ))}
                   {attendeeOverflow > 0 && (
