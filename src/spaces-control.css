@@ -270,19 +270,30 @@
   display: flex;
   gap: 14px;
   padding: 14px;
+  overflow: hidden;
 }
 
 .spaces-rail {
+  box-sizing: border-box;
   width: 224px;
   flex-shrink: 0;
+  align-self: stretch;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
   min-height: 0;
+  max-height: 100%;
+  padding: 8px 7px 8px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.045);
+  border-radius: 20px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.024), rgba(255, 255, 255, 0.008)),
+    rgba(var(--spaces-glass), 0.28);
 }
 
 .spaces-rail-head {
-  padding: 6px 8px 0;
+  flex: 0 0 auto;
+  padding: 2px 8px 4px;
 }
 
 .spaces-rail-copy {
@@ -292,39 +303,43 @@
 .spaces-rail-list {
   flex: 1;
   min-height: 0;
+  max-height: 100%;
   overflow-y: auto;
-  padding-right: 4px;
+  overscroll-behavior: contain;
+  padding: 2px 5px 12px 2px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 13px;
+  scroll-padding: 12px;
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
 }
 
 .spaces-rail-list::-webkit-scrollbar {
-  width: 4px;
+  width: 5px;
 }
 
 .spaces-rail-list::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.18);
   border-radius: 999px;
 }
 
 .spaces-rail-button {
+  box-sizing: border-box;
   position: relative;
   isolation: isolate;
   overflow: hidden;
   width: 100%;
-  padding: 11px 12px;
+  padding: 12px 12px;
   border: 1px solid rgba(255, 255, 255, 0.065);
-  border-radius: 15px;
+  border-radius: 16px;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.032), rgba(255, 255, 255, 0.008)),
     rgba(var(--spaces-glass), 0.58);
   color: rgba(255, 255, 255, 0.9);
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr);
-  gap: 10px;
+  gap: 11px;
   align-items: center;
   text-align: left;
   cursor: pointer;
@@ -493,7 +508,7 @@
 }
 
 .spaces-rail.collapsed {
-  width: 56px;
+  width: 74px;
 }
 
 .spaces-rail.collapsed .spaces-rail-toggle {
@@ -7088,13 +7103,15 @@
 
   .spaces-rail {
     width: 100%;
+    padding: 7px;
   }
 
   .spaces-rail-list {
     overflow-x: auto;
     overflow-y: hidden;
     flex-direction: row;
-    padding-bottom: 6px;
+    gap: 10px;
+    padding: 2px 2px 10px;
   }
 
   .spaces-rail-button {
@@ -7265,6 +7282,7 @@
 
   .spaces-rail.collapsed {
     width: 100%;
+    padding: 7px;
   }
 
   .spaces-rail.collapsed .spaces-rail-toggle {
