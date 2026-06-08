@@ -50,6 +50,18 @@ const WINDOWS_TASKBAR_ICON_NUDGE_PX = 3
  */
 const WINDOWS_TASKBAR_ICON_CENTER_ZOOM = 1
 
+function isSafeExternalUrl(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const trimmed = value.trim()
+  if (!trimmed) return false
+  try {
+    const parsed = new URL(trimmed)
+    return ['http:', 'https:', 'mailto:'].includes(parsed.protocol)
+  } catch {
+    return false
+  }
+}
+
 function zoomCenterCropPngToOriginalSize(img: Electron.NativeImage, zoom: number): Electron.NativeImage {
   if (zoom <= 1) return img
   const { width, height } = img.getSize()
@@ -2712,9 +2724,12 @@ app.whenReady().then(() => {
     if (lastWeatherData) event.sender.send('weather:update', lastWeatherData)
   })
 
-  // NEW: Open External Link
-  ipcMain.on('open-external', (_, url) => {
-    shell.openExternal(url)
+  ipcMain.handle('open-external', async (_, url) => {
+    if (!isSafeExternalUrl(url)) {
+      return { ok: false, error: 'invalid_url' }
+    }
+    await shell.openExternal(url.trim())
+    return { ok: true }
   })
 
   ipcMain.handle('whatsapp:get-status', async (_, payload: GatewayConnectionConfig) => {

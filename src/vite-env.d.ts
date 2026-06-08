@@ -293,7 +293,7 @@ interface Window {
     minimizeApp: () => void
     restoreApp: () => void
     restartApp: () => void
-    openExternal: (url: string) => void
+    openExternal: (url: string) => Promise<{ ok: boolean; error?: string }>
 
     // Voice APIs
     startVoice: () => void

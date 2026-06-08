@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Bot, CheckCircle2, Code2, KeyRound, LogIn, ShieldCheck, Terminal, Trash2 } from 'lucide-react'
+import { Bot, CheckCircle2, Code2, ExternalLink, KeyRound, LogIn, ShieldCheck, Terminal, Trash2 } from 'lucide-react'
 
 type CodexAuthMode = 'chatgpt' | 'api_key'
 type CodexApprovalMode = 'suggest' | 'auto_edit' | 'full_auto'
@@ -371,9 +371,10 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
                   <span key={`${line}-${index}`}>
                     {line}
                     {url ? (
-                      <a href={url} target="_blank" rel="noreferrer">
+                      <button type="button" onClick={() => window.cosmic?.openExternal(url)}>
+                        <ExternalLink size={12} />
                         Open
-                      </a>
+                      </button>
                     ) : null}
                   </span>
                 )

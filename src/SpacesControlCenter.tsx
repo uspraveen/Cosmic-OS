@@ -80,6 +80,12 @@ interface ToolOpportunity {
   repo_url?: string | null
 }
 
+const openExternalUrl = (url: string | null | undefined) => {
+  const value = String(url || '').trim()
+  if (!value) return
+  void window.cosmic?.openExternal?.(value)
+}
+
 interface OperationItem {
   title: string
   owner: string
@@ -1485,9 +1491,21 @@ function SessionMessageMarkdown({ source }: { source: string }) {
             }
             return <code className={className} {...props}>{children}</code>
           },
-          a: ({ node, ...props }: MarkdownElementProps<'a'>) => {
+          a: ({ node, href, ...props }: MarkdownElementProps<'a'>) => {
             void node
-            return <a target="_blank" rel="noopener noreferrer" {...props} />
+            return (
+              <a
+                {...props}
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(event) => {
+                  if (!href) return
+                  event.preventDefault()
+                  openExternalUrl(String(href))
+                }}
+              />
+            )
           },
         }}
       >
@@ -5017,7 +5035,7 @@ export default function SpacesControlCenter({
                 ) : null}
                 <div className="tools-card-actions">
                   {isLive ? (
-                    <button type="button" className="tools-primary" onClick={() => window.open(String(item.deployment_url), '_blank')}>Open</button>
+                    <button type="button" className="tools-primary" onClick={() => openExternalUrl(item.deployment_url)}>Open</button>
                   ) : canBuild ? (
                     <button type="button" className="tools-primary" disabled={isBusy} onClick={() => void buildToolOpportunity(item.opportunity_id)}>
                       {isBusy ? 'Preparing' : item.status === 'accepted' ? 'Continue in chat' : 'Build now'}
@@ -5032,7 +5050,7 @@ export default function SpacesControlCenter({
                     <button type="button" className="tools-secondary" disabled={isBusy} onClick={() => void updateToolOpportunityStatus(item.opportunity_id, 'archived')}>Archive</button>
                   ) : null}
                   {item.repo_url ? (
-                    <button type="button" className="tools-secondary" onClick={() => window.open(String(item.repo_url), '_blank')}>Repository</button>
+                    <button type="button" className="tools-secondary" onClick={() => openExternalUrl(item.repo_url)}>Repository</button>
                   ) : null}
                 </div>
               </article>

@@ -227,7 +227,7 @@ contextBridge.exposeInMainWorld('cosmic', {
 
   controlMedia: (action: string) => ipcRenderer.send('media:control', action),
   setVolume: (level: number) => ipcRenderer.send('media:set_volume', level),
-  openExternal: (url: string) => ipcRenderer.send('open-external', url),
+  openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
 
   // SETTINGS
   getSettings: () => ipcRenderer.send('settings:get-all'),
