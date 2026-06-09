@@ -1919,7 +1919,9 @@ class GatewayRuntime:
                 "These are compact references to Gmail items COSMIC recently decided were "
                 "worth surfacing. If the user says 'this email', 'that Gmail', or 'reply "
                 "to this', prefer the most recent matching item and delegate to Gmail "
-                "Agent with account_id + thread_id/message_id for exact thread context. "
+                "Agent with the exact account_id when shown plus thread_id/message_id "
+                "for exact thread context. If account_id is missing, use account_email "
+                "as account_hint instead of inventing an id. "
                 "Ask a clarifying question if more than one item plausibly matches."
             ),
         ]
@@ -1928,9 +1930,12 @@ class GatewayRuntime:
                 f"#{index}",
                 f"surfaced_id={self._safe_text(item.get('surfaced_id'))}",
             ]
+            account_id = self._safe_text(item.get("account_id"))
+            if account_id:
+                parts.append(f"account_id={account_id}")
             account_email = self._safe_text(item.get("account_email"))
             if account_email:
-                parts.append(f"account={account_email}")
+                parts.append(f"account_email={account_email}")
             sender = self._safe_text(item.get("sender"))
             if sender:
                 parts.append(f"from={sender}")

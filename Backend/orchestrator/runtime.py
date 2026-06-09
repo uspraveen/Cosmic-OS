@@ -2799,7 +2799,7 @@ class OrchestratorRuntime:
             "allow_primary_fallback": self._allow_primary_fallback(intent),
         }
 
-        explicit_account_id = str(child_input.get("account_id") or "").strip()
+        explicit_account_id = self._extract_explicit_account_id(child_input)
         if explicit_account_id:
             payload["account_id"] = explicit_account_id
 
@@ -2851,7 +2851,9 @@ class OrchestratorRuntime:
             )
         if response.status_code == 404:
             raise RuntimeError(
-                f"No usable {provider} credential is available for {intent}. The user may need to connect or re-authorize the account."
+                f"No matching {provider} credential/account reference is available for {intent}. "
+                "Check the account_id/account_hint and ask for the target account if ambiguous; "
+                "only ask the user to reconnect when the account is inactive, missing, or missing required scopes."
             )
         if response.status_code == 403:
             raise RuntimeError(
@@ -2886,10 +2888,26 @@ class OrchestratorRuntime:
             raise RuntimeError("Gateway returned an invalid refreshed credential payload.")
         return payload
 
+    def _extract_explicit_account_id(self, child_input: dict[str, Any]) -> str | None:
+        direct = str(child_input.get("account_id") or "").strip()
+        if self._looks_like_google_account_id(direct):
+            return direct
+
+        nested_account = child_input.get("account")
+        if isinstance(nested_account, dict):
+            for key in ("account_id", "id", "credential_account_id"):
+                value = str(nested_account.get(key) or "").strip()
+                if self._looks_like_google_account_id(value):
+                    return value
+        return None
+
+    def _looks_like_google_account_id(self, value: str) -> bool:
+        normalized = str(value or "").strip()
+        return normalized.startswith("acc_")
+
     def _extract_account_hint(self, child_input: dict[str, Any]) -> str | None:
         candidate_keys = (
             "account_hint",
-            "account",
             "account_name",
             "account_label",
             "account_email",
@@ -2912,10 +2930,39 @@ class OrchestratorRuntime:
             value = child_input.get(key)
             if value is None:
                 continue
-            normalized = str(value).strip()
+            normalized = self._normalize_account_hint_value(value)
+            if normalized:
+                return normalized
+
+        direct_account_id = str(child_input.get("account_id") or "").strip()
+        if direct_account_id and not self._looks_like_google_account_id(direct_account_id):
+            return direct_account_id
+
+        nested_account = child_input.get("account")
+        if isinstance(nested_account, dict):
+            for key in (
+                "account_hint",
+                "account_email",
+                "email",
+                "account_label",
+                "account_display_label",
+                "display_name",
+                "name",
+            ):
+                normalized = self._normalize_account_hint_value(nested_account.get(key))
+                if normalized:
+                    return normalized
+        elif nested_account is not None:
+            normalized = self._normalize_account_hint_value(nested_account)
             if normalized:
                 return normalized
         return None
+
+    def _normalize_account_hint_value(self, value: Any) -> str | None:
+        if value is None or isinstance(value, (dict, list, tuple, set)):
+            return None
+        normalized = str(value).strip()
+        return normalized or None
 
     def _classify_auth_operation_mode(self, intent: str) -> str:
         lowered = str(intent or "").strip().lower()
