@@ -1796,14 +1796,14 @@ export default function DynamicIsland({
               <span className="cal-detail-support">{selectedCalendarEvent.calendar_name}</span>
             </div>
 
-            <h3 className="cal-detail-title">{selectedCalendarEvent.summary}</h3>
+            <h3 className="cal-detail-title" title={selectedCalendarEvent.summary}>{selectedCalendarEvent.summary}</h3>
 
-            <div className="cal-detail-when">
+            <div className="cal-detail-when" title={`${dateLabel} · ${timeLabel}${durationLabel ? ` (${durationLabel})` : ''}`}>
               {dateLabel} {'\u00B7'} {timeLabel}{durationLabel ? ` (${durationLabel})` : ''}
             </div>
 
             {selectedCalendarEvent.location && (
-              <div className="cal-detail-location">{selectedCalendarEvent.location}</div>
+              <div className="cal-detail-location" title={selectedCalendarEvent.location}>{selectedCalendarEvent.location}</div>
             )}
           </div>
 
@@ -1812,7 +1812,7 @@ export default function DynamicIsland({
             {selectedCalendarEvent.organizer && (
               <div className="cal-detail-host">
                 <span className="cal-detail-meta-label">Host</span>
-                <strong>{selectedCalendarEvent.organizer}</strong>
+                <strong title={selectedCalendarEvent.organizer}>{selectedCalendarEvent.organizer}</strong>
               </div>
             )}
 
