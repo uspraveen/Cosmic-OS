@@ -2396,8 +2396,6 @@
   --di-inbox-accent: rgba(255, 255, 255, 0.5);
   --di-inbox-accent-soft: rgba(255, 255, 255, 0.055);
   --di-inbox-surface-raised: rgba(22, 22, 24, 0.94);
-  --di-cal-accent: rgba(255, 214, 122, 0.55);
-  --di-cal-accent-soft: rgba(255, 214, 122, 0.07);
 
   font-family: var(--di-agent-email-ui);
   font-size: 13px;
@@ -2492,12 +2490,7 @@
 }
 
 .di-notify-card--calendar {
-  --di-inbox-accent: var(--di-cal-accent);
-  --di-inbox-accent-soft: var(--di-cal-accent-soft);
-  border-left: 3px solid var(--di-cal-accent);
-  background:
-    linear-gradient(90deg, var(--di-cal-accent-soft), transparent 48%),
-    var(--di-inbox-surface-raised);
+  background: var(--di-inbox-surface-raised);
 }
 
 /* Strip: .agent-email-inbox-mailbox-label + mono address + sync-style action */
@@ -2611,9 +2604,9 @@
 }
 
 .di-notify-avatar--calendar {
-  background: linear-gradient(155deg, rgba(255, 214, 122, 0.22), rgba(255, 255, 255, 0.05));
-  border-color: rgba(255, 214, 122, 0.25);
-  color: rgba(255, 245, 220, 0.95);
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.03));
+  border-color: rgba(255, 255, 255, 0.09);
+  color: rgba(255, 255, 255, 0.92);
 }
 
 .di-notify-avatar-svg {
@@ -2724,9 +2717,9 @@
 }
 
 .di-notify-pill--warm {
-  color: rgba(255, 232, 195, 0.92);
-  border-color: rgba(255, 214, 122, 0.2);
-  background: rgba(255, 214, 122, 0.08);
+  color: rgba(255, 255, 255, 0.58);
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
 }
 
 /* ============================================================
