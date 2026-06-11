@@ -21,6 +21,7 @@ from shared import (
     generate_task_id,
     is_supported_document_artifact,
     parse_event_envelope,
+    render_markdown_email_bodies,
     sign_task_envelope,
 )
 from shared.agent_runtime import AgentRuntime
@@ -178,6 +179,13 @@ class EmailAgent(AgentRuntime):
             client=self._http_client,
         )
         self._trusted_sender_set: set[str] = set()
+
+    def _render_outbound_email_body(self, body: str) -> dict[str, str]:
+        rendered = render_markdown_email_bodies(body)
+        return {
+            "text_body": rendered.text_body,
+            "html_body": rendered.html_body,
+        }
 
     async def on_startup(self) -> None:
         self.data_root.mkdir(parents=True, exist_ok=True)
@@ -637,7 +645,7 @@ class EmailAgent(AgentRuntime):
                             "subject": self._reply_subject(context),
                             "to_recipients": reply_recipients,
                             "cc_recipients": cc_recipients,
-                            "text_body": drafted["body"],
+                            **self._render_outbound_email_body(drafted["body"]),
                         }
                         reply_to_message_id = self._reply_to_message_id(context)
                         if reply_to_message_id:
@@ -663,7 +671,7 @@ class EmailAgent(AgentRuntime):
                     else:
                         reply_payload: dict[str, Any] = {
                             "mailbox_id": mailbox["id"],
-                            "text_body": drafted["body"],
+                            **self._render_outbound_email_body(drafted["body"]),
                         }
                         if recipients:
                             reply_payload["to_recipients"] = recipients
@@ -2664,7 +2672,7 @@ class EmailAgent(AgentRuntime):
                 thread_id,
                 {
                     "mailbox_id": mailbox["id"],
-                    "text_body": body,
+                    **self._render_outbound_email_body(body),
                 },
             )
         except CosmicMailClientError as exc:
@@ -2833,7 +2841,7 @@ class EmailAgent(AgentRuntime):
                     "to_recipients": recipients,
                     "cc_recipients": cc_recipients,
                     "bcc_recipients": bcc_recipients,
-                    "text_body": text_body,
+                    **self._render_outbound_email_body(text_body),
                 }
             )
         except CosmicMailClientError as exc:

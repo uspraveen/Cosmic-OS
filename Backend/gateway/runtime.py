@@ -115,6 +115,7 @@ from shared import (
     normalize_cosmic_mail_base_url,
     parse_event_envelope,
     parse_stream_payload,
+    render_markdown_email_bodies,
     sign_task_envelope,
     utcnow,
 )
@@ -3500,12 +3501,14 @@ class GatewayRuntime:
             api_token=settings["api_token"],
             timeout_sec=self.config.cosmic_mail_timeout_sec,
         )
+        rendered_body = render_markdown_email_bodies(body_text)
         try:
             result = await client.update_approval_draft(
                 approval_id,
                 {
                     "subject": normalized_subject,
-                    "text_body": str(body_text or ""),
+                    "text_body": rendered_body.text_body,
+                    "html_body": rendered_body.html_body,
                 },
             )
         finally:

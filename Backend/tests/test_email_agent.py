@@ -62,6 +62,62 @@ def _build_agent(tmp_path: Path, *, config: EmailAgentConfig) -> EmailAgent:
 
 
 @pytest.mark.asyncio
+async def test_email_agent_outbound_draft_sends_rendered_html_for_markdown_tables(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+        ),
+    )
+    monkeypatch.setattr(agent, "_refresh_mail_client_from_store", AsyncMock(return_value=None))
+
+    captured_payload: dict[str, Any] = {}
+
+    class FakeMailClient:
+        async def resolve_mailbox(self, *, mailbox_id=None, mailbox_address=None):
+            assert mailbox_address == "assistant@example.com"
+            return {"id": "mbx_primary", "address": "assistant@example.com"}
+
+        async def create_draft(self, payload):
+            captured_payload.update(payload)
+            return {"id": "draft_markdown_table"}
+
+    agent.mail_client = FakeMailClient()  # type: ignore[assignment]
+    task = _make_task(
+        intent="email.reason",
+        task_id="tsk_render_markdown_email",
+        input_payload={"mailbox_address": "assistant@example.com"},
+    )
+
+    markdown = """# AI Hackathons
+
+| Hackathon | Dates | Organizer |
+|---|---|---|
+| **MLH Global Hack Week** | June 12-18, 2026 | Major League Hacking |
+"""
+
+    await agent._create_outbound_draft(  # noqa: SLF001 - targeted regression seam
+        task=task,
+        recipients=[{"email": "owner@example.com", "name": None}],
+        cc_recipients=[],
+        bcc_recipients=[],
+        subject="AI Hackathons",
+        text_body=markdown,
+    )
+
+    assert captured_payload["text_body"].startswith("AI Hackathons")
+    assert "|---|---|---|" not in captured_payload["text_body"]
+    assert "Hackathon: MLH Global Hack Week" in captured_payload["text_body"]
+    assert "<table" in captured_payload["html_body"]
+    assert "<strong>MLH Global Hack Week</strong>" in captured_payload["html_body"]
+
+
+@pytest.mark.asyncio
 async def test_email_agent_manage_instruction_roundtrip_and_recall(tmp_path: Path) -> None:
     agent = _build_agent(
         tmp_path,

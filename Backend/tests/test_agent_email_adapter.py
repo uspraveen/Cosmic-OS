@@ -362,6 +362,53 @@ async def test_agent_email_adapter_renders_markdown_for_drafts_and_replies() -> 
 
 
 @pytest.mark.asyncio
+async def test_agent_email_adapter_renders_markdown_tables_for_gmail_clients() -> None:
+    adapter = AgentEmailAdapter(
+        cosmic_mail_base_url="http://cosmic-mail.local",
+        cosmic_mail_api_token="token",
+        primary_mailbox_address="assistant@example.com",
+    )
+
+    class FakeClient:
+        created_payload = None
+
+        async def resolve_mailbox(self, *, mailbox_id=None, mailbox_address=None):
+            return {"id": "mbx_primary", "address": "assistant@example.com"}
+
+        async def create_draft(self, payload):
+            self.created_payload = payload
+            return {"id": "draft_table"}
+
+        async def send_draft(self, draft_id: str):
+            return {"id": "msg_table", "draft_id": draft_id, "status": "sent"}
+
+    fake_client = FakeClient()
+    adapter.client = fake_client  # type: ignore[assignment]
+
+    markdown = """# AI Hackathons
+
+| Hackathon | Dates | Organizer |
+|---|---|---|
+| **MLH Global Hack Week** | June 12-18, 2026 | Major League Hacking |
+"""
+
+    await adapter.send(
+        {
+            "subject": "AI Hackathons",
+            "content": markdown,
+            "to": [{"email": "owner@example.com", "name": "Owner"}],
+        },
+        channel="agent-email",
+    )
+
+    assert fake_client.created_payload is not None
+    assert "|---|---|---|" not in str(fake_client.created_payload["text_body"])
+    assert "Hackathon: MLH Global Hack Week" in str(fake_client.created_payload["text_body"])
+    assert "<table" in str(fake_client.created_payload["html_body"])
+    assert "<strong>MLH Global Hack Week</strong>" in str(fake_client.created_payload["html_body"])
+
+
+@pytest.mark.asyncio
 async def test_agent_email_adapter_send_skips_untrusted_thread_responses() -> None:
     adapter = AgentEmailAdapter(
         cosmic_mail_base_url="http://cosmic-mail.local",

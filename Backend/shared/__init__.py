@@ -85,6 +85,12 @@ from .map_artifacts import (
     is_supported_map_artifact,
 )
 from .response_blocks import build_response_blocks
+from .email_rendering import (
+    RenderedEmailBody,
+    render_markdown_email_bodies,
+    render_markdown_email_html,
+    render_markdown_email_text,
+)
 from .cosmic_mail_client import (
     CosmicMailClient,
     CosmicMailClientError,
@@ -112,6 +118,7 @@ __all__ = [
     "Heartbeat",
     "ModelSpec",
     "NON_TERMINAL_EVENTS",
+    "RenderedEmailBody",
     "SOURCE_PRIORITY_MAP",
     "STREAM_MAXLEN",
     "STREAM_MAXLEN_APPROX",
@@ -144,6 +151,9 @@ __all__ = [
     "SUPPORTED_TABULAR_EXTENSIONS",
     "SUPPORTED_TABULAR_MIME_TYPES",
     "build_response_blocks",
+    "render_markdown_email_bodies",
+    "render_markdown_email_html",
+    "render_markdown_email_text",
     "sign_task_envelope",
     "utcnow",
     "validate_outbound_version",
