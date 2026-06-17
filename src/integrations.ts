@@ -1,4 +1,4 @@
-export type IntegrationStatus = 'needs_auth' | 'connected' | 'revoked'
+export type IntegrationStatus = 'needs_auth' | 'connected' | 'revoked' | 'reauth_required' | 'degraded'
 
 export interface IntegrationToolDefinition {
   id: string
@@ -125,6 +125,10 @@ export const GOOGLE_TOOL_DEFINITIONS: IntegrationToolDefinition[] = [
 ]
 
 const GOOGLE_TOOL_MAP = new Map(GOOGLE_TOOL_DEFINITIONS.map((tool) => [tool.id, tool]))
+const GOOGLE_SCOPE_IMPLICATIONS: Record<string, string[]> = {
+  'https://www.googleapis.com/auth/calendar': ['https://www.googleapis.com/auth/calendar.events'],
+  'https://www.googleapis.com/auth/drive': ['https://www.googleapis.com/auth/drive.file'],
+}
 
 function makeDraftId() {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -253,6 +257,8 @@ export function toggleGoogleAccountTool(account: IntegrationAccountRecord, toolI
 
 export function statusLabel(status: IntegrationStatus) {
   if (status === 'connected') return 'Connected'
+  if (status === 'reauth_required') return 'Reconnect'
+  if (status === 'degraded') return 'Degraded'
   if (status === 'revoked') return 'Disconnected'
   return 'Needs Auth'
 }
@@ -279,13 +285,19 @@ export function formatRelativeConnection(timestamp?: number) {
 }
 
 export function scopesMatch(account: IntegrationAccountRecord) {
-  return account.required_scopes.every((scope) => account.granted_scopes.includes(scope))
+  return account.required_scopes.every((requiredScope) => {
+    if (account.granted_scopes.includes(requiredScope)) return true
+    return account.granted_scopes.some((grantedScope) =>
+      (GOOGLE_SCOPE_IMPLICATIONS[grantedScope] ?? []).includes(requiredScope),
+    )
+  })
 }
 
 export function accountNeedsReconnect(account: IntegrationAccountRecord) {
   return (
     account.status !== 'connected' ||
     !account.metadata?.has_refresh_token ||
+    account.metadata?.scope_match === false ||
     !scopesMatch(account)
   )
 }

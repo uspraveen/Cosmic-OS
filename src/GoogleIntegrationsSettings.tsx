@@ -265,7 +265,7 @@ export default function GoogleIntegrationsSettings({ active }: GoogleIntegration
             return (
               <div
                 key={account.account_id}
-                className="cosmic-google-card"
+                className={`cosmic-google-card ${needsReconnect ? 'needs-attention' : ''}`}
                 style={{ animationDelay: `${index * 0.04}s` }}
               >
                 <div className="cosmic-google-card-header">
@@ -283,6 +283,7 @@ export default function GoogleIntegrationsSettings({ active }: GoogleIntegration
                   </div>
                   <div className="cosmic-google-card-badges">
                     {account.is_primary && <span className="cosmic-google-badge primary">Primary</span>}
+                    {needsReconnect && <span className="cosmic-google-badge status-attention">Action needed</span>}
                     <span className={`cosmic-google-badge status-${account.status}`}>{statusLabel(account.status)}</span>
                   </div>
                 </div>

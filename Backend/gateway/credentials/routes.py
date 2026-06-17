@@ -24,6 +24,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
+from .manager import google_scopes_satisfy
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["credentials"])
@@ -61,6 +63,12 @@ class UpdateAccountRequest(BaseModel):
 
 class RefreshRequest(BaseModel):
     credential_ref: str
+
+
+class GoogleAuthHealthRequest(BaseModel):
+    agent_id: str | None = None
+    tool: str
+    required_scopes: list[str] = Field(default_factory=list)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -404,6 +412,166 @@ async def resolve_credential(body: ResolveRequest, request: Request):
     return result
 
 
+@router.post("/internal/credentials/google/auth-health")
+async def google_auth_health(body: GoogleAuthHealthRequest, request: Request):
+    """Probe Google auth health for a specialist without mutating user data.
+
+    This is intentionally stronger than a process ping: it resolves/refreshes
+    the Gateway-owned credential for each relevant connected account and then
+    performs one tiny scoped Google API call. It lets agent heartbeats report
+    reauth_required before a user-visible task fails.
+    """
+    _check_internal_token(request)
+    mgr = _get_manager(request)
+    tool = _normalize_google_tool(body.tool)
+    required_scopes = _normalize_scope_list(body.required_scopes)
+    if not tool:
+        raise HTTPException(status_code=400, detail="Unknown Google tool for auth health probe.")
+    if not required_scopes:
+        raise HTTPException(status_code=400, detail="required_scopes must not be empty.")
+
+    accounts = [
+        account
+        for account in mgr.list_accounts("google")
+        if _account_participates_in_tool(account, tool=tool, required_scopes=required_scopes)
+    ]
+    if not accounts:
+        return {
+            "status": "healthy",
+            "healthy": True,
+            "available": True,
+            "provider": "google",
+            "tool": tool,
+            "agent_id": body.agent_id,
+            "reason": "no_connected_accounts_for_tool",
+            "account_count": 0,
+            "accounts": [],
+        }
+
+    account_results: list[dict[str, Any]] = []
+    for account in accounts:
+        account_id = str(account.get("account_id") or "").strip()
+        account_result = {
+            "account_id": account_id,
+            "email": str(account.get("email") or "").strip(),
+            "display_name": str(account.get("display_name") or "").strip(),
+            "account_label": str(account.get("account_display_label") or account.get("account_label") or "").strip(),
+            "is_primary": bool(account.get("is_primary")),
+            "status": "unknown",
+            "needs_reconnect": False,
+            "error": "",
+        }
+        if not account_id or account.get("status") != "active" or not account.get("has_refresh_token"):
+            account_result.update(
+                {
+                    "status": "reauth_required",
+                    "needs_reconnect": True,
+                    "error": "Google account is not active or has no refresh token.",
+                }
+            )
+            account_results.append(account_result)
+            continue
+        try:
+            auth = await mgr.resolve_credential(
+                provider="google",
+                required_scopes=required_scopes,
+                account_id=account_id,
+                operation_mode="read",
+            )
+            if not auth:
+                account_result.update(
+                    {
+                        "status": "reauth_required",
+                        "needs_reconnect": True,
+                        "error": "Unable to resolve Google credential with required scopes.",
+                    }
+                )
+                account_results.append(account_result)
+                continue
+            await _probe_google_tool_auth(tool, str(auth.get("access_token") or ""))
+            account_result.update(
+                {
+                    "status": "healthy",
+                    "needs_reconnect": False,
+                    "credential_ref": auth.get("credential_ref"),
+                    "expires_at": auth.get("expires_at"),
+                }
+            )
+        except PermissionError as exc:
+            message = str(exc).strip() or "Google credential requires reconnect."
+            mgr.mark_account_auth_error(account_id, message)
+            account_result.update(
+                {
+                    "status": "reauth_required",
+                    "needs_reconnect": True,
+                    "error": message,
+                }
+            )
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            message = _google_auth_probe_error(exc)
+            if status_code in {401, 403}:
+                mgr.mark_account_auth_error(
+                    account_id,
+                    message,
+                    status="needs_auth" if status_code == 401 else "active",
+                )
+                account_result.update(
+                    {
+                        "status": "reauth_required",
+                        "needs_reconnect": True,
+                        "error": message,
+                    }
+                )
+            else:
+                account_result.update(
+                    {
+                        "status": "provider_error",
+                        "needs_reconnect": False,
+                        "error": message,
+                    }
+                )
+        except Exception as exc:
+            account_result.update(
+                {
+                    "status": "provider_error",
+                    "needs_reconnect": False,
+                    "error": str(exc).strip()[:500] or "Google auth health probe failed.",
+                }
+            )
+        account_results.append(account_result)
+
+    healthy_count = sum(1 for item in account_results if item.get("status") == "healthy")
+    reauth_count = sum(1 for item in account_results if item.get("status") == "reauth_required")
+    provider_error_count = sum(1 for item in account_results if item.get("status") == "provider_error")
+    if healthy_count == len(account_results):
+        status_value = "healthy"
+        available = True
+    elif healthy_count > 0:
+        status_value = "degraded"
+        available = True
+    elif reauth_count > 0 and provider_error_count == 0:
+        status_value = "reauth_required"
+        available = False
+    else:
+        status_value = "provider_error"
+        available = False
+
+    return {
+        "status": status_value,
+        "healthy": status_value == "healthy",
+        "available": available,
+        "provider": "google",
+        "tool": tool,
+        "agent_id": body.agent_id,
+        "account_count": len(account_results),
+        "healthy_account_count": healthy_count,
+        "reauth_required_count": reauth_count,
+        "provider_error_count": provider_error_count,
+        "accounts": account_results,
+    }
+
+
 @router.get("/internal/credentials/google/snapshot")
 async def google_integrations_snapshot(request: Request):
     """Gateway-backed integrations snapshot matching the desktop UI contract."""
@@ -453,7 +621,7 @@ async def google_integrations_snapshot(request: Request):
                     "has_refresh_token": bool(account.get("has_refresh_token")),
                     "access_token_expires_at": account.get("token_expires_at"),
                     "last_auth_error": account.get("last_auth_error", ""),
-                    "scope_match": all(scope in granted_scopes for scope in required_scopes) if required_scopes else True,
+                    "scope_match": google_scopes_satisfy(granted_scopes, required_scopes) if required_scopes else True,
                 },
                 "tools": [
                     {
@@ -501,6 +669,8 @@ async def refresh_credential(body: RefreshRequest, request: Request):
 
 
 _CALENDAR_API = "https://www.googleapis.com/calendar/v3"
+_GMAIL_API = "https://gmail.googleapis.com/gmail/v1"
+_DRIVE_API = "https://www.googleapis.com/drive/v3"
 _USERINFO_API = "https://www.googleapis.com/oauth2/v2/userinfo"
 
 
@@ -531,6 +701,114 @@ async def _google_get_json(
             raise PermissionError("Google access token expired.")
         resp.raise_for_status()
         return resp.json()
+
+
+def _normalize_scope_list(scopes: list[str]) -> list[str]:
+    result: list[str] = []
+    for scope in scopes or []:
+        normalized = str(scope or "").strip()
+        if normalized and normalized not in result:
+            result.append(normalized)
+    return result
+
+
+def _normalize_google_tool(value: str) -> str:
+    normalized = str(value or "").strip().lower().replace("_", "-")
+    aliases = {
+        "mail": "gmail",
+        "google-mail": "gmail",
+        "gcal": "calendar",
+        "google-calendar": "calendar",
+        "doc": "docs",
+        "google-docs": "docs",
+        "document": "docs",
+        "documents": "docs",
+        "sheet": "sheets",
+        "google-sheets": "sheets",
+        "spreadsheet": "sheets",
+        "spreadsheets": "sheets",
+    }
+    normalized = aliases.get(normalized, normalized)
+    return normalized if normalized in {"gmail", "calendar", "docs", "sheets"} else ""
+
+
+def _account_participates_in_tool(
+    account: dict[str, Any],
+    *,
+    tool: str,
+    required_scopes: list[str],
+) -> bool:
+    if account.get("status") not in {"active", "needs_auth"}:
+        return False
+    granted_scopes = {
+        str(item).strip()
+        for item in (account.get("granted_scopes") or [])
+        if str(item).strip()
+    }
+    selected_tools = {
+        str(item).strip().lower().replace("_", "-")
+        for item in (account.get("selected_tools") or [])
+        if str(item).strip()
+    }
+    selected_tools = {_normalize_google_tool(item) or item for item in selected_tools}
+    if selected_tools:
+        return tool in selected_tools
+    return bool(set(required_scopes).intersection(granted_scopes))
+
+
+async def _probe_google_tool_auth(tool: str, access_token: str) -> None:
+    if not access_token:
+        raise PermissionError("Google access token is missing.")
+    params: dict[str, Any]
+    if tool == "gmail":
+        await _google_get_json(access_token, f"{_GMAIL_API}/users/me/profile")
+        return
+    if tool == "calendar":
+        await _google_get_json(
+            access_token,
+            f"{_CALENDAR_API}/users/me/calendarList",
+            {"maxResults": 1, "showDeleted": "false"},
+        )
+        return
+    if tool == "docs":
+        params = {
+            "q": "mimeType='application/vnd.google-apps.document' and trashed=false",
+            "pageSize": 1,
+            "fields": "files(id)",
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true",
+        }
+        await _google_get_json(access_token, f"{_DRIVE_API}/files", params)
+        return
+    if tool == "sheets":
+        params = {
+            "q": "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
+            "pageSize": 1,
+            "fields": "files(id)",
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true",
+        }
+        await _google_get_json(access_token, f"{_DRIVE_API}/files", params)
+        return
+    raise ValueError(f"Unknown Google tool: {tool}")
+
+
+def _google_auth_probe_error(exc: httpx.HTTPStatusError) -> str:
+    status_code = exc.response.status_code
+    try:
+        payload = exc.response.json()
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        error_payload = payload.get("error")
+        if isinstance(error_payload, dict):
+            message = str(error_payload.get("message") or "").strip()
+            status = str(error_payload.get("status") or "").strip()
+            if message and status:
+                return f"Google API error {status_code} ({status}): {message}"[:500]
+            if message:
+                return f"Google API error {status_code}: {message}"[:500]
+    return f"Google API error {status_code}"[:500]
 
 
 async def _fetch_calendar_list(access_token: str) -> list[dict]:

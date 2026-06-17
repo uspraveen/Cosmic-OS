@@ -28,6 +28,19 @@ from .store import CredentialStore
 logger = logging.getLogger(__name__)
 
 _GENERIC_ACCOUNT_LABELS = {"", "google account", "google"}
+_GOOGLE_SCOPE_IMPLICATIONS = {
+    "https://www.googleapis.com/auth/drive": {
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/drive.metadata",
+        "https://www.googleapis.com/auth/drive.metadata.readonly",
+        "https://www.googleapis.com/auth/drive.readonly",
+    },
+    "https://www.googleapis.com/auth/calendar": {
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.events.readonly",
+        "https://www.googleapis.com/auth/calendar.readonly",
+    },
+}
 
 
 def _is_generic_account_label(value: str | None) -> bool:
@@ -62,6 +75,25 @@ def _hint_matches_value(normalized_hint: str, normalized_value: str) -> bool:
     if len(normalized_value) >= 4 and normalized_value in normalized_hint:
         return True
     return False
+
+
+def google_scopes_satisfy(granted_scopes: list[str] | set[str], required_scopes: list[str] | set[str]) -> bool:
+    granted = {
+        str(scope or "").strip()
+        for scope in granted_scopes
+        if str(scope or "").strip()
+    }
+    if not granted:
+        return False
+    effective_granted = set(granted)
+    for scope in granted:
+        effective_granted.update(_GOOGLE_SCOPE_IMPLICATIONS.get(scope, set()))
+    required = {
+        str(scope or "").strip()
+        for scope in required_scopes
+        if str(scope or "").strip()
+    }
+    return required.issubset(effective_granted)
 
 
 # Google Calendar scopes for Phase 1
@@ -473,9 +505,7 @@ class CredentialManager:
             return None
 
         # 6. Check scope coverage
-        granted = set(cred["granted_scopes"])
-        required = set(required_scopes)
-        if not required.issubset(granted):
+        if not google_scopes_satisfy(cred["granted_scopes"], required_scopes):
             # Scope mismatch — needs re-consent
             self._store.log_audit(
                 action="resolve",
@@ -577,6 +607,25 @@ class CredentialManager:
             action="purge",
             provider=acct["provider"],
             result="success",
+            credential_ref=cred["credential_ref"] if cred else "",
+        )
+
+    def mark_account_auth_error(self, account_id: str, error: str, *, status: str = "needs_auth") -> None:
+        acct = self._store.get_account(account_id)
+        if acct is None:
+            return
+        self._store.update_account(
+            account_id,
+            status=status,
+            metadata_patch={
+                "last_auth_error": str(error or "Google credential requires reconnect.")[:500],
+            },
+        )
+        cred = self._store.get_active_credential(account_id)
+        self._store.log_audit(
+            action="auth_health_probe",
+            provider=acct["provider"],
+            result="failed",
             credential_ref=cred["credential_ref"] if cred else "",
         )
 

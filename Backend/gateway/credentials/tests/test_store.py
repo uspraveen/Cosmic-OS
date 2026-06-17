@@ -17,6 +17,7 @@ sys.path.insert(0, str(BACKEND_ROOT))
 
 from gateway.credentials.store import CredentialStore
 from gateway.credentials.encryption import encrypt_token_str, decrypt_token
+from gateway.credentials.manager import google_scopes_satisfy
 
 
 @pytest.fixture
@@ -40,6 +41,21 @@ def store(tmp_db):
 
 
 # ── Account CRUD tests ───────────────────────────────────────────────────────
+
+
+def test_google_scope_implications_allow_broader_workspace_scopes() -> None:
+    assert google_scopes_satisfy(
+        ["https://www.googleapis.com/auth/drive"],
+        ["https://www.googleapis.com/auth/drive.file"],
+    )
+    assert google_scopes_satisfy(
+        ["https://www.googleapis.com/auth/calendar"],
+        ["https://www.googleapis.com/auth/calendar.events"],
+    )
+    assert not google_scopes_satisfy(
+        ["https://www.googleapis.com/auth/drive.file"],
+        ["https://www.googleapis.com/auth/drive"],
+    )
 
 
 class TestAccountCRUD:

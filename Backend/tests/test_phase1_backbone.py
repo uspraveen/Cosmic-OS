@@ -319,6 +319,36 @@ async def test_registry_live_state_skips_stale_or_overloaded_instances() -> None
     assert found == (None, None)
 
 
+@pytest.mark.asyncio
+async def test_registry_live_state_treats_degraded_as_available_but_reauth_required_unavailable() -> None:
+    client = FakeRedis()
+    card = _sample_card()
+    await register_intent_index("cosmic/research-agent:1.0.0", card, client)
+    degraded = Heartbeat(
+        agent_id="cosmic/research-agent:1.0.0",
+        instance_id="inst_degraded",
+        healthy=True,
+        current_load=0,
+        max_concurrency=3,
+        heartbeat_ttl_sec=30,
+        last_seen=utcnow(),
+    )
+    reauth_required = Heartbeat(
+        agent_id="cosmic/research-agent:1.0.0",
+        instance_id="inst_reauth",
+        healthy=False,
+        current_load=0,
+        max_concurrency=3,
+        heartbeat_ttl_sec=30,
+        last_seen=utcnow(),
+    )
+    await write_heartbeat(degraded, client, status="degraded", details={"tool": "gmail"})
+    await write_heartbeat(reauth_required, client, status="reauth_required", details={"tool": "gmail"})
+
+    found = await find_available_instance("research.topic", client)
+    assert found == ("cosmic/research-agent:1.0.0", "inst_degraded")
+
+
 def test_task_ledger_initializes_plan_tables_and_roundtrips_steps(tmp_path: Path) -> None:
     ledger = TaskLedger(tmp_path / "task_ledger.db")
     ledger.initialize()

@@ -2,12 +2,23 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import { ArrowLeft, Power, RefreshCw, RotateCw, Video } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import './island.css'
-import Settings from './Settings'
+import Settings, { type SettingsView } from './Settings'
 import WeatherAnimation from './WeatherAnimation'
 import DotBurstCheckmark from './DotBurstCheckmark'
 import AgentWorkSlide, { type AgentWorkPayload } from './AgentWorkSlide'
 import type { SearchPosition } from './App'
 import CalendarMonthView from './CalendarMonthView'
+import {
+  AUTH_ATTENTION_REMINDER_INTERVAL_MS,
+  AUTH_ATTENTION_SNOOZE_MS,
+  getGoogleAuthAttentionItems,
+  loadAuthAttentionPrefs,
+  pruneAuthAttentionPrefs,
+  saveAuthAttentionPrefs,
+  type AuthAttentionItem,
+  type AuthAttentionPrefs,
+} from './authAttention'
+import type { IntegrationsSnapshot } from './integrations'
 import {
   EMPTY_CALENDAR_AGENDA,
   formatCalendarTime,
@@ -122,7 +133,12 @@ interface DynamicIslandProps {
     groq?: boolean
     anthropic?: boolean
   }
-  authData?: any
+  authData?: {
+    fullName?: string
+    gatewayUrl?: string
+    gatewayApiToken?: string
+    [key: string]: unknown
+  }
   gatewayConnection?: {
     state: 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error'
     connected: boolean
@@ -196,10 +212,20 @@ interface IslandNotificationDetail {
   provider?: string
 }
 
+interface AuthAttentionReminderState {
+  item: AuthAttentionItem
+  count: number
+}
+
+type AgentWorkSmokeWindow = Window & {
+  __cosmicSmokeIsland?: (payload: AgentWorkPayload | { stop: true } | null) => void
+}
+
 const DOT_PROGRESS_COLUMNS = 28
 const DOT_PROGRESS_ROWS = 3
 const CALENDAR_REFRESH_MS = 5 * 60 * 1000
 const CALENDAR_STALE_AFTER_MS = 2 * 60 * 1000
+const AUTH_ATTENTION_REFRESH_MS = 5 * 60 * 1000
 
 /** Severe + advisory island alerts; used by weather slide and auto-peek scheduling. */
 const WEATHER_ALERT_PEEK_MS = 5000
@@ -382,6 +408,7 @@ export default function DynamicIsland({
   const [showVolume, setShowVolume] = useState(false)
   const [internalHover, setInternalHover] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [settingsInitialView, setSettingsInitialView] = useState<SettingsView>('main')
   const [isAnchored, setIsAnchored] = useState(false)
 
   // Voice State
@@ -408,6 +435,9 @@ export default function DynamicIsland({
 
   // Temporary Google integration toast (connect / disconnect / remove) — show in island then auto-dismiss
   const [integrationToast, setIntegrationToast] = useState<IntegrationToastState | null>(null)
+  const [authAttentionItems, setAuthAttentionItems] = useState<AuthAttentionItem[]>([])
+  const [authAttentionPrefs, setAuthAttentionPrefs] = useState<AuthAttentionPrefs>(() => loadAuthAttentionPrefs())
+  const [authAttentionReminder, setAuthAttentionReminder] = useState<AuthAttentionReminderState | null>(null)
   const integrationToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const integrationToastIdRef = useRef(0)
   const integrationDotsTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -436,6 +466,10 @@ export default function DynamicIsland({
       setCalendarRefreshing(false)
     }, 8000)
     window.cosmic.getCalendarAgenda()
+  }, [])
+
+  const requestIntegrationsSnapshot = useCallback(() => {
+    window.cosmic?.getIntegrations?.()
   }, [])
 
   const openCalendarEventDetail = useCallback((event: CalendarAgendaEvent) => {
@@ -503,6 +537,7 @@ export default function DynamicIsland({
       !!mailInboundNotification ||
       !!approvalRequestNotification ||
       !!integrationToast ||
+      !!authAttentionReminder ||
       !!selectedCalendarEvent ||
       showMonthView,
     [
@@ -513,6 +548,7 @@ export default function DynamicIsland({
       mailInboundNotification,
       approvalRequestNotification,
       integrationToast,
+      authAttentionReminder,
       selectedCalendarEvent,
       showMonthView,
     ],
@@ -527,6 +563,7 @@ export default function DynamicIsland({
     !!mailInboundNotification ||
     !!approvalRequestNotification ||
     !!integrationToast ||
+    !!authAttentionReminder ||
     !!selectedCalendarEvent ||
     voiceActive ||
     weatherAlertPeek ||
@@ -559,6 +596,7 @@ export default function DynamicIsland({
       setMailInboundNotification(null)
       setApprovalRequestNotification(null)
       setIntegrationToast(null)
+      setAuthAttentionReminder(null)
       if (integrationToastTimerRef.current) {
         clearTimeout(integrationToastTimerRef.current)
         integrationToastTimerRef.current = null
@@ -666,7 +704,7 @@ export default function DynamicIsland({
 
   useEffect(() => {
     const listener = (raw: Event) => {
-      const detail = (raw as CustomEvent<any>).detail || {}
+      const detail = ((raw as CustomEvent<Record<string, unknown>>).detail || {}) as Record<string, unknown>
       const kind = String(detail.kind || '').trim()
       if (kind === 'inbound') {
         setMailInboundNotification({
@@ -909,6 +947,101 @@ export default function DynamicIsland({
     }
   }, [requestCalendarAgenda])
 
+  useEffect(() => {
+    saveAuthAttentionPrefs(authAttentionPrefs)
+  }, [authAttentionPrefs])
+
+  useEffect(() => {
+    const activeKeys = new Set(authAttentionItems.map((item) => item.key))
+    setAuthAttentionPrefs((current) => {
+      const next = pruneAuthAttentionPrefs(current, activeKeys)
+      return JSON.stringify(next) === JSON.stringify(current) ? current : next
+    })
+  }, [authAttentionItems])
+
+  useEffect(() => {
+    const offIntegrations = window.cosmic?.onIntegrationsUpdate((snapshot: IntegrationsSnapshot) => {
+      setAuthAttentionItems(getGoogleAuthAttentionItems(snapshot))
+    })
+    const offShown = window.cosmic?.onShown(() => {
+      requestIntegrationsSnapshot()
+    })
+    const offIntegration = window.cosmic?.onIntegrationEvent((event: IntegrationToastEvent) => {
+      if (event.provider === 'google') {
+        window.setTimeout(requestIntegrationsSnapshot, 700)
+      }
+    })
+
+    requestIntegrationsSnapshot()
+    const intervalId = window.setInterval(requestIntegrationsSnapshot, AUTH_ATTENTION_REFRESH_MS)
+    return () => {
+      offIntegrations?.()
+      offShown?.()
+      offIntegration?.()
+      window.clearInterval(intervalId)
+    }
+  }, [requestIntegrationsSnapshot])
+
+  useEffect(() => {
+    if (authAttentionReminder) return
+    if (authAttentionItems.length === 0) return
+    if (
+      searchActive ||
+      hovered ||
+      internalHover ||
+      showSettings ||
+      voiceActive ||
+      notificationEvent ||
+      mailInboundNotification ||
+      approvalRequestNotification ||
+      integrationToast ||
+      selectedCalendarEvent ||
+      showMonthView ||
+      agentWorkPayload
+    ) {
+      return
+    }
+
+    const nowMs = Date.now()
+    const item = authAttentionItems.find((candidate) => {
+      if (authAttentionPrefs.neverNotifyByKey[candidate.key]) return false
+      const snoozedUntil = Number(authAttentionPrefs.snoozedUntilByKey[candidate.key] || 0)
+      if (Number.isFinite(snoozedUntil) && snoozedUntil > nowMs) return false
+      const lastNotifiedAt = Number(authAttentionPrefs.lastNotifiedAtByKey[candidate.key] || 0)
+      return !Number.isFinite(lastNotifiedAt) || lastNotifiedAt <= 0 || nowMs - lastNotifiedAt >= AUTH_ATTENTION_REMINDER_INTERVAL_MS
+    })
+    if (!item) return
+
+    const timer = window.setTimeout(() => {
+      setAuthAttentionReminder({ item, count: authAttentionItems.length })
+      setAuthAttentionPrefs((current) => ({
+        ...current,
+        lastNotifiedAtByKey: {
+          ...current.lastNotifiedAtByKey,
+          [item.key]: Date.now(),
+        },
+      }))
+    }, 1200)
+
+    return () => window.clearTimeout(timer)
+  }, [
+    agentWorkPayload,
+    approvalRequestNotification,
+    authAttentionItems,
+    authAttentionPrefs,
+    authAttentionReminder,
+    hovered,
+    internalHover,
+    integrationToast,
+    mailInboundNotification,
+    notificationEvent,
+    searchActive,
+    selectedCalendarEvent,
+    showMonthView,
+    showSettings,
+    voiceActive,
+  ])
+
   // Google integration events → temporary island toast (connect / disconnect status)
   useEffect(() => {
     const showToast = (
@@ -1035,13 +1168,13 @@ export default function DynamicIsland({
     // DevTools-friendly global helper:
     //   __cosmicSmokeIsland({ agentId: 'web-search' })
     //   __cosmicSmokeIsland(null)  // clear
-    ;(window as any).__cosmicSmokeIsland = (payload: AgentWorkPayload | { stop: true } | null) => {
+    ;(window as AgentWorkSmokeWindow).__cosmicSmokeIsland = (payload: AgentWorkPayload | { stop: true } | null) => {
       apply(payload)
     }
 
     return () => {
       window.removeEventListener('cosmic:island-agent-work', onAgentWork)
-      try { delete (window as any).__cosmicSmokeIsland } catch { /* ignore */ }
+      try { delete (window as AgentWorkSmokeWindow).__cosmicSmokeIsland } catch { /* ignore */ }
     }
   }, [])
 
@@ -1869,6 +2002,79 @@ export default function DynamicIsland({
     )
   }
 
+  const authAttentionCount = authAttentionItems.length
+
+  const openAuthAttentionSettings = useCallback(() => {
+    setAuthAttentionReminder(null)
+    setSettingsInitialView('integrations-google')
+    setShowSettings(true)
+  }, [])
+
+  const snoozeAuthAttentionReminder = useCallback(() => {
+    const item = authAttentionReminder?.item
+    if (!item) return
+    setAuthAttentionPrefs((current) => ({
+      ...current,
+      snoozedUntilByKey: {
+        ...current.snoozedUntilByKey,
+        [item.key]: Date.now() + AUTH_ATTENTION_SNOOZE_MS,
+      },
+    }))
+    setAuthAttentionReminder(null)
+  }, [authAttentionReminder])
+
+  const neverShowAuthAttentionReminder = useCallback(() => {
+    const item = authAttentionReminder?.item
+    if (!item) return
+    setAuthAttentionPrefs((current) => ({
+      ...current,
+      neverNotifyByKey: {
+        ...current.neverNotifyByKey,
+        [item.key]: true,
+      },
+    }))
+    setAuthAttentionReminder(null)
+  }, [authAttentionReminder])
+
+  const renderAuthAttentionReminder = () => {
+    if (!authAttentionReminder) return null
+    const { item, count } = authAttentionReminder
+    return (
+      <motion.div
+        key={item.key}
+        className="auth-attention-shell"
+        initial={{ opacity: 0, y: 10, scale: 0.985, filter: 'blur(10px)' }}
+        animate={{ opacity: 1, y: 0, scale: 1, filter: 'blur(0px)' }}
+        transition={{ duration: 0.36, ease: [0.22, 1, 0.36, 1] }}
+      >
+        <div className="auth-attention-header">
+          <div className="auth-attention-mark" aria-hidden="true">
+            <span />
+          </div>
+          <div className="auth-attention-copy">
+            <span className="auth-attention-provider">Google Workspace</span>
+            <strong>{item.title}</strong>
+            <p>{item.detail || item.message}</p>
+          </div>
+          <span className="auth-attention-status">
+            {count > 1 ? `${count} items` : 'Reauth'}
+          </span>
+        </div>
+        <div className="auth-attention-actions">
+          <button type="button" className="auth-attention-action primary" onClick={openAuthAttentionSettings}>
+            Auth now
+          </button>
+          <button type="button" className="auth-attention-action" onClick={snoozeAuthAttentionReminder}>
+            Snooze
+          </button>
+          <button type="button" className="auth-attention-action quiet" onClick={neverShowAuthAttentionReminder}>
+            Never show
+          </button>
+        </div>
+      </motion.div>
+    )
+  }
+
   const renderIntegrationToast = () => {
     if (!integrationToast) return null
     const dotsAreTransitioningToSuccess =
@@ -1961,11 +2167,13 @@ export default function DynamicIsland({
 
   const notificationIslandActive = !!(notificationEvent || mailInboundNotification || approvalRequestNotification)
 
-  // Override 'expanded' style if Month View or integration toast is open
+  // Override 'expanded' style if Month View or integration / auth attention toast is open
   const islandStyle = selectedCalendarEvent
     ? {}
     : showMonthView
       ? { width: '400px', height: '360px', borderRadius: '0 0 36px 36px' }
+      : authAttentionReminder
+        ? { width: '500px', height: '156px', borderRadius: '0 0 34px 34px' }
       : integrationToast
         ? { width: '456px', height: '136px', borderRadius: '0 0 30px 30px' }
         : notificationIslandActive
@@ -2244,6 +2452,7 @@ export default function DynamicIsland({
   }
 
   const renderContent = () => {
+    if (authAttentionReminder) return renderAuthAttentionReminder()
     if (integrationToast) return renderIntegrationToast()
     if (agentWorkPayload) return <AgentWorkSlide payload={agentWorkPayload} />
     if (notificationEvent) return renderNotification()
@@ -2262,7 +2471,7 @@ export default function DynamicIsland({
   return (
     <>
       <div
-        className={`island ${expanded ? 'expanded' : ''} ${integrationToast ? `integration-open tone-${integrationToast.tone}` : ''} ${expanded && notificationIslandActive ? 'island-notification-slide' : ''} ${agentWorkPayload ? 'agent-work-active' : ''}`}
+        className={`island ${expanded ? 'expanded' : ''} ${authAttentionReminder ? 'auth-attention-open' : ''} ${integrationToast ? `integration-open tone-${integrationToast.tone}` : ''} ${expanded && notificationIslandActive ? 'island-notification-slide' : ''} ${agentWorkPayload ? 'agent-work-active' : ''}`}
         onMouseEnter={() => {
           if (weatherAlertPeekRef.current && Date.now() >= peekUserCancelArmTimestampRef.current) {
             cancelWeatherPeekForUserHover()
@@ -2273,7 +2482,7 @@ export default function DynamicIsland({
         onWheel={onWheel}
         style={{
           ...dynamicBgStyle, // Apply background opacity here
-          ...(expanded && (showMonthView || selectedCalendarEvent || notificationEvent || mailInboundNotification || approvalRequestNotification || integrationToast)
+          ...(expanded && (showMonthView || selectedCalendarEvent || notificationEvent || mailInboundNotification || approvalRequestNotification || integrationToast || authAttentionReminder)
             ? islandStyle
             : {}),
           pointerEvents: 'auto'
@@ -2283,7 +2492,7 @@ export default function DynamicIsland({
 
         {expanded && (
           <>
-            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !mailInboundNotification && !approvalRequestNotification && !integrationToast && !agentWorkPayload && (
+            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !mailInboundNotification && !approvalRequestNotification && !integrationToast && !authAttentionReminder && !agentWorkPayload && (
               <>
                 <div style={{ position: 'absolute', top: 0, bottom: '50px', left: 0, width: '40px', zIndex: 50, cursor: activeSlide > 0 ? 'w-resize' : 'default' }} onMouseEnter={() => switchSlide('prev')} />
                 <div style={{ position: 'absolute', top: 0, bottom: '50px', right: 0, width: '40px', zIndex: 50, cursor: activeSlide < TOTAL_SLIDES - 1 ? 'e-resize' : 'default' }} onMouseEnter={() => switchSlide('next')} />
@@ -2303,7 +2512,7 @@ export default function DynamicIsland({
               </button>
             )}
 
-            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !mailInboundNotification && !approvalRequestNotification && !integrationToast && !agentWorkPayload && (
+            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !mailInboundNotification && !approvalRequestNotification && !integrationToast && !authAttentionReminder && !agentWorkPayload && (
               <>
                 <div className="island-anchor-container">
                   <button className={`anchor-btn ${isAnchored ? 'active' : ''}`} onClick={(e) => { e.stopPropagation(); setIsAnchored(!isAnchored) }}>
@@ -2313,10 +2522,20 @@ export default function DynamicIsland({
 
                 <div className="island-settings-container">
                   <button
-                    className={`settings-btn ${showSettings ? 'active' : ''}`}
-                    onClick={(e) => { e.stopPropagation(); setShowSettings(s => !s) }}
+                    className={`settings-btn ${showSettings ? 'active' : ''} ${authAttentionCount > 0 ? 'needs-attention' : ''}`}
+                    aria-label={authAttentionCount > 0 ? 'Open settings. Integrations need attention.' : 'Open settings'}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      if (showSettings) {
+                        setShowSettings(false)
+                      } else {
+                        setSettingsInitialView('main')
+                        setShowSettings(true)
+                      }
+                    }}
                   >
                     <svg width="12" height="12" fill="currentColor" viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z" /></svg>
+                    {authAttentionCount > 0 && <span className="settings-btn-attention-dot" aria-hidden="true" />}
                   </button>
                 </div>
 
@@ -2345,6 +2564,8 @@ export default function DynamicIsland({
           authData={authData}
           gatewayConnection={gatewayConnection}
           onLogout={onLogout}
+          initialView={settingsInitialView}
+          authAttentionCount={authAttentionCount}
         />
       )}
     </>

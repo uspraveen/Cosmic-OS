@@ -3,19 +3,29 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+import json
+
 import redis.asyncio as redis
 
 from shared import Heartbeat, heartbeat_key, intent_members_key, utcnow
 
 
-def heartbeat_mapping(heartbeat: Heartbeat, *, status: str | None = None) -> dict[str, str]:
-    return {
+def heartbeat_mapping(
+    heartbeat: Heartbeat,
+    *,
+    status: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    mapping = {
         "status": status or ("healthy" if heartbeat.healthy else "unhealthy"),
         "current_load": str(int(heartbeat.current_load)),
         "max_conc": str(int(heartbeat.max_concurrency)),
         "heartbeat_ttl": str(int(heartbeat.heartbeat_ttl_sec)),
         "last_seen": heartbeat.last_seen.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
+    if details:
+        mapping["health_details"] = json.dumps(details, ensure_ascii=False, sort_keys=True)
+    return mapping
 
 
 async def register_intent_index(agent_id: str, card: dict[str, Any], client: redis.Redis) -> None:
@@ -43,9 +53,10 @@ async def write_heartbeat(
     client: redis.Redis,
     *,
     status: str | None = None,
+    details: dict[str, Any] | None = None,
 ) -> str:
     key = heartbeat_key(heartbeat.agent_id, heartbeat.instance_id)
-    await client.hset(key, mapping=heartbeat_mapping(heartbeat, status=status))
+    await client.hset(key, mapping=heartbeat_mapping(heartbeat, status=status, details=details))
     await client.expire(key, int(heartbeat.heartbeat_ttl_sec) + 5)
     return key
 
@@ -122,7 +133,7 @@ def _parse_utc_timestamp(value: Any) -> datetime | None:
 def _state_is_available(state: dict[str, Any], *, now: datetime) -> bool:
     if not state:
         return False
-    if str(state.get("status") or "").strip() != "healthy":
+    if str(state.get("status") or "").strip() not in {"healthy", "degraded"}:
         return False
     load = _safe_int(state.get("current_load"), fallback=10**9)
     max_conc = _safe_int(state.get("max_conc"), fallback=0)

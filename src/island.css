@@ -146,6 +146,7 @@
 }
 
 .settings-btn {
+  position: relative;
   pointer-events: auto;
   width: 24px;
   height: 24px;
@@ -160,6 +161,23 @@
   transition: all 0.2s;
 }
 
+.settings-btn.needs-attention {
+  color: rgba(255, 255, 255, 0.56);
+}
+
+.settings-btn-attention-dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #ffd166;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.78),
+    0 0 10px rgba(255, 209, 102, 0.52);
+}
+
 .settings-btn:hover {
   background: rgba(255, 255, 255, 0.15);
   color: #fff;
@@ -172,6 +190,13 @@
   color: #fff;
   transform: scale(1.12) rotate(180deg);
   box-shadow: 0 0 24px rgba(0, 122, 255, 0.6);
+}
+
+.settings-btn.active .settings-btn-attention-dot {
+  background: #ffe08a;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.72),
+    0 0 12px rgba(255, 224, 138, 0.66);
 }
 
 /* MUSIC */
@@ -1983,16 +2008,152 @@
 
 /* ─── INTEGRATION TOAST ─── */
 
+.island.auth-attention-open,
 .island.integration-open {
   box-shadow:
     0 0 0 0.5px rgba(255, 255, 255, 0.12),
     0 12px 30px rgba(0, 0, 0, 0.28);
 }
 
+.island.auth-attention-open .island-content,
 .island.integration-open .island-content {
   position: relative;
   height: 100%;
   padding: 18px 22px 14px;
+}
+
+.auth-attention-shell {
+  height: 100%;
+  width: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 2px 0 0;
+  font-family: "SF Pro Display", "Segoe UI", sans-serif;
+  color: #fff;
+}
+
+.auth-attention-header {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+  min-width: 0;
+}
+
+.auth-attention-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 209, 102, 0.1);
+  border: 1px solid rgba(255, 209, 102, 0.2);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.auth-attention-mark span {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #ffd166;
+  box-shadow: 0 0 14px rgba(255, 209, 102, 0.44);
+}
+
+.auth-attention-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.auth-attention-provider {
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.auth-attention-copy strong {
+  min-width: 0;
+  font-size: 17px;
+  line-height: 1.08;
+  font-weight: 580;
+  letter-spacing: -0.03em;
+  color: rgba(255, 255, 255, 0.96);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.auth-attention-copy p {
+  margin: 0;
+  max-width: 350px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: rgba(255, 255, 255, 0.54);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.auth-attention-status {
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(255, 209, 102, 0.1);
+  border: 1px solid rgba(255, 209, 102, 0.18);
+  color: rgba(255, 226, 151, 0.92);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.auth-attention-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+
+.auth-attention-action {
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 999px;
+  padding: 7px 12px;
+  background: rgba(255, 255, 255, 0.055);
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: transform 0.18s ease, background 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+}
+
+.auth-attention-action:hover {
+  transform: translateY(-1px);
+  background: rgba(255, 255, 255, 0.09);
+  color: rgba(255, 255, 255, 0.95);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.auth-attention-action.primary {
+  background: rgba(255, 255, 255, 0.94);
+  color: #0a0a0b;
+  border-color: rgba(255, 255, 255, 0.7);
+}
+
+.auth-attention-action.primary:hover {
+  background: #fff;
+}
+
+.auth-attention-action.quiet {
+  color: rgba(255, 255, 255, 0.42);
 }
 
 .it-shell {

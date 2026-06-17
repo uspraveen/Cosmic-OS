@@ -3827,7 +3827,7 @@ kbd {
 }
 
 .assistant-collapsible-header.thinking {
-  color: rgba(255, 214, 122, 0.76);
+  color: rgba(255, 255, 255, 0.62);
 }
 
 .assistant-collapsible-header.flow {

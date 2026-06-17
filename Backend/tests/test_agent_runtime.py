@@ -204,6 +204,37 @@ version_info:
     return card
 
 
+def _write_google_agent_card(tmp_path: Path) -> Path:
+    card = tmp_path / "agent_card.yaml"
+    card.write_text(
+        """
+agent_id: cosmic/gmail-agent:1.0.0
+display_name: Gmail Agent
+description: Test Google-backed worker.
+intents:
+  - name: gmail.search
+    description: Search Gmail
+auth_requirements:
+  gmail.search:
+    provider: google
+    scopes:
+      - https://www.googleapis.com/auth/gmail.modify
+policies:
+  allowed_senders:
+    - cosmic/orchestrator:1.0.0
+sla:
+  max_concurrency: 2
+  heartbeat_interval_sec: 10
+  heartbeat_ttl_sec: 30
+  max_task_duration_sec: 30
+  provider_health_probe_interval_sec: 30
+stream_key: streams:cosmic/gmail-agent:1.0.0
+""".strip(),
+        encoding="utf-8",
+    )
+    return card
+
+
 def _signed_task(*, agent_id: str, secret: str, sender: str = "cosmic/orchestrator:1.0.0") -> TaskEnvelope:
     task = TaskEnvelope(
         task_id="tsk_agent_runtime",
@@ -330,6 +361,53 @@ async def test_agent_runtime_registers_card_and_heartbeats(tmp_path: Path) -> No
     assert client.expirations["registry:cosmic/test-agent:1.0.0:inst_001"] == 35
 
     await agent.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_publishes_google_provider_auth_health(tmp_path: Path) -> None:
+    card_path = _write_google_agent_card(tmp_path)
+    client = FakeRedis()
+    requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            json={
+                "status": "reauth_required",
+                "healthy": False,
+                "available": False,
+                "provider": "google",
+                "tool": "gmail",
+                "account_count": 1,
+                "reauth_required_count": 1,
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        agent = DummyAgent(
+            agent_card_path=card_path,
+            redis_client=client,
+            registry_db_path=tmp_path / "registry.db",
+            instance_id="inst_001",
+            agent_secret="agent-secret",
+            gateway_url="http://gateway",
+            gateway_internal_token="internal-token",
+            http_client=http_client,
+        )
+
+        await agent.register()
+
+        heartbeat_key = "registry:cosmic/gmail-agent:1.0.0:inst_001"
+        assert client.hashes[heartbeat_key]["status"] == "reauth_required"
+        assert client.hashes[heartbeat_key]["health_details"]
+        assert requests[-1] == {
+            "agent_id": "cosmic/gmail-agent:1.0.0",
+            "tool": "gmail",
+            "required_scopes": ["https://www.googleapis.com/auth/gmail.modify"],
+        }
+
+        await agent.stop()
 
 
 @pytest.mark.asyncio

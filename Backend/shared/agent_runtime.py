@@ -87,6 +87,12 @@ class AgentRuntime:
         self.heartbeat_ttl_sec = max(1, int(sla.get("heartbeat_ttl_sec") or 30))
         self.max_task_duration_sec = max(1, int(sla.get("max_task_duration_sec") or 300))
         self.claim_min_idle_ms = self.max_task_duration_sec * 2 * 1000
+        self.provider_health_probe_interval_sec = self._safe_positive_int(
+            sla.get("provider_health_probe_interval_sec")
+            or os.getenv("AGENT_PROVIDER_HEALTH_PROBE_INTERVAL_SEC", "300"),
+            fallback=300,
+            minimum=30,
+        )
 
         policies = self.agent_card.get("policies") if isinstance(self.agent_card.get("policies"), dict) else {}
         raw_allowed_senders = policies.get("allowed_senders") if isinstance(policies.get("allowed_senders"), list) else []
@@ -113,6 +119,8 @@ class AgentRuntime:
         self.step_plan: StepPlan | None = None
         self.memory_read: MemoryRead | None = None
         self.memory_write: MemoryWrite | None = None
+        self._provider_health_probe_cache: dict[str, Any] | None = None
+        self._provider_health_probe_last_at = 0.0
 
     async def on_startup(self) -> None:
         return None
@@ -503,7 +511,122 @@ class AgentRuntime:
         return task.model_copy(update={"intent": resume_intent, "input": merged_input})
 
     async def _publish_heartbeat(self, *, healthy: bool, status: str | None = None) -> None:
-        await write_heartbeat(self._heartbeat(healthy=healthy), self.redis, status=status)
+        heartbeat_healthy = healthy
+        heartbeat_status = status
+        health_details: dict[str, Any] | None = None
+        if healthy:
+            health_details = await self.provider_health_probe()
+            if health_details:
+                heartbeat_status = str(health_details.get("status") or heartbeat_status or "healthy")
+                heartbeat_healthy = bool(health_details.get("available", health_details.get("healthy", True)))
+        await write_heartbeat(
+            self._heartbeat(healthy=heartbeat_healthy),
+            self.redis,
+            status=heartbeat_status,
+            details=health_details,
+        )
+
+    async def provider_health_probe(self) -> dict[str, Any] | None:
+        """Return provider/auth health for heartbeat state.
+
+        Specialist processes do not own Google refresh tokens; Gateway does.
+        For Google-backed agents, this asks Gateway to verify account auth and
+        run a tiny scoped provider call. Results are cached so 10s heartbeats
+        do not hammer Google APIs.
+        """
+        probe_config = self._google_provider_health_probe_config()
+        if probe_config is None:
+            return None
+        now = asyncio.get_running_loop().time()
+        if (
+            self._provider_health_probe_cache is not None
+            and now - self._provider_health_probe_last_at < self.provider_health_probe_interval_sec
+        ):
+            return dict(self._provider_health_probe_cache)
+        probe = await self._run_google_provider_health_probe(probe_config)
+        self._provider_health_probe_cache = dict(probe)
+        self._provider_health_probe_last_at = now
+        return probe
+
+    async def _run_google_provider_health_probe(self, probe_config: dict[str, Any]) -> dict[str, Any]:
+        if not self.gateway_url or not self.gateway_internal_token:
+            return {
+                "status": "degraded",
+                "healthy": False,
+                "available": True,
+                "provider": "google",
+                "tool": probe_config.get("tool"),
+                "reason": "gateway_credentials_probe_unconfigured",
+            }
+        url = f"{self.gateway_url.rstrip('/')}/internal/credentials/google/auth-health"
+        try:
+            response = await self._http_client.post(
+                url,
+                json={
+                    "agent_id": self.agent_id,
+                    "tool": probe_config["tool"],
+                    "required_scopes": probe_config["required_scopes"],
+                },
+                headers={
+                    "X-Internal-Token": self.gateway_internal_token,
+                    "Content-Type": "application/json",
+                },
+                timeout=10.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise RuntimeError("Gateway auth-health response must be a JSON object.")
+            return payload
+        except Exception as exc:
+            logger.warning(
+                "agent.provider_health_probe_failed agent_id=%s tool=%s error=%s",
+                self.agent_id,
+                probe_config.get("tool"),
+                exc,
+            )
+            return {
+                "status": "degraded",
+                "healthy": False,
+                "available": True,
+                "provider": "google",
+                "tool": probe_config.get("tool"),
+                "reason": "gateway_credentials_probe_failed",
+                "error": str(exc)[:300],
+            }
+
+    def _google_provider_health_probe_config(self) -> dict[str, Any] | None:
+        tool = self._google_provider_tool_name()
+        if not tool:
+            return None
+        auth_requirements = self.agent_card.get("auth_requirements")
+        if not isinstance(auth_requirements, dict):
+            return None
+        scopes: set[str] = set()
+        for requirement in auth_requirements.values():
+            if not isinstance(requirement, dict):
+                continue
+            if str(requirement.get("provider") or "").strip().lower() != "google":
+                continue
+            for scope in requirement.get("scopes") or []:
+                normalized = str(scope or "").strip()
+                if normalized:
+                    scopes.add(normalized)
+        if not scopes:
+            return None
+        return {"provider": "google", "tool": tool, "required_scopes": sorted(scopes)}
+
+    def _google_provider_tool_name(self) -> str | None:
+        agent_id = self.agent_id.lower()
+        if "gmail-agent" in agent_id:
+            return "gmail"
+        if "calendar-agent" in agent_id:
+            return "calendar"
+        if "google-docs-agent" in agent_id:
+            return "docs"
+        if "google-sheets-agent" in agent_id:
+            return "sheets"
+        return None
 
     def _heartbeat(self, *, healthy: bool) -> Heartbeat:
         return Heartbeat(
@@ -550,6 +673,14 @@ class AgentRuntime:
         if not isinstance(intents, list) or not intents:
             raise ValueError("agent_card.yaml must declare at least one intent")
         return self._enrich_agent_card(raw, base_dir=path.parent)
+
+    @staticmethod
+    def _safe_positive_int(value: Any, *, fallback: int, minimum: int = 1) -> int:
+        try:
+            parsed = int(str(value).strip())
+        except (TypeError, ValueError):
+            parsed = fallback
+        return max(minimum, parsed)
 
     def _enrich_agent_card(self, card: dict[str, Any], *, base_dir: Path) -> dict[str, Any]:
         enriched = dict(card)

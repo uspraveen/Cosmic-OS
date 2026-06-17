@@ -366,6 +366,58 @@
   flex-direction: column;
   align-items: flex-start;
   gap: 4px;
+  min-width: 0;
+}
+
+.settings-nav-title-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.settings-attention-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 19px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: rgba(255, 209, 102, 0.11);
+  border: 1px solid rgba(255, 209, 102, 0.18);
+  color: rgba(255, 226, 151, 0.94);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.settings-attention-pill.compact {
+  height: 18px;
+  padding: 0 6px;
+  font-size: 8px;
+}
+
+.settings-attention-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #ffd166;
+  box-shadow: 0 0 12px rgba(255, 209, 102, 0.42);
+  flex-shrink: 0;
+}
+
+.settings-attention-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 209, 102, 0.07);
+  border: 1px solid rgba(255, 209, 102, 0.15);
+  color: rgba(255, 238, 194, 0.92);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .setting-nav-subcopy {
@@ -973,6 +1025,13 @@
   background: rgba(255, 255, 255, 0.06);
   border-color: rgba(255, 255, 255, 0.15);
   transform: translateY(-1px);
+}
+
+.prx-provider-card.needs-attention {
+  border-color: rgba(255, 209, 102, 0.18);
+  background:
+    linear-gradient(90deg, rgba(255, 209, 102, 0.055), transparent 52%),
+    rgba(255, 255, 255, 0.03);
 }
 
 .prx-provider-icon {
@@ -1747,6 +1806,13 @@
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 10px 28px rgba(0, 0, 0, 0.12);
 }
 
+.cosmic-google-card.needs-attention {
+  border-color: rgba(255, 209, 102, 0.18);
+  background:
+    linear-gradient(135deg, rgba(255, 209, 102, 0.045), transparent 38%),
+    rgba(20, 20, 22, 0.45);
+}
+
 @keyframes cosmicCardIn {
   from {
     opacity: 0;
@@ -1847,6 +1913,13 @@
 .cosmic-google-badge.status-needs_auth {
   background: rgba(255, 159, 10, 0.18);
   color: rgba(255, 230, 180, 0.95);
+}
+
+.cosmic-google-badge.status-reauth_required,
+.cosmic-google-badge.status-degraded,
+.cosmic-google-badge.status-attention {
+  background: rgba(255, 209, 102, 0.14);
+  color: rgba(255, 230, 180, 0.96);
 }
 
 .cosmic-google-badge.status-revoked {

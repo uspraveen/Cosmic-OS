@@ -41,9 +41,11 @@ interface SettingsProps {
     detail?: string
   }
   onLogout?: () => void
+  initialView?: SettingsView
+  authAttentionCount?: number
 }
 
-type SettingsView =
+export type SettingsView =
   | 'main'
   | 'monitors'
   | 'api'
@@ -71,8 +73,10 @@ export default function Settings({
   authData,
   gatewayConnection,
   onLogout,
+  initialView,
+  authAttentionCount = 0,
 }: SettingsProps) {
-  const [currentView, setCurrentView] = useState<SettingsView>('main')
+  const [currentView, setCurrentView] = useState<SettingsView>(initialView || 'main')
   const [alphaPreferredHarness, setAlphaPreferredHarness] = useState<'codex' | 'cursor'>('codex')
   const [alphaConfigLoading, setAlphaConfigLoading] = useState(false)
   const [alphaConfigError, setAlphaConfigError] = useState('')
@@ -88,6 +92,10 @@ export default function Settings({
   useEffect(() => {
     if (!isOpen) setCurrentView('main')
   }, [isOpen])
+
+  useEffect(() => {
+    if (isOpen && initialView) setCurrentView(initialView)
+  }, [isOpen, initialView])
 
   useEffect(() => {
     if (!isOpen || currentView !== 'agents') return
@@ -157,6 +165,7 @@ export default function Settings({
   }
 
   const integrationsPreview = GOOGLE_TOOL_DEFINITIONS.map((tool) => tool.label).join(' • ')
+  const hasAuthAttention = authAttentionCount > 0
   const allKeysConfigured =
     Boolean(keyStatus.deepgram) &&
     Boolean(keyStatus.anthropic)
@@ -249,7 +258,10 @@ export default function Settings({
 
                 <button className="setting-nav-btn" onClick={() => setCurrentView('integrations')}>
                   <div className="setting-nav-copy">
-                    <span style={{ fontWeight: 600 }}>Integrations</span>
+                    <div className="settings-nav-title-row">
+                      <span style={{ fontWeight: 600 }}>Integrations</span>
+                      {hasAuthAttention && <span className="settings-attention-pill">Action needed</span>}
+                    </div>
                     <span className="setting-nav-subcopy">
                       Google accounts, tool bundles, and future provider slots.
                     </span>
@@ -326,7 +338,18 @@ export default function Settings({
                   <p>Connect accounts once and let Cosmic use them across supported apps.</p>
                 </div>
 
-                <button className="prx-provider-card" onClick={() => setCurrentView('integrations-google')}>
+                {hasAuthAttention && (
+                  <div className="settings-attention-banner" role="status">
+                    <span className="settings-attention-dot" aria-hidden="true" />
+                    <span>
+                      {authAttentionCount === 1
+                        ? '1 integration needs authentication.'
+                        : `${authAttentionCount} integrations need authentication.`}
+                    </span>
+                  </div>
+                )}
+
+                <button className={`prx-provider-card ${hasAuthAttention ? 'needs-attention' : ''}`} onClick={() => setCurrentView('integrations-google')}>
                   <div className="prx-provider-icon">
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                       <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4" />
@@ -336,7 +359,10 @@ export default function Settings({
                     </svg>
                   </div>
                   <div className="prx-provider-info">
-                    <strong>Google Workspace</strong>
+                    <div className="settings-nav-title-row">
+                      <strong>Google Workspace</strong>
+                      {hasAuthAttention && <span className="settings-attention-pill compact">Reconnect</span>}
+                    </div>
                     <span>{integrationsPreview}</span>
                   </div>
                   <div className="prx-provider-arrow">
