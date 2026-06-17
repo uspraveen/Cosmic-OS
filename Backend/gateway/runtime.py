@@ -19133,6 +19133,19 @@ class GatewayRuntime:
             else None
         )
         if metadata is not None:
+            metadata = dict(metadata)
+            structured_decision_message = self._historical_structured_decision_message(
+                message,
+                metadata,
+            )
+            if structured_decision_message is not None:
+                hydrated["content"] = structured_decision_message
+                metadata["response_blocks"] = self._build_stable_response_blocks(
+                    content=structured_decision_message,
+                    produced_artifacts=self._normalize_produced_artifact_list(
+                        metadata.get("produced_artifacts")
+                    ),
+                )
             hydrated_metadata = self._hydrate_message_metadata_for_client(metadata)
             if not isinstance(hydrated_metadata.get("response_blocks"), list):
                 produced_artifacts = self._normalize_produced_artifact_list(
@@ -19153,6 +19166,43 @@ class GatewayRuntime:
                     hydrated_metadata["response_blocks"] = response_blocks
             hydrated["metadata"] = hydrated_metadata
         return hydrated
+
+    def _historical_structured_decision_message(
+        self,
+        message: dict[str, Any],
+        metadata: dict[str, Any],
+    ) -> str | None:
+        for key in (
+            "weekly_my_tools_review_decision",
+            "heartbeat_decision",
+            "gmail_surface_decision",
+        ):
+            decision = metadata.get(key)
+            if not isinstance(decision, dict):
+                continue
+            if (self._safe_text(decision.get("decision")) or "").lower() != "deliver":
+                continue
+            user_message = self._safe_text(decision.get("message"))
+            if user_message:
+                return user_message
+
+        source = self._safe_text(metadata.get("source"))
+        source_id = self._safe_text(metadata.get("source_id"))
+        if not (
+            (source == "cron" and source_id == SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW)
+            or source == "heartbeat"
+            or source == GMAIL_SURFACE_DECISION_SOURCE
+        ):
+            return None
+
+        payload = self._parse_json_object_from_text(
+            self._safe_text(message.get("content")) or ""
+        )
+        if not isinstance(payload, dict):
+            return None
+        if (self._safe_text(payload.get("decision")) or "").lower() != "deliver":
+            return None
+        return self._safe_text(payload.get("message"))
 
     def _build_recalled_artifact_record(
         self,

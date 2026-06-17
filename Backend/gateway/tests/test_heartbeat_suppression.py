@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -10,6 +11,7 @@ sys.path.insert(0, str(BACKEND_ROOT))
 from gateway.runtime import GatewayRuntime
 from gateway.runtime import ActiveRequest
 from gateway.runtime import GMAIL_SURFACE_DECISION_SOURCE
+from gateway.runtime import SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW
 
 
 def _runtime() -> GatewayRuntime:
@@ -136,6 +138,48 @@ def test_gmail_surface_decision_invalid_output_is_suppressed() -> None:
 
     assert decision["decision"] == "suppress"
     assert decision["reason"] == "invalid_gmail_surface_decision_envelope"
+
+
+def test_historical_weekly_decision_envelope_hydrates_as_user_message() -> None:
+    runtime = object.__new__(GatewayRuntime)
+    note = "Weekly My Tools review found one live CRM link worth checking."
+    payload = json.dumps(
+        {
+            "decision": "deliver",
+            "message": note,
+            "reason": "weekly_review_test",
+            "confidence": 0.9,
+            "notes": "",
+        }
+    )
+
+    hydrated = runtime._hydrate_history_message_for_client(
+        {
+            "role": "assistant",
+            "content": payload,
+            "metadata": {
+                "source": "cron",
+                "source_id": SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW,
+                "response_blocks": [
+                    {
+                        "id": "markdown_1",
+                        "type": "markdown",
+                        "text": payload,
+                    }
+                ],
+            },
+        }
+    )
+
+    assert hydrated["content"] == note
+    response_blocks = hydrated["metadata"]["response_blocks"]
+    assert response_blocks == [
+        {
+            "id": "markdown_1",
+            "type": "markdown",
+            "text": note,
+        }
+    ]
 
 
 def test_gmail_surface_decision_uses_valid_task_envelope_source() -> None:
