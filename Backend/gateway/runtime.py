@@ -16946,8 +16946,9 @@ class GatewayRuntime:
                 weekly_tools_review_decision
                 and weekly_tools_review_decision["decision"] == "deliver"
             ):
-                event["content"] = self._safe_text(
-                    weekly_tools_review_decision.get("message")
+                self._replace_structured_decision_payload_with_message(
+                    event,
+                    weekly_tools_review_decision.get("message"),
                 )
                 event["weekly_my_tools_review_decision"] = (
                     weekly_tools_review_decision
@@ -16983,7 +16984,10 @@ class GatewayRuntime:
                 )
                 return
             if heartbeat_decision and heartbeat_decision["decision"] == "deliver":
-                event["content"] = self._safe_text(heartbeat_decision.get("message"))
+                self._replace_structured_decision_payload_with_message(
+                    event,
+                    heartbeat_decision.get("message"),
+                )
                 event["heartbeat_decision"] = heartbeat_decision
             gmail_surface_decision = (
                 self._parse_gmail_surface_decision(event)
@@ -17013,8 +17017,9 @@ class GatewayRuntime:
                 gmail_surface_decision
                 and gmail_surface_decision["decision"] == "deliver"
             ):
-                event["content"] = self._safe_text(
-                    gmail_surface_decision.get("message")
+                self._replace_structured_decision_payload_with_message(
+                    event,
+                    gmail_surface_decision.get("message"),
                 )
                 event["gmail_surface_decision"] = gmail_surface_decision
             if is_heartbeat_response:
@@ -17693,6 +17698,18 @@ class GatewayRuntime:
             "confidence": confidence,
             "notes": self._safe_text(payload.get("notes")),
         }
+
+    def _replace_structured_decision_payload_with_message(
+        self, event: dict[str, Any], message: Any
+    ) -> None:
+        event["content"] = self._safe_text(message) or ""
+        # Structured proactive decisions are internal envelopes. If the model
+        # also emitted response blocks, those blocks still describe the raw JSON
+        # envelope and clients render blocks ahead of content. Drop them so the
+        # normal block builder regenerates client blocks from the extracted
+        # user-facing message.
+        event.pop("response_blocks", None)
+        event.pop("blocks", None)
 
     def _parse_json_object_from_text(self, text: str) -> dict[str, Any] | None:
         candidate = self._safe_text(text)

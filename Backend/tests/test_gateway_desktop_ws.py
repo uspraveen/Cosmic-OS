@@ -306,13 +306,29 @@ class FakeHeartbeatNoteOrchestratorClient(FakeOrchestratorClient):
 
 
 class FakeWeeklyMyToolsReviewOrchestratorClient(FakeOrchestratorClient):
-    def __init__(self, *, decision: str, message: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        decision: str,
+        message: str = "",
+        include_raw_response_block: bool = False,
+    ) -> None:
         super().__init__()
         self.decision = decision
         self.message = message
+        self.include_raw_response_block = include_raw_response_block
 
     async def stream_task(self, task) -> object:
         self.last_task = task
+        decision_payload = json.dumps(
+            {
+                "decision": self.decision,
+                "message": self.message,
+                "reason": "weekly_review_test",
+                "confidence": 0.9,
+                "notes": "",
+            }
+        )
         yield {
             "type": "task.created",
             "task_id": task.task_id,
@@ -335,14 +351,19 @@ class FakeWeeklyMyToolsReviewOrchestratorClient(FakeOrchestratorClient):
             "request_id": task.input.get("request_id"),
             "session_id": task.session_id,
             "channel": task.channel,
-            "content": json.dumps(
+            "content": decision_payload,
+            **(
                 {
-                    "decision": self.decision,
-                    "message": self.message,
-                    "reason": "weekly_review_test",
-                    "confidence": 0.9,
-                    "notes": "",
+                    "response_blocks": [
+                        {
+                            "id": "markdown_1",
+                            "type": "markdown",
+                            "text": decision_payload,
+                        }
+                    ]
                 }
+                if self.include_raw_response_block
+                else {}
             ),
             "route": "opus",
             "awaiting_reply": False,
@@ -4838,6 +4859,7 @@ async def test_weekly_my_tools_review_delivers_only_validated_user_message(
     runtime.orchestrator = FakeWeeklyMyToolsReviewOrchestratorClient(
         decision="deliver",
         message=note,
+        include_raw_response_block=True,
     )
     await runtime.start()
     try:
@@ -4866,6 +4888,15 @@ async def test_weekly_my_tools_review_delivers_only_validated_user_message(
         assert history[0]["metadata"]["weekly_my_tools_review_decision"]["decision"] == (
             "deliver"
         )
+        response_blocks = history[0]["metadata"]["response_blocks"]
+        assert response_blocks == [
+            {
+                "id": "markdown_1",
+                "type": "markdown",
+                "text": note,
+            }
+        ]
+        assert "decision" not in response_blocks[0]["text"]
     finally:
         await runtime.stop()
 
