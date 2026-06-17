@@ -2050,17 +2050,12 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: rgba(255, 209, 102, 0.1);
-  border: 1px solid rgba(255, 209, 102, 0.2);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
-}
-
-.auth-attention-mark span {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: #ffd166;
-  box-shadow: 0 0 14px rgba(255, 209, 102, 0.44);
+  background: rgba(255, 209, 102, 0.095);
+  border: 1px solid rgba(255, 209, 102, 0.18);
+  color: rgba(255, 226, 151, 0.96);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 8px 18px rgba(0, 0, 0, 0.12);
 }
 
 .auth-attention-copy {
@@ -2086,6 +2081,16 @@
   font-weight: 580;
   letter-spacing: -0.03em;
   color: rgba(255, 255, 255, 0.96);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.auth-attention-account {
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.1;
+  color: rgba(255, 255, 255, 0.62);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2124,36 +2129,48 @@
 }
 
 .auth-attention-action {
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: 999px;
-  padding: 7px 12px;
-  background: rgba(255, 255, 255, 0.055);
-  color: rgba(255, 255, 255, 0.72);
+  border: none;
+  border-radius: 10px;
+  padding: 8px 14px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.6);
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   cursor: pointer;
-  transition: transform 0.18s ease, background 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+  transition: transform 0.2s cubic-bezier(0.19, 1, 0.22, 1), background 0.2s ease, color 0.2s ease;
 }
 
 .auth-attention-action:hover {
-  transform: translateY(-1px);
-  background: rgba(255, 255, 255, 0.09);
-  color: rgba(255, 255, 255, 0.95);
-  border-color: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .auth-attention-action.primary {
-  background: rgba(255, 255, 255, 0.94);
-  color: #0a0a0b;
-  border-color: rgba(255, 255, 255, 0.7);
+  background: var(--accent, #007AFF);
+  color: #fff;
 }
 
 .auth-attention-action.primary:hover {
-  background: #fff;
+  background: #0a84ff;
+  transform: scale(1.02);
+}
+
+.auth-attention-action.secondary {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.auth-attention-action.secondary:hover {
+  background: rgba(255, 255, 255, 0.15);
 }
 
 .auth-attention-action.quiet {
-  color: rgba(255, 255, 255, 0.42);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.auth-attention-action:active {
+  transform: scale(0.97);
 }
 
 .it-shell {

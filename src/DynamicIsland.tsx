@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
-import { ArrowLeft, Power, RefreshCw, RotateCw, Video } from 'lucide-react'
+import { ArrowLeft, BellRing, Power, RefreshCw, RotateCw, Video } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import './island.css'
 import Settings, { type SettingsView } from './Settings'
@@ -2049,11 +2049,14 @@ export default function DynamicIsland({
       >
         <div className="auth-attention-header">
           <div className="auth-attention-mark" aria-hidden="true">
-            <span />
+            <BellRing size={15} strokeWidth={2.2} />
           </div>
           <div className="auth-attention-copy">
             <span className="auth-attention-provider">Google Workspace</span>
             <strong>{item.title}</strong>
+            <span className="auth-attention-account">
+              {item.email ? item.email : item.accountLabel}
+            </span>
             <p>{item.detail || item.message}</p>
           </div>
           <span className="auth-attention-status">
@@ -2064,7 +2067,7 @@ export default function DynamicIsland({
           <button type="button" className="auth-attention-action primary" onClick={openAuthAttentionSettings}>
             Auth now
           </button>
-          <button type="button" className="auth-attention-action" onClick={snoozeAuthAttentionReminder}>
+          <button type="button" className="auth-attention-action secondary" onClick={snoozeAuthAttentionReminder}>
             Snooze
           </button>
           <button type="button" className="auth-attention-action quiet" onClick={neverShowAuthAttentionReminder}>
