@@ -192,6 +192,12 @@ class SessionStore:
             )
             connection.execute(
                 """
+                CREATE INDEX IF NOT EXISTS idx_messages_request_role_created
+                    ON messages(request_id, role, created_at)
+                """
+            )
+            connection.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_messages_in_reply_to
                     ON messages(session_id, in_reply_to_request_id)
                 """
@@ -895,6 +901,57 @@ class SessionStore:
         metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else None
         return {
             "message_id": row["message_id"],
+            "role": row["role"],
+            "content": row["content"],
+            "route": row["route"],
+            "request_id": row["request_id"],
+            "in_reply_to_request_id": row["in_reply_to_request_id"],
+            "awaiting_reply": bool(row["awaiting_reply"]),
+            "channel": row["channel"],
+            "created_at": row["created_at"],
+            "metadata": metadata,
+        }
+
+    def find_latest_message_by_request_id(
+        self,
+        *,
+        request_id: str,
+        role: str,
+    ) -> dict[str, Any] | None:
+        if not request_id or role not in {"user", "assistant"}:
+            return None
+
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    message_id,
+                    session_id,
+                    role,
+                    content,
+                    route,
+                    request_id,
+                    in_reply_to_request_id,
+                    awaiting_reply,
+                    channel,
+                    created_at,
+                    metadata_json
+                FROM messages
+                WHERE role = ?
+                  AND request_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (role, request_id),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else None
+        return {
+            "message_id": row["message_id"],
+            "session_id": row["session_id"],
             "role": row["role"],
             "content": row["content"],
             "route": row["route"],

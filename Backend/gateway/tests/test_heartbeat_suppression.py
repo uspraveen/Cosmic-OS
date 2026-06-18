@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import json
 import sys
 from pathlib import Path
@@ -12,6 +13,8 @@ from gateway.runtime import GatewayRuntime
 from gateway.runtime import ActiveRequest
 from gateway.runtime import GMAIL_SURFACE_DECISION_SOURCE
 from gateway.runtime import SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW
+from gateway.scheduler import SchedulerStore
+from gateway.session_store import SessionStore
 
 
 def _runtime() -> GatewayRuntime:
@@ -346,3 +349,94 @@ def test_user_request_can_background_autonomous_foreground_on_same_channel() -> 
     assert runtime.active_requests["req_user"].foreground
     assert events[0]["type"] == "task.backgrounded"
     assert events[0]["request_id"] == "req_heartbeat"
+
+
+def test_heartbeat_recent_delivery_facts_include_completed_mobile_cron_across_rollover(tmp_path) -> None:
+    runtime = object.__new__(GatewayRuntime)
+    scheduler_store = SchedulerStore(tmp_path / "scheduler.db")
+    scheduler_store.initialize(default_timezone="America/Chicago")
+    session_store = SessionStore(tmp_path / "sessions.db")
+    session_store.initialize()
+    runtime.scheduler_store = scheduler_store
+    runtime.session_store = session_store
+
+    scheduled_for = "2026-06-16T13:20:00Z"
+    scheduler_store.upsert_cron(
+        cron_id="cron_todo",
+        name="Todo List - June 16",
+        kind="reminder",
+        description=None,
+        cron_expr="20 8 16 6 *",
+        timezone_name="America/Chicago",
+        next_fire_at=scheduled_for,
+        metadata={
+            "one_shot": True,
+            "delivery_channel": "mobile:mob_123",
+            "delivery_target": "mobile:mob_123",
+        },
+    )
+    scheduler_store.record_cron_result(
+        cron_id="cron_todo",
+        scheduled_for=scheduled_for,
+        status="completed",
+        summary="Reminder ran: Todo List - June 16",
+        next_fire_at=None,
+    )
+    request_id, _ = runtime._cron_execution_identity("cron_todo", scheduled_for)
+    message_id = session_store.append_message(
+        "sess_20260616",
+        role="assistant",
+        content="Good morning. Here's your list for today.",
+        channel="mobile:mob_123",
+        metadata={
+            "request_id": request_id,
+            "source": "cron",
+            "source_id": "cron_todo",
+        },
+    )
+
+    items = runtime._build_recent_user_visible_deliveries(
+        now=datetime.now(timezone.utc),
+    )
+
+    assert len(items) == 1
+    item = items[0]
+    assert item["label"] == "Todo List - June 16"
+    assert item["scheduled_for"] == scheduled_for
+    assert item["delivery_channel"] == "mobile:mob_123"
+    assert item["result_status"] == "completed"
+    assert item["state_for_heartbeat"] == "completed_and_stored"
+    assert item["evidence"] == "session_message"
+    assert item["message_id"] == message_id
+
+
+def test_heartbeat_context_renders_delivery_facts_before_stale_notes() -> None:
+    runtime = object.__new__(GatewayRuntime)
+
+    block = runtime._render_heartbeat_context_block(
+        {
+            "current_session_id": "sess_20260617",
+            "user_timezone": "America/Chicago",
+            "recent_user_visible_deliveries": [
+                {
+                    "source": "cron",
+                    "label": "Todo List - June 16",
+                    "scheduled_for": "2026-06-16T13:20:00Z",
+                    "delivered_at": "2026-06-16T13:20:17Z",
+                    "delivery_channel": "mobile:mob_123",
+                    "result_status": "completed",
+                    "state_for_heartbeat": "completed_and_stored",
+                    "evidence": "session_message",
+                    "summary": "Reminder ran: Todo List - June 16",
+                }
+            ],
+            "heartbeat_notes": "User offline since 8:20 AM CDT.",
+        }
+    )
+
+    assert block is not None
+    facts_index = block.index("### Recent User-Visible Delivery Facts")
+    notes_index = block.index("### Heartbeat Notes")
+    assert facts_index < notes_index
+    assert "Completed/stored items are not pending" in block
+    assert "may contain stale or inferential presence language" in block

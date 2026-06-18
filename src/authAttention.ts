@@ -8,8 +8,8 @@ import {
 } from './integrations'
 
 export const AUTH_ATTENTION_PREFS_KEY = 'cosmic.authAttentionPrefs.v1'
-export const AUTH_ATTENTION_REMINDER_INTERVAL_MS = 60 * 60 * 1000
-export const AUTH_ATTENTION_SNOOZE_MS = 6 * 60 * 60 * 1000
+export const AUTH_ATTENTION_REMINDER_INTERVAL_MS = 2 * 60 * 60 * 1000
+export const AUTH_ATTENTION_SNOOZE_MS = 2 * 60 * 60 * 1000
 
 export interface AuthAttentionItem {
   key: string

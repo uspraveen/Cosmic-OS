@@ -31,6 +31,7 @@ Each heartbeat receives a compact context packet rather than a replayed chat pro
 - Active background tasks and Alpha work.
 - Active or recently touched projects, websites, agents, documents, deployments, and automations.
 - Scheduler status and upcoming user crons.
+- Recent user-visible delivery facts for scheduled/autonomous items, bounded to the last 24-36 hours.
 - Delivery queue status for offline or deferred items.
 - Mobile/desktop presence and selected delivery channel.
 - Whether Cosmic Mail/email delivery is available.
@@ -77,6 +78,11 @@ last beat, this beat, and the next one.
 Use heartbeat_notes as your private scratchpad for compact self-notes across beats:
 read it when continuity matters, append or replace short watchpoints, and remove
 stale notes.
+Never infer that a reminder, cron, email, or calendar item was missed from
+desktop inactivity, missing heartbeat consumption, lack of chat activity, or
+stale heartbeat notes. Use explicit delivery facts when present, and treat
+completed/delivered scheduled items as already handled unless there is concrete
+failure or new follow-up evidence.
 Use the best COSMIC-owned delivery path available; if a proactive item is better
 sent as email, use Cosmic Mail or email capabilities when available.
 Your final response must be one JSON object and nothing else. Do not use Markdown.
@@ -99,6 +105,7 @@ Gateway owns the schedule because Gateway already owns sessions, delivery, prefe
 - Gateway builds a normal `TaskEnvelope` with `source="heartbeat"` and `priority="low"`.
 - The heartbeat request uses an empty live conversation context and a compact memory/context block.
 - Gateway resolves delivery at run time: active desktop first, then active mobile, then the latest mobile push target, then queued desktop fallback.
+- Gateway includes a compact `recent_user_visible_deliveries` digest. It is capped and derived from canonical scheduler/session records, not from model notes.
 - `visual_response_enhancement_enabled` is disabled for heartbeat turns unless explicitly changed later.
 - Heartbeat response chunks and progress are not streamed live; useful final responses still retain their compact Flow/activity log for later inspection.
 - Gateway parses the final heartbeat JSON decision before storage or delivery.
@@ -121,7 +128,18 @@ Expected use:
 - Keep notes compact: watchpoints, project follow-ups, future checks, and ideas worth revisiting on later beats.
 - Remove stale notes once acted on or no longer relevant.
 - Use durable memory/core facts for stable user preferences and identity-level facts; use heartbeat notes for ambient operational continuity.
+- Do not use heartbeat notes as proof that the user was offline, that a notification failed, or that a scheduled item was missed. Notes can be stale; delivery facts win.
 - Do not append a note every beat. Silence is valid when there is nothing to remember.
+
+## Recent Delivery Facts
+
+Heartbeat must distinguish "not recently chatting" from "not delivered." Gateway therefore sends a small factual digest of recent user-visible scheduled/autonomous deliveries.
+
+- The digest is bounded to roughly the last 24-36 hours and a small item cap.
+- It includes completed or failed user-visible cron/reminder runs with label, scheduled time, completion time, result status, channel, and evidence source.
+- When possible, Gateway resolves the cron run back to the stored assistant message across daily session rollover, so `mobile:*` deliveries remain visible to the next day's heartbeat.
+- Completed/stored items are not considered pending. Heartbeat may mention them only when there is a concrete new reason, such as a failed run, a new follow-up requirement, or an explicit user ask.
+- The digest is not a read-receipt system. If an item was delivered but not opened, the heartbeat should say only what the facts show.
 
 ## Calendar Digest
 

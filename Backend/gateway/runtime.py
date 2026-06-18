@@ -159,6 +159,8 @@ Use decision=suppress with an empty message when there is no meaningful user-fac
 HEARTBEAT_SOURCE_ID = "default"
 HEARTBEAT_SUPPRESS_TOKEN = "heartbeat_ok"
 HEARTBEAT_NOTES_CHAR_LIMIT = 4000
+HEARTBEAT_RECENT_DELIVERY_WINDOW_SEC = 36 * 60 * 60
+HEARTBEAT_RECENT_DELIVERY_LIMIT = 8
 GMAIL_SURFACE_DECISION_SOURCE = "gmail_surface"
 TASK_ENVELOPE_ALLOWED_SOURCES = {"user", "cron", "webhook", "heartbeat", "hook", "agent"}
 TASK_ENVELOPE_SOURCE_ALIASES = {
@@ -2348,6 +2350,10 @@ class GatewayRuntime:
             "and to reason about the last beat, this beat, and the next one. "
             "Use heartbeat_notes as your private scratchpad for compact self-notes across beats: "
             "read it when continuity matters, append or replace short watchpoints, and remove stale notes. "
+            "Never infer that a reminder, cron, email, or calendar item was missed from desktop inactivity, "
+            "missing heartbeat consumption, lack of chat activity, or stale heartbeat notes. Use explicit "
+            "delivery facts when present, and treat completed/delivered scheduled items as already handled "
+            "unless there is concrete failure or new follow-up evidence. "
             "Use the best COSMIC-owned "
             "delivery path available; if a proactive item is better sent as email, you may use Cosmic Mail "
             "or email capabilities when available. "
@@ -2376,6 +2382,133 @@ class GatewayRuntime:
             logger.exception("gateway.heartbeat_notes_read_failed path=%s", path)
             return ""
         return self._bounded_excerpt(text, limit=HEARTBEAT_NOTES_CHAR_LIMIT) or ""
+
+    def _build_recent_user_visible_deliveries(
+        self,
+        *,
+        now: datetime,
+    ) -> list[dict[str, Any]]:
+        cutoff = now - timedelta(seconds=HEARTBEAT_RECENT_DELIVERY_WINDOW_SEC)
+        try:
+            crons = self.scheduler_store.list_crons()
+        except Exception:
+            logger.exception("gateway.heartbeat_recent_deliveries_cron_load_failed")
+            return []
+
+        items: list[dict[str, Any]] = []
+        for cron in crons:
+            if not isinstance(cron, dict):
+                continue
+            if self._safe_text(cron.get("kind")) == "system":
+                continue
+            last_fired_at = self._safe_text(cron.get("last_fired_at"))
+            fired_dt = self._parse_utc_iso(last_fired_at)
+            if fired_dt is None or fired_dt < cutoff:
+                continue
+
+            cron_id = self._safe_text(cron.get("cron_id"))
+            metadata = (
+                cron.get("metadata") if isinstance(cron.get("metadata"), dict) else {}
+            )
+            latest_run: dict[str, Any] = {}
+            if cron_id:
+                try:
+                    history = self.scheduler_store.list_cron_history(cron_id, limit=1)
+                except Exception:
+                    logger.exception(
+                        "gateway.heartbeat_recent_delivery_history_failed cron_id=%s",
+                        cron_id,
+                    )
+                    history = []
+                if history and isinstance(history[0], dict):
+                    latest_run = history[0]
+
+            scheduled_for = self._safe_text(latest_run.get("scheduled_for"))
+            request_id = ""
+            if cron_id:
+                request_id, _ = self._cron_execution_identity(cron_id, scheduled_for)
+            assistant_message: dict[str, Any] | None = None
+            if request_id:
+                try:
+                    assistant_message = self.session_store.find_latest_message_by_request_id(
+                        request_id=request_id,
+                        role="assistant",
+                    )
+                except Exception:
+                    logger.exception(
+                        "gateway.heartbeat_recent_delivery_message_lookup_failed request_id=%s",
+                        request_id,
+                    )
+                    assistant_message = None
+
+            result_status = (
+                self._safe_text(latest_run.get("status"))
+                or self._safe_text(cron.get("last_result_status"))
+                or "unknown"
+            )
+            message_channel = (
+                self._safe_text(assistant_message.get("channel"))
+                if isinstance(assistant_message, dict)
+                else ""
+            )
+            message_created_at = (
+                self._safe_text(assistant_message.get("created_at"))
+                if isinstance(assistant_message, dict)
+                else ""
+            )
+            completed_at = (
+                self._safe_text(latest_run.get("completed_at")) or last_fired_at
+            )
+            channel = (
+                message_channel
+                or self._safe_text(metadata.get("delivery_channel"))
+                or self._safe_text(metadata.get("delivery_target"))
+                or "unknown"
+            )
+            if result_status in {"completed", "delivered"} and assistant_message:
+                heartbeat_state = "completed_and_stored"
+            elif result_status in {"completed", "delivered"}:
+                heartbeat_state = "completed_no_message_lookup"
+            elif result_status in {"failed", "deadletter", "error"}:
+                heartbeat_state = "failed"
+            else:
+                heartbeat_state = result_status
+
+            item = {
+                "source": "cron",
+                "id": cron_id,
+                "label": self._safe_text(cron.get("name")) or cron_id or "cron",
+                "kind": self._safe_text(cron.get("kind")) or "reminder",
+                "scheduled_for": scheduled_for,
+                "completed_at": completed_at,
+                "delivered_at": message_created_at or completed_at,
+                "delivery_channel": channel,
+                "result_status": result_status,
+                "state_for_heartbeat": heartbeat_state,
+                "evidence": "session_message" if assistant_message else "cron_history",
+            }
+            summary = self._safe_text(latest_run.get("summary")) or self._safe_text(
+                cron.get("last_result_summary")
+            )
+            if summary:
+                item["summary"] = self._bounded_excerpt(summary, limit=180)
+            if request_id:
+                item["request_id"] = request_id
+            if isinstance(assistant_message, dict):
+                message_id = self._safe_text(assistant_message.get("message_id"))
+                session_id = self._safe_text(assistant_message.get("session_id"))
+                if message_id:
+                    item["message_id"] = message_id
+                if session_id:
+                    item["session_id"] = session_id
+            items.append({key: value for key, value in item.items() if value not in ("", None)})
+
+        items.sort(
+            key=lambda item: self._safe_text(item.get("delivered_at"))
+            or self._safe_text(item.get("completed_at")),
+            reverse=True,
+        )
+        return items[:HEARTBEAT_RECENT_DELIVERY_LIMIT]
 
     async def _build_heartbeat_calendar_digest(
         self,
@@ -5607,6 +5740,7 @@ class GatewayRuntime:
             channel=channel,
             scheduled_for=scheduled_for,
         )
+        recent_deliveries = self._build_recent_user_visible_deliveries(now=now)
         crons = [
             {
                 "label": self._safe_text(item.get("name"))
@@ -5617,6 +5751,10 @@ class GatewayRuntime:
             }
             for item in self.scheduler_store.list_crons()
             if self._safe_text(item.get("kind")) != "system"
+            and (
+                self._safe_text(item.get("next_fire_at"))
+                or bool(item.get("paused"))
+            )
         ][:8]
         packet: dict[str, Any] = {
             "captured_at": utcnow_iso(),
@@ -5655,6 +5793,8 @@ class GatewayRuntime:
             packet["calendar_digest"] = calendar_digest
         if gmail_digest:
             packet["gmail_digest"] = gmail_digest
+        if recent_deliveries:
+            packet["recent_user_visible_deliveries"] = recent_deliveries
         tool_opportunities = self.tool_opportunity_service.heartbeat_digest(limit=8)
         if tool_opportunities.get("items"):
             packet["tool_opportunities"] = tool_opportunities
@@ -5778,9 +5918,55 @@ class GatewayRuntime:
         if preferences:
             lines.extend(["", "### Stable Preferences And Interests"])
             lines.extend(f"- {item}" for item in preferences)
+        recent_deliveries = (
+            context_packet.get("recent_user_visible_deliveries")
+            if isinstance(context_packet.get("recent_user_visible_deliveries"), list)
+            else []
+        )
+        if recent_deliveries:
+            lines.extend(
+                [
+                    "",
+                    "### Recent User-Visible Delivery Facts",
+                    "Use these canonical delivery facts over heartbeat notes or presence guesses. Completed/stored items are not pending unless a concrete failure or new follow-up is shown.",
+                ]
+            )
+            for item in recent_deliveries[:HEARTBEAT_RECENT_DELIVERY_LIMIT]:
+                if not isinstance(item, dict):
+                    continue
+                label = self._safe_text(item.get("label")) or self._safe_text(item.get("id")) or "delivery"
+                source = self._safe_text(item.get("source")) or "system"
+                state = self._safe_text(item.get("state_for_heartbeat")) or self._safe_text(item.get("result_status")) or "unknown"
+                scheduled_for = self._safe_text(item.get("scheduled_for"))
+                delivered_at = self._safe_text(item.get("delivered_at"))
+                channel = self._safe_text(item.get("delivery_channel"))
+                evidence = self._safe_text(item.get("evidence"))
+                summary = self._safe_text(item.get("summary"))
+                details = [
+                    f"source={source}",
+                    f"state={state}",
+                ]
+                if scheduled_for:
+                    details.append(f"scheduled_for={scheduled_for}")
+                if delivered_at:
+                    details.append(f"delivered_at={delivered_at}")
+                if channel:
+                    details.append(f"channel={channel}")
+                if evidence:
+                    details.append(f"evidence={evidence}")
+                line = f"- {label}: " + "; ".join(details)
+                if summary:
+                    line += f"; summary={summary}"
+                lines.append(line)
         heartbeat_notes = self._safe_text(context_packet.get("heartbeat_notes"))
         if heartbeat_notes:
-            lines.extend(["", "### Heartbeat Notes"])
+            lines.extend(
+                [
+                    "",
+                    "### Heartbeat Notes",
+                    "These are model-written continuity notes and may contain stale or inferential presence language. Do not treat them as delivery, open, or offline truth when Recent User-Visible Delivery Facts disagree.",
+                ]
+            )
             lines.append(heartbeat_notes)
         tool_opportunities = (
             context_packet.get("tool_opportunities")

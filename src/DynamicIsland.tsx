@@ -215,6 +215,7 @@ interface IslandNotificationDetail {
 interface AuthAttentionReminderState {
   item: AuthAttentionItem
   count: number
+  keys: string[]
 }
 
 type AgentWorkSmokeWindow = Window & {
@@ -226,6 +227,7 @@ const DOT_PROGRESS_ROWS = 3
 const CALENDAR_REFRESH_MS = 5 * 60 * 1000
 const CALENDAR_STALE_AFTER_MS = 2 * 60 * 1000
 const AUTH_ATTENTION_REFRESH_MS = 5 * 60 * 1000
+const AUTH_ATTENTION_AUTO_DISMISS_MS = 10 * 1000
 
 /** Severe + advisory island alerts; used by weather slide and auto-peek scheduling. */
 const WEATHER_ALERT_PEEK_MS = 5000
@@ -439,6 +441,7 @@ export default function DynamicIsland({
   const [authAttentionPrefs, setAuthAttentionPrefs] = useState<AuthAttentionPrefs>(() => loadAuthAttentionPrefs())
   const [authAttentionReminder, setAuthAttentionReminder] = useState<AuthAttentionReminderState | null>(null)
   const integrationToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const authAttentionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const integrationToastIdRef = useRef(0)
   const integrationDotsTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const burstPlayedRef = useRef(false)
@@ -597,6 +600,10 @@ export default function DynamicIsland({
       setApprovalRequestNotification(null)
       setIntegrationToast(null)
       setAuthAttentionReminder(null)
+      if (authAttentionTimerRef.current) {
+        clearTimeout(authAttentionTimerRef.current)
+        authAttentionTimerRef.current = null
+      }
       if (integrationToastTimerRef.current) {
         clearTimeout(integrationToastTimerRef.current)
         integrationToastTimerRef.current = null
@@ -1003,22 +1010,24 @@ export default function DynamicIsland({
     }
 
     const nowMs = Date.now()
-    const item = authAttentionItems.find((candidate) => {
+    const eligibleItems = authAttentionItems.filter((candidate) => {
       if (authAttentionPrefs.neverNotifyByKey[candidate.key]) return false
       const snoozedUntil = Number(authAttentionPrefs.snoozedUntilByKey[candidate.key] || 0)
       if (Number.isFinite(snoozedUntil) && snoozedUntil > nowMs) return false
       const lastNotifiedAt = Number(authAttentionPrefs.lastNotifiedAtByKey[candidate.key] || 0)
       return !Number.isFinite(lastNotifiedAt) || lastNotifiedAt <= 0 || nowMs - lastNotifiedAt >= AUTH_ATTENTION_REMINDER_INTERVAL_MS
     })
+    const item = eligibleItems[0]
     if (!item) return
 
     const timer = window.setTimeout(() => {
-      setAuthAttentionReminder({ item, count: authAttentionItems.length })
+      const visibleKeys = eligibleItems.map((candidate) => candidate.key)
+      setAuthAttentionReminder({ item, count: authAttentionItems.length, keys: visibleKeys })
       setAuthAttentionPrefs((current) => ({
         ...current,
         lastNotifiedAtByKey: {
           ...current.lastNotifiedAtByKey,
-          [item.key]: Date.now(),
+          ...Object.fromEntries(visibleKeys.map((key) => [key, Date.now()])),
         },
       }))
     }, 1200)
@@ -1220,6 +1229,30 @@ export default function DynamicIsland({
       }
     }
   }, [integrationToastId, integrationToastTone])
+
+  useEffect(() => {
+    if (authAttentionTimerRef.current) {
+      clearTimeout(authAttentionTimerRef.current)
+      authAttentionTimerRef.current = null
+    }
+
+    const reminderKey = authAttentionReminder?.item.key
+    if (!reminderKey) return
+
+    authAttentionTimerRef.current = setTimeout(() => {
+      authAttentionTimerRef.current = null
+      setAuthAttentionReminder((current) => (
+        current?.item.key === reminderKey ? null : current
+      ))
+    }, AUTH_ATTENTION_AUTO_DISMISS_MS)
+
+    return () => {
+      if (authAttentionTimerRef.current) {
+        clearTimeout(authAttentionTimerRef.current)
+        authAttentionTimerRef.current = null
+      }
+    }
+  }, [authAttentionReminder?.item.key])
 
   useEffect(() => {
     if (integrationDotsTransitionTimerRef.current) {
@@ -2005,6 +2038,10 @@ export default function DynamicIsland({
   const authAttentionCount = authAttentionItems.length
 
   const openAuthAttentionSettings = useCallback(() => {
+    if (authAttentionTimerRef.current) {
+      clearTimeout(authAttentionTimerRef.current)
+      authAttentionTimerRef.current = null
+    }
     setAuthAttentionReminder(null)
     setSettingsInitialView('integrations-google')
     setShowSettings(true)
@@ -2013,11 +2050,13 @@ export default function DynamicIsland({
   const snoozeAuthAttentionReminder = useCallback(() => {
     const item = authAttentionReminder?.item
     if (!item) return
+    const keys = authAttentionReminder.keys.length > 0 ? authAttentionReminder.keys : [item.key]
+    const snoozedUntil = Date.now() + AUTH_ATTENTION_SNOOZE_MS
     setAuthAttentionPrefs((current) => ({
       ...current,
       snoozedUntilByKey: {
         ...current.snoozedUntilByKey,
-        [item.key]: Date.now() + AUTH_ATTENTION_SNOOZE_MS,
+        ...Object.fromEntries(keys.map((key) => [key, snoozedUntil])),
       },
     }))
     setAuthAttentionReminder(null)
@@ -2026,11 +2065,12 @@ export default function DynamicIsland({
   const neverShowAuthAttentionReminder = useCallback(() => {
     const item = authAttentionReminder?.item
     if (!item) return
+    const keys = authAttentionReminder.keys.length > 0 ? authAttentionReminder.keys : [item.key]
     setAuthAttentionPrefs((current) => ({
       ...current,
       neverNotifyByKey: {
         ...current.neverNotifyByKey,
-        [item.key]: true,
+        ...Object.fromEntries(keys.map((key) => [key, true])),
       },
     }))
     setAuthAttentionReminder(null)
