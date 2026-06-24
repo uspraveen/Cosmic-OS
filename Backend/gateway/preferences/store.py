@@ -405,8 +405,8 @@ class GatewayPreferenceStore:
             _COSMIC_HEARTBEAT_KEY: {"enabled": True},
             _ALPHA_EXECUTION_PROVIDER_KEY: {"preferred_harness": "codex"},
             _COSMIC_ORCHESTRATOR_MODEL_KEY: {
-                "provider": "anthropic",
-                "model": "",
+                "provider": "fireworks_glm",
+                "model": _FIREWORKS_GLM_MODEL,
             },
         }
         for key, value in defaults.items():

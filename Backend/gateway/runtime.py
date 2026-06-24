@@ -18566,8 +18566,8 @@ class GatewayRuntime:
                 "gateway.cosmic_orchestrator_preference_snapshot_failed; using runtime fallback defaults"
             )
             cosmic_orchestrator_model = {
-                "provider": "anthropic",
-                "model": "",
+                "provider": "fireworks_glm",
+                "model": "accounts/fireworks/models/glm-5p2",
                 "revision": 1,
                 "updated_at": utcnow_iso(),
                 "updated_source": "runtime_fallback",

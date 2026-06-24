@@ -113,7 +113,7 @@ class OrchestratorConfig:
     anthropic_max_input_images: int = 10
     anthropic_max_staged_input_files: int = 4
     anthropic_max_staged_input_file_bytes: int = 20 * 1024 * 1024
-    orchestrator_default_provider: str = "anthropic"
+    orchestrator_default_provider: str = "fireworks_glm"
     fireworks_api_key: str = ""
     fireworks_base_url: str = "https://api.fireworks.ai/inference/v1"
     fireworks_kimi_model: str = "accounts/fireworks/models/kimi-k2p6"
@@ -216,8 +216,8 @@ class OrchestratorConfig:
                 _env_int("ANTHROPIC_MAX_STAGED_INPUT_FILE_BYTES", 20 * 1024 * 1024),
             ),
             orchestrator_default_provider=(
-                os.getenv("COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER", "anthropic").strip().lower()
-                or "anthropic"
+                os.getenv("COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER", "fireworks_glm").strip().lower()
+                or "fireworks_glm"
             ),
             fireworks_api_key=(
                 os.getenv("ORCHESTRATOR_FIREWORKS_API_KEY")

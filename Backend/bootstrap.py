@@ -4783,7 +4783,7 @@ def build_service_env_overrides(
         orchestrator_external.get("COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER"),
         orchestrator_existing.get("COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER"),
         orchestrator_data.get("COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER"),
-        "anthropic",
+        "fireworks_glm",
     )
     memory_url = first_meaningful_value(
         gateway_external.get("COSMIC_MEMORY_URL"),
@@ -4960,7 +4960,7 @@ def build_service_env_overrides(
             "ANTHROPIC_API_KEY": shared_anthropic_api_key or "<anthropic-api-key>",
             "ANTHROPIC_MODEL": opus_model or "claude-opus-4-6",
             "COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER": cosmic_orchestrator_default_provider
-            or "anthropic",
+            or "fireworks_glm",
             "ORCHESTRATOR_FIREWORKS_API_KEY": orchestrator_fireworks_api_key or "",
             "ORCHESTRATOR_FIREWORKS_BASE_URL": orchestrator_fireworks_base_url
             or "https://api.fireworks.ai/inference/v1",

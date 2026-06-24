@@ -259,6 +259,7 @@ def test_build_service_env_overrides_emits_fireworks_glm_defaults(tmp_path) -> N
     )
 
     orchestrator_env = overrides["orchestrator.env"]
+    assert orchestrator_env["COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER"] == "fireworks_glm"
     assert orchestrator_env["ORCHESTRATOR_FIREWORKS_API_KEY"] == "fw-live"
     assert orchestrator_env["ORCHESTRATOR_FIREWORKS_KIMI_MODEL"] == "accounts/fireworks/models/kimi-k2p6"
     assert orchestrator_env["ORCHESTRATOR_FIREWORKS_GLM_MODEL"] == "accounts/fireworks/models/glm-5p2"
