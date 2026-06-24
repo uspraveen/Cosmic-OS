@@ -4558,7 +4558,16 @@ export default function App() {
       return
     }
     lastGatewayResumeRequestAtRef.current = now
-    window.cosmic.requestGatewayResume().catch(() => { })
+    window.cosmic.requestGatewayResume()
+      .then((state: any) => {
+        if (!state) {
+          return
+        }
+        restoreForegroundStreamsFromState(state.foregroundStreams ?? state.foreground_streams, {
+          clearIfNone: false,
+        })
+      })
+      .catch(() => { })
   }
 
   const showTaskSurface = (options: { focusComposer?: boolean; focusInputRequestId?: string | null } = {}) => {

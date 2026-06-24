@@ -411,6 +411,7 @@ export class GatewayConnectionManager {
   private reconnectAttempt = 0
   private manuallyStopped = false
   private pendingResumeRequestId: string | null = null
+  private resumeWaiters = new Map<string, { resolve: (state: ReturnType<GatewayConnectionManager['getState']>) => void, timer: NodeJS.Timeout }>()
   private resumeAttemptCount = 0
   private lastSocketActivityAt = 0
   private currentSessionId: string | null = null
@@ -563,6 +564,11 @@ export class GatewayConnectionManager {
     this.foregroundStreamRequestIndex.clear()
     this.foregroundStreamTaskIndex.clear()
     this.backgroundedRequestIds.clear()
+    for (const [requestId, waiter] of this.resumeWaiters) {
+      clearTimeout(waiter.timer)
+      this.resumeWaiters.delete(requestId)
+      waiter.resolve(this.getState())
+    }
     if (this.socket) {
       const socket = this.socket
       this.socket = null
@@ -577,13 +583,15 @@ export class GatewayConnectionManager {
     this.resumeAttemptCount = 0
     if (this.socket?.readyState === WebSocket.OPEN) {
       try {
-        this.sendResume()
+        const requestId = this.sendResume()
+        return this.waitForResume(requestId)
       } catch {
         this.socket.terminate()
       }
-      return
+      return Promise.resolve(this.getState())
     }
     this.connect()
+    return Promise.resolve(this.getState())
   }
 
   sendQuery(
@@ -691,6 +699,27 @@ export class GatewayConnectionManager {
     this.pendingResumeRequestId = requestId
     this.resumeAttemptCount += 1
     this.scheduleResumeTimeout(requestId)
+    return requestId
+  }
+
+  private waitForResume(requestId: string, timeoutMs = 3500) {
+    return new Promise<ReturnType<GatewayConnectionManager['getState']>>((resolve) => {
+      const timer = setTimeout(() => {
+        this.resumeWaiters.delete(requestId)
+        resolve(this.getState())
+      }, timeoutMs)
+      this.resumeWaiters.set(requestId, { resolve, timer })
+    })
+  }
+
+  private resolveResumeWaiter(requestId: string) {
+    const waiter = this.resumeWaiters.get(requestId)
+    if (!waiter) {
+      return
+    }
+    clearTimeout(waiter.timer)
+    this.resumeWaiters.delete(requestId)
+    waiter.resolve(this.getState())
   }
 
   private upsertHistoryMessage(message: any) {
@@ -1494,6 +1523,10 @@ export class GatewayConnectionManager {
       payload = {
         ...payload,
         foreground_streams: this.getForegroundStreams(),
+      }
+      const responseRequestId = String(payload.request_id || '').trim()
+      if (responseRequestId) {
+        this.resolveResumeWaiter(responseRequestId)
       }
     }
 

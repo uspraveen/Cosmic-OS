@@ -130,6 +130,8 @@ class ClassifyRequest(BaseModel):
 _http_client: Optional[httpx.AsyncClient] = None
 _connection_warmed: bool = False
 _warmup_latency_ms: Optional[float] = None
+_last_provider_error: Optional[str] = None
+_last_provider_status_code: Optional[int] = None
 
 
 # ============================================================================
@@ -456,14 +458,19 @@ def create_http2_client() -> httpx.AsyncClient:
 
 async def prewarm_connection() -> float:
     global _http_client, _connection_warmed, _warmup_latency_ms
+    global _last_provider_error, _last_provider_status_code
 
     if not GROQ_API_KEY:
         logger.warning("GROQ_API_KEY is not configured; model router readiness will remain false.")
         _connection_warmed = False
         _warmup_latency_ms = None
+        _last_provider_error = "missing_groq_api_key"
+        _last_provider_status_code = None
         return -1
 
     if _http_client is None:
+        _last_provider_error = "http_client_not_initialized"
+        _last_provider_status_code = None
         return -1
 
     start = now()
@@ -480,15 +487,26 @@ async def prewarm_connection() -> float:
         response.raise_for_status()
         _connection_warmed = True
         _warmup_latency_ms = (now() - start) * 1000
+        _last_provider_error = None
+        _last_provider_status_code = None
         logger.info(
             "Model Router connection warmed in %.1fms (http2=%s)",
             _warmup_latency_ms,
             HTTP2_ENABLED,
         )
         return _warmup_latency_ms
+    except httpx.HTTPStatusError as exc:  # pragma: no cover - provider failure path
+        _connection_warmed = False
+        _warmup_latency_ms = -1
+        _last_provider_status_code = exc.response.status_code if exc.response is not None else None
+        _last_provider_error = f"provider_http_{_last_provider_status_code or 'unknown'}"
+        logger.warning("Model Router warmup failed: %s", exc)
+        return -1
     except Exception as exc:  # pragma: no cover - network failure path
         _connection_warmed = False
         _warmup_latency_ms = -1
+        _last_provider_error = exc.__class__.__name__
+        _last_provider_status_code = None
         logger.warning("Model Router warmup failed: %s", exc)
         return -1
 
@@ -499,27 +517,45 @@ async def classify_async(
     memory_context: Optional[str] = None,
     max_completion_tokens: int = DEFAULT_MAX_COMPLETION_TOKENS,
 ) -> Tuple[Dict[str, Any], Dict[str, Any], str, Dict[str, Any] | None, str | None, str, str]:
-    global _http_client
+    global _http_client, _connection_warmed
+    global _last_provider_error, _last_provider_status_code
 
     if not GROQ_API_KEY:
+        _last_provider_error = "missing_groq_api_key"
+        _last_provider_status_code = None
         raise RuntimeError("GROQ_API_KEY is not configured")
     if _http_client is None:
+        _last_provider_error = "http_client_not_initialized"
+        _last_provider_status_code = None
         raise RuntimeError("HTTP client is not initialized")
 
     metered_call = begin_metered_call(prefix="call")
     start = now()
-    response = await _http_client.post(
-        f"{CLASSIFIER_BASE_URL}/chat/completions",
-        json={
-            "model": CLASSIFIER_MODEL,
-            "messages": build_messages(user_text, conversation_context, memory_context),
-            "temperature": 0.0,
-            "max_tokens": max_completion_tokens,
-        },
-    )
-    response.raise_for_status()
+    try:
+        response = await _http_client.post(
+            f"{CLASSIFIER_BASE_URL}/chat/completions",
+            json={
+                "model": CLASSIFIER_MODEL,
+                "messages": build_messages(user_text, conversation_context, memory_context),
+                "temperature": 0.0,
+                "max_tokens": max_completion_tokens,
+            },
+        )
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        _connection_warmed = False
+        _last_provider_status_code = exc.response.status_code if exc.response is not None else None
+        _last_provider_error = f"provider_http_{_last_provider_status_code or 'unknown'}"
+        raise
+    except httpx.HTTPError as exc:
+        _connection_warmed = False
+        _last_provider_error = exc.__class__.__name__
+        _last_provider_status_code = None
+        raise
 
     end = now()
+    _last_provider_error = None
+    _last_provider_status_code = None
     result = response.json()
     raw = result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
     parsed = extract_json_object(raw) or default_classifier_output("parse_failed")
@@ -553,6 +589,10 @@ def readiness_payload() -> Tuple[bool, Dict[str, Any]]:
         reasons.append("missing_groq_api_key")
     if _http_client is None:
         reasons.append("http_client_not_initialized")
+    if not _connection_warmed:
+        reasons.append("connection_not_warmed")
+    if _last_provider_error and _last_provider_error not in reasons:
+        reasons.append(_last_provider_error)
 
     ready = not reasons
     return ready, {
@@ -561,6 +601,8 @@ def readiness_payload() -> Tuple[bool, Dict[str, Any]]:
         "http2_enabled": HTTP2_ENABLED,
         "connection_warmed": _connection_warmed,
         "warmup_latency_ms": _warmup_latency_ms,
+        "last_provider_error": _last_provider_error,
+        "last_provider_status_code": _last_provider_status_code,
         "classifier_model": CLASSIFIER_MODEL,
         "classifier_base_url": CLASSIFIER_BASE_URL,
     }
@@ -593,11 +635,15 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health() -> Dict[str, Any]:
+        ready, readiness = readiness_payload()
         return {
-            "status": "healthy",
+            "status": "healthy" if ready else "degraded",
             "http2_enabled": HTTP2_ENABLED,
             "connection_warmed": _connection_warmed,
             "warmup_latency_ms": _warmup_latency_ms,
+            "reasons": readiness.get("reasons", []),
+            "last_provider_error": _last_provider_error,
+            "last_provider_status_code": _last_provider_status_code,
             "classifier_model": CLASSIFIER_MODEL,
             "classifier_base_url": CLASSIFIER_BASE_URL,
         }

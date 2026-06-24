@@ -167,7 +167,7 @@ interface Window {
 
     // Gateway chat APIs
     getGatewayState: () => Promise<GatewaySocketState | null>
-    requestGatewayResume: () => Promise<{ ok: boolean }>
+    requestGatewayResume: () => Promise<GatewaySocketState | null>
     getGatewayPreferences: () => Promise<any>
     saveGatewayPreferences: (payload: {
       visualResponseEnhancementEnabled?: boolean
