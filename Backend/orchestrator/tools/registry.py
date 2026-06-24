@@ -1343,8 +1343,11 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         api_definition={
             "name": "firecrawl_scrape",
             "description": (
-                "Use the Firecrawl specialist agent to scrape a live web page into robust formats such as markdown, html, links, images, or screenshot metadata. "
-                "Prefer this over plain web_fetch when you need page rendering resilience or structured scrape outputs."
+                "Use the Firecrawl specialist agent to scrape a live web page into robust formats such as markdown, html, links, images, or a screenshot. "
+                "Prefer this over plain web_fetch when you need page rendering resilience or structured scrape outputs. "
+                "When the data you need is locked inside an image on the page (a benchmark table, chart, or infographic rendered as a picture rather than text), "
+                "request formats including 'screenshot': COSMIC captures it as an image artifact and the vision model reads it for you. "
+                "For PDF or scanned-document URLs whose text does not come through cleanly, pass parsers=[{\"type\":\"pdf\"}] to force OCR."
             ),
             "input_schema": {
                 "type": "object",
@@ -1356,7 +1359,10 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                     "formats": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Requested formats such as markdown, html, rawHtml, links, images, or screenshot.",
+                        "description": (
+                            "Requested formats such as markdown, html, rawHtml, links, images, or screenshot. "
+                            "Use 'screenshot' to let the vision model read image-locked tables/charts."
+                        ),
                     },
                     "only_main_content": {
                         "type": "boolean",
@@ -1395,12 +1401,20 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                         "description": "Optional Firecrawl proxy tier: auto, basic, or enhanced.",
                         "enum": ["auto", "basic", "enhanced"],
                     },
+                    "parsers": {
+                        "type": "array",
+                        "items": {"type": ["string", "object"]},
+                        "description": (
+                            "Optional Firecrawl document parsers, e.g. [\"pdf\"] or [{\"type\":\"pdf\"}], to force OCR/parsing "
+                            "for PDF or scanned-document URLs whose text is otherwise missing."
+                        ),
+                    },
                 },
                 "required": ["url"],
             },
         },
         group="research",
-        prompt_summary="Robust page scrape via the Firecrawl specialist agent when plain fetch is not enough and you need clean formats or rendered content artifacts.",
+        prompt_summary="Robust page scrape via the Firecrawl specialist agent when plain fetch is not enough and you need clean formats or rendered content artifacts. Use formats:[\"screenshot\"] for image-locked tables/charts and parsers for PDFs.",
         progress_builder=_firecrawl_scrape_progress,
         handler_method="_firecrawl_scrape",
         exposed_to_model=False,
@@ -1412,7 +1426,10 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "name": "firecrawl_extract",
             "description": (
                 "Use the Firecrawl specialist agent to extract structured data from one or more URLs. "
-                "Use this for schema-shaped research outputs, list building, and reliable multi-page extraction."
+                "Use this for schema-shaped research outputs, list building, and reliable multi-page extraction. "
+                "Extraction is text/DOM based, so it cannot reliably read numbers that live inside an image (e.g. a benchmark table rendered as a picture); "
+                "for those, scrape with formats:[\"screenshot\"] and let the vision model read it. "
+                "Fields whose values are not explicitly present are returned as null rather than guessed."
             ),
             "input_schema": {
                 "type": "object",
@@ -1457,12 +1474,20 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                         "type": "integer",
                         "description": "Optional cache max-age in milliseconds.",
                     },
+                    "parsers": {
+                        "type": "array",
+                        "items": {"type": ["string", "object"]},
+                        "description": (
+                            "Optional Firecrawl document parsers, e.g. [\"pdf\"] or [{\"type\":\"pdf\"}], to force OCR/parsing "
+                            "for PDF or scanned-document sources before extraction."
+                        ),
+                    },
                 },
                 "required": ["urls", "prompt"],
             },
         },
         group="research",
-        prompt_summary="Structured extraction via the Firecrawl specialist agent for schema-shaped outputs, list building, and multi-page research tasks.",
+        prompt_summary="Structured extraction via the Firecrawl specialist agent for schema-shaped outputs, list building, and multi-page research tasks. Returns null for absent fields; not for image-locked numbers (use screenshot+vision).",
         progress_builder=_firecrawl_extract_progress,
         handler_method="_firecrawl_extract",
         exposed_to_model=False,

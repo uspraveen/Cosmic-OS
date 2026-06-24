@@ -7,16 +7,23 @@ description: >
 
 intents:
   - name: firecrawl.scrape
-    description: Scrape a single URL into clean content formats such as markdown, html, links, images, or screenshot metadata.
+    description: Scrape a single URL into clean content formats such as markdown, html, links, images, or a screenshot. Use formats:["screenshot"] to capture image-locked tables/charts as an image artifact the vision model can read, and parsers (e.g. ["pdf"]) to force OCR on PDF/scanned sources.
     input_schema: schemas/intents/firecrawl.scrape.input.json
     output_schema: schemas/intents/firecrawl.scrape.output.json
     timeout_sec: 120
+    usage_hints:
+      - Request formats:["screenshot"] when the data you need is rendered as an image (benchmark tables, charts, infographics); the screenshot becomes an image/png artifact for the vision model.
+      - Pass parsers (e.g. ["pdf"] or [{"type":"pdf"}]) for PDF or scanned-document URLs whose text is missing or garbled.
 
   - name: firecrawl.extract
-    description: Run Firecrawl extraction over one or more URLs and return structured data with optional sources.
+    description: Run Firecrawl extraction over one or more URLs and return structured data with optional sources. Text/DOM based; returns null for absent fields and never fabricates. For image-locked numbers, use firecrawl.scrape with formats:["screenshot"] instead.
     input_schema: schemas/intents/firecrawl.extract.input.json
     output_schema: schemas/intents/firecrawl.extract.output.json
     timeout_sec: 180
+    usage_hints:
+      - Extraction cannot read numbers that exist only inside an image; for those use firecrawl.scrape formats:["screenshot"] and let the vision model read it.
+      - Absent values come back as null; cross-check surprising numbers against page text or the screenshot.
+      - Pass parsers (e.g. ["pdf"]) for PDF or scanned-document sources.
 
   - name: firecrawl.agent
     description: Run an autonomous Firecrawl AI agent that searches, navigates, and extracts data from the web given a natural-language prompt.

@@ -23,6 +23,28 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 @dataclass(slots=True)
 class FirecrawlWebScrapeConfig:
     redis_url: str = "redis://127.0.0.1:6379/0"
@@ -35,6 +57,16 @@ class FirecrawlWebScrapeConfig:
     firecrawl_extract_max_wait_sec: float = 120.0
     firecrawl_agent_poll_interval_sec: float = 3.0
     firecrawl_agent_max_wait_sec: float = 240.0
+    # Inline excerpt budgets surfaced back to the orchestrator. Full bodies always
+    # live in artifacts; these only bound what we echo inline so a long page (or a
+    # data table further down the page) is not silently cut off in the model view.
+    inline_markdown_chars: int = 12000
+    inline_html_chars: int = 6000
+    # Capture page screenshots as a real image artifact (image/png) so the
+    # orchestrator's vision path (Kimi) can read image-locked tables/charts.
+    screenshot_as_image_artifact: bool = True
+    screenshot_download_timeout_sec: float = 30.0
+    screenshot_max_bytes: int = 12_000_000
 
     @classmethod
     def from_env(cls) -> "FirecrawlWebScrapeConfig":
@@ -50,4 +82,9 @@ class FirecrawlWebScrapeConfig:
             firecrawl_extract_max_wait_sec=max(15.0, _env_float("FIRECRAWL_EXTRACT_MAX_WAIT_SEC", 120.0)),
             firecrawl_agent_poll_interval_sec=max(1.0, _env_float("FIRECRAWL_AGENT_POLL_INTERVAL_SEC", 3.0)),
             firecrawl_agent_max_wait_sec=max(30.0, _env_float("FIRECRAWL_AGENT_MAX_WAIT_SEC", 240.0)),
+            inline_markdown_chars=max(1000, _env_int("FIRECRAWL_INLINE_MARKDOWN_CHARS", 12000)),
+            inline_html_chars=max(500, _env_int("FIRECRAWL_INLINE_HTML_CHARS", 6000)),
+            screenshot_as_image_artifact=_env_bool("FIRECRAWL_SCREENSHOT_AS_IMAGE_ARTIFACT", True),
+            screenshot_download_timeout_sec=max(5.0, _env_float("FIRECRAWL_SCREENSHOT_DOWNLOAD_TIMEOUT_SEC", 30.0)),
+            screenshot_max_bytes=max(100_000, _env_int("FIRECRAWL_SCREENSHOT_MAX_BYTES", 12_000_000)),
         )

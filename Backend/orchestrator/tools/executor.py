@@ -1167,6 +1167,7 @@ class ToolExecutor:
             "exclude_tags",
             "mobile",
             "proxy",
+            "parsers",
         ):
             value = tool_input.get(key)
             if value not in (None, "", [], {}):
@@ -1197,6 +1198,7 @@ class ToolExecutor:
             "wait_for_ms",
             "timeout_ms",
             "max_age_ms",
+            "parsers",
         ):
             value = tool_input.get(key)
             if value not in (None, "", [], {}):

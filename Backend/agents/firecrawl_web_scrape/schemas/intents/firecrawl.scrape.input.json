@@ -51,6 +51,13 @@
     "proxy": {
       "type": "string",
       "enum": ["auto", "basic", "enhanced"]
+    },
+    "parsers": {
+      "type": "array",
+      "description": "Optional Firecrawl document parsers (e.g. [\"pdf\"] or [{\"type\":\"pdf\"}]) to force OCR/parsing for PDF or scanned-document URLs.",
+      "items": {
+        "type": ["string", "object"]
+      }
     }
   },
   "required": ["url"]

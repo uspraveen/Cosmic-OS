@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -21,9 +22,13 @@ from .config import AGENT_ROOT, BACKEND_ROOT, FirecrawlWebScrapeConfig
 
 logger = logging.getLogger(__name__)
 
-_MAX_INLINE_MARKDOWN_CHARS = 4000
-_MAX_INLINE_HTML_CHARS = 2000
+# Fallback inline excerpt budgets. The effective limits are config-driven
+# (FirecrawlWebScrapeConfig.inline_markdown_chars / inline_html_chars); these
+# constants only apply when a config is unavailable.
+_MAX_INLINE_MARKDOWN_CHARS = 12000
+_MAX_INLINE_HTML_CHARS = 6000
 _MAX_LIST_ITEMS = 25
+_SUPPORTED_IMAGE_MIME = "image/png"
 _RUNS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS firecrawl_session_runs (
     task_id TEXT PRIMARY KEY,
@@ -202,6 +207,7 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
         max_age_ms = self._optional_int(task.input.get("max_age_ms"), minimum=0)
         include_tags = self._normalize_string_list(task.input.get("include_tags"))
         exclude_tags = self._normalize_string_list(task.input.get("exclude_tags"))
+        parsers = self._normalize_parsers(task.input.get("parsers"))
         proxy = str(task.input.get("proxy") or "").strip()
         if wait_for_ms is not None:
             payload["waitFor"] = wait_for_ms
@@ -213,6 +219,8 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
             payload["includeTags"] = include_tags
         if exclude_tags:
             payload["excludeTags"] = exclude_tags
+        if parsers:
+            payload["parsers"] = parsers
         if proxy:
             if proxy not in self.SCRAPE_PROXY_VALUES:
                 raise FirecrawlAgentError(
@@ -311,16 +319,19 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
         wait_for_ms = self._optional_int(task.input.get("wait_for_ms"), minimum=0, maximum=120000)
         timeout_ms = self._optional_int(task.input.get("timeout_ms"), minimum=1000, maximum=180000)
         max_age_ms = self._optional_int(task.input.get("max_age_ms"), minimum=0)
+        parsers = self._normalize_parsers(task.input.get("parsers"))
         if wait_for_ms is not None:
             scrape_options["waitFor"] = wait_for_ms
         if timeout_ms is not None:
             scrape_options["timeout"] = timeout_ms
         if max_age_ms is not None:
             scrape_options["maxAge"] = max_age_ms
+        if parsers:
+            scrape_options["parsers"] = parsers
 
         payload: dict[str, Any] = {
             "urls": urls,
-            "prompt": prompt,
+            "prompt": self._harden_extract_prompt(prompt),
             "enableWebSearch": self._coerce_bool(task.input.get("enable_web_search"), default=False),
             "showSources": self._coerce_bool(task.input.get("show_sources"), default=False),
             "scrapeOptions": scrape_options,
@@ -807,16 +818,130 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
                 )
             )
         screenshot = data.get("screenshot")
+        screenshot_extra_by_id: dict[str, dict[str, str]] = {}
+        synthetic_refs: list[dict[str, str]] = []
         if screenshot not in (None, "", [], {}):
-            manifests.append(
-                self._write_json_artifact(
-                    task=task,
-                    filename="screenshot.json",
-                    payload={"screenshot": screenshot},
-                    source_url=source_url,
-                )
+            shot_manifest, shot_extra = await self._persist_screenshot_artifact(
+                task=task,
+                screenshot=screenshot,
+                source_url=source_url,
             )
-        return manifests, [self._artifact_ref(item) for item in manifests]
+            if shot_manifest is not None:
+                manifests.append(shot_manifest)
+                screenshot_extra_by_id[shot_manifest.artifact_id] = shot_extra or {}
+            elif shot_extra is not None:
+                # Bytes were not retrievable but we still have a fetchable URL; expose a
+                # URL-only image reference (no local path) so the orchestrator vision path
+                # can read it without risking a broken local-file load.
+                synthetic_refs.append({"artifact_id": f"art_{uuid4().hex[:12]}", **shot_extra})
+            else:
+                # Unusable screenshot payload; keep the raw value for debugging only.
+                manifests.append(
+                    self._write_json_artifact(
+                        task=task,
+                        filename="screenshot.json",
+                        payload={"screenshot": screenshot},
+                        source_url=source_url,
+                    )
+                )
+
+        refs = [
+            self._artifact_ref(item, extra=screenshot_extra_by_id.get(item.artifact_id))
+            for item in manifests
+        ]
+        refs.extend(synthetic_refs)
+        return manifests, refs
+
+    async def _persist_screenshot_artifact(
+        self,
+        *,
+        task: TaskEnvelope,
+        screenshot: Any,
+        source_url: str | None,
+    ) -> tuple[ArtifactManifest | None, dict[str, str] | None]:
+        """Turn a Firecrawl screenshot into a vision-readable image artifact.
+
+        Returns (manifest, extra_ref). When the screenshot is a hosted URL we download
+        the PNG (so both the URL-based Fireworks path and the local-bytes Anthropic path
+        can read it) and also carry the URL on the ref. When it is base64 we decode it to
+        bytes. Either way the ref advertises an `image/png` mime so the orchestrator's
+        existing tool-result image pipeline surfaces it and auto-escalates to the vision
+        model. All failures are best-effort and never break the scrape.
+        """
+        if not getattr(self.config, "screenshot_as_image_artifact", True):
+            return None, None
+
+        url: str | None = None
+        raw: bytes | None = None
+        if isinstance(screenshot, str):
+            candidate = screenshot.strip()
+            if candidate.startswith(("http://", "https://")):
+                url = candidate
+                raw = await self._download_image_bytes(url)
+            elif candidate.startswith("data:image"):
+                raw = self._decode_data_uri(candidate)
+            elif candidate:
+                raw = self._decode_base64(candidate)
+
+        if raw is None and url is None:
+            return None, None
+
+        extra: dict[str, str] = {
+            "filename": "screenshot.png",
+            "kind": "screenshot",
+            "mime": _SUPPORTED_IMAGE_MIME,
+        }
+        if url:
+            extra["download_url"] = url
+            extra["provider_url"] = url
+
+        if raw is not None:
+            manifest = self._write_binary_artifact(
+                task=task,
+                filename="screenshot.png",
+                content=raw,
+                mime=_SUPPORTED_IMAGE_MIME,
+                source_url=source_url,
+            )
+            return manifest, extra
+
+        return None, extra
+
+    async def _download_image_bytes(self, url: str) -> bytes | None:
+        try:
+            response = await self._firecrawl_client.get(
+                url,
+                timeout=self.config.screenshot_download_timeout_sec,
+            )
+        except Exception:
+            logger.warning("firecrawl_agent.screenshot_download_failed url=%s", url, exc_info=True)
+            return None
+        if response.status_code >= 400:
+            logger.warning(
+                "firecrawl_agent.screenshot_download_status url=%s status=%d",
+                url,
+                response.status_code,
+            )
+            return None
+        content = response.content or b""
+        if not content or len(content) > self.config.screenshot_max_bytes:
+            return None
+        return content
+
+    def _decode_data_uri(self, value: str) -> bytes | None:
+        try:
+            _, _, encoded = value.partition(",")
+            if not encoded:
+                return None
+            return base64.b64decode(encoded, validate=False)
+        except Exception:
+            return None
+
+    def _decode_base64(self, value: str) -> bytes | None:
+        try:
+            return base64.b64decode(value, validate=True)
+        except Exception:
+            return None
 
     async def _persist_extract_artifacts(
         self,
@@ -868,21 +993,36 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
     def _normalize_scrape_output(self, data: dict[str, Any]) -> dict[str, Any]:
         output_data: dict[str, Any] = {}
         available_formats: list[str] = []
+        markdown_limit = self._inline_markdown_limit()
+        html_limit = self._inline_html_limit()
 
         markdown = data.get("markdown")
         if isinstance(markdown, str) and markdown.strip():
             available_formats.append("markdown")
-            output_data["markdown_excerpt"] = self._clip_text(markdown, limit=_MAX_INLINE_MARKDOWN_CHARS)
+            full_markdown = markdown.strip()
+            output_data["markdown_excerpt"] = self._clip_text(full_markdown, limit=markdown_limit)
+            if len(full_markdown) > markdown_limit:
+                output_data["markdown_truncated"] = True
+                output_data["markdown_full_chars"] = len(full_markdown)
+                output_data["markdown_full_artifact"] = "page.md"
 
         html = data.get("html")
         if isinstance(html, str) and html.strip():
             available_formats.append("html")
-            output_data["html_excerpt"] = self._clip_text(html, limit=_MAX_INLINE_HTML_CHARS)
+            full_html = html.strip()
+            output_data["html_excerpt"] = self._clip_text(full_html, limit=html_limit)
+            if len(full_html) > html_limit:
+                output_data["html_truncated"] = True
+                output_data["html_full_artifact"] = "page.html"
 
         raw_html = data.get("rawHtml")
         if isinstance(raw_html, str) and raw_html.strip():
             available_formats.append("rawHtml")
-            output_data["raw_html_excerpt"] = self._clip_text(raw_html, limit=_MAX_INLINE_HTML_CHARS)
+            full_raw_html = raw_html.strip()
+            output_data["raw_html_excerpt"] = self._clip_text(full_raw_html, limit=html_limit)
+            if len(full_raw_html) > html_limit:
+                output_data["raw_html_truncated"] = True
+                output_data["raw_html_full_artifact"] = "page.raw.html"
 
         links = data.get("links")
         if isinstance(links, list):
@@ -899,7 +1039,15 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
         screenshot = data.get("screenshot")
         if screenshot not in (None, "", [], {}):
             available_formats.append("screenshot")
-            output_data["screenshot"] = screenshot
+            # Never inline raw screenshot bytes/base64 into the model view; surface a
+            # short pointer and rely on the persisted image artifact for vision reads.
+            if isinstance(screenshot, str) and screenshot.strip().startswith(("http://", "https://")):
+                output_data["screenshot_url"] = screenshot.strip()
+            output_data["screenshot_captured"] = True
+            output_data["screenshot_hint"] = (
+                "A page screenshot was captured as an image artifact; COSMIC can read it visually "
+                "(useful when tables/charts are images rather than text)."
+            )
 
         metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
         return {
@@ -1031,7 +1179,7 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
         task_dir.mkdir(parents=True, exist_ok=True)
         path = task_dir / filename
         path.write_text(content, encoding="utf-8")
-        relative_path = path.relative_to(BACKEND_ROOT).as_posix()
+        relative_path = self._logical_artifact_path(path)
         return ArtifactManifest(
             artifact_id=f"art_{uuid4().hex[:12]}",
             task_id=task.task_id,
@@ -1043,12 +1191,110 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
             audience="supporting",
         )
 
-    def _artifact_ref(self, artifact: ArtifactManifest) -> dict[str, str]:
-        return {
+    def _write_binary_artifact(
+        self,
+        *,
+        task: TaskEnvelope,
+        filename: str,
+        content: bytes,
+        mime: str,
+        source_url: str | None,
+    ) -> ArtifactManifest:
+        task_dir = self.artifacts_root / task.task_id / "firecrawl_web_scrape"
+        task_dir.mkdir(parents=True, exist_ok=True)
+        path = task_dir / filename
+        path.write_bytes(content)
+        relative_path = self._logical_artifact_path(path)
+        return ArtifactManifest(
+            artifact_id=f"art_{uuid4().hex[:12]}",
+            task_id=task.task_id,
+            mime=mime,
+            sha256=hashlib.sha256(content).hexdigest(),
+            path=relative_path,
+            source_url=source_url,
+            created_by_agent=self.agent_id,
+            audience="supporting",
+        )
+
+    def _logical_artifact_path(self, path: Path) -> str:
+        # Production artifacts live under BACKEND_ROOT/runs/artifacts, so the logical
+        # path is the BACKEND_ROOT-relative form ("runs/artifacts/..."). When the
+        # artifacts root is configured elsewhere (e.g. tests), fall back to a path
+        # rooted at artifacts_root while preserving the same "runs/artifacts/" prefix.
+        try:
+            return path.relative_to(BACKEND_ROOT).as_posix()
+        except ValueError:
+            return f"runs/artifacts/{path.relative_to(self.artifacts_root).as_posix()}"
+
+    def _artifact_ref(
+        self,
+        artifact: ArtifactManifest,
+        *,
+        extra: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        ref: dict[str, str] = {
             "artifact_id": artifact.artifact_id,
             "path": artifact.path,
             "mime": artifact.mime,
         }
+        if extra:
+            for key, value in extra.items():
+                if value not in (None, ""):
+                    ref[key] = value
+        return ref
+
+    def _inline_markdown_limit(self) -> int:
+        return int(getattr(self.config, "inline_markdown_chars", _MAX_INLINE_MARKDOWN_CHARS) or _MAX_INLINE_MARKDOWN_CHARS)
+
+    def _inline_html_limit(self) -> int:
+        return int(getattr(self.config, "inline_html_chars", _MAX_INLINE_HTML_CHARS) or _MAX_INLINE_HTML_CHARS)
+
+    def _harden_extract_prompt(self, prompt: str) -> str:
+        text = str(prompt or "").strip()
+        guard = (
+            "If a requested value is not explicitly present in the page content, return null for that field. "
+            "Never guess, infer, approximate, or fabricate values, numbers, or facts."
+        )
+        if not text:
+            return guard
+        if guard in text:
+            return text
+        return f"{text}\n\n{guard}"
+
+    def _normalize_parsers(self, value: Any) -> list[Any]:
+        if value in (None, "", [], {}):
+            return []
+        if not isinstance(value, list):
+            raise FirecrawlAgentError(
+                code="INVALID_INPUT",
+                message="parsers must be a list of parser names or parser objects.",
+                retryable=False,
+                next_action="revise_input",
+            )
+        normalized: list[Any] = []
+        for item in value:
+            if isinstance(item, str):
+                candidate = item.strip()
+                if candidate:
+                    normalized.append(candidate)
+            elif isinstance(item, dict):
+                parser_type = str(item.get("type") or "").strip()
+                if not parser_type:
+                    raise FirecrawlAgentError(
+                        code="INVALID_INPUT",
+                        message="Each parser object must include a non-empty 'type'.",
+                        retryable=False,
+                        next_action="revise_input",
+                    )
+                normalized.append(item)
+            else:
+                raise FirecrawlAgentError(
+                    code="INVALID_INPUT",
+                    message="parsers entries must be strings or objects.",
+                    retryable=False,
+                    next_action="revise_input",
+                )
+        return normalized
 
     def _normalize_scrape_formats(self, value: Any) -> list[str]:
         if not isinstance(value, list) or not value:
