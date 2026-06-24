@@ -171,6 +171,36 @@
       },
       "status": "active"
     },
+    "fireworks:accounts/fireworks/models/glm-5p2": {
+      "provider": "fireworks",
+      "model": "accounts/fireworks/models/glm-5p2",
+      "sdk": "openai_compatible",
+      "base_url": "https://api.fireworks.ai/inference/v1",
+      "usage_kind": "chat_completion",
+      "context_window_tokens": 1000000,
+      "max_output_tokens": 131072,
+      "recommended_headroom_reserve_tokens": 16000,
+      "pricing": {
+        "input_per_1m_usd": 1.4,
+        "cached_input_per_1m_usd": 0.26,
+        "output_per_1m_usd": 4.4
+      },
+      "capabilities": {
+        "supports_cached_input_tokens": true,
+        "supports_reasoning_tokens": true,
+        "supports_streaming": true,
+        "supports_image_input": false,
+        "supports_tool_calling": true
+      },
+      "token_field_map": {
+        "prompt_tokens": ["prompt_tokens", "input_tokens"],
+        "completion_tokens": ["completion_tokens", "output_tokens"],
+        "total_tokens": ["total_tokens"],
+        "cached_tokens": ["cached_tokens", "cache_read_input_tokens", "prompt_tokens_details.cached_tokens"],
+        "reasoning_tokens": ["reasoning_tokens", "completion_tokens_details.reasoning_tokens"]
+      },
+      "status": "active"
+    },
     "groq:openai/gpt-oss-20b": {
       "provider": "groq",
       "model": "openai/gpt-oss-20b",

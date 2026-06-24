@@ -6,7 +6,7 @@ type GatewayConnectionState = {
   detail?: string
 }
 
-type CosmicOrchestratorProvider = 'anthropic' | 'fireworks_kimi'
+type CosmicOrchestratorProvider = 'anthropic' | 'fireworks_kimi' | 'fireworks_glm'
 
 interface GatewayPreferencesSettingsProps {
   active: boolean
@@ -81,9 +81,13 @@ function normalizeTimestampedPreference(source: Record<string, unknown>): Timest
 
 function normalizeCosmicProvider(value: unknown): CosmicOrchestratorProvider {
   const normalized = String(value || '').trim().toLowerCase().replace(/-/g, '_')
-  return normalized === 'fireworks' || normalized === 'fireworks_kimi' || normalized === 'kimi' || normalized === 'smarter'
-    ? 'fireworks_kimi'
-    : 'anthropic'
+  if (normalized === 'fireworks' || normalized === 'fireworks_kimi' || normalized === 'kimi' || normalized === 'smarter') {
+    return 'fireworks_kimi'
+  }
+  if (normalized === 'fireworks_glm' || normalized === 'glm' || normalized === 'glm_5p2' || normalized === 'glm_5_2' || normalized === 'glm52') {
+    return 'fireworks_glm'
+  }
+  return 'anthropic'
 }
 
 function normalizePreferences(payload: unknown): GatewayPreferenceSnapshot | null {
@@ -441,7 +445,7 @@ export default function GatewayPreferencesSettings({
         <div className="preferences-card-copy">
           <div className="preferences-card-title">Cosmic Brain</div>
           <div className="preferences-card-note">
-            Choose the model provider behind Cosmic's orchestrator. Smart uses Claude, the current production path; Kimi uses Fireworks K2.6 through the OpenAI-compatible path.
+            Choose the model provider behind Cosmic's orchestrator. Smart uses Claude; Kimi and GLM use Fireworks. If GLM is selected and a turn needs images, Cosmic temporarily routes that turn through Kimi without changing your preference.
           </div>
           {preferences?.cosmic.model && (
             <div className="preferences-card-detail">
@@ -475,6 +479,16 @@ export default function GatewayPreferencesSettings({
           >
             <span>Kimi</span>
             <small>Fireworks K2.6</small>
+          </button>
+          <button
+            type="button"
+            className={`preferences-provider-option ${preferences?.cosmic.provider === 'fireworks_glm' ? 'active' : ''}`}
+            onClick={() => { void handleSelectProvider('fireworks_glm') }}
+            disabled={!canSave}
+            aria-pressed={preferences?.cosmic.provider === 'fireworks_glm'}
+          >
+            <span>GLM</span>
+            <small>Fireworks 5.2</small>
           </button>
         </div>
       </div>

@@ -779,7 +779,7 @@
 
 .preferences-provider-control {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   padding: 4px;
   border-radius: 12px;
@@ -954,6 +954,11 @@
 
   .preferences-provider-control {
     width: 100%;
+    gap: 6px;
+  }
+
+  .preferences-provider-option {
+    padding: 9px 10px;
   }
 
   .preferences-switch {

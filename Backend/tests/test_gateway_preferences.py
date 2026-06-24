@@ -270,6 +270,18 @@ def test_cosmic_orchestrator_model_preference_defaults_and_updates() -> None:
         assert updated["updated_source"] == "test"
         assert updated["updated_device_id"] == "desk_kimi_1"
 
+        updated_glm = runtime.preference_store.set_cosmic_orchestrator_model(
+            "glm",
+            source="test",
+            device_id="desk_glm_1",
+        )
+
+        assert updated_glm["provider"] == "fireworks_glm"
+        assert updated_glm["model"] == "accounts/fireworks/models/glm-5p2"
+        assert updated_glm["revision"] == 3
+        assert updated_glm["updated_source"] == "test"
+        assert updated_glm["updated_device_id"] == "desk_glm_1"
+
 
 @pytest.mark.asyncio
 async def test_process_incoming_message_pins_gateway_preferences_metadata() -> None:

@@ -13,6 +13,7 @@ _ALPHA_EXECUTION_PROVIDER_KEY = "alpha_execution_provider"
 _COSMIC_ORCHESTRATOR_MODEL_KEY = "cosmic_orchestrator_model"
 _COSMIC_HEARTBEAT_KEY = "cosmic_heartbeat"
 _FIREWORKS_KIMI_MODEL = "accounts/fireworks/models/kimi-k2p6"
+_FIREWORKS_GLM_MODEL = "accounts/fireworks/models/glm-5p2"
 
 
 def _json_dumps(value: Any) -> str:
@@ -540,6 +541,8 @@ class GatewayPreferenceStore:
         normalized = str(value or "").strip().lower().replace("-", "_")
         if normalized in {"fireworks", "fireworks_kimi", "kimi", "kimi_k2_6", "smarter"}:
             return "fireworks_kimi"
+        if normalized in {"fireworks_glm", "glm", "glm_5p2", "glm_5_2", "glm52"}:
+            return "fireworks_glm"
         return "anthropic"
 
     def _normalize_cosmic_orchestrator_model(
@@ -551,6 +554,8 @@ class GatewayPreferenceStore:
         normalized_model = str(model or "").strip()
         if normalized_provider == "fireworks_kimi":
             return normalized_model or _FIREWORKS_KIMI_MODEL
+        if normalized_provider == "fireworks_glm":
+            return normalized_model or _FIREWORKS_GLM_MODEL
         return normalized_model
 
     def _connect(self) -> sqlite3.Connection:

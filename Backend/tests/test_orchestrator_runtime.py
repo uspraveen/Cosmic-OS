@@ -308,6 +308,153 @@ async def test_orchestrator_runtime_streams_fireworks_kimi_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_runtime_streams_fireworks_glm_text_path() -> None:
+    runtime_root = Path.cwd() / "pytest-glm-runtime" / uuid4().hex
+    runtime_root.mkdir(parents=True, exist_ok=False)
+    chunks = [
+        b'data: {"choices":[{"delta":{"content":"Hello from GLM."},"finish_reason":null}]}\n\n',
+        b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":4,"total_tokens":15}}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).endswith("/chat/completions"):
+            payload = json.loads(request.content.decode("utf-8"))
+            assert payload["model"] == "accounts/fireworks/models/glm-5p2"
+            assert payload["messages"][0]["role"] == "system"
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=SSEByteStream(chunks),
+            )
+        return httpx.Response(204)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="",
+        fireworks_api_key="fireworks-key",
+        task_ledger_db_path=runtime_root / "task_ledger_glm.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    await runtime.start()
+    try:
+        base_task = _signed_task("signing-secret")
+        task = base_task.model_copy(
+            update={
+                "input": {
+                    **base_task.input,
+                    "cosmic_orchestrator_model": {
+                        "provider": "fireworks_glm",
+                        "model": "accounts/fireworks/models/glm-5p2",
+                    },
+                }
+            }
+        )
+        task = task.model_copy(update={"signature": sign_task_envelope(task, "signing-secret")})
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+        rmtree(runtime_root, ignore_errors=True)
+
+    assert streamed_events[0]["type"] == "task.created"
+    assert streamed_events[0]["model_provider"] == "fireworks_glm"
+    assert streamed_events[0]["model"] == "accounts/fireworks/models/glm-5p2"
+    complete = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert complete["content"] == "Hello from GLM."
+    assert complete["model_provider"] == "fireworks_glm"
+    assert complete["model"] == "accounts/fireworks/models/glm-5p2"
+    assert complete["preferred_model_provider"] == "fireworks_glm"
+    assert complete["preferred_model"] == "accounts/fireworks/models/glm-5p2"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_runtime_falls_back_from_glm_to_kimi_for_images() -> None:
+    runtime_root = Path.cwd() / "pytest-glm-image-runtime" / uuid4().hex
+    runtime_root.mkdir(parents=True, exist_ok=False)
+    chunks = [
+        b'data: {"choices":[{"delta":{"content":"I can inspect the image."},"finish_reason":null}]}\n\n',
+        b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":6,"total_tokens":26}}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).endswith("/chat/completions"):
+            payload = json.loads(request.content.decode("utf-8"))
+            assert payload["model"] == "accounts/fireworks/models/kimi-k2p6"
+            user_messages = [msg for msg in payload["messages"] if msg.get("role") == "user"]
+            assert user_messages
+            assert any(
+                isinstance(msg.get("content"), list)
+                and any(
+                    isinstance(part, dict)
+                    and part.get("type") == "image_url"
+                    and part.get("image_url", {}).get("url") == "https://gateway.test/image.png"
+                    for part in msg["content"]
+                )
+                for msg in user_messages
+            )
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=SSEByteStream(chunks),
+            )
+        return httpx.Response(204)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="",
+        fireworks_api_key="fireworks-key",
+        task_ledger_db_path=runtime_root / "task_ledger_glm_image.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    await runtime.start()
+    try:
+        base_task = _signed_task("signing-secret")
+        task = base_task.model_copy(
+            update={
+                "input": {
+                    **base_task.input,
+                    "cosmic_orchestrator_model": {
+                        "provider": "fireworks_glm",
+                        "model": "accounts/fireworks/models/glm-5p2",
+                    },
+                },
+                "input_artifacts": [
+                    {
+                        "kind": "image",
+                        "mime": "image/png",
+                        "filename": "image.png",
+                        "provider_url": "https://gateway.test/image.png",
+                    }
+                ],
+            }
+        )
+        task = task.model_copy(update={"signature": sign_task_envelope(task, "signing-secret")})
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+        rmtree(runtime_root, ignore_errors=True)
+
+    assert streamed_events[0]["type"] == "task.created"
+    assert streamed_events[0]["model_provider"] == "fireworks_kimi"
+    assert streamed_events[0]["model"] == "accounts/fireworks/models/kimi-k2p6"
+    assert streamed_events[0]["preferred_model_provider"] == "fireworks_glm"
+    assert streamed_events[0]["preferred_model"] == "accounts/fireworks/models/glm-5p2"
+    assert streamed_events[0]["model_fallback_reason"] == "image_input"
+    complete = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert complete["content"] == "I can inspect the image."
+    assert complete["model_provider"] == "fireworks_kimi"
+    assert complete["model"] == "accounts/fireworks/models/kimi-k2p6"
+    assert complete["preferred_model_provider"] == "fireworks_glm"
+    assert complete["preferred_model"] == "accounts/fireworks/models/glm-5p2"
+    assert complete["metrics"]["effective_models"] == ["fireworks_kimi:accounts/fireworks/models/kimi-k2p6"]
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_runtime_separates_fireworks_inline_thinking() -> None:
     runtime_root = Path.cwd() / "pytest-kimi-runtime" / uuid4().hex
     runtime_root.mkdir(parents=True, exist_ok=False)

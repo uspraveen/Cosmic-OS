@@ -4760,6 +4760,25 @@ def build_service_env_overrides(
         slide_existing_env.get("FIREWORKS_KIMI_MODEL"),
         "accounts/fireworks/models/kimi-k2p6",
     )
+    orchestrator_fireworks_glm_model = first_meaningful_value(
+        orchestrator_external.get("ORCHESTRATOR_FIREWORKS_GLM_MODEL"),
+        orchestrator_external.get("FIREWORKS_GLM_MODEL"),
+        orchestrator_existing.get("ORCHESTRATOR_FIREWORKS_GLM_MODEL"),
+        orchestrator_existing.get("FIREWORKS_GLM_MODEL"),
+        orchestrator_data.get("ORCHESTRATOR_FIREWORKS_GLM_MODEL"),
+        orchestrator_data.get("FIREWORKS_GLM_MODEL"),
+        "accounts/fireworks/models/glm-5p2",
+    )
+    orchestrator_fireworks_vision_fallback_model = first_meaningful_value(
+        orchestrator_external.get("ORCHESTRATOR_FIREWORKS_VISION_FALLBACK_MODEL"),
+        orchestrator_external.get("FIREWORKS_VISION_FALLBACK_MODEL"),
+        orchestrator_existing.get("ORCHESTRATOR_FIREWORKS_VISION_FALLBACK_MODEL"),
+        orchestrator_existing.get("FIREWORKS_VISION_FALLBACK_MODEL"),
+        orchestrator_data.get("ORCHESTRATOR_FIREWORKS_VISION_FALLBACK_MODEL"),
+        orchestrator_data.get("FIREWORKS_VISION_FALLBACK_MODEL"),
+        orchestrator_fireworks_kimi_model,
+        "accounts/fireworks/models/kimi-k2p6",
+    )
     cosmic_orchestrator_default_provider = first_meaningful_value(
         orchestrator_external.get("COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER"),
         orchestrator_existing.get("COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER"),
@@ -4946,6 +4965,11 @@ def build_service_env_overrides(
             "ORCHESTRATOR_FIREWORKS_BASE_URL": orchestrator_fireworks_base_url
             or "https://api.fireworks.ai/inference/v1",
             "ORCHESTRATOR_FIREWORKS_KIMI_MODEL": orchestrator_fireworks_kimi_model
+            or "accounts/fireworks/models/kimi-k2p6",
+            "ORCHESTRATOR_FIREWORKS_GLM_MODEL": orchestrator_fireworks_glm_model
+            or "accounts/fireworks/models/glm-5p2",
+            "ORCHESTRATOR_FIREWORKS_VISION_FALLBACK_MODEL": orchestrator_fireworks_vision_fallback_model
+            or orchestrator_fireworks_kimi_model
             or "accounts/fireworks/models/kimi-k2p6",
             "ORCHESTRATOR_CODE_SANDBOX_ENABLED": orchestrator_external.get("ORCHESTRATOR_CODE_SANDBOX_ENABLED")
             or orchestrator_existing.get("ORCHESTRATOR_CODE_SANDBOX_ENABLED")

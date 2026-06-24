@@ -11,6 +11,7 @@ def test_model_specs_registry_contains_active_runtime_models() -> None:
     assert "perplexity:sonar" in specs
     assert "perplexity:pplx-embed-v1-4b" in specs
     assert "fireworks:accounts/fireworks/models/kimi-k2p6" in specs
+    assert "fireworks:accounts/fireworks/models/glm-5p2" in specs
     assert "groq:openai/gpt-oss-20b" in specs
     assert "openai:gpt-5-mini" in specs
     assert "openai:gpt-image-1.5" in specs
@@ -85,6 +86,17 @@ def test_lookup_model_spec_returns_expected_context_metadata() -> None:
     assert kimi.capabilities["supports_tool_calling"] is True
     assert "prompt_tokens_details.cached_tokens" in kimi.token_field_map["cached_tokens"]
     assert "completion_tokens_details.reasoning_tokens" in kimi.token_field_map["reasoning_tokens"]
+
+    glm = get_model_spec("fireworks:accounts/fireworks/models/glm-5p2")
+    assert glm is not None
+    assert glm.sdk == "openai_compatible"
+    assert glm.context_window_tokens == 1_000_000
+    assert glm.max_output_tokens == 131_072
+    assert glm.pricing["input_per_1m_usd"] == 1.4
+    assert glm.pricing["cached_input_per_1m_usd"] == 0.26
+    assert glm.pricing["output_per_1m_usd"] == 4.4
+    assert glm.capabilities["supports_image_input"] is False
+    assert glm.capabilities["supports_tool_calling"] is True
 
 
 def test_estimate_text_tokens_is_bounded_and_nonzero_for_text() -> None:

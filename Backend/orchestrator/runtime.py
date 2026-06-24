@@ -56,6 +56,7 @@ from shared import (
     sign_task_envelope,
     verify_task_envelope,
     is_supported_image_artifact,
+    lookup_model_spec,
 )
 
 from .config import BACKEND_ROOT, OrchestratorConfig
@@ -284,6 +285,15 @@ class InputArtifactPayload:
     content: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class OrchestratorModelSelection:
+    preferred_provider: str
+    preferred_model: str
+    effective_provider: str
+    effective_model: str
+    fallback_reason: str | None = None
+
+
 class OrchestratorRuntime:
     def __init__(
         self,
@@ -419,8 +429,9 @@ class OrchestratorRuntime:
         channel = task.channel
         if not query:
             raise RuntimeError("TaskEnvelope.input.query is required for orchestrator.process")
-        orchestrator_provider = self._select_orchestrator_provider(task)
-        if orchestrator_provider == "fireworks_kimi":
+        model_selection = self._select_initial_orchestrator_model(task)
+        orchestrator_provider = model_selection.effective_provider
+        if self._is_fireworks_provider(orchestrator_provider):
             if not self.config.fireworks_api_key:
                 raise RuntimeError("FIREWORKS_API_KEY is not configured in orchestrator.env.")
         elif not self.config.anthropic_api_key:
@@ -443,19 +454,26 @@ class OrchestratorRuntime:
             "source_id": task.source_id,
         }
 
-        yield {
+        created_event = {
             **ev,
             "type": "task.created",
             "route": "opus",
             "status": "running",
             "model_provider": orchestrator_provider,
+            "model": model_selection.effective_model,
+            "preferred_model_provider": model_selection.preferred_provider,
+            "preferred_model": model_selection.preferred_model,
         }
+        if model_selection.fallback_reason:
+            created_event["model_fallback_reason"] = model_selection.fallback_reason
+        yield created_event
 
-        if orchestrator_provider == "fireworks_kimi":
-            async for event in self._stream_fireworks_kimi_task(
+        if self._is_fireworks_provider(orchestrator_provider):
+            async for event in self._stream_fireworks_task(
                 task=task,
                 ev=ev,
                 query=query,
+                model_selection=model_selection,
             ):
                 yield event
             return
@@ -1139,12 +1157,13 @@ class OrchestratorRuntime:
             )
             self._active_runs.pop(task.task_id, None)
 
-    async def _stream_fireworks_kimi_task(
+    async def _stream_fireworks_task(
         self,
         *,
         task: TaskEnvelope,
         ev: dict[str, Any],
         query: str,
+        model_selection: OrchestratorModelSelection,
     ) -> AsyncIterator[dict[str, Any]]:
         request_id = str(ev.get("request_id") or "").strip() or None
         session_id = task.session_id
@@ -1169,7 +1188,12 @@ class OrchestratorRuntime:
         )
         research_paths: set[str] = set()
         specialist_receipts: list[dict[str, Any]] = []
-        model_name = self._select_fireworks_kimi_model(task)
+        preferred_provider = model_selection.preferred_provider
+        preferred_model = model_selection.preferred_model
+        effective_provider = model_selection.effective_provider
+        effective_model = model_selection.effective_model
+        effective_model_keys: set[str] = {f"{effective_provider}:{effective_model}"}
+        last_announced_selection_key = f"{effective_provider}:{effective_model}"
 
         tool_context = ToolExecutionContext(
             task_id=task.task_id,
@@ -1199,7 +1223,7 @@ class OrchestratorRuntime:
                 if visual_mode_enabled
                 else None,
             )
-            system_prompt = self._with_fireworks_kimi_runtime_note(system_prompt)
+            system_prompt = self._with_fireworks_runtime_note(system_prompt)
             openai_messages = [
                 {"role": "system", "content": system_prompt},
                 *self._messages_to_openai_chat(messages),
@@ -1223,6 +1247,31 @@ class OrchestratorRuntime:
             while iteration < max_iterations:
                 iteration += 1
                 fireworks_requests += 1
+                turn_selection = self._effective_fireworks_selection_for_images(
+                    preferred_provider=preferred_provider,
+                    preferred_model=preferred_model,
+                    has_images=self._openai_messages_have_image_input(openai_messages),
+                )
+                effective_provider = turn_selection.effective_provider
+                effective_model = turn_selection.effective_model
+                effective_model_keys.add(f"{effective_provider}:{effective_model}")
+                selection_key = f"{effective_provider}:{effective_model}"
+                if (
+                    selection_key != last_announced_selection_key
+                    and turn_selection.fallback_reason == "image_input"
+                ):
+                    yield {
+                        **ev,
+                        "type": "task.progress",
+                        "status": "model_switch",
+                        "message": "Cosmic switched to Kimi for visual input.",
+                        "model_provider": effective_provider,
+                        "model": effective_model,
+                        "preferred_model_provider": preferred_provider,
+                        "preferred_model": preferred_model,
+                        "reason": turn_selection.fallback_reason,
+                    }
+                last_announced_selection_key = selection_key
                 max_request_context_chars = max(
                     max_request_context_chars,
                     self._estimate_openai_request_context_chars(openai_messages),
@@ -1252,7 +1301,10 @@ class OrchestratorRuntime:
                                 "type": "task.progress",
                                 "status": "thinking",
                                 "message": "Cosmic is reasoning through the request.",
-                                "model_provider": "fireworks_kimi",
+                                "model_provider": effective_provider,
+                                "model": effective_model,
+                                "preferred_model_provider": preferred_provider,
+                                "preferred_model": preferred_model,
                             }
                         )
                     if iteration == 1:
@@ -1280,7 +1332,10 @@ class OrchestratorRuntime:
                                 "type": "task.progress",
                                 "status": "responding",
                                 "message": "Cosmic is writing the response.",
-                                "model_provider": "fireworks_kimi",
+                                "model_provider": effective_provider,
+                                "model": effective_model,
+                                "preferred_model_provider": preferred_provider,
+                                "preferred_model": preferred_model,
                             }
                         )
                     if visual_coordinator is not None:
@@ -1308,7 +1363,7 @@ class OrchestratorRuntime:
                     return events
 
                 async for payload in self._stream_openai_chat_events(
-                    model_name=model_name,
+                    model_name=effective_model,
                     messages=openai_messages,
                     tools=tools,
                     usage_context={
@@ -1318,7 +1373,10 @@ class OrchestratorRuntime:
                         "route": "opus",
                         "operation": usage_operation,
                         "metadata_json": {
-                            "provider": "fireworks_kimi",
+                            "provider": effective_provider,
+                            "model": effective_model,
+                            "preferred_provider": preferred_provider,
+                            "preferred_model": preferred_model,
                             "iteration": iteration,
                             "source": task.source,
                             "source_id": task.source_id,
@@ -1590,7 +1648,11 @@ class OrchestratorRuntime:
                 "tool_iterations": iteration,
                 "loop_diagnostics": {
                     "fireworks_requests": fireworks_requests,
-                    "model_provider": "fireworks_kimi",
+                    "model_provider": effective_provider,
+                    "model": effective_model,
+                    "preferred_model_provider": preferred_provider,
+                    "preferred_model": preferred_model,
+                    "effective_models": sorted(effective_model_keys),
                     "max_request_context_chars": max_request_context_chars,
                     "max_request_message_count": max_request_message_count,
                 },
@@ -1606,13 +1668,19 @@ class OrchestratorRuntime:
                 "result_type": result_type,
                 "awaiting_reply": awaiting_reply,
                 "thinking_text": full_reasoning_text,
-                "model_provider": "fireworks_kimi",
-                "model": model_name,
+                "model_provider": effective_provider,
+                "model": effective_model,
+                "preferred_model_provider": preferred_provider,
+                "preferred_model": preferred_model,
                 "metrics": {
                     "rtt_ms": elapsed_ms,
                     "tool_iterations": iteration,
                     "fireworks_requests": fireworks_requests,
-                    "model_provider": "fireworks_kimi",
+                    "model_provider": effective_provider,
+                    "model": effective_model,
+                    "preferred_model_provider": preferred_provider,
+                    "preferred_model": preferred_model,
+                    "effective_models": sorted(effective_model_keys),
                     "max_request_context_chars": max_request_context_chars,
                     "max_request_message_count": max_request_message_count,
                     **cumulative_usage,
@@ -1640,7 +1708,10 @@ class OrchestratorRuntime:
                 "type": "task.completed",
                 "route": "opus",
                 "status": "completed",
-                "model_provider": "fireworks_kimi",
+                "model_provider": effective_provider,
+                "model": effective_model,
+                "preferred_model_provider": preferred_provider,
+                "preferred_model": preferred_model,
             }
 
         except asyncio.CancelledError:
@@ -1654,7 +1725,10 @@ class OrchestratorRuntime:
                     "route": "opus",
                     "status": "cancelled",
                     "message": message,
-                    "model_provider": "fireworks_kimi",
+                    "model_provider": effective_provider,
+                    "model": effective_model,
+                    "preferred_model_provider": preferred_provider,
+                    "preferred_model": preferred_model,
                 }
                 return
             self.task_ledger.mark_failed(
@@ -1664,15 +1738,18 @@ class OrchestratorRuntime:
             )
             raise
         except Exception as exc:
-            code = "KIMI_UPSTREAM_ERROR"
-            message = str(exc).strip() or "Kimi orchestrator processing failed."
+            code = "FIREWORKS_UPSTREAM_ERROR"
+            message = str(exc).strip() or "Fireworks orchestrator processing failed."
             self.task_ledger.mark_failed(task.task_id, code=code, message=message)
             yield {
                 **ev,
                 "type": "task.failed",
                 "route": "opus",
                 "status": "failed",
-                "model_provider": "fireworks_kimi",
+                "model_provider": effective_provider,
+                "model": effective_model,
+                "preferred_model_provider": preferred_provider,
+                "preferred_model": preferred_model,
                 "error": {"code": code, "message": message, "retryable": False},
             }
         finally:
@@ -1754,7 +1831,22 @@ class OrchestratorRuntime:
     def get_loop_diagnostics_snapshot(self) -> dict[str, int]:
         return self._anthropic_loop_stats.as_dict()
 
-    def _select_orchestrator_provider(self, task: TaskEnvelope) -> str:
+    def _select_initial_orchestrator_model(self, task: TaskEnvelope) -> OrchestratorModelSelection:
+        preferred_provider, preferred_model = self._select_preferred_orchestrator_model(task)
+        if self._is_fireworks_provider(preferred_provider):
+            return self._effective_fireworks_selection_for_images(
+                preferred_provider=preferred_provider,
+                preferred_model=preferred_model,
+                has_images=self._task_has_image_input(task),
+            )
+        return OrchestratorModelSelection(
+            preferred_provider="anthropic",
+            preferred_model=preferred_model,
+            effective_provider="anthropic",
+            effective_model=preferred_model,
+        )
+
+    def _select_preferred_orchestrator_model(self, task: TaskEnvelope) -> tuple[str, str]:
         task_input = task.input if isinstance(task.input, dict) else {}
         raw_preference = task_input.get("cosmic_orchestrator_model")
         if not isinstance(raw_preference, dict):
@@ -1764,24 +1856,124 @@ class OrchestratorRuntime:
         if isinstance(raw_preference, dict):
             provider = self._normalize_orchestrator_provider(raw_preference.get("provider"))
             if provider:
-                return provider
-        return self._normalize_orchestrator_provider(
-            self.config.orchestrator_default_provider
-        ) or "anthropic"
+                model = str(raw_preference.get("model") or "").strip()
+                return provider, model or self._default_model_for_orchestrator_provider(provider)
+        provider = self._normalize_orchestrator_provider(self.config.orchestrator_default_provider) or "anthropic"
+        return provider, self._default_model_for_orchestrator_provider(provider)
 
-    def _select_fireworks_kimi_model(self, task: TaskEnvelope) -> str:
+    def _default_model_for_orchestrator_provider(self, provider: str) -> str:
+        if provider == "fireworks_kimi":
+            return self.config.fireworks_kimi_model
+        if provider == "fireworks_glm":
+            return self.config.fireworks_glm_model
+        return self.config.anthropic_model
+
+    @staticmethod
+    def _is_fireworks_provider(provider: str) -> bool:
+        return provider in {"fireworks_kimi", "fireworks_glm"}
+
+    def _effective_fireworks_selection_for_images(
+        self,
+        *,
+        preferred_provider: str,
+        preferred_model: str,
+        has_images: bool,
+    ) -> OrchestratorModelSelection:
+        normalized_provider = (
+            preferred_provider
+            if self._is_fireworks_provider(preferred_provider)
+            else self._fireworks_provider_for_model(preferred_model)
+        )
+        normalized_model = preferred_model or self._default_model_for_orchestrator_provider(normalized_provider)
+        if not has_images or self._fireworks_model_supports_image_input(normalized_model):
+            return OrchestratorModelSelection(
+                preferred_provider=normalized_provider,
+                preferred_model=normalized_model,
+                effective_provider=normalized_provider,
+                effective_model=normalized_model,
+            )
+        fallback_model = (
+            self.config.fireworks_vision_fallback_model
+            or self.config.fireworks_kimi_model
+            or "accounts/fireworks/models/kimi-k2p6"
+        )
+        if not self._fireworks_model_supports_image_input(fallback_model):
+            fallback_model = "accounts/fireworks/models/kimi-k2p6"
+        return OrchestratorModelSelection(
+            preferred_provider=normalized_provider,
+            preferred_model=normalized_model,
+            effective_provider=self._fireworks_provider_for_model(fallback_model),
+            effective_model=fallback_model,
+            fallback_reason="image_input",
+        )
+
+    @staticmethod
+    def _fireworks_provider_for_model(model: str) -> str:
+        normalized = str(model or "").strip().lower()
+        if "glm" in normalized:
+            return "fireworks_glm"
+        return "fireworks_kimi"
+
+    @staticmethod
+    def _fireworks_model_supports_image_input(model: str) -> bool:
+        normalized_model = str(model or "").strip()
+        spec = lookup_model_spec("fireworks", normalized_model)
+        if spec is not None:
+            return bool(spec.capabilities.get("supports_image_input"))
+        # Unknown Fireworks models should not be assumed vision-capable, except
+        # for Kimi-family fallback names used before specs are added.
+        return "kimi" in normalized_model.lower()
+
+    @staticmethod
+    def _task_has_image_input(task: TaskEnvelope) -> bool:
+        artifacts = task.input_artifacts if isinstance(task.input_artifacts, list) else []
+        for artifact in artifacts:
+            if isinstance(artifact, dict) and is_supported_image_artifact(artifact):
+                if str(artifact.get("provider_url") or "").strip():
+                    return True
         task_input = task.input if isinstance(task.input, dict) else {}
-        raw_preference = task_input.get("cosmic_orchestrator_model")
-        if not isinstance(raw_preference, dict):
-            gateway_preferences = task_input.get("gateway_preferences")
-            if isinstance(gateway_preferences, dict):
-                raw_preference = gateway_preferences.get("cosmic_orchestrator_model")
-        if isinstance(raw_preference, dict):
-            provider = self._normalize_orchestrator_provider(raw_preference.get("provider"))
-            model = str(raw_preference.get("model") or "").strip()
-            if provider == "fireworks_kimi" and model:
-                return model
-        return self.config.fireworks_kimi_model
+        context = task_input.get("conversation_context")
+        if isinstance(context, list):
+            for item in context:
+                if isinstance(item, dict) and OrchestratorRuntime._anthropic_content_has_image_input(item.get("content")):
+                    return True
+        return False
+
+    @classmethod
+    def _anthropic_content_has_image_input(cls, content: Any) -> bool:
+        if isinstance(content, list):
+            return any(cls._anthropic_content_has_image_input(item) for item in content)
+        if isinstance(content, dict):
+            part_type = str(content.get("type") or "").strip()
+            if part_type == "image":
+                return True
+            source = content.get("source") if isinstance(content.get("source"), dict) else {}
+            if str(source.get("type") or "").strip() in {"url", "base64"}:
+                return True
+            return any(cls._anthropic_content_has_image_input(value) for value in content.values())
+        return False
+
+    @classmethod
+    def _openai_messages_have_image_input(cls, messages: list[dict[str, Any]]) -> bool:
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            if cls._openai_content_has_image_input(message.get("content")):
+                return True
+        return False
+
+    @classmethod
+    def _openai_content_has_image_input(cls, content: Any) -> bool:
+        if isinstance(content, list):
+            return any(cls._openai_content_has_image_input(item) for item in content)
+        if isinstance(content, dict):
+            part_type = str(content.get("type") or "").strip()
+            if part_type in {"image_url", "image"}:
+                return True
+            if isinstance(content.get("image_url"), dict):
+                return True
+            return any(cls._openai_content_has_image_input(value) for value in content.values())
+        return False
 
     @staticmethod
     def _normalize_orchestrator_provider(value: Any) -> str | None:
@@ -1790,15 +1982,18 @@ class OrchestratorRuntime:
             return None
         if normalized in {"fireworks", "fireworks_kimi", "kimi", "kimi_k2_6", "smarter"}:
             return "fireworks_kimi"
+        if normalized in {"fireworks_glm", "glm", "glm_5p2", "glm_5_2", "glm52"}:
+            return "fireworks_glm"
         if normalized in {"anthropic", "claude", "opus", "sonnet"}:
             return "anthropic"
         return "anthropic"
 
     @staticmethod
-    def _with_fireworks_kimi_runtime_note(system_prompt: str) -> str:
+    def _with_fireworks_runtime_note(system_prompt: str) -> str:
         note = (
             "## COSMIC Runtime Provider\n"
-            "You are running on COSMIC's Fireworks Kimi path through an OpenAI-compatible chat API. "
+            "You are running on COSMIC's Fireworks OpenAI-compatible orchestrator path. "
+            "The preferred model may be GLM 5.2 or Kimi; COSMIC will automatically scope a Kimi fallback for any turn or follow-up that needs direct visual input when the preferred model lacks image support. "
             "Anthropic's hosted code_execution container and native server web tools are not attached on this path, but COSMIC provides `cosmic_code_execution` as a bounded local Python sandbox. "
             "Use `cosmic_code_execution` for calculations, small Python checks, data transforms, chart/file generation, and artifact-producing snippets; write deliverable files under `outputs/` so COSMIC can attach them. "
             "Do not use `cosmic_code_execution` to generate maps, route visuals, geocoding displays, or Folium/HTML map files when the user expects an inline map; search the specialist catalog and delegate to `map.render` because it returns COSMIC inline map artifacts. "
@@ -2042,7 +2237,7 @@ class OrchestratorRuntime:
                     },
                 )
                 if yielded_any or attempt == 2:
-                    raise RuntimeError(f"Fireworks Kimi API error: {exc}") from exc
+                    raise RuntimeError(f"Fireworks API error: {exc}") from exc
                 await asyncio.sleep(0.5 * (2**attempt))
 
     @staticmethod

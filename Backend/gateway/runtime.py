@@ -11517,6 +11517,7 @@ class GatewayRuntime:
             ("anthropic", "claude-sonnet-4-6"),
             ("perplexity", self.config.perplexity_model),
             ("fireworks", "accounts/fireworks/models/kimi-k2p6"),
+            ("fireworks", "accounts/fireworks/models/glm-5p2"),
         ]
         try:
             cosmic_model = self.preference_store.get_cosmic_orchestrator_model()
@@ -11525,7 +11526,7 @@ class GatewayRuntime:
         if isinstance(cosmic_model, dict):
             provider = str(cosmic_model.get("provider") or "").strip().lower()
             model = str(cosmic_model.get("model") or "").strip()
-            if provider == "fireworks_kimi" and model:
+            if provider in {"fireworks_kimi", "fireworks_glm"} and model:
                 candidates.append(("fireworks", model))
         seen: set[str] = set()
         for provider, model in candidates:

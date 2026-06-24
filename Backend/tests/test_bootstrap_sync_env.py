@@ -230,6 +230,41 @@ def test_normalize_bootstrap_env_payload_maps_current_supabase_shape() -> None:
     assert normalized["orchestrator.env"]["ANTHROPIC_MODEL"] == "claude-opus-4-6"
 
 
+def test_build_service_env_overrides_emits_fireworks_glm_defaults(tmp_path) -> None:
+    gateway_source = tmp_path / "gateway.env"
+    model_router_source = tmp_path / "model-router.env"
+    orchestrator_source = tmp_path / "orchestrator.env"
+    bridge_source = tmp_path / "whatsapp-bridge.env"
+    gateway_source.write_text(
+        "GATEWAY_INTERNAL_TOKEN=shared-token\n"
+        "GATEWAY_SIGNING_SECRET=signing-token\n"
+        "ANTHROPIC_API_KEY=anthropic-live\n"
+        "FIREWORKS_API_KEY=fw-live\n",
+        encoding="utf-8",
+    )
+    model_router_source.write_text("GROQ_API_KEY=groq-live\n", encoding="utf-8")
+    orchestrator_source.write_text(
+        "ANTHROPIC_MODEL=claude-opus-4-6\n",
+        encoding="utf-8",
+    )
+    bridge_source.write_text("WHATSAPP_BRIDGE_TOKEN=bridge-token\n", encoding="utf-8")
+
+    overrides = bootstrap.build_service_env_overrides(
+        [
+            (gateway_source, Path("/etc/cosmic/gateway.env")),
+            (model_router_source, Path("/etc/cosmic/model-router.env")),
+            (orchestrator_source, Path("/etc/cosmic/orchestrator.env")),
+            (bridge_source, Path("/etc/cosmic/whatsapp-bridge.env")),
+        ]
+    )
+
+    orchestrator_env = overrides["orchestrator.env"]
+    assert orchestrator_env["ORCHESTRATOR_FIREWORKS_API_KEY"] == "fw-live"
+    assert orchestrator_env["ORCHESTRATOR_FIREWORKS_KIMI_MODEL"] == "accounts/fireworks/models/kimi-k2p6"
+    assert orchestrator_env["ORCHESTRATOR_FIREWORKS_GLM_MODEL"] == "accounts/fireworks/models/glm-5p2"
+    assert orchestrator_env["ORCHESTRATOR_FIREWORKS_VISION_FALLBACK_MODEL"] == "accounts/fireworks/models/kimi-k2p6"
+
+
 def test_normalize_bootstrap_env_payload_maps_vm_user_id_to_gateway_env() -> None:
     normalized = bootstrap.normalize_bootstrap_env_payload(
         {
