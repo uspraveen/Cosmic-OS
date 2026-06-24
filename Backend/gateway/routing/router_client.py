@@ -22,6 +22,11 @@ class ModelRouterClient:
                 base_url=self.base_url,
                 timeout=httpx.Timeout(self.timeout_sec, connect=min(self.timeout_sec, 5.0)),
             )
+            try:
+                await self.health(timeout_sec=min(self.timeout_sec, 2.0))
+            except Exception:
+                # Startup must not fail because the optional router is degraded.
+                pass
 
     async def stop(self) -> None:
         if self._client is not None:
@@ -125,6 +130,12 @@ class ModelRouterClient:
                 "status": payload.get("status") or "not_ready",
                 "http_status": response.status_code,
             }
+            provider_status = payload.get("last_provider_status_code")
+            if provider_status in {401, 403}:
+                self._open_circuit(
+                    seconds=300.0,
+                    reason=f"provider auth HTTP {provider_status}",
+                )
         if self._disabled_until_monotonic > time.monotonic():
             payload = {
                 **payload,
