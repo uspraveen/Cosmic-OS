@@ -482,6 +482,7 @@ class GatewayRuntime:
         self._system_metrics_network_sample: tuple[int, int, float] | None = None
         self._scheduler_run_lock = asyncio.Lock()
         self._recent_push_dedupe: dict[str, float] = {}
+        self._recent_google_reauth_pushes: dict[str, float] = {}
         self._codex_login_session: dict[str, Any] | None = None
         self._cursor_login_session: dict[str, Any] | None = None
         self._heartbeat_outcomes_by_request_id: dict[str, dict[str, str]] = {}
@@ -12404,6 +12405,135 @@ class GatewayRuntime:
             "live_targets": live_targets,
             "notification_id": notification.get("notification_id"),
         }
+
+    async def publish_google_reauth_required(
+        self,
+        *,
+        tool: str,
+        agent_id: str | None,
+        accounts: list[dict[str, Any]],
+        status: str,
+    ) -> dict[str, Any]:
+        reauth_accounts = [
+            account
+            for account in accounts
+            if isinstance(account, dict)
+            and (
+                self._safe_text(account.get("status")) == "reauth_required"
+                or bool(account.get("needs_reconnect"))
+            )
+        ]
+        if not reauth_accounts:
+            return {"status": "ignored", "reason": "no_reauth_accounts"}
+
+        tool_label = self._google_tool_display_name(tool)
+        event = {
+            "type": "google.reauth_required",
+            "provider": "google",
+            "tool": self._safe_text(tool),
+            "tool_label": tool_label,
+            "agent_id": self._safe_text(agent_id),
+            "status": self._safe_text(status) or "reauth_required",
+            "account_count": len(reauth_accounts),
+            "accounts": [
+                {
+                    "account_id": self._safe_text(account.get("account_id")),
+                    "email": self._safe_text(account.get("email")),
+                    "display_name": self._safe_text(account.get("display_name")),
+                    "account_label": self._safe_text(account.get("account_label")),
+                    "is_primary": bool(account.get("is_primary")),
+                    "error": self._safe_text(account.get("error")),
+                }
+                for account in reauth_accounts
+            ],
+            "timestamp": utcnow_iso(),
+        }
+
+        live_targets = 0
+        for adapter in self.registry.adapters.values():
+            if not isinstance(adapter, (DesktopAdapter, MobileAdapter)):
+                continue
+            try:
+                live_targets += await adapter.broadcast_all(event)
+            except Exception:
+                logger.exception(
+                    "gateway.google_reauth.broadcast_failed platform=%s",
+                    adapter.platform,
+                )
+
+        push_count = 0
+        for account in reauth_accounts:
+            account_id = self._safe_text(account.get("account_id"))
+            email = self._safe_text(account.get("email"))
+            label = (
+                self._safe_text(account.get("account_label"))
+                or self._safe_text(account.get("display_name"))
+                or email
+                or "Google account"
+            )
+            reauth_key = account_id or email.casefold() or label.casefold()
+            if not reauth_key or self._google_reauth_push_recently_sent(reauth_key):
+                continue
+            body = (
+                f"Reconnect {label} so Cosmic can keep using {tool_label}."
+                if tool_label
+                else f"Reconnect {label} so Cosmic can keep using Google."
+            )
+            self._schedule_mobile_push(
+                session_id=None,
+                origin_channel="google-auth",
+                event_type="google.reauth_required",
+                title="Google access needs attention",
+                body=body,
+                screen="settings",
+                priority="high",
+                data={
+                    "type": "google.reauth_required",
+                    "provider": "google",
+                    "tool": self._safe_text(tool),
+                    "tool_label": tool_label,
+                    "account_id": account_id,
+                    "account_email": email,
+                    "account_label": label,
+                    "screen": "settings",
+                    "page_id": "settings",
+                    "section": "google",
+                    "channel_id": "cosmic-actions",
+                    "reauth_key": reauth_key,
+                },
+            )
+            push_count += 1
+
+        return {
+            "status": "published",
+            "live_targets": live_targets,
+            "push_count": push_count,
+            "account_count": len(reauth_accounts),
+        }
+
+    def _google_reauth_push_recently_sent(self, key: str, *, ttl_sec: float = 7200.0) -> bool:
+        now = time.monotonic()
+        stale_before = now - max(ttl_sec * 2, ttl_sec + 60.0)
+        self._recent_google_reauth_pushes = {
+            existing_key: sent_at
+            for existing_key, sent_at in self._recent_google_reauth_pushes.items()
+            if sent_at >= stale_before
+        }
+        current = self._recent_google_reauth_pushes.get(key)
+        if current is not None and now - current < ttl_sec:
+            return True
+        self._recent_google_reauth_pushes[key] = now
+        return False
+
+    def _google_tool_display_name(self, tool: str | None) -> str:
+        normalized = self._safe_text(tool).lower()
+        return {
+            "gmail": "Gmail",
+            "calendar": "Calendar",
+            "docs": "Docs",
+            "drive": "Drive",
+            "sheets": "Sheets",
+        }.get(normalized, normalized.replace("_", " ").title() if normalized else "Google")
 
     def _schedule_mobile_push(
         self,

@@ -13,6 +13,7 @@ Exposed endpoints:
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import time
@@ -85,9 +86,20 @@ def _check_local_token(request: Request) -> None:
     expected = runtime.config.local_api_token
     if not expected:
         return  # no token configured — open (dev mode)
-    provided = request.headers.get("X-Local-Token", "")
-    if provided != expected:
+    provided = _extract_local_request_token(request)
+    if not hmac.compare_digest(provided, expected):
         raise HTTPException(status_code=403, detail="Invalid local token")
+
+
+def _extract_local_request_token(request: Request) -> str:
+    authorization = request.headers.get("Authorization", "")
+    if authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    for header_name in ("X-Local-Token", "X-API-Token"):
+        token = request.headers.get(header_name, "").strip()
+        if token:
+            return token
+    return ""
 
 
 def _check_internal_token(request: Request) -> None:
@@ -557,7 +569,7 @@ async def google_auth_health(body: GoogleAuthHealthRequest, request: Request):
         status_value = "provider_error"
         available = False
 
-    return {
+    response = {
         "status": status_value,
         "healthy": status_value == "healthy",
         "available": available,
@@ -570,6 +582,23 @@ async def google_auth_health(body: GoogleAuthHealthRequest, request: Request):
         "provider_error_count": provider_error_count,
         "accounts": account_results,
     }
+    if reauth_count > 0:
+        runtime = getattr(request.app.state, "gateway_runtime", None)
+        if runtime is not None and hasattr(runtime, "publish_google_reauth_required"):
+            try:
+                await runtime.publish_google_reauth_required(
+                    tool=tool,
+                    agent_id=body.agent_id,
+                    accounts=account_results,
+                    status=status_value,
+                )
+            except Exception:
+                logger.exception(
+                    "google_auth_health.reauth_notification_failed tool=%s agent_id=%s",
+                    tool,
+                    body.agent_id,
+                )
+    return response
 
 
 @router.get("/internal/credentials/google/snapshot")

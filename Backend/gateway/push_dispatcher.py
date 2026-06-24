@@ -290,6 +290,7 @@ def _notification_channel(notification: PushNotification) -> str:
     if event_type == "task.input_required" or event_type in {
         "task.failed",
         "task.cancelled",
+        "google.reauth_required",
     }:
         return "cosmic-actions"
     if event_type == "response.complete":
@@ -303,7 +304,7 @@ def _notification_color(notification: PushNotification) -> str:
         return "#8ff5dc"
     if event_type in {"task.failed", "task.cancelled"}:
         return "#ff8a8a"
-    if event_type == "task.input_required":
+    if event_type in {"task.input_required", "google.reauth_required"}:
         return "#ffd67a"
     if event_type == "task.completed":
         return "#9af7b3"
