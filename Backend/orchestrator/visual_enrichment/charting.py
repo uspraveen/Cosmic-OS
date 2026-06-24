@@ -1,15 +1,26 @@
+import math
 from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageChops, ImageColor, ImageDraw, ImageFilter, ImageFont
 
 _OUTPUT_WIDTH = 1600
 _OUTPUT_HEIGHT = 900
-_RENDER_SCALE = 1
-_LANCZOS = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
-_SERIES_PALETTE = ("#0A84FF", "#30D158", "#E8EDF7", "#BF5AF2", "#FF9F0A")
+
+# Shared COSMIC chart theme. These values mirror the liquid-glass card the chart
+# is rendered inside (see `.assistant-inline-image-card` in spotlight.css): a dark
+# vertical gradient with a blue glow top-left and a teal glow bottom-right, plus the
+# Cosmic blue/teal accent duo. Keeping them in sync makes the PNG melt into its card.
+_SERIES_PALETTE = ("#0A84FF", "#4DEAB2", "#FF9F0A", "#BF5AF2", "#FF566A", "#64D2FF")
+_BG_TOP = "#0E111C"
+_BG_BOTTOM = "#07090F"
+_INK = "#F5F8FF"
+_INK_MUTED = "#A8B2C4"
+_INK_FAINT = "#7E8BA0"
+_ACCENT_BLUE = "#5BA3FF"
+_ACCENT_TEAL = "#4DEAB2"
 
 
 def normalize_chart_spec(spec: dict[str, Any], *, max_points: int) -> dict[str, Any]:
@@ -106,6 +117,8 @@ def _format_tick(value: float) -> str:
         return f"{value / 1_000_000:.1f}M".rstrip("0").rstrip(".")
     if abs_value >= 1_000:
         return f"{value / 1_000:.1f}K".rstrip("0").rstrip(".")
+    if abs_value >= 100:
+        return f"{value:.0f}"
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
@@ -155,540 +168,6 @@ def _add_vertical_gradient(
     return Image.alpha_composite(image, gradient)
 
 
-def _draw_glass_band(
-    image: Image.Image,
-    *,
-    points: list[tuple[int, int]],
-    fill: tuple[int, int, int, int],
-    blur_radius: int,
-) -> Image.Image:
-    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay, "RGBA")
-    draw.polygon(points, fill=fill)
-    return Image.alpha_composite(image, overlay)
-
-
-def _draw_chip(
-    draw: ImageDraw.ImageDraw,
-    *,
-    x: int,
-    y: int,
-    text: str,
-    color: str,
-    font: ImageFont.ImageFont,
-    scale: int,
-) -> int:
-    text_width, text_height = _text_size(draw, text, font)
-    chip_height = max(text_height + (16 * scale), 36 * scale)
-    chip_width = text_width + (40 * scale)
-    draw.rounded_rectangle(
-        (x, y, x + chip_width, y + chip_height),
-        radius=chip_height // 2,
-        fill=(255, 255, 255, 18),
-        outline=(255, 255, 255, 24),
-        width=max(1, scale),
-    )
-    dot_size = 10 * scale
-    dot_x = x + (16 * scale)
-    dot_y = y + (chip_height // 2)
-    draw.ellipse(
-        (dot_x - dot_size // 2, dot_y - dot_size // 2, dot_x + dot_size // 2, dot_y + dot_size // 2),
-        fill=ImageColor.getrgb(color) + (255,),
-    )
-    draw.text(
-        (x + (30 * scale), y + ((chip_height - text_height) // 2) - (1 * scale)),
-        text,
-        font=font,
-        fill="#eef3ff",
-    )
-    return chip_width
-
-
-def _measure_chip_width(
-    draw: ImageDraw.ImageDraw,
-    *,
-    text: str,
-    font: ImageFont.ImageFont,
-    scale: int,
-) -> tuple[int, int]:
-    text_width, text_height = _text_size(draw, text, font)
-    chip_height = max(text_height + (16 * scale), 36 * scale)
-    return text_width + (40 * scale), chip_height
-
-
-def _draw_panel(
-    image: Image.Image,
-    *,
-    bounds: tuple[int, int, int, int],
-    radius: int,
-    fill: tuple[int, int, int, int],
-    outline: tuple[int, int, int, int],
-    highlight_alpha: int,
-) -> Image.Image:
-    shadow = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    shadow_draw = ImageDraw.Draw(shadow, "RGBA")
-    shadow_offset = max(10, radius // 2)
-    shadow_bounds = (
-        bounds[0],
-        bounds[1] + shadow_offset,
-        bounds[2],
-        bounds[3] + shadow_offset,
-    )
-    shadow_draw.rounded_rectangle(shadow_bounds, radius=radius, fill=(0, 0, 0, 58))
-    image = Image.alpha_composite(image, shadow)
-
-    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay, "RGBA")
-    draw.rounded_rectangle(bounds, radius=radius, fill=fill, outline=outline, width=max(1, radius // 14))
-    top_strip = (bounds[0] + radius // 3, bounds[1] + radius // 3, bounds[2] - radius // 3, bounds[1] + radius)
-    draw.rounded_rectangle(top_strip, radius=radius // 2, fill=(255, 255, 255, highlight_alpha))
-    draw.arc(
-        (bounds[0] + radius // 3, bounds[1] + radius // 4, bounds[2] - radius // 3, bounds[3] - radius // 4),
-        start=205,
-        end=335,
-        fill=(255, 255, 255, max(12, highlight_alpha)),
-        width=max(1, radius // 18),
-    )
-    return Image.alpha_composite(image, overlay)
-
-
-def _draw_gradient_rounded_rect(
-    image: Image.Image,
-    *,
-    bounds: tuple[int, int, int, int],
-    radius: int,
-    top_color: str,
-    bottom_color: str,
-    alpha: int,
-    outline: tuple[int, int, int, int] | None = None,
-    width: int = 1,
-) -> Image.Image:
-    left, top, right, bottom = bounds
-    rect_width = max(1, right - left)
-    rect_height = max(1, bottom - top)
-    top_rgb = ImageColor.getrgb(top_color)
-    bottom_rgb = ImageColor.getrgb(bottom_color)
-    gradient = Image.new("RGBA", (rect_width, rect_height), (0, 0, 0, 0))
-    gradient_draw = ImageDraw.Draw(gradient, "RGBA")
-    for y in range(rect_height):
-        ratio = y / max(rect_height - 1, 1)
-        color = tuple(int(top_rgb[channel] + ((bottom_rgb[channel] - top_rgb[channel]) * ratio)) for channel in range(3))
-        gradient_draw.line((0, y, rect_width, y), fill=color + (alpha,))
-    mask = Image.new("L", (rect_width, rect_height), 0)
-    mask_draw = ImageDraw.Draw(mask)
-    mask_draw.rounded_rectangle((0, 0, rect_width - 1, rect_height - 1), radius=radius, fill=255)
-    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    overlay.paste(gradient, (left, top), mask)
-    if outline:
-        outline_draw = ImageDraw.Draw(overlay, "RGBA")
-        outline_draw.rounded_rectangle(bounds, radius=radius, outline=outline, width=max(1, width))
-    return Image.alpha_composite(image, overlay)
-
-
-def _draw_callout(
-    draw: ImageDraw.ImageDraw,
-    *,
-    anchor_x: float,
-    anchor_y: float,
-    text: str,
-    font: ImageFont.ImageFont,
-    scale: int,
-) -> None:
-    text_width, text_height = _text_size(draw, text, font)
-    bubble_width = text_width + (30 * scale)
-    bubble_height = text_height + (18 * scale)
-    bubble_x = int(anchor_x - (bubble_width // 2))
-    bubble_y = int(anchor_y - bubble_height - (22 * scale))
-    draw.rounded_rectangle(
-        (bubble_x, bubble_y, bubble_x + bubble_width, bubble_y + bubble_height),
-        radius=16 * scale,
-        fill=(238, 244, 255, 238),
-        outline=(255, 255, 255, 84),
-        width=max(1, scale),
-    )
-    draw.text(
-        (bubble_x + (bubble_width - text_width) // 2, bubble_y + (bubble_height - text_height) // 2 - (1 * scale)),
-        text,
-        font=font,
-        fill="#070A10",
-    )
-    draw.line(
-        (
-            int(anchor_x),
-            bubble_y + bubble_height,
-            int(anchor_x),
-            int(anchor_y - (7 * scale)),
-        ),
-        fill=(246, 248, 255, 210),
-        width=max(2 * scale, 2),
-    )
-
-
-def _build_background(width: int, height: int, scale: int) -> Image.Image:
-    image = Image.new("RGBA", (width, height), ImageColor.getrgb("#03050a"))
-    image = _add_vertical_gradient(
-        image,
-        top_color="#121722",
-        bottom_color="#04060b",
-        alpha=225,
-    )
-    image = _add_glow(
-        image,
-        bounds=(-int(width * 0.18), -int(height * 0.16), int(width * 0.48), int(height * 0.5)),
-        color="#0A84FF",
-        alpha=88,
-        blur_radius=210 * scale,
-    )
-    image = _add_glow(
-        image,
-        bounds=(int(width * 0.52), -int(height * 0.14), int(width * 1.1), int(height * 0.5)),
-        color="#30D158",
-        alpha=52,
-        blur_radius=230 * scale,
-    )
-    image = _add_glow(
-        image,
-        bounds=(int(width * 0.26), int(height * 0.46), int(width * 0.86), int(height * 1.08)),
-        color="#BF5AF2",
-        alpha=38,
-        blur_radius=210 * scale,
-    )
-    image = _draw_glass_band(
-        image,
-        points=[
-            (int(width * -0.1), int(height * 0.18)),
-            (int(width * 1.06), int(height * -0.08)),
-            (int(width * 1.15), int(height * 0.04)),
-            (int(width * 0.0), int(height * 0.31)),
-        ],
-        fill=(255, 255, 255, 17),
-        blur_radius=18 * scale,
-    )
-    image = _draw_glass_band(
-        image,
-        points=[
-            (int(width * 0.04), int(height * 0.96)),
-            (int(width * 1.08), int(height * 0.56)),
-            (int(width * 1.14), int(height * 0.76)),
-            (int(width * 0.22), int(height * 1.08)),
-        ],
-        fill=(255, 255, 255, 11),
-        blur_radius=24 * scale,
-    )
-    shadow = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    shadow_draw = ImageDraw.Draw(shadow, "RGBA")
-    shadow_draw.rounded_rectangle(
-        (int(width * 0.06), int(height * 0.08), int(width * 0.94), int(height * 0.92)),
-        radius=64 * scale,
-        fill=(0, 0, 0, 78),
-    )
-    return Image.alpha_composite(image, shadow)
-
-
-def _render_chart_png_legacy(spec: dict[str, Any]) -> bytes:
-    output_width = _OUTPUT_WIDTH
-    output_height = _OUTPUT_HEIGHT
-    scale = _RENDER_SCALE
-    width = output_width * scale
-    height = output_height * scale
-
-    image = _build_background(width, height, scale)
-    image = _draw_panel(
-        image,
-        bounds=(48 * scale, 42 * scale, width - (48 * scale), height - (42 * scale)),
-        radius=40 * scale,
-        fill=(9, 12, 18, 226),
-        outline=(255, 255, 255, 34),
-        highlight_alpha=28,
-    )
-    image = _draw_panel(
-        image,
-        bounds=(92 * scale, 196 * scale, width - (92 * scale), height - (84 * scale)),
-        radius=30 * scale,
-        fill=(14, 17, 25, 204),
-        outline=(255, 255, 255, 24),
-        highlight_alpha=18,
-    )
-    draw = ImageDraw.Draw(image, "RGBA")
-
-    eyebrow_font = _load_font(13 * scale, bold=True)
-    title_font = _load_font(35 * scale, bold=True)
-    subtitle_font = _load_font(16 * scale)
-    label_font = _load_font(14 * scale, bold=True)
-    tick_font = _load_font(15 * scale)
-    chip_font = _load_font(13 * scale, bold=True)
-    callout_font = _load_font(15 * scale, bold=True)
-
-    outer = (
-        48 * scale,
-        42 * scale,
-        width - (48 * scale),
-        height - (42 * scale),
-    )
-    panel = (
-        92 * scale,
-        196 * scale,
-        width - (92 * scale),
-        height - (84 * scale),
-    )
-    plot_left = panel[0] + (124 * scale)
-    plot_right = panel[2] - (70 * scale)
-    plot_top = panel[1] + (82 * scale)
-    plot_bottom = panel[3] - (120 * scale)
-    plot_width = plot_right - plot_left
-    plot_height = plot_bottom - plot_top
-
-    ordered_categories: list[str] = []
-    seen_categories: set[str] = set()
-    y_values: list[float] = []
-    for series in spec["series"]:
-        for point in series["points"]:
-            category = point["x"]
-            if category not in seen_categories:
-                seen_categories.add(category)
-                ordered_categories.append(category)
-            y_values.append(float(point["y"]))
-    if not ordered_categories or not y_values:
-        raise ValueError("Chart spec did not contain drawable data.")
-
-    min_y = min(0.0, min(y_values))
-    max_y = max(0.0, max(y_values))
-    if min_y == max_y:
-        max_y = min_y + 1.0
-    value_padding = (max_y - min_y) * 0.16
-    min_y -= value_padding
-    max_y += value_padding
-    if min_y == max_y:
-        max_y = min_y + 1.0
-
-    def y_to_px(value: float) -> float:
-        ratio = (value - min_y) / (max_y - min_y)
-        return plot_bottom - (ratio * plot_height)
-
-    axis_zero_y = y_to_px(0.0)
-    category_count = len(ordered_categories)
-    category_step = plot_width / max(category_count, 1)
-    category_centers = {
-        category: plot_left + (idx + 0.5) * category_step
-        for idx, category in enumerate(ordered_categories)
-    }
-
-    plot_shell = (
-        plot_left - (34 * scale),
-        plot_top - (38 * scale),
-        plot_right + (24 * scale),
-        plot_bottom + (64 * scale),
-    )
-    draw.rounded_rectangle(
-        plot_shell,
-        radius=28 * scale,
-        fill=(255, 255, 255, 8),
-        outline=(255, 255, 255, 16),
-        width=max(1, scale),
-    )
-
-    draw.text(
-        (outer[0] + (44 * scale), outer[1] + (34 * scale)),
-        "COSMIC VISUAL",
-        font=eyebrow_font,
-        fill="#8EA0B8",
-    )
-    draw.text(
-        (outer[0] + (44 * scale), outer[1] + (64 * scale)),
-        spec["title"],
-        font=title_font,
-        fill="#f6f8ff",
-    )
-    accent_y = outer[1] + (110 * scale)
-    accent_left = outer[0] + (44 * scale)
-    accent_right = accent_left + (210 * scale)
-    for offset in range(5 * scale):
-        ratio = offset / max((5 * scale) - 1, 1)
-        alpha = int(110 * (1 - ratio))
-        draw.line(
-            (accent_left, accent_y + offset, accent_right, accent_y + offset),
-            fill=ImageColor.getrgb("#30D158") + (alpha,),
-            width=max(1, scale),
-        )
-    subtitle = str(spec.get("caption") or "").strip() or "Generated from structured data in this response."
-    draw.text(
-        (outer[0] + (44 * scale), outer[1] + (116 * scale)),
-        subtitle,
-        font=subtitle_font,
-        fill="#A2ADBE",
-    )
-
-    chip_x = outer[2] - (46 * scale)
-    chip_y = outer[1] + (58 * scale)
-    for series_index, series in reversed(list(enumerate(spec["series"]))):
-        chip_width, _ = _measure_chip_width(
-            draw,
-            text=str(series["label"]),
-            font=chip_font,
-            scale=scale,
-        )
-        chip_x -= chip_width
-        _draw_chip(
-            draw,
-            x=chip_x,
-            y=chip_y,
-            text=str(series["label"]),
-            color=_SERIES_PALETTE[series_index % len(_SERIES_PALETTE)],
-            font=chip_font,
-            scale=scale,
-        )
-        chip_x -= 12 * scale
-
-    grid_lines = 5
-    for idx in range(grid_lines + 1):
-        value = min_y + ((max_y - min_y) * (idx / grid_lines))
-        y = y_to_px(value)
-        is_zero = abs(value) <= max(abs(max_y - min_y) * 0.02, 1e-9)
-        draw.line(
-            (plot_left, y, plot_right, y),
-            fill=(255, 255, 255, 34 if is_zero else 15),
-            width=max(1, 2 * scale if is_zero else scale),
-        )
-        tick_text = _format_tick(value)
-        tick_width, tick_height = _text_size(draw, tick_text, tick_font)
-        draw.text(
-            (plot_left - tick_width - (20 * scale), y - (tick_height // 2)),
-            tick_text,
-            font=tick_font,
-            fill="#8F9BAE",
-        )
-
-    for idx in range(category_count):
-        x = plot_left + (idx * category_step)
-        draw.line(
-            (x, plot_top, x, plot_bottom),
-            fill=(255, 255, 255, 8),
-            width=max(1, scale),
-        )
-
-    draw.line((plot_left, plot_top, plot_left, plot_bottom), fill=(255, 255, 255, 22), width=max(1, scale))
-    draw.line((plot_left, plot_bottom, plot_right, plot_bottom), fill=(255, 255, 255, 22), width=max(1, scale))
-
-    if spec["chart_type"] == "bar":
-        series_count = len(spec["series"])
-        group_width = category_step * 0.68
-        bar_width = group_width / max(series_count, 1)
-        palette = ("#E8EDF7", "#0A84FF", "#30D158", "#BF5AF2", "#FF9F0A")
-        for series_index, series in enumerate(spec["series"]):
-            color = palette[series_index % len(palette)]
-            base_rgb = ImageColor.getrgb(color)
-            for category in ordered_categories:
-                point = next((item for item in series["points"] if item["x"] == category), None)
-                if point is None:
-                    continue
-                center = category_centers[category]
-                left = int(center - (group_width / 2) + (series_index * bar_width) + (8 * scale))
-                right = int(left + max(24 * scale, bar_width - (14 * scale)))
-                top = int(y_to_px(float(point["y"])))
-                bottom = int(axis_zero_y)
-                if top > bottom:
-                    top, bottom = bottom, top
-                glow = Image.new("RGBA", image.size, (0, 0, 0, 0))
-                glow_draw = ImageDraw.Draw(glow, "RGBA")
-                glow_draw.rounded_rectangle(
-                    (left - (4 * scale), top - (4 * scale), right + (4 * scale), bottom + (4 * scale)),
-                    radius=13 * scale,
-                    fill=base_rgb + (48,),
-                )
-                image = Image.alpha_composite(image, _blur_overlay(glow, 12 * scale))
-                draw = ImageDraw.Draw(image, "RGBA")
-                image = _draw_gradient_rounded_rect(
-                    image,
-                    bounds=(left, top, right, bottom),
-                    radius=10 * scale,
-                    top_color="#F8FBFF" if series_index == 0 else color,
-                    bottom_color=color if series_index == 0 else "#0A1020",
-                    alpha=232,
-                    outline=(255, 255, 255, 32),
-                    width=max(1, scale),
-                )
-                draw = ImageDraw.Draw(image, "RGBA")
-                draw.rounded_rectangle(
-                    (left + (3 * scale), top + (3 * scale), right - (3 * scale), min(bottom, top + (15 * scale))),
-                    radius=8 * scale,
-                    fill=(255, 255, 255, 42),
-                )
-    else:
-        primary_peak: tuple[float, float, str] | None = None
-        for series_index, series in enumerate(spec["series"]):
-            color = _SERIES_PALETTE[series_index % len(_SERIES_PALETTE)]
-            rgba = ImageColor.getrgb(color)
-            polyline: list[tuple[float, float]] = []
-            for point in series["points"]:
-                polyline.append((category_centers[point["x"]], y_to_px(float(point["y"]))))
-            if len(polyline) >= 2:
-                if series_index == 0:
-                    polygon = [(polyline[0][0], plot_bottom)] + polyline + [(polyline[-1][0], plot_bottom)]
-                    draw.polygon(polygon, fill=rgba + (34,))
-                glow = Image.new("RGBA", image.size, (0, 0, 0, 0))
-                glow_draw = ImageDraw.Draw(glow, "RGBA")
-                glow_draw.line(polyline, fill=rgba + (118,), width=max(18 * scale, 18), joint="curve")
-                image = Image.alpha_composite(image, _blur_overlay(glow, 9 * scale))
-                draw = ImageDraw.Draw(image, "RGBA")
-                draw.line(polyline, fill=rgba + (248,), width=max(6 * scale, 7), joint="curve")
-                draw.line(polyline, fill=(255, 255, 255, 72), width=max(2 * scale, 2), joint="curve")
-            for point_index, (x, y) in enumerate(polyline):
-                halo = 10 * scale
-                draw.ellipse((x - halo, y - halo, x + halo, y + halo), fill=rgba + (62,))
-                dot = 5 * scale
-                draw.ellipse(
-                    (x - dot, y - dot, x + dot, y + dot),
-                    fill=(245, 249, 255, 255),
-                    outline=(10, 12, 18, 255),
-                    width=max(2 * scale, 2),
-                )
-                if series_index == 0:
-                    point_value = float(series["points"][point_index]["y"])
-                    if primary_peak is None or point_value > float(primary_peak[2]):
-                        primary_peak = (x, y, str(point_value))
-        if primary_peak is not None:
-            _draw_callout(
-                draw,
-                anchor_x=primary_peak[0],
-                anchor_y=primary_peak[1],
-                text=_format_tick(float(primary_peak[2])),
-                font=callout_font,
-                scale=scale,
-            )
-
-    for idx, category in enumerate(ordered_categories):
-        center = int(plot_left + (idx + 0.5) * category_step)
-        text_width, text_height = _text_size(draw, category, tick_font)
-        draw.text(
-            (center - (text_width // 2), plot_bottom + (16 * scale)),
-            category,
-            font=tick_font,
-            fill="#d4dcea",
-        )
-
-    if spec.get("x_label"):
-        x_label = str(spec["x_label"])
-        x_width, x_height = _text_size(draw, x_label, label_font)
-        draw.text(
-            (plot_left + (plot_width // 2) - (x_width // 2), panel[3] - (58 * scale)),
-            x_label,
-            font=label_font,
-            fill="#e7edf8",
-        )
-    if spec.get("y_label"):
-        draw.text(
-            (panel[0] + (28 * scale), panel[1] + (18 * scale)),
-            str(spec["y_label"]),
-            font=label_font,
-            fill="#e7edf8",
-        )
-
-    final_image = image.resize((output_width, output_height), _LANCZOS).convert("RGB")
-    buffer = BytesIO()
-    final_image.save(buffer, format="PNG", compress_level=3)
-    return buffer.getvalue()
-
-
 def _trim_to_width(
     draw: ImageDraw.ImageDraw,
     text: str,
@@ -701,10 +180,39 @@ def _trim_to_width(
         return ""
     if _text_size(draw, value, font)[0] <= max_width:
         return value
-    ellipsis = "..."
+    ellipsis = "…"
     while value and _text_size(draw, f"{value}{ellipsis}", font)[0] > max_width:
         value = value[:-1].rstrip()
     return f"{value}{ellipsis}" if value else ellipsis
+
+
+def _wrap_lines(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    *,
+    font: ImageFont.ImageFont,
+    max_width: int,
+    max_lines: int,
+) -> list[str]:
+    words = str(text or "").strip().split()
+    if not words:
+        return []
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if _text_size(draw, candidate, font)[0] <= max_width or not current:
+            current = candidate
+            continue
+        lines.append(current)
+        current = word
+        if len(lines) >= max_lines:
+            break
+    if current and len(lines) < max_lines:
+        lines.append(current)
+    if words and len(lines) == max_lines:
+        lines[-1] = _trim_to_width(draw, lines[-1], font=font, max_width=max_width)
+    return lines
 
 
 def _draw_text_block(
@@ -718,26 +226,7 @@ def _draw_text_block(
     line_gap: int,
     max_lines: int,
 ) -> int:
-    words = str(text or "").strip().split()
-    if not words:
-        return xy[1]
-    lines: list[str] = []
-    current = ""
-    for word in words:
-        candidate = f"{current} {word}".strip()
-        if _text_size(draw, candidate, font)[0] <= max_width:
-            current = candidate
-            continue
-        if current:
-            lines.append(current)
-        current = word
-        if len(lines) >= max_lines:
-            break
-    if current and len(lines) < max_lines:
-        lines.append(current)
-    if len(lines) == max_lines and words:
-        lines[-1] = _trim_to_width(draw, lines[-1], font=font, max_width=max_width)
-
+    lines = _wrap_lines(draw, text, font=font, max_width=max_width, max_lines=max_lines)
     y = xy[1]
     for line in lines:
         draw.text((xy[0], y), line, font=font, fill=fill)
@@ -745,154 +234,260 @@ def _draw_text_block(
     return y
 
 
-def _draw_simple_chip(
-    draw: ImageDraw.ImageDraw,
-    *,
-    x: int,
-    y: int,
-    text: str,
-    color: str,
-    font: ImageFont.ImageFont,
-) -> int:
-    label = str(text or "").strip()
-    text_width, text_height = _text_size(draw, label, font)
-    width = text_width + 44
-    height = max(34, text_height + 14)
-    draw.rounded_rectangle(
-        (x, y, x + width, y + height),
-        radius=height // 2,
-        fill=(255, 255, 255, 10),
-        outline=(255, 255, 255, 22),
-        width=1,
+def _nice_bounds(values: list[float], *, target_ticks: int = 5) -> tuple[float, float, float]:
+    data_min = min(values)
+    data_max = max(values)
+    lo = 0.0 if data_min >= 0 else data_min
+    hi = 0.0 if data_max <= 0 else data_max
+    if lo == hi:
+        hi = lo + 1.0
+    span = hi - lo
+    hi += span * 0.08
+    if data_min < 0:
+        lo -= span * 0.04
+    span = hi - lo
+    raw_step = span / max(target_ticks, 1)
+    if raw_step <= 0:
+        raw_step = 1.0
+    magnitude = 10 ** math.floor(math.log10(raw_step))
+    step = 10 * magnitude
+    for multiplier in (1, 2, 2.5, 5, 10):
+        if multiplier * magnitude >= raw_step:
+            step = multiplier * magnitude
+            break
+    nice_min = math.floor(lo / step) * step
+    nice_max = math.ceil(hi / step) * step
+    if nice_min == nice_max:
+        nice_max = nice_min + step
+    return nice_min, nice_max, step
+
+
+def _build_canvas() -> Image.Image:
+    image = Image.new("RGBA", (_OUTPUT_WIDTH, _OUTPUT_HEIGHT), ImageColor.getrgb(_BG_BOTTOM) + (255,))
+    image = _add_vertical_gradient(image, top_color=_BG_TOP, bottom_color=_BG_BOTTOM, alpha=210)
+    # Blue glow top-left + teal glow bottom-right, matching the card's radial accents.
+    image = _add_glow(
+        image,
+        bounds=(-320, -300, 700, 560),
+        color=_ACCENT_BLUE,
+        alpha=42,
+        blur_radius=220,
     )
-    draw.ellipse((x + 14, y + height // 2 - 5, x + 24, y + height // 2 + 5), fill=ImageColor.getrgb(color))
-    draw.text((x + 32, y + (height - text_height) // 2 - 1), label, font=font, fill="#E8EEF8")
-    return width
+    image = _add_glow(
+        image,
+        bounds=(980, 520, 1900, 1240),
+        color=_ACCENT_TEAL,
+        alpha=30,
+        blur_radius=240,
+    )
+    return image
 
 
-def _draw_bar(
-    draw: ImageDraw.ImageDraw,
+def _horizontal_gradient_pill(
+    image: Image.Image,
     *,
     bounds: tuple[int, int, int, int],
-    color: str,
+    radius: int,
+    left_color: str,
+    right_color: str,
 ) -> None:
-    left, top, right, bottom = bounds
-    if bottom - top < 2:
-        top = bottom - 2
-    radius = min(16, max(4, (right - left) // 3))
-    rgb = ImageColor.getrgb(color)
-    draw.rounded_rectangle((left, top, right, bottom), radius=radius, fill=rgb + (228,))
-    draw.rounded_rectangle(
-        (left + 2, top + 2, right - 2, min(bottom, top + 14)),
-        radius=max(3, radius - 2),
-        fill=(255, 255, 255, 44),
-    )
-    draw.line((left, bottom, right, bottom), fill=(255, 255, 255, 56), width=1)
+    left, top, right, bottom = (int(value) for value in bounds)
+    width = max(1, right - left)
+    height = max(1, bottom - top)
+    radius = max(0, min(radius, height // 2))
+    left_rgb = ImageColor.getrgb(left_color)
+    right_rgb = ImageColor.getrgb(right_color)
+    gradient = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    gradient_draw = ImageDraw.Draw(gradient, "RGBA")
+    for x in range(width):
+        ratio = x / max(width - 1, 1)
+        color = tuple(int(left_rgb[c] + ((right_rgb[c] - left_rgb[c]) * ratio)) for c in range(3))
+        gradient_draw.line((x, 0, x, height), fill=color + (255,))
+    mask = Image.new("L", (width, height), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, width - 1, height - 1), radius=radius, fill=255)
+    gradient.putalpha(ImageChops.multiply(gradient.split()[3], mask))
+    image.alpha_composite(gradient, (left, top))
 
 
-def _nice_range(values: list[float]) -> tuple[float, float]:
-    min_y = min(0.0, min(values))
-    max_y = max(0.0, max(values))
-    if min_y == max_y:
-        max_y = min_y + 1.0
-    padding = (max_y - min_y) * 0.12
-    return min_y - padding, max_y + padding
+def _rounded_gradient_bar(
+    image: Image.Image,
+    *,
+    bounds: tuple[int, int, int, int],
+    radius: int,
+    top_color: str,
+    bottom_color: str,
+) -> None:
+    left, top, right, bottom = (int(value) for value in bounds)
+    width = max(1, right - left)
+    height = max(1, bottom - top)
+    radius = max(0, min(radius, width // 2, height))
+    top_rgb = ImageColor.getrgb(top_color)
+    bottom_rgb = ImageColor.getrgb(bottom_color)
+    gloss_span = max(height * 0.32, 1.0)
+    gradient = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    gradient_draw = ImageDraw.Draw(gradient, "RGBA")
+    for y in range(height):
+        ratio = y / max(height - 1, 1)
+        color = [int(top_rgb[c] + ((bottom_rgb[c] - top_rgb[c]) * ratio)) for c in range(3)]
+        # Bake a soft glossy highlight into the top of the bar so it stays fully
+        # opaque (drawing a translucent overlay later would flatten to a dark cap).
+        gloss = max(0.0, 1.0 - (y / gloss_span)) * 0.32
+        if gloss > 0:
+            color = [int(channel + ((255 - channel) * gloss)) for channel in color]
+        gradient_draw.line((0, y, width, y), fill=tuple(color) + (255,))
+    mask = Image.new("L", (width, height), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, width - 1, height - 1), radius=radius, fill=255)
+    gradient.putalpha(ImageChops.multiply(gradient.split()[3], mask))
+    image.alpha_composite(gradient, (left, top))
+
+
+def _draw_legend(
+    draw: ImageDraw.ImageDraw,
+    *,
+    series: list[dict[str, Any]],
+    x: int,
+    y: int,
+    max_width: int,
+    font: ImageFont.ImageFont,
+) -> int:
+    chip_gap = 16
+    row_gap = 10
+    chip_height = max(34, _text_size(draw, "Ag", font)[1] + 16)
+    cursor_x = x
+    cursor_y = y
+    for index, item in enumerate(series):
+        label = _trim_to_width(draw, str(item.get("label") or f"Series {index + 1}"), font=font, max_width=280)
+        text_width = _text_size(draw, label, font)[0]
+        chip_width = text_width + 46
+        if cursor_x > x and cursor_x + chip_width > x + max_width:
+            cursor_x = x
+            cursor_y += chip_height + row_gap
+        color = _SERIES_PALETTE[index % len(_SERIES_PALETTE)]
+        draw.rounded_rectangle(
+            (cursor_x, cursor_y, cursor_x + chip_width, cursor_y + chip_height),
+            radius=chip_height // 2,
+            fill=(255, 255, 255, 12),
+            outline=(255, 255, 255, 26),
+            width=1,
+        )
+        dot_cx = cursor_x + 19
+        dot_cy = cursor_y + chip_height // 2
+        draw.ellipse((dot_cx - 6, dot_cy - 6, dot_cx + 6, dot_cy + 6), fill=ImageColor.getrgb(color) + (255,))
+        text_height = _text_size(draw, label, font)[1]
+        draw.text((cursor_x + 33, cursor_y + (chip_height - text_height) // 2 - 1), label, font=font, fill="#E8EEF8")
+        cursor_x += chip_width + chip_gap
+    return cursor_y + chip_height
+
+
+def _draw_rotated_text(
+    image: Image.Image,
+    *,
+    text: str,
+    font: ImageFont.ImageFont,
+    fill: str,
+    center: tuple[int, int],
+) -> None:
+    label = str(text or "").strip()
+    if not label:
+        return
+    measure = ImageDraw.Draw(image)
+    text_width, text_height = _text_size(measure, label, font)
+    tile = Image.new("RGBA", (text_width + 8, text_height + 8), (0, 0, 0, 0))
+    ImageDraw.Draw(tile).text((4, 4), label, font=font, fill=fill)
+    rotated = tile.rotate(90, expand=True)
+    paste_x = int(center[0] - rotated.width / 2)
+    paste_y = int(center[1] - rotated.height / 2)
+    image.alpha_composite(rotated, (paste_x, paste_y))
 
 
 def render_chart_png(spec: dict[str, Any]) -> bytes:
-    output_width = _OUTPUT_WIDTH
-    output_height = _OUTPUT_HEIGHT
-    image = Image.new("RGBA", (output_width, output_height), ImageColor.getrgb("#050505") + (255,))
-    image = _add_vertical_gradient(image, top_color="#10131A", bottom_color="#050505", alpha=190)
-    image = _add_glow(
+    width = _OUTPUT_WIDTH
+    height = _OUTPUT_HEIGHT
+    image = _build_canvas()
+    draw = ImageDraw.Draw(image, "RGBA")
+
+    eyebrow_font = _load_font(17, bold=True)
+    title_font = _load_font(40, bold=True)
+    caption_font = _load_font(20)
+    legend_font = _load_font(16, bold=True)
+    axis_title_font = _load_font(17, bold=True)
+    tick_font = _load_font(18)
+    category_font = _load_font(18)
+    value_font = _load_font(16, bold=True)
+
+    series = spec["series"]
+    multi_series = len(series) > 1
+    margin_x = 96
+    header_width = width - (2 * margin_x)
+
+    # --- Header: eyebrow, title, accent rule, caption ---
+    eyebrow_y = 58
+    draw.text((margin_x, eyebrow_y), "COSMIC VISUAL", font=eyebrow_font, fill=_INK_FAINT)
+
+    title_y = eyebrow_y + 28
+    title = _trim_to_width(draw, str(spec["title"]), font=title_font, max_width=header_width)
+    draw.text((margin_x, title_y), title, font=title_font, fill=_INK)
+    title_bottom = draw.textbbox((margin_x, title_y), title or "Ag", font=title_font)[3]
+
+    rule_y = title_bottom + 14
+    _horizontal_gradient_pill(
         image,
-        bounds=(-220, -180, 640, 520),
-        color="#0A84FF",
-        alpha=54,
-        blur_radius=180,
-    )
-    image = _add_glow(
-        image,
-        bounds=(940, -140, 1780, 480),
-        color="#30D158",
-        alpha=34,
-        blur_radius=210,
-    )
-    image = _add_glow(
-        image,
-        bounds=(430, 550, 1120, 1120),
-        color="#BF5AF2",
-        alpha=25,
-        blur_radius=210,
+        bounds=(margin_x, rule_y, margin_x + 232, rule_y + 5),
+        radius=3,
+        left_color=_ACCENT_BLUE,
+        right_color=_ACCENT_TEAL,
     )
     draw = ImageDraw.Draw(image, "RGBA")
 
-    eyebrow_font = _load_font(18, bold=True)
-    title_font = _load_font(42, bold=True)
-    subtitle_font = _load_font(20)
-    label_font = _load_font(17, bold=True)
-    tick_font = _load_font(18)
-    legend_font = _load_font(16, bold=True)
-    value_font = _load_font(17, bold=True)
-
-    margin_x = 92
-    top_y = 72
-    draw.text((margin_x, top_y), "COSMIC VISUAL", font=eyebrow_font, fill="#8591A3")
-    title_width = 1040 if len(spec["series"]) > 1 else 1360
-    title = _trim_to_width(draw, str(spec["title"]), font=title_font, max_width=title_width)
-    draw.text((margin_x, top_y + 38), title, font=title_font, fill="#F7F9FF")
-    draw.line((margin_x, top_y + 96, margin_x + 260, top_y + 96), fill=ImageColor.getrgb("#30D158") + (150,), width=3)
-
+    cursor_y = rule_y + 20
     caption = str(spec.get("caption") or "").strip()
     if caption:
-        _draw_text_block(
+        cursor_y = _draw_text_block(
             draw,
-            xy=(margin_x, top_y + 116),
+            xy=(margin_x, cursor_y),
             text=caption,
-            font=subtitle_font,
-            fill="#A8B1C0",
-            max_width=980,
-            line_gap=4,
+            font=caption_font,
+            fill=_INK_MUTED,
+            max_width=header_width,
+            line_gap=6,
             max_lines=2,
         )
+        cursor_y += 6
 
-    if len(spec["series"]) > 1:
-        legend_x = output_width - margin_x
-        legend_y = top_y + 42
-        for series_index, series in reversed(list(enumerate(spec["series"]))):
-            label = _trim_to_width(draw, str(series["label"]), font=legend_font, max_width=220)
-            chip_width = _text_size(draw, label, legend_font)[0] + 44
-            legend_x -= chip_width
-            _draw_simple_chip(
-                draw,
-                x=legend_x,
-                y=legend_y,
-                text=label,
-                color=_SERIES_PALETTE[series_index % len(_SERIES_PALETTE)],
-                font=legend_font,
-            )
-            legend_x -= 12
+    # --- Legend (its own row beneath the header, never over the title) ---
+    if multi_series:
+        cursor_y = _draw_legend(
+            draw,
+            series=series,
+            x=margin_x,
+            y=cursor_y + 4,
+            max_width=header_width,
+            font=legend_font,
+        )
 
-    plot_left = 176
-    plot_right = output_width - 96
-    plot_top = 242
-    plot_bottom = 728
+    # --- Plot frame (dynamic top so nothing overlaps the header) ---
+    has_y_label = bool(spec.get("y_label"))
+    has_x_label = bool(spec.get("x_label"))
+    plot_left = 168 if has_y_label else 132
+    plot_right = width - 80
+    plot_top = max(int(cursor_y) + 30, 268)
+    plot_bottom = height - (132 if has_x_label else 96)
     plot_width = plot_right - plot_left
     plot_height = plot_bottom - plot_top
 
     draw.rounded_rectangle(
-        (plot_left - 36, plot_top - 28, plot_right + 24, plot_bottom + 78),
-        radius=26,
-        fill=(255, 255, 255, 7),
-        outline=(255, 255, 255, 18),
+        (plot_left - 34, plot_top - 26, plot_right + 22, plot_bottom + 24),
+        radius=24,
+        fill=(255, 255, 255, 6),
+        outline=(255, 255, 255, 16),
         width=1,
     )
 
     ordered_categories: list[str] = []
     seen_categories: set[str] = set()
     y_values: list[float] = []
-    for series in spec["series"]:
-        for point in series["points"]:
+    for item in series:
+        for point in item["points"]:
             category = point["x"]
             if category not in seen_categories:
                 seen_categories.add(category)
@@ -901,13 +496,13 @@ def render_chart_png(spec: dict[str, Any]) -> bytes:
     if not ordered_categories or not y_values:
         raise ValueError("Chart spec did not contain drawable data.")
 
-    min_y, max_y = _nice_range(y_values)
+    min_y, max_y, step = _nice_bounds(y_values)
 
     def y_to_px(value: float) -> float:
         ratio = (value - min_y) / (max_y - min_y)
         return plot_bottom - (ratio * plot_height)
 
-    axis_zero_y = y_to_px(0.0)
+    axis_zero_y = max(plot_top, min(plot_bottom, y_to_px(0.0)))
     category_count = len(ordered_categories)
     category_step = plot_width / max(category_count, 1)
     category_centers = {
@@ -915,58 +510,75 @@ def render_chart_png(spec: dict[str, Any]) -> bytes:
         for idx, category in enumerate(ordered_categories)
     }
 
-    grid_lines = 5
-    for idx in range(grid_lines + 1):
-        value = min_y + ((max_y - min_y) * (idx / grid_lines))
-        y = y_to_px(value)
-        is_zero = abs(value) <= max(abs(max_y - min_y) * 0.02, 1e-9)
+    # --- Horizontal gridlines + y ticks ---
+    tick_value = min_y
+    while tick_value <= max_y + (step * 0.001):
+        y = y_to_px(tick_value)
+        is_zero = abs(tick_value) <= step * 0.001
         draw.line(
             (plot_left, y, plot_right, y),
-            fill=(255, 255, 255, 46 if is_zero else 22),
+            fill=(255, 255, 255, 48 if is_zero else 18),
             width=2 if is_zero else 1,
         )
-        tick = _format_tick(value)
-        tick_width, tick_height = _text_size(draw, tick, tick_font)
-        draw.text((plot_left - tick_width - 24, y - tick_height // 2), tick, font=tick_font, fill="#B3BDCC")
+        tick_text = _format_tick(tick_value)
+        tick_width, tick_height = _text_size(draw, tick_text, tick_font)
+        draw.text((plot_left - tick_width - 22, y - tick_height // 2), tick_text, font=tick_font, fill=_INK_MUTED)
+        tick_value += step
 
-    draw.line((plot_left, plot_bottom, plot_right, plot_bottom), fill=(255, 255, 255, 56), width=2)
     draw.line((plot_left, plot_top, plot_left, plot_bottom), fill=(255, 255, 255, 34), width=1)
+    draw.line((plot_left, plot_bottom, plot_right, plot_bottom), fill=(255, 255, 255, 60), width=2)
+
+    series_count = len(series)
+    show_bar_values = series_count * category_count <= 22
 
     if spec["chart_type"] == "bar":
-        series_count = len(spec["series"])
-        group_width = min(category_step * 0.7, 118)
-        bar_gap = 8
-        bar_width = max(12, (group_width - ((series_count - 1) * bar_gap)) / max(series_count, 1))
-        for series_index, series in enumerate(spec["series"]):
+        inner_gap = 8 if series_count > 1 else 0
+        group_width = min(category_step * 0.72, (series_count * 84) + ((series_count - 1) * inner_gap))
+        bar_width = max(12.0, (group_width - ((series_count - 1) * inner_gap)) / max(series_count, 1))
+        group_width = (bar_width * series_count) + (inner_gap * (series_count - 1))
+        for series_index, item in enumerate(series):
             color = _SERIES_PALETTE[series_index % len(_SERIES_PALETTE)]
+            base_rgb = ImageColor.getrgb(color)
+            top_rgb = tuple(min(255, channel + 60) for channel in base_rgb)
+            top_color = "#%02X%02X%02X" % top_rgb
             for category in ordered_categories:
-                point = next((item for item in series["points"] if item["x"] == category), None)
+                point = next((entry for entry in item["points"] if entry["x"] == category), None)
                 if point is None:
                     continue
                 center = category_centers[category]
-                left = int(center - group_width / 2 + (series_index * (bar_width + bar_gap)))
-                right = int(left + bar_width)
-                top = int(y_to_px(float(point["y"])))
-                bottom = int(axis_zero_y)
+                left = center - (group_width / 2) + (series_index * (bar_width + inner_gap))
+                right = left + bar_width
+                value = float(point["y"])
+                top = y_to_px(value)
+                bottom = axis_zero_y
                 if top > bottom:
                     top, bottom = bottom, top
-                _draw_bar(draw, bounds=(left, top, right, bottom), color=color)
-                if category_count <= 8 and series_count == 1:
-                    value = _format_tick(float(point["y"]))
-                    value_width, value_height = _text_size(draw, value, value_font)
-                    draw.text(
-                        (left + ((right - left) // 2) - value_width // 2, max(plot_top, top - value_height - 10)),
-                        value,
-                        font=value_font,
-                        fill="#F1F5FA",
-                    )
+                if bottom - top < 3:
+                    top = bottom - 3
+                radius = max(4, int(min(14, bar_width / 2.4)))
+                _rounded_gradient_bar(
+                    image,
+                    bounds=(left, top, right, bottom),
+                    radius=radius,
+                    top_color=top_color,
+                    bottom_color=color,
+                )
+                draw = ImageDraw.Draw(image, "RGBA")
+                if show_bar_values:
+                    value_text = _format_tick(value)
+                    value_width, value_height = _text_size(draw, value_text, value_font)
+                    label_x = int(left + (bar_width / 2) - (value_width / 2))
+                    label_y = int(top - value_height - 8)
+                    if label_y < plot_top:
+                        label_y = int(top + 8)
+                    draw.text((label_x, label_y), value_text, font=value_font, fill="#EEF3FB")
     else:
-        for series_index, series in enumerate(spec["series"]):
+        for series_index, item in enumerate(series):
             color = _SERIES_PALETTE[series_index % len(_SERIES_PALETTE)]
             rgb = ImageColor.getrgb(color)
             polyline = [
                 (category_centers[point["x"]], y_to_px(float(point["y"])))
-                for point in series["points"]
+                for point in item["points"]
                 if point["x"] in category_centers
             ]
             if len(polyline) >= 2:
@@ -976,34 +588,45 @@ def render_chart_png(spec: dict[str, Any]) -> bytes:
                         fill=rgb + (30,),
                     )
                 glow = Image.new("RGBA", image.size, (0, 0, 0, 0))
-                glow_draw = ImageDraw.Draw(glow, "RGBA")
-                glow_draw.line(polyline, fill=rgb + (90,), width=16, joint="curve")
+                ImageDraw.Draw(glow, "RGBA").line(polyline, fill=rgb + (90,), width=16, joint="curve")
                 image = Image.alpha_composite(image, _blur_overlay(glow, 8))
                 draw = ImageDraw.Draw(image, "RGBA")
                 draw.line(polyline, fill=rgb + (255,), width=5, joint="curve")
             for x, y in polyline:
-                draw.ellipse((x - 7, y - 7, x + 7, y + 7), fill=(5, 5, 5, 255), outline=rgb + (255,), width=3)
+                draw.ellipse((x - 8, y - 8, x + 8, y + 8), fill=ImageColor.getrgb(_BG_BOTTOM) + (255,), outline=rgb + (255,), width=3)
 
-    label_skip = max(1, int(category_count / 10) + (1 if category_count > 10 and category_count % 10 else 0))
-    max_label_width = max(54, int(category_step * 0.86))
+    # --- X category labels ---
+    label_skip = max(1, math.ceil(category_count / 12))
+    max_label_width = max(56, int(category_step * 0.92))
     for idx, category in enumerate(ordered_categories):
         if idx % label_skip != 0 and idx != category_count - 1:
             continue
         center = int(plot_left + (idx + 0.5) * category_step)
-        label = _trim_to_width(draw, str(category), font=tick_font, max_width=max_label_width)
-        label_width, label_height = _text_size(draw, label, tick_font)
-        draw.text((center - label_width // 2, plot_bottom + 24), label, font=tick_font, fill="#DDE5F0")
+        label = _trim_to_width(draw, str(category), font=category_font, max_width=max_label_width)
+        label_width = _text_size(draw, label, category_font)[0]
+        draw.text((center - label_width // 2, plot_bottom + 20), label, font=category_font, fill="#DDE5F0")
 
-    if spec.get("x_label"):
-        x_label = _trim_to_width(draw, str(spec["x_label"]), font=label_font, max_width=520)
-        x_width, _ = _text_size(draw, x_label, label_font)
-        draw.text((plot_left + plot_width // 2 - x_width // 2, output_height - 70), x_label, font=label_font, fill="#D9E1EC")
-    if spec.get("y_label"):
-        y_label = _trim_to_width(draw, str(spec["y_label"]), font=label_font, max_width=620)
-        draw.text((plot_left, plot_top - 38), y_label, font=label_font, fill="#D9E1EC")
+    # --- Axis titles ---
+    if has_x_label:
+        x_label = _trim_to_width(draw, str(spec["x_label"]), font=axis_title_font, max_width=plot_width)
+        x_label_width = _text_size(draw, x_label, axis_title_font)[0]
+        draw.text(
+            (plot_left + (plot_width // 2) - (x_label_width // 2), height - 64),
+            x_label,
+            font=axis_title_font,
+            fill="#C8D2E0",
+        )
+    if has_y_label:
+        _draw_rotated_text(
+            image,
+            text=_trim_to_width(draw, str(spec["y_label"]), font=axis_title_font, max_width=plot_height),
+            font=axis_title_font,
+            fill="#C8D2E0",
+            center=(plot_left - 118, (plot_top + plot_bottom) // 2),
+        )
 
     final_image = Image.alpha_composite(
-        Image.new("RGBA", image.size, ImageColor.getrgb("#050505") + (255,)),
+        Image.new("RGBA", image.size, ImageColor.getrgb(_BG_BOTTOM) + (255,)),
         image,
     ).convert("RGB")
     buffer = BytesIO()

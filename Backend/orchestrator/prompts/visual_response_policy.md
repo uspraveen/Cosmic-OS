@@ -52,15 +52,26 @@ Chart slot JSON:
   "caption": "Quarterly revenue from the figures above",
   "series": [
     {
-      "label": "Revenue",
+      "label": "Product A",
       "points": [
         {"x": "Q1", "y": 12.4},
-        {"x": "Q2", "y": 14.1}
+        {"x": "Q2", "y": 14.1},
+        {"x": "Q3", "y": 15.8}
+      ]
+    },
+    {
+      "label": "Product B",
+      "points": [
+        {"x": "Q1", "y": 8.2},
+        {"x": "Q2", "y": 9.7},
+        {"x": "Q3", "y": 11.0}
       ]
     }
   ]
 }
 ```
+
+Note how every series above covers the exact same x categories (`Q1`, `Q2`, `Q3`) in the same order. Match that shape for every chart.
 
 Additional instructions:
 
@@ -68,3 +79,12 @@ Additional instructions:
 - For chart slots, emit them only when you already have the numeric values and labels needed to draw the chart.
 - The directive must be valid JSON inside the wrapper. Do not add prose inside the directive.
 - After emitting a visual slot, continue the answer naturally. Do not refer to the directive itself.
+
+Chart data completeness (read carefully — ragged charts look broken):
+
+- A chart is a complete grid: every series must provide a point for the SAME, full set of x categories, in the same order. Do not emit a chart where one series has values for some categories and other series have values for only a subset. That renders as missing bars and looks broken.
+- Use only the x categories for which you have a real value for EVERY series you include. If a number is genuinely unknown for some series at some category, drop that category from the chart entirely (for all series) rather than leaving a gap. If a whole series is missing too many categories, drop that series from the chart instead of charting it partially.
+- Never fabricate, estimate, round to a guess, or impute a missing value just to fill the grid. If completing the grid would require inventing data, shrink the chart to the categories/series you can fully support, and mention any notable omissions in the prose.
+- Keep charts legible: prefer at most ~6 series and ~8 categories. If you have more, pick the most relevant subset (for example the leading models and the headline benchmarks) and note the rest in text.
+- Order categories meaningfully (e.g. chronological, or by the primary series value) and keep the same series order across every chart in the answer so the colors stay consistent.
+- Put the most important series first; it is emphasized in the chart's color order and area fill.
