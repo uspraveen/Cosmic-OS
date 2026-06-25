@@ -22,6 +22,11 @@
       "description": "Prefer the main page content over boilerplate.",
       "default": true
     },
+    "screenshot_full_page": {
+      "type": "boolean",
+      "description": "When a screenshot is requested, capture the full page (default true) so content below the fold is included. Set false for the top viewport only.",
+      "default": true
+    },
     "wait_for_ms": {
       "type": "integer",
       "minimum": 0,

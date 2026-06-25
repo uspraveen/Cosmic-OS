@@ -16,6 +16,11 @@ import httpx
 
 from shared.agent_runtime import AgentRuntime
 from shared.contracts import AgentError, AgentResult, ArtifactManifest, TaskEnvelope
+from shared.image_artifacts import (
+    SUPPORTED_IMAGE_EXTENSIONS,
+    SUPPORTED_IMAGE_MIME_TYPES,
+    infer_image_mime_from_extension,
+)
 from shared.sqlite_client import connect_sync
 
 from .config import AGENT_ROOT, BACKEND_ROOT, FirecrawlWebScrapeConfig
@@ -195,10 +200,27 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
     async def _handle_scrape(self, task: TaskEnvelope) -> AgentResult:
         prompt_assets = self._load_prompt_assets()
         url = self._require_url(task.input.get("url"), field_name="url")
+
+        # Direct image URLs (e.g. a benchmark/chart table saved as a .png) cannot be
+        # scraped by Firecrawl, which only handles HTML/PDF/docs. Fetch the image
+        # ourselves and surface it as a vision-readable artifact so the orchestrator's
+        # vision model can read it.
+        if self._looks_like_image_url(url):
+            return await self._handle_image_fetch(
+                task=task,
+                url=url,
+                prompt_assets=prompt_assets,
+                reason="direct_image_url",
+            )
+
         formats = self._normalize_scrape_formats(task.input.get("formats"))
+        full_page = self._coerce_bool(
+            task.input.get("screenshot_full_page"),
+            default=bool(getattr(self.config, "screenshot_full_page", True)),
+        )
         payload: dict[str, Any] = {
             "url": url,
-            "formats": formats,
+            "formats": self._build_firecrawl_formats(formats, full_page=full_page),
             "onlyMainContent": self._coerce_bool(task.input.get("only_main_content"), default=True),
             "mobile": self._coerce_bool(task.input.get("mobile"), default=False),
         }
@@ -233,7 +255,19 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
 
         await self._emit_progress(task.task_id, f"Scraping {url} via Firecrawl.")
         started = time.perf_counter()
-        response_payload = await self._firecrawl_request("POST", "/v2/scrape", json_body=payload)
+        try:
+            response_payload = await self._firecrawl_request("POST", "/v2/scrape", json_body=payload)
+        except FirecrawlAgentError as exc:
+            # Firecrawl rejects binary files (e.g. image content-types) it cannot parse.
+            # If the target turned out to be an image, fetch it directly for vision.
+            if self._is_unsupported_image_error(exc):
+                return await self._handle_image_fetch(
+                    task=task,
+                    url=url,
+                    prompt_assets=prompt_assets,
+                    reason="firecrawl_image_content_type",
+                )
+            raise
         elapsed_ms = max(1, int((time.perf_counter() - started) * 1000))
         data = response_payload.get("data")
         if not isinstance(data, dict):
@@ -292,6 +326,157 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
             elapsed_ms,
         )
         return AgentResult(status="completed", output=output, artifacts=artifact_manifests)
+
+    def _build_firecrawl_formats(self, formats: list[str], *, full_page: bool) -> list[Any]:
+        """Map normalized string formats to the Firecrawl payload.
+
+        Most formats stay as bare strings, but `screenshot` is expanded into the
+        object form so we can request a full-page capture (the default), which is
+        what surfaces content below the fold such as image-based benchmark tables.
+        """
+        built: list[Any] = []
+        for fmt in formats:
+            if fmt == "screenshot":
+                screenshot_format: dict[str, Any] = {
+                    "type": "screenshot",
+                    "fullPage": bool(full_page),
+                }
+                quality = int(getattr(self.config, "screenshot_quality", 0) or 0)
+                if 1 <= quality <= 100:
+                    screenshot_format["quality"] = quality
+                viewport_width = int(getattr(self.config, "screenshot_viewport_width", 0) or 0)
+                if viewport_width > 0:
+                    screenshot_format["viewport"] = {"width": viewport_width, "height": 800}
+                built.append(screenshot_format)
+            else:
+                built.append(fmt)
+        return built
+
+    def _looks_like_image_url(self, url: str) -> bool:
+        path = urlparse(url).path
+        suffix = Path(path).suffix.lower()
+        return suffix in SUPPORTED_IMAGE_EXTENSIONS
+
+    def _is_unsupported_image_error(self, exc: "FirecrawlAgentError") -> bool:
+        message = str(getattr(exc, "message", "") or "").lower()
+        return "image/" in message and ("cannot process" in message or "not supported" in message)
+
+    async def _handle_image_fetch(
+        self,
+        *,
+        task: TaskEnvelope,
+        url: str,
+        prompt_assets: dict[str, str],
+        reason: str,
+    ) -> AgentResult:
+        """Fetch a standalone image URL and surface it as a vision-readable artifact.
+
+        Firecrawl cannot scrape binary images, so for direct image URLs (e.g. a chart
+        or benchmark table saved as a .png) we download the bytes ourselves and emit an
+        image/png-style artifact carrying the source URL. The orchestrator's existing
+        tool-result image pipeline then surfaces it and auto-escalates to the vision
+        model so it can read the image content.
+        """
+        await self._emit_progress(task.task_id, f"Fetching image {url} for visual reading.")
+        started = time.perf_counter()
+        content, header_mime = await self._download_binary_with_mime(url)
+        elapsed_ms = max(1, int((time.perf_counter() - started) * 1000))
+        if content is None:
+            raise FirecrawlAgentError(
+                code="NETWORK_ERROR",
+                message=f"Could not download the image at {url}.",
+                retryable=True,
+                next_action="retry",
+            )
+
+        extension_mime = infer_image_mime_from_extension(Path(urlparse(url).path).suffix)
+        mime = header_mime if header_mime in SUPPORTED_IMAGE_MIME_TYPES else extension_mime
+        if mime not in SUPPORTED_IMAGE_MIME_TYPES:
+            raise FirecrawlAgentError(
+                code="INVALID_INPUT",
+                message=(
+                    f"{url} did not return a supported image (got {header_mime or 'unknown'}). "
+                    "Only JPEG, PNG, GIF, and WEBP can be read visually."
+                ),
+                retryable=False,
+                next_action="revise_input",
+            )
+
+        filename = self._image_filename_from_url(url, mime)
+        manifest = self._write_binary_artifact(
+            task=task,
+            filename=filename,
+            content=content,
+            mime=mime,
+            source_url=url,
+        )
+        ref = self._artifact_ref(
+            manifest,
+            extra={
+                "filename": filename,
+                "kind": "image",
+                "mime": mime,
+                "download_url": url,
+                "provider_url": url,
+            },
+        )
+        message = f"Fetched image {url} as an artifact for visual reading."
+        output = {
+            "response": message,
+            "message": message,
+            "url": url,
+            "title": None,
+            "available_formats": ["image"],
+            "metadata": {},
+            "data": {
+                "image_url": url,
+                "image_captured": True,
+                "image_mime": mime,
+                "image_hint": (
+                    "This image was fetched as an artifact; COSMIC can read it visually. "
+                    "Use it to read tables/charts that exist only as an image."
+                ),
+            },
+            "artifacts": [ref],
+        }
+        details = {
+            "message": message,
+            "elapsed_ms": elapsed_ms,
+            "image_fetch_reason": reason,
+            "image_mime": mime,
+            "prompt_assets_loaded": sorted(key for key, value in prompt_assets.items() if value),
+        }
+        self._record_session_run(
+            task=task,
+            intent=task.intent,
+            target_urls=[url],
+            summary=message,
+            artifact_refs=[ref],
+            details=details,
+        )
+        logger.info(
+            "firecrawl_agent.image_fetch_completed task_id=%s url=%s mime=%s reason=%s elapsed_ms=%d",
+            task.task_id,
+            url,
+            mime,
+            reason,
+            elapsed_ms,
+        )
+        return AgentResult(status="completed", output=output, artifacts=[manifest])
+
+    def _image_filename_from_url(self, url: str, mime: str) -> str:
+        raw_name = Path(urlparse(url).path).name.strip()
+        extension = Path(raw_name).suffix.lower()
+        if extension in SUPPORTED_IMAGE_EXTENSIONS and raw_name:
+            return raw_name
+        ext_for_mime = {
+            "image/jpeg": ".jpg",
+            "image/png": ".png",
+            "image/gif": ".gif",
+            "image/webp": ".webp",
+        }.get(mime, ".png")
+        stem = Path(raw_name).stem if raw_name else "image"
+        return f"{stem or 'image'}{ext_for_mime}"
 
     async def _handle_extract(self, task: TaskEnvelope) -> AgentResult:
         prompt_assets = self._load_prompt_assets()
@@ -908,25 +1093,30 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
         return None, extra
 
     async def _download_image_bytes(self, url: str) -> bytes | None:
+        content, _mime = await self._download_binary_with_mime(url)
+        return content
+
+    async def _download_binary_with_mime(self, url: str) -> tuple[bytes | None, str | None]:
         try:
             response = await self._firecrawl_client.get(
                 url,
                 timeout=self.config.screenshot_download_timeout_sec,
             )
         except Exception:
-            logger.warning("firecrawl_agent.screenshot_download_failed url=%s", url, exc_info=True)
-            return None
+            logger.warning("firecrawl_agent.image_download_failed url=%s", url, exc_info=True)
+            return None, None
         if response.status_code >= 400:
             logger.warning(
-                "firecrawl_agent.screenshot_download_status url=%s status=%d",
+                "firecrawl_agent.image_download_status url=%s status=%d",
                 url,
                 response.status_code,
             )
-            return None
+            return None, None
         content = response.content or b""
         if not content or len(content) > self.config.screenshot_max_bytes:
-            return None
-        return content
+            return None, None
+        mime = str(response.headers.get("content-type") or "").split(";", 1)[0].strip().lower() or None
+        return content, mime
 
     def _decode_data_uri(self, value: str) -> bytes | None:
         try:

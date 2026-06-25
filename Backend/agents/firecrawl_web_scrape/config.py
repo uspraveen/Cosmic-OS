@@ -67,6 +67,11 @@ class FirecrawlWebScrapeConfig:
     screenshot_as_image_artifact: bool = True
     screenshot_download_timeout_sec: float = 30.0
     screenshot_max_bytes: int = 12_000_000
+    # Default to full-page screenshots so content below the fold (e.g. benchmark
+    # tables rendered as images) is captured, not just the top viewport.
+    screenshot_full_page: bool = True
+    screenshot_quality: int = 80
+    screenshot_viewport_width: int = 1280
 
     @classmethod
     def from_env(cls) -> "FirecrawlWebScrapeConfig":
@@ -87,4 +92,7 @@ class FirecrawlWebScrapeConfig:
             screenshot_as_image_artifact=_env_bool("FIRECRAWL_SCREENSHOT_AS_IMAGE_ARTIFACT", True),
             screenshot_download_timeout_sec=max(5.0, _env_float("FIRECRAWL_SCREENSHOT_DOWNLOAD_TIMEOUT_SEC", 30.0)),
             screenshot_max_bytes=max(100_000, _env_int("FIRECRAWL_SCREENSHOT_MAX_BYTES", 12_000_000)),
+            screenshot_full_page=_env_bool("FIRECRAWL_SCREENSHOT_FULL_PAGE", True),
+            screenshot_quality=min(100, max(1, _env_int("FIRECRAWL_SCREENSHOT_QUALITY", 80))),
+            screenshot_viewport_width=min(7680, max(320, _env_int("FIRECRAWL_SCREENSHOT_VIEWPORT_WIDTH", 1280))),
         )

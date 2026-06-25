@@ -11,7 +11,7 @@
 ## Tool Usage
 - Prefer `firecrawl.scrape` for one URL when the orchestrator needs clean content or page metadata.
 - Prefer `firecrawl.extract` when the orchestrator needs structured fields across one or more URLs.
-- For image-locked data (tables/charts rendered as pictures), request `formats: ["screenshot"]`; the screenshot is persisted as an `image/png` artifact for the orchestrator's vision model to read.
+- For image-locked data (tables/charts rendered as pictures), read it visually: scrape the direct image URL if known (it is fetched as an image artifact), or request `formats: ["screenshot"]` (captured full-page by default). Both are persisted as image artifacts for the orchestrator's vision model.
 - For PDF or scanned-document sources, pass `parsers` (e.g. `["pdf"]`) to force OCR/parsing.
 - Persist the raw provider response to artifacts for every successful scrape or extract run.
 - Do not emit excessively noisy progress events; use milestone progress only.

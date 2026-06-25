@@ -1168,6 +1168,7 @@ class ToolExecutor:
             "mobile",
             "proxy",
             "parsers",
+            "screenshot_full_page",
         ):
             value = tool_input.get(key)
             if value not in (None, "", [], {}):

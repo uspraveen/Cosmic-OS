@@ -144,7 +144,9 @@ async def test_firecrawl_agent_scrape_screenshot_becomes_vision_image_artifact(t
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url == httpx.URL("https://api.firecrawl.dev/v2/scrape"):
             payload = json.loads(request.content.decode("utf-8"))
-            assert payload["formats"] == ["screenshot"]
+            # Screenshots are requested in object form with full-page capture by default.
+            assert payload["formats"][0]["type"] == "screenshot"
+            assert payload["formats"][0]["fullPage"] is True
             return httpx.Response(
                 200,
                 json={
@@ -200,6 +202,102 @@ async def test_firecrawl_agent_scrape_screenshot_becomes_vision_image_artifact(t
     assert len(image_refs) == 1
     assert image_refs[0]["download_url"] == screenshot_url
     assert image_refs[0]["filename"] == "screenshot.png"
+
+
+@pytest.mark.asyncio
+async def test_firecrawl_agent_scrape_direct_image_url_fetches_vision_artifact(tmp_path: Path) -> None:
+    image_url = "https://sakana.ai/assets/fugu-release/benchmark-table.png"
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"7" * 128
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        # Firecrawl's /v2/scrape must NOT be called for a direct image URL.
+        assert request.url.path != "/v2/scrape"
+        if request.url == httpx.URL(image_url):
+            return httpx.Response(200, content=png_bytes, headers={"content-type": "image/png"})
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as firecrawl_client:
+        agent = FirecrawlWebScrapeAgent(
+            redis_client=FakeRedis(),
+            config=FirecrawlWebScrapeConfig(
+                redis_url="redis://unused",
+                gateway_url="http://gateway",
+                gateway_internal_token="internal-token",
+                firecrawl_api_key="firecrawl-key",
+                firecrawl_api_base_url="https://api.firecrawl.dev",
+            ),
+            firecrawl_client=firecrawl_client,
+            store_root=tmp_path / "store",
+            runtime_root=tmp_path / "runtime",
+            artifacts_root=tmp_path / "runs" / "artifacts",
+            agent_secret="agent-secret",
+        )
+        await agent.on_startup()
+        try:
+            result = await agent.execute(
+                _make_task(intent="firecrawl.scrape", payload={"url": image_url})
+            )
+        finally:
+            await agent.stop()
+
+    assert result.status == "completed"
+    assert result.output["available_formats"] == ["image"]
+    image_manifests = [a for a in result.artifacts if a.mime == "image/png"]
+    assert len(image_manifests) == 1
+    assert image_manifests[0].path.endswith("/firecrawl_web_scrape/benchmark-table.png")
+    image_refs = [ref for ref in result.output["artifacts"] if ref.get("mime") == "image/png"]
+    assert len(image_refs) == 1
+    assert image_refs[0]["download_url"] == image_url
+
+
+@pytest.mark.asyncio
+async def test_firecrawl_agent_scrape_falls_back_to_image_fetch_on_content_type_error(tmp_path: Path) -> None:
+    # URL has no image extension, so Firecrawl is tried first and rejects it as an image.
+    target_url = "https://example.com/asset?id=benchmark"
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"9" * 64
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/scrape":
+            return httpx.Response(
+                400,
+                json={
+                    "success": False,
+                    "error": "The URL returned a file type that Firecrawl cannot process: image/png.",
+                },
+            )
+        if request.url == httpx.URL(target_url):
+            return httpx.Response(200, content=png_bytes, headers={"content-type": "image/png"})
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as firecrawl_client:
+        agent = FirecrawlWebScrapeAgent(
+            redis_client=FakeRedis(),
+            config=FirecrawlWebScrapeConfig(
+                redis_url="redis://unused",
+                gateway_url="http://gateway",
+                gateway_internal_token="internal-token",
+                firecrawl_api_key="firecrawl-key",
+                firecrawl_api_base_url="https://api.firecrawl.dev",
+            ),
+            firecrawl_client=firecrawl_client,
+            store_root=tmp_path / "store",
+            runtime_root=tmp_path / "runtime",
+            artifacts_root=tmp_path / "runs" / "artifacts",
+            agent_secret="agent-secret",
+        )
+        await agent.on_startup()
+        try:
+            result = await agent.execute(
+                _make_task(intent="firecrawl.scrape", payload={"url": target_url, "formats": ["markdown"]})
+            )
+        finally:
+            await agent.stop()
+
+    assert result.status == "completed"
+    assert result.output["available_formats"] == ["image"]
+    assert any(a.mime == "image/png" for a in result.artifacts)
 
 
 @pytest.mark.asyncio

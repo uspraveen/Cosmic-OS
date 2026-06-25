@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.0 - 2026-06-24
+- Screenshots are now captured full-page by default (via Firecrawl's `{"type":"screenshot","fullPage":true}`), so image-based tables/charts below the fold are included rather than just the top viewport. Override with `screenshot_full_page: false`.
+- `firecrawl.scrape` now handles direct image URLs (e.g. a `.png` chart/table): instead of failing on Firecrawl's "cannot process binary image" error, the agent downloads the image and surfaces it as a vision-readable artifact. Also auto-falls back to direct image fetch when Firecrawl rejects a URL as an image content-type.
+
 ## 1.2.0 - 2026-06-24
 - Screenshots captured via `formats:["screenshot"]` are now persisted as real `image/png` artifacts with a fetchable URL, so the orchestrator's existing tool-result image pipeline surfaces them to the vision model (Kimi) for reading image-locked tables/charts. The default text orchestrator cannot read images; COSMIC auto-escalates to the vision model when an image artifact is surfaced.
 - Added `parsers` passthrough to `firecrawl.scrape` and `firecrawl.extract` for Firecrawl OCR/parsing of PDF and scanned-document sources.

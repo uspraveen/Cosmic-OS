@@ -7,12 +7,14 @@ description: >
 
 intents:
   - name: firecrawl.scrape
-    description: Scrape a single URL into clean content formats such as markdown, html, links, images, or a screenshot. Use formats:["screenshot"] to capture image-locked tables/charts as an image artifact the vision model can read, and parsers (e.g. ["pdf"]) to force OCR on PDF/scanned sources.
+    description: Scrape a single URL into clean content formats such as markdown, html, links, images, or a full-page screenshot. Use formats:["screenshot"] to capture image-locked tables/charts as an image artifact the vision model can read (full-page by default), pass a direct image URL to read that image, and parsers (e.g. ["pdf"]) to force OCR on PDF/scanned sources.
     input_schema: schemas/intents/firecrawl.scrape.input.json
     output_schema: schemas/intents/firecrawl.scrape.output.json
     timeout_sec: 120
     usage_hints:
-      - Request formats:["screenshot"] when the data you need is rendered as an image (benchmark tables, charts, infographics); the screenshot becomes an image/png artifact for the vision model.
+      - When the data you need is rendered as an image, read it visually one of two ways - scrape the direct image URL (e.g. a .png chart/table), or request formats:["screenshot"] which is captured full-page by default so content below the fold is included. Both surface an image artifact for the vision model.
+      - A direct image URL is fetched as an image artifact even though Firecrawl cannot parse binary images; prefer it when you know the exact image URL.
+      - Set screenshot_full_page:false only if you specifically want the top viewport instead of the whole page.
       - Pass parsers (e.g. ["pdf"] or [{"type":"pdf"}]) for PDF or scanned-document URLs whose text is missing or garbled.
 
   - name: firecrawl.extract

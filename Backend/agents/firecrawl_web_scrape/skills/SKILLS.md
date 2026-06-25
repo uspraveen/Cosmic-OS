@@ -6,6 +6,7 @@
 - Native web fetch is insufficient because the page is dynamic, noisy, or inconsistent.
 - The data is locked inside an image (a benchmark table, chart, or infographic rendered as a picture, not text). Request `formats: ["screenshot"]`; the screenshot is persisted as an `image/png` artifact that the orchestrator's vision model can read directly. The default text orchestrator cannot read images, but COSMIC automatically escalates to the vision-capable model when an image artifact is surfaced.
 - The source is a PDF or scanned document whose text does not come through. Pass `parsers: ["pdf"]` (or `[{"type": "pdf"}]`) to force OCR/parsing.
+- The URL points directly at an image file (e.g. a `.png`/`.jpg` chart or table). Scrape it as-is; the agent fetches the image and surfaces it for the vision model instead of failing on the binary file.
 
 ## When To Use `firecrawl.extract`
 - Need structured data instead of raw page text.
@@ -24,8 +25,11 @@
 
 ## Reading Image-Locked Data (tables/charts as pictures)
 - Symptom: the page renders the numbers you need as an image, so markdown/extract come back empty, partial, or suspiciously round.
-- Fix: scrape the page with `formats: ["screenshot"]`. The agent saves the screenshot as an `image/png` artifact and exposes a fetchable URL on the artifact reference, so the orchestrator surfaces it to the vision model automatically — no separate image agent needed.
-- Do not fabricate or approximate numbers from a partial text read. If the authoritative values are in an image, get the screenshot and read it visually.
+- Two ways to read it visually (both feed the vision model automatically — no separate image agent needed):
+  1. **Direct image URL** — if you can identify the exact image URL (e.g. `https://site/assets/benchmark-table.png`), just call `firecrawl.scrape` with that URL. The agent detects it is an image, downloads it, and surfaces it as an `image/png` artifact for the vision model. (Firecrawl itself cannot parse binary images; the agent handles this case directly.) This is the most reliable path when the table/chart is its own image file.
+  2. **Full-page screenshot** — call `firecrawl.scrape` with `formats: ["screenshot"]`. Screenshots are captured **full-page by default** (not just the top viewport), so content below the fold is included. Set `screenshot_full_page: false` only if you specifically want the viewport.
+- Prefer the direct image URL when you know it (sharper, just the table). Use the full-page screenshot when the data is embedded in the page layout or you do not have a direct image URL.
+- Do not fabricate or approximate numbers from a partial text read. If the authoritative values are in an image, read the image (direct URL or full-page screenshot) visually.
 
 ## Output Discipline
 - Return a compact human-readable summary.

@@ -1345,8 +1345,9 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "description": (
                 "Use the Firecrawl specialist agent to scrape a live web page into robust formats such as markdown, html, links, images, or a screenshot. "
                 "Prefer this over plain web_fetch when you need page rendering resilience or structured scrape outputs. "
-                "When the data you need is locked inside an image on the page (a benchmark table, chart, or infographic rendered as a picture rather than text), "
-                "request formats including 'screenshot': COSMIC captures it as an image artifact and the vision model reads it for you. "
+                "When the data you need is locked inside an image (a benchmark table, chart, or infographic rendered as a picture rather than text), read it visually one of two ways: "
+                "(1) if you know the exact image URL, scrape that URL directly — COSMIC fetches the image and the vision model reads it (Firecrawl itself cannot parse binary images, but this agent handles that case for you); "
+                "(2) otherwise request formats including 'screenshot', which is captured full-page by default so tables below the fold are included, and the vision model reads it. "
                 "For PDF or scanned-document URLs whose text does not come through cleanly, pass parsers=[{\"type\":\"pdf\"}] to force OCR."
             ),
             "input_schema": {
@@ -1361,7 +1362,14 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                         "items": {"type": "string"},
                         "description": (
                             "Requested formats such as markdown, html, rawHtml, links, images, or screenshot. "
-                            "Use 'screenshot' to let the vision model read image-locked tables/charts."
+                            "Use 'screenshot' (captured full-page by default) to let the vision model read image-locked tables/charts."
+                        ),
+                    },
+                    "screenshot_full_page": {
+                        "type": "boolean",
+                        "description": (
+                            "When requesting a screenshot, capture the full page (default true) so content below the fold "
+                            "is included. Set false to capture only the top viewport."
                         ),
                     },
                     "only_main_content": {
