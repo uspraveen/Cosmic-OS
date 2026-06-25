@@ -26,6 +26,7 @@
           "mime": { "type": "string" },
           "filename": { "type": "string" },
           "kind": { "type": "string" },
+          "audience": { "type": "string", "enum": ["deliverable", "supporting", "debug"] },
           "download_url": { "type": "string" },
           "provider_url": { "type": "string" }
         },

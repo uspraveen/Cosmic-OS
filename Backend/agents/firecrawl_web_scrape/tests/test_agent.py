@@ -134,6 +134,9 @@ async def test_firecrawl_agent_scrape_persists_artifacts_and_compact_output(tmp_
     assert any(path.endswith("runs/artifacts/tsk_firecrawl_scrape/firecrawl_web_scrape/scrape_response.json") for path in artifact_paths)
     assert any(path.endswith("runs/artifacts/tsk_firecrawl_scrape/firecrawl_web_scrape/page.md") for path in artifact_paths)
     assert any(path.endswith("runs/artifacts/tsk_firecrawl_scrape/firecrawl_web_scrape/links.json") for path in artifact_paths)
+    for ref in result.output["artifacts"]:
+        assert ref.get("audience") == "supporting"
+        assert ref.get("filename")
 
 
 @pytest.mark.asyncio
@@ -202,6 +205,12 @@ async def test_firecrawl_agent_scrape_screenshot_becomes_vision_image_artifact(t
     assert len(image_refs) == 1
     assert image_refs[0]["download_url"] == screenshot_url
     assert image_refs[0]["filename"] == "screenshot.png"
+    # The full-page screenshot is a vision aid only: it must NOT be surfaced as an inline
+    # image / Produced Files deliverable card, so it is marked "supporting". The
+    # provider_url/download_url it still carries is what feeds the vision model.
+    assert image_refs[0]["kind"] == "screenshot"
+    assert image_refs[0]["audience"] == "supporting"
+    assert image_refs[0]["provider_url"] == screenshot_url
 
 
 @pytest.mark.asyncio
@@ -249,6 +258,7 @@ async def test_firecrawl_agent_scrape_direct_image_url_fetches_vision_artifact(t
     image_refs = [ref for ref in result.output["artifacts"] if ref.get("mime") == "image/png"]
     assert len(image_refs) == 1
     assert image_refs[0]["download_url"] == image_url
+    assert image_refs[0]["audience"] == "deliverable"
 
 
 @pytest.mark.asyncio

@@ -47,6 +47,7 @@ interface ForegroundStreamSnapshot {
   docs_progress?: unknown
   tabular_progress?: unknown
   produced_artifacts?: any[]
+  supporting_artifacts?: any[]
   response_blocks?: any[]
   snapshot_seq?: number | null
   sources?: any[]
@@ -1150,6 +1151,7 @@ export class GatewayConnectionManager {
         docs_progress: payload.docs_progress,
         tabular_progress: payload.tabular_progress,
         produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : undefined,
+        supporting_artifacts: Array.isArray(payload.supporting_artifacts) ? payload.supporting_artifacts : undefined,
         response_blocks: Array.isArray(payload.response_blocks) ? payload.response_blocks : undefined,
         snapshot_seq:
           Number.isFinite(Number(payload.snapshot_seq)) && Number(payload.snapshot_seq) > 0
@@ -1199,6 +1201,7 @@ export class GatewayConnectionManager {
         docs_progress: payload.docs_progress,
         tabular_progress: payload.tabular_progress,
         produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : undefined,
+        supporting_artifacts: Array.isArray(payload.supporting_artifacts) ? payload.supporting_artifacts : undefined,
         response_blocks: Array.isArray(payload.response_blocks) ? payload.response_blocks : undefined,
         snapshot_seq:
           Number.isFinite(Number(payload.snapshot_seq)) && Number(payload.snapshot_seq) > 0
@@ -1356,6 +1359,7 @@ export class GatewayConnectionManager {
           Array.isArray(payload.alpha_terminal_log) ? payload.alpha_terminal_log : undefined,
         ),
         produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : undefined,
+        supporting_artifacts: Array.isArray(payload.supporting_artifacts) ? payload.supporting_artifacts : undefined,
         response_blocks: Array.isArray(payload.response_blocks) ? payload.response_blocks : undefined,
         snapshot_seq:
           Number.isFinite(Number(payload.snapshot_seq)) && Number(payload.snapshot_seq) > 0

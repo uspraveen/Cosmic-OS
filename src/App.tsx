@@ -29,6 +29,7 @@ interface Message {
   content: string
   attachments?: MessageAttachment[]
   producedArtifacts?: ProducedArtifact[]
+  supportingArtifacts?: ProducedArtifact[]
   responseBlocks?: ResponseBlock[]
   thinking?: string
   activity?: string
@@ -74,6 +75,7 @@ interface BackgroundTask {
   alphaTerminalLog?: AlphaTerminalEntry[]
   progress?: DocsProgressState | TabularProgressState
   producedArtifacts?: ProducedArtifact[]
+  supportingArtifacts?: ProducedArtifact[]
   sources?: Array<{ url: string; title?: string; domain?: string } | string>
 }
 
@@ -120,6 +122,7 @@ interface GatewayForegroundStreamSnapshot {
   alphaTerminalLog?: AlphaTerminalEntry[]
   progress?: DocsProgressState | TabularProgressState
   producedArtifacts?: ProducedArtifact[]
+  supportingArtifacts?: ProducedArtifact[]
   responseBlocks?: ResponseBlock[]
   snapshotSeq?: number | null
   sources?: Array<{ url: string; title?: string; domain?: string } | string>
@@ -388,6 +391,17 @@ const extractMessageAttachments = (metadata: any): MessageAttachment[] | undefin
 }
 
 const normalizeProducedArtifacts = (value: unknown): ProducedArtifact[] | undefined => {
+  return normalizeArtifactEntries(value, { audience: 'deliverable' })
+}
+
+const normalizeSupportingArtifacts = (value: unknown): ProducedArtifact[] | undefined => {
+  return normalizeArtifactEntries(value, { audience: 'supporting' })
+}
+
+const normalizeArtifactEntries = (
+  value: unknown,
+  options: { audience: 'deliverable' | 'supporting' },
+): ProducedArtifact[] | undefined => {
   if (!Array.isArray(value)) {
     return undefined
   }
@@ -399,7 +413,11 @@ const normalizeProducedArtifacts = (value: unknown): ProducedArtifact[] | undefi
     const audience = typeof (item as any).audience === 'string'
       ? (item as any).audience.trim()
       : ''
-    if (audience && audience !== 'deliverable') {
+    if (options.audience === 'deliverable') {
+      if (audience && audience !== 'deliverable') {
+        continue
+      }
+    } else if (audience === 'deliverable') {
       continue
     }
     const artifactId = typeof (item as any).artifact_id === 'string'
@@ -1019,6 +1037,7 @@ const historyToMessages = (history: any[] = []): Message[] => {
       content: String(item.content || ''),
       attachments: extractMessageAttachments(item?.metadata),
       producedArtifacts: normalizeProducedArtifacts(item?.metadata?.produced_artifacts),
+      supportingArtifacts: normalizeSupportingArtifacts(item?.metadata?.supporting_artifacts),
       responseBlocks: normalizeResponseBlocks(item?.metadata?.response_blocks),
       thinking: typeof item?.metadata?.thinking_text === 'string' ? item.metadata.thinking_text : undefined,
       activityLog: normalizeActivityLog(item?.metadata?.activity_log),
@@ -1133,6 +1152,7 @@ const normalizeForegroundStreamSnapshot = (value: unknown): GatewayForegroundStr
     alphaTerminalLog: normalizeAlphaTerminalLog((value as any).alpha_terminal_log ?? (value as any).alphaTerminalLog),
     progress,
     producedArtifacts: normalizeProducedArtifacts((value as any).produced_artifacts ?? (value as any).producedArtifacts),
+    supportingArtifacts: normalizeSupportingArtifacts((value as any).supporting_artifacts ?? (value as any).supportingArtifacts),
     responseBlocks: normalizeResponseBlocks((value as any).response_blocks ?? (value as any).responseBlocks ?? (value as any).blocks),
     snapshotSeq: Number.isFinite(Number((value as any).snapshot_seq ?? (value as any).snapshotSeq))
       ? Number((value as any).snapshot_seq ?? (value as any).snapshotSeq)
@@ -1208,6 +1228,7 @@ const mergeHydratedMessages = (current: Message[], hydrated: Message[]): Message
       content: String(message.content || '').trim() ? message.content : existing.content,
       attachments: message.attachments ?? existing.attachments,
       producedArtifacts: message.producedArtifacts ?? existing.producedArtifacts,
+      supportingArtifacts: message.supportingArtifacts ?? existing.supportingArtifacts,
       responseBlocks: message.responseBlocks ?? existing.responseBlocks,
       thinking: typeof message.thinking === 'string' && message.thinking.trim()
         ? message.thinking
@@ -1527,6 +1548,7 @@ const normalizeBackgroundTask = (value: unknown): BackgroundTask | null => {
     alphaTerminalLog: normalizeAlphaTerminalLog((value as any).alpha_terminal_log ?? (value as any).alphaTerminalLog),
     progress: normalizeTabularProgress((value as any).tabular_progress) ?? normalizeDocsProgress((value as any).docs_progress),
     producedArtifacts: normalizeProducedArtifacts((value as any).produced_artifacts ?? (value as any).producedArtifacts),
+    supportingArtifacts: normalizeSupportingArtifacts((value as any).supporting_artifacts ?? (value as any).supportingArtifacts),
     sources: Array.isArray((value as any).sources) ? (value as any).sources : undefined,
   }
 }
@@ -2110,6 +2132,52 @@ const AlphaAgentConsole = ({
   )
 }
 
+const ProducedArtifactCard = ({
+  artifact,
+  messageId,
+  downloadingArtifactId,
+  onDownload,
+}: {
+  artifact: ProducedArtifact
+  messageId: string
+  downloadingArtifactId: string | null
+  onDownload: (messageId: string, artifact: ProducedArtifact) => void
+}) => {
+  const isDownloading = downloadingArtifactId === artifact.artifactId
+  return (
+    <div className="source-card produced-artifact-card">
+      <div className="source-header-row produced-artifact-header">
+        <div className="produced-artifact-icon" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm0 2.5L18.5 9H14V4.5zM12 17l-4-4h2.5v-3h3v3H16l-4 4z" />
+          </svg>
+        </div>
+        <div className="source-title produced-artifact-title" title={artifact.filename}>
+          {artifact.filename}
+        </div>
+      </div>
+      <div className="source-snippet produced-artifact-snippet">
+        {formatProducedArtifactKind(artifact)}
+        {artifact.sizeBytes ? ` · ${formatAttachmentSize(artifact.sizeBytes)}` : ''}
+        {artifact.createdByAgent ? ` · ${artifact.createdByAgent}` : ''}
+      </div>
+      <div className="source-footer produced-artifact-footer">
+        <span className="source-idx">
+          {artifact.downloadable ? '↓' : '•'}
+        </span>
+        <button
+          type="button"
+          className="produced-artifact-download"
+          onClick={() => onDownload(messageId, artifact)}
+          disabled={!artifact.downloadable || isDownloading}
+        >
+          {isDownloading ? 'Saving…' : artifact.downloadable ? 'Download' : 'Unavailable'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 const AssistantProducedArtifacts = ({
   messageId,
   artifacts,
@@ -2128,43 +2196,102 @@ const AssistantProducedArtifacts = ({
     <div className="produced-artifacts-section">
       <div className="sources-header">PRODUCED FILES</div>
       <div className="sources-grid produced-artifacts-grid">
-        {artifacts.map((artifact) => {
-          const isDownloading = downloadingArtifactId === artifact.artifactId
-          return (
-            <div key={artifact.artifactId} className="source-card produced-artifact-card">
-              <div className="source-header-row produced-artifact-header">
-                <div className="produced-artifact-icon" aria-hidden="true">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm0 2.5L18.5 9H14V4.5zM12 17l-4-4h2.5v-3h3v3H16l-4 4z" />
-                  </svg>
-                </div>
-                <div className="source-title produced-artifact-title" title={artifact.filename}>
-                  {artifact.filename}
-                </div>
-              </div>
-              <div className="source-snippet produced-artifact-snippet">
-                {formatProducedArtifactKind(artifact)}
-                {artifact.sizeBytes ? ` · ${formatAttachmentSize(artifact.sizeBytes)}` : ''}
-                {artifact.createdByAgent ? ` · ${artifact.createdByAgent}` : ''}
-              </div>
-              <div className="source-footer produced-artifact-footer">
-                <span className="source-idx">
-                  {artifact.downloadable ? '↓' : '•'}
-                </span>
-                <button
-                  type="button"
-                  className="produced-artifact-download"
-                  onClick={() => onDownload(messageId, artifact)}
-                  disabled={!artifact.downloadable || isDownloading}
-                >
-                  {isDownloading ? 'Saving…' : artifact.downloadable ? 'Download' : 'Unavailable'}
-                </button>
-              </div>
-            </div>
-          )
-        })}
+        {artifacts.map((artifact) => (
+          <ProducedArtifactCard
+            key={artifact.artifactId}
+            artifact={artifact}
+            messageId={messageId}
+            downloadingArtifactId={downloadingArtifactId}
+            onDownload={onDownload}
+          />
+        ))}
       </div>
     </div>
+  )
+}
+
+const AssistantSupportingArtifacts = ({
+  messageId,
+  artifacts,
+  downloadingArtifactId,
+  onDownload,
+}: {
+  messageId: string
+  artifacts?: ProducedArtifact[]
+  downloadingArtifactId: string | null
+  onDownload: (messageId: string, artifact: ProducedArtifact) => void
+}) => {
+  const [expanded, setExpanded] = useState(false)
+  if (!artifacts || artifacts.length <= 0) {
+    return null
+  }
+  return (
+    <div className="supporting-artifacts-section">
+      <button
+        type="button"
+        className="supporting-artifacts-toggle"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((current) => !current)}
+      >
+        <ChevronRight
+          size={14}
+          className={`supporting-artifacts-chevron${expanded ? ' is-expanded' : ''}`}
+          aria-hidden="true"
+        />
+        <span className="supporting-artifacts-toggle-label">INTERNAL FILES</span>
+        <span className="supporting-artifacts-count">{artifacts.length}</span>
+      </button>
+      {expanded && (
+        <div className="sources-grid produced-artifacts-grid supporting-artifacts-grid">
+          {artifacts.map((artifact) => (
+            <ProducedArtifactCard
+              key={artifact.artifactId}
+              artifact={artifact}
+              messageId={messageId}
+              downloadingArtifactId={downloadingArtifactId}
+              onDownload={onDownload}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+const AssistantMessageArtifacts = ({
+  messageId,
+  producedArtifacts,
+  supportingArtifacts,
+  downloadingArtifactId,
+  onDownload,
+}: {
+  messageId: string
+  producedArtifacts?: ProducedArtifact[]
+  supportingArtifacts?: ProducedArtifact[]
+  downloadingArtifactId: string | null
+  onDownload: (messageId: string, artifact: ProducedArtifact) => void
+}) => {
+  if (
+    (!producedArtifacts || producedArtifacts.length <= 0) &&
+    (!supportingArtifacts || supportingArtifacts.length <= 0)
+  ) {
+    return null
+  }
+  return (
+    <>
+      <AssistantProducedArtifacts
+        messageId={messageId}
+        artifacts={producedArtifacts}
+        downloadingArtifactId={downloadingArtifactId}
+        onDownload={onDownload}
+      />
+      <AssistantSupportingArtifacts
+        messageId={messageId}
+        artifacts={supportingArtifacts}
+        downloadingArtifactId={downloadingArtifactId}
+        onDownload={onDownload}
+      />
+    </>
   )
 }
 
@@ -3701,6 +3828,7 @@ export default function App() {
           activityLog: nextTask.activityLog ?? item.activityLog,
           alphaTerminalLog: mergeAlphaTerminalLogs(item.alphaTerminalLog, nextTask.alphaTerminalLog),
           producedArtifacts: nextTask.producedArtifacts ?? item.producedArtifacts,
+          supportingArtifacts: nextTask.supportingArtifacts ?? item.supportingArtifacts,
           sources: nextTask.sources ?? item.sources,
         }
       })
@@ -4103,6 +4231,7 @@ export default function App() {
         alphaTerminalLog: mergeAlphaTerminalLogs(existingMessage?.alphaTerminalLog, stream.alphaTerminalLog),
         progress: stream.progress ?? existingMessage?.progress,
         producedArtifacts: stream.producedArtifacts ?? existingMessage?.producedArtifacts,
+        supportingArtifacts: stream.supportingArtifacts ?? existingMessage?.supportingArtifacts,
         responseBlocks: stream.responseBlocks ?? existingMessage?.responseBlocks,
         sources: stream.sources ?? existingMessage?.sources,
         requestId: requestId || existingMessage?.requestId || null,
@@ -5124,6 +5253,7 @@ export default function App() {
 
         if (backgroundEventType === 'response.complete') {
           const producedArtifacts = normalizeProducedArtifacts((event as any).produced_artifacts)
+          const supportingArtifacts = normalizeSupportingArtifacts((event as any).supporting_artifacts)
           const activityLog = normalizeActivityLog((event as any).activity_log)
           patchBackgroundTask(requestId, (current) => ({
             ...current,
@@ -5135,6 +5265,7 @@ export default function App() {
               ? event.thinking_text
               : current.partialThinking,
             producedArtifacts: producedArtifacts ?? current.producedArtifacts,
+            supportingArtifacts: supportingArtifacts ?? current.supportingArtifacts,
             activityLog: mergeActivityLogEntries(current.activityLog, activityLog),
             sources: Array.isArray(event.sources) ? event.sources : current.sources,
             progress: undefined,
@@ -5342,8 +5473,11 @@ export default function App() {
         markResponseStreamSeen(event)
         setActiveSessionId((prev) => typeof event.session_id === 'string' ? event.session_id : prev)
         const responseBlocks = normalizeResponseBlocks((event as any).response_blocks ?? (event as any).blocks)
+        const supportingArtifacts = normalizeSupportingArtifacts((event as any).supporting_artifacts)
         if (!responseBlocks || responseBlocks.length <= 0) {
-          return
+          if (!supportingArtifacts || supportingArtifacts.length <= 0) {
+            return
+          }
         }
         setMessages((prev) => {
           const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
@@ -5353,7 +5487,8 @@ export default function App() {
             }
             return {
               ...message,
-              responseBlocks,
+              responseBlocks: responseBlocks ?? message.responseBlocks,
+              supportingArtifacts: supportingArtifacts ?? message.supportingArtifacts,
               progress: undefined,
               stopped: false,
             }
@@ -5367,6 +5502,7 @@ export default function App() {
         setStreamingProgress('')
         setActiveSessionId((prev) => typeof event.session_id === 'string' ? event.session_id : prev)
         const producedArtifacts = normalizeProducedArtifacts((event as any).produced_artifacts)
+        const supportingArtifacts = normalizeSupportingArtifacts((event as any).supporting_artifacts)
         const responseBlocks = normalizeResponseBlocks((event as any).response_blocks ?? (event as any).blocks)
         const activityLog = normalizeActivityLog((event as any).activity_log)
         const alphaTerminalLog = normalizeAlphaTerminalLog((event as any).alpha_terminal_log)
@@ -5389,6 +5525,7 @@ export default function App() {
               content: mergeCompletedStreamText(message.content, event.content),
               sources,
               producedArtifacts: producedArtifacts ?? message.producedArtifacts,
+              supportingArtifacts: supportingArtifacts ?? message.supportingArtifacts,
               responseBlocks: responseBlocks ?? message.responseBlocks,
               activityLog: mergeActivityLogEntries(message.activityLog, activityLog),
               alphaTerminalLog: mergeAlphaTerminalLogs(message.alphaTerminalLog, alphaTerminalLog),
@@ -5488,10 +5625,18 @@ export default function App() {
         const producedArtifacts = role === 'assistant'
           ? normalizeProducedArtifacts((event as any).produced_artifacts)
           : undefined
+        const supportingArtifacts = role === 'assistant'
+          ? normalizeSupportingArtifacts((event as any).supporting_artifacts)
+          : undefined
         const responseBlocks = role === 'assistant'
           ? normalizeResponseBlocks((event as any).response_blocks)
           : undefined
-        if (!content && (!producedArtifacts || producedArtifacts.length === 0) && (!responseBlocks || responseBlocks.length === 0)) return
+        if (
+          !content &&
+          (!producedArtifacts || producedArtifacts.length === 0) &&
+          (!supportingArtifacts || supportingArtifacts.length === 0) &&
+          (!responseBlocks || responseBlocks.length === 0)
+        ) return
         const eventSessionId = typeof event.session_id === 'string' ? event.session_id : null
 
         // If the session rolled over, show a divider and clear old messages
@@ -5521,6 +5666,9 @@ export default function App() {
               : undefined,
             producedArtifacts: role === 'assistant'
               ? producedArtifacts
+              : undefined,
+            supportingArtifacts: role === 'assistant'
+              ? supportingArtifacts
               : undefined,
             responseBlocks: role === 'assistant'
               ? responseBlocks
@@ -7122,9 +7270,10 @@ export default function App() {
                                           </div>
                                         )}
                                         {backgroundMessageId && (
-                                          <AssistantProducedArtifacts
+                                          <AssistantMessageArtifacts
                                             messageId={backgroundMessageId}
-                                            artifacts={task.producedArtifacts}
+                                            producedArtifacts={task.producedArtifacts}
+                                            supportingArtifacts={task.supportingArtifacts}
                                             downloadingArtifactId={downloadingArtifactId}
                                             onDownload={handleDownloadProducedArtifact}
                                           />
@@ -7390,9 +7539,10 @@ export default function App() {
                                   ) : (
                                     <AssistantMarkdownBlock content={pairedResponse.content} />
                                   )}
-                                  <AssistantProducedArtifacts
+                                  <AssistantMessageArtifacts
                                     messageId={pairedResponse.id}
-                                    artifacts={pairedResponse.producedArtifacts}
+                                    producedArtifacts={pairedResponse.producedArtifacts}
+                                    supportingArtifacts={pairedResponse.supportingArtifacts}
                                     downloadingArtifactId={downloadingArtifactId}
                                     onDownload={handleDownloadProducedArtifact}
                                   />
@@ -7498,9 +7648,10 @@ export default function App() {
                           ) : (
                             <AssistantMarkdownBlock content={msg.content} />
                           )}
-                          <AssistantProducedArtifacts
+                          <AssistantMessageArtifacts
                             messageId={msg.id}
-                            artifacts={msg.producedArtifacts}
+                            producedArtifacts={msg.producedArtifacts}
+                            supportingArtifacts={msg.supportingArtifacts}
                             downloadingArtifactId={downloadingArtifactId}
                             onDownload={handleDownloadProducedArtifact}
                           />

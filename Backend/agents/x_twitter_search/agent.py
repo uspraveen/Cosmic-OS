@@ -852,11 +852,18 @@ class XTwitterSearchAgent(AgentRuntime):
         )
 
     def _artifact_ref(self, artifact: ArtifactManifest) -> dict[str, str]:
-        return {
+        filename = Path(str(artifact.path or "")).name
+        ref: dict[str, str] = {
             "artifact_id": artifact.artifact_id,
             "path": artifact.path,
             "mime": artifact.mime,
+            "audience": str(artifact.audience or "supporting").strip() or "supporting",
         }
+        if filename:
+            ref["filename"] = filename
+        if artifact.created_by_agent:
+            ref["created_by_agent"] = artifact.created_by_agent
+        return ref
 
     def _normalize_handles(self, value: Any) -> list[str]:
         if not isinstance(value, list):

@@ -344,6 +344,36 @@ body,
   border-radius: 12px;
   border: 1px solid var(--table-border);
   background: rgba(0, 0, 0, 0.2);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+
+/* Match .response-content vertical scrollbar — thin, transparent track, soft thumb */
+.table-wrapper::-webkit-scrollbar {
+  height: 4px;
+}
+
+.table-wrapper::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.table-wrapper::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.table-wrapper::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 10px;
+}
+
+.table-wrapper::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.table-wrapper::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 .response-content table {
@@ -2246,6 +2276,62 @@ kbd {
   margin-bottom: 4px;
   width: 100%;
   animation: fadeIn 0.35s ease-out;
+}
+
+.supporting-artifacts-section {
+  margin-top: 10px;
+  margin-bottom: 4px;
+  width: 100%;
+}
+
+.supporting-artifacts-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+
+.supporting-artifacts-toggle:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.14);
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.supporting-artifacts-chevron {
+  transition: transform 0.18s ease;
+  opacity: 0.72;
+}
+
+.supporting-artifacts-chevron.is-expanded {
+  transform: rotate(90deg);
+}
+
+.supporting-artifacts-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 10px;
+  letter-spacing: 0;
+}
+
+.supporting-artifacts-grid {
+  margin-top: 10px;
+  animation: fadeIn 0.25s ease-out;
 }
 
 .produced-artifacts-grid {

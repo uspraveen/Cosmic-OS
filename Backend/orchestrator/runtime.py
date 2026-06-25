@@ -965,6 +965,7 @@ class OrchestratorRuntime:
                             self._collect_specialist_artifacts(
                                 result_str,
                                 produced_artifacts=produced_artifacts,
+                                supporting_artifacts=supporting_artifacts,
                             )
                         self._collect_specialist_receipt(
                             tb.tool_name,
@@ -1036,11 +1037,25 @@ class OrchestratorRuntime:
                 for visual_event in final_visual.get("events") or []:
                     if isinstance(visual_event, dict):
                         yield {**ev, **visual_event}
-                supporting_artifacts = [
-                    item
-                    for item in (final_visual.get("supporting_artifacts") or [])
-                    if isinstance(item, dict)
-                ]
+                for item in (final_visual.get("supporting_artifacts") or []):
+                    if not isinstance(item, dict):
+                        continue
+                    dedupe_key = (
+                        str(item.get("artifact_id") or "").strip(),
+                        str(item.get("path") or "").strip(),
+                    )
+                    if not any(dedupe_key):
+                        continue
+                    existing_keys = {
+                        (
+                            str(existing.get("artifact_id") or "").strip(),
+                            str(existing.get("path") or "").strip(),
+                        )
+                        for existing in supporting_artifacts
+                        if isinstance(existing, dict)
+                    }
+                    if dedupe_key not in existing_keys:
+                        supporting_artifacts.append(item)
                 display_text = str(final_visual.get("content") or "").rstrip()
                 final_response_blocks = (
                     final_visual.get("response_blocks")
@@ -1544,6 +1559,7 @@ class OrchestratorRuntime:
                             self._collect_specialist_artifacts(
                                 result_str,
                                 produced_artifacts=produced_artifacts,
+                                supporting_artifacts=supporting_artifacts,
                             )
                         self._collect_specialist_receipt(
                             tool_name,
@@ -1613,11 +1629,25 @@ class OrchestratorRuntime:
                 for visual_event in final_visual.get("events") or []:
                     if isinstance(visual_event, dict):
                         yield {**ev, **visual_event}
-                supporting_artifacts = [
-                    item
-                    for item in (final_visual.get("supporting_artifacts") or [])
-                    if isinstance(item, dict)
-                ]
+                for item in (final_visual.get("supporting_artifacts") or []):
+                    if not isinstance(item, dict):
+                        continue
+                    dedupe_key = (
+                        str(item.get("artifact_id") or "").strip(),
+                        str(item.get("path") or "").strip(),
+                    )
+                    if not any(dedupe_key):
+                        continue
+                    existing_keys = {
+                        (
+                            str(existing.get("artifact_id") or "").strip(),
+                            str(existing.get("path") or "").strip(),
+                        )
+                        for existing in supporting_artifacts
+                        if isinstance(existing, dict)
+                    }
+                    if dedupe_key not in existing_keys:
+                        supporting_artifacts.append(item)
                 display_text = str(final_visual.get("content") or "").rstrip()
                 final_response_blocks = (
                     final_visual.get("response_blocks")
@@ -5265,6 +5295,7 @@ class OrchestratorRuntime:
         result_str: str,
         *,
         produced_artifacts: list[dict[str, Any]],
+        supporting_artifacts: list[dict[str, Any]] | None = None,
     ) -> None:
         data = self._parse_tool_result_json(result_str)
         if not isinstance(data, dict):
@@ -5273,7 +5304,7 @@ class OrchestratorRuntime:
         if not isinstance(raw_artifacts, list):
             return
 
-        existing_keys = {
+        produced_keys = {
             (
                 str(item.get("artifact_id") or "").strip(),
                 str(item.get("path") or "").strip(),
@@ -5281,12 +5312,18 @@ class OrchestratorRuntime:
             for item in produced_artifacts
             if isinstance(item, dict)
         }
+        supporting_keys = {
+            (
+                str(item.get("artifact_id") or "").strip(),
+                str(item.get("path") or "").strip(),
+            )
+            for item in (supporting_artifacts or [])
+            if isinstance(item, dict)
+        }
         for item in raw_artifacts:
             if not isinstance(item, dict):
                 continue
             audience = self._activity_excerpt(item.get("audience"), limit=32) or "deliverable"
-            if audience != "deliverable":
-                continue
             artifact_id = self._activity_excerpt(item.get("artifact_id"), limit=160)
             path = self._activity_excerpt(item.get("path"), limit=400)
             mime = self._activity_excerpt(item.get("mime"), limit=160)
@@ -5299,28 +5336,38 @@ class OrchestratorRuntime:
             dedupe_key = (artifact_id or "", path or "")
             if not any(dedupe_key):
                 continue
-            if dedupe_key in existing_keys:
+
+            artifact_payload = {
+                key: value
+                for key, value in {
+                    "artifact_id": artifact_id,
+                    "task_id": task_id,
+                    "mime": mime,
+                    "path": path,
+                    "kind": kind,
+                    "audience": audience,
+                    "filename": filename,
+                    "created_by_agent": created_by_agent,
+                    "source_url": source_url,
+                    "sha256": sha256,
+                    "created_at": item.get("created_at"),
+                }.items()
+                if value not in (None, "", [], {})
+            }
+
+            if audience != "deliverable":
+                if supporting_artifacts is None or dedupe_key in supporting_keys:
+                    continue
+                supporting_keys.add(dedupe_key)
+                supporting_artifacts.append(artifact_payload)
+                if len(supporting_artifacts) >= 24:
+                    break
                 continue
-            existing_keys.add(dedupe_key)
-            produced_artifacts.append(
-                {
-                    key: value
-                    for key, value in {
-                        "artifact_id": artifact_id,
-                        "task_id": task_id,
-                        "mime": mime,
-                        "path": path,
-                        "kind": kind,
-                        "audience": audience,
-                        "filename": filename,
-                        "created_by_agent": created_by_agent,
-                        "source_url": source_url,
-                        "sha256": sha256,
-                        "created_at": item.get("created_at"),
-                    }.items()
-                    if value not in (None, "", [], {})
-                }
-            )
+
+            if dedupe_key in produced_keys:
+                continue
+            produced_keys.add(dedupe_key)
+            produced_artifacts.append(artifact_payload)
             if len(produced_artifacts) >= 12:
                 break
 

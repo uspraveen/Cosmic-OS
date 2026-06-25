@@ -526,6 +526,7 @@ def test_collect_specialist_artifacts_only_keeps_deliverables(tmp_path) -> None:
     )
     runtime = OrchestratorRuntime(config)
     produced_artifacts: list[dict[str, object]] = []
+    supporting_artifacts: list[dict[str, object]] = []
 
     runtime._collect_specialist_artifacts(
         json.dumps(
@@ -553,6 +554,7 @@ def test_collect_specialist_artifacts_only_keeps_deliverables(tmp_path) -> None:
             }
         ),
         produced_artifacts=produced_artifacts,
+        supporting_artifacts=supporting_artifacts,
     )
 
     assert produced_artifacts == [
@@ -564,6 +566,17 @@ def test_collect_specialist_artifacts_only_keeps_deliverables(tmp_path) -> None:
             "kind": "output",
             "audience": "deliverable",
             "filename": "output.csv",
+        }
+    ]
+    assert supporting_artifacts == [
+        {
+            "artifact_id": "art_supporting_1",
+            "task_id": "tsk_supporting",
+            "mime": "application/json",
+            "path": "runs/artifacts/tsk_supporting/supporting.json",
+            "kind": "output",
+            "audience": "supporting",
+            "filename": "supporting.json",
         }
     ]
 

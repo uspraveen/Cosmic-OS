@@ -416,6 +416,7 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
                 "filename": filename,
                 "kind": "image",
                 "mime": mime,
+                "audience": "deliverable",
                 "download_url": url,
                 "provider_url": url,
             },
@@ -1075,6 +1076,11 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
             "filename": "screenshot.png",
             "kind": "screenshot",
             "mime": _SUPPORTED_IMAGE_MIME,
+            # Full-page screenshots are an internal vision aid (often a tall, unreadable
+            # strip), not a user deliverable. Marking them "supporting" keeps them
+            # readable by the vision model via provider_url/download_url while preventing
+            # the orchestrator from surfacing them as an inline image / Produced Files card.
+            "audience": "supporting",
         }
         if url:
             extra["download_url"] = url
@@ -1422,11 +1428,17 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
         *,
         extra: dict[str, str] | None = None,
     ) -> dict[str, str]:
+        filename = Path(str(artifact.path or "")).name
         ref: dict[str, str] = {
             "artifact_id": artifact.artifact_id,
             "path": artifact.path,
             "mime": artifact.mime,
+            "audience": str(artifact.audience or "supporting").strip() or "supporting",
         }
+        if filename:
+            ref["filename"] = filename
+        if artifact.created_by_agent:
+            ref["created_by_agent"] = artifact.created_by_agent
         if extra:
             for key, value in extra.items():
                 if value not in (None, ""):
