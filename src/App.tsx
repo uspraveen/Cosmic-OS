@@ -6778,7 +6778,7 @@ export default function App() {
                       </div>
                       <div className="task-interrupt-copy">
                         <div className="task-interrupt-kicker">
-                          {isHeartbeatNotification ? '❤️ Cosmic heartbeat' : 'Scheduled result ready'}
+                          {isHeartbeatNotification ? 'Cosmic heartbeat' : 'Scheduled result ready'}
                         </div>
                         <div className="task-interrupt-meta">
                           {orderedCronResultNotifications.length > 1
@@ -7530,7 +7530,6 @@ export default function App() {
                                 <div className="message-row assistant" style={{ marginBottom: 8, display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
                                   {isHeartbeatMessage(pairedResponse) && (
                                     <div className="assistant-heartbeat-badge" title="Proactive Cosmic heartbeat">
-                                      <span aria-hidden>❤️</span>
                                       <span>Cosmic heartbeat</span>
                                     </div>
                                   )}
@@ -7601,7 +7600,6 @@ export default function App() {
                         <>
                           {isHeartbeatMessage(msg) && (
                             <div className="assistant-heartbeat-badge" title="Proactive Cosmic heartbeat">
-                              <span aria-hidden>❤️</span>
                               <span>Cosmic heartbeat</span>
                             </div>
                           )}

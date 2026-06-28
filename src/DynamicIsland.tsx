@@ -420,6 +420,12 @@ export default function DynamicIsland({
   const [voiceError, setVoiceError] = useState<string | null>(null)
   const [voiceHistory, setVoiceHistory] = useState<string[]>([])
   const [lastFinalTranscript, setLastFinalTranscript] = useState('')
+  const [voiceShortcutEnabled, setVoiceShortcutEnabled] = useState(true)
+
+  const voiceShortcutLabel = useMemo(() => {
+    const isMac = /Mac|iPhone|iPod|iPad/i.test(navigator.platform)
+    return isMac ? '⌘⇧V' : 'Ctrl+Shift+V'
+  }, [])
 
   // Agent-at-work slide (orchestrator's current tool/specialist).
   // Driven by `cosmic:island-agent-work` CustomEvent — `null` clears the slide.
@@ -1326,6 +1332,21 @@ export default function DynamicIsland({
         setLastFinalTranscript('')
       }
     })
+    return () => unsub?.()
+  }, [])
+
+  useEffect(() => {
+    const parseVoiceShortcutEnabled = (settings: Record<string, unknown>) => {
+      const raw = settings?.voiceTypingShortcutEnabled
+      if (raw === undefined || raw === null || raw === '') return true
+      const normalized = String(raw).trim().toLowerCase()
+      return normalized !== 'false' && normalized !== '0' && normalized !== 'off' && normalized !== 'no'
+    }
+
+    const unsub = window.cosmic?.onSettingsUpdate?.((settings) => {
+      setVoiceShortcutEnabled(parseVoiceShortcutEnabled(settings))
+    })
+    window.cosmic?.getSettings?.()
     return () => unsub?.()
   }, [])
 
@@ -2398,6 +2419,14 @@ export default function DynamicIsland({
       }
     }
 
+    const handleVoiceShortcutToggle = () => {
+      const next = !voiceShortcutEnabled
+      setVoiceShortcutEnabled(next)
+      window.cosmic?.setVoiceTypingShortcutEnabled?.(next)?.catch(() => {
+        setVoiceShortcutEnabled(!next)
+      })
+    }
+
     const historyItems = voiceHistory.slice(-3)
     const totalHistory = voiceHistory.length
 
@@ -2467,6 +2496,18 @@ export default function DynamicIsland({
           <div className="voice-status-label">
             {isError ? 'ERROR' : isListening ? 'LISTENING' : 'READY'}
           </div>
+          <button
+            type="button"
+            className="voice-shortcut-toggle"
+            onClick={handleVoiceShortcutToggle}
+            title={
+              voiceShortcutEnabled
+                ? `Stop ${voiceShortcutLabel} from opening voice typing`
+                : `Allow ${voiceShortcutLabel} to open voice typing`
+            }
+          >
+            {voiceShortcutEnabled ? `Disable ${voiceShortcutLabel}` : `Enable ${voiceShortcutLabel}`}
+          </button>
         </div>
       </div>
     )

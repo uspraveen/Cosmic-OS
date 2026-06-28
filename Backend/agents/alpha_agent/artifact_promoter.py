@@ -14,6 +14,21 @@ from .workspace_manager import WorkspacePaths
 CREATED_BY = "cosmic/alpha-agent:1.0.0"
 MAX_PROMOTED_ARTIFACTS = 24
 MAX_PROMOTED_FILE_BYTES = 512 * 1024 * 1024
+# CLI runner transcripts, research copies, and deployment notes are internal — not user deliverables.
+INTERNAL_ARTIFACT_FILENAMES = frozenset(
+    {
+        "cursor-last-message.md",
+        "codex-last-message.md",
+        "alpha-full-goal.md",
+        "DEPLOYMENT_REPORT.md",
+        "replacement-report.txt",
+    }
+)
+_INTERNAL_ARTIFACT_NAME_PATTERNS = (
+    re.compile(r"^\d{2}_", re.IGNORECASE),  # numbered research copies: 01_page.md, 02_page.html
+    re.compile(r"alpha[_-]?input[_-]?goal", re.IGNORECASE),
+    re.compile(r"alpha[_-]?full[_-]?goal", re.IGNORECASE),
+)
 TEXT_MIME_OVERRIDES = {
     ".md": "text/markdown",
     ".markdown": "text/markdown",
@@ -110,12 +125,30 @@ def promote_alpha_artifacts(
                 path=str(resolved),
                 created_by_agent=CREATED_BY,
                 kind="output",
-                audience="deliverable",
+                audience=_artifact_audience(resolved),
             )
         )
         if len(manifests) >= MAX_PROMOTED_ARTIFACTS:
             break
     return manifests
+
+
+def _artifact_audience(path: Path) -> str:
+    if _is_internal_alpha_artifact(path):
+        return "supporting"
+    return "deliverable"
+
+
+def _is_internal_alpha_artifact(path: Path) -> bool:
+    name = path.name
+    name_key = name.casefold()
+    if name_key in {item.casefold() for item in INTERNAL_ARTIFACT_FILENAMES}:
+        return True
+    if any(part.casefold() == ".git" for part in path.parts):
+        return True
+    if name.endswith(".sample"):
+        return True
+    return any(pattern.search(name) for pattern in _INTERNAL_ARTIFACT_NAME_PATTERNS)
 
 
 def _iter_files(root: Path) -> list[Path]:
@@ -159,6 +192,8 @@ def _path_spellings(path: Path) -> list[str]:
 
 
 def _is_allowed_alpha_output(path: Path, *, paths: WorkspacePaths) -> bool:
+    if any(part.casefold() == ".git" for part in path.parts):
+        return False
     allowed_roots = [
         paths.artifacts,
         paths.workspace,

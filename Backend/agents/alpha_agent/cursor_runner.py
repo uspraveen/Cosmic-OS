@@ -688,7 +688,7 @@ class CursorWorkspaceRunner:
             path=str(path),
             created_by_agent="cosmic/alpha-agent:1.0.0",
             kind="output",
-            audience="deliverable",
+            audience="supporting",
         )
 
     def _env(self) -> dict[str, str]:

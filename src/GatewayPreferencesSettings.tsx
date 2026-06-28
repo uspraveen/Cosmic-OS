@@ -525,7 +525,6 @@ export default function GatewayPreferencesSettings({
       <div className={`preferences-card ${!canSave ? 'muted' : ''}`}>
         <div className="preferences-card-copy">
           <div className="preferences-card-title-row">
-            <span className="preferences-heart-icon" aria-hidden>❤️</span>
             <div className="preferences-card-title">Cosmic Heartbeat</div>
           </div>
           <div className="preferences-card-note">
@@ -547,7 +546,6 @@ export default function GatewayPreferencesSettings({
 
         <div className="preferences-heartbeat-control">
           <span className="preferences-heartbeat-last">
-            <span aria-hidden>❤️</span>
             {lastBeatLabel}
           </span>
           <button

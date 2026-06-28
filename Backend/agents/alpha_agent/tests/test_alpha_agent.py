@@ -506,7 +506,13 @@ def test_alpha_execute_retries_dirty_cursor_before_any_cross_provider_fallback(t
     assert result.output["native_session"]["native_session_id"] == "chat_retry_2"
     assert "cursor_1" in result.output["attempts"]
     assert "cursor_2" in result.output["attempts"]
-    assert {artifact.mime for artifact in result.artifacts} >= {"text/markdown", "text/plain"}
+    assert {artifact.mime for artifact in result.artifacts} >= {"text/plain"}
+    deliverable_names = {
+        Path(str(artifact.path)).name
+        for artifact in result.artifacts
+        if getattr(artifact, "audience", "deliverable") == "deliverable"
+    }
+    assert "cursor-last-message.md" not in deliverable_names
     assert any("alpha.harness_retry" in str(event) for event in redis.events)
     assert "Previous CLI Attempt" in prompts[1]
     assert "pkill -f" in prompts[1]
@@ -605,6 +611,83 @@ def test_promote_alpha_artifacts_includes_task_artifact_dir_files(tmp_path: Path
     assert len(artifacts) == 1
     assert artifacts[0].mime == "image/png"
     assert artifacts[0].path == str(screenshot.resolve())
+
+
+def test_promote_alpha_artifacts_marks_runner_transcripts_as_supporting(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    paths = WorkspaceManager(
+        cfg.alpha_root,
+        codex_home=cfg.codex_home,
+        cursor_home=cfg.cursor_home,
+    ).prepare(
+        project_id="prj_abc123",
+        task_id="tsk_def456",
+    )
+    (paths.artifacts / "cursor-last-message.md").write_text("Cursor transcript", encoding="utf-8")
+    (paths.artifacts / "final.txt").write_text("done", encoding="utf-8")
+
+    artifacts = promote_alpha_artifacts(
+        task_id="tsk_def456",
+        paths=paths,
+        text_hints=[],
+    )
+    by_name = {Path(artifact.path).name: artifact for artifact in artifacts}
+
+    assert by_name["final.txt"].audience == "deliverable"
+    assert by_name["cursor-last-message.md"].audience == "supporting"
+
+
+def test_promote_alpha_artifacts_marks_research_and_report_files_as_supporting(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    paths = WorkspaceManager(
+        cfg.alpha_root,
+        codex_home=cfg.codex_home,
+        cursor_home=cfg.cursor_home,
+    ).prepare(
+        project_id="prj_abc123",
+        task_id="tsk_def456",
+    )
+    (paths.artifacts / "index.html").write_text("<html></html>", encoding="utf-8")
+    (paths.artifacts / "cursor-last-message.md").write_text("transcript", encoding="utf-8")
+    (paths.artifacts / "01_page.md").write_text("scrape copy", encoding="utf-8")
+    (paths.artifacts / "DEPLOYMENT_REPORT.md").write_text("deploy notes", encoding="utf-8")
+    (paths.artifacts / "04_alpha_input_goal.md").write_text("goal", encoding="utf-8")
+
+    artifacts = promote_alpha_artifacts(
+        task_id="tsk_def456",
+        paths=paths,
+        text_hints=[],
+    )
+    by_name = {Path(artifact.path).name: artifact for artifact in artifacts}
+
+    assert by_name["index.html"].audience == "deliverable"
+    assert by_name["cursor-last-message.md"].audience == "supporting"
+    assert by_name["01_page.md"].audience == "supporting"
+    assert by_name["DEPLOYMENT_REPORT.md"].audience == "supporting"
+    assert by_name["04_alpha_input_goal.md"].audience == "supporting"
+
+
+def test_promote_alpha_artifacts_skips_git_internals_even_when_referenced(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    paths = WorkspaceManager(
+        cfg.alpha_root,
+        codex_home=cfg.codex_home,
+        cursor_home=cfg.cursor_home,
+    ).prepare(
+        project_id="prj_abc123",
+        task_id="tsk_def456",
+    )
+    git_head = paths.workspace / ".git" / "HEAD"
+    git_head.parent.mkdir(parents=True, exist_ok=True)
+    git_head.write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    artifacts = promote_alpha_artifacts(
+        task_id="tsk_def456",
+        paths=paths,
+        text_hints=[f"Committed using {git_head.resolve()}."],
+    )
+
+    assert artifacts == []
 
 
 def test_promote_alpha_artifacts_includes_referenced_workspace_files(tmp_path: Path) -> None:

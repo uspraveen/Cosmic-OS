@@ -144,6 +144,9 @@ let meetingProcess: any = null
 
 let voiceProcess: any = null
 let voiceActive = false
+let voiceTypingShortcutEnabled = true
+const VOICE_TYPING_SHORTCUT = 'CommandOrControl+Shift+V'
+const VOICE_TYPING_SHORTCUT_SETTING_KEY = 'voiceTypingShortcutEnabled'
 let searchVisible = false
 let lastWeatherData: any = null
 let gatewayConnectionManager: GatewayConnectionManager | null = null
@@ -1499,6 +1502,7 @@ function startSettingsBridge(window: BrowserWindow) {
         const json = JSON.parse(content)
         if (tag === 'SETTINGS') {
           syncGatewaySettingsFromPayload(json)
+          syncVoiceTypingShortcutFromSettings(json)
           window.webContents.send('settings:all', json)
         }
         else if (tag === 'INTEGRATIONS') window.webContents.send('integrations:all', json)
@@ -1625,6 +1629,41 @@ function toggleVoiceTyping() {
     voiceActive = nextActive
   }
   return { ok: sent, active: voiceActive }
+}
+
+function isVoiceTypingShortcutEnabledValue(value: unknown): boolean {
+  if (value === false || value === 0) return false
+  const normalized = String(value ?? '').trim().toLowerCase()
+  if (!normalized) return true
+  return normalized !== 'false' && normalized !== '0' && normalized !== 'off' && normalized !== 'no'
+}
+
+function applyVoiceTypingShortcutRegistration(enabled: boolean) {
+  const currentlyRegistered = globalShortcut.isRegistered(VOICE_TYPING_SHORTCUT)
+  if (enabled === voiceTypingShortcutEnabled && enabled === currentlyRegistered) {
+    return
+  }
+
+  voiceTypingShortcutEnabled = enabled
+  try {
+    globalShortcut.unregister(VOICE_TYPING_SHORTCUT)
+    if (!enabled) return
+
+    const registered = globalShortcut.register(VOICE_TYPING_SHORTCUT, () => {
+      toggleVoiceTyping()
+    })
+    if (!registered) {
+      console.warn(`Failed to register voice typing shortcut: ${VOICE_TYPING_SHORTCUT}`)
+    }
+  } catch (error) {
+    console.warn('Voice typing shortcut registration error:', error)
+  }
+}
+
+function syncVoiceTypingShortcutFromSettings(settings: Record<string, unknown> | null | undefined) {
+  if (!settings || typeof settings !== 'object') return
+  const enabled = isVoiceTypingShortcutEnabledValue(settings[VOICE_TYPING_SHORTCUT_SETTING_KEY])
+  applyVoiceTypingShortcutRegistration(enabled)
 }
 
 function getPreferredDisplayId() {
@@ -2026,6 +2065,14 @@ app.whenReady().then(() => {
     sendToVoiceBridge(`SET_KEY:${key}`)
   })
   ipcMain.handle('voice:toggle-typing', () => toggleVoiceTyping())
+  ipcMain.handle('voice:set-shortcut-enabled', (_, enabled: unknown) => {
+    const nextEnabled = enabled !== false && String(enabled ?? '').toLowerCase() !== 'false'
+    applyVoiceTypingShortcutRegistration(nextEnabled)
+    settingsProcess?.stdin.write(
+      `SAVE_SETTING:${VOICE_TYPING_SHORTCUT_SETTING_KEY}:${nextEnabled ? 'true' : 'false'}\n`,
+    )
+    return { ok: true, enabled: nextEnabled }
+  })
 
   ipcMain.on('meeting:start', (_, payload) => {
     if (meetingProcess?.stdin) {
@@ -3790,8 +3837,6 @@ app.whenReady().then(() => {
     console.warn('Failed to register meeting shortcut: CommandOrControl+Left')
   }
 
-  // Voice activation shortcut - CommandOrControl+Shift+V to toggle voice
-  globalShortcut.register('CommandOrControl+Shift+V', () => {
-    toggleVoiceTyping()
-  })
+  // Voice activation shortcut — enabled by default; user can disable from the island voice slide.
+  applyVoiceTypingShortcutRegistration(true)
 })
