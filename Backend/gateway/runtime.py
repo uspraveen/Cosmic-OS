@@ -273,6 +273,7 @@ class ActiveRequest:
     activity: str = ""
     activity_log: list[dict[str, Any]] = field(default_factory=list)
     alpha_terminal_log: list[dict[str, Any]] = field(default_factory=list)
+    alpha_console_anchors: dict[str, int] = field(default_factory=dict)
     error_message: str = ""
 
 
@@ -9450,6 +9451,9 @@ class GatewayRuntime:
             metadata["thinking_text"] = state.partial_thinking
         if state.alpha_terminal_log:
             metadata["alpha_terminal_log"] = [dict(item) for item in state.alpha_terminal_log]
+        alpha_console_anchors = self._alpha_console_anchors_payload(state.alpha_console_anchors)
+        if alpha_console_anchors:
+            metadata["alpha_console_anchors"] = alpha_console_anchors
         if state.error_message:
             metadata["error"] = state.error_message
         if state.partial_content:
@@ -10897,7 +10901,15 @@ class GatewayRuntime:
         if stream not in {"stdout", "stderr", "system"}:
             stream = "stdout"
         entry_task_id = self._safe_text(value.get("task_id")) or self._safe_text(value.get("taskId")) or task_id
-        return {
+        stream_offset: int | None = None
+        for raw_offset in (value.get("stream_offset"), value.get("streamOffset")):
+            try:
+                if raw_offset is not None:
+                    stream_offset = max(0, int(raw_offset))
+                    break
+            except (TypeError, ValueError):
+                continue
+        entry = {
             "id": self._safe_text(value.get("id")) or f"alpha_terminal_{uuid4().hex}",
             "task_id": entry_task_id,
             "stream": stream,
@@ -10909,6 +10921,49 @@ class GatewayRuntime:
             or self._safe_text(value.get("createdAt"))
             or utcnow_iso(),
         }
+        if stream_offset is not None:
+            entry["stream_offset"] = stream_offset
+        return entry
+
+    def _alpha_console_anchors_payload(
+        self,
+        anchors: dict[str, int] | None,
+    ) -> list[dict[str, Any]]:
+        if not anchors:
+            return []
+        payload: list[dict[str, Any]] = []
+        for key, offset in sorted(anchors.items(), key=lambda item: item[1]):
+            try:
+                safe_offset = max(0, int(offset))
+            except (TypeError, ValueError):
+                continue
+            payload.append(
+                {
+                    "task_id": None if key == "_default" else key,
+                    "offset": safe_offset,
+                }
+            )
+        return payload
+
+    def _alpha_console_anchors_from_terminal_log(
+        self,
+        terminal_log: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(terminal_log, list):
+            return []
+        anchors: dict[str, int] = {}
+        for item in terminal_log:
+            if not isinstance(item, dict):
+                continue
+            task_id = self._safe_text(item.get("task_id")) or "_default"
+            if task_id in anchors:
+                continue
+            try:
+                offset = int(item.get("stream_offset"))
+            except (TypeError, ValueError):
+                continue
+            anchors[task_id] = max(0, offset)
+        return self._alpha_console_anchors_payload(anchors)
 
     def _refresh_active_working_set(self, session_id: str) -> dict[str, Any]:
         metadata = self.session_store.get_session_metadata(session_id)
@@ -17463,6 +17518,12 @@ class GatewayRuntime:
                 and isinstance(task_notebook.get("alpha_terminal_log"), list)
                 else []
             )
+            request_state = self.active_requests.get(request_id) if request_id else None
+            alpha_console_anchors = (
+                self._alpha_console_anchors_payload(request_state.alpha_console_anchors)
+                if request_state is not None and request_state.alpha_console_anchors
+                else self._alpha_console_anchors_from_terminal_log(alpha_terminal_log)
+            )
             assistant_message_id = store_assistant_message(
                 str(event.get("content") or ""),
                 awaiting_reply=bool(event.get("awaiting_reply")),
@@ -17491,6 +17552,7 @@ class GatewayRuntime:
                     "response_blocks": response_blocks,
                     "activity_log": activity_log,
                     "alpha_terminal_log": alpha_terminal_log,
+                    "alpha_console_anchors": alpha_console_anchors,
                 },
                 channel=event_channel,
                 route="opus",
@@ -17535,6 +17597,8 @@ class GatewayRuntime:
                 event["activity_log"] = activity_log
             if alpha_terminal_log:
                 event["alpha_terminal_log"] = alpha_terminal_log
+            if alpha_console_anchors:
+                event["alpha_console_anchors"] = alpha_console_anchors
             event_channel_platform = self._channel_platform(event_channel)
             email_delivery = (
                 self._effective_email_delivery(event)
@@ -18178,7 +18242,10 @@ class GatewayRuntime:
         next_start = next_text[:1]
         if not prev_end or not next_start or prev_end.isspace() or next_start.isspace():
             return prev + next_text
-        if re.search(r'[\.\!\?:\u2026]', prev_end) and re.search(r'[A-Z0-9"\'`\(\[]', next_start):
+        if re.search(r'[\.\!\?:\u2026]', prev_end) and re.search(
+            r'[A-Za-z0-9"\'`\(\[]',
+            next_start,
+        ):
             return prev + "\n\n" + next_text
         if re.search(r"[A-Za-z0-9]", prev_end) and re.search(r"[A-Za-z0-9]", next_start):
             return prev + " " + next_text
@@ -20022,6 +20089,10 @@ class GatewayRuntime:
                 task_id=self._safe_text(event.get("task_id")),
             )
             if terminal_entry:
+                anchor_key = self._safe_text(terminal_entry.get("task_id")) or "_default"
+                if anchor_key not in state.alpha_console_anchors:
+                    state.alpha_console_anchors[anchor_key] = len(state.partial_content or "")
+                terminal_entry["stream_offset"] = state.alpha_console_anchors[anchor_key]
                 state.alpha_terminal_log = [
                     *state.alpha_terminal_log,
                     terminal_entry,

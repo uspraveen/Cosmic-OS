@@ -2014,8 +2014,41 @@ def test_orchestrator_stream_text_append_inserts_turn_boundary() -> None:
         )
         == "Let me grab the artifact!\n\nGot it - firing Alpha now."
     )
+    assert (
+        OrchestratorRuntime._append_stream_text(
+            "Let me search it.",
+            "found the repo.",
+        )
+        == "Let me search it.\n\nfound the repo."
+    )
     assert OrchestratorRuntime._append_stream_text("Hello", "world") == "Hello world"
     assert OrchestratorRuntime._append_stream_text("Hello ", "world") == "Hello world"
+
+
+def test_orchestrator_stream_turn_chunk_delta_prefixes_turn_boundary() -> None:
+    chunk, emitted = OrchestratorRuntime._stream_turn_chunk_delta(
+        "Let me search it.",
+        "Found it!",
+        boundary_emitted=False,
+    )
+    assert chunk == "\n\nFound it!"
+    assert emitted is True
+
+    follow_up, emitted = OrchestratorRuntime._stream_turn_chunk_delta(
+        "Let me search it.",
+        " Next step.",
+        boundary_emitted=emitted,
+    )
+    assert follow_up == " Next step."
+    assert emitted is True
+
+    first_turn_chunk, emitted = OrchestratorRuntime._stream_turn_chunk_delta(
+        "",
+        "Starting now.",
+        boundary_emitted=False,
+    )
+    assert first_turn_chunk == "Starting now."
+    assert emitted is True
 
 
 @pytest.mark.asyncio

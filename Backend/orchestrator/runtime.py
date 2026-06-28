@@ -555,6 +555,7 @@ class OrchestratorRuntime:
 
             while iteration < max_iterations:
                 iteration += 1
+                turn_stream_boundary_emitted = False
                 messages = self._prepare_messages_for_anthropic(
                     messages,
                     strip_all_server_tool_blocks=strict_server_tool_replay_recovery,
@@ -709,6 +710,13 @@ class OrchestratorRuntime:
                                     if not responding_announced:
                                         responding_announced = True
                                         yield {**ev, "type": "task.progress", "status": "responding", "message": "Opus is writing the response."}
+                                    chunk, turn_stream_boundary_emitted = self._stream_turn_chunk_delta(
+                                        full_response_text,
+                                        chunk,
+                                        boundary_emitted=turn_stream_boundary_emitted,
+                                    )
+                                    if not chunk:
+                                        continue
                                     if visual_coordinator is not None:
                                         visible_chunk, visual_events = visual_coordinator.consume_text(chunk)
                                         for visual_event in visual_events:
@@ -1261,6 +1269,7 @@ class OrchestratorRuntime:
 
             while iteration < max_iterations:
                 iteration += 1
+                turn_stream_boundary_emitted = False
                 fireworks_requests += 1
                 turn_selection = self._effective_fireworks_selection_for_images(
                     preferred_provider=preferred_provider,
@@ -1334,8 +1343,16 @@ class OrchestratorRuntime:
                     return events
 
                 def collect_content_events(visible_text: str) -> list[dict[str, Any]]:
-                    nonlocal responding_announced
+                    nonlocal responding_announced, turn_stream_boundary_emitted
                     if not visible_text:
+                        return []
+                    chunk_to_emit = visible_text
+                    chunk_to_emit, turn_stream_boundary_emitted = self._stream_turn_chunk_delta(
+                        full_response_text,
+                        visible_text,
+                        boundary_emitted=turn_stream_boundary_emitted,
+                    )
+                    if not chunk_to_emit:
                         return []
                     turn_text_parts.append(visible_text)
                     events: list[dict[str, Any]] = []
@@ -1354,7 +1371,7 @@ class OrchestratorRuntime:
                             }
                         )
                     if visual_coordinator is not None:
-                        visible_chunk, visual_events = visual_coordinator.consume_text(visible_text)
+                        visible_chunk, visual_events = visual_coordinator.consume_text(chunk_to_emit)
                         for visual_event in visual_events:
                             events.append({**ev, **visual_event})
                         if visible_chunk:
@@ -1371,7 +1388,7 @@ class OrchestratorRuntime:
                             {
                                 **ev,
                                 "type": "response.chunk",
-                                "content": visible_text,
+                                "content": chunk_to_emit,
                                 "done": False,
                             }
                         )
@@ -4608,11 +4625,32 @@ class OrchestratorRuntime:
         next_start = next_text[:1]
         if not prev_end or not next_start or prev_end.isspace() or next_start.isspace():
             return prev + next_text
-        if re.search(r'[\.\!\?:\u2026]', prev_end) and re.search(r'[A-Z0-9"\'`\(\[]', next_start):
+        if re.search(r'[\.\!\?:\u2026]', prev_end) and re.search(
+            r'[A-Za-z0-9"\'`\(\[]',
+            next_start,
+        ):
             return prev + "\n\n" + next_text
         if re.search(r"[A-Za-z0-9]", prev_end) and re.search(r"[A-Za-z0-9]", next_start):
             return prev + " " + next_text
         return prev + next_text
+
+    @staticmethod
+    def _stream_turn_chunk_delta(
+        current: str,
+        incoming: str,
+        *,
+        boundary_emitted: bool,
+    ) -> tuple[str, bool]:
+        chunk = str(incoming or "")
+        if not chunk:
+            return "", boundary_emitted
+        current_text = str(current or "")
+        if boundary_emitted or not current_text:
+            return chunk, True
+        merged = OrchestratorRuntime._append_stream_text(current_text, chunk)
+        if merged.startswith(current_text):
+            return merged[len(current_text):], True
+        return chunk, True
 
     def _estimate_request_context_chars(self, system_prompt: str, messages: list[dict[str, Any]]) -> int:
         try:
