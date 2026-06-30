@@ -2283,7 +2283,12 @@ async def create_sandbox_permission(
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
     created = await runtime.create_sandbox_permission_and_notify(body.model_dump())
-    return {"permission_id": created.get("permission_id"), "permission": created}
+    return {
+        "permission_id": created.get("permission_id"),
+        "permission": created.get("permission"),
+        "auto_approved": bool(created.get("auto_approved")),
+        "result": created.get("result"),
+    }
 
 
 @router.post("/channels/sandbox-permissions/{permission_id}/approve")

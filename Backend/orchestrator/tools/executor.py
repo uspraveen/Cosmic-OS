@@ -344,6 +344,9 @@ class ToolExecutor:
             capabilities,
             settings_allow_network=settings.allow_network,
         ):
+            # The create call may run the sandbox inline when the session already
+            # granted covering capabilities, so allow enough time for execution.
+            create_timeout = max(60.0, (timeout_sec or settings.timeout_sec) + 60.0)
             permission_payload = await self._request_gateway_json(
                 "POST",
                 "/internal/sandbox-permissions/create",
@@ -361,6 +364,7 @@ class ToolExecutor:
                     "task_id": task_id,
                     "channel": context.channel if context else None,
                 },
+                timeout=create_timeout,
             )
             if not isinstance(permission_payload, dict) or not permission_payload.get("permission_id"):
                 return {
@@ -370,6 +374,13 @@ class ToolExecutor:
                         or "Could not create a sandbox permission request."
                     ),
                 }
+            # The session already had a covering grant, so the gateway ran the
+            # sandbox immediately. Return the result inline so the model can keep
+            # working in the same turn instead of stopping for another approval.
+            if permission_payload.get("auto_approved") and isinstance(
+                permission_payload.get("result"), dict
+            ):
+                return permission_payload["result"]
             permission_id = str(permission_payload["permission_id"]).strip()
             receipt = build_sandbox_permission_receipt(
                 permission_id=permission_id,
@@ -2456,15 +2467,21 @@ class ToolExecutor:
         json_body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
         allow_404: bool = False,
+        timeout: float | None = None,
     ) -> dict[str, Any] | None:
         if not self.gateway_url:
             raise RuntimeError("Gateway internal API is not configured.")
+        request_kwargs: dict[str, Any] = {
+            "json": json_body,
+            "params": params,
+            "headers": self._gateway_headers(),
+        }
+        if timeout is not None:
+            request_kwargs["timeout"] = timeout
         response = await self._client.request(
             method,
             f"{self.gateway_url}{path}",
-            json=json_body,
-            params=params,
-            headers=self._gateway_headers(),
+            **request_kwargs,
         )
         if allow_404 and response.status_code == 404:
             return None

@@ -92,6 +92,75 @@ def sandbox_grants_from_capabilities(capabilities: dict[str, Any]) -> dict[str, 
     }
 
 
+def normalize_grant_path(value: Any) -> str:
+    return str(value or "").strip().replace("\\", "/").rstrip("/")
+
+
+def path_within_any(path: Any, bases: Any) -> bool:
+    child = normalize_grant_path(path)
+    if not child:
+        return False
+    for base in bases or []:
+        normalized_base = normalize_grant_path(base)
+        if not normalized_base:
+            continue
+        if child == normalized_base or child.startswith(normalized_base + "/"):
+            return True
+    return False
+
+
+def union_session_grant(grants: Any) -> dict[str, Any] | None:
+    """Merge multiple approved permissions into one effective session grant."""
+    if not grants:
+        return None
+    network = False
+    read_paths: list[str] = []
+    write_paths: list[str] = []
+    allowed_hosts: list[str] = []
+    for grant in grants:
+        if not isinstance(grant, dict):
+            continue
+        if grant.get("network"):
+            network = True
+        for path in grant.get("host_read_paths") or []:
+            normalized = normalize_grant_path(path)
+            if normalized and normalized not in read_paths:
+                read_paths.append(normalized)
+        for path in grant.get("host_write_paths") or []:
+            normalized = normalize_grant_path(path)
+            if normalized and normalized not in write_paths:
+                write_paths.append(normalized)
+        for host in grant.get("allowed_hosts") or []:
+            host_text = str(host or "").strip().lower()
+            if host_text and host_text not in allowed_hosts:
+                allowed_hosts.append(host_text)
+    return {
+        "network": network,
+        "host_read_paths": read_paths,
+        "host_write_paths": write_paths,
+        "allowed_hosts": allowed_hosts,
+    }
+
+
+def session_grant_covers(requested: dict[str, Any], granted: dict[str, Any]) -> bool:
+    """True when an approved session grant already covers the requested caps."""
+    if not isinstance(requested, dict) or not isinstance(granted, dict):
+        return False
+    if requested.get("network") and not granted.get("network"):
+        return False
+    readable = list(granted.get("host_read_paths") or []) + list(
+        granted.get("host_write_paths") or []
+    )
+    for path in requested.get("host_read_paths") or []:
+        if not path_within_any(path, readable):
+            return False
+    writable = list(granted.get("host_write_paths") or [])
+    for path in requested.get("host_write_paths") or []:
+        if not path_within_any(path, writable):
+            return False
+    return True
+
+
 def _normalize_host_paths(raw: Any) -> list[str]:
     if not isinstance(raw, list):
         return []

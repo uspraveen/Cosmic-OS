@@ -76,6 +76,7 @@ from .usage_store import UsageStore
 from .wishlist import CapabilityWishlistService, CapabilityWishlistStore
 from .tool_opportunities import ToolOpportunityService, ToolOpportunityStore
 from orchestrator.local_code_sandbox import LocalCodeSandboxSettings, run_local_code_sandbox
+from orchestrator.sandbox_permissions import session_grant_covers, union_session_grant
 from orchestrator.store.ledger import TaskLedger
 
 try:
@@ -3528,9 +3529,83 @@ class GatewayRuntime:
         self,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
+        # If the user already approved covering capabilities earlier in this
+        # session, run immediately instead of prompting again. This keeps a
+        # multi-step task (find -> read -> edit) to a single approval.
+        auto = await self._maybe_auto_run_sandbox_with_session_grant(payload)
+        if auto is not None:
+            return auto
         created = self.create_sandbox_permission(payload)
         await self._emit_sandbox_permission_block_created(created, payload)
-        return created
+        return {
+            "permission_id": created.get("permission_id"),
+            "permission": created,
+            "auto_approved": False,
+        }
+
+    async def _maybe_auto_run_sandbox_with_session_grant(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        session_id = self._safe_text(payload.get("session_id"))
+        if not session_id:
+            return None
+        requested = {
+            "network": bool(payload.get("network")),
+            "host_read_paths": payload.get("host_read_paths") or [],
+            "host_write_paths": payload.get("host_write_paths") or [],
+            "allowed_hosts": payload.get("allowed_hosts") or [],
+        }
+        try:
+            prior = self.sandbox_permission_store.list_completed_for_session(session_id)
+        except Exception:
+            logger.exception("gateway.sandbox_permission.session_grant_lookup_failed")
+            return None
+        effective = union_session_grant(prior)
+        if not effective or not session_grant_covers(requested, effective):
+            return None
+
+        created = self.create_sandbox_permission(payload)
+        permission_id = self._safe_text(created.get("permission_id"))
+        running = self.sandbox_permission_store.mark_running(permission_id) or created
+        settings = self._local_code_sandbox_settings_for_permission(running)
+        task_id = self._safe_text(running.get("task_id")) or "gateway-sandbox"
+        code = str(running.get("code") or "")
+        logger.info(
+            "gateway.sandbox_permission.auto_approved session=%s permission_id=%s",
+            session_id,
+            permission_id,
+        )
+        try:
+            result = await asyncio.to_thread(
+                run_local_code_sandbox,
+                code=code,
+                artifacts_root=self.config.artifacts_root,
+                task_id=task_id,
+                description=str(running.get("description") or ""),
+                packages=running.get("packages") if isinstance(running.get("packages"), list) else [],
+                timeout_sec=running.get("timeout_sec"),
+                settings=settings,
+            )
+        except Exception as exc:
+            logger.exception(
+                "gateway.sandbox_permission.auto_run_failed permission_id=%s",
+                permission_id,
+            )
+            result = {
+                "error": True,
+                "status": "failed",
+                "message": str(exc) or "Sandbox execution failed.",
+            }
+        executed = self.sandbox_permission_store.mark_executed(permission_id, result)
+        if executed is None:
+            executed = self.sandbox_permission_store.get(permission_id) or running
+        return {
+            "permission_id": permission_id,
+            "permission": executed,
+            "auto_approved": True,
+            "result": result,
+        }
 
     async def _emit_sandbox_permission_block_created(
         self,

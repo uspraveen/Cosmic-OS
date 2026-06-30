@@ -174,6 +174,33 @@ class SandboxPermissionStore:
                     return [self._row_to_dict(dict(row)) for row in rows]
         return []
 
+    def list_completed_for_session(
+        self,
+        session_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return successfully executed permissions for a session.
+
+        Used to derive a session-scoped capability grant so that follow-up
+        sandbox runs whose capabilities are a subset of what the user already
+        approved can run without prompting again.
+        """
+        sid = str(session_id or "").strip()
+        if not sid:
+            return []
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM sandbox_permissions
+                WHERE session_id = ? AND status = 'completed'
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (sid, int(limit)),
+            ).fetchall()
+        return [self._row_to_dict(dict(row)) for row in rows]
+
     def mark_approved(self, permission_id: str) -> dict[str, Any] | None:
         now = utcnow_iso()
         with self._lock, self._connection() as connection:

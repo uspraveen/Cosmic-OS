@@ -14,6 +14,8 @@ from orchestrator.sandbox_permissions import (
     build_sandbox_permission_receipt,
     capabilities_require_permission,
     normalize_requested_capabilities,
+    session_grant_covers,
+    union_session_grant,
 )
 
 
@@ -184,6 +186,71 @@ def test_local_sandbox_read_outside_grant_is_denied(tmp_path: Path) -> None:
     stdout = str(result.get("stdout"))
     assert "TOP-SECRET" not in stdout
     assert "BLOCKED:" in stdout
+
+
+def test_session_grant_covers_subset_capabilities() -> None:
+    granted = union_session_grant(
+        [
+            {
+                "network": True,
+                "host_read_paths": ["/home/ubuntu", "/var/www"],
+                "host_write_paths": ["/var/www"],
+                "allowed_hosts": ["example.com"],
+            }
+        ]
+    )
+    assert granted is not None
+    # Subset read path under a granted tree -> covered.
+    assert session_grant_covers(
+        {"network": False, "host_read_paths": ["/home/ubuntu/Cosmic-OS"], "host_write_paths": []},
+        granted,
+    )
+    # Write under a granted write tree -> covered.
+    assert session_grant_covers(
+        {"network": True, "host_read_paths": [], "host_write_paths": ["/var/www/site"]},
+        granted,
+    )
+    # Write under a read-only tree -> NOT covered.
+    assert not session_grant_covers(
+        {"network": False, "host_read_paths": [], "host_write_paths": ["/home/ubuntu/x"]},
+        granted,
+    )
+    # Path outside any granted tree -> NOT covered.
+    assert not session_grant_covers(
+        {"network": False, "host_read_paths": ["/etc"], "host_write_paths": []},
+        granted,
+    )
+
+
+def test_session_grant_requires_network_grant() -> None:
+    granted = union_session_grant(
+        [{"network": False, "host_read_paths": ["/srv"], "host_write_paths": []}]
+    )
+    assert granted is not None
+    assert not session_grant_covers(
+        {"network": True, "host_read_paths": ["/srv"], "host_write_paths": []},
+        granted,
+    )
+
+
+def test_list_completed_for_session(tmp_path: Path) -> None:
+    store = SandboxPermissionStore(tmp_path / "sandbox_permissions.db")
+    store.initialize()
+    created = store.create_pending(
+        {
+            "description": "Read repo",
+            "code": "print('x')",
+            "session_id": "sess_grant",
+            "host_read_paths": ["/home/ubuntu"],
+        }
+    )
+    permission_id = created["permission_id"]
+    assert store.list_completed_for_session("sess_grant") == []
+    store.mark_running(permission_id)
+    store.mark_executed(permission_id, {"status": "completed", "stdout": "ok"})
+    completed = store.list_completed_for_session("sess_grant")
+    assert [p["permission_id"] for p in completed] == [permission_id]
+    assert completed[0]["host_read_paths"] == ["/home/ubuntu"]
 
 
 def test_build_sandbox_permission_receipt_shape() -> None:
