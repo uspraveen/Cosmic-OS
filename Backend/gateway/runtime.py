@@ -3567,6 +3567,7 @@ class GatewayRuntime:
 
         created = self.create_sandbox_permission(payload)
         permission_id = self._safe_text(created.get("permission_id"))
+        self.sandbox_permission_store.mark_auto_approved(permission_id)
         running = self.sandbox_permission_store.mark_running(permission_id) or created
         settings = self._local_code_sandbox_settings_for_permission(running)
         task_id = self._safe_text(running.get("task_id")) or "gateway-sandbox"
@@ -4753,6 +4754,10 @@ class GatewayRuntime:
             permission_id = self._safe_text(permission.get("permission_id"))
             if not permission_id or permission_id in seen_ids:
                 return
+            # Auto-approved runs (covered by an existing session grant) execute
+            # silently and must not render an approval card.
+            if permission.get("auto_approved"):
+                return
             seen_ids.add(permission_id)
             persisted.append(permission)
 
@@ -4768,14 +4773,15 @@ class GatewayRuntime:
             row = self.sandbox_permission_store.get(permission_id)
             _add(row if row is not None else permission)
 
-        # 2) Fallback: re-attach any sandbox permission created during this turn,
-        #    keyed by request/task/session. This keeps the inline approval card
-        #    on the response even when the receipt does not survive the loop.
+        # 2) Fallback: re-attach a sandbox permission created during THIS turn only
+        #    (scoped strictly to the turn's request_id / task_id) so the inline
+        #    approval card survives even if the receipt is dropped in the loop.
+        #    Session scope is intentionally NOT used here: it would drag every
+        #    sandbox card from the whole session into an unrelated response.
         try:
             scoped = self.sandbox_permission_store.list_for_scope(
                 request_id=self._safe_text(event.get("request_id")),
                 task_id=self._safe_text(event.get("task_id")),
-                session_id=self._safe_text(event.get("session_id")),
             )
         except Exception:
             logger.exception("gateway.sandbox_permission.scope_lookup_failed")

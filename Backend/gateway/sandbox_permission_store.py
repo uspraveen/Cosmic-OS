@@ -45,6 +45,7 @@ class SandboxPermissionStore:
                     channel TEXT,
                     reviewer_note TEXT,
                     result_json TEXT,
+                    auto_approved INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     reviewed_at TEXT,
@@ -58,6 +59,17 @@ class SandboxPermissionStore:
                     ON sandbox_permissions(session_id, updated_at DESC);
                 """
             )
+            # Migration for databases created before auto_approved existed.
+            columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(sandbox_permissions)"
+                ).fetchall()
+            }
+            if "auto_approved" not in columns:
+                connection.execute(
+                    "ALTER TABLE sandbox_permissions ADD COLUMN auto_approved INTEGER NOT NULL DEFAULT 0"
+                )
             connection.commit()
 
     def create_pending(self, item: dict[str, Any]) -> dict[str, Any]:
@@ -221,6 +233,15 @@ class SandboxPermissionStore:
             ).fetchone()
         return self._row_to_dict(dict(row)) if row else None
 
+    def mark_auto_approved(self, permission_id: str) -> None:
+        """Flag a permission as auto-approved so it never renders an approval card."""
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                "UPDATE sandbox_permissions SET auto_approved = 1 WHERE permission_id = ?",
+                (permission_id,),
+            )
+            connection.commit()
+
     def mark_running(self, permission_id: str) -> dict[str, Any] | None:
         now = utcnow_iso()
         with self._lock, self._connection() as connection:
@@ -320,6 +341,7 @@ class SandboxPermissionStore:
             "channel": row.get("channel"),
             "reviewer_note": row.get("reviewer_note"),
             "result": result,
+            "auto_approved": bool(row.get("auto_approved")),
             "created_at": row.get("created_at"),
             "updated_at": row.get("updated_at"),
             "reviewed_at": row.get("reviewed_at"),
