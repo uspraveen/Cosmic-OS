@@ -2282,7 +2282,7 @@ async def create_sandbox_permission(
     _: None = Depends(require_internal_token),
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
-    created = runtime.create_sandbox_permission(body.model_dump())
+    created = await runtime.create_sandbox_permission_and_notify(body.model_dump())
     return {"permission_id": created.get("permission_id"), "permission": created}
 
 

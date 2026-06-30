@@ -3524,6 +3524,63 @@ class GatewayRuntime:
     def create_sandbox_permission(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.sandbox_permission_store.create_pending(payload)
 
+    async def create_sandbox_permission_and_notify(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        created = self.create_sandbox_permission(payload)
+        await self._emit_sandbox_permission_block_created(created, payload)
+        return created
+
+    async def _emit_sandbox_permission_block_created(
+        self,
+        permission: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
+        request_id = self._safe_text(payload.get("request_id"))
+        session_id = self._safe_text(payload.get("session_id"))
+        channel = self._safe_text(payload.get("channel"))
+        if not request_id or not channel:
+            return
+        block = self._sandbox_permission_response_block(permission)
+        state = self.active_requests.get(request_id)
+        base_blocks: list[dict[str, Any]] = []
+        supporting_artifacts: list[dict[str, Any]] | None = None
+        if state is not None:
+            base_blocks = [
+                dict(item) for item in state.response_blocks_snapshot if isinstance(item, dict)
+            ]
+            supporting_artifacts = [
+                dict(item) for item in state.supporting_artifacts if isinstance(item, dict)
+            ] or None
+        merged_blocks = self._append_trusted_response_blocks(base_blocks, [block])
+        client_blocks = self._hydrate_response_blocks_for_client(
+            merged_blocks,
+            supporting_artifacts=supporting_artifacts,
+        )
+        if not client_blocks:
+            return
+        if state is not None:
+            state.snapshot_seq += 1
+            state.response_blocks_snapshot = [
+                dict(item) for item in merged_blocks if isinstance(item, dict)
+            ]
+            snapshot_seq = state.snapshot_seq
+        else:
+            snapshot_seq = 1
+        await self._deliver_or_queue_channel_event(
+            {
+                "type": "response.blocks.snapshot",
+                "request_id": request_id,
+                "session_id": session_id,
+                "channel": channel,
+                "response_blocks": client_blocks,
+                "blocks": client_blocks,
+                "snapshot_seq": snapshot_seq,
+            },
+            channel=channel,
+        )
+
     def _local_code_sandbox_settings_for_permission(
         self,
         permission: dict[str, Any],
