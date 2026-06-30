@@ -4533,8 +4533,20 @@ class GatewayRuntime:
         return persisted
 
     async def _persist_sandbox_permission_receipts(self, event: dict[str, Any]) -> list[dict[str, Any]]:
-        receipts = self._normalize_specialist_receipts(event.get("specialist_receipts"))
         persisted: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        def _add(permission: dict[str, Any] | None) -> None:
+            if not isinstance(permission, dict):
+                return
+            permission_id = self._safe_text(permission.get("permission_id"))
+            if not permission_id or permission_id in seen_ids:
+                return
+            seen_ids.add(permission_id)
+            persisted.append(permission)
+
+        # 1) Receipts explicitly carried by the orchestrator completion event.
+        receipts = self._normalize_specialist_receipts(event.get("specialist_receipts"))
         for receipt in receipts:
             permission = receipt.get("sandbox_permission")
             if not isinstance(permission, dict):
@@ -4543,7 +4555,23 @@ class GatewayRuntime:
             if not permission_id:
                 continue
             row = self.sandbox_permission_store.get(permission_id)
-            persisted.append(row if row is not None else permission)
+            _add(row if row is not None else permission)
+
+        # 2) Fallback: re-attach any sandbox permission created during this turn,
+        #    keyed by request/task/session. This keeps the inline approval card
+        #    on the response even when the receipt does not survive the loop.
+        try:
+            scoped = self.sandbox_permission_store.list_for_scope(
+                request_id=self._safe_text(event.get("request_id")),
+                task_id=self._safe_text(event.get("task_id")),
+                session_id=self._safe_text(event.get("session_id")),
+            )
+        except Exception:
+            logger.exception("gateway.sandbox_permission.scope_lookup_failed")
+            scoped = []
+        for permission in scoped:
+            _add(permission)
+
         return persisted
 
     async def _publish_sandbox_permission_notification(self, permission: dict[str, Any]) -> None:
@@ -17757,11 +17785,7 @@ class GatewayRuntime:
                 if event.get("specialist_receipts")
                 else []
             )
-            sandbox_permissions = (
-                await self._persist_sandbox_permission_receipts(event)
-                if event.get("specialist_receipts")
-                else []
-            )
+            sandbox_permissions = await self._persist_sandbox_permission_receipts(event)
             response_blocks = (
                 [dict(item) for item in event.get("response_blocks") if isinstance(item, dict)]
                 if isinstance(event.get("response_blocks"), list)

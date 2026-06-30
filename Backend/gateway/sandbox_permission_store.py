@@ -133,6 +133,47 @@ class SandboxPermissionStore:
             ).fetchone()
         return self._row_to_dict(dict(row)) if row else None
 
+    def list_for_scope(
+        self,
+        *,
+        request_id: str | None = None,
+        task_id: str | None = None,
+        session_id: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Return permissions tied to a turn, preferring the narrowest scope available.
+
+        Lookup order: request_id, then task_id, then session_id. This lets the
+        gateway re-attach a sandbox permission block to a response even when the
+        orchestrator receipt plumbing does not carry it through to completion.
+        """
+        clauses: list[tuple[str, str]] = []
+        rid = str(request_id or "").strip()
+        tid = str(task_id or "").strip()
+        sid = str(session_id or "").strip()
+        if rid:
+            clauses.append(("request_id = ?", rid))
+        if tid:
+            clauses.append(("task_id = ?", tid))
+        if sid:
+            clauses.append(("session_id = ?", sid))
+        if not clauses:
+            return []
+        with self._lock, self._connection() as connection:
+            for where, value in clauses:
+                rows = connection.execute(
+                    f"""
+                    SELECT * FROM sandbox_permissions
+                    WHERE {where}
+                    ORDER BY created_at ASC
+                    LIMIT ?
+                    """,
+                    (value, int(limit)),
+                ).fetchall()
+                if rows:
+                    return [self._row_to_dict(dict(row)) for row in rows]
+        return []
+
     def mark_approved(self, permission_id: str) -> dict[str, Any] | None:
         now = utcnow_iso()
         with self._lock, self._connection() as connection:

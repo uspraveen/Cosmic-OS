@@ -79,6 +79,35 @@ def test_sandbox_permission_store_round_trip(tmp_path: Path) -> None:
     assert rejected["reviewer_note"] == "nope"
 
 
+def test_sandbox_permission_store_list_for_scope(tmp_path: Path) -> None:
+    store = SandboxPermissionStore(tmp_path / "sandbox_permissions.db")
+    store.initialize()
+    created = store.create_pending(
+        {
+            "description": "Probe repo",
+            "code": "print('x')",
+            "request_id": "req_abc",
+            "task_id": "task_abc",
+            "session_id": "sess_abc",
+        }
+    )
+    permission_id = created["permission_id"]
+
+    by_request = store.list_for_scope(request_id="req_abc")
+    assert [p["permission_id"] for p in by_request] == [permission_id]
+
+    # Falls back to task scope when request_id is unknown.
+    by_task = store.list_for_scope(request_id="missing", task_id="task_abc")
+    assert [p["permission_id"] for p in by_task] == [permission_id]
+
+    # Falls back to session scope when request/task are unknown.
+    by_session = store.list_for_scope(session_id="sess_abc")
+    assert [p["permission_id"] for p in by_session] == [permission_id]
+
+    assert store.list_for_scope(request_id="nope") == []
+    assert store.list_for_scope() == []
+
+
 def test_build_sandbox_permission_receipt_shape() -> None:
     capabilities = normalize_requested_capabilities(
         {"network": True, "host_read_paths": ["/tmp/read"], "allowed_hosts": ["api.github.com"]}
