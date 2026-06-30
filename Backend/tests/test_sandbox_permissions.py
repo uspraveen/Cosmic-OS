@@ -6,6 +6,10 @@ from pathlib import Path
 import pytest
 
 from gateway.sandbox_permission_store import SandboxPermissionStore
+from orchestrator.local_code_sandbox import (
+    LocalCodeSandboxSettings,
+    run_local_code_sandbox,
+)
 from orchestrator.sandbox_permissions import (
     build_sandbox_permission_receipt,
     capabilities_require_permission,
@@ -106,6 +110,80 @@ def test_sandbox_permission_store_list_for_scope(tmp_path: Path) -> None:
 
     assert store.list_for_scope(request_id="nope") == []
     assert store.list_for_scope() == []
+
+
+def test_local_sandbox_blocks_os_import_without_grant(tmp_path: Path) -> None:
+    result = run_local_code_sandbox(
+        code="import os\nprint(os.getcwd())\n",
+        artifacts_root=tmp_path / "artifacts",
+        task_id="task_no_grant",
+        settings=LocalCodeSandboxSettings(),
+    )
+    assert result.get("error") is True
+    assert "os imports are blocked" in str(result.get("message"))
+
+
+def test_local_sandbox_allows_os_for_granted_host_paths(tmp_path: Path) -> None:
+    granted = tmp_path / "granted"
+    granted.mkdir()
+    (granted / "portfolio.html").write_text("PORTFOLIO-MARKER", encoding="utf-8")
+    code = (
+        "import os\n"
+        f"target = {str(granted)!r}\n"
+        "chunks = []\n"
+        "for base, _dirs, files in os.walk(target):\n"
+        "    for name in files:\n"
+        "        with open(os.path.join(base, name), 'r', encoding='utf-8') as fh:\n"
+        "            chunks.append(fh.read())\n"
+        "print('READ:' + '|'.join(chunks))\n"
+    )
+    result = run_local_code_sandbox(
+        code=code,
+        artifacts_root=tmp_path / "artifacts",
+        task_id="task_grant",
+        settings=LocalCodeSandboxSettings(host_read_paths=(str(granted),)),
+    )
+    assert result.get("status") == "completed", result
+    assert "PORTFOLIO-MARKER" in str(result.get("stdout"))
+
+
+def test_local_sandbox_blocks_process_spawn_even_with_grant(tmp_path: Path) -> None:
+    granted = tmp_path / "granted"
+    granted.mkdir()
+    result = run_local_code_sandbox(
+        code="import os\nos.system('echo should-not-run')\n",
+        artifacts_root=tmp_path / "artifacts",
+        task_id="task_spawn",
+        settings=LocalCodeSandboxSettings(host_read_paths=(str(granted),)),
+    )
+    assert result.get("status") == "failed", result
+    assert "Process execution is blocked" in str(result.get("stderr"))
+
+
+def test_local_sandbox_read_outside_grant_is_denied(tmp_path: Path) -> None:
+    granted = tmp_path / "granted"
+    granted.mkdir()
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOP-SECRET", encoding="utf-8")
+    code = (
+        "import os\n"
+        f"secret = {str(secret)!r}\n"
+        "try:\n"
+        "    with open(secret, 'r', encoding='utf-8') as fh:\n"
+        "        print('LEAK:' + fh.read())\n"
+        "except PermissionError as exc:\n"
+        "    print('BLOCKED:' + str(exc))\n"
+    )
+    result = run_local_code_sandbox(
+        code=code,
+        artifacts_root=tmp_path / "artifacts",
+        task_id="task_outside",
+        settings=LocalCodeSandboxSettings(host_read_paths=(str(granted),)),
+    )
+    assert result.get("status") == "completed", result
+    stdout = str(result.get("stdout"))
+    assert "TOP-SECRET" not in stdout
+    assert "BLOCKED:" in stdout
 
 
 def test_build_sandbox_permission_receipt_shape() -> None:

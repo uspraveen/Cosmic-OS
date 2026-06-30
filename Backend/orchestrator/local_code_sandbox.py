@@ -166,6 +166,41 @@ def _cosmic_guarded_open(file, mode="r", buffering=-1, encoding=None, errors=Non
 
 _cosmic_builtins.open = _cosmic_guarded_open
 _cosmic_io.open = _cosmic_guarded_open
+
+# User code may now `import os` directly (host filesystem access was granted and
+# approved). Keep the sandbox invariants intact: block process spawning entirely
+# and scope low-level filesystem entry points to the sandbox root + granted trees.
+def _cosmic_os_process_blocked(*args, **kwargs):
+    raise PermissionError("Process execution is blocked in the COSMIC code sandbox.")
+
+for _cosmic_name in (
+    "system", "popen", "fork", "forkpty",
+    "exec", "execl", "execle", "execlp", "execlpe",
+    "execv", "execve", "execvp", "execvpe",
+    "spawnl", "spawnle", "spawnlp", "spawnlpe",
+    "spawnv", "spawnve", "spawnvp", "spawnvpe",
+    "posix_spawn", "posix_spawnp", "startfile",
+):
+    if hasattr(_cosmic_os, _cosmic_name):
+        setattr(_cosmic_os, _cosmic_name, _cosmic_os_process_blocked)
+
+_cosmic_orig_os_open = _cosmic_os.open
+def _cosmic_guarded_os_open(path, flags, mode=0o777, *, dir_fd=None):
+    resolved = _cosmic_resolve_path(path)
+    return _cosmic_orig_os_open(resolved, flags, mode, dir_fd=dir_fd)
+_cosmic_os.open = _cosmic_guarded_os_open
+
+_cosmic_orig_scandir = _cosmic_os.scandir
+def _cosmic_guarded_scandir(path="."):
+    resolved = _cosmic_resolve_path(path)
+    return _cosmic_orig_scandir(resolved)
+_cosmic_os.scandir = _cosmic_guarded_scandir
+
+_cosmic_orig_listdir = _cosmic_os.listdir
+def _cosmic_guarded_listdir(path="."):
+    resolved = _cosmic_resolve_path(path)
+    return _cosmic_orig_listdir(resolved)
+_cosmic_os.listdir = _cosmic_guarded_listdir
 '''
 
 
@@ -208,7 +243,12 @@ def run_local_code_sandbox(
             "tool": "cosmic_code_execution",
             "message": f"code is too large for one sandbox run ({len(encoded)} bytes > {settings.max_script_bytes}).",
         }
-    validation_error = _validate_code(code, allow_network=settings.allow_network)
+    allow_host_fs = bool(settings.host_read_paths or settings.host_write_paths)
+    validation_error = _validate_code(
+        code,
+        allow_network=settings.allow_network,
+        allow_host_fs=allow_host_fs,
+    )
     if validation_error:
         return {"error": True, "tool": "cosmic_code_execution", "message": validation_error}
 
@@ -323,10 +363,18 @@ def run_local_code_sandbox(
     }
 
 
-def _validate_code(code: str, *, allow_network: bool) -> str | None:
-    patterns = _DENY_PATTERNS
-    if allow_network:
-        patterns = tuple(item for item in patterns if "Network access" not in item[1])
+def _validate_code(code: str, *, allow_network: bool, allow_host_fs: bool) -> str | None:
+    patterns: list[tuple[re.Pattern[str], str]] = []
+    for pattern, message in _DENY_PATTERNS:
+        if allow_network and "Network access" in message:
+            continue
+        # When host filesystem access has been explicitly approved, the user code
+        # needs `os`/`sys` (os.walk, os.listdir, os.path, sys.path) to do anything
+        # useful. The runtime prelude keeps reads/writes scoped to granted trees
+        # and blocks process spawning, so the static block is no longer required.
+        if allow_host_fs and ("Direct os imports" in message or "Direct sys imports" in message):
+            continue
+        patterns.append((pattern, message))
     for pattern, message in patterns:
         if pattern.search(code):
             return message
